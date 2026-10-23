@@ -17,6 +17,7 @@ const CHECKLIST = {
   id: 'c1', service_line: 'termite', service_type: 'Termite Inspection / Treatment',
   checklist_items: [
     { category: 'Inspection', items: [{ item: 'Moisture meter', required: true }, { item: 'Foam drill kit', required: false, note: 'Treatment visits only' }] },
+    'Flashlight',
   ],
 };
 
@@ -41,6 +42,8 @@ describe('TechProtocolsPage equipment tab', () => {
     expect(screen.getByText('Foam drill kit').closest('li')).toHaveTextContent('(optional)');
     expect(screen.getByText('Treatment visits only')).toBeInTheDocument();
     expect(screen.getByText('Moisture meter').closest('li')).not.toHaveTextContent('(optional)');
+    // An older flat row never said whether the item was optional; the page must not say so either.
+    expect(screen.getByText('Flashlight').closest('li')).not.toHaveTextContent('(optional)');
     expect(screen.queryByText(/"category"/)).not.toBeInTheDocument();
   });
 });
@@ -48,8 +51,8 @@ describe('TechProtocolsPage equipment tab', () => {
 describe('checklistGroups', () => {
   it('keeps older flat rows readable and drops empty entries', () => {
     expect(checklistGroups(['Flashlight', { label: 'Probe' }, { name: 'Ladder', required: true }, null])).toEqual([
-      { category: '', items: [{ item: 'Flashlight', required: false, note: '' }] },
-      { category: '', items: [{ item: 'Probe', required: false, note: '' }] },
+      { category: '', items: [{ item: 'Flashlight', required: undefined, note: '' }] },
+      { category: '', items: [{ item: 'Probe', required: undefined, note: '' }] },
       { category: '', items: [{ item: 'Ladder', required: true, note: '' }] },
     ]);
     expect(checklistGroups('not a list')).toEqual([]);

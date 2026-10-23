@@ -36,38 +36,53 @@ function optionalText(value, max) {
   return { value: text };
 }
 
+// condition_rating: undefined = leave alone; null or blank = clear; else 1 to 10.
+function conditionValue(raw) {
+  if (raw === undefined) return { skip: true };
+  if (raw === null || raw === '') return { value: null };
+  const rating = Number(raw);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 10) {
+    return { error: 'condition_rating must be a whole number from 1 to 10' };
+  }
+  return { value: rating };
+}
+
+// assigned_vehicle_id: the equipment row (category 'vehicle') a tool rides on.
+// A row can never be its own truck, and a truck is never cargo on another
+// truck (by the body's category, or the stored one when the body is silent).
+async function vehicleTarget(body, selfId) {
+  const raw = body.assigned_vehicle_id;
+  if (raw === undefined) return { skip: true };
+  if (raw === null || raw === '') return { value: null };
+  const vehicleId = String(raw);
+  if (!UUID_RE.test(vehicleId) || vehicleId === selfId) return { error: 'assigned_vehicle_id must be a vehicle' };
+  const vehicle = await db('equipment').where({ id: vehicleId, category: 'vehicle' }).first('id');
+  if (!vehicle) return { error: 'assigned_vehicle_id must be a vehicle' };
+  let category = body.category;
+  if (category === undefined && selfId) {
+    const self = await db('equipment').where({ id: selfId }).first('category');
+    category = self ? self.category : undefined;
+  }
+  if (category === 'vehicle') return { error: 'a vehicle cannot be assigned to a truck' };
+  return { value: vehicleId };
+}
+
 // The custody values a body carries, validated. Returns { values } holding
 // only the keys present in the body, or { error } with the first problem.
 async function custodyFields(body, { selfId = null } = {}) {
   const values = {};
-  const tag = optionalText(body.asset_tag, ASSET_TAG_MAX);
-  if (tag.error) return { error: `asset_tag ${tag.error}` };
-  if (!tag.skip) values.asset_tag = tag.value;
-  const location = optionalText(body.location, LOCATION_MAX);
-  if (location.error) return { error: `location ${location.error}` };
-  if (!location.skip) values.location = location.value;
-  if (body.condition_rating !== undefined) {
-    if (body.condition_rating === null || body.condition_rating === '') {
-      values.condition_rating = null;
-    } else {
-      const rating = Number(body.condition_rating);
-      if (!Number.isInteger(rating) || rating < 1 || rating > 10) {
-        return { error: 'condition_rating must be a whole number from 1 to 10' };
-      }
-      values.condition_rating = rating;
-    }
+  const checks = [
+    ['asset_tag', optionalText(body.asset_tag, ASSET_TAG_MAX)],
+    ['location', optionalText(body.location, LOCATION_MAX)],
+    ['condition_rating', conditionValue(body.condition_rating)],
+    ['assigned_vehicle_id', await vehicleTarget(body, selfId)],
+  ];
+  for (const [key, result] of checks) {
+    if (result.error) return { error: key === 'asset_tag' || key === 'location' ? `${key} ${result.error}` : result.error };
+    if (!result.skip) values[key] = result.value;
   }
-  if (body.assigned_vehicle_id !== undefined) {
-    if (body.assigned_vehicle_id === null || body.assigned_vehicle_id === '') {
-      values.assigned_vehicle_id = null;
-    } else {
-      const vehicleId = String(body.assigned_vehicle_id);
-      if (!UUID_RE.test(vehicleId) || vehicleId === selfId) return { error: 'assigned_vehicle_id must be a vehicle' };
-      const vehicle = await db('equipment').where({ id: vehicleId, category: 'vehicle' }).first('id');
-      if (!vehicle) return { error: 'assigned_vehicle_id must be a vehicle' };
-      values.assigned_vehicle_id = vehicleId;
-    }
-  }
+  // Recategorizing a row as a vehicle drops any truck it rode on.
+  if (body.category === 'vehicle') values.assigned_vehicle_id = null;
   return { values };
 }
 
@@ -129,7 +144,9 @@ router.get('/equipment', async (req, res, next) => {
 });
 
 // POST /equipment — add new
-router.post('/equipment', async (req, res, next) => {
+// Custody and identity columns are the office's: a technician token never
+// creates or edits an asset, whatever GATE_STAFF_DEFAULT_DENY says.
+router.post('/equipment', requireAdmin, async (req, res, next) => {
   try {
     const {
       name, category, make, model, serial_number,
@@ -169,7 +186,7 @@ router.post('/equipment', async (req, res, next) => {
 });
 
 // PUT /equipment/:id — update
-router.put('/equipment/:id', async (req, res, next) => {
+router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
   try {
     // Whitelist updatable columns instead of spreading req.body, so a caller
     // can't set columns they shouldn't (e.g. id/created_at, or any future

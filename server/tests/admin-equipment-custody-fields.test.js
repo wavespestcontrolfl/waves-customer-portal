@@ -11,7 +11,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/equipment-maintenance', () => ({}));
 jest.mock('../models/db', () => {
-  const state = { vehicles: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
+  const state = { vehicles: {}, rows: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
   const chain = (table) => {
     const c = { table, calls: [], cond: null };
     const rec = (name) => jest.fn((...args) => { c.calls.push([name, ...args]); return c; });
@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
     c.first = jest.fn(async (...args) => {
       c.calls.push(['first', ...args]);
       if (table === 'equipment' && c.cond && c.cond.category === 'vehicle') return state.vehicles[c.cond.id] || null;
+      if (table === 'equipment' && c.cond && c.cond.id && c.cond.category === undefined) return state.rows[c.cond.id] || null;
       return null;
     });
     c.insert = jest.fn((row) => { c.calls.push(['insert', row]); state.inserted = row; return c; });
@@ -46,6 +47,7 @@ jest.mock('../models/db', () => {
 
 const db = require('../models/db');
 const router = require('../routes/admin-equipment');
+const { requireAdmin } = require('../middleware/admin-auth');
 
 const VEHICLE = '11111111-2222-4333-8444-555555555555';
 const OTHER = '22222222-2222-4333-8444-555555555555';
@@ -75,11 +77,56 @@ beforeEach(() => {
   jest.clearAllMocks();
   const s = db.__state;
   s.vehicles = { [VEHICLE]: { id: VEHICLE } };
+  s.rows = { [TOOL]: { id: TOOL, category: 'tool' }, [OTHER]: { id: OTHER, category: 'vehicle' } };
   s.inserted = null;
   s.updated = null;
   s.fail = null;
   s.listRows = [];
   s.chains = [];
+});
+
+describe('asset create and edit are office-only', () => {
+  // The router admits technicians (requireTechOrAdmin) for its reads and the
+  // field writes; the custody columns must not depend on GATE_STAFF_DEFAULT_DENY.
+  test.each([['post', '/equipment'], ['put', '/equipment/:id']])('%s %s carries requireAdmin', (method, path) => {
+    const layer = layerFor(method, path);
+    expect(layer.route.stack.some((l) => l.handle === requireAdmin)).toBe(true);
+  });
+
+  test('requireAdmin refuses a technician token', () => {
+    const res = { statusCode: 200, status(c) { this.statusCode = c; return this; }, json() { return this; } };
+    const next = jest.fn();
+    requireAdmin({ techRole: 'technician' }, res, next);
+    expect(res.statusCode).toBe(403);
+    expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe('a vehicle is never cargo', () => {
+  test('creating a vehicle with a truck is refused', async () => {
+    const res = await run('post', '/equipment', { body: { name: 'Synthetic van', category: 'vehicle', assigned_vehicle_id: VEHICLE } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/vehicle cannot be assigned/);
+    expect(db.__state.inserted).toBeNull();
+  });
+
+  test('assigning a truck to a stored vehicle row is refused', async () => {
+    const res = await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_vehicle_id: VEHICLE } });
+    expect(res.statusCode).toBe(400);
+    expect(db.__state.updated).toBeNull();
+  });
+
+  test('recategorizing a tool as a vehicle drops the truck it rode on', async () => {
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { category: 'vehicle' } });
+    expect(res.statusCode).toBe(200);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ category: 'vehicle', assigned_vehicle_id: null }));
+  });
+
+  test('a tool still rides on a truck', async () => {
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: VEHICLE } });
+    expect(res.statusCode).toBe(200);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ assigned_vehicle_id: VEHICLE }));
+  });
 });
 
 describe('POST /equipment custody columns', () => {
