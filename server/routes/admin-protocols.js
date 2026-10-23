@@ -11,6 +11,8 @@ const {
   visitNutrientTargets,
   sheetReadsPlansStep,
   nitrogenCutNotes,
+  chinchRateRows,
+  chinchTetrinoNotes,
   parseProtocolLines,
   resolveProtocolItems,
   summarizeMaterialCost,
@@ -1063,7 +1065,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // line text, the objective and the amount agree. Only a visit the planner would also plan on v13, and only for the month of the
     // window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
     const nitrogen = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }) });
-    const { visit, targets: nutrientTargets } = nitrogen;
+    const { visit, targets: nutrientTargets, chinchRate } = nitrogen;
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
@@ -1099,7 +1101,8 @@ router.get('/lawn-mix', async (req, res, next) => {
     // nutrient-target derivation, as the plan does; no staged protocol = no sheet.
     let v13Rows;
     try {
-      v13Rows = await loadV13RowsForMonth(db, trackKey, month, bermuda.rowOptions);
+      // GATE_LAWN_CHINCH_TETRINO_RATE: the May Tetrino row states the raised rate for a chinch-mapped lawn (same Map back otherwise).
+      v13Rows = chinchRateRows(await loadV13RowsForMonth(db, trackKey, month, bermuda.rowOptions), chinchRate ?? null);
     } catch (err) {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
@@ -1164,7 +1167,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
-        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, nitrogenCutNotes(plannedMix, product, nitrogen)) : {}),
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...nitrogenCutNotes(plannedMix, product, nitrogen), ...chinchTetrinoNotes(v13Line?.row, plannedMix, chinchRate)]) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render

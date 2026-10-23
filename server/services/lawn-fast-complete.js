@@ -31,6 +31,7 @@ const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-regist
 const shotList = require('./lawn-photo-shots');
 const bermudaRemoval = require('./lawn-bermuda-removal');
 const { FUNGUS_NITROGEN_NOTE_KEY, RECLAIMED_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
+const { CHINCH_TETRINO_NOTE_KEY } = require('../config/lawn-v13-chinch-rate');
 const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
 
 const LAWN_CATEGORY = 'lawn_care';
@@ -541,9 +542,10 @@ function programRateFor(item, programRows) {
 }
 
 // GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N: a nitrogen line the plan sized for a reduced target (or left at its full rate on
-// a reclaimed lawn because it carries the pre-emergent) keeps the plan's note on the sheet (the planned row prints its gateNotes). Only
+// a reclaimed lawn because it carries the pre-emergent or the winter potash) keeps the plan's note on the sheet (the planned row prints its
+// gateNotes). GATE_LAWN_CHINCH_TETRINO_RATE: the Tetrino line the plan sized at the raised chinch rate keeps its note the same way. Only
 // those notes are carried: every other planned row is the payload it was. `{}` when the plan wrote none.
-const NITROGEN_NOTE_KEYS = [FUNGUS_NITROGEN_NOTE_KEY, RECLAIMED_NITROGEN_NOTE_KEY];
+const NITROGEN_NOTE_KEYS = [FUNGUS_NITROGEN_NOTE_KEY, RECLAIMED_NITROGEN_NOTE_KEY, CHINCH_TETRINO_NOTE_KEY];
 function nitrogenNoteOf(item) {
   const texts = (Array.isArray(item.gateNotes) ? item.gateNotes : []).filter((note) => NITROGEN_NOTE_KEYS.includes(note?.key) && note.text).map((note) => note.text);
   return texts.length ? { gateNotes: texts } : {};
