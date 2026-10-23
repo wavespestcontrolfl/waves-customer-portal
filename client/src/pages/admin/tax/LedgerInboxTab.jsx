@@ -542,13 +542,16 @@ export default function LedgerInboxTab() {
         onRetryCategories={() => setCategoryAttempt((n) => n + 1)}
       />
 
+      {/* a page request and a decision never overlap: Load more reads from
+          the current list length, and a row removed while that read runs
+          would shift the next page by one (a row skipped for good) */}
       {rows.map((r) => (
         <InboxRow
           key={r.id}
           row={r}
           view={view}
           categories={categories}
-          busy={busyIds.has(r.id)}
+          busy={loading || busyIds.has(r.id)}
           error={rowErrors[r.id]}
           onAct={act}
         />
@@ -557,7 +560,7 @@ export default function LedgerInboxTab() {
       {loading && <div className="text-ink-secondary">Loading…</div>}
       {!loading && rows.length < total && (
         <div>
-          <Button variant="secondary" onClick={() => loadRows(view, rows.length)}>Load more</Button>
+          <Button variant="secondary" disabled={busyIds.size > 0} onClick={() => loadRows(view, rows.length)}>Load more</Button>
         </div>
       )}
 

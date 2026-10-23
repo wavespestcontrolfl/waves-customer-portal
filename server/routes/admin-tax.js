@@ -2303,6 +2303,24 @@ router.post('/bank-import/match', async (req, res, next) => {
 // LOOKING AT (same principle as /expenses/auto-categorize's scoped ids —
 // a global oldest-first pass can report "20 processed" while changing
 // nothing on screen); without ids it falls back to oldest-first.
+// With the ledger gate off a row the AI pass admits may carry a transfer
+// RULE's flag (the kill switch hides it): the model's category replaces
+// that reading, so the flag and its reason go with the rule's keys. Left
+// behind, the flag would read as the matcher's own and Bank Import would
+// show "internal transfer?" over the new category. The write repeats the
+// case it read: a flag that appeared, or a rule that went, during the
+// model call makes it miss instead.
+function aiWriteFlagState(sug, ledgerOn) {
+  const ruleFlag = !ledgerOn && !!(sug && sug.ignore && sug.rule && sug.rule.kind === 'transfer');
+  if (ruleFlag) {
+    return {
+      flagState: "coalesce(suggestion->>'ignore','') = 'true' and (suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null",
+      dropKeys: [...bankImport.LEDGER_RULE_KEYS, 'ignore', 'reason'],
+    };
+  }
+  return { flagState: "coalesce(suggestion->>'ignore','') <> 'true'", dropKeys: bankImport.LEDGER_RULE_KEYS };
+}
+
 router.post('/bank-import/suggest', async (req, res, next) => {
   try {
     const rawLimit = parseInt(req.body?.limit, 10);
@@ -2346,13 +2364,14 @@ router.post('/bank-import/suggest', async (req, res, next) => {
           // the eligibility is repeated at the write: a ledger pass can mark
           // the row personal or a transfer during the model call, and an AI
           // category on top of that would recreate the contradiction
-          const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(noCategory).whereRaw(notIgnored).update({
+          const { flagState, dropKeys } = aiWriteFlagState(row.suggestion, ledgerOn);
+          const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(noCategory).whereRaw(notIgnored).whereRaw(flagState).update({
             // provenance moves to the model: a category a ledger rule wrote
             // before is replaced, and the kill switch no longer owns it. The
             // rule's own keys go with it (rule, its stamp, personal/review
             // notes, the override marker): a dormant rule must not resurface
             // next to the model's category when the gate comes back on
-            suggestion: bankImport.suggestionMerge({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null }, bankImport.LEDGER_RULE_KEYS),
+            suggestion: bankImport.suggestionMerge({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null }, dropKeys),
             updated_at: new Date(),
           });
           if (landed) results.push({ id: row.id, category: ai.categoryName, applied: true });
@@ -2439,11 +2458,16 @@ async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnP
       // an Income decision is never an expense, from any tab
       .whereRaw("coalesce(suggestion ->> 'decision', '') <> 'income'");
     // the Inbox's Business action is two requests (decide = preflight, then
-    // this claim): a Later or Income decision made in between is the newer
-    // owner action and wins, so the claim repeats the no-decision check
-    if (fromLedger) claim = claim.whereRaw(taxLedgerRules.MATCHER_EXAMINED_SQL).whereRaw(taxLedgerRules.NO_LIVE_CANDIDATES_SQL).whereRaw(taxLedgerRules.NOT_DECIDED_SQL);
-    const claimed = await claim
-      .update({ status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
+    // this claim). Business is offered on the Later shelf too, so a Later
+    // decision is the one this action replaces (its shelf key goes with
+    // it); any other decision made in between is the newer owner action
+    // and wins, so the claim repeats the check
+    const patch = { status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() };
+    if (fromLedger) {
+      claim = claim.whereRaw(taxLedgerRules.MATCHER_EXAMINED_SQL).whereRaw(taxLedgerRules.NO_LIVE_CANDIDATES_SQL).whereRaw(taxLedgerRules.NOT_DECIDED_OR_LATER_SQL);
+      patch.suggestion = bankImport.suggestionMerge({}, taxLedgerRules.LATER_KEYS);
+    }
+    const claimed = await claim.update(patch);
     if (!claimed) {
       const e = new Error('row was matched by someone else mid-flight');
       e.code = 'CLAIM_LOST';

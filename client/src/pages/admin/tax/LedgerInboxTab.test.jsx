@@ -230,6 +230,35 @@ it('a row stays busy until its own request finishes, whatever happens on another
   await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
 });
 
+it('a page load and a decision never overlap: Load more disables the rows, a row in flight disables Load more', async () => {
+  const base = fetch;
+  const second = { ...row, id: 'row-2', description: 'OTHER SHOP 55' };
+  let resolvePage;
+  let resolveDecide;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/inbox')) {
+      if (u.includes('offset=0')) return json({ rows: [row], total: 3 });
+      return new Promise((r) => { resolvePage = () => r(json({ rows: [second], total: 3 })); });
+    }
+    if (u.includes('/ledger/decide')) return new Promise((r) => { resolveDecide = () => r(json({ success: true, action: 'ignored', ruleCreated: false })); });
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByText('ACME HARDWARE 123');
+  const personal = (id) => within(screen.getByTestId(`ledger-row-${id}`)).getByRole('button', { name: 'Personal' });
+  fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+  await waitFor(() => expect(personal('row-1')).toBeDisabled()); // the page is in flight: no decision can shift it
+  await act(async () => { resolvePage(); });
+  await screen.findByText('OTHER SHOP 55');
+  expect(personal('row-1')).not.toBeDisabled();
+  fireEvent.click(personal('row-2'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Load more' })).toBeDisabled()); // a decision is in flight: no page can be read past a moving list
+  await act(async () => { resolveDecide(); });
+  await waitFor(() => expect(screen.queryByText('OTHER SHOP 55')).not.toBeInTheDocument());
+  expect(screen.getByRole('button', { name: 'Load more' })).not.toBeDisabled();
+});
+
 it('the Income view offers Recorded, which settles the row with the recorded decision; other views do not', async () => {
   const base = fetch;
   const credit = { ...row, direction: 'credit', amount: 120, suggestion: { noMatch: true, income: true, decision: 'income' } };

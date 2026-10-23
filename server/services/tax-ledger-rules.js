@@ -87,10 +87,13 @@ const ELIGIBLE_SQL = `${MATCHER_EXAMINED_SQL} and ${NO_LIVE_CANDIDATES_SQL}`;
 // what every decision UPDATE requires, so a matcher that parks candidates
 // (or a bank change) while the owner is deciding wins the race
 const DECIDABLE_SQL = `${bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT} and ${ELIGIBLE_SQL}`;
+// the Income shelf: an income rule's pre-fill or an Income decision
+const ON_INCOME_SHELF_SQL = "coalesce(suggestion->>'income','') = 'true'";
+function onIncomeShelf(sug) { return !!sug && String(sug.income) === 'true'; }
 const VIEW_SQL = {
-  open: `coalesce(suggestion->>'later','') <> 'true' and coalesce(suggestion->>'income','') <> 'true' and ${ELIGIBLE_SQL}`,
+  open: `coalesce(suggestion->>'later','') <> 'true' and not ${ON_INCOME_SHELF_SQL} and ${ELIGIBLE_SQL}`,
   later: `coalesce(suggestion->>'later','') = 'true' and ${ELIGIBLE_SQL}`,
-  income: `coalesce(suggestion->>'income','') = 'true' and ${ELIGIBLE_SQL}`,
+  income: `${ON_INCOME_SHELF_SQL} and ${ELIGIBLE_SQL}`,
   bankImport: `not (${NO_LIVE_CANDIDATES_SQL})`,
   unexamined: `not ${MATCHER_EXAMINED_SQL}`,
 };
@@ -418,6 +421,11 @@ async function loadRules(conn = db) {
 // - after = {txn_date, id} continues a pass past its row budget: the result
 //   carries more:true and the cursor to send back.
 const NOT_DECIDED_SQL = "(suggestion -> 'decision') is null";
+// What the Inbox's Business claim requires: no decision, or Later (the
+// shelf Business is offered from: the claim replaces that decision)
+const NOT_DECIDED_OR_LATER_SQL = "coalesce(suggestion ->> 'decision', '') in ('', 'later')";
+// the keys a Later decision writes (what a claim that replaces it drops)
+const LATER_KEYS = ['later', 'decision', 'decidedAt'];
 // "the matcher has not flagged this row as a transfer since it was read":
 // a seed-rule write is conditional on it, so a flag the matcher adds between
 // the SELECT and the UPDATE still wins over the seed.
@@ -694,9 +702,11 @@ function decisionWrite(decision, row, now) {
   }
   if (decision === 'recorded') {
     // the receipt has been recorded as a sale (invoice + payment): the row
-    // leaves the Income shelf as settled; Undo in Bank Import reopens it
+    // leaves the Income shelf as settled; Undo in Bank Import reopens it.
+    // The UPDATE repeats the shelf check: a rule change that took the row
+    // off the shelf since the read refuses it
     const patch = { income: true, reason: 'income recorded as a sale per the owner', decision, decidedAt: now.toISOString() };
-    return { action: 'ignored', write: { status: 'ignored', suggestion: bankImport.suggestionMerge(patch, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now } };
+    return { action: 'ignored', guard: ON_INCOME_SHELF_SQL, write: { status: 'ignored', suggestion: bankImport.suggestionMerge(patch, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now } };
   }
   const patch = { reason: `${decision} per the owner`, decision, decidedAt: now.toISOString() };
   if (decision === 'transfer') patch.ignore = true; else patch.personal = true;
@@ -720,7 +730,9 @@ async function decide({ id, decision, categoryId = null, always = false }) {
   const row = await loadDecidableRow(id);
   if (decision === 'expense' && !categoryId) throw httpError(400, 'an expense needs a categoryId');
   if (decision === 'income' && row.direction !== 'credit') throw httpError(400, 'only money in can be income; this row is a payment out');
-  if (decision === 'recorded' && !(row.suggestion && row.suggestion.decision === 'income')) throw httpError(400, 'only a row on the Income shelf can be marked recorded');
+  // the Income shelf holds rows an income rule pre-filled (income without
+  // a decision) as well as decided ones: both offer Recorded
+  if (decision === 'recorded' && !onIncomeShelf(row.suggestion)) throw httpError(400, 'only a row on the Income shelf can be marked recorded');
   // an Always the pattern builder cannot honour is refused up front: the
   // owner must not believe the payee is handled from now on
   // later and recorded are about this row only: Always writes no rule for them
@@ -730,11 +742,13 @@ async function decide({ id, decision, categoryId = null, always = false }) {
   if (decision === 'expense') return { success: true, action: 'create-expense', createExpense: true, ruleCreated: false };
 
   const now = new Date();
-  const { action, write } = decisionWrite(decision, row, now);
+  const { action, write, guard } = decisionWrite(decision, row, now);
   // the decision and its rule commit together: a row that stopped being the
   // Inbox's to decide (candidates parked, bank change) refuses both
   await db.transaction(async (trx) => {
-    const changed = await trx('bank_transactions').where({ id, status: 'unmatched' }).whereRaw(DECIDABLE_SQL).update(write);
+    let q = trx('bank_transactions').where({ id, status: 'unmatched' }).whereRaw(DECIDABLE_SQL);
+    if (guard) q = q.whereRaw(guard);
+    const changed = await q.update(write);
     if (!changed) throw httpError(409, 'the row changed while you were deciding (a possible match or a bank change appeared); reload');
     if (rule) await createRule({ ...rule, conn: trx });
   });
@@ -752,7 +766,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 
 module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON,
-  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, assertPatternFast, probeStrings, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
+  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, assertPatternFast, probeStrings, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };

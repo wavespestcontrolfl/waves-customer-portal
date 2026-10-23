@@ -636,8 +636,18 @@ describe('decide', () => {
     expect(w.patch.status).toBe('ignored');
     expect(w.patch.suggestion.merged).toEqual(expect.objectContaining({ income: true, decision: 'recorded', reason: expect.stringMatching(/recorded as a sale/) }));
     expect(state.inserted).toHaveLength(0);
-    state.updates = []; state.bankRow = { ...moneyIn(), suggestion: { noMatch: true } };
-    await expect(svc.decide({ id: 'b1', decision: 'recorded' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/Income shelf/) });
+    // the UPDATE repeats the shelf check
+    expect(w.wheres).toContain(svc.ON_INCOME_SHELF_SQL);
+    // a row an income RULE pre-filled (no decision yet) sits on the shelf too and gets the same completion
+    state.updates = []; state.bankRow = { ...moneyIn(), suggestion: { noMatch: true, income: true, rule: { id: 'r1', kind: 'income' }, rulesAt: '2026-01-02T00:00:00Z' } };
+    expect(await svc.decide({ id: 'b1', decision: 'recorded' })).toEqual(expect.objectContaining({ action: 'ignored', ruleCreated: false }));
+    expect(state.updates[0].patch.status).toBe('ignored');
+    expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ income: true, decision: 'recorded' }));
+    // off the shelf (no income key, a Later row): refused
+    for (const sug of [{ noMatch: true }, { noMatch: true, later: true, decision: 'later' }]) {
+      state.updates = []; state.bankRow = { ...moneyIn(), suggestion: sug };
+      await expect(svc.decide({ id: 'b1', decision: 'recorded' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/Income shelf/) });
+    }
   });
 
   test.each([
