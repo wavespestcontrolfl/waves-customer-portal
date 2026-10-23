@@ -7130,10 +7130,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           );
           // Lawn Fast Complete: the target a spot fungicide / insecticide row is stored with (lawn-spot-target.js; the row's own tags for any other
           // completion). Resolved BEFORE the report facts freeze, so the stored application and every frozen report fact use the same targets.
-          const spotTargets = await require('../services/lawn-spot-target').resolveForCompletion({
+          const lawnSpotTarget = require('../services/lawn-spot-target');
+          // A row the staged plan offers for mole cricket nymphs records that target when none was chosen (lawn-spot-target.js).
+          const spotTargets = lawnSpotTarget.withProtocolDefaultTargets(await lawnSpotTarget.resolveForCompletion({
             rows: products, lawnFast, catalog: completionCatalogRowsById, canonicalId: canonicalProductId, inferMethod: inferServiceReportApplicationMethod, serviceLine: reportServiceLine,
             confirm: () => require('./lawn-fast-complete').troubleTypeIdsFor(svc),
-          });
+          }), { plan: waveguardPlan, canonicalId: canonicalProductId });
           const reportProductFactsSnapshot = freezeReportProductFacts({
             productIds: snapshotProductIds, submitted: spotTargets.submitted(products), catalogById: completionCatalogRowsById, plan: waveguardPlan,
           });

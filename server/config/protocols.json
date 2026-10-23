@@ -108,7 +108,7 @@
             "premium": true
           },
           "notes": "BLACKOUT. K-Flow (soil-test gated). N rate: 0 lb. ★ Chinch IPM threshold defined. ★ Irrigation audit #2 w/ VWC documentation. Mole cricket nymph spots (UF/IFAS and Clemson: treat small nymphs from mid-June through July): Advion Insect Granule bait, 3 lb per 1,000 sq ft of treated area by hand shaker, on the tunnel areas, once per spot per year. Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. On this hose visit it goes on after the micronutrient pass has dried. Second product: Acelepryn, watered in. Fall adults: Dylox.",
-          "conditional_cost": "0.95"
+          "conditional_cost": "3.19"
         },
         {
           "visit": 7,
@@ -124,7 +124,7 @@
             "premium": true
           },
           "notes": "Celsius app 2/3. ★ Chinch MOA rotation: Talstar (3A) → Arena (4A) if no knockdown 7d. Mole cricket nymph spots: Advion Insect Granule bait, 3 lb per 1,000 sq ft by hand shaker, on new tunnel areas not baited in June (once per spot per year). Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. Second product: Acelepryn, watered in. Fall adults: Dylox.",
-          "conditional_cost": "1.30"
+          "conditional_cost": "2.42"
         },
         {
           "visit": 8,
@@ -324,7 +324,7 @@
             "premium": true
           },
           "notes": "BLACKOUT. K-Flow (soil-test gated). PGR cycle 4. ★ Armyworm IPM threshold defined. ★ Irrigation audit #2. Mole cricket nymph spots (UF/IFAS and Clemson: treat small nymphs from mid-June through July): Advion Insect Granule bait, 3 lb per 1,000 sq ft of treated area by hand shaker, on the tunnel areas, once per spot per year. Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. On this hose visit it goes on after the micronutrient pass has dried. Second product: Acelepryn, watered in. Fall adults: Dylox.",
-          "conditional_cost": "0.88"
+          "conditional_cost": "3.12"
         },
         {
           "visit": 7,
@@ -340,7 +340,7 @@
             "premium": true
           },
           "notes": "Celsius replaces SpeedZone (>85°F). PGR cycle 5. ★ Armyworm MOA rotation: Bifen (3A) → chlorantraniliprole (28). Mole cricket nymph spots: Advion Insect Granule bait, 3 lb per 1,000 sq ft by hand shaker, on new tunnel areas not baited in June (once per spot per year). Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. Second product: Acelepryn, watered in. Fall adults: Dylox.",
-          "conditional_cost": "1.12"
+          "conditional_cost": "2.24"
         },
         {
           "visit": 8,
@@ -533,7 +533,7 @@
             "premium": true
           },
           "notes": "BLACKOUT. K-Flow (soil-test gated). PGR lower frequency. ★ Irrigation audit #2. Overwatering on Zoysia = fall large patch setup. Mole cricket nymph spots (UF/IFAS and Clemson: treat small nymphs from mid-June through July): Advion Insect Granule bait, 3 lb per 1,000 sq ft of treated area by hand shaker, on the tunnel areas, once per spot per year. Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. On this hose visit it goes on after the micronutrient pass has dried. Second product: Acelepryn, watered in. Fall adults: Dylox.",
-          "conditional_cost": "0.00"
+          "conditional_cost": "2.24"
         },
         {
           "visit": 7,
@@ -549,7 +549,7 @@
             "premium": true
           },
           "notes": "Celsius for summer. SpeedZone BANNED Jul-Sep. ★ PGR response doc — if turf thinning, reduce rate IMMEDIATELY. Mole cricket nymph spots: Advion Insect Granule bait, 3 lb per 1,000 sq ft by hand shaker, on new tunnel areas not baited in June (once per spot per year). Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. Second product: Acelepryn, watered in. Fall adults: Dylox.",
-          "conditional_cost": "0.00"
+          "conditional_cost": "1.12"
         },
         {
           "visit": 8,
@@ -745,7 +745,7 @@
             "premium": true
           },
           "notes": "BLACKOUT. K-Flow (irrigated only, soil-test gated). ★ Mole cricket soap flush #2 with defined threshold and Dylox curative. ★ Non-irrigated properties: reduced product load. Mole cricket nymph spots (UF/IFAS and Clemson: treat small nymphs from mid-June through July): Advion Insect Granule bait, 3 lb per 1,000 sq ft of treated area by hand shaker, on the tunnel areas, once per spot per year. Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. On this hose visit it goes on after the micronutrient pass has dried. Second product: Acelepryn, watered in. Fall adults: Dylox.",
-          "conditional_cost": "3.13"
+          "conditional_cost": "5.37"
         },
         {
           "visit": 7,
@@ -761,7 +761,7 @@
             "premium": true
           },
           "notes": "No Celsius (not labeled for bahia). ★ Seed head customer talk STRUCTURED — proactive, not reactive. Mowing upsell opportunity if mowing division/partner available. Mole cricket nymph spots: Advion Insect Granule bait, 3 lb per 1,000 sq ft by hand shaker, on new tunnel areas not baited in June (once per spot per year). Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. Second product: Acelepryn, watered in. Fall adults: Dylox.",
-          "conditional_cost": "0.00"
+          "conditional_cost": "1.12"
         },
         {
           "visit": 8,

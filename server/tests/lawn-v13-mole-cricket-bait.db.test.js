@@ -12,6 +12,7 @@ const catalogMigration = require('../models/migrations/20261023140000_lawn_v13_a
 const rowsMigration = require('../models/migrations/20261023141000_lawn_v13_mole_cricket_bait_staged_rows');
 const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const stampMigration = require('../models/migrations/20261023142000_lawn_v13_advion_label_verified');
+const followMigration = require('../models/migrations/20261023143000_lawn_v13_advion_followups');
 const { validateRule, rulesForTargets } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { approvedReportProductFacts } = require('../services/service-report/report-data');
@@ -43,7 +44,8 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
     expect(JSON.stringify(v13Recipe)).not.toMatch(/1\.6 lb/);
     // Acelepryn is the second product: watered in (the opposite of the Advion direction), June and July.
     expect(lineFor(visit(grass, 'Jun').secondary, N.ACE)).toMatch(/mole cricket nymph spots, second product after Advion, label rate, watered in right after application/);
-    expect(lineFor(visit(grass, 'Jul').secondary, N.ACE)).toMatch(/caterpillars, 0\.046 to 0\.092 fl oz per 1,000 sq ft.*; mole cricket nymph spots, second product after Advion: label rate, watered in right after application/);
+    // July's Acelepryn line stays the caterpillar use (its row carries the 24-hour hold); mole crickets are June's offer, with their own staged row.
+    expect(lineFor(visit(grass, 'Jul').secondary, N.ACE)).not.toMatch(/mole cricket/);
     // Talak stays where it belongs (chinch bugs, caterpillars) and is gone as the nymph product.
     expect(lineFor(visit(grass, 'Jul').secondary, N.TAL)).toBe(`${N.TAL} — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours`);
     expect(lineFor(visit(grass, 'Aug').secondary, N.TAL)).toBeUndefined();
@@ -474,6 +476,126 @@ describeDb('mole cricket bait migrations through PostgreSQL', () => {
     });
   });
 
+  describe('follow-ups (20261023143000): service_lines on the Advion row, a mole cricket entry on the Acelepryn rule', () => {
+    const fixtureRule = () => JSON.parse(JSON.stringify(require('./fixtures/lawn-watering-rules-v13-2026-10-22.json')[N.ACE]));
+    const withoutMoleCricket = () => { const rule = fixtureRule(); rule.by_target = rule.by_target.filter((e) => !e.match.includes('mole cricket')); return rule; };
+    const ace = () => knex('products_catalog').where({ id: ids.ace }).first();
+    const audits = () => knex('lawn_protocol_audit_log').where({ action: followMigration.ACTION });
+    beforeEach(async () => {
+      await reset(); await upBoth();
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify(withoutMoleCricket()) });
+    });
+
+    test('service_lines becomes ["lawn"] on the inserted row only; the pest-control row and the rest of the row are untouched', async () => {
+      const before = await newRow();
+      const wdgBefore = await knex('products_catalog').where({ id: ids.wdg }).first();
+      await followMigration.up(knex);
+      const after = await newRow();
+      expect(after.service_lines).toEqual(['lawn']);
+      const { service_lines: _a, updated_at: _u, ...rest } = after;
+      const { service_lines: _b, updated_at: _v, ...restBefore } = before;
+      expect(rest).toEqual(restBefore);
+      expect(await knex('products_catalog').where({ id: ids.wdg }).first()).toEqual(wdgBefore);
+    });
+
+    test('a service_lines value someone set first is left alone', async () => {
+      await knex('products_catalog').where({ name: NAME }).update({ service_lines: JSON.stringify(['pest']) });
+      await followMigration.up(knex);
+      expect((await newRow()).service_lines).toEqual(['pest']);
+    });
+
+    test('Acelepryn gets the mole cricket water-in entry appended, nothing else in the rule changes; a second up changes nothing', async () => {
+      await followMigration.up(knex);
+      const rule = (await ace()).post_application_watering;
+      expect(rule).toEqual(fixtureRule());
+      expect(validateRule(rule).valid).toBe(true);
+      const once = await snapshot();
+      await followMigration.up(knex);
+      expect(await snapshot()).toEqual(once);
+      expect(await audits()).toHaveLength(1);
+    });
+
+    test('an Acelepryn rule with no by_target list, or with an entry that already covers mole crickets, is left alone', async () => {
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify({ mode: 'hold', hold_hours: 24, source: 'label' }) });
+      await followMigration.up(knex);
+      expect((await ace()).post_application_watering).toEqual({ mode: 'hold', hold_hours: 24, source: 'label' });
+      await knex('lawn_protocol_audit_log').where({ action: followMigration.ACTION }).del();
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify(fixtureRule()) });
+      await followMigration.up(knex);
+      expect((await ace()).post_application_watering).toEqual(fixtureRule());
+    });
+
+    test('down puts both back exactly; a rule or service_lines staff changed since makes down a full no-op', async () => {
+      const start = await snapshot();
+      await followMigration.up(knex);
+      await followMigration.down(knex);
+      expect(await snapshot()).toEqual(start);
+      await followMigration.up(knex);
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify({ ...fixtureRule(), source: 'label' }) });
+      const edited = await snapshot();
+      await followMigration.down(knex);
+      expect(await snapshot()).toEqual(edited);
+      await knex('products_catalog').where({ id: ids.ace }).update({ post_application_watering: JSON.stringify(fixtureRule()) });
+      await knex('products_catalog').where({ name: NAME }).update({ service_lines: JSON.stringify(['lawn', 'pest']) });
+      const edited2 = await snapshot();
+      await followMigration.down(knex);
+      expect(await snapshot()).toEqual(edited2);
+    });
+
+    test('with the entry, a blank chip on the mole cricket offer reads water-in text; without the default target it would read the caterpillar hold', () => {
+      const { rulesForTargets } = require('../services/service-report/lawn-watering-rule');
+      const rule = validateRule(fixtureRule()).rule;
+      const text = (targets) => buildWateringInstruction({ rules: rulesForTargets(rule, targets).map((r) => ({ name: N.ACE, rule: r })), completedAt: '2026-06-23T20:00:00Z', plainWhenNoSetup: true, labelFirst: true });
+      expect(text([]).state).toBe('hold'); // the caterpillar hold: what a blank chip read before
+      const moleCricket = text(['Tawny mole crickets']);
+      expect(moleCricket.state).toBe('water_in');
+      expect(moleCricket.waterInInches).toBe(0.25);
+    });
+  });
+
+  describe('a blank Treating chip on the mole cricket offer records the target by default', () => {
+    const { withProtocolDefaultTargets, resolveForCompletion, MOLE_CRICKET_TARGET } = require('../services/lawn-spot-target');
+    const plan = { protocol: { structured: { products: [
+      { productId: 'ACE-ID', gates: { trigger: 'mole_cricket_nymphs' } },
+      { productId: 'CAT-ID', gates: { trigger: 'caterpillars', delayWateringOrMowingHours: 24 } },
+    ] } } };
+    const plain = async (rows, lawnFast = null) => resolveForCompletion({ rows, lawnFast, catalog: new Map(), canonicalId: (id) => id, inferMethod: () => 'spot_treatment', serviceLine: 'lawn', confirm: async () => ({ takeAll: new Set(), chinch: new Set(), chinchOnly: new Set() }) });
+
+    test('the staged mole cricket row gets the target when none was chosen; a chosen target and every other row are untouched', async () => {
+      const rows = [{ productId: 'ACE-ID', targets: [] }, { productId: 'CAT-ID', targets: [] }, { productId: 'ACE-ID-2', targets: [] }];
+      const out = withProtocolDefaultTargets(await plain(rows), { plan, canonicalId: (id) => id });
+      expect(out.of(rows[0])).toEqual([MOLE_CRICKET_TARGET]);
+      expect(out.of(rows[1])).toEqual([]);
+      expect(out.of(rows[2])).toEqual([]);
+      expect(out.submitted(rows).map((r) => r.targets)).toEqual([[MOLE_CRICKET_TARGET], [], []]);
+      const chosen = [{ productId: 'ACE-ID', targets: ['White grubs'] }];
+      const kept = withProtocolDefaultTargets(await plain(chosen), { plan, canonicalId: (id) => id });
+      expect(kept.of(chosen[0])).toEqual(['White grubs']);
+      expect(kept.submitted(chosen)).toEqual(chosen);
+    });
+
+    test('a plan with no mole cricket row changes nothing at all', async () => {
+      const rows = [{ productId: 'CAT-ID', targets: [] }];
+      const base = await plain(rows);
+      expect(withProtocolDefaultTargets(base, { plan: { protocol: { structured: { products: [plan.protocol.structured.products[1]] } } }, canonicalId: (id) => id })).toBe(base);
+      expect(withProtocolDefaultTargets(base, { plan: null })).toBe(base);
+    });
+
+    test('the frozen report facts read the default: Acelepryn on the mole cricket offer freezes the water-in direction', async () => {
+      const { freezeReportProductFacts } = require('../services/complete-scheduled-service');
+      const aceId = '7f1e2d3c-0000-4000-8000-0000000000bb';
+      const catalogRow = { id: aceId, name: N.ACE, category: 'insecticide', epa_reg_number: '100-1489', active: true, label_verified_at: new Date(), approved_for_service_report: true,
+        content_status: 'approved', customer_visibility: 'public', post_application_watering: JSON.parse(JSON.stringify(require('./fixtures/lawn-watering-rules-v13-2026-10-22.json')[N.ACE])) };
+      const stagedPlan = { protocol: { structured: { products: [{ productId: aceId, gates: { trigger: 'mole_cricket_nymphs' } }] } } };
+      const rows = [{ productId: aceId, targets: [] }];
+      const spot = withProtocolDefaultTargets(await plain(rows), { plan: stagedPlan, canonicalId: (id) => id });
+      const frozen = freezeReportProductFacts({ productIds: [aceId], submitted: spot.submitted(rows), catalogById: new Map([[aceId, catalogRow]]), plan: stagedPlan })[aceId];
+      expect(frozen.wateringRule.by_target.some((e) => e.mode === 'water_in' && e.match.includes('mole cricket'))).toBe(true);
+      const { rulesForTargets } = require('../services/service-report/lawn-watering-rule');
+      expect(rulesForTargets(frozen.wateringRule, spot.of(rows[0])).map((r) => r.mode)).toEqual(['water_in']);
+    });
+  });
+
   describe('Advion once per spot per year: June baits a spot, July baits a NEW spot (owner 2026-10-23)', () => {
     const applicationLimits = require('../services/application-limits');
     const featureGates = require('../config/feature-gates');
@@ -511,6 +633,47 @@ describeDb('mole cricket bait migrations through PostgreSQL', () => {
       expect(result.allowed).toBe(false);
       expect(amount(result)).toHaveLength(1);
       expect(amount(result)[0].message).toMatch(/yearly label amount \(4\.6 lb per 1,000 sq ft\).*THIS APPLICATION WOULD EXCEED IT/);
+    });
+
+    describe('one yearly cap across both catalog rows of the granule (EPA 100-1483)', () => {
+      const oldRow = (rate, place, unit = 'lb') => knex('property_application_history').insert({
+        customer_id: customerId, product_id: ids.wdg, application_date: '2026-05-20', application_rate: rate, rate_unit: unit, treated_place: place,
+      });
+      beforeEach(async () => { await knex('property_application_history').del(); });
+
+      test('earlier use under the pest-control row (Advion WDG Granular) counts against a new-row application at the same place; another place is open', async () => {
+        jest.spyOn(featureGates, 'lawnTroubleAreasLive').mockReturnValue(true);
+        await oldRow(3, 'front');
+        const same = await check({ place: 'front' });
+        expect(same.allowed).toBe(false);
+        expect(amount(same)[0].message).toMatch(/total 65\.2% of the yearly label amount \(4\.6 lb per 1,000 sq ft\).*THIS APPLICATION WOULD EXCEED IT/);
+        expect((await check({ place: 'back' })).allowed).toBe(true);
+      });
+
+      test('the old row\'s ounces convert (48 oz = 3 lb); a use that cannot be sized counts at the program rate; another EPA number does not count', async () => {
+        await oldRow(48, null, 'oz');
+        expect((await check({})).allowed).toBe(false);
+        await knex('property_application_history').del();
+        await oldRow(null, null, null);
+        expect((await check({})).allowed).toBe(false);
+        await knex('property_application_history').del();
+        const [other] = await knex('products_catalog').insert({ name: 'Some other indoxacarb bait', category: 'insecticide', epa_reg_number: '100-1484', active: true }).returning('*');
+        await knex('property_application_history').insert({ customer_id: customerId, product_id: other.id, application_date: '2026-05-20', application_rate: 3, rate_unit: 'lb' });
+        expect((await check({})).allowed).toBe(true);
+        await knex('products_catalog').where({ id: other.id }).del();
+      });
+
+      test('the closeout audit counts the old row too (the same history set): 3 lb under each row is over the yearly maximum', async () => {
+        process.env.GATE_LAWN_V13 = 'true';
+        const [limit] = (await caps.applyV13CountCaps(knex, { id: product.id, name: NAME }, [], product.id)).filter((l) => l.match_type === caps.V13_AMOUNT);
+        expect(limit.history_epa_reg_number).toBe(catalogMigration.CATALOG.epa_reg_number);
+        await oldRow(3, null);
+        expect(await applicationLimits.auditAmount(knex, customerId, product, '2026-07-14', limit, {})).toBeNull();
+        await knex('property_application_history').insert({ customer_id: customerId, product_id: product.id, application_date: '2026-07-14', application_rate: 3, rate_unit: 'lb' });
+        const found = await applicationLimits.auditAmount(knex, customerId, product, '2026-07-14', limit, {});
+        expect(found).toMatchObject({ type: 'annual_max_rate' });
+        expect(found.current).toBeGreaterThan(100);
+      });
     });
 
     test('a whole-lawn check (no place) after June\'s 3 lb is blocked too: 3 + 3 lb is over 4.6', async () => {

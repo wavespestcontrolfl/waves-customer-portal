@@ -133,6 +133,10 @@ const V13_MORE_LIMITS = Object.freeze([
       cap: 4.6,
       unit: 'lb/1000sf/year',
       fallbackRate: 3,
+      // The pest-control catalog row "Advion WDG Granular" is the same granule (EPA 100-1483) under another product id, and the label's yearly
+      // maximum is the product's, not a row's. History under ANY catalog row with this EPA number counts against this cap, as the shared
+      // active-ingredient caps count prodiamine across formulations (owner 2026-10-23).
+      sharedEpaRegNumber: '100-1483',
       description: 'Advion Insect Granule: no more than 4.6 lb per 1,000 sq ft a year under the v13 lawn program, all applications at one spot added up, so one 3 lb pass per spot a year (label EPA 100-1483). An earlier application with no readable rate counts as 3 lb, the program rate.',
     },
   },
@@ -291,6 +295,7 @@ function syntheticAmountLimit(entry, productId = null) {
     severity: 'hard_block',
     description: amount.description,
     fallback_rate: amount.fallbackRate,
+    ...(amount.sharedEpaRegNumber ? { history_epa_reg_number: amount.sharedEpaRegNumber } : {}),
     synthetic: true,
   };
 }
