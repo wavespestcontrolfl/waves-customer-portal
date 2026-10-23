@@ -332,6 +332,15 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
 async function transitionJobStatus({
   jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
   cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false, holdCompletionOutcome = 'performed',
+  // 'caller': the caller runs the invoice void and inspection-credit reversal itself, on the effects it was shown
+  // (the Intelligence Bar cancel card's pinned follow-through), so this writer's unpinned seam stands down.
+  moneySeam,
+  // The Intelligence Bar cancel card approved the customer text (opt-in, with notifyCustomer 'caller'): the durable
+  // claim is minted 'pending_approved', a state NO sweep adopts, so a crash before the approved send finalizes it
+  // can never let the sweep text the live template to the current recipients (the receipt says it was not confirmed).
+  // Also set when the card explicitly chose NO text (notifyCustomer 'caller_suppress'): the terminal 'suppressed' marker
+  // is then written whatever GATE_CANCEL_NOTICE_HOOK says, so no pod can late-claim the row and text it.
+  cancelNoticeApproved = false,
   // A caller transitioning a BATCH of rows passes one Set and refreshes the
   // affected routes once after its loop (dispatch-assignment.js
   // flushDispatchQualityDates). Without it a 100-row bulk cancel would
@@ -607,6 +616,10 @@ async function transitionJobStatus({
           await sp('ops_email_send_state')
             .where({ email_key: `cn-ci-${jobId}` })
             .del();
+          // Likewise the approved-cancel suppress tombstone: a later real cancellation must notice normally.
+          await sp('ops_email_send_state')
+            .where({ email_key: `cn-sup-${jobId}` })
+            .del();
         });
       } catch (clearErr) {
         logger.warn(`[job-status] cancellation-marker clear failed for ${jobId}: ${clearErr.message}`);
@@ -615,7 +628,12 @@ async function transitionJobStatus({
     if (String(toStatus || '') === 'cancelled') {
       try {
         const { isEnabled } = require('../config/feature-gates');
-        if (isEnabled('cancelNoticeHook')) {
+        // The card's notice disposition is persisted whatever GATE_CANCEL_NOTICE_HOOK says: the approved text's
+        // 'pending_approved' marker, or the terminal 'suppressed' of a card that chose no text. The approved
+        // send (handleCancellation with approvedNotice) does not depend on the hook, and in a rolling deploy a pod with the
+        // hook off could otherwise commit a markerless approved cancel that a newer pod's late claim would text from the
+        // live template. Everything else this gate controls (hook-owned claims, the outbox) stays gated.
+        if (isEnabled('cancelNoticeHook') || cancelNoticeApproved) {
           await t.transaction(async (sp) => {
             // Series routes pass ONE shared token for every target so the
             // sweep sees a single group even if the process dies before
@@ -633,7 +651,7 @@ async function transitionJobStatus({
             // suppress intent finalizes terminally here.
             let targetState = (notifyCustomer === false || notifyCustomer === 'caller_suppress')
               ? 'suppressed'
-              : (notifyCustomer === 'caller' ? 'pending_notify' : 'pending');
+              : (notifyCustomer === 'caller' ? (cancelNoticeApproved ? 'pending_approved' : 'pending_notify') : 'pending');
             // Merged-slot survivor (codex r12): when the status-sync
             // trigger promoted a sibling for the SAME customer/slot, the
             // customer still has a live visit at that time — a
@@ -653,7 +671,14 @@ async function transitionJobStatus({
             const claimedRows = await sp('appointment_reminders')
               .where({ scheduled_service_id: jobId })
               .where(function claimable() {
-                this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
+                this.whereNull('cancellation_notice_at').orWhere(function priorCycleMarker() {
+                  // A card-approved cancel replaces a terminal / approved marker left by an EARLIER cancellation cycle
+                  // (a restoration whose marker clear was swallowed). This cancel just moved the visit out of a live status
+                  // under its row lock, so no such marker can belong to this cycle; reusing one would leave the new
+                  // approved text with nothing it can claim, and it would be silently skipped.
+                  if (cancelNoticeApproved) this.whereIn('cancellation_notice_state', ['suppressed', 'sent', 'pending_approved']);
+                  else this.whereRaw('false');
+                }).orWhere(function staleLease() {
                   // Singleton leases only (codex r39): a stale SHARED
                   // (series) token stays owned as a group — the sweep
                   // recovers it with the combined copy; stealing one row
@@ -664,12 +689,37 @@ async function transitionJobStatus({
                 });
               })
               .update({ cancellation_notice_at: claimTs, cancellation_notice_state: targetState, updated_at: claimTs });
+            // The approved text needs its marker (or a terminal state) on the row: when the claim touched nothing because
+            // an older pending / pending_notify claim already sits there (a restoration whose marker clear failed), that
+            // claim stays eligible for the sweep and would send the live template after a crash. Abort the cancellation.
+            // No reminder row at all is fine: nothing can send. (Terminal / approved markers are replaced above, so a row
+            // still unclaimed here holds a live older claim.)
+            if (cancelNoticeApproved && !claimedRows) {
+              const existing = await sp('appointment_reminders').where({ scheduled_service_id: jobId }).first('cancellation_notice_state');
+              if (existing) {
+                throw new Error('approved cancellation text: an older notice claim holds this reminder, so the approved marker could not be written');
+              }
+              // No reminder row yet: nothing can be marked, but one can still be inserted right after this check (a
+              // booking registration, the reminder self-heal), and the cancel-notice sweep would then late-claim that
+              // markerless row and send the live template. Leave a durable suppress tombstone in THIS transaction (the
+              // sweep's late claim reads it and finalizes the new row 'suppressed'). Written for the approved text and
+              // the no-text choice alike, and for approved linked visits (they take this same path). The reminder
+              // table has no verified unique key on scheduled_service_id, so the tombstone lives on the outbox table
+              // (unique email_key), next to the caller-intent outbox row 'cn-ci-<id>'. A failure here aborts the cancel.
+              await sp('ops_email_send_state')
+                .insert({ email_key: `cn-sup-${jobId}`, last_sent_at: claimTs, updated_at: sp.fn.now() })
+                .onConflict('email_key')
+                .merge(['last_sent_at', 'updated_at']);
+            }
             // The immediate post-commit worker runs only for hook-owned
             // paths; 'caller' claims are settled by the route (or sweep).
             if (claimedRows && targetState === 'pending' && notifyCustomer !== 'caller') cancelNoticeClaimTs = claimTs;
           });
         }
       } catch (claimErr) {
+        // The card-approved text needs its pending_approved marker: without it a crash would leave an unmarked row the
+        // late-claim sweep could text with the live template. Abort the cancellation instead of committing without it.
+        if (cancelNoticeApproved) throw claimErr;
         // The transition still commits; the post-commit worker attempts a
         // LATE claim so the obligation isn't lost (codex r20).
         cancelNoticeLateClaim = notifyCustomer === undefined || notifyCustomer === true;
@@ -679,7 +729,8 @@ async function transitionJobStatus({
         // late-claim mints pending_notify instead of evidence-gated
         // plain pending when it finds it. Own savepoint: its failure
         // must never roll back the transition.
-        if (notifyCustomer === 'caller') {
+        // An approved text never gets the outbox: its late claim would mint a live-template 'pending_notify'.
+        if (notifyCustomer === 'caller' && !cancelNoticeApproved) {
           try {
             // Key stays under email_key's varchar(60): 'cn-ci-' + UUID =
             // 42 chars (codex r8). The VALUE is the shared claim token so
@@ -1009,9 +1060,11 @@ async function transitionJobStatus({
       // idempotent, so routes that also run it (cancel/no-show branches)
       // double-run safely. Post-commit by placement, best-effort by
       // contract.
-      void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
-        logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
-      });
+      if (moneySeam !== 'caller') {
+        void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
+          logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
+        });
+      }
       // Visit-group seam (visit-group-scope.md §2): a cancelled/skipped
       // child leaves its group; the last remaining row dissolves it.
       // Guarded HERE — the one shared status writer — so no transition

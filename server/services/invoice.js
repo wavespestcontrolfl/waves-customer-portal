@@ -5667,6 +5667,43 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
 // its deposit_credit lines carry (restoreDepositCreditForVoidedInvoice sums
 // the same lines the same way). Cents-rounded so a pg numeric string and a
 // pinned JSON number compare equal.
+// True when another invoice rides the same PaymentIntent (a combined payment covering other visits). Cancelling that
+// PaymentIntent would also clear the stamps on those invoices, which a single visit's card never lists.
+async function paymentIntentSharedWithOtherInvoice(conn, paymentIntentId, invoiceId) {
+  if (!paymentIntentId) return false;
+  const other = await conn("invoices")
+    .where({ stripe_payment_intent_id: paymentIntentId })
+    .whereNot("id", invoiceId)
+    .first("id");
+  return Boolean(other);
+}
+
+// The pinned sweep's combined-payment guard: opens a transaction, takes the per-customer pay.combined.customer
+// advisory lock the combined setup takes (same key), then checks for a sibling invoice on the same PaymentIntent.
+// Only a pinned candidate that carries a PaymentIntent is guarded; for any other { lock: null, shared: false }.
+async function lockPinnedPaymentIntent(pinnedById, candidate) {
+  if (!pinnedById || !candidate.stripe_payment_intent_id) return { lock: null, shared: false };
+  const lock = await db.transaction();
+  try {
+    await require("./pay-combined").lockCombinedCustomers(lock, [String(candidate.customer_id)]);
+    return { lock, shared: await paymentIntentSharedWithOtherInvoice(lock, candidate.stripe_payment_intent_id, candidate.id) };
+  } catch (err) {
+    // The caller never receives the transaction, so it must be rolled back here (frees the connection and the lock).
+    await lock.rollback().catch(() => {});
+    throw err;
+  }
+}
+
+async function releaseCombinedLock(lock) {
+  if (lock) await lock.commit().catch(() => {});
+}
+
+// { combined_payment: true } when the invoice's PaymentIntent also rides another invoice, else {} (preview entry key).
+async function combinedPaymentFlag(candidate) {
+  if (!candidate.stripe_payment_intent_id) return {};
+  return await paymentIntentSharedWithOtherInvoice(db, candidate.stripe_payment_intent_id, candidate.id) ? { combined_payment: true } : {};
+}
+
 function cancelVoidInvoiceAmounts(row) {
   const cents = (v) => Math.round(Number(v || 0) * 100);
   const depositCents = invoiceDepositCreditCents(row);
@@ -5860,6 +5897,373 @@ async function renderInvoiceSmsBody(invoice, customer, payUrl, { noVariants = fa
     logger.warn(`[invoice] Template lookup failed: ${err.message}`);
   }
   return { body: null, renderedTemplateKey: null };
+}
+
+// ── Cancelled-service void sweep (voidOpenInvoicesForCancelledService) helpers ──────────────────────────────────
+// Split out of the method to keep each piece reviewable; the order of locks, Stripe calls and writes is unchanged.
+
+// The invoices a cancelled visit's sweep considers (or, for a refused-send cleanup, the one claimed invoice).
+async function selectCancelledServiceVoidCandidates({ scheduledServiceId, invoiceId, refusedClaimToken, refusedSendCleanup, pinnedById }) {
+  const candidateQuery = db("invoices");
+  if (refusedSendCleanup) {
+    candidateQuery.where({ id: invoiceId, status: "sending", send_claim_token: refusedClaimToken });
+  } else {
+    // Widened (Codex round-4 P1 #4131, raised twice for this slice):
+    // most post-completion invoices carry only service_record_id, never
+    // scheduled_service_id directly (migration 20260420000002) - the
+    // inverse of linkedScheduledServiceId's own fallback. Matching
+    // scheduled_service_id alone left those rows permanently un-voidable
+    // by this sweep; done once here, not duplicated at each caller.
+    candidateQuery
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            db("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      })
+      .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
+    // A cancel confirmed from a card that listed the invoices it voids
+    // (Intelligence Bar cancel_appointment, via the follow-through's
+    // pinned effects) voids ONLY those, and only at the amounts shown
+    // (checked below, before any Stripe call and again under the row
+    // lock); an invoice created or changed after the card is left
+    // open, and the follow-through's post-void gate then sends the fee
+    // to office review.
+    if (pinnedById) candidateQuery.whereIn("id", [...pinnedById.keys()]);
+  }
+  return candidateQuery
+    .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id",
+      "total", "credit_applied", "line_items", "customer_id", "created_at", "scheduled_service_id");
+}
+
+// Pre-lock Stripe triage of the PaymentIntent stamped on a candidate invoice. Returns true when the invoice must be
+// left alone (logged here); false when the sweep may go on to the row-locked void. `piConn` is the connection the
+// stamp clear runs on (the pinned path's combined-payment lock transaction, else the shared db).
+async function triageCancelledServicePaymentIntent({ candidate, triagedPiId, scheduledServiceId, piConn, StripeService }) {
+  let pi;
+  try {
+    pi = await StripeService.retrievePaymentIntent(triagedPiId);
+  } catch (e) {
+    logger.warn(
+      `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} lookup failed (${e.message}); needs manual review`,
+    );
+    return true;
+  }
+  if (!pi) {
+    // A PI id is stamped but Stripe isn't configured/reachable -
+    // can't verify the money state, so fail closed.
+    logger.warn(
+      `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} attached but unverifiable; needs manual review`,
+    );
+    return true;
+  }
+  if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
+    logger.warn(
+      `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — payment in flight (PI ${triagedPiId} is ${pi.status}); needs manual refund/credit review`,
+    );
+    return true;
+  }
+  if (pi.status !== "canceled") {
+    try {
+      await StripeService.cancelPaymentIntent(triagedPiId, {
+        cancellation_reason: "abandoned",
+      });
+      logger.info(
+        `[invoice] Cancelled PaymentIntent ${triagedPiId} (was ${pi.status}) before voiding ${candidate.invoice_number} — scheduled service ${scheduledServiceId} cancelled`,
+      );
+    } catch (e) {
+      // Cancel races a confirmation -> the PI may now be charging.
+      logger.warn(
+        `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} cancel failed (${e.message}); needs manual review`,
+      );
+      return true;
+    }
+  }
+  // Unbind combined siblings from the canceled PI - REGARDLESS of
+  // who canceled it (codex #3427 r17 P2: an already-canceled PI,
+  // e.g. via the Stripe dashboard, must not leave stale bindings).
+  await require("./pay-combined").clearPaymentIntentStamps(piConn, triagedPiId, { keepInvoiceIds: [String(candidate.id)] });
+  return false;
+}
+
+// Refused-send cleanup, under the invoice row lock: the claim must still be ours and nothing else may own the
+// delivery. Returns a skip result, or null to go on.
+async function refusedSendCleanupSkip(trx, locked, { refusedClaimToken, scheduledServiceId }) {
+  if (locked.status !== "sending" || locked.send_claim_token !== refusedClaimToken) {
+    return { skipped: "delivery claim changed; replacement episode retained", invoice: locked };
+  }
+  // A deferred invoice message may already own this delivery.
+  // Keep the invoice claimed while that message is queued,
+  // dispatching, or finalizing so terminal-refusal cleanup cannot
+  // erase its pay link or accepted-provider evidence.
+  const liveQueuedDelivery = await trx("sms_log")
+    .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
+    .whereRaw("metadata->>'invoice_id' = ?", [String(locked.id)])
+    .whereRaw("(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))")
+    .first("id");
+  if (liveQueuedDelivery) {
+    return { skipped: `queued delivery ${liveQueuedDelivery.id} is still live; needs delivery review`, invoice: locked };
+  }
+  const linkedVisitId = await linkedScheduledServiceId(locked, trx);
+  if (String(linkedVisitId || "") !== String(scheduledServiceId)) {
+    return { skipped: "linked visit changed after refusal", invoice: locked };
+  }
+  const terminalVisit = await require("./invoice-helpers")
+    .visitRefusesSettlement(trx, linkedVisitId);
+  if (!terminalVisit) {
+    return { skipped: "linked visit is no longer terminal", invoice: locked };
+  }
+  return null;
+}
+
+// Normal cancellation, under the invoice row lock: still a voidable status, and (pinned) still what the card showed.
+// Returns a skip result, or null to go on.
+async function lockedCandidateSkip(trx, locked, { pinnedById, pinnedMismatch }) {
+  if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
+    return { skipped: `status moved to ${locked.status}`, invoice: locked };
+  }
+  if (pinnedMismatch(locked)) {
+    return { skipped: "amounts changed since the confirmed card; needs office review", invoice: locked };
+  }
+  if (pinnedById && await require("./appointment-cancel-impact").invoiceDownstreamReason(trx, [locked])) {
+    // Everything the card refused at preview, repeated on the locked row: the bar's void rules (charge markers, a paid date,
+    // a payment on file, an unresolved saved-card charge, a payment plan, page-only effects) and setup-fee, annual-prepay or
+    // membership-dues effects. An invoice edited or charged since can keep its amounts and still gain one; the void would
+    // then hide money or restore an unapproved obligation. A check that cannot complete throws, leaving the invoice open.
+    return { skipped: "money or billing effects appeared since the confirmed card (a card charge, a paid date, a payment plan, an unresolved charge, or downstream effects); needs office review", invoice: locked };
+  }
+  return null;
+}
+
+// Applied money (a paid/processing payments row or payment_recorded_at) blocks the auto-void. Returns a skip or null.
+async function appliedMoneySkip(trx, locked) {
+  // Payments reference invoices via metadata.invoice_id (prepaid
+  // credits, Stripe charges alike - there is no payments.invoice_id
+  // column). Either signal means applied money: skip the auto-void.
+  const appliedPayment = await trx("payments")
+    .whereIn("status", ["paid", "processing"])
+    .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [locked.id])
+    .first("id");
+  if (locked.payment_recorded_at || appliedPayment) {
+    return {
+      skipped: `money already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment_recorded_at set"}); needs manual refund/credit review`,
+      invoice: locked,
+    };
+  }
+  return null;
+}
+
+// The void write plus its same-transaction restores (deposit credit, account credit, statement rollup, rodent setup).
+async function voidLockedCancelledServiceInvoice(trx, locked, { refusedSendCleanup, refusedClaimToken, lockedDues }) {
+  const voidQuery = trx("invoices")
+    .where({ id: locked.id, status: locked.status });
+  if (refusedSendCleanup) voidQuery.where({ send_claim_token: refusedClaimToken });
+  const [voidedInvoice] = await voidQuery
+    .update({ status: "void", send_claim_token: null, updated_at: new Date() })
+    .returning("*");
+  if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
+  assertDuesOwnerUnmoved(lockedDues, voidedInvoice);
+  // Same-transaction ledger restore, matching voidInvoice: a
+  // cancelled job's pre-minted first invoice may carry the
+  // estimate's deposit credit, which must become available again
+  // (roll-forward or terminal sweep) once this invoice stops
+  // billing.
+  const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
+  await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice, trx });
+  // Return any auto-applied account credit too (a partially credit-
+  // covered collectible invoice for a cancelled service).
+  const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
+  await restoreAccountCreditForVoidedInvoice({ invoice: voidedInvoice, createdBy: "system:service_cancel" }, trx);
+  // Phase 2: drop the voided accrued child from its OPEN statement total
+  // in the same transaction (rollupStatement excludes status='void').
+  if (voidedInvoice.payer_statement_id) {
+    await require("./payer-statements").rollupStatement(voidedInvoice.payer_statement_id, trx);
+  }
+  // A cancelled visit's auto-voided invoice may have billed the
+  // rodent bait-station setup (codex #3591 r58 P1) - restore the
+  // obligation to the living series exactly like voidInvoice does
+  // (billable-visit guard + dead-series re-bill inside).
+  await InvoiceService.restoreRodentSetupObligationForReversedInvoice(trx, voidedInvoice);
+  return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
+}
+
+// The atomic re-check + void for one candidate, in a single transaction under the invoice row lock.
+async function recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, ctx) {
+  return db.transaction(async (trx) => {
+    // A cancelled visit's void of a stamped dues invoice removes the
+    // month's coverage: dues-month lock first.
+    const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, candidate);
+    await claimCustomerCollectionForDuesRelease(trx, lockedDues);
+    // Codex #4971 pre-push P0 (lock order): this void can take a
+    // credit-settled ('prepaid') invoice and restore its credit, so
+    // a termite renewal parent-decision gate tied to it is this
+    // transaction's FIRST lock (no-op without a termite term).
+    await require("./annual-prepay-renewals").acquireTermiteGateAtEntry(trx, { invoiceIds: [candidate.id] });
+    // Phase 2: parent-before-child lock order (matches the edit/void
+    // paths) so a concurrent accrued edit/void + this cancellation can't
+    // AB-BA deadlock. Lock the statement FIRST (using the
+    // payer_statement_id carried from the candidate scan - it never
+    // changes after creation), skip a finalized one, then lock the
+    // invoice.
+    if (candidate.payer_statement_id) {
+      const stmt = await trx("payer_statements").where({ id: candidate.payer_statement_id }).forUpdate().first("status");
+      if (stmt && stmt.status !== "open") {
+        return { skipped: "on a finalized payer statement; needs a credit on the next statement", invoice: candidate };
+      }
+    }
+    const locked = await trx("invoices")
+      .where({ id: candidate.id })
+      .forUpdate()
+      .first();
+    if (!locked) return { skipped: "invoice no longer exists" };
+    const stateSkip = ctx.refusedSendCleanup
+      ? await refusedSendCleanupSkip(trx, locked, ctx)
+      : await lockedCandidateSkip(trx, locked, ctx);
+    if (stateSkip) return stateSkip;
+    // A different/new PI attached after triage means a customer is
+    // actively starting a payment - skip.
+    if ((locked.stripe_payment_intent_id || null) !== triagedPiId) {
+      return {
+        skipped: `PaymentIntent changed to ${locked.stripe_payment_intent_id || "none"} after triage (payment in progress); needs manual review`,
+        invoice: locked,
+      };
+    }
+    const moneySkip = await appliedMoneySkip(trx, locked);
+    if (moneySkip) return moneySkip;
+    return voidLockedCancelledServiceInvoice(trx, locked, { ...ctx, lockedDues });
+  });
+}
+
+// Post-commit side effects of a void, matching voidInvoice.
+async function afterCancelledServiceVoid(result) {
+  await alertIfMembershipDuesCoverageReleased(result.invoice, { releasedBy: "voided" });
+  await stopInvoiceFollowupSequence(result.invoice.id, "invoice_voided");
+  try {
+    await require("./annual-prepay-renewals").syncTermForInvoicePayment(
+      result.invoice,
+    );
+  } catch (err) {
+    logger.warn(
+      `[invoice] annual prepay sync skipped after void ${result.invoice.invoice_number}: ${err.message}`,
+    );
+  }
+}
+
+// Pre-triage checks for one candidate: a pinned (card-confirmed) cancel leaves anything that changed since the card.
+// Returns the connection the PaymentIntent steps run on and the combined-payment lock, or { skip: true }.
+async function pinnedCandidateGate(candidate, ctx) {
+  const { scheduledServiceId, pinnedById, pinnedMismatch } = ctx;
+  // A card-confirmed cancel never pins an invoice carrying a
+  // PaymentIntent (the card refuses that shape), so one attached
+  // since the card is left alone: no Stripe cancel, no void.
+  // A pinned invoice that carries a PaymentIntent is voided only when the card named that exact PaymentIntent
+  // (payment_intent_id); a pin without it (every older card) still leaves a PaymentIntent-bearing invoice alone.
+  const pinnedPi = pinnedById ? pinnedById.get(String(candidate.id))?.payment_intent_id : null;
+  if (pinnedById && (pinnedMismatch(candidate)
+    || (candidate.stripe_payment_intent_id && String(candidate.stripe_payment_intent_id) !== String(pinnedPi || '')))) {
+    logger.warn(
+      `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — changed since the confirmed card; needs office review`,
+    );
+    return { skip: true, combinedLock: null };
+  }
+  // A pinned (card-confirmed) cancel never cancels a combined payment: the PaymentIntent also covers invoices the
+  // card did not list, and cancelling it clears their stamps. Left open for the office. The sibling check, the
+  // Stripe cancel and the stamp clear all run under the SAME per-customer pay.combined.customer advisory lock
+  // the combined setup takes (same key), so a combined session cannot be stamped between the check and the
+  // cancel. Dispatch's unpinned sweep takes no lock and is unchanged.
+  const held = await lockPinnedPaymentIntent(pinnedById, candidate);
+  if (held.shared) {
+    logger.warn(
+      `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — its PaymentIntent is a combined payment covering other invoices; needs office review`,
+    );
+    return { skip: true, combinedLock: held.lock };
+  }
+  return { skip: false, combinedLock: held.lock, piConn: held.lock || db };
+}
+
+// One candidate of the sweep, start to finish. Returns the voided invoice id, or null when it was left alone or failed
+// (best-effort: logs and continues, never throws).
+async function voidOneCancelledServiceCandidate(candidate, ctx) {
+  const { scheduledServiceId, refusedSendCleanup, StripeService } = ctx;
+  // Pinned path only: the combined-payment lock, held until this candidate is settled.
+  let combinedLock = null;
+  try {
+    const gate = await pinnedCandidateGate(candidate, ctx);
+    combinedLock = gate.combinedLock;
+    if (gate.skip) return null;
+    // ── Stripe PI triage (pre-lock) ────────────────────────────────
+    const triagedPiId = candidate.stripe_payment_intent_id || null;
+    // The refused-send cleanup runs after provider preparation. Never
+    // perform an external Stripe cancellation from that delayed path:
+    // a reactivated visit/replacement episode could have attached the
+    // PI after the refusal snapshot. Leave any PI-bearing row claimed
+    // for explicit money review. Normal cancellation keeps its existing
+    // triage below.
+    if (refusedSendCleanup && triagedPiId) {
+      logger.warn(
+        `[invoice] NOT auto-voiding ${candidate.invoice_number} after terminal delivery refusal — PaymentIntent ${triagedPiId} is attached; needs manual review`,
+      );
+      return null;
+    }
+    if (triagedPiId && await triageCancelledServicePaymentIntent({ candidate, triagedPiId, scheduledServiceId, piConn: gate.piConn, StripeService })) {
+      return null;
+    }
+    // ── Atomic re-check + void (row lock) ──────────────────────────
+    const result = await recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, ctx);
+    if (!result.voided) {
+      if (result.skipped && result.invoice) {
+        logger.warn(
+          `[invoice] NOT auto-voiding ${result.invoice.invoice_number} for cancelled service ${scheduledServiceId} — ${result.skipped}`,
+        );
+      }
+      return null;
+    }
+    // The combined-payment lock protects only the PaymentIntent cancel and the void: release it before the
+    // post-commit cleanup below (stopping follow-ups opens its own transaction on the same customer lock).
+    await releaseCombinedLock(combinedLock);
+    combinedLock = null;
+    logger.info(
+      `[invoice] Voided ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`,
+    );
+    // The id counts as voided from here on, even if a post-commit side effect below throws (as before).
+    const voidedId = result.invoice.id;
+    try {
+      await afterCancelledServiceVoid(result);
+    } catch (sideEffectErr) {
+      logger.error(
+        `[invoice] Failed to void invoice ${candidate.id} for cancelled service ${scheduledServiceId}: ${sideEffectErr.message}`,
+      );
+    }
+    return voidedId;
+  } catch (e) {
+    logger.error(
+      `[invoice] Failed to void invoice ${candidate.id} for cancelled service ${scheduledServiceId}: ${e.message}`,
+    );
+    return null;
+  } finally {
+    await releaseCombinedLock(combinedLock);
+  }
+}
+
+// Inspection-credit reversal after the sweep (see the call site); sets voided.inspectionCreditReversal. Never throws.
+async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds) {
+  try {
+    // Surfaced for callers that COUNT reversals (the hourly sweep,
+    // which now routes through this seam - Codex #3178 r33 P2): a
+    // property on the returned array is additive and invisible to
+    // every array-consuming caller.
+    const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
+      scheduledServiceId,
+      createdBy: 'system:inspection_credit_cancellation_void_hook',
+      ...(pinnedCreditReversalOfferIds ? { pinnedReversalOfferIds: pinnedCreditReversalOfferIds } : {}),
+    });
+    voided.inspectionCreditReversal = rev;
+  } catch (revErr) {
+    logger.error(
+      `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
+    );
+  }
 }
 
 const InvoiceService = {
@@ -13338,251 +13742,14 @@ const InvoiceService = {
     const pinnedMismatch = (row) => pinnedById
       && !cancelVoidAmountsMatch(cancelVoidInvoiceAmounts(row), pinnedById.get(String(row.id)));
     try {
-      const candidateQuery = db("invoices");
-      if (refusedSendCleanup) {
-        candidateQuery.where({ id: invoiceId, status: "sending", send_claim_token: refusedClaimToken });
-      } else {
-        // Widened (Codex round-4 P1 #4131, raised twice for this slice):
-        // most post-completion invoices carry only service_record_id, never
-        // scheduled_service_id directly (migration 20260420000002) — the
-        // inverse of linkedScheduledServiceId's own fallback. Matching
-        // scheduled_service_id alone left those rows permanently un-voidable
-        // by this sweep; done once here, not duplicated at each caller.
-        candidateQuery
-          .where((q) => {
-            q.where({ scheduled_service_id: scheduledServiceId })
-              .orWhereIn(
-                "service_record_id",
-                db("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
-              );
-          })
-          .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
-        // A cancel confirmed from a card that listed the invoices it voids
-        // (Intelligence Bar cancel_appointment, via the follow-through's
-        // pinned effects) voids ONLY those, and only at the amounts shown
-        // (checked below, before any Stripe call and again under the row
-        // lock); an invoice created or changed after the card is left
-        // open, and the follow-through's post-void gate then sends the fee
-        // to office review.
-        if (pinnedById) candidateQuery.whereIn("id", [...pinnedById.keys()]);
-      }
-      const candidates = await candidateQuery
-        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id",
-          "total", "credit_applied", "line_items", "customer_id", "created_at", "scheduled_service_id");
+      const candidates = await selectCancelledServiceVoidCandidates({
+        scheduledServiceId, invoiceId, refusedClaimToken, refusedSendCleanup, pinnedById,
+      });
       if (candidates.length === 0) return voided;
-      const StripeService = require("./stripe");
+      const ctx = { scheduledServiceId, refusedSendCleanup, refusedClaimToken, pinnedById, pinnedMismatch, StripeService: require("./stripe") };
       for (const candidate of candidates) {
-        try {
-          // A card-confirmed cancel never pins an invoice carrying a
-          // PaymentIntent (the card refuses that shape), so one attached
-          // since the card is left alone: no Stripe cancel, no void.
-          if (pinnedById && (pinnedMismatch(candidate) || candidate.stripe_payment_intent_id)) {
-            logger.warn(
-              `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — changed since the confirmed card; needs office review`,
-            );
-            continue;
-          }
-          // ── Stripe PI triage (pre-lock) ────────────────────────────────
-          const triagedPiId = candidate.stripe_payment_intent_id || null;
-          // The refused-send cleanup runs after provider preparation. Never
-          // perform an external Stripe cancellation from that delayed path:
-          // a reactivated visit/replacement episode could have attached the
-          // PI after the refusal snapshot. Leave any PI-bearing row claimed
-          // for explicit money review. Normal cancellation keeps its existing
-          // triage below.
-          if (refusedSendCleanup && triagedPiId) {
-            logger.warn(
-              `[invoice] NOT auto-voiding ${candidate.invoice_number} after terminal delivery refusal — PaymentIntent ${triagedPiId} is attached; needs manual review`,
-            );
-            continue;
-          }
-          if (triagedPiId) {
-            let pi;
-            try {
-              pi = await StripeService.retrievePaymentIntent(triagedPiId);
-            } catch (e) {
-              logger.warn(
-                `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} lookup failed (${e.message}); needs manual review`,
-              );
-              continue;
-            }
-            if (!pi) {
-              // A PI id is stamped but Stripe isn't configured/reachable —
-              // can't verify the money state, so fail closed.
-              logger.warn(
-                `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} attached but unverifiable; needs manual review`,
-              );
-              continue;
-            }
-            if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
-              logger.warn(
-                `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — payment in flight (PI ${triagedPiId} is ${pi.status}); needs manual refund/credit review`,
-              );
-              continue;
-            }
-            if (pi.status !== "canceled") {
-              try {
-                await StripeService.cancelPaymentIntent(triagedPiId, {
-                  cancellation_reason: "abandoned",
-                });
-                logger.info(
-                  `[invoice] Cancelled PaymentIntent ${triagedPiId} (was ${pi.status}) before voiding ${candidate.invoice_number} — scheduled service ${scheduledServiceId} cancelled`,
-                );
-              } catch (e) {
-                // Cancel races a confirmation → the PI may now be charging.
-                logger.warn(
-                  `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — PaymentIntent ${triagedPiId} cancel failed (${e.message}); needs manual review`,
-                );
-                continue;
-              }
-            }
-            // Unbind combined siblings from the canceled PI — REGARDLESS of
-            // who canceled it (codex #3427 r17 P2: an already-canceled PI,
-            // e.g. via the Stripe dashboard, must not leave stale bindings).
-            await require("./pay-combined").clearPaymentIntentStamps(db, triagedPiId, { keepInvoiceIds: [String(candidate.id)] });
-          }
-
-          // ── Atomic re-check + void (row lock) ──────────────────────────
-          const result = await db.transaction(async (trx) => {
-            // A cancelled visit's void of a stamped dues invoice removes the
-            // month's coverage: dues-month lock first.
-            const lockedDues = await lockMembershipDuesMonthOfInvoice(trx, candidate);
-            await claimCustomerCollectionForDuesRelease(trx, lockedDues);
-            // Codex #4971 pre-push P0 (lock order): this void can take a
-            // credit-settled ('prepaid') invoice and restore its credit, so
-            // a termite renewal parent-decision gate tied to it is this
-            // transaction's FIRST lock (no-op without a termite term).
-            await require("./annual-prepay-renewals").acquireTermiteGateAtEntry(trx, { invoiceIds: [candidate.id] });
-            // Phase 2: parent-before-child lock order (matches the edit/void
-            // paths) so a concurrent accrued edit/void + this cancellation can't
-            // AB-BA deadlock. Lock the statement FIRST (using the
-            // payer_statement_id carried from the candidate scan — it never
-            // changes after creation), skip a finalized one, then lock the
-            // invoice.
-            if (candidate.payer_statement_id) {
-              const stmt = await trx("payer_statements").where({ id: candidate.payer_statement_id }).forUpdate().first("status");
-              if (stmt && stmt.status !== "open") {
-                return { skipped: "on a finalized payer statement; needs a credit on the next statement", invoice: candidate };
-              }
-            }
-            const locked = await trx("invoices")
-              .where({ id: candidate.id })
-              .forUpdate()
-              .first();
-            if (!locked) return { skipped: "invoice no longer exists" };
-            if (refusedSendCleanup) {
-              if (locked.status !== "sending" || locked.send_claim_token !== refusedClaimToken) {
-                return { skipped: "delivery claim changed; replacement episode retained", invoice: locked };
-              }
-              // A deferred invoice message may already own this delivery.
-              // Keep the invoice claimed while that message is queued,
-              // dispatching, or finalizing so terminal-refusal cleanup cannot
-              // erase its pay link or accepted-provider evidence.
-              const liveQueuedDelivery = await trx("sms_log")
-                .whereRaw("metadata->>'entry_point' IN ('invoice_send_deferred', 'invoice_followup_deferred', 'autopay_completion_decline_deferred', 'dispatch_completion_deferred')")
-                .whereRaw("metadata->>'invoice_id' = ?", [String(locked.id)])
-                .whereRaw("(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))")
-                .first("id");
-              if (liveQueuedDelivery) {
-                return { skipped: `queued delivery ${liveQueuedDelivery.id} is still live; needs delivery review`, invoice: locked };
-              }
-              const linkedVisitId = await linkedScheduledServiceId(locked, trx);
-              if (String(linkedVisitId || "") !== String(scheduledServiceId)) {
-                return { skipped: "linked visit changed after refusal", invoice: locked };
-              }
-              const terminalVisit = await require("./invoice-helpers")
-                .visitRefusesSettlement(trx, linkedVisitId);
-              if (!terminalVisit) {
-                return { skipped: "linked visit is no longer terminal", invoice: locked };
-              }
-            } else if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
-              return { skipped: `status moved to ${locked.status}`, invoice: locked };
-            } else if (pinnedMismatch(locked)) {
-              return { skipped: "amounts changed since the confirmed card; needs office review", invoice: locked };
-            }
-            // A different/new PI attached after triage means a customer is
-            // actively starting a payment — skip.
-            if ((locked.stripe_payment_intent_id || null) !== triagedPiId) {
-              return {
-                skipped: `PaymentIntent changed to ${locked.stripe_payment_intent_id || "none"} after triage (payment in progress); needs manual review`,
-                invoice: locked,
-              };
-            }
-            // Payments reference invoices via metadata.invoice_id (prepaid
-            // credits, Stripe charges alike — there is no payments.invoice_id
-            // column). Either signal means applied money: skip the auto-void.
-            const appliedPayment = await trx("payments")
-              .whereIn("status", ["paid", "processing"])
-              .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [locked.id])
-              .first("id");
-            if (locked.payment_recorded_at || appliedPayment) {
-              return {
-                skipped: `money already applied (${appliedPayment ? `payment ${appliedPayment.id}` : "payment_recorded_at set"}); needs manual refund/credit review`,
-                invoice: locked,
-              };
-            }
-            const voidQuery = trx("invoices")
-              .where({ id: locked.id, status: locked.status });
-            if (refusedSendCleanup) voidQuery.where({ send_claim_token: refusedClaimToken });
-            const [voidedInvoice] = await voidQuery
-              .update({ status: "void", send_claim_token: null, updated_at: new Date() })
-              .returning("*");
-            if (!voidedInvoice) return { skipped: "concurrent status change", invoice: locked };
-            assertDuesOwnerUnmoved(lockedDues, voidedInvoice);
-            // Same-transaction ledger restore, matching voidInvoice: a
-            // cancelled job's pre-minted first invoice may carry the
-            // estimate's deposit credit, which must become available again
-            // (roll-forward or terminal sweep) once this invoice stops
-            // billing.
-            const { restoreDepositCreditForVoidedInvoice } = require("./estimate-deposits");
-            await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice, trx });
-            // Return any auto-applied account credit too (a partially credit-
-            // covered collectible invoice for a cancelled service).
-            const { restoreAccountCreditForVoidedInvoice } = require("./customer-credit");
-            await restoreAccountCreditForVoidedInvoice({ invoice: voidedInvoice, createdBy: "system:service_cancel" }, trx);
-            // Phase 2: drop the voided accrued child from its OPEN statement total
-            // in the same transaction (rollupStatement excludes status='void').
-            if (voidedInvoice.payer_statement_id) {
-              await require("./payer-statements").rollupStatement(voidedInvoice.payer_statement_id, trx);
-            }
-            // A cancelled visit's auto-voided invoice may have billed the
-            // rodent bait-station setup (codex #3591 r58 P1) — restore the
-            // obligation to the living series exactly like voidInvoice does
-            // (billable-visit guard + dead-series re-bill inside).
-            await InvoiceService.restoreRodentSetupObligationForReversedInvoice(trx, voidedInvoice);
-            return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
-          });
-
-          if (!result.voided) {
-            if (result.skipped && result.invoice) {
-              logger.warn(
-                `[invoice] NOT auto-voiding ${result.invoice.invoice_number} for cancelled service ${scheduledServiceId} — ${result.skipped}`,
-              );
-            }
-            continue;
-          }
-
-          voided.push(result.invoice.id);
-          logger.info(
-            `[invoice] Voided ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`,
-          );
-          // Post-commit side effects, matching voidInvoice.
-          await alertIfMembershipDuesCoverageReleased(result.invoice, { releasedBy: "voided" });
-          await stopInvoiceFollowupSequence(result.invoice.id, "invoice_voided");
-          try {
-            await require("./annual-prepay-renewals").syncTermForInvoicePayment(
-              result.invoice,
-            );
-          } catch (err) {
-            logger.warn(
-              `[invoice] annual prepay sync skipped after void ${result.invoice.invoice_number}: ${err.message}`,
-            );
-          }
-        } catch (e) {
-          logger.error(
-            `[invoice] Failed to void invoice ${candidate.id} for cancelled service ${scheduledServiceId}: ${e.message}`,
-          );
-        }
+        const voidedId = await voidOneCancelledServiceCandidate(candidate, ctx);
+        if (voidedId) voided.push(voidedId);
       }
     } catch (e) {
       logger.error(
@@ -13590,32 +13757,16 @@ const InvoiceService = {
       );
     } finally {
       // Inspection credit: a cancelled booking must not keep its $75.
-      // Reversal lives HERE — in the one helper every cancellation path
-      // already calls — so no cancel surface can forget to wire it, and
+      // Reversal lives HERE - in the one helper every cancellation path
+      // already calls - so no cancel surface can forget to wire it, and
       // the ordering is guaranteed by construction: voiding an invoice
       // RESTORES any credit applied to it, so reversing before the void
       // would find the balance short and then hand the credit back
       // spendable (Codex #3178 r7 P0). `finally` covers the no-invoice
-      // early return too — a cancel with nothing to void still reverses.
+      // early return too - a cancel with nothing to void still reverses.
       // Idempotent and never throws; the hourly sweep stays as recovery.
       if (!refusedSendCleanup || voided.includes(invoiceId)) {
-        try {
-          const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
-            scheduledServiceId,
-            createdBy: 'system:inspection_credit_cancellation_void_hook',
-            ...(pinnedCreditReversalOfferIds ? { pinnedReversalOfferIds: pinnedCreditReversalOfferIds } : {}),
-          });
-          // Surfaced for callers that COUNT reversals (the hourly sweep,
-          // which now routes through this seam — Codex #3178 r33 P2): a
-          // property on the returned array is additive and invisible to
-          // every array-consuming caller. Assigned in finally, so the
-          // no-invoice early return carries it too.
-          voided.inspectionCreditReversal = rev;
-        } catch (revErr) {
-          logger.error(
-            `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
-          );
-        }
+        await reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds);
       }
     }
     return voided;
@@ -13637,7 +13788,7 @@ const InvoiceService = {
    * the whole effect set as undeterminable. A PaymentIntent that Stripe
    * cannot verify without an error (`!pi`) is skipped, as the sweep does.
    */
-  async previewInvoiceVoidForCancelledService(scheduledServiceId) {
+  async previewInvoiceVoidForCancelledService(scheduledServiceId, { piCache = null, piCacheOnly = false } = {}) {
     const would = [];
     if (!scheduledServiceId) return would;
     const candidates = await db("invoices")
@@ -13663,7 +13814,17 @@ const InvoiceService = {
         .first("id");
       if (candidate.payment_recorded_at || appliedPayment) continue; // money already applied — needs manual refund/credit review
       if (candidate.stripe_payment_intent_id) {
-        const pi = await require("./stripe").retrievePaymentIntent(candidate.stripe_payment_intent_id);
+        // Opt-in piCache (the Intelligence Bar cancel check that runs under the visit lock): a PaymentIntent already
+        // retrieved before the lock is read from the cache, and with piCacheOnly one that is NOT cached throws
+        // instead of calling Stripe while the lock is held.
+        const piId = candidate.stripe_payment_intent_id;
+        let pi;
+        if (piCache && piCache.has(piId)) pi = piCache.get(piId);
+        else if (piCacheOnly) throw new Error(`PaymentIntent ${piId} was not checked before the lock`);
+        else {
+          pi = await require("./stripe").retrievePaymentIntent(piId);
+          if (piCache) piCache.set(piId, pi);
+        }
         if (!pi || PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) continue;
       }
       would.push({
@@ -13673,6 +13834,10 @@ const InvoiceService = {
         // The void would CANCEL this PaymentIntent (and unbind it from
         // combined siblings) — a card-confirmed cancel refuses that shape.
         payment_intent: Boolean(candidate.stripe_payment_intent_id),
+        // The PaymentIntent the void would cancel, so a card-confirmed cancel can approve exactly that one.
+        ...(candidate.stripe_payment_intent_id ? { payment_intent_id: candidate.stripe_payment_intent_id } : {}),
+        // The PaymentIntent also covers another invoice (a combined payment): a card refuses it (combined_payment).
+        ...(await combinedPaymentFlag(candidate)),
         ...cancelVoidInvoiceAmounts(candidate),
       });
     }

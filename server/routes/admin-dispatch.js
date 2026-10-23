@@ -2558,7 +2558,8 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put('/:serviceId/status', async (req, res, next) => {
+router.put('/:serviceId/status', serviceStatusHandler);
+async function serviceStatusHandler(req, res, next) {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
     // Same closed target allow-list as admin-schedule's PUT /:id/status
@@ -2957,6 +2958,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
           ? {
               notificationSent: cancelNoticeOutcome.notificationSent,
               notificationError: cancelNoticeOutcome.notificationError || null,
+              ...(cancelNoticeOutcome.notificationPartial ? { notificationPartial: true } : {}),
+              ...(cancelNoticeOutcome.notificationUncertain ? { notificationUncertain: true } : {}),
             }
           : {}),
       });
@@ -3083,6 +3086,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
             && ['pending', 'confirmed'].includes(String(locked.status));
         }
         const isFieldLifecycleTakeover = takeoverCandidate && fieldConfirmVerified;
+        // Set only by cancelServiceFromBar: the Intelligence Bar cancel card re-checks what it showed, under this lock.
+        if (typeof req.ibBeforeCancelCommit === 'function') await req.ibBeforeCancelCommit(trx);
         // Lifecycle timestamps live on the same row as status; flip
         // them inside the same trx so a rollback also rolls back the
         // timestamp change. transitionJobStatus owns the status +
@@ -3144,6 +3149,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // fire-and-forget claim could race and steal the marker from the
           // operator-requested text.
           notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
+          // Set only by cancelServiceFromBar: the pinned follow-through below does the invoice void and credit
+          // reversal on the card's effects, so the shared writer's unpinned money seam stands down.
+          ...(req.ibApprovedMoney ? { moneySeam: 'caller' } : {}),
+          // The card approved the text: the durable claim is minted in a state no sweep adopts (see job-status.js).
+          // A card that explicitly said NO text is a disposition too: its terminal 'suppressed' marker is persisted in
+          // this transaction whatever GATE_CANCEL_NOTICE_HOOK says, so no pod can late-claim the row and text it.
+          ...(req.ibApprovedCancelNotice || req.ibApprovedNoText ? { cancelNoticeApproved: true } : {}),
           // This route runs the OFFICE version of the activation itself
           // (below) — the shared writer must not fire its lazy one too.
           legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,
@@ -3163,6 +3175,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
       }
       throw err;
     }
+    // The status change is committed from here on. Only the Intelligence Bar replay (cancelServiceFromBar) reads this:
+    // a failure after this point must not make it record the action as failed (see there).
+    req.ibCommitted = true;
 
     // Office confirmation of a pending outbound-review booking from THIS route
     // must run the same side effects as the admin-schedule confirm path (arm
@@ -3327,9 +3342,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // committed but the requested text didn't go out (missing reminder
         // row/phone, consent block, provider failure).
         cancelNoticeOutcome = notifyCustomer !== false ? {} : null;
+        req.ibCancelNoticeOutcome = cancelNoticeOutcome;
         await AppointmentReminders.handleCancellation(svc.id, {
           sendNotification: notifyCustomer !== false,
           ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
+          // Set only by cancelServiceFromBar: the text the Intelligence Bar card approved, per recipient.
+          ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
 
@@ -3342,6 +3360,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
         waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
         reason: notes || null,
         source: 'admin-dispatch',
+        // Set only by cancelServiceFromBar: the linked visits the card approved (each re-checked under its lock).
+        ...(req.ibApprovedLinkedChildren ? { linkedChildren: req.ibApprovedLinkedChildren, linkedChildReport: req.ibLinkedChildReport } : {}),
+        // Set only by cancelServiceFromBar: the money effects the card showed (invoices to void at those amounts and
+        // PaymentIntents, credits to reverse, no card rail). The follow-through acts on these only.
+        ...(req.ibApprovedMoney ? { pinnedEffects: { [svc.id]: req.ibApprovedMoney }, moneyReport: req.ibMoneyReport } : {}),
       });
       // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
       // inside a 9-application plan adds one back at the end of the series.
@@ -3468,11 +3491,76 @@ router.put('/:serviceId/status', async (req, res, next) => {
         ? {
             notificationSent: cancelNoticeOutcome.notificationSent,
             notificationError: cancelNoticeOutcome.notificationError || null,
+            ...(cancelNoticeOutcome.notificationPartial ? { notificationPartial: true } : {}),
+            ...(cancelNoticeOutcome.notificationUncertain ? { notificationUncertain: true } : {}),
           }
         : {}),
+      ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
+      ...(req.ibMoneyReport ? { moneySkipped: req.ibMoneyReport.skipped } : {}),
     });
   } catch (err) { next(err); }
-});
+}
+
+// The Intelligence Bar's cancel of a visit with an invoice, credit or linked visit (GATE_IB_CANCEL_WITH_EFFECTS, owner
+// decision 2026-10-12) runs the SAME handler as PUT /:serviceId/status, without an HTTP request (the sendInvoiceFromBar
+// pattern in admin-invoices.js): the handler gets the only request fields it reads and a capture response, and the
+// promise resolves the reply it would send, { status, json }. The body is the carded one and nothing else: status
+// 'cancelled', scope 'this_only', the operator's reason and notifyCustomer as the card showed it. No waiveCardHoldFee
+// and no coordinates. `beforeCommit(trx)` runs inside the handler's cancel transaction right after it locks the visit.
+// `approvedNotice` and `linkedChildren` carry what the card showed: the send uses exactly that text, and the linked
+// visits not on the card (or changed since) are left alone and reported as `linkedVisitsSkipped`.
+function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeCommit, approvedNotice, linkedChildren, approvedMoney }) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    const req = {
+      params: { serviceId },
+      body: { status: 'cancelled', scope: 'this_only', notifyCustomer: notifyCustomer !== false, ...(notes ? { notes } : {}) },
+      techRole: 'admin',
+      technicianId: actor?.technicianId || null,
+      ibBeforeCancelCommit: beforeCommit,
+      // The card's approvals: the text per recipient ([{ recipient_key, body }]) and the linked visits
+      // ([{ id, status, scheduled_date, service_type }]). The handler's cascade cancels only those.
+      ibApprovedCancelNotice: approvedNotice || null,
+      // The card explicitly chose no customer text (notifyCustomer false): that choice must be durable too.
+      ibApprovedNoText: notifyCustomer === false,
+      ibApprovedLinkedChildren: Array.isArray(linkedChildren) ? linkedChildren : null,
+      ibLinkedChildReport: Array.isArray(linkedChildren) ? { skipped: [] } : null,
+      // The card's money effects ({ invoices, creditReversalOfferIds }); anything that changed is skipped and reported.
+      ibApprovedMoney: approvedMoney || null,
+      ibMoneyReport: approvedMoney ? { skipped: [] } : null,
+    };
+    // A failure AFTER the cancel committed (the activity log insert, a settlement step...) must not reject: the visit is
+    // cancelled, the text and the money settlement may already have run, and a rejection would make the caller record
+    // the action as failed and drop the receipt with its warnings. Resolve what is known, flagged postCommitFailure.
+    const fail = (err) => {
+      if (!req.ibCommitted) { reject(err); return; }
+      logger.error(`[admin-dispatch] bar cancel of ${serviceId} committed, then a later step failed: ${err && err.message}`);
+      const notice = req.ibCancelNoticeOutcome;
+      resolve({
+        status: 200,
+        json: {
+          success: true,
+          postCommitFailure: (err && err.message) || 'a step after the cancel failed',
+          ...(notice && notice.notificationSent !== undefined
+            ? {
+                notificationSent: notice.notificationSent,
+                notificationError: notice.notificationError || null,
+                ...(notice.notificationPartial ? { notificationPartial: true } : {}),
+                ...(notice.notificationUncertain ? { notificationUncertain: true } : {}),
+              }
+            : {}),
+          ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
+          ...(req.ibMoneyReport ? { moneySkipped: req.ibMoneyReport.skipped } : {}),
+        },
+      });
+    };
+    Promise.resolve(serviceStatusHandler(req, res, fail)).catch(fail);
+  });
+}
 
 // GET /api/admin/dispatch/:serviceId/complete-preview
 //
@@ -7384,6 +7472,7 @@ module.exports = router;
 // (never a diverging local copy).
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.mergeCardHoldPreviews = mergeCardHoldPreviews;
+module.exports.cancelServiceFromBar = cancelServiceFromBar;
 module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
 module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
