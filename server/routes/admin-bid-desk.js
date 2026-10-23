@@ -201,17 +201,17 @@ async function closeDoneAlerts(conn, bidId, before, after) {
     prefixes.push(`bid-desk:remind:${bidId}:`);
     reason.push('due_date_changed');
   }
-  // GATE_BID_CHECKLIST reminders: a changed or cleared date retires the reminder sent for the old one.
-  if (bidChecklistLive()) {
-    const at = (row, key) => (row[key] ? new Date(row[key]).getTime() : null);
-    if (at(before, 'questions_due_at') !== at(after, 'questions_due_at')) {
-      prefixes.push(`bid-desk:remind-questions:${bidId}:`);
-      reason.push('questions_date_changed');
-    }
-    if (at(before, 'job_walk_at') !== at(after, 'job_walk_at')) {
-      prefixes.push(`bid-desk:remind-jobwalk:${bidId}:`);
-      reason.push('job_walk_date_changed');
-    }
+  // GATE_BID_CHECKLIST reminders: a changed or cleared date retires the reminder sent for the old one. This cleanup
+  // is NOT behind the gate: the gate stops NEW reminders only, and a bell rung while it was on must still close when
+  // the date changes or the bid is decided after it is turned off (turning it back on cannot repair a bell left open).
+  const at = (row, key) => (row[key] ? new Date(row[key]).getTime() : null);
+  if (at(before, 'questions_due_at') !== at(after, 'questions_due_at')) {
+    prefixes.push(`bid-desk:remind-questions:${bidId}:`);
+    reason.push('questions_date_changed');
+  }
+  if (at(before, 'job_walk_at') !== at(after, 'job_walk_at')) {
+    prefixes.push(`bid-desk:remind-jobwalk:${bidId}:`);
+    reason.push('job_walk_date_changed');
   }
   if (before.status === 'new' && after.status !== 'new') {
     prefixes.push(`bid-desk:new:${bidId}`);
@@ -219,7 +219,7 @@ async function closeDoneAlerts(conn, bidId, before, after) {
   }
   if (OPEN_STATUSES.includes(before.status) && !OPEN_STATUSES.includes(after.status)) {
     prefixes.push(`bid-desk:new:${bidId}`, `bid-desk:addendum:${bidId}:`, `bid-desk:remind:${bidId}:`);
-    if (bidChecklistLive()) prefixes.push(`bid-desk:remind-questions:${bidId}:`, `bid-desk:remind-jobwalk:${bidId}:`);
+    prefixes.push(`bid-desk:remind-questions:${bidId}:`, `bid-desk:remind-jobwalk:${bidId}:`);
     reason.push('bid_closed');
     keep.length = 0;
   }

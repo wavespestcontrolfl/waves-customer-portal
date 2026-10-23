@@ -566,6 +566,45 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect([await cleared(keys.walk), await cleared(keys.due)]).toEqual([true, true]);
     });
 
+    test('with the gate off, an open questions bell and job-walk bell still close on a date change and when the bid is decided; nothing new rings', async () => {
+      const id = await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1), job_walk_confirmed: true });
+      const row = await bidRow(id);
+      const keys = {
+        questions: `bid-desk:remind-questions:${id}:${row.questions_due_at.toISOString()}`,
+        walk: `bid-desk:remind-jobwalk:${id}:${row.job_walk_at.toISOString()}`,
+      };
+      const open = async (key) => (await mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).first('metadata')).metadata.autoCleared !== true;
+      const ring = async () => { for (const key of Object.values(keys)) await mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: key }) }); };
+      const wall = (date) => new Date(date.getTime() - 4 * 60 * 60 * 1000).toISOString().slice(0, 16); // ET wall time in October
+
+      // The bells rang while the gate was on; the gate is turned off afterwards.
+      await ring();
+      delete process.env.GATE_BID_CHECKLIST;
+      expect(await service.sendDueReminders({ now: NOW })).toBe(0); // no new reminder while off
+      expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+
+      // A changed questions date (the original key) closes only the questions bell; the site-visit date likewise.
+      expect((await call('PATCH', `/${id}`, { questions_due_at: wall(at(1.5)) })).status).toBe(200);
+      expect([await open(keys.questions), await open(keys.walk)]).toEqual([false, true]);
+      expect((await call('PATCH', `/${id}`, { job_walk_at: wall(at(1.6)) })).status).toBe(200);
+      expect(await open(keys.walk)).toBe(false);
+
+      // Deciding the bid closes both, even when the dates did not change.
+      await mockPg('notifications').whereRaw("metadata->>'dedupeKey' like ?", [`bid-desk:remind-%:${id}:%`]).del();
+      await ring();
+      expect((await call('PATCH', `/${id}`, { status: 'submitted' })).status).toBe(200);
+      expect([await open(keys.questions), await open(keys.walk)]).toEqual([false, false]);
+
+      // No bid does the same.
+      const other = await newBid({ questions_due_at: at(1), job_walk_at: at(1), job_walk_confirmed: true });
+      const otherRow = await bidRow(other);
+      const otherKeys = [`bid-desk:remind-questions:${other}:${otherRow.questions_due_at.toISOString()}`, `bid-desk:remind-jobwalk:${other}:${otherRow.job_walk_at.toISOString()}`];
+      for (const key of otherKeys) await mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: key }) });
+      expect((await call('PATCH', `/${other}`, { status: 'no_bid' })).status).toBe(200);
+      for (const key of otherKeys) expect(await open(key)).toBe(false);
+      expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    });
+
     test('a tick of the job with the gate on runs the new reminders; with it off it does not', async () => {
       await newBid({ questions_due_at: at(1) });
       await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
