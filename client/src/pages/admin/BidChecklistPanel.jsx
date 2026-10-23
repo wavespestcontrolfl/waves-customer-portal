@@ -216,22 +216,28 @@ function AddRow({ busy, onAdd }) {
   );
 }
 
-function Checklist({ bidId, bid, items, progress, busy, run, invite }) {
+function Checklist({ bidId, bid, items, progress, missing, busy, run, invite }) {
   const act = (path, method, body, query = "") => adminFetch(`/admin/bid-desk/${bidId}/checklist${path}${query}`, { method, ...(body === undefined ? {} : { body }) });
   const start = (query) => run(() => act("/start", "POST", bid.solicitation_type ? { type: bid.solicitation_type } : {}, query));
+  // "Add missing lines" is offered whenever the bid has a type and template lines it does not carry, even with no live
+  // lines left (a line added and removed must not leave the page with no way to start).
+  const addMissing = bid.solicitation_type && missing > 0 && (
+    <Button size="sm" variant="ghost" disabled={busy} onClick={() => start("?add=missing")}>Add missing lines for this type</Button>
+  );
   return (
     <>
       {items.length === 0 ? (
         <div className="flex flex-wrap items-center gap-2 text-ui-body">
           <span className="text-ink-secondary">No checklist yet. It starts from the lines for the solicitation type{bid.solicitation_type ? ` (${TYPE_LABEL[bid.solicitation_type]})` : ""}.</span>
           <Button disabled={busy} onClick={() => start("")}>Start checklist</Button>
+          {addMissing}
         </div>
       ) : (
         <>
           <div className="mb-2 flex flex-wrap items-center gap-2 text-ui-body">
             <Badge tone={progress.required > 0 && progress.checked === progress.required ? "strong" : "neutral"}>{progress.checked}/{progress.required}</Badge>
             <span className="text-ink-secondary">required lines checked</span>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => start("?add=missing")}>Add missing lines for this type</Button>
+            {addMissing}
           </div>
           <ul className="grid gap-2">
             {items.map((item, index) => (
@@ -296,7 +302,7 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
     const res = await adminFetch(`/admin/bid-desk/${bidId}`);
     const body = await res.json().catch(() => ({}));
     if (res.ok && body.checklist_live) {
-      setState({ checklist: body.checklist, progress: body.checklist_progress, estimate: body.estimate, documents: body.documents });
+      setState({ checklist: body.checklist, progress: body.checklist_progress, missing: body.checklist_missing ?? 0, estimate: body.estimate, documents: body.documents });
       // The list row's chip follows at once, not on the next list load.
       if (onProgress) onProgress(bidId, body.checklist_progress);
     }
@@ -317,6 +323,8 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
       await refresh();
+      // A plain answer from the server (for example, every template line was removed) is shown, not an error.
+      if (body.message) setMessage({ text: body.message, error: false });
       return true;
     } catch (err) {
       setMessage({ text: `Not saved: ${err.message}`, error: true });
@@ -333,7 +341,7 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
       <Section title="Estimate and proposal"><EstimateLink bid={bid} estimate={state.estimate} busy={disabled} save={save} /></Section>
       <Section title="Documents"><Documents documents={state.documents} /></Section>
       <Section title="Checklist">
-        <Checklist bidId={bidId} bid={bid} items={state.checklist} progress={state.progress} busy={disabled} run={run} invite={invite} />
+        <Checklist bidId={bidId} bid={bid} items={state.checklist} progress={state.progress} missing={state.missing ?? 0} busy={disabled} run={run} invite={invite} />
         {message.text && <ActionFeedback error={message.error} className="mt-2">{message.text}</ActionFeedback>}
       </Section>
       <Section title="Submission record"><Submission bid={bid} busy={disabled} save={save} invite={invite} /></Section>

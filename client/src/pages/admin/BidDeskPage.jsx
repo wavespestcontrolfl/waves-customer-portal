@@ -152,7 +152,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
       const data = await api(`/${bidId}`);
       // The checklist fields arrive only while GATE_BID_CHECKLIST is on; without them the panel is not shown.
       const extras = data.checklist_live
-        ? { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, estimate: data.estimate || null, documents: data.documents || [] }
+        ? { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] }
         : null;
       setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
       setDueInput(etDatetimeLocalValue(data.bid.due_at));

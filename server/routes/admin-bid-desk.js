@@ -344,6 +344,8 @@ router.get('/:id', async (req, res, next) => {
       checklist_live: true,
       checklist: items,
       checklist_progress: checklist.progressOf(items),
+      // Template lines for the bid's type that it does not carry (what "Add missing lines" would add).
+      checklist_missing: await checklist.missingCount(db, bid.id, bid.solicitation_type),
       estimate: estimate ? estimateSummary(estimate) : null,
       documents: await bidDocuments(db, bid.id),
     });
@@ -417,7 +419,7 @@ router.post('/:id/checklist/start', requireChecklist, async (req, res, next) => 
       if (value.type && value.type !== bid.solicitation_type) await trx('bid_opportunities').where({ id: bid.id }).update({ solicitation_type: value.type });
       const result = await checklist.startChecklist(trx, bid.id, type, { addMissing: req.query.add === 'missing' });
       const items = await checklist.listItems(trx, bid.id);
-      return { ...result, type, checklist: items, checklist_progress: checklist.progressOf(items) };
+      return { ...result, type, checklist: items, checklist_progress: checklist.progressOf(items), checklist_missing: await checklist.missingCount(trx, bid.id, type) };
     });
     if (!outcome) return notFound(res);
     return res.status(outcome.added ? 201 : 200).json({ ok: true, ...outcome });

@@ -310,6 +310,49 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect((await call('POST', `/${bidId}/checklist/start?add=missing`, {})).body.added).toBe(0);
     });
 
+    test('a custom line added and then removed does not block Start: the bid has no live lines, so the template is inserted', async () => {
+      const bidId = await newBid();
+      const custom = (await call('POST', `/${bidId}/checklist`, { label: 'Bring the lift permit' })).body.item;
+      await call('DELETE', `/${bidId}/checklist/${custom.id}`);
+      expect((await call('GET', `/${bidId}`)).body).toMatchObject({ checklist: [], checklist_missing: 10 });
+      const started = await call('POST', `/${bidId}/checklist/start`, {});
+      expect(started.status).toBe(201);
+      expect(started.body).toMatchObject({ added: 10, checklist_missing: 0 });
+      expect(started.body).not.toHaveProperty('allRemoved');
+      expect((await items(bidId)).filter((r) => !r.archived_at && r.template_key)).toHaveLength(10);
+      // With live lines a plain start is still a no-op.
+      expect((await call('POST', `/${bidId}/checklist/start`, {})).body).toMatchObject({ added: 0 });
+    });
+
+    test('with no live lines, Start skips template lines removed on purpose but adds the rest', async () => {
+      const bidId = await newBid();
+      await call('POST', `/${bidId}/checklist/start`, { type: 'quote' }); // 18 lines
+      const rows = await items(bidId);
+      // The type changes to itb and every line is removed (the 10 base lines are shared with itb).
+      await call('PATCH', `/${bidId}`, { solicitationType: 'itb' });
+      for (const row of rows) await call('DELETE', `/${bidId}/checklist/${row.id}`);
+      const res = await call('POST', `/${bidId}/checklist/start`, {});
+      // itb has 25 lines; the 10 base lines were removed on purpose and stay removed, the 4 stop and 11 own lines are new.
+      expect(res.body).toMatchObject({ added: 15, checklist_missing: 0 });
+      expect((await items(bidId)).filter((r) => !r.archived_at && r.template_key.startsWith('base.'))).toHaveLength(0);
+    });
+
+    test('when every template line was removed on purpose, Start adds nothing and says so; add=missing is unchanged', async () => {
+      const bidId = await newBid();
+      await call('POST', `/${bidId}/checklist/start`, {});
+      for (const row of await items(bidId)) await call('DELETE', `/${bidId}/checklist/${row.id}`);
+      const detail = (await call('GET', `/${bidId}`)).body;
+      expect(detail).toMatchObject({ checklist: [], checklist_missing: 0 });
+      const res = await call('POST', `/${bidId}/checklist/start`, {});
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ added: 0, allRemoved: true, message: 'All template lines for this type were removed. Add lines by hand.' });
+      expect(await items(bidId)).toHaveLength(10); // still the ten archived rows
+      expect((await call('POST', `/${bidId}/checklist/start?add=missing`, {})).body).toMatchObject({ added: 0 });
+      expect((await call('POST', `/${bidId}/checklist/start?add=missing`, {})).body).not.toHaveProperty('allRemoved');
+      // A line typed by hand works as before.
+      expect((await call('POST', `/${bidId}/checklist`, { label: 'By hand' })).status).toBe(201);
+    });
+
     test('tick stamps the time and the person, untick clears both, and progress counts required lines only', async () => {
       const bidId = await newBid();
       await call('POST', `/${bidId}/checklist/start`, {});

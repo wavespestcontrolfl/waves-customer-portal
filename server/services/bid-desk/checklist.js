@@ -33,18 +33,34 @@ async function nextPosition(conn, bidId) {
   return Number(row?.top || 0) + 1;
 }
 
+const ALL_REMOVED = 'All template lines for this type were removed. Add lines by hand.';
+
+// Template keys the bid already carries, live or archived (an archived custom line has no key and blocks nothing).
+const carriedKeys = async (conn, bidId) => new Set((await conn('bid_checklist_items').where({ bid_id: bidId }).whereNotNull('template_key').select('template_key'))
+  .map((row) => row.template_key));
+
+/** How many template lines for `type` the bid does not carry (what "Add missing lines" would add). */
+async function missingCount(conn, bidId, type) {
+  const carried = await carriedKeys(conn, bidId);
+  return templateRows(type).filter((row) => !carried.has(row.template_key)).length;
+}
+
 /**
- * Inserts the template lines for `type`. Idempotent: a bid that already has lines is left alone, unless `addMissing`,
- * which adds only the template lines the bid does not carry (matched by template_key; an archived line still counts as
- * carried, so a line the operator removed does not come back).
- * @returns {Promise<{ added: number, existing: number }>}
+ * Inserts the template lines for `type`. Idempotent: a bid that already has live lines is left alone on a plain start.
+ * A bid with NO live lines counts as not started (an added-then-removed custom line must not block the template), so a
+ * plain start inserts every template line it does not carry. `addMissing` does that for a bid that has live lines too.
+ * An archived template line still counts as carried, so a line the operator removed on purpose does not come back; an
+ * archived custom line blocks nothing. When every template line was removed on purpose there is nothing to insert:
+ * `allRemoved` is true and the page says so.
+ * @returns {Promise<{ added: number, existing: number, allRemoved?: boolean, message?: string }>}
  */
 async function startChecklist(conn, bidId, type, { addMissing = false } = {}) {
-  const have = await conn('bid_checklist_items').where({ bid_id: bidId }).select('template_key');
-  if (have.length && !addMissing) return { added: 0, existing: have.length };
+  const have = await conn('bid_checklist_items').where({ bid_id: bidId }).select('template_key', 'archived_at');
+  const live = have.filter((row) => !row.archived_at).length;
+  if (live && !addMissing) return { added: 0, existing: have.length };
   const carried = new Set(have.map((row) => row.template_key).filter(Boolean));
   const rows = templateRows(type).filter((row) => !carried.has(row.template_key));
-  if (!rows.length) return { added: 0, existing: have.length };
+  if (!rows.length) return { added: 0, existing: have.length, ...(live || addMissing ? {} : { allRemoved: true, message: ALL_REMOVED }) };
   const first = await nextPosition(conn, bidId);
   await conn('bid_checklist_items').insert(rows.map((row, index) => ({ bid_id: bidId, position: first + index, ...row })));
   return { added: rows.length, existing: have.length };
@@ -116,4 +132,4 @@ async function progressForBids(conn, bidIds) {
   return out;
 }
 
-module.exports = { listItems, progressOf, startChecklist, addItem, updateItem, archiveItem, reorderItems, progressForBids, ITEM_COLUMNS };
+module.exports = { listItems, progressOf, startChecklist, missingCount, addItem, updateItem, archiveItem, reorderItems, progressForBids, ITEM_COLUMNS };

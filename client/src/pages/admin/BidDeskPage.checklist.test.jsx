@@ -243,3 +243,32 @@ it("ticking a checklist line moves the chip in the list row at once", async () =
   await waitFor(() => expect(within(screen.getByRole("table")).getByText("1/2")).toBeInTheDocument());
   expect(within(screen.getByRole("table")).queryByText("0/2")).toBeNull();
 });
+
+it("with no live lines left, still offers Add missing lines for the bid's type and starts from it", async () => {
+  const add = vi.fn(() => reply({ ok: true, added: 18 }, { status: 201 }));
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ bid: bid({ solicitation_type: "quote" }), checklist_missing: 18 })),
+    "POST /admin/bid-desk/b1/checklist/start?add=missing": add,
+  });
+  renderPage();
+  expect(await screen.findByRole("button", { name: "Start checklist" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Add missing lines for this type" }));
+  await waitFor(() => expect(add).toHaveBeenCalled());
+  expect(add.mock.calls[0][0].body).toEqual({ type: "quote" });
+});
+
+it("offers no Add missing lines when nothing is missing, and shows the server's message when every template line was removed", async () => {
+  const start = vi.fn(() => reply({ ok: true, added: 0, allRemoved: true, message: "All template lines for this type were removed. Add lines by hand." }));
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ bid: bid({ solicitation_type: "quote" }), checklist_missing: 0 })),
+    "POST /admin/bid-desk/b1/checklist/start": start,
+  });
+  renderPage();
+  const startButton = await screen.findByRole("button", { name: "Start checklist" });
+  expect(screen.queryByRole("button", { name: "Add missing lines for this type" })).toBeNull();
+  fireEvent.click(startButton);
+  expect(await screen.findByText("All template lines for this type were removed. Add lines by hand.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Add line" })).toBeInTheDocument();
+});

@@ -48,7 +48,7 @@ An RFQ uses the quote rows and an ITN uses the RFP rows (same keys, so changing 
 
 Routes (all under `/api/admin/bid-desk/:id/checklist`, 404 while the gate is off):
 
-- `POST /start` with an optional `{ "type": "..." }` copies the template lines into the bid, once. A second press changes nothing. The type in the body is saved on the bid. `POST /start?add=missing` adds only template lines the bid does not carry; a line the operator archived still counts as carried and does not come back.
+- `POST /start` with an optional `{ "type": "..." }` copies the template lines into the bid, once. A second press changes nothing. The type in the body is saved on the bid. `POST /start?add=missing` adds only template lines the bid does not carry; a line the operator archived still counts as carried and does not come back. A bid with no live lines counts as not started: a plain start inserts every template line the bid does not carry, so a custom line added and then removed never blocks it. A template line removed on purpose (archived) is not brought back; when every template line was removed, start adds nothing and answers `allRemoved` with a plain message the page shows. GET also returns `checklist_missing`, the number of template lines for the bid's type not carried; the page offers "Add missing lines for this type" whenever it is above 0.
 - `POST /` adds a custom line (`label`, optional `sourceText` = the quote or page from the solicitation, `notes`, `required`).
 - `PATCH /:itemId` edits a line, or ticks it (`{ "checked": true }`, which stamps `checked_at` and `checked_by`) or unticks it.
 - `POST /reorder` with `{ "ids": [...] }`: every live line, each once, in the new order. A stale list answers 409.
