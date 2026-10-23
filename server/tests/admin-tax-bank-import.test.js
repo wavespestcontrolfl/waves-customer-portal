@@ -417,6 +417,23 @@ describe('create-expense (gate on)', () => {
     delete process.env.GATE_TAX_LEDGER;
   });
 
+  test('the claim refuses a newer Inbox decision (fromLedger) and an Income decision (any path) in its CAS', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.suggestion = { noMatch: true };
+    state.bankUpdates = []; state.insertedExpenses = [];
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true })).status).toBe(200);
+    const claim = state.bankUpdates.find((u) => u.patch.status === 'created_expense');
+    expect(claim.wheres).toContainEqual(["(suggestion -> 'decision') is null", undefined]);
+    expect(claim.wheres).toContainEqual(["coalesce(suggestion ->> 'decision', '') <> 'income'", undefined]);
+    // the plain Bank Import path: an Income item is never an expense; a Later row may still be booked
+    state.bankUpdates = []; state.insertedExpenses = [];
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);
+    const plain = state.bankUpdates.find((u) => u.patch.status === 'created_expense');
+    expect(plain.wheres).toContainEqual(["coalesce(suggestion ->> 'decision', '') <> 'income'", undefined]);
+    expect(plain.wheres).not.toContainEqual(["(suggestion -> 'decision') is null", undefined]);
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
   test('fromLedger + always on a description with no payee word is a 400 before any insert', async () => {
     process.env.GATE_TAX_LEDGER = 'true';
     state.bankRow.description = 'ACH DEBIT 1234';
@@ -1170,7 +1187,9 @@ describe('suggest scoped to visible rows (gate on)', () => {
     // atomic jsonb merge — never a rebuild that could erase keys the
     // matcher wrote during the model call
     const sug = state.bankUpdates[0].patch.suggestion;
-    expect(sug.sql).toContain("coalesce(suggestion, '{}'::jsonb) ||");
+    // still an atomic jsonb merge (the matcher's keys written during the model call survive);
+    // a dormant rule's own keys are subtracted first
+    expect(sug.sql).toMatch(/^coalesce\(suggestion, '\{\}'::jsonb\)( - '[a-zA-Z]+')* \|\| \?::jsonb$/);
     expect(JSON.parse(sug.bindings[0])).toMatchObject({ categoryId: 'cat-1', categoryName: 'Supplies' });
   });
 });
@@ -1286,6 +1305,8 @@ describe('AI suggest eligibility follows the ledger kill switch', () => {
     expect((await res.json()).processed).toBe(1);
     const merged = JSON.parse(state.bankUpdates[0].patch.suggestion.bindings[0]);
     expect(merged).toEqual(expect.objectContaining({ categoryId: 'cat-meals', categorySource: 'ai' }));
+    // the dormant rule's keys go with its category: nothing to resurface when the gate comes back on
+    for (const k of ['rule', 'rulesAt', 'personal', 'review', 'note', 'examined']) expect(String(state.bankUpdates[0].patch.suggestion.sql)).toContain(`- '${k}'`);
   });
   test('gate on: the AI write repeats the eligibility (no personal rule, no transfer flag) and reports applied only when it lands', async () => {
     process.env.GATE_TAX_LEDGER = 'true';

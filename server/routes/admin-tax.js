@@ -2348,8 +2348,11 @@ router.post('/bank-import/suggest', async (req, res, next) => {
           // category on top of that would recreate the contradiction
           const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(noCategory).whereRaw(notIgnored).update({
             // provenance moves to the model: a category a ledger rule wrote
-            // before is replaced, and the kill switch no longer owns it
-            suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null })]),
+            // before is replaced, and the kill switch no longer owns it. The
+            // rule's own keys go with it (rule, its stamp, personal/review
+            // notes, the override marker): a dormant rule must not resurface
+            // next to the model's category when the gate comes back on
+            suggestion: bankImport.suggestionMerge({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null }, bankImport.LEDGER_RULE_KEYS),
             updated_at: new Date(),
           });
           if (landed) results.push({ id: row.id, category: ai.categoryName, applied: true });
@@ -2432,8 +2435,13 @@ async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnP
     }).returning('*');
     let claim = trx('bank_transactions')
       .where({ id: row.id, status: 'unmatched' })
-      .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT);
-    if (fromLedger) claim = claim.whereRaw(taxLedgerRules.MATCHER_EXAMINED_SQL).whereRaw(taxLedgerRules.NO_LIVE_CANDIDATES_SQL);
+      .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
+      // an Income decision is never an expense, from any tab
+      .whereRaw("coalesce(suggestion ->> 'decision', '') <> 'income'");
+    // the Inbox's Business action is two requests (decide = preflight, then
+    // this claim): a Later or Income decision made in between is the newer
+    // owner action and wins, so the claim repeats the no-decision check
+    if (fromLedger) claim = claim.whereRaw(taxLedgerRules.MATCHER_EXAMINED_SQL).whereRaw(taxLedgerRules.NO_LIVE_CANDIDATES_SQL).whereRaw(taxLedgerRules.NOT_DECIDED_SQL);
     const claimed = await claim
       .update({ status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
     if (!claimed) {
