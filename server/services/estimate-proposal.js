@@ -149,6 +149,7 @@ function normalizeCorrectiveWorkItem(raw = {}) {
   // package's visit count — without them a derived 3-visit roach package
   // costs one treatment's COGS, and operator text decides the family.
   const visits = num(raw.visits ?? raw.visitsPerYear, 0);
+  const mistingIdentity = require('../utils/mosquito-misting-system').mistingProposalIdentity(raw);
   return {
     // A stable id (same shape as a line's) so an editor save can carry the misting identity by id.
     ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
@@ -160,8 +161,10 @@ function normalizeCorrectiveWorkItem(raw = {}) {
     includes: cleanStringList(raw.includes, { maxItems: 12, maxLen: 200 }),
     // A misting-system row keeps a canonical identity even when the editor sends no service (inferred from its text the way
     // normalizeLineItem / normalizeProgram do), so a later rename cannot shed it (pre-push audit P1).
-    service: cleanString(raw.service, 80) || require('../utils/mosquito-misting-system').mistingProposalIdentity(raw) || null,
-    ...(raw.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}),
+    service: cleanString(raw.service, 80) || mistingIdentity || null,
+    // A separate identity marker, persisted whatever raw.service says (a row may carry a generic family such as 'mosquito'
+    // beside a misting label), so a later rename cannot shed the identity (pre-push audit P1).
+    ...(mistingIdentity || raw.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}),
     visits: visits > 0 ? Math.min(Math.round(visits), 52) : null,
   };
 }

@@ -738,3 +738,20 @@ describe('pre-push audit: the canonical hand-booked work labels are misting iden
   });
 });
 
+describe('pre-push audit: a corrective-work row with a generic family keeps a misting marker', () => {
+  const { normalizeCorrectiveWork, carryMistingIdentity } = require('../services/estimate-proposal');
+  afterEach(() => { delete process.env.GATE_MOSQUITO_MISTING; });
+  test('service family stays, originalRequestedService marks it, a rename keeps both guards', () => {
+    const saved = { enabled: true, buildings: [], correctiveWork: normalizeCorrectiveWork([{ id: 'cw-f', service: 'mosquito', label: 'Mosquito Misting System Installation', amount: 4595 }]) };
+    expect(saved.correctiveWork[0]).toMatchObject({ service: 'mosquito', originalRequestedService: 'mosquito_misting' });
+    const renamed = normalizeCorrectiveWork(carryMistingIdentity({ correctiveWork: [{ id: 'cw-f', service: 'mosquito', label: 'Install equipment', amount: 4595 }] }, saved).correctiveWork);
+    expect(renamed[0].originalRequestedService).toBe('mosquito_misting');
+    const data = { result: { recurring: { services: [] } }, proposal: { enabled: true, buildings: [], correctiveWork: renamed } };
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+    delete process.env.GATE_MOSQUITO_MISTING;
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_GATED' });
+    expect(normalizeCorrectiveWork([{ service: 'mosquito', label: 'Barrier touch-up', amount: 80 }])[0]).not.toHaveProperty('originalRequestedService');
+  });
+});
+
