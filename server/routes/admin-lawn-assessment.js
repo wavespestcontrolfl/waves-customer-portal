@@ -1515,18 +1515,32 @@ router.post('/confirm', async (req, res, next) => {
 // =========================================================================
 router.get('/service/:serviceId', async (req, res, next) => {
   try {
+    let visit = null;
     if (isTechnicianRequest(req)) {
-      const owned = await technicianCurrentVisitFilter(
+      visit = await technicianCurrentVisitFilter(
         req,
         db('scheduled_services').where('scheduled_services.id', req.params.serviceId),
-      ).first('scheduled_services.id');
-      if (!owned) return res.status(404).json({ error: 'Service not found' });
+      ).first('scheduled_services.*');
+      if (!visit) return res.status(404).json({ error: 'Service not found' });
+    } else {
+      visit = await db('scheduled_services').where({ id: req.params.serviceId }).first().catch(() => null);
     }
+    // The last confirmed lawn visit's four scores and overall score, read-only
+    // on the completion screens (owner 2026-10-23). A failed read leaves the
+    // key out (the screen then shows no row) and never fails this lookup.
+    let lastVisit;
+    try {
+      lastVisit = visit ? await require('../services/lawn-last-visit-scores').lastVisitScores(visit, db) : undefined;
+    } catch (err) {
+      logger.warn(`[lawn-assessment] last visit scores failed for ${req.params.serviceId}: ${err.message}`);
+      lastVisit = undefined;
+    }
+    const lastVisitPart = lastVisit === undefined ? {} : { lastVisit };
     const assessment = await applyServiceAssessmentOrder(
       db('lawn_assessments').where({ service_id: req.params.serviceId }),
     ).first();
 
-    if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), ...(labelPickLive() ? { labelPickEnabled: true } : {}), assessment: null });
+    if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), ...(labelPickLive() ? { labelPickEnabled: true } : {}), ...lastVisitPart, assessment: null });
 
     const visitRun = await visitRuns.loadRun(assessment.id, db);
     const photos = await db('lawn_assessment_photos')
@@ -1540,6 +1554,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
       ...(shotListLive() ? { shotListEnabled: true } : {}),
       // GATE_LAWN_PHOTO_LABEL_PICK: tells the sheet to show the label chooser (key absent when off).
       ...(labelPickLive() ? { labelPickEnabled: true } : {}),
+      ...lastVisitPart,
       assessment: {
         ...normalizeAssessmentRow(assessment),
         photo_records: photos,

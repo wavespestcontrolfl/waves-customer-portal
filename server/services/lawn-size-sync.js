@@ -277,6 +277,14 @@ async function writeLawnSqft(trx, customerId, sqft, { onlyIfEmpty = false } = {}
   if (onlyIfEmpty && [turf?.lawn_sqft, primary?.property_sqft, customer?.property_sqft].some((v) => Number(v) > 0)) {
     return { changed: false, refused: 'has_size', before, after: before, mirrorsSynced: false };
   }
+  // A confirmed size for the customer's current primary (estimateTargetsPrimary / the owner's set-size) is evidence
+  // about the CURRENT lawn whatever the stored number, so it re-establishes the lawn AREA for the weekly plan after a
+  // move even when it equals the former home's figure (codex #6498 r1 P2, r2 P2). Its own ledger entry; an idempotent
+  // union, so the unchanged path may stamp too.
+  if (Number(sqft) > 0) {
+    const { confirmIrrigationFields, LAWN_SQFT_CONFIRMED_FIELD } = require('./irrigation-schedule-confirmation');
+    await confirmIrrigationFields(trx, customerId, [LAWN_SQFT_CONFIRMED_FIELD]);
+  }
   const turfChanged = before.turf_lawn_sqft !== sqft;
   const mirrorDiffers = (!!mirrorTarget && (before.primary_property_sqft !== sqft || before.customer_property_sqft !== sqft))
     || (customerOnly && before.customer_property_sqft !== sqft);
