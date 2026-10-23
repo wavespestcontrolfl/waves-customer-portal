@@ -153,6 +153,10 @@ function documentInputProjection(payload) {
     acceptance: payload?.acceptance ?? null,
     publicOrigin: payload?.publicOrigin ?? null,
     documentRender: payload?.documentRender ?? null,
+    // The "What we can and can't fix" block the document prints (GATE_ESTIMATE_LAWN_LIMITS): a turf
+    // flag edited while an attachment renders or waits must invalidate it. Absent (null) with the
+    // gate off or on a non-lawn estimate.
+    lawnLimits: payload?.lawnLimits ?? null,
   };
 }
 
