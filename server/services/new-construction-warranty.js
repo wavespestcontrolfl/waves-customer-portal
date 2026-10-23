@@ -155,7 +155,8 @@ const SUBTERRANEAN_TARGETS = ['Subterranean termites', 'Formosan subterranean te
 function targetsSubterranean(value) {
   let targets = value;
   if (typeof targets === 'string') {
-    try { targets = JSON.parse(targets); } catch { targets = [targets]; }
+    // The form stores "A, B"; older rows may hold a JSON list.
+    try { targets = JSON.parse(targets); } catch { targets = targets.split(','); }
   }
   if (!Array.isArray(targets)) targets = [targets];
   return targets.some((target) => SUBTERRANEAN_TARGETS.includes(oneLine(target)));
@@ -230,8 +231,10 @@ const UNIT_WORD = {
 function withoutUnit(value, unit) {
   const raw = oneLine(value);
   if (!UNIT_WORD[unit].test(raw)) return raw;
-  const number = /(\d{1,3}(,\d{3})+|\d+)(\.\d+)?|\.\d+/.exec(raw);
-  return number ? number[0] : raw;
+  // Exactly one number, or the value stays as written and fails the amount
+  // check: "2 passes; 180 gallons" must not print as 2 gallons.
+  const numbers = raw.match(/(\d{1,3}(,\d{3})+|\d+)(\.\d+)?|\.\d+/g) || [];
+  return numbers.length === 1 ? numbers[0] : raw;
 }
 
 // Certificate fields that print inside the treatment description are
@@ -247,6 +250,17 @@ function isShortText(value) {
   // Waves will pay"); "12 Main St. Bradenton" and "Blk. C" are not.
   return raw.length <= 120 && !/[\r\n]|\*\*|[!?]|\.\s+\S+\s+[a-z]/.test(raw) && !CLAUSE_WORDS.test(raw);
 }
+// A treatment of 0% or 0 gallons over 0 area is not a treatment.
+function amount(findings, field) {
+  return Number(withoutUnit(findings[field], AMOUNT_FIELDS[field]).replace(/,/g, '')) || 0;
+}
+function positiveAmountProblems(findings) {
+  return [
+    ...['concentration_pct', 'gallons_applied'].filter((field) => !(amount(findings, field) > 0)),
+    ...(amount(findings, 'square_footage') > 0 || amount(findings, 'linear_feet') > 0 ? [] : ['square_footage or linear_feet']),
+  ];
+}
+
 function assertStructuredCertificate(findings) {
   const failing = [
     ...SHORT_TEXT_FIELDS.filter((field) => !isShortText(findings[field])),
@@ -254,6 +268,7 @@ function assertStructuredCertificate(findings) {
       .filter(([field, unit]) => oneLine(findings[field]) && !/^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?$/.test(withoutUnit(findings[field], unit)))
       .map(([field]) => field),
     ...(/^[A-Z0-9-]{3,20}$/i.test(oneLine(findings.applicator_fdacs_id)) ? [] : ['applicator_fdacs_id']),
+    ...positiveAmountProblems(findings),
   ];
   if (failing.length) throw bad(`Fix these certificate fields first (a short value, not a sentence): ${failing.join(', ')}.`, 409);
 }
@@ -340,8 +355,8 @@ const PRINTED_CUSTOMER_FIELDS = ['first_name', 'last_name', 'company_name', 'add
 // Section 1 prints the owner's or agent's name and complete address (Rule
 // 5E-14.105(2)(a)), so the customer record must have one and pass the screen.
 function assertCustomerPrintable(customer) {
-  if (![customer.address_line1, customer.city, customer.zip].every((part) => oneLine(part))) {
-    throw bad("Add the owner's or agent's full mailing address (street, city, ZIP) to the customer first.", 409);
+  if (![customer.address_line1, customer.city, customer.state, customer.zip].every((part) => oneLine(part))) {
+    throw bad("Add the owner's or agent's full mailing address (street, city, state, ZIP) to the customer first.", 409);
   }
   // A complete name: a person's first and last name, or a company with no
   // partial person name (the contract prints the person's name when given).
@@ -364,7 +379,11 @@ function assertCustomerPrintable(customer) {
 // catalog has no row for them (a fresh database seeds none).
 const BUILT_IN_PRODUCTS = (getProjectType('pre_treatment_termite_certificate')?.findingsFields || [])
   .find((field) => field.key === 'product_name')?.options || [];
+// A bait system or a direct wood treatment is not a soil barrier, whatever
+// method the certificate records (termitePretreatRates.js kinds).
+const NON_SOIL_PRODUCT = /\b(trelona|bora-?care|sentricon|timbor|jecta|bait)\b/i;
 async function catalogProduct(conn, treatment) {
+  if (NON_SOIL_PRODUCT.test(treatment.product)) throw bad(`${treatment.product} is not a soil treatment, so this warranty does not fit the job.`, 409);
   const row = await conn('products_catalog').whereRaw('lower(name) = ?', [treatment.product.toLowerCase()]).first('name', 'active_ingredient');
   if (!row) {
     const builtIn = BUILT_IN_PRODUCTS.find((name) => name.toLowerCase() === treatment.product.toLowerCase());
@@ -416,6 +435,8 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   const issuer = body?.values?.issuer || {};
   return screenValues({
     ...values,
+    // Named here, or the context falls back to the customer's plan tier.
+    service: { name: 'New Construction Termite Warranty' },
     warranty: {
       ...values.warranty,
       ...officeFields(body, initial),

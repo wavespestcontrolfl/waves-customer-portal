@@ -70,7 +70,7 @@ const SUBTERRANEAN_TARGETS = ['Subterranean termites', 'Formosan subterranean te
 function targetsSubterranean(value) {
   let targets = value;
   if (typeof targets === 'string') {
-    try { targets = JSON.parse(targets); } catch { targets = [targets]; }
+    try { targets = JSON.parse(targets); } catch { targets = targets.split(','); }
   }
   return (Array.isArray(targets) ? targets : [targets]).some((target) => SUBTERRANEAN_TARGETS.includes(text(target)));
 }

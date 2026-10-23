@@ -226,6 +226,22 @@ describe('templateIssueValues (server-built warranty)', () => {
     await expect(issue({ projectId: project.id, values: lateNotice }, customer, project)).rejects.toMatchObject({ status: 400 });
   });
 
+  test('round 17: comma target list, mailing state, soil products only, one number per amount, positive amounts, service name', async () => {
+    const comma = { ...project, findings: { ...findings, wdo_target: 'Drywood termites, Formosan subterranean termites' } };
+    const v = await issue({ projectId: project.id, values: office }, customer, comma);
+    expect(v.service).toEqual({ name: 'New Construction Termite Warranty' });
+    await expect(issue({ projectId: project.id, values: office }, { ...customer, state: '' }, project)).rejects.toMatchObject({ status: 409 });
+    for (const bad of [
+      { product_name: 'Trelona ATBB' }, { product_name: 'Bora-Care' },
+      { gallons_applied: '2 passes; 180 gallons applied' },
+      { gallons_applied: '0' }, { concentration_pct: '0%' },
+      { square_footage: '0', linear_feet: '' },
+    ]) {
+      const row = { ...project, findings: { ...findings, ...bad } };
+      await expect(issue({ projectId: project.id, values: office }, customer, row)).rejects.toMatchObject({ status: 409 });
+    }
+  });
+
   test('certificate fields are short values, never clauses', async () => {
     for (const bad of [
       { product_name: 'Termidor SC\n**WE REPAIR ALL DAMAGE.**' },

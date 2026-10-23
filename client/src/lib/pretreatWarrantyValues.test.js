@@ -68,6 +68,7 @@ describe('pretreatWarrantyValues', () => {
     expect(warrantyEligible({ ...findings, treatment_method: 'Wood treatment (borate)' })).toBe(false);
     expect(warrantyEligible({ ...findings, treatment_method: 'Bait system' })).toBe(false);
     expect(warrantyEligible({ ...findings, wdo_target: ['Drywood termites'] })).toBe(false);
+    expect(warrantyEligible({ ...findings, wdo_target: 'Drywood termites, Formosan subterranean termites' })).toBe(true);
     expect(warrantyEligible({ ...findings, treatment_method: 'Other', treatment_method_other: 'Soil barrier (chemical)' })).toBe(true);
     expect(warrantyEligible({ ...findings, additional_applications: [{ treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care' }] })).toBe(false);
     expect(warrantyEligible({ ...findings, additional_applications: JSON.stringify([{ product_name: '' }]) })).toBe(true);
