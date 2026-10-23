@@ -239,7 +239,9 @@ async function deliverOwedBidAlert(bidId) {
       await alerts.raise(alerts.newBidSpec(bid, null), bid.owed_alert_key, trx);
       await trx('bid_opportunities').where({ id: bid.id }).update({ notified_at: trx.fn.now() });
     } else if (!moot) {
-      await alerts.raise(alerts.addendumSpec(bid, null), bid.owed_alert_key, trx);
+      // The key carries the deadline, and SAM.gov can move a date away and back (B, C, B): an earlier episode the
+      // operator's confirmation closed must ring again, so this goes through the reopening path.
+      await alerts.raiseReopening(alerts.addendumSpec(bid, null), bid.owed_alert_key, trx);
     }
     await trx('bid_opportunities').where({ id: bid.id }).update({ owed_alert_kind: null, owed_alert_key: null });
     return !moot;

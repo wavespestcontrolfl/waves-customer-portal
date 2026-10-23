@@ -14,6 +14,10 @@ jest.mock('../services/admin-alert-compose', () => ({
   ...jest.requireActual('../services/admin-alert-compose'),
   raiseAdminAlert: jest.fn(),
 }));
+jest.mock('../services/admin-alert-episodes', () => ({
+  ...jest.requireActual('../services/admin-alert-episodes'),
+  raiseAdminAlertWithReopen: jest.fn(),
+}));
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -23,6 +27,7 @@ const sourceDueMigration = require('../models/migrations/20261023020000_bid_desk
 const service = require('../services/bid-desk');
 const sam = require('../services/bid-desk/sam-gov');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
+const { raiseAdminAlertWithReopen } = require('../services/admin-alert-episodes');
 
 const describeDb = SKIP ? describe.skip : describe;
 jest.setTimeout(60000);
@@ -66,6 +71,8 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     mockPg = await database.transaction();
     raiseAdminAlert.mockReset();
     raiseAdminAlert.mockImplementation(async (_category, spec) => { composeAdminAlert(spec); return { id: randomUUID(), deduped: false }; });
+    raiseAdminAlertWithReopen.mockReset();
+    raiseAdminAlertWithReopen.mockImplementation(async () => ({ id: randomUUID(), deduped: false, rang: true }));
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
@@ -144,13 +151,27 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(new Date(bid.due_at).toISOString()).toBe('2026-11-12T19:00:00.000Z');
     expect(bid.due_confirmed).toBe(false);
     expect(bid.needs_date_confirmation).toBe(true);
-    expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe(`bid-desk:addendum:${bid.id}:sam:2026-11-12T19:00:00.000Z`);
-    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/^SAM\.gov posted a different deadline/);
+    // A date change rings through the reopening path (SAM.gov can move a deadline away and back).
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    const [, headline, why, opts] = raiseAdminAlertWithReopen.mock.calls[0];
+    expect(opts.dedupeKey).toBe(`bid-desk:addendum:${bid.id}:sam:2026-11-12T19:00:00.000Z`);
+    expect(headline).toBeTruthy();
+    expect(why).toMatch(/^SAM\.gov posted a different deadline/);
 
     // The same version again changes nothing and rings nothing.
-    raiseAdminAlert.mockClear();
+    raiseAdminAlertWithReopen.mockClear();
     expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([moved]), apiKey: 'test-key' })).toMatchObject({ refreshed: 0, rung: 0 });
-    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+
+    // Moved away and back (B, C, B): each change owes a ring, and B's key goes through the reopening path again.
+    await mockPg('bid_opportunities').where({ id: bid.id }).update({ needs_date_confirmation: false });
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-6', { responseDeadLine: '2026-11-19T14:00:00-05:00' })]), apiKey: 'test-key' });
+    await mockPg('bid_opportunities').where({ id: bid.id }).update({ needs_date_confirmation: false });
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([moved]), apiKey: 'test-key' });
+    expect(raiseAdminAlertWithReopen.mock.calls.map(([, , , o]) => o.dedupeKey)).toEqual([
+      `bid-desk:addendum:${bid.id}:sam:2026-11-19T19:00:00.000Z`,
+      `bid-desk:addendum:${bid.id}:sam:2026-11-12T19:00:00.000Z`,
+    ]);
   });
 
   test('a confirmed date is never overwritten by a republished deadline; the bid is flagged instead', async () => {
