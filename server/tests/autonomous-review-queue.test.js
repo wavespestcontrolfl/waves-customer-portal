@@ -89,6 +89,7 @@ describe('autonomous-review-queue read model helpers', () => {
       can_dismiss: false,
       can_approve_trust_build: false,
       can_approve_named_competitor: false,
+      never_published: false,
     });
   });
 
@@ -107,6 +108,7 @@ describe('autonomous-review-queue read model helpers', () => {
       can_dismiss: true,
       can_approve_trust_build: false,
       can_approve_named_competitor: false,
+      never_published: false,
     });
   });
 
@@ -557,7 +559,7 @@ describe('a run that never published can be dismissed', () => {
     ['a blog whose writer gave up', opp({ action_type: 'new_supporting_blog', skip_reason: 'attempts_exhausted' }), run({ action_type: 'new_supporting_blog', outcome: 'failed_agent', skip_reason: null })],
     ['a shadow-mode blog', opp({ action_type: 'new_supporting_blog', skip_reason: 'shadow_would_gate' }), run({ action_type: 'new_supporting_blog', outcome: 'skipped_shadow_mode' })],
   ])('%s: Dismiss is offered and it closes the item', async (_label, o, r) => {
-    expect(reviewActions({ opportunity: o, run: r }).can_dismiss).toBe(true);
+    expect(reviewActions({ opportunity: o, run: r })).toMatchObject({ can_dismiss: true, never_published: true });
     const updates = mockDismiss(o, r);
     await decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }).catch(() => {});
     expect(updates).toContainEqual(expect.objectContaining({ status: 'skipped' }));

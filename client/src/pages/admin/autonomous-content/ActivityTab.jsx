@@ -51,9 +51,10 @@ function PipelineStatus({ selected }) {
   );
 }
 
-// A may-have-published blog hold (an interrupted approval) is the one blog
-// state a person decides: the server offers Dismiss only, after GitHub has
-// been checked. Every other blog row stays engine-managed.
+// Two blog states a person decides, both Dismiss only: a may-have-published
+// hold (an interrupted approval, after GitHub has been checked), and a run
+// that never published (review_actions.never_published). Every other blog
+// row stays engine-managed.
 export function blogHoldDismissable(selected) {
   return selected?.action_type === "new_supporting_blog"
     && selected?.status === "pending_review"
@@ -66,7 +67,9 @@ function ContentDecisions({ selected, view, reviewNote, setReviewNote, loading, 
     return (
       <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
         <p className="m-0 text-sm text-zinc-700">
-          This publish was interrupted and may already be on GitHub. Check for an open Astro PR or a live post, close or keep it, then dismiss.
+          {reviewActions.never_published
+            ? "This draft never published: its run stopped before any Astro PR or live post. Dismiss closes it."
+            : "This publish was interrupted and may already be on GitHub. Check for an open Astro PR or a live post, close or keep it, then dismiss."}
         </p>
         <Textarea
           value={reviewNote}

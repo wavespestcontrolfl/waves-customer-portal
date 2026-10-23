@@ -463,6 +463,9 @@ function reviewActions({ opportunity, run }) {
   return {
     can_requeue: pendingReview,
     can_dismiss: pendingReview || holdDismissable || unpublishedDismissable || (inReview && supersededReconciliationHold(opportunity)),
+    // Tells the review screen this Dismiss is for a run that stopped before
+    // any PR or page, not an interrupted publish (Codex #6486 r1).
+    never_published: unpublishedDismissable,
     can_approve_trust_build: pendingReview && isTrustBuildRun(run),
     can_approve_named_competitor: pendingReview && isNamedCompetitorReviewRun(run),
   };
