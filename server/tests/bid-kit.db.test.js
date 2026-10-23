@@ -212,10 +212,12 @@ describeDb('Bid kit (PostgreSQL)', () => {
       const created = await create({ item_key: 'business_license_copy' });
       await upload(created.id, 'first.pdf');
       const firstKey = (await rowOf(created.id)).file_s3_key;
-      expect(firstKey).toMatch(new RegExp(`^bid-kit/${created.id}/[0-9a-f]{16}-first\\.pdf$`));
+      expect(firstKey).toMatch(new RegExp(`^bid-kit/${created.id}/[0-9a-f]{16}\\.pdf$`));
+      expect(firstKey).not.toContain('first');
       await upload(created.id, 'second.pdf');
       const row = await rowOf(created.id);
-      expect(row.file_s3_key).toMatch(/-second\.pdf$/);
+      expect(row.file_s3_key).toMatch(/\.pdf$/);
+      expect(row.file_s3_key).not.toContain('second');
       expect(row).toMatchObject({ file_name: 'second.pdf', file_content_type: 'application/pdf', file_size: PDF.length });
       expect(mockSent.filter((c) => c.constructor.name === 'DeleteObjectCommand').map((c) => c.input.Key)).toEqual([firstKey]);
       expect(mockSent.filter((c) => c.constructor.name === 'PutObjectCommand').every((c) => !('ACL' in c.input))).toBe(true);
@@ -223,6 +225,18 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect(link.status).toBe(200);
       expect(link.body.url).toContain(row.file_s3_key);
       expect(link.body.url).toMatch(/expires=300$/);
+    });
+
+    test('a file name with a tax ID is refused: nothing is stored, no row or key holds it', async () => {
+      const created = await create({ item_key: 'business_license_copy' });
+      for (const name of ['W9-123-45-6789.pdf', 'W9 12-3456789.pdf', 'EIN 123456789.pdf']) {
+        expect((await upload(created.id, name)).status).toBe(400);
+      }
+      expect(mockSent).toHaveLength(0);
+      expect(await rowOf(created.id)).toMatchObject({ file_s3_key: null, file_name: null });
+      expect(JSON.stringify((await call('GET', '')).body)).not.toMatch(/123-45-6789|12-3456789|123456789/);
+      expect((await upload(created.id, 'FDACS license 2026.pdf')).status).toBe(200);
+      expect((await rowOf(created.id)).file_name).toBe('FDACS license 2026.pdf');
     });
 
     test('one live row per catalog item (references repeat); archive keeps the row and frees the slot', async () => {

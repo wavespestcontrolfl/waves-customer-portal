@@ -473,10 +473,59 @@ describe('files', () => {
     expect(JSON.stringify(res.body)).not.toMatch(/bid-kit\/|file_s3_key|https?:/);
     const put = mockSent.find((command) => command.constructor.name === 'PutObjectCommand');
     expect(put.input).toMatchObject({ Bucket: 'test-bucket', ContentType: 'application/pdf' });
-    expect(put.input.Key).toMatch(new RegExp(`^bid-kit/${item.id}/[0-9a-f]{16}-FDACS_license_2026\\.pdf$`));
+    // The key is a random token and a whitelisted extension: the original name is never part of it.
+    expect(put.input.Key).toMatch(new RegExp(`^bid-kit/${item.id}/[0-9a-f]{16}\\.pdf$`));
     expect(put.input).not.toHaveProperty('ACL');
     expect(Object.keys(put.input).sort()).toEqual(['Body', 'Bucket', 'ContentType', 'Key']);
     expect(store.activity.at(-1)).toMatchObject({ action: 'bid_kit_file_uploaded' });
+  });
+
+  test.each([
+    ['a hyphenated SSN', 'W9-123-45-6789.pdf'],
+    ['a hyphenated EIN', 'W9 12-3456789.pdf'],
+    ['a labelled nine-digit EIN', 'EIN 123456789.pdf'],
+    ['a labelled TIN with a separator', 'W9_TIN_123456789.pdf'],
+  ])('a file name with %s is refused with the tax-ID message, and never reaches storage, the row or any response', async (_name, fileName) => {
+    const item = await create();
+    const res = await upload(item.id, { name: fileName });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/tax ID/);
+    expect(JSON.stringify(res.body)).not.toMatch(/\d{2}-\d{7}|\d{3}-\d{2}-\d{4}|\d{9}/);
+    expect(mockSent).toHaveLength(0); // nothing was stored, so there is no key or object to carry the name
+    expect(store.rows.get(item.id)).toMatchObject({ file_s3_key: null, file_name: null });
+    const everything = JSON.stringify([
+      (await call('GET', '/api/admin/bid-kit')).body, (await call('GET', '/api/admin/bid-kit?all=1')).body, (await call('GET', '/api/admin/bid-kit/facts-sheet')).body,
+      (await call('GET', `/api/admin/bid-kit/${item.id}/file`)).body, [...store.rows.values()],
+    ]);
+    expect(everything).not.toMatch(/123-45-6789|12-3456789|123456789/);
+    expect(getSignedUrl).not.toHaveBeenCalled();
+  });
+
+  test('an ordinary name still works; it is kept for display and offered by the signed link, but is never in the storage key', async () => {
+    const item = await create();
+    const res = await upload(item.id, { name: 'Policy 2026 renewal (final).pdf' });
+    expect(res.status).toBe(200);
+    expect(res.body.item.file.name).toBe('Policy 2026 renewal _final_.pdf');
+    const key = store.keyOf(item.id);
+    expect(key).toMatch(new RegExp(`^bid-kit/${item.id}/[0-9a-f]{16}\\.pdf$`));
+    expect(key).not.toMatch(/Policy|renewal/);
+    await call('GET', `/api/admin/bid-kit/${item.id}/file`);
+    expect(getSignedUrl.mock.calls[0][1].input.ResponseContentDisposition).toBe('inline; filename="Policy 2026 renewal _final_.pdf"');
+    expect(getSignedUrl.mock.calls[0][1].input.Key).toBe(key);
+  });
+
+  test('every accepted type gets a whitelisted extension in its key', async () => {
+    for (const [name, type, bytes, ext] of [['scan.PNG', 'image/png', PNG, 'png'], ['photo.jpeg', 'image/jpeg', JPEG, 'jpg'], ['plan.docx', DOCX_TYPE, DOCX, 'docx']]) {
+      const item = await create({ item_key: `${ext}` === 'docx' ? 'ipm_plan' : ext === 'png' ? 'capability_sheet' : 'service_center_proof' });
+      expect((await upload(item.id, { name, type, bytes })).status).toBe(200);
+      expect(store.keyOf(item.id)).toMatch(new RegExp(`^bid-kit/${item.id}/[0-9a-f]{16}\\.${ext}$`));
+    }
+  });
+
+  test('a stored name that somehow holds a tax ID is never offered by a signed link', async () => {
+    const files = require('../services/bid-kit-files');
+    await files.signedUrl({ key: 'bid-kit/x/abc.pdf', fileName: 'W9-123-45-6789.pdf', contentType: 'application/pdf' });
+    expect(getSignedUrl.mock.calls[0][1].input.ResponseContentDisposition).toBe('inline; filename="file.pdf"');
   });
 
   test.each([

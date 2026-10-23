@@ -23,7 +23,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Any /:id that is not a UUID is a 404 before a handler (or an upload) runs.
 router.param('id', (req, res, next, id) => (UUID.test(id) ? next() : res.status(404).json({ error: 'Not found' })));
 const CHANGED = 'This item changed since you opened it. Reload and check it again.';
-const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID.';
+const TAX_ID_REFUSED = catalog.TAX_ID_REFUSED;
 
 const text = (max) => Joi.string().trim().max(max).allow('', null);
 const day = Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null);

@@ -235,7 +235,7 @@ describe('what clears a sign-off', () => {
 describe('tax IDs are never stored', () => {
   test.each([
     '12-3456789', '123-45-6789', 'EIN 12-3456789 on file', 'note: 987-65-4321.',
-    'EIN 123456789', 'EIN: 123456789', 'ein 123456789', 'FEIN 123456789', 'TIN: 123456789', 'SSN 123456789', 'tax id 123456789', 'Tax ID: 123456789', 'taxpayer ID: 123456789', 'Taxpayer 123456789',
+    'EIN 123456789', 'EIN: 123456789', 'ein 123456789', 'FEIN 123456789', 'TIN: 123456789', 'SSN 123456789', 'tax id 123456789', 'Tax ID: 123456789', 'taxpayer ID: 123456789', 'Taxpayer 123456789', 'EIN_123456789.pdf', 'W9_TIN_123456789', 'W9-SSN-123456789.pdf',
   ])('%s is refused', (text) => {
     expect(looksLikeTaxId(text)).toBe(true);
     expect(containsTaxId({ nested: [text] })).toBe(true);

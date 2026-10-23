@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const config = require('../config');
+const catalog = require('../../shared/bid-kit-catalog.cjs');
 const logger = require('./logger');
 
 const MAX_FILE_BYTES = 15 * 1024 * 1024;
@@ -67,6 +68,9 @@ function validateFile(file) {
   if (!TYPES[declared] || !TYPES[declared].includes(ext)) throw new FileError(SUPPORTED_MESSAGE);
   const detected = detectType(file.buffer);
   if (detected !== declared) throw new FileError('The file content does not match its type. ' + SUPPORTED_MESSAGE);
+  // A file name is typed text too: one that carries a tax ID or SSN (W9-123-45-6789.pdf) is refused, never stored or cleaned,
+  // so the number cannot reach file_name, a list response or a signed link. The refusal never repeats the name.
+  if (catalog.containsTaxId([file.originalname, safeFileName(file.originalname)])) throw new FileError(catalog.TAX_ID_REFUSED);
   return detected;
 }
 
@@ -81,6 +85,12 @@ function safeFileName(name = 'file') {
   return cleaned || 'file';
 }
 
+// The name a signed link offers. A stored name that somehow holds a tax ID is replaced by a plain one.
+function downloadName(fileName, contentType) {
+  const name = safeFileName(fileName);
+  return catalog.containsTaxId(name) ? `file.${(TYPES[contentType] || ['bin'])[0]}` : name;
+}
+
 const keyFingerprint = (key) => crypto.createHash('sha256').update(String(key || '')).digest('hex').slice(0, 12);
 
 // Stores one file under a new private key and returns what the row keeps.
@@ -88,7 +98,8 @@ async function putFile(itemId, file) {
   if (!config.s3?.bucket) throw new FileError('File storage is not configured', 500);
   const contentType = validateFile(file);
   const fileName = safeFileName(file.originalname);
-  const key = `${KEY_PREFIX}${itemId}/${crypto.randomBytes(8).toString('hex')}-${fileName.replace(/ /g, '_')}`;
+  // The key never carries the original name: a random token and a whitelisted extension only.
+  const key = `${KEY_PREFIX}${itemId}/${crypto.randomBytes(8).toString('hex')}.${TYPES[contentType][0]}`;
   await s3().send(new PutObjectCommand({ Bucket: config.s3.bucket, Key: key, Body: file.buffer, ContentType: contentType }));
   return { key, fileName, contentType, size: file.buffer.length };
 }
@@ -100,7 +111,7 @@ async function signedUrl({ key, fileName, contentType }) {
   return getSignedUrl(s3(), new GetObjectCommand({
     Bucket: config.s3.bucket,
     Key: key,
-    ResponseContentDisposition: `inline; filename="${safeFileName(fileName)}"`,
+    ResponseContentDisposition: `inline; filename="${downloadName(fileName, contentType)}"`,
     ResponseContentType: contentType || undefined,
   }), { expiresIn: SIGNED_URL_SECONDS });
 }

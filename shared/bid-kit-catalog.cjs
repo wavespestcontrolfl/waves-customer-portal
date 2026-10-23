@@ -130,7 +130,10 @@ const SIGN_OFF_REFUSAL = {
 // nine-digit run that follows a label (EIN, FEIN, TIN, SSN, "tax id", "taxpayer") by at most 12 characters. A bare nine-digit
 // number with no such label (an insurance policy number) is fine. The message never repeats the text.
 const TAX_ID_PATTERN = /(?<!\d)(?:\d{2}-\d{7}|\d{3}-\d{2}-\d{4})(?!\d)|(?:\b(?:EIN|FEIN|TIN|SSN)\b|tax\s*id|taxpayer)[\s\S]{0,12}?(?<!\d)\d{9}(?!\d)/i;
-const looksLikeTaxId = (text) => typeof text === 'string' && TAX_ID_PATTERN.test(text);
+// The one plain refusal every tax-ID check gives. It never repeats the text.
+const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID.';
+// An underscore counts as a space, so a file name like EIN_123456789.pdf is read the same as "EIN 123456789".
+const looksLikeTaxId = (text) => typeof text === 'string' && TAX_ID_PATTERN.test(text.replace(/_/g, ' '));
 function containsTaxId(value) {
   if (value == null) return false;
   if (typeof value === 'string') return looksLikeTaxId(value);
@@ -255,5 +258,5 @@ module.exports = {
   LIMIT_KEYS, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, MAX_LIMIT_DOLLARS, REFERENCE_DETAIL_KEYS, PUBLIC_OR_PRIVATE,
   SUBSTANTIVE_FIELDS, EXPIRING_DAYS, STATUS, STATUS_ORDER, STATUS_LABEL, SIGN_OFF_REFUSAL,
   catalogItem, catalogSections, itemStatus, buildChecklist, summarize, changesSubstance,
-  looksLikeTaxId, containsTaxId, etToday, dayText, daysBetween,
+  TAX_ID_REFUSED, looksLikeTaxId, containsTaxId, etToday, dayText, daysBetween,
 };
