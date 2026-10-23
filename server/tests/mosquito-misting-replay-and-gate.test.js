@@ -686,3 +686,29 @@ describe('Codex round 7: replayed limits, distinct work labels, one account key'
     expect(key('Commercial Mosquito Program')).toBe('commercial_mosquito');
   });
 });
+
+describe('Codex round 8: whole-number counts, one commercial misting key', () => {
+  const { priceMosquitoMisting } = require('../services/pricing-engine/service-pricing');
+
+  test('a fractional nozzle or riser count is invalid (reason + fallback), never rounded into a different quote', () => {
+    const n = priceMosquitoMisting({}, { tier: 'smart', nozzles: 35.5 });
+    expect(n.nozzles).toBe(35);
+    expect(n.manualReviewReasons).toContain('mosquito_misting_invalid_nozzles');
+    const r = priceMosquitoMisting({}, { tier: 'smart', risers: 2.5 });
+    expect(r.risers).toBe(0);
+    expect(r.manualReviewReasons).toContain('mosquito_misting_invalid_risers');
+    const ok = priceMosquitoMisting({}, { tier: 'smart', nozzles: 40, risers: 12 });
+    expect(ok.manualReviewReasons).toEqual([]);
+    expect(ok.nozzles).toBe(40);
+    expect(ok.risers).toBe(12);
+  });
+
+  test('a commercial misting row files its invoices under the same canonical key the rows group by', () => {
+    const ctx = require('../services/estimate-membership-context');
+    expect(ctx.accountServiceKeys('Commercial Mosquito Misting System')).toEqual(['mosquito_misting']);
+    expect(ctx.accountServiceKey('Commercial Mosquito Misting System')).toBe('mosquito_misting');
+    expect(ctx.accountServiceKeys('Mosquito Misting Service Plan')).toEqual(['mosquito_misting']);
+    expect(ctx.accountServiceKeys('Commercial Mosquito Program')).toEqual(['commercial_mosquito']);
+  });
+});
+

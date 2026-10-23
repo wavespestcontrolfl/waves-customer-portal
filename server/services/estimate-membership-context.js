@@ -218,8 +218,10 @@ function accountServiceKeys(raw) {
   if (text.includes('pest') && !rodentService) add('pest_control');
   if (text.includes('lawn') || text.includes('turf')) add('lawn_care');
   if (!palmService && (text.includes('tree') || text.includes('shrub'))) add('tree_shrub');
-  // The misting system is not the barrier program and not a WaveGuard qualifier.
-  if (isMistingSystemIdentity(text)) add('mosquito_misting');
+  // The misting system is not the barrier program and not a WaveGuard qualifier. It is ONE canonical key whatever the
+  // row's name says (never the commercial_ prefix), so a paid invoice files where accountServiceKey groups the rows
+  // (Codex #6503 r8).
+  if (isMistingSystemIdentity(text)) keys.add('mosquito_misting');
   else if (text.includes('mosquito')) add('mosquito');
   if (text.includes('termite')) add('termite_bait');
   if (rodentService) add('rodent_bait');
@@ -1917,3 +1919,4 @@ module.exports = {
 
 // Exported for tests (Codex #6503 r7): the one account-key resolver the membership panel groups rows by.
 module.exports.accountServiceKey = accountServiceKey;
+module.exports.accountServiceKeys = accountServiceKeys;

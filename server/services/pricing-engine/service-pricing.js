@@ -5064,23 +5064,23 @@ function resolveMistingBasis({ tier, solution }, knobs) {
 
 // The requested counts, validated (reasons are appended in the order the checks run).
 function resolveMistingNozzles(raw, basis, reasons) {
+  // A physical count is a whole number: a fractional input is invalid (reason + fallback), never silently rounded
+  // into a different quote (Codex #6503 r8).
   let nozzles = raw == null ? basis.includedNozzles : Number(raw);
-  if (!Number.isFinite(nozzles) || nozzles < basis.minNozzles) {
+  if (!Number.isInteger(nozzles) || nozzles < basis.minNozzles) {
     reasons.push('mosquito_misting_invalid_nozzles');
     nozzles = basis.includedNozzles;
   }
-  nozzles = Math.round(nozzles);
   const oversize = nozzles > basis.maxNozzles;
   if (oversize) reasons.push('mosquito_misting_oversize');
   return { nozzles, oversize };
 }
 function resolveMistingRisers(raw, basis, reasons) {
   let risers = raw == null ? 0 : Number(raw);
-  if (!Number.isFinite(risers) || risers < 0) {
+  if (!Number.isInteger(risers) || risers < 0) {
     reasons.push('mosquito_misting_invalid_risers');
     risers = 0;
   }
-  risers = Math.round(risers);
   const oversize = risers > basis.maxRisers;
   if (oversize) reasons.push('mosquito_misting_oversize_risers');
   return { risers, oversize };
