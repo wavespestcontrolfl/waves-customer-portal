@@ -167,7 +167,8 @@ test('the legacy retire holds the item\'s truck lock around the probe and the wr
   const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
   await handler({ params: { id: TOOL }, body: {}, techRole: 'admin' }, res, (err) => { throw err; });
   expect(res.statusCode).toBe(200);
-  expect(truckKit.lockTruck).toHaveBeenCalledWith(db, TRUCK);
+  // The item row first, then its truck.
+  expect(truckKit.lockTruck.mock.calls.map(([, id]) => id)).toEqual([TOOL, TRUCK]);
   expect(db.transaction).toHaveBeenCalled();
   expect(db.__state.equipment[TOOL].status).toBe('retired');
   // A tool that moved trucks while the retire waited for the lock is refused.
@@ -178,6 +179,14 @@ test('the legacy retire holds the item\'s truck lock around the probe and the wr
   await handler({ params: { id: 'e-moving' }, body: {}, techRole: 'admin' }, res3, (err) => { throw err; });
   expect(res3.statusCode).toBe(409);
   expect(db.__state.equipment['e-moving'].status).toBe('active');
+  // A row that became a vehicle while the retire waited is refused.
+  jest.clearAllMocks();
+  let catReads = 0;
+  db.__state.equipment['e-turning'] = { id: 'e-turning', status: 'active', assigned_vehicle_id: null, get category() { return catReads++ === 0 ? 'tool' : 'vehicle'; } };
+  const resC = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await handler({ params: { id: 'e-turning' }, body: {}, techRole: 'admin' }, resC, (err) => { throw err; });
+  expect(resC.statusCode).toBe(409);
+  expect(db.__state.equipment['e-turning'].status).toBe('active');
   // A truck with a tool on it is not retired from here: 409, nothing written.
   jest.clearAllMocks();
   const resR = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };

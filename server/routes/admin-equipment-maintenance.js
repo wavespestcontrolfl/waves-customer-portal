@@ -255,16 +255,20 @@ router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => 
     // alert's outcome (Retired / Lost), never around it; the probe and the
     // write hold the item's truck lock so a check in flight finishes first.
     const record = await db.transaction(async (trx) => {
+      // Same lock order as an asset save: the item row first (so the
+      // snapshot below cannot race another save of the same row), then the
+      // truck it rides on, or itself when it is a truck (a check in flight
+      // must finish or fail ownership before the truck retires), then a
+      // re-read under both: a row that moved trucks or changed category
+      // meanwhile is refused, never retired on a truck nobody locked.
+      await truckKit.lockTruck(trx, req.params.id);
       const item = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category');
-      // A tool locks its truck; a truck locks itself (a check in flight on
-      // it must finish or fail ownership before the truck retires). The
-      // assignment is read again under the lock: a tool that moved trucks
-      // meanwhile is not retired on a truck nobody locked.
       const itemTruck = item?.assigned_vehicle_id || null;
-      const truckId = item?.category === 'vehicle' ? req.params.id : itemTruck;
+      const itemCategory = item?.category || null;
+      const truckId = itemCategory === 'vehicle' ? req.params.id : itemTruck;
       if (truckId) await truckKit.lockTruck(trx, truckId);
       const again = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category');
-      if (item && (!again || (again.assigned_vehicle_id || null) !== itemTruck)) return 'moved';
+      if (item && (!again || (again.assigned_vehicle_id || null) !== itemTruck || (again.category || null) !== itemCategory)) return 'moved';
       // A truck with tools still on it is not retired from here either.
       if (item?.category === 'vehicle' && await trx('equipment').where({ assigned_vehicle_id: req.params.id }).first('id')) return 'riders';
       if (await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
