@@ -227,7 +227,17 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
-  it('gate on: a builder 1-year warranty keeps the call to action but makes no renewable-contract claim', async () => {
+  it('gate on: the builder 1-year renewable to year 5 (Rule 5E-14.105(3)) states the renewable contract', async () => {
+    const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: { ...findings, warranty_type: 'Builder 1-year, renewable yearly to year 5' },
+    }));
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).toHaveTextContent('placed under a retreatment contract renewable by payment of an annual fee');
+    expect(sticker).toHaveTextContent('Activate your termite warranty');
+  });
+
+  it('gate on: a legacy builder 1-year warranty keeps the call to action but makes no renewable-contract claim', async () => {
     const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       pretreatStickerReport: true,
       findings: { ...findings, warranty_type: 'Builder 1-year' },

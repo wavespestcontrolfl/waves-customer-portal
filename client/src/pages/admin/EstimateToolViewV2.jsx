@@ -7170,7 +7170,7 @@ export default function EstimateToolViewV2({
                           <SelectV2
                             k="preslabWarranty"
                             options={[
-                              { value: "NONE", label: "No warranty" },
+                              { value: "NONE", label: "No warranty (addition to an existing building only)" },
                               { value: "BASIC", label: "Basic 1-yr (included)" },
                               { value: "EXTENDED", label: "Extended 5-yr (+$200)" },
                             ]}

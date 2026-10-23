@@ -1731,7 +1731,7 @@ describe('admin projects routes', () => {
         customer_id: 'customer-1',
         project_type: 'pre_treatment_termite_certificate',
         project_date: '2026-07-17',
-        findings: { treatment_address: '123 Slab Ct', applicator_name: 'Adam Benetti', treatment_time: '08:40', warranty_type: 'Builder 1-year' },
+        findings: { treatment_address: '123 Slab Ct', applicator_name: 'Adam Benetti', treatment_time: '08:40', warranty_type: 'Builder 1-year, renewable yearly to year 5' },
         sent_at: null,
         status: 'draft',
       }),
