@@ -307,6 +307,7 @@ describe('the daily ring budget (docs/admin-notifications.md rule 3)', () => {
     expect(opts).toMatchObject({ bell: true, refreshOnDedupe: true, link: '/admin/bid-kit' }); // admitted by the bell policy, kept off the bell by feed: 'activity'
     expect(opts.metadata).toMatchObject({ count: 9, feed: 'activity', quiet: true, doneWhen: 'count_zero', severity: 'needs-you' });
     expect(opts.metadata.itemKeys).toHaveLength(9);
+    expect(opts.ringOnRefresh({}, {})).toBe(false); // a changed count is rewritten quietly, never rung
     // The standing row names each waiting paper by its catalog name and date; the three with bells are not in it.
     expect([...opts.metadata.itemKeys].sort()).toEqual(MANY(12).slice(3).map((row) => row.id).sort());
     for (const day of ['Oct 13', 'Oct 17', 'Oct 21']) expect(opts.detail).toContain(day);
@@ -334,6 +335,37 @@ describe('the daily ring budget (docs/admin-notifications.md rule 3)', () => {
     const result = await runBidKitExpiryCheck({ now: NOW });
     expect(result).toEqual({ scanned: 6, rang: 3, closed: 0, overflow: 0 });
     expect(standingCalls()).toHaveLength(0);
+  });
+
+  test('past the budget, an item with an open bell still has its words refreshed, quietly, onto its standing row', async () => {
+    const all = MANY(6);
+    mockRows.push(...all);
+    const holders = all.slice(3).map(keyFor); // the three least urgent already have bells
+    episodes.openAdminAlertKeys.mockResolvedValue(holders);
+    raiseAdminAlert.mockImplementation(async (c, h, w, opts) => (holders.includes(opts.dedupeKey)
+      ? { id: 'n0', deduped: true, refreshed: true, rung: false, rang: false } : { id: 'n1', deduped: false, rang: true }));
+    const result = await runBidKitExpiryCheck({ now: NOW });
+    expect(result).toEqual({ scanned: 6, rang: 3, closed: 0, overflow: 0 });
+    const calls = bellCalls();
+    expect(calls.map(([, , , opts]) => opts.dedupeKey)).toEqual(all.map(keyFor));
+    for (const [, , , opts] of calls.slice(3)) {
+      expect(opts.dedupeWindowMs).toBeUndefined(); // onto the standing row whatever its age: never a new row
+      expect(opts.refreshOnDedupe).toBe(true);
+      expect(opts.ringOnRefresh({}, {})).toBe(false);
+    }
+    expect(standingCalls()).toHaveLength(0);
+  });
+
+  test('past the budget, an item whose bell closed meanwhile is not raised at all', async () => {
+    const all = MANY(4);
+    mockRows.push(...all);
+    episodes.openAdminAlertKeys
+      .mockResolvedValueOnce([keyFor(all[3])]) // the run sees the fourth item's bell open...
+      .mockResolvedValue([]); // ...but it is closed when the item's lock is taken
+    raiseAdminAlert.mockImplementation(async () => ({ id: 'n1', deduped: false, rang: true }));
+    const result = await runBidKitExpiryCheck({ now: NOW });
+    expect(result).toEqual({ scanned: 4, rang: 3, closed: 0, overflow: 0 });
+    expect(bellCalls()).toHaveLength(3);
   });
 
   test('the standing row closes when the overflow reaches zero, and nothing closes while no standing row is open', async () => {

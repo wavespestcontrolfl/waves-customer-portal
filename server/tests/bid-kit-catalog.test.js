@@ -268,7 +268,11 @@ describe('what clears a sign-off', () => {
 
 describe('tax IDs are never stored: one detector', () => {
   const { detectTaxId, rowHasTaxId } = catalog;
-  const SEPARATORS = [['space', ' '], ['hyphen', '-'], ['en dash', '–'], ['dot', '.'], ['underscore', '_'], ['slash', '/'], ['double space', '  '], ['hyphen and space', '- ']];
+  const SEPARATORS = [['space', ' '], ['hyphen', '-'], ['en dash', '–'], ['dot', '.'], ['underscore', '_'], ['slash', '/'], ['double space', '  '], ['hyphen and space', '- '],
+    // Every other Unicode dash or minus, and the no-break spaces, read as a hyphen or a space.
+    ['em dash', '\u2014'], ['non-breaking hyphen', '\u2011'], ['hyphen (U+2010)', '\u2010'], ['figure dash', '\u2012'], ['horizontal bar', '\u2015'],
+    ['minus sign', '\u2212'], ['fullwidth hyphen', '\uFF0D'], ['small em dash', '\uFE58'], ['no-break space', '\u00A0'], ['narrow no-break space', '\u202F'],
+    ['ideographic space', '\u3000']];
 
   // [text, refused?, note]: typed text, no file-name rule.
   const TYPED = [
@@ -319,6 +323,11 @@ describe('tax IDs are never stored: one detector', () => {
     ['561710, 561730', false, 'NAICS list'], ['NIGP 968-45', false, 'NIGP code'], ['JB000000', false, 'license number'], ['JNXA12345678', false, 'entity ID'],
     ['1234567890123', false, 'thirteen digits'], ['Example Pest Services LLC', false, 'a name'], ['100 Fixture Way, Sampleville, FL 34202', false, 'address'],
     ['', false, 'empty'],
+    // Read in one normal form: fullwidth digits, invisible characters between the digits.
+    ['\uFF11\uFF12\uFF13\uFF14\uFF15\uFF16\uFF17\uFF18\uFF19', true, 'fullwidth nine digits'],
+    ['123\u200B45\u200B6789', true, 'zero-width spaces inside an SSN'], ['12\u00AD3456789', true, 'soft hyphen inside an EIN'],
+    ['SSN 123\u201445\u20146789', true, 'SSN with em dashes'], ['EIN 12\u20143456789', true, 'EIN with an em dash'],
+    ['2026\u201410\u201423', false, 'date with em dashes'], ['Policy 1234\u20145678', false, 'eight digits with an em dash'],
   ];
 
   test.each(TYPED)('typed text %j: refused = %s (%s)', (text, refused) => {
@@ -339,6 +348,7 @@ describe('tax IDs are never stored: one detector', () => {
     ['W9-123-45-6789.pdf', true], ['W9 12-3456789.pdf', true], ['EIN 123456789.pdf', true], ['W9_TIN_123456789.pdf', true],
     ['SSN 123 45 6789.pdf', true], ['SSN_123_45_6789.pdf', true], ['EIN 12 3456789.pdf', true], ['W9 1234 56789.pdf', true], ['W9 123.456.789.pdf', true],
     ['scan 123-456-789.pdf', true], ['W9 123–45–6789.pdf', true],
+    ['W9 123\u201445\u20146789.pdf', true], ['scan\uFF0D123456789.pdf', true], ['scan_\uFF11\uFF12\uFF13\uFF14\uFF15\uFF16\uFF17\uFF18\uFF19.pdf', true],
     ['12345678.pdf', false], ['1234567890.pdf', false], ['1234567890123.pdf', false], ['FDACS license 2026.pdf', false], ['Policy 2026-10-23.pdf', false],
     ['W-9 signed.pdf', false], ['COI 2026 renewal (final).docx', false], ['scan 941-555-0100.pdf', false], ['license_2026_10_23.pdf', false],
   ];

@@ -130,7 +130,10 @@ const SIGN_OFF_REFUSAL = {
 // A tax ID or Social Security number is never stored: the W-9 file is the only place one lives. Every path asks this one
 // function (typed fields, the merged-row pairs, reference details, uploaded file names, the signed-link name fallback).
 //
-// A separator is any run of space, hyphen, en dash, dot, underscore or slash. In typed text (a number counts as its digits),
+// The text is read in one normal form first (screenText): compatibility forms folded (fullwidth digits and dashes, no-break
+// spaces), every Unicode dash or minus read as a hyphen, invisible format characters (zero-width spaces, joiners, the soft
+// hyphen) removed, an underscore read as a space. A separator is then any run of space, hyphen, dot, underscore or slash.
+// In typed text (a number counts as its digits),
 // each field alone and each label/value pair read together, these are refused:
 //   (A) the SSN shape: 3 digits, separator, 2 digits, separator, 4 digits, label or not;
 //   (B) the EIN shape: 2 digits, separator, 7 digits, label or not;
@@ -143,7 +146,10 @@ const SIGN_OFF_REFUSAL = {
 // Not refused: runs of 8 digits or of 10 or more, dates, phone numbers, and a grouped number with no tax phrase.
 // A run is a maximal chain of digit groups joined by separators; nine digits means some consecutive groups of the chain add up
 // to exactly nine. The refusal never repeats the text.
-const SEPARATOR = '[\\s\\-\\u2013._/]+';
+const DASHES = /[\u2010-\u2015\u2043\u2212\u2E3A\u2E3B\uFE58\uFE63\uFF0D]/g;
+const INVISIBLE = /[\u00AD\u180E\u200B-\u200D\u2060-\u2064\uFEFF]/g;
+const screenText = (text) => text.normalize('NFKC').replace(INVISIBLE, '').replace(DASHES, '-').replace(/_/g, ' ');
+const SEPARATOR = '[\\s\\-._/]+';
 const SSN_SHAPE = new RegExp(`(?<!\\d)\\d{3}${SEPARATOR}\\d{2}${SEPARATOR}\\d{4}(?!\\d)`);
 const EIN_SHAPE = new RegExp(`(?<!\\d)\\d{2}${SEPARATOR}\\d{7}(?!\\d)`);
 const NINE_CONTIGUOUS = /(?<!\d)\d{9}(?!\d)/;
@@ -169,10 +175,11 @@ function hasNineDigitGrouping(text) {
   return false;
 }
 
-// True when the text holds a tax ID or an SSN. An underscore counts as a space ("EIN_123456789.pdf" reads as "EIN 123456789").
+// True when the text holds a tax ID or an SSN, read in its normal form ("EIN_123456789.pdf" reads as "EIN 123456789",
+// "123—45—6789" as "123-45-6789").
 function detectTaxId(text, { fileName = false } = {}) {
   if (typeof text !== 'string') return false;
-  const t = text.replace(/_/g, ' ');
+  const t = screenText(text);
   if (SSN_SHAPE.test(t) || EIN_SHAPE.test(t) || NINE_CONTIGUOUS.test(t)) return true;
   if (!hasNineDigitGrouping(t)) return false;
   return fileName || TAX_PHRASE.test(t);

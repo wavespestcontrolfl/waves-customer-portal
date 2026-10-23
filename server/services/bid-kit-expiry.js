@@ -108,18 +108,20 @@ async function syncExpiryBell(item, { now = new Date() } = {}) {
 }
 
 // One candidate from the daily run's snapshot: under the item's lock the row is read again, and the bell is raised only
-// while the FRESH row still qualifies. Returns true when it rang.
-async function raiseIfStillDue(candidate, today) {
+// while the FRESH row still qualifies. Returns true when it rang. refreshOnly (past the run's ring budget): only an item
+// whose bell is open has its words rewritten, onto that row whatever its age; never a new row, never a ring.
+async function raiseIfStillDue(candidate, today, { refreshOnly = false } = {}) {
   return withItemLock(candidate.id, async (trx) => {
     const fresh = await store.getItem(candidate.id, trx);
     if (!fresh || !qualifies(fresh, today)) return false;
+    if (refreshOnly && !(await episodes.openAdminAlertKeys(trx, keyFor(fresh))).includes(keyFor(fresh))) return false;
     const { spec, detail } = specFor(fresh, today);
     // The shared episode path: a bell closed after a renewal rings again when the item comes back inside the window.
     const composed = composeAdminAlert(spec);
     const result = await episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
       bell: true,
       dedupeKey: keyFor(fresh),
-      dedupeWindowMs: DEDUPE_DAYS * 86400000,
+      ...(refreshOnly ? {} : { dedupeWindowMs: DEDUPE_DAYS * 86400000 }),
       // The words count down ("in 12 days") and follow a changed date: a standing bell is rewritten each day, quietly
       // (never rung again inside the week); a bell closed by a renewal still rings when the item comes back.
       refreshOnDedupe: true,
@@ -175,6 +177,7 @@ async function syncOverflowRow(overflow, today, standing) {
     dedupeKey: OVERFLOW_KEY,
     dedupeVersion: crypto.createHash('sha256').update(ids.join(',')).digest('hex'),
     refreshOnDedupe: true,
+    ringOnRefresh: () => false, // a changed count or list is rewritten quietly: it stays an Activity-only standing count
     detail: `Bid kit: ${lines.join('; ')}`,
     link: composed.link,
     trx,
@@ -210,13 +213,14 @@ async function runBidKitExpiryCheck({ now = new Date() } = {}) {
   let rang = 0;
   const overflow = [];
   for (const item of due) {
-    // Out of budget: an item with a bell already waits (it only rings again after its 7-day window); one with none is counted.
-    if (rang >= MAX_NEW_BELLS) {
-      if (!holders.has(keyFor(item))) overflow.push(item);
+    // Out of budget: an item with no bell is counted; one with a bell only has its words refreshed (it never rings here).
+    const spent = rang >= MAX_NEW_BELLS;
+    if (spent && !holders.has(keyFor(item))) {
+      overflow.push(item);
       continue;
     }
     try {
-      if (await raiseIfStillDue(item, today)) rang += 1;
+      if (await raiseIfStillDue(item, today, { refreshOnly: spent })) rang += 1;
     } catch (err) {
       logger.warn(`[bid-kit] expiry alert failed: ${errorTag(err)}`);
     }
