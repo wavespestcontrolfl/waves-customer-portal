@@ -227,7 +227,17 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
-  it('gate on: a builder 1-year warranty keeps the call to action but makes no renewable-contract claim', async () => {
+  it('gate on: the builder 1-year renewable to year 5 (Rule 5E-14.105(3)) states the renewable contract', async () => {
+    const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: { ...findings, warranty_type: 'Builder 1-year, renewable yearly to year 5' },
+    }));
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).toHaveTextContent('placed under a retreatment contract renewable by payment of an annual fee');
+    expect(sticker).toHaveTextContent('Activate your termite warranty');
+  });
+
+  it('gate on: a legacy builder 1-year warranty keeps the call to action but makes no renewable-contract claim', async () => {
     const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       pretreatStickerReport: true,
       findings: { ...findings, warranty_type: 'Builder 1-year' },
@@ -237,18 +247,47 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
-  it('gate off: the certificate stays today\'s document even with final exterior values stored', async () => {
+  it('a blank warranty is missing data, not "no contract": no no-contract sentence, gate-off footer kept', async () => {
+    const on = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: { ...findings, warranty_type: '' },
+    }));
+    const sticker = await on.findByTestId('termite-notice-sticker');
+    expect(sticker).not.toHaveTextContent('No retreatment contract covers this treatment');
+    expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
+    on.unmount();
+    const off = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      findings: { ...findings, warranty_type: '' },
+    }));
+    await off.findAllByText(/Pre-Construction Termite Protection/i);
+    expect(off.getByText(/Activate Your Termite Warranty/i)).toBeInTheDocument();
+  });
+
+  it('gate off: an addition to an existing building drops the warranty footer', async () => {
     const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      findings: { ...findings, warranty_type: 'Addition to an existing building (no warranty required)' },
+    }));
+    await findAllByText(/Pre-Construction Termite Protection/i);
+    expect(queryByText(/Activate Your Termite Warranty/i)).not.toBeInTheDocument();
+  });
+
+  it('gate off: the certificate also prints a recorded final exterior treatment and scopes the signature', async () => {
+    // The staff send validates the final exterior record on both layouts
+    // (Codex #6490 r4), so the gate-off certificate prints it too.
+    const { findAllByText, findByText, getByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       findings: {
         ...findings,
         applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
         final_exterior_date: '2026-09-14',
+        final_exterior_time: '09:30',
         final_exterior_product: 'Termidor SC',
+        final_exterior_active_ingredient: 'Fipronil',
+        final_exterior_applicator_name: 'Sam Example',
       },
     }));
     await findAllByText(/Pre-Construction Termite Protection/i);
-    expect(queryByText(/Final exterior treatment/i)).not.toBeInTheDocument();
-    expect(queryByText(/covers the initial treatment only/)).not.toBeInTheDocument();
+    expect(await findByText('09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
+    expect(getByText(/covers the initial treatment only/)).toBeInTheDocument();
   });
 
   it('gate on: "No warranty" drops the contract clause and the warranty call to action', async () => {
@@ -257,12 +296,26 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
       findings: { ...findings, warranty_type: 'No warranty' },
     }));
     const sticker = await findByTestId('termite-notice-sticker');
-    expect(sticker).not.toHaveTextContent('retreatment contract');
+    expect(sticker).not.toHaveTextContent('placed under a retreatment contract');
     expect(sticker).not.toHaveTextContent('Activate your termite warranty');
     expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
-    // FBC 105.11: every notice names the need for reinspection and contract renewal.
-    expect(sticker).toHaveTextContent('Annual reinspection and renewal of the treatment contract are needed');
+    // FBC 105.11: every notice names reinspection and contract renewal; with no
+    // warranty it recommends a contract rather than naming one.
+    expect(sticker).toHaveTextContent('No retreatment contract covers this treatment');
+    expect(sticker).not.toHaveTextContent('renewal of the treatment contract are needed');
     expect(sticker).toHaveTextContent('Posted per FL Building Code 105.11');
+  });
+
+  it('gate on: an addition to an existing building reads like "No warranty" (Rule 5E-14.105(3)(d))', async () => {
+    const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: { ...findings, warranty_type: 'Addition to an existing building (no warranty required)' },
+    }));
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).not.toHaveTextContent('placed under a retreatment contract');
+    expect(sticker).not.toHaveTextContent('Activate your termite warranty');
+    expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
+    expect(sticker).toHaveTextContent('No retreatment contract covers this treatment');
   });
 
   it('gate on: a later exterior visit gets its own record line and the signature is scoped to the initial treatment', async () => {
@@ -272,12 +325,13 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
         ...findings,
         applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
         final_exterior_date: '2026-09-14',
+        final_exterior_time: '09:30',
         final_exterior_product: 'Termidor SC',
         final_exterior_active_ingredient: 'Fipronil',
         final_exterior_applicator_name: 'Sam Example',
       },
     }));
-    expect(await findByText('09/14/2026 · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
+    expect(await findByText('09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
     expect(getByText(/This signature covers the initial treatment only\./)).toBeInTheDocument();
   });
 });
