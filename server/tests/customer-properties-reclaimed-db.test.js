@@ -35,6 +35,27 @@ suite('reclaimed water edits against isolated Postgres', () => {
     expect((await auditOf(property.id)).length).toBe(3);
   }, 30000);
 
+  test('a merged-away copy\'s office answer counts until the office answers this home; then "Automatic" really returns it to the county', async () => {
+    const { isReclaimedService } = require('../services/lawn-reclaimed-water');
+    const property = await primaryOf();
+    expect((await put(property.id, { reclaimed: null })).status).toBe(200);
+    // What a customer merge leaves: the loser's copy of the same address, deactivated, its columns not moved.
+    const { id: _id, created_at: _c, updated_at: _u, ...copy } = property;
+    const [merged] = await db('customer_properties').insert({
+      ...copy, is_primary: false, active: false, reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_checked_at: new Date(),
+    }).returning('id');
+    const mergedId = merged.id || merged;
+    const visit = { id: 'svc-merged', property_id: property.id, customer_id: customerA };
+    try {
+      expect(await isReclaimedService(db, visit)).toBe(true);
+      expect((await put(property.id, { reclaimed: null })).status).toBe(200);
+      expect(await db('customer_properties').where({ id: mergedId }).first()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+      expect(await isReclaimedService(db, visit)).toBe(false);
+    } finally {
+      await db('customer_properties').where({ id: mergedId }).del();
+    }
+  }, 30000);
+
   test('a bad body, another customer\'s property and the gate off write nothing and leave no audit row', async () => {
     const property = await primaryOf();
     const before = (await auditOf(property.id)).length;

@@ -1292,8 +1292,21 @@ async function editManualProperty(customerId, propertyId, input, options = {}) {
     const stamps = Object.assign({}, ...Object.keys(changes).map(field => EDITABLE_FIELDS[field].columns?.(changes[field], trx)));
     await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
       .update({ ...changes, ...stamps, updated_at: trx.fn.now() });
+    if ('reclaimed_water' in changes) await supersedeMergedReclaimedAnswers(trx, customerId, propertyId);
     return propertyId;
   });
+}
+
+// The office's reclaimed-water answer (Automatic included) is now THE answer for this home: a person's answer left on a merged-away copy of
+// the same address (isReclaimedService falls back to it while the active copy has none) is cleared in the same transaction, so "Automatic"
+// really hands the home back to the county match instead of reviving the old answer.
+async function supersedeMergedReclaimedAnswers(trx, customerId, propertyId) {
+  const { address_key: addressKey } = await trx('customer_properties').where({ id: propertyId }).first('address_key') || {};
+  if (!addressKey) return;
+  await trx('customer_properties')
+    .where({ customer_id: customerId, active: false, address_key: addressKey })
+    .whereIn('reclaimed_water_source', ['office', 'customer'])
+    .update({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null, updated_at: trx.fn.now() });
 }
 
 async function removeManualProperty(customerId, propertyId, options = {}) {
