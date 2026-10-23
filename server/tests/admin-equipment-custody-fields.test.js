@@ -259,7 +259,7 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     db.__state.rows[TOOL] = { id: TOOL, category: 'tool', get assigned_vehicle_id() { return reads++ === 0 ? VEHICLE : OTHER; } };
     const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: null } });
     expect(res.statusCode).toBe(409);
-    expect(res.body.error).toMatch(/moved this item/);
+    expect(res.body.error).toMatch(/changed this item/);
     expect(db.__state.updated).toBeNull();
   });
 
@@ -281,6 +281,16 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: VEHICLE } });
     expect(res.statusCode).toBe(409);
     expect(res.body.error).toMatch(/cannot ride on a truck/);
+    expect(db.__state.updated).toBeNull();
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE };
+  });
+
+  test('a Lost outcome that landed while the save waited is not undone by the dialog payload', async () => {
+    let reads = 0;
+    // Reads: the target check, the first snapshot (both active), then the under-lock snapshot (lost).
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE, get status() { return reads++ < 2 ? 'active' : 'lost'; } };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status: 'active', name: 'Full payload', assigned_vehicle_id: VEHICLE } });
+    expect(res.statusCode).toBe(409);
     expect(db.__state.updated).toBeNull();
     db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE };
   });

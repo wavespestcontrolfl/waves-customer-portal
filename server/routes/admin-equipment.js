@@ -265,7 +265,9 @@ async function applyAssetUpdate(trx, id, updates) {
   if (!first) return null;
   for (const truckId of trucksTouched(id, first, updates)) await truckKit.lockTruck(trx, truckId);
   const before = await trx('equipment').where({ id }).first(...ITEM_COLUMNS);
-  if (!before || before.assigned_vehicle_id !== first.assigned_vehicle_id || before.category !== first.category) return 'moved';
+  // Truck, category OR status: an alert outcome (Lost / Retired) that landed
+  // while this save waited must not be undone by the dialog's full payload.
+  if (!before || ['assigned_vehicle_id', 'category', 'status'].some((key) => before[key] !== first[key])) return 'moved';
   const refusal = await writeRefusal(trx, id, updates, before);
   if (refusal) return refusal;
   const moved = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id;
@@ -337,7 +339,7 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     // alerts with it, so the old truck's bell must be re-judged: under both
     // trucks' locks, in the same transaction as the move (truck-kit.js).
     const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates));
-    if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload and try again.' });
+    if (record === 'moved') return res.status(409).json({ error: 'Another save changed this item (its truck, category or status). Reload and try again.' });
     if (record === 'vehicle-cargo') return res.status(409).json({ error: 'This item is now a vehicle; a vehicle cannot ride on a truck. Reload and try again.' });
     if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
