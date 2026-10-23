@@ -59,7 +59,6 @@ const termiteBond = { service: 'termite_bond', name: 'Termite Bond', visitsPerYe
 const rodentTrap = { service: 'rodent', name: 'Rodent Trapping' };
 
 const render = (estimate) => buildEstimateProposalPDFBuffer(estimate, { billsPerApplication: false });
-const HEAD = 'BEFORE YOU BOOK';
 const PHRASE = {
   scheduling: 'SCHEDULING AND PAYING',
   pest: 'IF YOUR ESTIMATE INCLUDES PEST CONTROL',
