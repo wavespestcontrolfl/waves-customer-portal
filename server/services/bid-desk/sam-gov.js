@@ -39,8 +39,15 @@ const MAX_PAGES = 5;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
 // The API's longest posted-date range is one year.
 const MAX_WINDOW_DAYS = 364;
-// Open SAM.gov bids re-read by notice id each run (one API call each; a registered key allows 1,000 calls a day).
+// Open SAM.gov bids re-read by notice id each run (one API call each), at most this many.
 const REFRESH_LIMIT = 25;
+// API calls one run may make. A personal SAM.gov key with no role allows 10 a day; SAM_GOV_DAILY_CALLS raises it for a
+// role-backed key. Discovery is spent first; the by-id re-read gets what is left.
+const DEFAULT_DAILY_CALLS = 10;
+function dailyCallBudget() {
+  const n = Number(process.env.SAM_GOV_DAILY_CALLS);
+  return Number.isInteger(n) && n >= 2 ? n : DEFAULT_DAILY_CALLS;
+}
 
 // ---------- pure helpers ----------
 
@@ -218,33 +225,47 @@ const sameInstant = (a, b) => (a == null ? null : new Date(a).getTime()) === (b 
 /**
  * What a republished notice changes on its bid. SAM.gov keeps the notice id and serves only the latest version, so
  * a new deadline replaces an UNCONFIRMED date (still unconfirmed); a date the operator confirmed is never
- * overwritten. A moved or removed deadline, or a notice that turned inactive, flags the bid for confirmation (which
- * pauses its reminders) and owes one addendum bell for that change.
+ * overwritten. A moved or removed deadline, a notice that turned inactive, or one active again, flags the bid for
+ * confirmation (which pauses its reminders) and owes one addendum bell for that change.
  */
+// What changed on SAM.gov since it was last read: { what, line } for the bell key and the source line, or null. A
+// closure wins over a deadline move, which wins over a reopening. Compared with what SAM.gov last showed, not with
+// due_at: a date the operator typed is not a source change.
+function sourceChange(bid, row) {
+  if (row.source_active === false && bid.source_active !== false) {
+    return { what: 'inactive', line: 'SAM.gov no longer lists this notice as active' };
+  }
+  if (!sameInstant(bid.source_due_at, row.due_at)) {
+    return {
+      what: row.due_at ? new Date(row.due_at).toISOString() : 'none',
+      line: row.due_source_line || 'SAM.gov no longer lists a response deadline',
+      deadline: true,
+    };
+  }
+  if (row.source_active === true && bid.source_active === false) {
+    return { what: 'reopened', line: row.due_source_line || 'SAM.gov lists this notice as active again' };
+  }
+  return null;
+}
+
 function refreshPatch(bid, row) {
   const patch = {};
   for (const field of REFRESH_FIELDS) {
     if (row[field] != null && row[field] !== bid[field]) patch[field] = row[field];
   }
-  // Compared with what SAM.gov last showed, not with due_at: a date the operator typed is not a source change. A
-  // deadline that moved, a deadline the notice no longer lists, and a notice that turned inactive each flag the bid.
-  const deadlineChanged = !sameInstant(bid.source_due_at, row.due_at);
-  const closed = row.source_active === false && bid.source_active !== false;
   if (row.source_active !== bid.source_active) patch.source_active = row.source_active;
-  if (!deadlineChanged && !closed) return patch;
-  if (deadlineChanged) {
+  if (!sameInstant(bid.source_due_at, row.due_at)) {
     patch.source_due_at = row.due_at;
-    patch.due_source_line = row.due_source_line || 'SAM.gov no longer lists a response deadline';
     if (row.due_at && !bid.due_confirmed) patch.due_at = row.due_at;
   }
-  if (closed) patch.due_source_line = 'SAM.gov no longer lists this notice as active';
+  const change = sourceChange(bid, row);
+  if (!change) return patch;
+  patch.due_source_line = change.line;
   patch.needs_date_confirmation = true;
-  const open = OPEN_STATUSES.includes(bid.status) && !bid.historical;
   // A new-bid bell still owed rings with the current state; it is not replaced by an addendum bell.
-  if (open && bid.owed_alert_kind !== 'new') {
-    const what = closed ? 'inactive' : (row.due_at ? new Date(row.due_at).toISOString() : 'none');
+  if (OPEN_STATUSES.includes(bid.status) && !bid.historical && bid.owed_alert_kind !== 'new') {
     patch.owed_alert_kind = 'addendum';
-    patch.owed_alert_key = `bid-desk:addendum:${bid.id}:sam:${what}`;
+    patch.owed_alert_key = `bid-desk:addendum:${bid.id}:sam:${change.what}`;
   }
   return patch;
 }
@@ -309,30 +330,49 @@ async function collectNotices({ apiKey, postedFrom, postedTo, refreshFrom, refre
       if (id && (!onlyId || id === onlyId)) seen.set(id, notice);
     }
   };
+  // Every request counts against the run's call budget (the key's daily quota).
+  let calls = 0;
+  const counted = (...args) => { calls += 1; return fetchImpl(...args); };
   for (const ncode of NAICS_CODES) {
-    add(await fetchAll({ apiKey, filter: { ncode, state: 'FL' }, postedFrom, postedTo, fetchImpl }));
+    add(await fetchAll({ apiKey, filter: { ncode, state: 'FL' }, postedFrom, postedTo, fetchImpl: counted }));
   }
-  // The by-id read needs a posted-date range too. The notice may have been posted long before it was filed here (the
-  // first run looks back 30 days), so it uses the API's whole one-year range.
-  const batch = await openSamBids(refreshAfter);
+  // The by-id re-read gets what discovery left of the budget. It needs a posted-date range too, and the notice may have
+  // been posted long before it was filed here, so it uses the API's whole one-year range. A refused or failed read
+  // (quota, outage) stops the re-read for this run without losing the discovery results; the next run resumes after the
+  // last bid read.
+  const limit = Math.min(REFRESH_LIMIT, dailyCallBudget() - calls);
+  const batch = await openSamBids(refreshAfter, limit);
   const missing = [];
+  let lastRead = refreshAfter;
+  let stopped = false;
   for (const externalId of batch) {
-    const { notices } = await fetchPage({ apiKey, filter: { noticeid: externalId }, postedFrom: refreshFrom, postedTo, offset: 0, fetchImpl });
+    let notices;
+    try {
+      ({ notices } = await fetchPage({ apiKey, filter: { noticeid: externalId }, postedFrom: refreshFrom, postedTo, offset: 0, fetchImpl: counted }));
+    } catch (err) {
+      if (!(err instanceof SamApiError)) throw err;
+      stopped = true;
+      break;
+    }
     add(notices, externalId);
     // No version came back: the notice was deleted, or it was posted more than a year ago (the API searches one year).
     if (!notices.some((n) => text(n?.noticeId) === externalId)) missing.push(externalId);
+    lastRead = externalId;
   }
-  // A full batch continues after its last id next run; a short one wraps to the start, so every open bid is checked.
-  return { notices: [...seen.values()], missing, nextRefreshAfter: batch.length === REFRESH_LIMIT ? batch[batch.length - 1] : null };
+  // A stopped or full batch continues after the last bid read; a short one wraps to the start; no budget left keeps the
+  // place. So every open bid is checked in turn.
+  let nextRefreshAfter = null;
+  if (!(limit > 0) || stopped || batch.length === limit) nextRefreshAfter = lastRead;
+  return { notices: [...seen.values()], missing, nextRefreshAfter, refreshStopped: stopped };
 }
 
-// Open SAM.gov bids whose notice is still listed active (the ones a change on SAM.gov could still affect), in notice-id
-// order after `after`, one batch a run.
-async function openSamBids(after) {
+// Open SAM.gov bids, open or closed on SAM.gov (a closed notice can be unarchived), in notice-id order after `after`.
+async function openSamBids(after, limit) {
+  if (!(limit > 0)) return [];
   const rows = await db('bid_opportunities').where({ source: 'sam_gov', historical: false }).whereIn('status', OPEN_STATUSES)
-    .whereNot('source_active', false).whereNotNull('external_id')
+    .whereNotNull('external_id')
     .modify((q) => { if (after) q.where('external_id', '>', after); })
-    .orderBy('external_id').limit(REFRESH_LIMIT).select('external_id');
+    .orderBy('external_id').limit(limit).select('external_id');
   return rows.map((r) => r.external_id);
 }
 

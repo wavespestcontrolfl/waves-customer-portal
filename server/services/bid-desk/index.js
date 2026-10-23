@@ -381,6 +381,8 @@ async function sendDueReminders({ now = new Date() } = {}) {
   const candidates = await db('bid_opportunities')
     // A date waiting on an addendum check is not reminded until it is confirmed again.
     .where({ due_confirmed: true, historical: false, needs_date_confirmation: false })
+    // A notice closed on SAM.gov never reminds (email bids have no source_active, NULL).
+    .whereRaw('source_active IS DISTINCT FROM false')
     .whereIn('status', ['new', 'bid'])
     .where('due_at', '>', now).where('due_at', '<=', horizon)
     // Only bids still owed a window, so already-reminded rows cannot fill the limit and starve later ones.

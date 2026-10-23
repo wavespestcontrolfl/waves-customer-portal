@@ -60,6 +60,12 @@ describe('reminderDue', () => {
     expect(reminderDue(due(3 * DAY, { needs_date_confirmation: true }), NOW)).toBeNull();
   });
 
+  test('a notice closed on SAM.gov is never reminded, even with a confirmed date', () => {
+    expect(reminderDue(due(3 * DAY, { source_active: false }), NOW)).toBeNull();
+    expect(reminderDue(due(3 * DAY, { source_active: true }), NOW)).toBe('7d');
+    expect(reminderDue(due(3 * DAY, { source_active: null }), NOW)).toBe('7d');
+  });
+
   const due = (ms, over = {}) => bid({ due_at: new Date(NOW.getTime() + ms), due_confirmed: true, ...over });
 
   test('an unconfirmed date never reminds', () => {

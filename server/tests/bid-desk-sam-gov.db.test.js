@@ -265,10 +265,57 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(bid.source_active).toBe(false);
     expect(bid.needs_date_confirmation).toBe(true);
 
-    // Archived bids are not re-read again.
+    // A closed notice is still re-read (it can be unarchived), but the unchanged closure rings nothing new.
     fetchImpl.mockClear();
-    await sam.runSamGovPoll({ now: later, fetchImpl, apiKey: 'test-key' });
-    expect(fetchImpl.mock.calls.some(([u]) => new URL(u).searchParams.get('noticeid'))).toBe(false);
+    raiseAdminAlertWithReopen.mockClear();
+    expect(await sam.runSamGovPoll({ now: later, fetchImpl, apiKey: 'test-key' })).toMatchObject({ refreshed: 0, rung: 0 });
+    expect(fetchImpl.mock.calls.some(([u]) => new URL(u).searchParams.get('noticeid') === 'n-13')).toBe(true);
+
+    // The operator confirms the date anyway: a closed notice still never reminds.
+    await mockPg('bid_opportunities').where({ id: filed.id }).update({ needs_date_confirmation: false, due_at: new Date('2026-11-01T16:00:00Z') });
+    expect(await service.sendDueReminders({ now: later })).toBe(0);
+
+    // SAM.gov unarchives it: the bid flags once as active again.
+    const reopenedFetch = jest.fn(async (url) => {
+      const body = new URL(url).searchParams.get('noticeid') === 'n-13'
+        ? { totalRecords: 1, opportunitiesData: [notice('n-13', { active: 'Yes' })] }
+        : { totalRecords: 0, opportunitiesData: [] };
+      return { ok: true, status: 200, json: async () => body };
+    });
+    raiseAdminAlertWithReopen.mockClear();
+    expect(await sam.runSamGovPoll({ now: later, fetchImpl: reopenedFetch, apiKey: 'test-key' })).toMatchObject({ refreshed: 1, rung: 1 });
+    const back = await mockPg('bid_opportunities').where({ id: filed.id }).first();
+    expect(back.source_active).toBe(true);
+    expect(back.needs_date_confirmation).toBe(true);
+    expect(raiseAdminAlertWithReopen.mock.calls.map(([, , , o]) => o.dedupeKey)).toContain(`bid-desk:addendum:${filed.id}:sam:reopened`);
+  });
+
+  test('the run stays inside the daily call budget, and a refusal mid re-read keeps the discovery results', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => `q-${String(i).padStart(3, '0')}`);
+    await mockPg('bid_opportunities').insert(ids.map((id) => ({ source: 'sam_gov', external_id: id, status: 'new', source_active: true })));
+    // Default budget 10: 2 discovery calls, so 8 by-id reads.
+    const ok = jest.fn(async (url) => {
+      const id = new URL(url).searchParams.get('noticeid');
+      const body = id ? { totalRecords: 1, opportunitiesData: [{ noticeId: id, type: 'Solicitation', active: 'Yes' }] } : { totalRecords: 1, opportunitiesData: [notice('d-1')] };
+      return { ok: true, status: 200, json: async () => body };
+    });
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: ok, apiKey: 'test-key' });
+    expect(ok).toHaveBeenCalledTimes(10);
+    expect((await cursorState()).refresh_after).toBe(ids[7]);
+
+    // The key is refused (429) on the third by-id read: the new notice from discovery is still filed, and the next run
+    // resumes after the last bid read.
+    let byId = 0;
+    const limited = jest.fn(async (url) => {
+      const id = new URL(url).searchParams.get('noticeid');
+      if (id && (byId += 1) === 3) return { ok: false, status: 429, json: async () => ({}) };
+      const body = id ? { totalRecords: 1, opportunitiesData: [{ noticeId: id, type: 'Solicitation', active: 'Yes' }] } : { totalRecords: 1, opportunitiesData: [notice('d-2')] };
+      return { ok: true, status: 200, json: async () => body };
+    });
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: limited, apiKey: 'test-key' })).toMatchObject({ filed: 1 });
+    expect((await mockPg('bid_opportunities').where({ external_id: 'd-2' })).length).toBe(1);
+    const readIds = limited.mock.calls.map(([u]) => new URL(u).searchParams.get('noticeid')).filter(Boolean);
+    expect((await cursorState()).refresh_after).toBe(readIds[1]);
   });
 
   test('the by-id refresh rotates through every open bid in batches', async () => {
@@ -284,12 +331,15 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
       await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'test-key' });
       return fetchImpl.mock.calls.map(([u]) => new URL(u).searchParams.get('noticeid')).filter(Boolean);
     };
+    // A role-backed key (budget raised): the batch is the refresh cap.
+    process.env.SAM_GOV_DAILY_CALLS = '1000';
     const first = await read();
     expect(first).toEqual(ids.slice(0, sam.REFRESH_LIMIT));
     expect((await cursorState()).refresh_after).toBe(ids[sam.REFRESH_LIMIT - 1]);
     expect(await read()).toEqual(ids.slice(sam.REFRESH_LIMIT));
     expect((await cursorState()).refresh_after).toBeNull();
     expect(await read()).toEqual(ids.slice(0, sam.REFRESH_LIMIT));
+    delete process.env.SAM_GOV_DAILY_CALLS;
   });
 
   test('a filed notice that becomes an award notice outside the area still reaches its bid', async () => {
@@ -304,7 +354,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(bid.location).toBe('GA 30301');
   });
 
-  test('an open bid whose notice SAM.gov no longer returns is flagged once and leaves the refresh', async () => {
+  test('an open bid whose notice SAM.gov no longer returns is flagged once', async () => {
     await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-15')]), apiKey: 'test-key' });
     const [filed] = await samBids();
     await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid' });
@@ -317,9 +367,9 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(bid.due_source_line).toMatch(/^SAM\.gov no longer returns this notice/);
     expect(raiseAdminAlertWithReopen.mock.calls[0][3].dedupeKey).toBe(`bid-desk:addendum:${filed.id}:sam:unreachable`);
 
-    gone.mockClear();
-    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: gone, apiKey: 'test-key' })).toMatchObject({ unreachable: 0 });
-    expect(gone.mock.calls.some(([u]) => new URL(u).searchParams.get('noticeid'))).toBe(false);
+    raiseAdminAlertWithReopen.mockClear();
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: gone, apiKey: 'test-key' })).toMatchObject({ unreachable: 0, rung: 0 });
+    expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 
   test('a cursor older than a year is clamped to the API window', async () => {
