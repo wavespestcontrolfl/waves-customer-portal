@@ -131,7 +131,9 @@ function parseLedgerCsv(text) {
     if (!period || Number(period.tax_year) < 2000) throw fail(`line ${line}: date must be a real YYYY-MM-DD date from 2000 on (got "${r.date}")`);
     r.period = period;
     if (!r.description) throw fail(`line ${line}: missing description`);
-    if (r.description.includes('\u0000')) throw fail(`line ${line}: description contains a NUL byte`);
+    for (const h of HEADER) {
+      if (String(r[h]).includes('\u0000')) throw fail(`line ${line}: ${h} contains a NUL byte`);
+    }
     const amount = parseAmountCell(r.amount);
     if (amount === null) throw fail(`line ${line}: amount must be a positive decimal (got "${r.amount}")`);
     r.amount = amount;
@@ -166,11 +168,12 @@ function tupleKey(r) {
  * row's account is known when its label carries those digits (an upload
  * labelled by the owner) or its Plaid account mask equals them.
  */
+const ACCOUNT_ALIASES = { amex: ['amex', 'american express', 'american-express', 'americanexpress'] };
 function sameAccount(source, accountLabel, masks) {
   const code = String(source || '').trim().toLowerCase();
   const label = String(accountLabel || '').toLowerCase();
   if (!code || !label) return false;
-  if (label.includes(code)) return true;
+  if ((ACCOUNT_ALIASES[code] || [code]).some(a => label.includes(a))) return true;
   const mask = masks.get(String(accountLabel));
   return !!mask && mask.toLowerCase() === code;
 }
@@ -252,7 +255,15 @@ function mapRow(row, ordinal, basename) {
   const out = { bank, expense: null, categoryName: null, unmatchedLine: null, ledgerClass: row.class };
   const base = { ledgerClass: row.class, ledgerCategory: row.category, flag: row.flag };
 
-  const refundCredit = row.class === 'refund' || (BUSINESS_CLASSES.has(row.class) && row.direction === 'in');
+  // a refund is money IN; a "refund" that is money out is a mislabelled row
+  // and goes to ordinary review (Bank Import's refund flow takes credits only)
+  const refundCredit = (row.class === 'refund' || BUSINESS_CLASSES.has(row.class)) && row.direction === 'in';
+  if (row.class === 'refund' && row.direction === 'out') {
+    bank.status = 'unmatched';
+    bank.suggestion = reviewSuggestion(row, { note: 'refund class on money out: check the ledger row' });
+    out.unmatchedLine = row.sched_c_line || '(none)';
+    return out;
+  }
   if (refundCredit) {
     bank.status = 'unmatched';
     bank.suggestion = { refundCredit: true, reason: REFUND_REASON, ...base, schedCLine: row.sched_c_line };
@@ -391,36 +402,15 @@ class DuplicateRace extends Error {}
  * With dryRun it reads (existing hashes, categories) but writes nothing.
  * Returns { report, counts, summary }.
  */
-async function run({ file, dryRun = false, skipExisting = false, db, log = () => {} } = {}) {
-  if (!file) throw fail('missing --file');
-  if (!db) throw fail('run() needs a db');
-  let text;
-  try {
-    text = fs.readFileSync(file, 'utf8');
-  } catch (err) {
-    throw fail(`cannot read file: ${err.message}`);
-  }
-  const basename = path.basename(file);
-  const rows = parseLedgerCsv(text);
-  const ordinals = withOrdinals(rows);
-  const mapped = rows.map((r, i) => mapRow(r, ordinals[i], basename));
-
-  // Existing hashes: one lookup (chunked only to stay under the bind limit).
+// What the portal already holds for this file: the ledger rows loaded
+// before (by row_hash), the bank rows from a feed or an upload in the file's
+// date range, the hand-entered expenses in it, and the Plaid account masks.
+async function loadPortalState(db, mapped, rows, skipExisting) {
   const existing = new Set();
   for (const part of chunk(mapped.map(m => m.bank.row_hash), HASH_LOOKUP_CHUNK)) {
     const found = await db('bank_transactions').whereIn('row_hash', part).select('row_hash');
     found.forEach(f => existing.add(f.row_hash));
   }
-  // The ledger is the book of record for a year the portal did not cover.
-  // When the portal already holds rows for this date range from a bank feed
-  // or an upload, or expenses, the import stops and says so; with
-  // --skip-existing it leaves out every ledger row that matches a bank row of
-  // the SAME account, day, amount and direction (exact text: skipped; other
-  // text: held), one-for-one, and lists a match whose account it cannot tell
-  // as imported-but-check. Expenses are never matched by guesswork; the
-  // hand-entered ones in the range are listed. Nothing is claimed, linked or
-  // merged: a charge is never booked twice, and an ambiguous one is the
-  // owner's call, in Bank Import.
   const dates = rows.map(r => r.date).sort();
   const range = [dates[0], dates[dates.length - 1]];
   const existingBank = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).whereNot('source', SOURCE_TAG)
@@ -440,6 +430,12 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
     throw fail(`the portal already holds ${existingBank.length} bank row(s) from a feed or upload and ${handExpenses.length} hand-entered expense(s) between ${range[0]} and ${range[1]}; rerun with --skip-existing to leave out the ledger rows that match a bank row of the same account, day, amount and direction (hand-entered expenses are listed for you to check)`);
   }
   const masks = new Map((await db('plaid_accounts').select('account_label', 'mask')).map(a => [String(a.account_label), String(a.mask || '')]));
+  const categories = await db('expense_categories').select('id', 'name');
+  return { existing, existingBank, handExpenses, masks, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+}
+
+// Pools of the portal's rows, consumed one-for-one as ledger rows match them.
+function buildPools({ existingBank, handExpenses }) {
   const bankLeft = new Map();
   existingBank.forEach(f => { const k = tupleKey(f); if (!bankLeft.has(k)) bankLeft.set(k, []); bankLeft.get(k).push(f); });
   // A feed writes its own text for a transaction ("Wawa" against the
@@ -460,108 +456,135 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
   // expense), one-for-one, never booked on top of it. No payee guessing.
   const handLeft = new Map();
   handExpenses.forEach(e => { const k = `${ymdOf(e.expense_date)}|${Number(e.amount).toFixed(2)}`; if (!handLeft.has(k)) handLeft.set(k, []); handLeft.get(k).push(e); });
+  return { bankLeft, looseKey, looseLeft, dropLoose, handLeft };
+}
 
-  const categories = await db('expense_categories').select('id', 'name');
-  const categoryIds = new Map(categories.map(c => [c.name, c.id]));
-
+// Which ledger rows load, and which the portal already answers for.
+function reconcileRows(mapped, rows, portal) {
+  const { existing, masks, categoryIds } = portal;
+  const pools = buildPools(portal);
   const fresh = [];
-  let duplicates = 0;
-  let overlaps = 0;
   const unsure = [];
   const held = [];
+  let duplicates = 0;
+  let overlaps = 0;
   // Pass 1: exact matches (same text) reserve their portal rows first, so a
   // looser match (same account, day and amount, other text) earlier in the
   // file cannot take the row an exact match later in the file is for.
-  const exactUsed = new Set();
+  const settled = new Set();
   mapped.forEach((m, i) => {
-    if (existing.has(m.bank.row_hash)) { duplicates += 1; exactUsed.add(i); return; }
-    const pool = bankLeft.get(tupleKey(m.bank)) || [];
+    if (existing.has(m.bank.row_hash)) { duplicates += 1; settled.add(i); return; }
+    const pool = pools.bankLeft.get(tupleKey(m.bank)) || [];
     const same = pool.findIndex(f => sameAccount(rows[i].source, f.account_label, masks));
     if (same !== -1) {
       const [used] = pool.splice(same, 1);
-      dropLoose(used);
+      pools.dropLoose(used);
       overlaps += 1;
-      exactUsed.add(i);
+      settled.add(i);
     }
   });
-  // Pass 2: everything else, in file order.
+  // Pass 2: everything else, in file order: a hold wins over an "imported,
+  // check it" note, which is only given for a row that does load.
   mapped.forEach((m, i) => {
-    if (exactUsed.has(i)) return;
-    const pool = bankLeft.get(tupleKey(m.bank)) || [];
-    if (pool.length) unsure.push({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other: pool[0].account_label || '(no label)' });
+    if (settled.has(i)) return;
+    const note = (other, account) => ({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other, account });
     if (m.expense) {
-      const hand = handLeft.get(`${rows[i].date}|${Number(m.bank.amount).toFixed(2)}`) || [];
+      const hand = pools.handLeft.get(`${rows[i].date}|${Number(m.bank.amount).toFixed(2)}`) || [];
       if (hand.length) {
         const used = hand.shift();
-        held.push({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other: used.vendor_name || used.description || '(no text)', account: 'a hand-entered expense' });
+        held.push(note(used.vendor_name || used.description || '(no text)', 'a hand-entered expense'));
         return;
       }
     }
-    const loose = looseLeft.get(looseKey(m.bank)) || [];
+    const loose = pools.looseLeft.get(pools.looseKey(m.bank)) || [];
     const sameLoose = loose.findIndex(f => sameAccount(rows[i].source, f.account_label, masks));
     if (sameLoose !== -1) {
       const [used] = loose.splice(sameLoose, 1);
-      const exact = bankLeft.get(tupleKey(used)) || [];
+      const exact = pools.bankLeft.get(tupleKey(used)) || [];
       const j = exact.indexOf(used);
       if (j !== -1) exact.splice(j, 1);
-      held.push({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other: used.description, account: used.account_label || '(no label)' });
+      held.push(note(used.description, used.account_label || '(no label)'));
       return;
     }
+    const pool = pools.bankLeft.get(tupleKey(m.bank)) || [];
+    if (pool.length) unsure.push({ ...note(pool[0].account_label || '(no label)', null), rowHash: m.bank.row_hash });
     if (m.expense && !categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     fresh.push(m);
   });
+  return { fresh, duplicates, overlaps, held, unsure };
+}
 
-  const withExpense = fresh.filter(m => m.expense);
-  const plain = fresh.filter(m => !m.expense);
+// Writes the fresh rows: non-expense rows in bulk (row_hash conflicts
+// ignored, only the rows that landed count), expense rows one transaction
+// each (expense + bank row), so a failure leaves no orphan expense.
+async function writeRows(db, fresh, categoryIds) {
   let inserted = 0;
-
-  if (!dryRun) {
-    // Non-expense rows: bulk insert; row_hash conflicts are ignored. The
-    // rows that landed come back by hash, so a row another writer inserted
-    // after the existence lookup is marked skipped and stays out of the
-    // report's tallies, like a raced expense row.
-    for (const part of chunk(plain, INSERT_CHUNK)) {
-      const res = await db('bank_transactions')
-        .insert(part.map(m => m.bank))
-        .onConflict('row_hash')
-        .ignore()
-        .returning(['id', 'row_hash']);
-      const landedHashes = new Set(res.map(r => (r && typeof r === 'object' ? r.row_hash : null)).filter(Boolean));
-      for (const m of part) {
-        if (landedHashes.has(m.bank.row_hash)) inserted += 1;
-        else { duplicates += 1; m.skipped = true; }
-      }
-    }
-    // Expense rows: expense + bank row in one transaction each, so a failure
-    // leaves no orphan expense.
-    for (const m of withExpense) {
-      try {
-        await db.transaction(async trx => {
-          const [exp] = await trx('expenses')
-            .insert({ ...m.expense, category_id: categoryIds.get(m.categoryName) })
-            .returning('id');
-          const expenseId = exp && typeof exp === 'object' ? exp.id : exp;
-          const res = await trx('bank_transactions')
-            .insert({ ...m.bank, matched_expense_id: expenseId, matched_at: new Date() })
-            .onConflict('row_hash')
-            .ignore()
-            .returning('id');
-          if (!res.length) throw new DuplicateRace('row_hash already present');
-        });
-        inserted += 1;
-      } catch (err) {
-        if (err instanceof DuplicateRace) { duplicates += 1; m.skipped = true; continue; }
-        throw err;
-      }
+  let duplicates = 0;
+  for (const part of chunk(fresh.filter(m => !m.expense), INSERT_CHUNK)) {
+    const res = await db('bank_transactions')
+      .insert(part.map(m => m.bank))
+      .onConflict('row_hash')
+      .ignore()
+      .returning(['id', 'row_hash']);
+    const landedHashes = new Set(res.map(r => (r && typeof r === 'object' ? r.row_hash : null)).filter(Boolean));
+    for (const m of part) {
+      if (landedHashes.has(m.bank.row_hash)) inserted += 1;
+      else { duplicates += 1; m.skipped = true; }
     }
   }
-  if (dryRun) inserted = fresh.length;
+  for (const m of fresh.filter(x => x.expense)) {
+    try {
+      await db.transaction(async trx => {
+        const [exp] = await trx('expenses')
+          .insert({ ...m.expense, category_id: categoryIds.get(m.categoryName) })
+          .returning('id');
+        const expenseId = exp && typeof exp === 'object' ? exp.id : exp;
+        const res = await trx('bank_transactions')
+          .insert({ ...m.bank, matched_expense_id: expenseId, matched_at: new Date() })
+          .onConflict('row_hash')
+          .ignore()
+          .returning('id');
+        if (!res.length) throw new DuplicateRace('row_hash already present');
+      });
+      inserted += 1;
+    } catch (err) {
+      if (err instanceof DuplicateRace) { duplicates += 1; m.skipped = true; continue; }
+      throw err;
+    }
+  }
+  return { inserted, duplicates };
+}
 
-  const landed = dryRun ? fresh : fresh.filter(m => !m.skipped);
-  // Rows lost to an insert-time conflict are not in the report's tallies.
+/**
+ * Load a ledger CSV. `db` is a knex instance (or a stub with the same calls).
+ * With dryRun it reads (what the portal holds, categories) but writes nothing.
+ * Returns { report, counts, summary }.
+ */
+async function run({ file, dryRun = false, skipExisting = false, db, log = () => {} } = {}) {
+  if (!file) throw fail('missing --file');
+  if (!db) throw fail('run() needs a db');
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    throw fail(`cannot read file: ${err.message}`);
+  }
+  const basename = path.basename(file);
+  const rows = parseLedgerCsv(text);
+  const ordinals = withOrdinals(rows);
+  const mapped = rows.map((r, i) => mapRow(r, ordinals[i], basename));
+  const portal = await loadPortalState(db, mapped, rows, skipExisting);
+  const r = reconcileRows(mapped, rows, portal);
+  const written = dryRun ? { inserted: r.fresh.length, duplicates: 0 } : await writeRows(db, r.fresh, portal.categoryIds);
+  // Rows lost to an insert-time conflict are not in the report's tallies,
+  // and an "imported, check it" note is only for a row that did land.
+  const landed = dryRun ? r.fresh : r.fresh.filter(m => !m.skipped);
+  const landedHashes = new Set(landed.map(m => m.bank.row_hash));
+  const unsure = r.unsure.filter(u => landedHashes.has(u.rowHash));
   const summary = summarize(landed);
-  const counts = { read: rows.length, inserted, duplicates, overlaps, held: held.length, unsure: unsure.length, handExpenses: handExpenses.length };
-  const report = formatReport({ dryRun, file, read: rows.length, inserted, duplicates, overlaps, held, unsure, handExpenses, summary });
+  const duplicates = r.duplicates + written.duplicates;
+  const counts = { read: rows.length, inserted: written.inserted, duplicates, overlaps: r.overlaps, held: r.held.length, unsure: unsure.length, handExpenses: portal.handExpenses.length };
+  const report = formatReport({ dryRun, file, read: rows.length, inserted: written.inserted, duplicates, overlaps: r.overlaps, held: r.held, unsure, handExpenses: portal.handExpenses, summary });
   log(report);
   return { report, counts, summary };
 }

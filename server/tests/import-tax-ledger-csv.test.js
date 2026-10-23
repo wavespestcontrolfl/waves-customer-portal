@@ -603,6 +603,10 @@ describe('--skip-existing and expenses', () => {
     expect(sameAccount('3098', 'capone-card-3098', masks)).toBe(true);
     expect(sameAccount('3098', 'checking-main', masks)).toBe(true);
     expect(sameAccount('amex', 'Amex Business', masks)).toBe(true);
+    // Plaid's default label for the card spells the issuer out
+    expect(sameAccount('amex', 'american-express-card-1005', masks)).toBe(true);
+    expect(sameAccount('amex', 'American Express Blue', masks)).toBe(true);
+    expect(sameAccount('amex', 'capone-card-3098', masks)).toBe(false);
     expect(sameAccount('3098', 'capone-card-9731', masks)).toBe(false);
     expect(sameAccount('3098', 'checking', masks)).toBe(false);
     expect(sameAccount('', 'capone-card-3098', masks)).toBe(false);
@@ -655,6 +659,35 @@ describe('--skip-existing and expenses', () => {
     const { counts } = await run({ file, db, skipExisting: true });
     expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0, handExpenses: 0 });
     expect(db.tables().expenses[0].vendor_name).toBe('DEBIT CARD PURCHASE - WAWA 5519 BRADENTON FL');
+  });
+
+  test('a NUL byte in any persisted text field fails the whole file before anything is written', () => {
+    const header = HEADER.join(',');
+    for (const [col, line] of [['source', '30\u000098,2025-03-14,ACME,10.00,out,expense,Supplies,22,,,'], ['category', '3098,2025-03-14,ACME,10.00,out,expense,Supp\u0000lies,22,,,'], ['flag', '3098,2025-03-14,ACME,10.00,out,expense,Supplies,22,NO\u0000REC,,'], ['bank_category', '3098,2025-03-14,ACME,10.00,out,expense,Supplies,22,,,Mer\u0000chandise']]) {
+      expect(() => parseLedgerCsv(`${header}\n${line}`)).toThrow(new RegExp(`${col} contains a NUL byte`));
+    }
+  });
+
+  test('a refund-class row that is money OUT is parked for ordinary review, never offered as a refund credit', () => {
+    const m = mapRow(parsedRow({ direction: 'out', class: 'refund', sched_c_line: '' }), 0, 'l.csv');
+    expect(m.bank.status).toBe('unmatched');
+    expect(m.bank.suggestion).toMatchObject({ review: true, note: expect.stringMatching(/refund class on money out/) });
+    expect(m.bank.suggestion.refundCredit).toBeUndefined();
+    expect(m.expense).toBeNull();
+  });
+
+  test('a held row is never also listed as "imported, check it", even with an exact match in another account', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
+    const file = path.join(dir, 'ledger-2025.csv');
+    fs.writeFileSync(file, csv(row({ description: 'DEBIT CARD PURCHASE - WAWA 5519 BRADENTON FL', amount: '41.10', class: 'vehicle', sched_c_line: '9', category: 'Vehicle fuel' })));
+    const db = makeFakeDb();
+    const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
+    // another account has the exact text; the SAME account has the charge under other text → held, not "check"
+    db.tables().bank_transactions.push({ id: 'o-1', row_hash: 'h1', source: 'csv', account_label: 'card-9731', txn_date: first.date, description: first.description, amount: '41.10', direction: 'debit', status: 'unmatched' });
+    db.tables().bank_transactions.push({ id: 's-1', row_hash: 'h2', source: 'plaid', account_label: 'checking 3098', txn_date: first.date, description: 'Wawa', amount: '41.10', direction: 'debit', status: 'unmatched' });
+    const { counts, report } = await run({ file, db, skipExisting: true });
+    expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 0, overlaps: 0, held: 1, unsure: 0, handExpenses: 0 });
+    expect(report).toMatch(/check these:\s+0 /);
   });
 
   test('parseArgs reads --skip-existing', () => {
