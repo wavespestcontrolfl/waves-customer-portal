@@ -306,6 +306,21 @@ function storedTermiteResult(estData = {}) {
   };
 }
 
+// Mosquito misting system quote-time snapshot (GATE_MOSQUITO_MISTING; same contract as the termite stamp). The priced
+// plan row (mapped recurring row or raw engine line) carries `pricingKnobs`; they replay verbatim so a later pricing_config
+// edit cannot move a sent quote. Returns the stamp when it carries finite tierPrice / planMonthly / refillPrice, else null
+// (no misting row, or an unstamped one: the live config prices it, like a fresh quote).
+function mistingKnobSignalForReplay(estData = {}) {
+  const { storedMistingRows } = require('./estimate-result-container');
+  const rows = storedMistingRows(estData).filter((row) => row.service === 'mosquito_misting' || row.service === 'mosquito_misting_installation');
+  const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+  for (const row of rows) {
+    const k = row.pricingKnobs;
+    if (k && typeof k === 'object' && !Array.isArray(k) && finite(k.tierPrice) && finite(k.planMonthly) && finite(k.refillPrice)) return { ...k };
+  }
+  return null;
+}
+
 // Every install knob a stamped line carries replays verbatim (codex #4313
 // r5 P1: a later multiplier / buildup / floor edit must not move a sent
 // install either); an unstamped line replays the pre-stamp values of those
@@ -404,6 +419,7 @@ function applyTreeShrubPalmReplay(v1Input, estData = {}) {
 
 module.exports = {
   termiteKnobSignalForReplay,
+  mistingKnobSignalForReplay,
   PRE_STAMP_TERMITE_STATION_COST,
   treeShrubKnobSignalForReplay,
   NEUTRAL_TREE_SHRUB_KNOBS,

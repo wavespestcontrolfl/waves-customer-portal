@@ -296,6 +296,10 @@ function recurringServiceKey(svc = {}) {
       || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
     )
   ) return 'rodent_bait';
+  // The mosquito MISTING system plan (GATE_MOSQUITO_MISTING) is its own identity: it must never read as the barrier
+  // mosquito program (solo-mosquito setup fee, prepay waiver, tier count, seeder routing). It is never a commercial
+  // auto-priced program, so this runs before the commercial and residential mosquito checks.
+  if (raw.includes('misting')) return 'mosquito_misting';
   // Commercial auto-priced lines keep a DISTINCT key — they must never be
   // classified as residential lawn_care/tree_shrub, which are discountable for
   // annual prepay (the flat commercial price would then get a 5% prepay cut).

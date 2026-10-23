@@ -12,7 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
-const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRows } = require('../estimate-result-container');
+const { authoritativeEstimateResult, proposalIsAuthoritative, storedAreaAddOnRows, storedMistingRows } = require('../estimate-result-container');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -961,6 +961,7 @@ function mapV1ToLegacyShape(v1Result) {
     svcAdd('Mosquito Misting Service Plan', mmLI, {
       service: 'mosquito_misting',
       annual: Number(mmLI.annual) || null,
+      pricingKnobs: mmLI.pricingKnobs || null,
       detail: `${mmLI.nozzles} nozzles · ${mmLI.visitsPerYear} applications/yr · $${mmLI.perApp} per application · ${mmLI.refill?.label || ''} refill $${mmLI.refill?.perFill ?? ''} per refill application`,
       discountable: false,
       discountEligible: false,
@@ -1300,6 +1301,7 @@ function mapV1ToLegacyShape(v1Result) {
       service: 'mosquito_misting_installation',
       name: `${mmLI.tierLabel || 'Mosquito Misting System'} Installation`,
       price: mmLI.installation.price,
+      pricingKnobs: mmLI.pricingKnobs || null,
       detail: `${mmLI.nozzles} nozzles · ${mmLI.risers} risers · ${mmLI.refill?.label || ''} refill $${mmLI.refill?.perFill ?? ''} per refill application`,
       discountable: false,
       tierDiscountable: false,
@@ -1691,6 +1693,37 @@ function estimateDataCarriesAreaAddOns(estimateDataRaw, { pricingAuthority = nul
   return storedAreaAddOnRows(d, { pricingAuthority }).length > 0;
 }
 
+// Does a persisted estimate carry the mosquito misting system (GATE_MOSQUITO_MISTING)? The engine ignores a misting key
+// while the gate is off, so a stored misting quote replayed or served from its rows must be refused at the boundaries (the
+// same shared refusal the area add-on uses). Evidence: replayable inputs (services.mosquitoMisting / mosquito_misting) and the
+// stored plan / install rows of the authoritative container.
+function proposalCarriesMisting(proposal) {
+  const lines = [
+    ...(proposal.buildings || []).flatMap((building) => building?.lineItems || []),
+    ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+  ];
+  return lines.some((line) => line?.service === 'mosquito_misting' || line?.service === 'mosquito_misting_installation');
+}
+function estimateDataCarriesMosquitoMisting(estimateDataRaw, { pricingAuthority = null } = {}) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  if (proposalIsAuthoritative(d) && proposalIsItemized(d.proposal)) return proposalCarriesMisting(d.proposal);
+  const listed = (value) => value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0);
+  const inputShapes = [d.engineInputs, d.engineInput, d.inputs, d.engineRequest?.options];
+  if (inputShapes.some((shape) => shape && typeof shape === 'object'
+    && (listed(shape.services?.mosquitoMisting) || listed(shape.services?.mosquito_misting)))) return true;
+  return storedMistingRows(d, { pricingAuthority }).length > 0;
+}
+const MOSQUITO_MISTING_GATED_CODE = 'MOSQUITO_MISTING_GATED';
+const MOSQUITO_MISTING_GATED_REASON = 'mosquito_misting_disabled';
+function estimateMistingGated(estimateDataRaw, options) {
+  return estimateDataCarriesMosquitoMisting(estimateDataRaw, options)
+    && !require('../../config/feature-gates').mosquitoMistingLive();
+}
+
 // The persisted-boundary guard for area add-ons, shared by every route and
 // service that already guards the Bermuda add-on: true when the stored estimate
 // carries an add-on AND GATE_AREA_ADDONS is off (read at call time; unset =
@@ -1716,6 +1749,13 @@ function gatedAddOnStaffRefusal(estimateDataRaw, action, options) {
       message: `This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before ${action}.`,
     };
   }
+  if (estimateMistingGated(estimateDataRaw, options)) {
+    return {
+      code: MOSQUITO_MISTING_GATED_CODE,
+      reason: MOSQUITO_MISTING_GATED_REASON,
+      message: `This estimate includes a mosquito misting system, which is currently disabled (GATE_MOSQUITO_MISTING). Re-enable the gate or rebuild the estimate without it before ${action}.`,
+    };
+  }
   return estimateAreaAddOnsGated(estimateDataRaw, options)
     ? { code: AREA_ADDONS_GATED_CODE, message: areaAddOnsGatedStaffMessage(action) } : null;
 }
@@ -1734,6 +1774,9 @@ function gatedAddOnCustomerRefusal(estimateDataRaw, options) {
   if (estimateDataCarriesBermudaSuppression(estimateDataRaw)
     && !require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
     return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: 'BERMUDA_SUPPRESSION_GATED' };
+  }
+  if (estimateMistingGated(estimateDataRaw, options)) {
+    return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: MOSQUITO_MISTING_GATED_CODE, reason: MOSQUITO_MISTING_GATED_REASON };
   }
   return estimateAreaAddOnsGated(estimateDataRaw, options)
     ? { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE } : null;
@@ -1756,6 +1799,10 @@ module.exports = {
   estimateResultCarriesBermudaSuppression,
   estimateDataCarriesAreaAddOns,
   estimateAreaAddOnsGated,
+  estimateDataCarriesMosquitoMisting,
+  estimateMistingGated,
+  MOSQUITO_MISTING_GATED_CODE,
+  MOSQUITO_MISTING_GATED_REASON,
   areaAddOnsGatedStaffMessage,
   gatedAddOnStaffRefusal,
   gatedAddOnCustomerRefusal,

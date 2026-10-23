@@ -117,7 +117,8 @@ function toQualifyingKeys(raw) {
   // (\bpalms?\b never matches "palmetto", so palmetto-bug pest names pass.)
   const palmService = /\bpalms?\b/.test(s);
   if (!palmService && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) keys.add('tree_shrub');
-  if (s.includes('mosquito')) keys.add('mosquito');
+  // The misting system is not the barrier program and not a WaveGuard qualifier.
+  if (s.includes('mosquito') && !s.includes('misting')) keys.add('mosquito');
   if (s.includes('termite') && s.includes('bait')) keys.add('termite_bait');
   // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive): a
   // rodent-LED bait/station/monitoring row is a qualifier. Separators are
@@ -597,7 +598,7 @@ function ownershipFamiliesFromText(raw) {
     if (s.includes('pest') && !rodentLed) add('pest_control');
     if (s.includes('lawn') || s.includes('turf')) add('lawn_care');
     if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
-    if (s.includes('mosquito')) add('mosquito');
+    if (s.includes('mosquito') && !s.includes('misting')) add('mosquito');
   }
   // Rodent ownership means the BAIT-MONITORING product (codex #3253 r4):
   // trapping / exclusion / rodent_general_one_time are distinct specialties

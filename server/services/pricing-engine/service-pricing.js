@@ -5009,10 +5009,43 @@ function priceMosquitoMisting(property, options = {}) {
   }
   const refillCfg = M.refills[solution];
 
-  let nozzles = options.nozzles == null ? tierCfg.includedNozzles : Number(options.nozzles);
+  // Pricing basis: the live (DB-synced) constants, or the knobs a sent estimate was priced under (options.knobs, injected
+  // by the replay paths from the stored row). A knob stamped for a different tier or solution does not apply (the whole
+  // snapshot is skipped, like the termite "stamped for THIS system" rule); a missing or non-finite knob falls back per field.
+  const snap = options.knobs && typeof options.knobs === 'object' && !Array.isArray(options.knobs)
+    && (!options.knobs.tier || options.knobs.tier === tier)
+    && (!options.knobs.refillSolution || options.knobs.refillSolution === solution)
+    ? options.knobs : null;
+  const knob = (name, live, { positive = false, whole = false } = {}) => {
+    const v = snap ? snap[name] : undefined;
+    const ok = typeof v === 'number' && Number.isFinite(v) && (positive ? v > 0 : v >= 0) && (!whole || Number.isInteger(v));
+    return ok ? v : live;
+  };
+  const basis = {
+    tierPrice: knob('tierPrice', tierCfg.price),
+    hardwareCost: knob('hardwareCost', tierCfg.hardwareCost),
+    includedNozzles: knob('includedNozzles', tierCfg.includedNozzles, { positive: true, whole: true }),
+    extraNozzlePrice: knob('extraNozzlePrice', M.extraNozzlePrice),
+    extraNozzleCost: knob('extraNozzleCost', M.extraNozzleCost),
+    includedRisers: knob('includedRisers', M.includedRisers, { whole: true }),
+    extraRiserPrice: knob('extraRiserPrice', M.extraRiserPrice),
+    extraRiserCost: knob('extraRiserCost', M.extraRiserCost),
+    installTechs: knob('installTechs', M.install.techs, { positive: true }),
+    installHours: knob('installHours', M.install.hours),
+    laborRate: knob('laborRate', GLOBAL.LABOR_RATE, { positive: true }),
+    planMonthly: knob('planMonthly', M.plan.monthly, { positive: true }),
+    planVisitsPerYear: knob('planVisitsPerYear', M.plan.visitsPerYear, { positive: true }),
+    laborMinutesPerVisit: knob('laborMinutesPerVisit', M.plan.laborMinutesPerVisit),
+    partsReservePerMonth: knob('partsReservePerMonth', M.plan.partsReservePerMonth),
+    refillPrice: knob('refillPrice', refillCfg.price),
+    refillProductCost: knob('refillProductCost', refillCfg.productCost),
+    serviceCallNoPlan: knob('serviceCallNoPlan', M.serviceCallNoPlan),
+  };
+
+  let nozzles = options.nozzles == null ? basis.includedNozzles : Number(options.nozzles);
   if (!Number.isFinite(nozzles) || nozzles < M.minNozzles) {
     reasons.push('mosquito_misting_invalid_nozzles');
-    nozzles = tierCfg.includedNozzles;
+    nozzles = basis.includedNozzles;
   }
   nozzles = Math.round(nozzles);
   const nozzlesOversize = nozzles > M.maxNozzles;
@@ -5033,44 +5066,44 @@ function priceMosquitoMisting(property, options = {}) {
     refillsPerYear = M.defaultRefillsPerYear;
   }
 
-  const extraNozzles = Math.max(0, nozzles - tierCfg.includedNozzles);
-  const extraRisers = Math.max(0, risers - M.includedRisers);
+  const extraNozzles = Math.max(0, nozzles - basis.includedNozzles);
+  const extraRisers = Math.max(0, risers - basis.includedRisers);
 
   const refill = {
     solution,
     label: refillCfg.label,
-    perFill: refillCfg.price,
-    productCost: refillCfg.productCost,
+    perFill: basis.refillPrice,
+    productCost: basis.refillProductCost,
     refillsPerYear,
-    annualEstimate: Math.round(refillCfg.price * refillsPerYear * 100) / 100,
+    annualEstimate: Math.round(basis.refillPrice * refillsPerYear * 100) / 100,
   };
 
   const pricingKnobs = {
     tier,
-    tierPrice: tierCfg.price,
-    hardwareCost: tierCfg.hardwareCost,
-    includedNozzles: tierCfg.includedNozzles,
-    extraNozzlePrice: M.extraNozzlePrice,
-    extraNozzleCost: M.extraNozzleCost,
-    includedRisers: M.includedRisers,
-    extraRiserPrice: M.extraRiserPrice,
-    extraRiserCost: M.extraRiserCost,
-    installTechs: M.install.techs,
-    installHours: M.install.hours,
-    laborRate: GLOBAL.LABOR_RATE,
+    tierPrice: basis.tierPrice,
+    hardwareCost: basis.hardwareCost,
+    includedNozzles: basis.includedNozzles,
+    extraNozzlePrice: basis.extraNozzlePrice,
+    extraNozzleCost: basis.extraNozzleCost,
+    includedRisers: basis.includedRisers,
+    extraRiserPrice: basis.extraRiserPrice,
+    extraRiserCost: basis.extraRiserCost,
+    installTechs: basis.installTechs,
+    installHours: basis.installHours,
+    laborRate: basis.laborRate,
     minNozzles: M.minNozzles,
     maxNozzles: M.maxNozzles,
     maxRisers: M.maxRisers,
     maxRefillsPerYear: M.maxRefillsPerYear,
-    planMonthly: M.plan.monthly,
-    planVisitsPerYear: M.plan.visitsPerYear,
-    laborMinutesPerVisit: M.plan.laborMinutesPerVisit,
-    partsReservePerMonth: M.plan.partsReservePerMonth,
+    planMonthly: basis.planMonthly,
+    planVisitsPerYear: basis.planVisitsPerYear,
+    laborMinutesPerVisit: basis.laborMinutesPerVisit,
+    partsReservePerMonth: basis.partsReservePerMonth,
     refillSolution: solution,
-    refillPrice: refillCfg.price,
-    refillProductCost: refillCfg.productCost,
+    refillPrice: basis.refillPrice,
+    refillProductCost: basis.refillProductCost,
     defaultRefillsPerYear: M.defaultRefillsPerYear,
-    serviceCallNoPlan: M.serviceCallNoPlan,
+    serviceCallNoPlan: basis.serviceCallNoPlan,
   };
 
   const base = {
@@ -5085,7 +5118,7 @@ function priceMosquitoMisting(property, options = {}) {
     extraRisers,
     refill,
     refillsBilledPerApplication: true,
-    visitsPerYear: M.plan.visitsPerYear,
+    visitsPerYear: basis.planVisitsPerYear,
     requiresMeasurement: false,
     pricingKnobs,
   };
@@ -5103,14 +5136,14 @@ function priceMosquitoMisting(property, options = {}) {
     };
   }
 
-  const price = Math.round(tierCfg.price + extraNozzles * M.extraNozzlePrice + extraRisers * M.extraRiserPrice);
-  const materialCost = Math.round((tierCfg.hardwareCost + extraNozzles * M.extraNozzleCost + extraRisers * M.extraRiserCost) * 100) / 100;
-  const laborCost = Math.round(M.install.techs * M.install.hours * GLOBAL.LABOR_RATE * 100) / 100;
+  const price = Math.round(basis.tierPrice + extraNozzles * basis.extraNozzlePrice + extraRisers * basis.extraRiserPrice);
+  const materialCost = Math.round((basis.hardwareCost + extraNozzles * basis.extraNozzleCost + extraRisers * basis.extraRiserCost) * 100) / 100;
+  const laborCost = Math.round(basis.installTechs * basis.installHours * basis.laborRate * 100) / 100;
   const totalCost = Math.round((materialCost + laborCost) * 100) / 100;
   // annual = per-application price × the configured cadence (pre-push audit P1: an edited visitsPerYear must move annual).
-  const annual = Math.round(M.plan.monthly * M.plan.visitsPerYear * 100) / 100;
+  const annual = Math.round(basis.planMonthly * basis.planVisitsPerYear * 100) / 100;
   const planCostAnnual = Math.round(
-    ((M.plan.laborMinutesPerVisit / 60) * GLOBAL.LABOR_RATE * M.plan.visitsPerYear + M.plan.partsReservePerMonth * 12) * 100,
+    ((basis.laborMinutesPerVisit / 60) * basis.laborRate * basis.planVisitsPerYear + basis.partsReservePerMonth * 12) * 100,
   ) / 100;
 
   const result = {
@@ -5119,8 +5152,8 @@ function priceMosquitoMisting(property, options = {}) {
     // The monthly AVERAGE of the configured annual (per application × cadence / 12).
     monthly: Math.round(annual / 12 * 100) / 100,
     // The plan is monthly applications: customer surfaces read "per application".
-    perApp: M.plan.monthly,
-    perVisit: M.plan.monthly,
+    perApp: basis.planMonthly,
+    perVisit: basis.planMonthly,
     installation: {
       price,
       retailValue: price,
@@ -5130,7 +5163,7 @@ function priceMosquitoMisting(property, options = {}) {
       margin: price > 0 ? Math.round(((price - totalCost) / price) * 1000) / 1000 : null,
     },
     plan: {
-      monthly: M.plan.monthly,
+      monthly: basis.planMonthly,
       annual,
       costAnnual: planCostAnnual,
       margin: annual > 0 ? Math.round(((annual - planCostAnnual) / annual) * 1000) / 1000 : null,

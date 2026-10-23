@@ -19977,6 +19977,9 @@ function savedFloorReplayOverrides(estData) {
   const termiteKnobs = require('../services/estimate-tree-shrub-knob-replay')
     .termiteKnobSignalForReplay(estData);
   if (termiteKnobs) overrides.termitePricingKnobs = termiteKnobs;
+  // Mosquito misting quote-time snapshot (GATE_MOSQUITO_MISTING): a sent misting quote keeps the prices it was sent at.
+  const mistingKnobs = require('../services/estimate-tree-shrub-knob-replay').mistingKnobSignalForReplay(estData);
+  if (mistingKnobs) overrides.mistingPricingKnobs = mistingKnobs;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.

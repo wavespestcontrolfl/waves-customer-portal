@@ -790,6 +790,10 @@ async function depositStillRecordable(estimateId) {
     if (require('./pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) {
       return { recordable: false, reason: 'area_addons_gated' };
     }
+    // Same kill-switch race for a persisted mosquito misting system (GATE_MOSQUITO_MISTING).
+    if (require('./pricing-engine/v1-legacy-mapper').estimateMistingGated(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) {
+      return { recordable: false, reason: 'mosquito_misting_disabled' };
+    }
   }
 
   let gates = null;

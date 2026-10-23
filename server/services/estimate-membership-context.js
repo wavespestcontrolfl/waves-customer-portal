@@ -190,6 +190,7 @@ function accountServiceKey(raw) {
     if (s.includes('pest') && !isRodentLedName(s)) return 'commercial_pest_control';
     if (s.includes('lawn') || s.includes('turf')) return 'commercial_lawn_care';
     if (!isPalmName(s) && (s.includes('tree') || s.includes('shrub'))) return 'commercial_tree_shrub';
+    if (s.includes('misting')) return 'mosquito_misting';
     if (s.includes('mosquito')) return 'commercial_mosquito';
     if (s.includes('termite')) return 'commercial_termite_bait';
     if (s.includes('rodent')) return 'commercial_rodent_bait';
@@ -214,7 +215,9 @@ function accountServiceKeys(raw) {
   if (text.includes('pest') && !rodentService) add('pest_control');
   if (text.includes('lawn') || text.includes('turf')) add('lawn_care');
   if (!palmService && (text.includes('tree') || text.includes('shrub'))) add('tree_shrub');
-  if (text.includes('mosquito')) add('mosquito');
+  // The misting system is not the barrier program and not a WaveGuard qualifier.
+  if (text.includes('misting')) add('mosquito_misting');
+  else if (text.includes('mosquito')) add('mosquito');
   if (text.includes('termite')) add('termite_bait');
   if (rodentService) add('rodent_bait');
   if (palmService) add('palm_injection');

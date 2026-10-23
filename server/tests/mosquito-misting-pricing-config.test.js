@@ -107,6 +107,28 @@ describe('validation: bounds, plain JSON numbers, and no code-owned field', () =
     [{ refills: { ...seed().refills, natural: { ...seed().refills.natural, productCost: 'x' } } }, /refills\.natural\.productCost/],
   ])('%j is refused', (patch, pattern) => bad(edit(patch), pattern));
 
+  test.each([
+    [{ tiers: { ...seed().tiers, smart: { ...seed().tiers.smart, includedNozzles: 0 } } }, /tiers\.smart\.includedNozzles/],
+    [{ tiers: { ...seed().tiers, smart: { ...seed().tiers.smart, includedNozzles: 9 } } }, /tiers\.smart\.includedNozzles/],
+    [{ tiers: { ...seed().tiers, smart: { ...seed().tiers.smart, includedNozzles: 100 } } }, /tiers\.smart\.includedNozzles/],
+    [{ tiers: { ...seed().tiers, essential: { ...seed().tiers.essential, includedNozzles: 35.5 } } }, /tiers\.essential\.includedNozzles must be a whole number/],
+    [{ includedRisers: 10.5 }, /includedRisers must be a whole number/],
+    [{ includedRisers: 81 }, /includedRisers/],
+    [{ includedRisers: -1 }, /includedRisers/],
+  ])('included counts are whole numbers inside the code-owned limits: %j is refused', (patch, pattern) => bad(edit(patch), pattern));
+
+  test('the edges of the included counts are accepted, and a bad one ignores the whole row on sync', async () => {
+    const edges = edit({ includedRisers: 80, tiers: { ...seed().tiers, smart: { ...seed().tiers.smart, includedNozzles: 80 }, essential: { ...seed().tiers.essential, includedNozzles: 10 } } });
+    expect(config.normalizeMosquitoMistingPricingConfig(edges)).toMatchObject({ ok: true });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const data = seed();
+    data.plan.monthly = 70;
+    data.tiers.smart.includedNozzles = 100;
+    await sync(data);
+    expect(live()).toEqual(pristine);
+    warn.mockRestore();
+  });
+
   test('not an object, an unknown tier or solution is refused by the PUT and ignored by the sync', () => {
     bad(null, /object/);
     bad([], /object/);

@@ -1274,8 +1274,20 @@ function generateEstimate(input) {
   // (excludedFromPercentDiscount.mosquito_misting); its install price rides
   // line.installation.price into installationTotal / year1Total below.
   const mistingService = services.mosquitoMisting || services.mosquito_misting;
+  const mistingReplayKnobs = input.mistingPricingKnobs && typeof input.mistingPricingKnobs === 'object' ? input.mistingPricingKnobs : null;
+  if (mistingService && !require('../../config/feature-gates').mosquitoMistingLive() && mistingReplayKnobs) {
+    // A STORED misting quote (the server-derived replay stamp rides only a replay) re-entering the engine while the gate is
+    // off must fail closed, never silently reprice without the system (a fresh quote with the key is simply ignored).
+    const err = new Error('The mosquito misting system is not enabled on this environment (GATE_MOSQUITO_MISTING) - remove it or flip the gate.');
+    err.statusCode = 400;
+    err.code = 'MOSQUITO_MISTING_GATED';
+    err.reason = 'mosquito_misting_disabled';
+    err.failClosed = true;
+    throw err;
+  }
   if (mistingService && require('../../config/feature-gates').mosquitoMistingLive()) {
-    const result = priceMosquitoMisting(property, serviceOptions(mistingService));
+    // knobs: the quote-time snapshot replayed from a stored estimate (server-derived only, like the termite knobs).
+    const result = priceMosquitoMisting(property, { ...serviceOptions(mistingService), knobs: mistingReplayKnobs });
     lineItems.push(result);
     if (!result.quoteRequired) activeServiceKeys.push('mosquito_misting');
   }

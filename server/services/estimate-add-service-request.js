@@ -99,6 +99,7 @@ function normalizeRequestedServiceKey(value) {
   if (!raw) return null;
   if (Object.prototype.hasOwnProperty.call(SERVICE_LABELS, raw)) return raw;
   if (raw.includes('lawn')) return 'lawn_care';
+  if (raw.includes('misting')) return null;
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite')) return 'termite_bait';
   if (raw.includes('pest')) return 'pest_control';

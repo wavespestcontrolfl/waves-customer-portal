@@ -31,10 +31,11 @@ const COUNT = [0, 200];
 const BOUNDS = Object.freeze({
   price: PRICE,
   hardwareCost: COST,
-  includedNozzles: COUNT,
+  // Whole numbers inside the code-owned layout limits (minNozzles..maxNozzles), so an included count can never sit outside what the pricer sells.
+  includedNozzles: [MOSQUITO_MISTING.minNozzles, MOSQUITO_MISTING.maxNozzles],
   extraNozzlePrice: PRICE,
   extraNozzleCost: COST,
-  includedRisers: COUNT,
+  includedRisers: [0, MOSQUITO_MISTING.maxRisers],
   extraRiserPrice: PRICE,
   extraRiserCost: COST,
   techs: [1, 4],
@@ -50,8 +51,10 @@ const BOUNDS = Object.freeze({
 
 const isPlain = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isNum = (value) => typeof value === 'number' && Number.isFinite(value);
-const inBounds = (field, value) => isNum(value) && value >= BOUNDS[field][0] && value <= BOUNDS[field][1];
+const WHOLE = new Set(['includedNozzles', 'includedRisers']);
+const inBounds = (field, value) => isNum(value) && (!WHOLE.has(field) || Number.isInteger(value)) && value >= BOUNDS[field][0] && value <= BOUNDS[field][1];
 const range = (field) => `${BOUNDS[field][0]} to ${BOUNDS[field][1]}`;
+const kind = (field) => (WHOLE.has(field) ? 'a whole number' : 'a number');
 
 const TOP_NUMBERS = ['extraNozzlePrice', 'extraNozzleCost', 'includedRisers', 'extraRiserPrice', 'extraRiserCost', 'serviceCallNoPlan'];
 // Group name -> its editable number fields (a group with keyed members is listed in KEYED).
@@ -65,7 +68,7 @@ function checkFields(path, obj, fields, strict, errors) {
     if (!fields.includes(field) && strict) errors.push(`${path}.${field} is set in code, not here`);
   }
   for (const field of fields) {
-    if (obj[field] !== undefined && !inBounds(field, obj[field])) errors.push(`${path}.${field} must be a number from ${range(field)}`);
+    if (obj[field] !== undefined && !inBounds(field, obj[field])) errors.push(`${path}.${field} must be ${kind(field)} from ${range(field)}`);
   }
 }
 
@@ -82,7 +85,7 @@ function normalizeMosquitoMistingPricingConfig(data, { strict = true } = {}) {
   const value = {};
   for (const field of TOP_NUMBERS) {
     if (data[field] === undefined) continue;
-    if (!inBounds(field, data[field])) errors.push(`${field} must be a number from ${range(field)}`);
+    if (!inBounds(field, data[field])) errors.push(`${field} must be ${kind(field)} from ${range(field)}`);
     value[field] = data[field];
   }
   for (const [group, fields] of Object.entries(GROUPS)) {
