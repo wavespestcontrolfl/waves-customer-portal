@@ -58,6 +58,20 @@ describe('Tree/Shrub closeout validation', () => {
     expect(inferTreeShrubOrdinanceZone({ city: 'Venice', county: 'Sarasota', service_address_city: 'Unknown Town' })).toBe('other_unknown');
   });
 
+  test('the city decides the zone; street text never overrides it or lifts a blackout', () => {
+    // Stamped street without a stamped city: the customer city decides.
+    expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', service_address_line1: '123 North Port Boulevard' })).toBe('manatee_parrish');
+    // Unstamped legacy fields: the same.
+    expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', address_line1: '123 North Port Boulevard' })).toBe('manatee_parrish');
+    expect(inferTreeShrubOrdinanceZone({ city: 'Venice', address: '9 Parrish Road' })).toBe('sarasota_venice');
+    expect(inferTreeShrubOrdinanceZone({ city: 'North Port', address_line1: '5 Venice Avenue' })).toBe('north_port');
+    // A stamped city beats a customer city and any street.
+    expect(inferTreeShrubOrdinanceZone({ city: 'North Port', service_address_city: 'Bradenton', service_address_line1: '1 North Port Boulevard' })).toBe('manatee_parrish');
+    // No city anywhere: a street may add a blackout zone, never North Port.
+    expect(inferTreeShrubOrdinanceZone({ service_address_line1: '123 North Port Boulevard' })).toBe('other_unknown');
+    expect(inferTreeShrubOrdinanceZone({ address_line1: '8 Venice Avenue' })).toBe('sarasota_venice');
+  });
+
   test('blocks N/P fertilizer during Sarasota and Manatee landscape blackout', () => {
     const result = validate({
       products: [{ productId: 'fert-1', name: '8-2-12 Palm Fertilizer', totalAmount: 6, amountUnit: 'lb' }],

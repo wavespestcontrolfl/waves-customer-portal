@@ -20,6 +20,8 @@ const CATALOG = [
   row('bs', 'Blindside Herbicide', { category: 'herbicide' }),
   row('gf', 'LESCO Green Flo 6-0-0 10% Ca'),
   row('bc', 'Bora-Care', { category: 'insecticide' }),
+  row('ij10', 'Arborjet Ima-Jet 10', { category: 'insecticide' }),
+  row('ijs', 'Arborjet Ima-Jet Systemic Insecticide', { category: 'insecticide' }),
 ];
 const match = (raw) => matchCatalogProduct({ raw }, CATALOG)?.name || null;
 
@@ -49,7 +51,19 @@ describe('catalog match needs a distinctive word', () => {
     expect(match('LESCO 24-0-11 fert ($8.68)')).toBe('LESCO 24-0-11 with PolyPlus OPTI');
     expect(match('LESCO 24-0-11 75% PolyPlus fert ($8.68)')).toBe('LESCO 24-0-11 with PolyPlus OPTI');
     expect(match('Bora-Care scope based on finding location')).toBe('Bora-Care');
-    expect(match('Green Flo 6-0-0 Ca ($1.39)')).toBe('LESCO Green Flo 6-0-0 10% Ca');
+  });
+
+  test('an exact full name outranks a longer row that only spells all its words', () => {
+    expect(match('Arborjet Ima-Jet 10')).toBe('Arborjet Ima-Jet 10');
+    expect(match('Arborjet Ima-Jet Systemic Insecticide')).toBe('Arborjet Ima-Jet Systemic Insecticide');
+  });
+
+  test('a number the line carries, or the name needs, keeps an all-words match out', () => {
+    const noExact = CATALOG.filter((p) => p.id !== 'ij10');
+    // "Ima-Jet 10" is a different product and rate from the Systemic Insecticide row.
+    expect(matchCatalogProduct({ raw: 'Ima-Jet 10 trunk injection' }, noExact)?.name).not.toBe('Arborjet Ima-Jet Systemic Insecticide');
+    // A name with a number the line lacks ("10%") is not spelled by the line.
+    expect(match('Green Flo 6-0-0 Ca ($1.39)')).not.toBe('LESCO Green Flo 6-0-0 10% Ca');
   });
 
   test('the job card follows: the Manganese line gets its fertilizer card, the Reliant line none', () => {

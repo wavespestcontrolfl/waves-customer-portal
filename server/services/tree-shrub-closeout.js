@@ -161,23 +161,25 @@ function normalizeOrdinanceZone(value) {
 }
 
 // The N/P fertilizer blackout belongs to the property treated, not to the customer's mailing city. A visit row stamps
-// its own service address (service_address_city / service_address_line1), field by field like resolveVisitAddress:
-// the stamped city wins, then the customer city the row carries. A row with no stamp reads as before.
+// its own service address (service_address_city), and that city wins over the customer city the row carries.
+// The CITY decides the zone: street text ("123 North Port Boulevard") names a road, not a place, so it never
+// overrides a city. Only a row with no city at all falls back to street text, and then only to a blackout zone: a
+// street can add a restriction, never lift one (North Port is the one zone with no summer blackout).
 function inferTreeShrubOrdinanceZone(service = {}) {
   const stampedCity = text(service.service_address_city);
-  const stampedLine1 = text(service.service_address_line1);
-  const location = stampedCity || stampedLine1
-    ? combinedText(stampedCity || service.city, stampedLine1)
-    : combinedText(
-      service.city,
-      service.municipality,
-      service.county,
-      service.address,
-      service.address_line1,
-      service.property_address,
-      service.service_address,
-    );
-  if (/\bnorth\s*port\b/.test(location)) return 'north_port';
+  const cityText = stampedCity
+    ? combinedText(stampedCity)
+    : combinedText(service.city, service.municipality, service.county);
+  const hasCity = Boolean(cityText.trim());
+  const streetText = hasCity ? '' : combinedText(
+    service.service_address_line1,
+    service.address,
+    service.address_line1,
+    service.property_address,
+    service.service_address,
+  );
+  const location = hasCity ? cityText : streetText;
+  if (hasCity && /\bnorth\s*port\b/.test(location)) return 'north_port';
   if (/\b(parrish|manatee|bradenton|palmetto|ellenton|lakewood\s*ranch)\b/.test(location)) {
     return 'manatee_parrish';
   }

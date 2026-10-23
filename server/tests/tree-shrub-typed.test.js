@@ -535,6 +535,8 @@ describe('ported closeout compliance (typed path)', () => {
     expect(run({ city: 'Bradenton', service_address_line1: '1 Test St', service_address_city: 'North Port' })).not.toContain('tree_shrub_np_blackout');
     // A North Port customer whose visit is at a Bradenton property: blackout.
     expect(run({ city: 'North Port', service_address_line1: '1 Test St', service_address_city: 'Bradenton' })).toContain('tree_shrub_np_blackout');
+    // A street named for another zone never lifts the customer city's blackout.
+    expect(run({ city: 'Bradenton', service_address_line1: '123 North Port Boulevard' })).toContain('tree_shrub_np_blackout');
     // A stamp with no city of its own keeps the customer city.
     expect(run({ city: 'Bradenton', service_address_line1: '1 Test St' })).toContain('tree_shrub_np_blackout');
     // No stamp at all: the customer city, as before.
