@@ -4229,7 +4229,7 @@ function initScheduledJobs() {
     try {
       await runExclusive('ib-cancel-effect-recovery', async () => {
         const result = await require('./ib-cancel-effect-bundles').sweepIbCancelBundles();
-        if (result.recovered || result.abandoned || result.reported || result.failed) {
+        if (result.recovered || result.abandoned || result.reported || result.receipts || result.failed) {
           logger.info(`[ib-cancel-bundle] sweep: ${JSON.stringify(result)}`);
         }
         // A row that failed stays pending for the next tick; job health shows the failed run.

@@ -79,6 +79,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       t.timestamp('updated_at', { useTz: true });
       t.timestamp('location_updated_at', { useTz: true });
     });
+    await app.schema.createTable('ib_pending_actions', (t) => { t.uuid('id').primary(); t.jsonb('result'); t.timestamp('updated_at', { useTz: true }); });
     await migration.up(app);
     svc = require('../services/ib-cancel-effect-bundles');
   });
@@ -99,6 +100,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     await app('appointment_reminders').del();
     await app('tech_status').del();
     await app('customers').del();
+    await app('ib_pending_actions').del();
     await app('customers').insert({ id: customer, first_name: 'Synthia', last_name: 'Tester' });
     await app('scheduled_services').insert({ id: visit, customer_id: customer, status: 'cancelled', service_type: 'Pest Control', scheduled_date: '2099-01-15' });
     await app('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: app.raw("now() - interval '40 minutes'") });
@@ -451,6 +453,100 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     expect(mockHandleCancellation).toHaveBeenCalledTimes(12);
     expect((await app(TABLE).whereIn('id', parked)).every((r) => r.status === 'recovered')).toBe(true);
   });
+
+  // ── An exhausted bundle is claimed before it is reported; a complete bundle's missing receipt is rebuilt ────────
+  describe('report claim and receipt reconcile (real SQL)', () => {
+    const exhaust = async (id) => app(TABLE).where({ id }).update({
+      attempts: 5, lease_owner: null, lease_until: null, created_at: app.raw("now() - interval '3 hours'"),
+    });
+    afterEach(() => { mockRecordResult.mockImplementation(async () => true); });
+    // The real pending-actions write, so onlyIfEmpty is tested against a real row.
+    const writeLikeRecordResult = async (id, result, opts = {}) => {
+      const q = app('ib_pending_actions').where({ id });
+      if (opts.onlyIfEmpty) q.whereNull('result');
+      await q.update({ result: JSON.stringify(result), updated_at: app.fn.now() });
+      return true;
+    };
+
+    test('two sweeps at once report an exhausted bundle exactly once', async () => {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      await exhaust(id);
+      const [a, b] = await Promise.all([svc.sweepIbCancelBundles(), svc.sweepIbCancelBundles()]);
+      expect(a.reported + b.reported).toBe(1);
+      expect(mockRaise).toHaveBeenCalledTimes(1);
+      expect(mockRecordResult).toHaveBeenCalledTimes(1);
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'expired', finish_note: 'attempts_exhausted', lease_owner: null, attempts: 5 });
+      expect(mockFollowThrough).not.toHaveBeenCalled();
+    });
+
+    test('the claim does not count an attempt and skips a row a live request still holds', async () => {
+      const held = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      await exhaust(held);
+      await app(TABLE).where({ id: held }).update({ lease_owner: 'request', lease_until: app.raw("now() + interval '5 minutes'") });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ reported: 0 });
+      expect(await app(TABLE).where({ id: held }).first()).toMatchObject({ status: 'pending', attempts: 5, lease_owner: 'request' });
+    });
+
+    test('while a report claim is live the request cannot complete the row; an expired one or a recovery token does not block it', async () => {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      const report = { ibCancelBundleId: id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } };
+      await app(TABLE).where({ id }).update({ lease_owner: 'report:abc', lease_until: app.raw("now() + interval '5 minutes'") });
+      await svc.liveFinish(report);
+      expect((await app(TABLE).where({ id }).first()).status).toBe('pending');
+      await app(TABLE).where({ id }).update({ lease_owner: 'report:abc', lease_until: app.raw("now() - interval '1 minute'") });
+      await svc.liveFinish(report);
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'complete', finish_note: 'request', lease_owner: null });
+      const other = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      await app(TABLE).where({ id: other }).update({ lease_owner: 'sweep-token', lease_until: app.raw("now() + interval '5 minutes'") });
+      await svc.liveFinish({ ...report, ibCancelBundleId: other });
+      expect((await app(TABLE).where({ id: other }).first()).status).toBe('complete');
+    });
+
+    const completeWithoutReceipt = async (extra = {}) => {
+      const body = pins();
+      const id = await app.transaction((trx) => svc.insertBundle(trx, body));
+      await app(TABLE).where({ id }).update({
+        status: 'complete', finish_note: 'request', lease_owner: null, lease_until: null,
+        finished_at: app.raw("now() - interval '15 minutes'"), created_at: app.raw("now() - interval '20 minutes'"),
+        followthrough_done_at: app.raw("now() - interval '15 minutes'"),
+        followthrough_outcome: JSON.stringify({ money_skipped: [{ kind: 'invoice', id: 'inv-9', reason: 'paid_since_card' }], linked_skipped: [] }),
+        notice_outcome: JSON.stringify({ state: 'sent', by: 'request' }),
+        ...extra,
+      });
+      await app('ib_pending_actions').insert({ id: body.pendingActionId, result: null });
+      return { id, actionId: body.pendingActionId };
+    };
+
+    test('a missing receipt is rebuilt once, even with two sweeps at once, and a present one is left alone', async () => {
+      mockRecordResult.mockImplementation(writeLikeRecordResult);
+      const gap = await completeWithoutReceipt();
+      const fine = await completeWithoutReceipt();
+      await app('ib_pending_actions').where({ id: fine.actionId }).update({ result: JSON.stringify({ success: true, from: 'request' }) });
+      const [a, b] = await Promise.all([svc.sweepIbCancelBundles(), svc.sweepIbCancelBundles()]);
+      expect(a.receipts + b.receipts).toBe(1);
+      expect(mockRaise).toHaveBeenCalledTimes(1);
+      const saved = (await app('ib_pending_actions').where({ id: gap.actionId }).first()).result;
+      expect(saved).toMatchObject({ success: true, ran_dispatch_cancel: true, money_skipped: [{ kind: 'invoice', id: 'inv-9' }] });
+      expect(saved.warning).toMatch(/stopped before it saved this result/);
+      expect((await app('ib_pending_actions').where({ id: fine.actionId }).first()).result).toEqual({ success: true, from: 'request' });
+      expect(await app(TABLE).where({ id: gap.id }).first()).toMatchObject({ status: 'complete', finish_note: 'request+receipt', lease_owner: null });
+      expect((await app(TABLE).where({ id: fine.id }).first()).finish_note).toBe('request+receipt');
+      expect(mockFollowThrough).not.toHaveBeenCalled();
+      expect(mockHandleCancellation).not.toHaveBeenCalled();
+      // A later pass finds nothing.
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ receipts: 0 });
+      expect(mockRaise).toHaveBeenCalledTimes(1);
+    });
+
+    test('a row completed 3 minutes ago, and one completed past the hard stop, are not reconciled', async () => {
+      mockRecordResult.mockImplementation(writeLikeRecordResult);
+      await completeWithoutReceipt({ finished_at: app.raw("now() - interval '3 minutes'") });
+      await completeWithoutReceipt({ finished_at: app.raw("now() - interval '26 hours'") });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ receipts: 0 });
+      expect(mockRaise).not.toHaveBeenCalled();
+    });
+  });
+
 
   test('down drops the table and up builds it again', async () => {
     await migration.down(app);

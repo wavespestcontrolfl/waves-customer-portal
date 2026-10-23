@@ -1529,9 +1529,13 @@ async function rebindRedeemedOffer(offerId, bookingId, cancelFence = null) {
  * doesn't land the rollback releases the claim for the next sweep. A later
  * successful reversal clears the marker when the offer reopens.
  */
-async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, body }) {
+async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, body }, cancelFence = null) {
   try {
     await db.transaction(async (trx) => {
+      // Recovery sweep only: the offer marker and the office alert describe a CANCELLED booking, so the generation is proven in this
+      // very transaction (visit share lock, NOWAIT), before the marker is stamped. A restore after the sweep's earlier check can
+      // no longer produce a "credit could not be reversed" alert for a live booking.
+      if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelFence);
       // The claim re-validates the STATE the alert describes, not just the
       // dedupe marker (pre-push P1 r19): between the failed/deferred
       // reversal and this transaction another worker can reverse or rebind
@@ -1567,7 +1571,9 @@ async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, bod
       }
     });
   } catch (notifyErr) {
-    if (notifyErr?.inspectionCreditSkip === 'alert_not_delivered') {
+    if (notifyErr?.code === 'CANCEL_FENCE') {
+      logger.info(`[inspection-credit] reversal alert for offer ${offer.id} skipped: the booking is no longer the approved cancel (${notifyErr.fenceReason})`);
+    } else if (notifyErr?.inspectionCreditSkip === 'alert_not_delivered') {
       logger.warn(`[inspection-credit] reversal alert not delivered for offer ${offer.id} — will retry next sweep`);
     } else {
       logger.error(`[inspection-credit] reversal alert failed for offer ${offer.id}: ${notifyErr.message}`);
@@ -1720,7 +1726,7 @@ async function reverseInspectionCreditForBooking({
             await alertReversalNeedsOffice(offer, scheduledServiceId, {
               reason: 'invoice_unresolved',
               body: `A $${round2(offer.amount).toFixed(2)} inspection credit is tied to a cancelled booking whose invoice still holds money. Reversing automatically could take unrelated balance — resolve the invoice, then collect or write off the credit.`,
-            });
+            }, cancelFence);
             continue;
           }
         } catch (checkErr) {
@@ -1818,7 +1824,7 @@ async function reverseInspectionCreditForBooking({
           await alertReversalNeedsOffice(offer, scheduledServiceId, {
             reason: 'credit_already_spent',
             body: `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
-          });
+          }, cancelFence);
         }
       }
     }

@@ -630,6 +630,68 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
+  // The office alert stamps the offer's marker and tells staff the credit "could not be reversed" for a CANCELLED booking. For
+  // the recovery sweep that statement must be proven inside the alert's own transaction, before the marker is stamped.
+  it('a recovery alert re-proves the cancellation inside its transaction before it stamps the marker', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockInvoices = [{ id: 'inv-9', status: 'paid' }];
+    const fence = { visitId: 'svc-2', restorations: 0, hits: [] };
+    const order = [];
+    mockFence.mockReset();
+    mockFence.mockImplementation(async () => { order.push(`fence@${mockUpdates.filter((u) => u.reversal_alerted_at instanceof Date).length}`); });
+    mockNotifyAdmin.mockClear();
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    // The last fence call (the alert transaction's) ran with no marker stamped yet; the marker was stamped after it.
+    expect(order[order.length - 1]).toBe('fence@0');
+    expect(mockUpdates.some((u) => u.reversal_alerted_at instanceof Date)).toBe(true);
+    expect(mockFence.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('a booking restored after the point-in-time check: no marker and no staff alert (unresolved invoice)', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockInvoices = [{ id: 'inv-9', status: 'paid' }];
+    const fence = { visitId: 'svc-2', restorations: 0, hits: [] };
+    mockFence.mockReset();
+    mockFence.mockResolvedValueOnce(undefined).mockRejectedValue(Object.assign(new Error('cancellation fence: visit_restored_since'), { code: 'CANCEL_FENCE', fenceReason: 'visit_restored_since' }));
+    mockNotifyAdmin.mockClear();
+    mockUpdates.length = 0;
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockUpdates.some((u) => u.reversal_alerted_at instanceof Date)).toBe(false);
+  });
+
+  it('a booking restored after the point-in-time check: no marker and no staff alert (credit already spent)', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      expires_at: new Date('2099-01-01'), credit_ledger_id: 'ledger-1',
+    }];
+    const spent = new Error('Insufficient account credit — balance is $0.00, cannot apply $75.00');
+    spent.code = 'INSUFFICIENT_CREDIT';
+    mockPostCreditMovement.mockRejectedValueOnce(spent);
+    const fence = { visitId: 'svc-2', restorations: 0, hits: [] };
+    mockFence.mockReset();
+    // Point-in-time check and the reversal transaction's proof pass; the alert transaction's proof is refused.
+    mockFence.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined)
+      .mockRejectedValue(Object.assign(new Error('cancellation fence: visit_restored_since'), { code: 'CANCEL_FENCE', fenceReason: 'visit_restored_since' }));
+    mockNotifyAdmin.mockClear();
+    mockUpdates.length = 0;
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockUpdates.some((u) => u.reversal_alerted_at instanceof Date)).toBe(false);
+  });
+
   it('a lapsed offer closes out instead of dangling reopened', async () => {
     mockOffers = [{
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',

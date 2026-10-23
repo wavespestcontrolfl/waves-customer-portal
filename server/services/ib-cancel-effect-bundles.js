@@ -39,7 +39,16 @@
  *     token holder writes results.
  *
  * The sweep acts only while the visit is still cancelled with no later restoration; a row past the 24 hour hard stop
- * (or out of attempts) is NOT acted on and is reported to the office.
+ * (or out of attempts) is NOT acted on and is reported to the office. That report is made only by the sweep that
+ * CLAIMED the row (same SKIP LOCKED token pattern as the recovery claim), and the request's liveFinish cannot complete a
+ * row while a report claim is live, so a cancel that is finishing is never reported as exhausted.
+ *
+ * THE RECEIPT. liveFinish marks the row complete BEFORE the route saves the result on the pending action (the card's
+ * receipt). A crash between the two would leave a complete row, an empty receipt and the money/linked warnings lost. The
+ * warnings are not lost: liveFinish stores them on the row, atomically with 'complete'. So the sweep RECONCILES: a row the
+ * request completed, whose pending action still has no result 10 minutes later, gets the receipt rebuilt from the stored
+ * outcome (onlyIfEmpty, so a slow request that saves its own wins) and the office alert raised from it. This covers every
+ * crash point (and a failed receipt save), and needs no change to the request path or the table.
  */
 const crypto = require('crypto');
 const db = require('../models/db');
@@ -54,6 +63,11 @@ const MAX_ATTEMPTS = 5;
 const RETENTION_DAYS = 90;
 const BATCH = 10;
 const REQUEST_LEASE = 'request';
+// A sweep that claimed a row only to REPORT it (past the hard stop / out of attempts) leases it under this prefix.
+const REPORT_PREFIX = 'report:';
+// A row the request completed whose receipt was found missing: marker values of finish_note.
+const FINISH_REQUEST = 'request';
+const FINISH_RECEIPT_CHECKED = 'request+receipt';
 
 // Database-clock times as bound raw values (one binding each, so no value is spliced into the SQL).
 const nowPlusMs = (conn, ms) => conn.raw("now() + (? * interval '1 millisecond')", [ms]);
@@ -170,12 +184,17 @@ function liveFinish(req) {
   };
   return guarded('complete', () => db(TABLE)
     .where({ id, status: 'pending' })
+    // A row a sweep claimed to REPORT as exhausted is not completed under it (the report is then the record); a normal
+    // recovery claim is not blocked: the request finishing first is the case the recovery's LeaseLost handles.
+    .where(function notClaimedForReport() {
+      this.whereNull('lease_owner').orWhere('lease_owner', 'not like', `${REPORT_PREFIX}%`).orWhere('lease_until', '<', db.fn.now());
+    })
     .update({
       status: 'complete',
       followthrough_done_at: db.fn.now(),
       followthrough_outcome: JSON.stringify(followthrough),
       finished_at: db.fn.now(),
-      finish_note: 'request',
+      finish_note: FINISH_REQUEST,
       lease_owner: null,
       lease_until: null,
       updated_at: db.fn.now(),
@@ -187,6 +206,8 @@ function liveFinish(req) {
 class LeaseLost extends Error {}
 
 const ownedWhere = (id, token) => db(TABLE).where({ id, lease_owner: token, status: 'pending' });
+
+const completeOwnedWhere = (id, token) => db(TABLE).where({ id, lease_owner: token, status: 'complete' });
 
 async function ownedUpdate(id, token, patch) {
   const rows = await ownedWhere(id, token).update({ ...patch, updated_at: db.fn.now() });
@@ -219,16 +240,47 @@ async function claimNext(token) {
   return (result && result.rows && result.rows[0]) || null;
 }
 
-// A bundle the sweep must not act on: older than the hard stop, or out of attempts.
-async function listUnactable() {
-  return db(TABLE)
-    .where({ status: 'pending' })
-    .where(function leaseFree() { this.whereNull('lease_until').orWhere('lease_until', '<', db.fn.now()); })
-    .where(function stale() {
-      this.where('created_at', '<=', nowMinusMs(db, HARD_STOP_MS)).orWhere('attempts', '>=', MAX_ATTEMPTS);
-    })
-    .orderBy('created_at')
-    .limit(BATCH);
+// A bundle the sweep must not act on: older than the hard stop, or out of attempts. CLAIMED atomically (SKIP LOCKED, a
+// report-prefixed token, no attempt counted), so only one sweep reports it and the request cannot complete it meanwhile.
+async function claimUnactable(token) {
+  const result = await db.raw(
+    `UPDATE ${TABLE}
+        SET lease_owner = ?, lease_until = now() + (? * interval '1 millisecond'), updated_at = now()
+      WHERE id = (
+        SELECT id FROM ${TABLE}
+         WHERE status = 'pending'
+           AND (lease_until IS NULL OR lease_until < now())
+           AND (created_at <= now() - (? * interval '1 millisecond') OR attempts >= ?)
+         ORDER BY created_at
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED)
+      RETURNING *`,
+    [token, LEASE_MS, HARD_STOP_MS, MAX_ATTEMPTS],
+  );
+  return (result && result.rows && result.rows[0]) || null;
+}
+
+// A row the request completed whose receipt may be missing: complete, request-finished, 10 minutes ago or more, and inside
+// the hard stop (so a receipt that can never be saved is retried for a day, not forever). Claimed like the others.
+async function claimReceiptGap(token) {
+  const result = await db.raw(
+    `UPDATE ${TABLE}
+        SET lease_owner = ?, lease_until = now() + (? * interval '1 millisecond'), updated_at = now()
+      WHERE id = (
+        SELECT id FROM ${TABLE}
+         WHERE status = 'complete'
+           AND finish_note = '${FINISH_REQUEST}'
+           AND pending_action_id IS NOT NULL
+           AND finished_at <= now() - (? * interval '1 millisecond')
+           AND finished_at > now() - (? * interval '1 millisecond')
+           AND (lease_until IS NULL OR lease_until < now())
+         ORDER BY finished_at
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED)
+      RETURNING *`,
+    [token, LEASE_MS, GRACE_MS, HARD_STOP_MS],
+  );
+  return (result && result.rows && result.rows[0]) || null;
 }
 
 // The cancel must still stand: the visit is cancelled and has had no restoration since the bundle was written (an unlocked
@@ -416,7 +468,7 @@ function noticeLines(bundle, notice) {
  * What the sweep records on the pending action (`result`) and tells the office (`lines`). `needsReview` is true when
  * any step was skipped, uncertain or not sent; a clean recovery has none.
  */
-function buildReceipt(bundle, ft, notice) {
+function buildReceipt(bundle, ft, notice, { receiptOnly = false } = {}) {
   const money = (ft && ft.money_skipped) || [];
   const linked = (ft && ft.linked_skipped) || [];
   const noticeProblems = notice && notice.state !== 'sent' ? noticeLines(bundle, notice) : [];
@@ -435,7 +487,7 @@ function buildReceipt(bundle, ft, notice) {
       ...(notice && notice.state === 'uncertain' ? { customer_text_uncertain: true } : {}),
       ...(linked.length ? { linked_visits_skipped: linked } : {}),
       ...(money.length ? { money_skipped: money } : {}),
-      ...(problems.length ? { warning: `The cancel was finished in the background after an interruption. ${problems.join(' ')}` } : {}),
+      ...(problems.length ? { warning: `${receiptOnly ? 'The cancel finished, but the app stopped before it saved this result.' : 'The cancel was finished in the background after an interruption.'} ${problems.join(' ')}` } : {}),
     },
   };
 }
@@ -611,8 +663,14 @@ async function releaseFailed(bundle, token, err) {
     .catch(() => {});
 }
 
+async function releaseReceiptClaim(bundle, token) {
+  await completeOwnedWhere(bundle.id, token)
+    .update({ lease_owner: null, lease_until: null, updated_at: db.fn.now() })
+    .catch(() => {});
+}
+
 // A bundle past the hard stop or out of attempts is only REPORTED: nothing runs, the office checks the visit by hand.
-async function reportUnactable(bundle) {
+async function reportUnactable(bundle, token) {
   const why = bundle.attempts >= MAX_ATTEMPTS && new Date(bundle.created_at).getTime() > Date.now() - HARD_STOP_MS
     ? 'attempts_exhausted'
     : 'hard_stop';
@@ -629,6 +687,8 @@ async function reportUnactable(bundle) {
     ...noticeLines(bundle, notice),
     'Check the visit, its invoices, its linked visits and the customer message history.',
   ];
+  // Each write below is guarded on the report claim: if it is gone, nothing is recorded or told.
+  await assertStillOwned(bundle.id, token);
   const info = await visitInfo(bundle);
   await recordOnPendingAction(bundle, withVisitFacts({
     success: true,
@@ -637,6 +697,7 @@ async function reportUnactable(bundle) {
     recovered_after_interruption: true,
     warning: `The approved follow-on steps of this cancel could not be confirmed (${why === 'hard_stop' ? 'too much time passed' : 'repeated failures'}). Check the visit's invoices, linked visits and message history.`,
   }, info));
+  await assertStillOwned(bundle.id, token);
   await tellOffice(bundle, info, {
     review: true,
     action: (name) => `check ${name}'s cancelled visit`,
@@ -645,9 +706,52 @@ async function reportUnactable(bundle) {
       : 'The approved cancel steps finished, but their receipt was missing.',
     lines,
   });
-  await db(TABLE)
-    .where({ id: bundle.id, status: 'pending' })
-    .update({ status: 'expired', finished_at: db.fn.now(), finish_note: why, lease_owner: null, lease_until: null, updated_at: db.fn.now() });
+  await ownedUpdate(bundle.id, token, { status: 'expired', finished_at: db.fn.now(), finish_note: why, lease_owner: null, lease_until: null });
+}
+
+async function assertCompleteOwned(id, token) {
+  if (!(await completeOwnedWhere(id, token).first('id'))) throw new LeaseLost(`receipt claim on bundle ${id} was lost`);
+}
+
+// The pending action's stored result, parsed; undefined = no such action, null = no result saved.
+async function storedReceipt(pendingActionId) {
+  const row = await db('ib_pending_actions').where({ id: pendingActionId }).first('id', 'result');
+  if (!row) return undefined;
+  if (row.result === null || row.result === undefined) return null;
+  try { return typeof row.result === 'string' ? JSON.parse(row.result) : row.result; } catch { return null; }
+}
+
+// The request completed this row but may have stopped before it saved the card's receipt. If the receipt is missing, it is
+// rebuilt from what the request stored on the row (followthrough_outcome, notice_outcome), saved only if still empty, and the
+// office is told (a skipped step rings). A receipt that exists is the request's own and is left alone. Re-running after a
+// crash is safe: the save is onlyIfEmpty and the alert has a dedupe key.
+async function reconcileReceipt(bundle, token) {
+  const stored = await storedReceipt(bundle.pending_action_id);
+  const missing = stored === null || (stored !== undefined && stored && stored.recovered_after_interruption === true);
+  if (missing) {
+    // The text outcome is unknown only if the request ended before liveNotice ran for a card that asked for a text.
+    const notice = bundle.notice_outcome
+      || (bundle.notify_customer === true
+        ? { state: 'uncertain', note: 'the app stopped before it recorded whether the text went out' }
+        : { state: 'no_text' });
+    const receipt = buildReceipt(bundle, bundle.followthrough_outcome || {}, notice, { receiptOnly: true });
+    await assertCompleteOwned(bundle.id, token);
+    const info = await visitInfo(bundle);
+    await recordOnPendingAction(bundle, withVisitFacts(receipt.result, info));
+    await assertCompleteOwned(bundle.id, token);
+    await tellOffice(bundle, info, {
+      review: receipt.needsReview,
+      action: receipt.needsReview ? (name) => `check ${name}'s cancelled visit` : (name) => `${name}'s cancel finished`,
+      why: receipt.needsReview
+        ? 'The cancel finished, but the app stopped before saving its result, and some steps need a look.'
+        : 'The cancel finished; only its saved result was missing, and it is saved now.',
+      lines: receipt.lines.length ? receipt.lines : ['All approved steps are done.'],
+    });
+  }
+  const marked = await completeOwnedWhere(bundle.id, token)
+    .update({ finish_note: FINISH_RECEIPT_CHECKED, lease_owner: null, lease_until: null, updated_at: db.fn.now() });
+  if (!marked) throw new LeaseLost(`receipt claim on bundle ${bundle.id} was lost`);
+  return missing ? 'rebuilt' : 'present';
 }
 
 async function pruneFinished() {
@@ -662,16 +766,28 @@ async function pruneFinished() {
  * from several pods (SKIP LOCKED + lease) and safe to run late (it queries by age).
  */
 async function sweepIbCancelBundles() {
-  const summary = { recovered: 0, abandoned: 0, deferred: 0, failed: 0, reported: 0, lost: 0 };
-  for (const stale of await listUnactable()) {
-    try { await reportUnactable(stale); summary.reported += 1; } catch (err) {
-      summary.failed += 1;
-      logger.error(`[ib-cancel-bundle] could not report ${stale.id}: ${scrub(err && err.message)}`);
+  const summary = { recovered: 0, abandoned: 0, deferred: 0, failed: 0, reported: 0, lost: 0, receipts: 0 };
+  // Claimed rows keep their lease until the loops end, so one pass cannot claim the same row twice; failures are released then.
+  const release = [];
+  const reportToken = `${REPORT_PREFIX}${crypto.randomUUID()}`;
+  for (let i = 0; i < BATCH; i += 1) {
+    const stale = await claimUnactable(reportToken);
+    if (!stale) break;
+    try {
+      await reportUnactable(stale, reportToken);
+      summary.reported += 1;
+    } catch (err) {
+      if (err instanceof LeaseLost) {
+        summary.lost += 1;
+        logger.warn(`[ib-cancel-bundle] ${err.message}`);
+      } else {
+        summary.failed += 1;
+        logger.error(`[ib-cancel-bundle] could not report ${stale.id}: ${scrub(err && err.message)}`);
+        release.push(() => releaseFailed(stale, reportToken, err));
+      }
     }
   }
   const token = crypto.randomUUID();
-  // A deferred or failed row keeps its lease until the loop ends, so this pass cannot claim the same row again.
-  const release = [];
   for (let i = 0; i < BATCH; i += 1) {
     const bundle = await claimNext(token);
     if (!bundle) break;
@@ -687,6 +803,23 @@ async function sweepIbCancelBundles() {
       } else {
         summary.failed += 1;
         release.push(() => releaseFailed(bundle, token, err));
+      }
+    }
+  }
+  const receiptToken = crypto.randomUUID();
+  for (let i = 0; i < BATCH; i += 1) {
+    const done = await claimReceiptGap(receiptToken);
+    if (!done) break;
+    try {
+      if (await reconcileReceipt(done, receiptToken) === 'rebuilt') summary.receipts += 1;
+    } catch (err) {
+      if (err instanceof LeaseLost) {
+        summary.lost += 1;
+        logger.warn(`[ib-cancel-bundle] ${err.message}`);
+      } else {
+        summary.failed += 1;
+        logger.error(`[ib-cancel-bundle] could not rebuild the receipt of ${done.id}: ${scrub(err && err.message)}`);
+        release.push(() => releaseReceiptClaim(done, receiptToken));
       }
     }
   }
