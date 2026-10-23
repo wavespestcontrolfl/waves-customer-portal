@@ -74,8 +74,10 @@ const lockTechnician = (conn, technicianId) => conn.raw('SELECT pg_advisory_xact
 // treats nothing and needs no tools. A diagnostic inspection (WDO letter,
 // lawn health inspection) DOES: its checklist names the instruments, so the
 // catalog category alone never exempts a visit, only a consultation identity.
-const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link', 'consultation']);
-const CONSULTATION_NAME = /\b(assessment|consultation|walk-?through)\b/i;
+// new_customer_inspection is the first-visit walkthrough (catalog: assess
+// the property and recommend services), a consultation by another name.
+const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link', 'consultation', 'new_customer_inspection']);
+const CONSULTATION_NAME = /\b(assessment|consultation|walk-?through|new customer property inspection)\b/i;
 const isConsultation = (serviceType, serviceKey) =>
   (serviceKey ? CONSULTATION_KEYS.has(String(serviceKey).toLowerCase()) : false) || CONSULTATION_NAME.test(String(serviceType || ''));
 // Mechanical lawn work (job-card.js ADDON_PROGRAMS lawn_care.nonChemical)

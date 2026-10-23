@@ -382,6 +382,8 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Waves Assessment')).toEqual([]);
     expect(truckKit.serviceLinesFor('Property Review', { serviceKey: 'waves_assessment' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Lawn Consultation')).toEqual([]);
+    expect(truckKit.serviceLinesFor('New Customer Property Inspection', { serviceKey: 'new_customer_inspection' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('New Customer Property Inspection')).toEqual([]);
     // Catalog category "inspection" is NOT an exemption: the WDO letter needs the meter and probe.
     expect(truckKit.serviceLinesFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' })).toEqual(['termite']);
     expect(truckKit.serviceLinesFor('Lawn Health Inspection', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
