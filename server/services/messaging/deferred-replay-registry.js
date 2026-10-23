@@ -677,7 +677,19 @@ const REGISTRY = {
     },
     async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      return finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
+      const ReviewService = require('../review-request');
+      // The replay's channel: the first pass knows it; a finalize-only retry
+      // reads it from the accepted provider id (a Twilio SID = a text).
+      const channel = ReviewService.heldReportReplayChannel({ channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });
+      // A finalize-only retry carries the delivery time markScheduledSmsSent
+      // stored (sms_log.created_at); the first pass runs at delivery.
+      const deliveredAt = ctx.deliveredAt || undefined;
+      const result = await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true, channel, deliveredAt });
+      // GATE_REVIEW_ASK_AFTER_REPORT: when the held report went out as a TEXT,
+      // its review ask is re-planned to 10 minutes after it. Idempotent; never
+      // throws, never changes this finalize's outcome.
+      await ReviewService.pullAskAfterHeldReport(meta.service_record_id, { channel, deliveredAt });
+      return result;
     },
     async onTerminal(meta) {
       // Reset the record's 'deferred' status to 'failed' FIRST — the

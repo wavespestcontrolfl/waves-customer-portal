@@ -7850,6 +7850,15 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test('a row moved to a later time after the runner selected it is not sent (codex #6471 pre-push P1)', async () => {
+    const mock = book({ next_run_at: new Date(Date.now() + 9 * 60000) }); // pullAskAfterHeldReport re-planned it
+    db.mockImplementation(mock);
+    const out = await ReviewService._runSequenceStep('seq-hold');
+    expect(out).toMatchObject({ ran: false, deferred: true, reason: 'not_due' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(seqRow(mock)).toMatchObject({ current_step: 1, touches_sent: 1 });
+  });
+
   test('a held final step completes the cadence at once (never left active past its plan)', async () => {
     mockGates.reviewAskTechVoice = true;
     const mock = book({ current_step: 2, touches_sent: 2, payment_hold_step: 2, payment_hold_since: new Date(Date.now() - 4 * 86400000) });
@@ -7881,6 +7890,7 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(new Date(seqRow(mock).payment_hold_since).getTime()).toBe(since);
     // Once the first hold is three days old the step is dropped.
     seqRow(mock).payment_hold_since = new Date(Date.now() - 3 * 86400000 - 60000);
+    seqRow(mock).next_run_at = new Date(Date.now() - 1000); // the later tick: the row is due again
     const later = await ReviewService._runSequenceStep('seq-hold');
     expect(later).toMatchObject({ stepSkipped: true, reason: 'ask_dropped_payment_hold' });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
@@ -8092,6 +8102,59 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
     await ReviewService.enrollPostService({ customerId: 'ar-10', serviceType: 'Quarterly Pest Control', reportTextAnchor: { status: 'paid', at: new Date() } });
     expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(Date.now() + DELAY * MIN);
     expect(decisionOf(mock)).toMatchObject({ reason: 'after_report' });
+  });
+
+  describe('a smart-window ask waits while its own report is still queued (codex #6471 r3 P2)', () => {
+    const seqRowFor = (over = {}) => ({
+      id: 'seq-q', customer_id: 'ar-q', status: 'active', current_step: 0, touches_sent: 0, service_record_id: 'sr-q', started_by: 'post_service',
+      plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+      started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 1000),
+      decision: JSON.stringify({ reason: 'smart_window' }), ...over,
+    });
+    const bookQ = (notes, over) => makeMock({
+      ...customer('ar-q'),
+      review_sequences: [seqRowFor(over)],
+      service_records: [{ id: 'sr-q', customer_id: 'ar-q', service_type: 'Quarterly Pest Control', status: 'completed', structured_notes: notes }],
+    });
+
+    test('report still queued: no send, re-checked in 5 minutes, reason stays smart_window for the replay pull', async () => {
+      mockGates.reviewAskAfterReport = true;
+      const mock = bookQ({ completionSmsStatus: 'deferred', completionSmsDeferredTo: new Date().toISOString() });
+      db.mockImplementation(mock);
+      const out = await ReviewService._runSequenceStep('seq-q');
+      expect(out).toMatchObject({ ran: false, deferred: true, reason: 'report_queued' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const row = mock.__state.rows.review_sequences[0];
+      expect(new Date(row.next_run_at).getTime() - Date.now()).toBeGreaterThan(4 * 60000);
+      expect(JSON.parse(row.decision)).toMatchObject({ reason: 'smart_window' });
+    });
+
+    test('report delivered 3 minutes ago (the replay finalize, before its pull): held until 10 minutes after the delivery (codex #6471 pre-push P1)', async () => {
+      mockGates.reviewAskAfterReport = true;
+      const deliveredAt = new Date(Date.now() - 3 * 60000);
+      const mock = bookQ({ completionSmsStatus: 'sent', completionSmsDeferredTo: new Date(Date.now() - 3600000).toISOString(), completionSmsDeferredDeliveredAt: deliveredAt.toISOString() });
+      db.mockImplementation(mock);
+      const out = await ReviewService._runSequenceStep('seq-q');
+      expect(out).toMatchObject({ ran: false, deferred: true, reason: 'report_queued' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(new Date(mock.__state.rows.review_sequences[0].next_run_at).getTime()).toBe(deliveredAt.getTime() + 10 * 60000);
+    });
+
+    test.each([
+      ['the report went out', { completionSmsStatus: 'sent' }, {}],
+      ['the held report went to the customer App (codex #6471 r4 P2)', { completionSmsStatus: 'sent', sentSmsChannel: 'push', completionSmsDeferredDeliveredAt: new Date(Date.now() - 3 * 60000).toISOString() }, {}],
+      ['the held report went out over 10 minutes ago', { completionSmsStatus: 'sent', completionSmsDeferredDeliveredAt: new Date(Date.now() - 11 * 60000).toISOString() }, {}],
+      ['the gate is off', { completionSmsStatus: 'deferred' }, {}, false],
+      ['enrolled over 24 hours ago', { completionSmsStatus: 'deferred' }, { started_at: new Date(Date.now() - 25 * 3600000) }],
+      ['an operator timing', { completionSmsStatus: 'deferred' }, { decision: JSON.stringify({ reason: 'operator_timing' }) }],
+      ['a captured customer request on the cadence (codex #6471 r6 P2)', { completionSmsStatus: 'deferred' }, { customer_requested: JSON.stringify({ by: 'office', at: new Date().toISOString(), source: 'completion' }) }],
+    ])('%s: the ask sends as before', async (_label, notes, over, gate = true) => {
+      mockGates.reviewAskAfterReport = gate;
+      const mock = bookQ(notes, over);
+      db.mockImplementation(mock);
+      const out = await ReviewService._runSequenceStep('seq-q');
+      expect(out?.reason).not.toBe('report_queued');
+    });
   });
 
   describe('the report text decides (quiet hours, failed, blocked)', () => {
