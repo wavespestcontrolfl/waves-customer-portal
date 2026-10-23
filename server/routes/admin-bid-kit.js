@@ -225,7 +225,7 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-// The owner's sign-off on the version they looked at. Refused for an item that is missing or expired.
+// The owner's sign-off on the version they looked at. Refused (400) while the item is missing, expired or has no expiry date.
 router.post('/:id/attest', async (req, res, next) => {
   try {
     const { error, value } = attestSchema.validate(req.body || {});
@@ -234,8 +234,7 @@ router.post('/:id/attest', async (req, res, next) => {
     const outcome = await store.updateItem(req.params.id, (row) => {
       if (!sameInstant(row.updated_at, value.expected_updated_at)) return { error: { status: 409, message: CHANGED } };
       const status = catalog.itemStatus(statusRow(row), { today });
-      if (status === catalog.STATUS.MISSING) return { error: { status: 409, message: 'Add the file or value before you sign off.' } };
-      if (status === catalog.STATUS.EXPIRED) return { error: { status: 409, message: 'This item has expired. Replace it before you sign off.' } };
+      if (catalog.SIGN_OFF_REFUSAL[status]) return { error: { status: 400, message: catalog.SIGN_OFF_REFUSAL[status] } };
       return { patch: { attested_by: req.technicianId, attested_at: new Date() } };
     });
     if (outcome.notFound) return res.status(404).json({ error: 'Not found' });

@@ -174,7 +174,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
     });
 
     test('sign-off: recorded with the admin and time, cleared in the same update by an edit, a replaced file and a relink', async () => {
-      const created = await create({ item_key: 'business_license_copy', value: 'JB000000' });
+      const created = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-06-30' });
       const attested = await call('POST', `/${created.id}/attest`, { expected_updated_at: created.updated_at });
       expect(attested.status).toBe(200);
       expect(await rowOf(created.id)).toMatchObject({ attested_by: mockAdminId });
@@ -191,12 +191,21 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect(await rowOf(created.id)).toMatchObject({ attested_at: null, attested_by: null });
     });
 
-    test('a sign-off is refused for a missing and for an expired item, and the row is left alone', async () => {
+    test('a sign-off is refused for a missing item, an expired one and one with no expiry date, and the row is left alone', async () => {
       const missing = await create({ item_key: 'w9' });
-      expect((await call('POST', `/${missing.id}/attest`, { expected_updated_at: missing.updated_at })).status).toBe(409);
+      expect((await call('POST', `/${missing.id}/attest`, { expected_updated_at: missing.updated_at })).status).toBe(400);
       const old = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
-      expect((await call('POST', `/${old.id}/attest`, { expected_updated_at: old.updated_at })).status).toBe(409);
+      expect((await call('POST', `/${old.id}/attest`, { expected_updated_at: old.updated_at })).status).toBe(400);
       expect((await rowOf(old.id)).attested_at).toBeNull();
+      const undated = await create({ item_key: 'business_license_copy', value: 'JB000000' });
+      expect(undated.status).toBe('needs_expiry');
+      const refused = await call('POST', `/${undated.id}/attest`, { expected_updated_at: undated.updated_at });
+      expect(refused).toMatchObject({ status: 400, body: { error: 'Add the expiry date first.' } });
+      expect((await rowOf(undated.id)).attested_at).toBeNull();
+      // A stale version is still a 409.
+      const plan = await create({ item_key: 'ipm_plan', value: 'On file' });
+      await call('PATCH', `/${plan.id}`, { value: 'Replaced', expected_updated_at: plan.updated_at });
+      expect((await call('POST', `/${plan.id}/attest`, { expected_updated_at: plan.updated_at })).status).toBe(409);
     });
 
     test('a file replace points the row at the new private key, removes the old object and clears the sign-off', async () => {

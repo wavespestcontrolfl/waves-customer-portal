@@ -317,6 +317,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // GATE_BID_KIT (Bid kit, admin only, dark). Boot-log entry only; the call-time reader is bidKitLive().
+  bidKit: process.env.GATE_BID_KIT === 'true',
   // Admin-only fixed test pair for one explicitly configured customer; opt-in everywhere.
   editorialEvidence: gateEnvValue('GATE_EDITORIAL_EVIDENCE'),
   customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
@@ -2162,8 +2164,6 @@ const gates = {
   bidDesk: process.env.GATE_BID_DESK === 'true',
   // GATE_BID_DESK_SAM (Bid Desk SAM.gov reader, dark). Boot-log entry only; the call-time reader is bidDeskSamLive().
   bidDeskSam: process.env.GATE_BID_DESK_SAM === 'true',
-  // GATE_BID_KIT (Bid kit, admin only, dark). Boot-log entry only; the call-time reader is bidKitLive().
-  bidKit: process.env.GATE_BID_KIT === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.

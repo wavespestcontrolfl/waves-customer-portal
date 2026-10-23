@@ -65,7 +65,8 @@ async function runBidKitExpiryCheck({ now = new Date() } = {}) {
   const due = rows.filter((row) => {
     if (row.archived_at || !row.expires_on) return false;
     const status = catalog.itemStatus({ ...row, has_file: row.has_file === true }, { today });
-    return status === catalog.STATUS.EXPIRED || status === catalog.STATUS.EXPIRING;
+    // By date, not by status: an unsigned item that expires soon still needs renewing (its status reads needs sign-off).
+    return status !== catalog.STATUS.MISSING && catalog.daysBetween(today, row.expires_on) <= catalog.EXPIRING_DAYS;
   });
   let rang = 0;
   for (const item of due) {

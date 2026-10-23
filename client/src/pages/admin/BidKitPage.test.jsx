@@ -22,7 +22,8 @@ const row = (over = {}) => ({
 const ITEMS = [
   row(),
   row({ id: "i2", item_key: "cpco_certificate", label: "Certified operator certificate and current renewal", status: "expired", expires_on: "2026-09-01", source_document: null, checked_on: null }),
-  row({ id: "i3", item_key: "insurance_certificate", label: "Certificate of insurance", status: "expiring", expires_on: "2026-11-05", limits: { glEachOccurrence: 1000000, workersComp: "statutory" } }),
+  row({ id: "i3", item_key: "insurance_certificate", label: "Certificate of insurance", status: "expiring", expires_on: "2026-11-05", attested_at: "2026-10-03T15:00:00.000Z", limits: { glEachOccurrence: 1000000, workersComp: "statutory" } }),
+  row({ id: "i8", item_key: "business_tax_receipt", label: "Local business tax receipt", status: "needs_expiry", expires_on: null }),
   row({ id: "i4", item_key: "w9", label: "W-9", status: "ready", expires_on: null, attested_at: "2026-10-03T15:00:00.000Z" }),
   row({ id: "i5", kind: "reference", item_key: "reference", label: "Customer reference", file: null, status: "needs_permission", details: { entity: "Sample District", contactRole: "Facilities lead" }, expires_on: null }),
   row({ id: "i6", kind: "fact", item_key: "legal_name", label: "Legal name", file: null, value: "Example Pest Services LLC", status: "unattested", expires_on: null, source_document: null, checked_on: null }),
@@ -54,13 +55,16 @@ it("shows each item's status chip in catalog order, with the summary line and th
   renderPage();
   expect(await screen.findByText("FDACS business license copy")).toBeInTheDocument();
 
+  // Ready and expiring count together as ready; expiring soon is shown beside it.
   const { overall } = payload().summary;
-  expect(screen.getByTestId("bid-kit-summary")).toHaveTextContent(`${overall.ready} of ${overall.total} ready`);
-  expect(overall.ready).toBe(1);
+  expect(overall).toMatchObject({ ready: 2, expiring: 1, needs_expiry: 1 });
+  expect(screen.getByTestId("bid-kit-summary")).toHaveTextContent(`${overall.ready} of ${overall.total} ready · 1 expiring soon`);
+  expect(screen.getByTestId("bid-kit-summary")).toHaveTextContent("1 need an expiry date");
 
   expect(within(rowFor("FDACS business license copy")).getByText("Needs sign-off")).toBeInTheDocument();
   expect(within(rowFor("Certified operator certificate and current renewal")).getByText("Expired")).toBeInTheDocument();
   expect(within(rowFor("Certificate of insurance")).getByText("Expiring soon")).toBeInTheDocument();
+  expect(within(rowFor("Local business tax receipt")).getByText("Add expiry date")).toBeInTheDocument();
   expect(within(rowFor("W-9")).getByText("Ready")).toBeInTheDocument();
   expect(within(rowFor("Customer reference")).getByText("Needs permission")).toBeInTheDocument();
   expect(within(rowFor("IPM plan")).getByText("Missing")).toBeInTheDocument();
@@ -76,16 +80,18 @@ it("shows each item's status chip in catalog order, with the summary line and th
   expect(screen.getAllByText(/\$1,000,000/).length).toBeGreaterThan(0);
 });
 
-it("the Sign off button works only for an item that is there and not expired", async () => {
+it("the Sign off button works only for an item that is there, not expired and with an expiry date when it needs one", async () => {
   route({ "GET /admin/bid-kit/": () => reply(payload()) });
   renderPage();
   await screen.findByText("FDACS business license copy");
   const signOff = (label) => within(rowFor(label)).getByRole("button", { name: "Sign off" });
   expect(signOff("FDACS business license copy")).toBeEnabled();
-  expect(signOff("Certificate of insurance")).toBeEnabled(); // expiring soon can still be signed off
+  expect(signOff("Certificate of insurance")).toBeDisabled(); // signed off already, expiring soon
   expect(signOff("Customer reference")).toBeEnabled();
   expect(signOff("Certified operator certificate and current renewal")).toBeDisabled(); // expired
-  expect(signOff("Certified operator certificate and current renewal")).toHaveAttribute("title", "Replace the expired item first");
+  expect(signOff("Certified operator certificate and current renewal")).toHaveAttribute("title", "This item has expired. Replace it before you sign off.");
+  expect(signOff("Local business tax receipt")).toBeDisabled(); // no expiry date yet
+  expect(signOff("Local business tax receipt")).toHaveAttribute("title", "Add the expiry date first.");
   expect(signOff("W-9")).toBeDisabled(); // already signed off
   expect(signOff("IPM plan")).toBeDisabled(); // missing
   expect(within(rowFor("Notarized statement: the certified operator in charge works full-time for us")).queryByRole("button", { name: "Sign off" })).toBeNull(); // no row yet
@@ -105,7 +111,7 @@ it("Sign off posts the version the owner looked at, then reads the kit again", a
   await waitFor(() => expect(attest).toHaveBeenCalledTimes(1));
   expect(attest.mock.calls[0][0]).toMatchObject({ method: "POST", body: { expected_updated_at: "2026-10-02T12:00:00.000Z" } });
   await waitFor(() => expect(within(rowFor("FDACS business license copy")).getByText("Ready")).toBeInTheDocument());
-  expect(screen.getByTestId("bid-kit-summary")).toHaveTextContent(/2 of \d+ ready/);
+  expect(screen.getByTestId("bid-kit-summary")).toHaveTextContent(/3 of \d+ ready · 1 expiring soon/);
   expect(screen.getByText("Signed off")).toBeInTheDocument();
 });
 
@@ -220,6 +226,7 @@ it("buildEntries lays the server's items over the catalog and sends custom rows 
   const sections = buildEntries(catalogSections(), [...ITEMS, row({ id: "c1", item_key: "custom", label: "County vendor letter", status: "unattested" }), row({ id: "gone", item_key: "w9", archived_at: "2026-10-01T00:00:00Z" })]);
   expect(sections.map((section) => section.key)).toEqual(["sank_bids", "insurance", "registration_tax", "plans_company", "references", "facts", "other"]);
   expect(sections[0].entries.map((entry) => entry.status)).toEqual(["unattested", "expired", "missing", "missing", "missing"]);
+  expect(sections[2].entries.find((entry) => entry.item.key === "business_tax_receipt").status).toBe("needs_expiry");
   expect(sections.at(-1).entries[0].row.label).toBe("County vendor letter");
   expect(sections[2].entries.find((entry) => entry.item.key === "w9").row.id).toBe("i4"); // the archived w9 row is not shown
 });

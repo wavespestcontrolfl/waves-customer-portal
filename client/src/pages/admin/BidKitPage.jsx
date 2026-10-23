@@ -7,14 +7,14 @@ import {
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import { formatETDateOnly } from "../../lib/timezone";
-import { STATUS_LABEL, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, PUBLIC_OR_PRIVATE, REFERENCE_DETAIL_KEYS } from "@bid-kit-catalog";
+import { STATUS_LABEL, SIGN_OFF_REFUSAL, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, PUBLIC_OR_PRIVATE, REFERENCE_DETAIL_KEYS } from "@bid-kit-catalog";
 
 // Bid kit (GATE_BID_KIT, dark, admin only). The papers and facts every government bid asks for. Nothing here is public and
 // nothing is sent to anyone. A status comes from the server; a sign-off belongs to the version of the item you looked at,
 // and any edit to the item clears it. No AI anywhere.
 
 const STATUS_TONE = {
-  ready: "strong", missing: "alert", expired: "alert", expiring: "warn", needs_permission: "warn", unattested: "warn",
+  ready: "strong", expiring: "strong", missing: "alert", expired: "alert", needs_expiry: "warn", needs_permission: "warn", unattested: "warn",
 };
 const LIMIT_LABEL = {
   glEachOccurrence: "General liability, each occurrence", glAggregate: "General liability, aggregate", productsCompletedOps: "Products and completed operations",
@@ -283,8 +283,9 @@ function RowDetails({ row, item }) {
 function Row({ entry, busy, editing, highlighted, onEdit, onCancel, onSave, onArchive, onSignOff, onOpenFile, onUpload }) {
   const { item, row, status } = entry;
   const fileInput = useRef(null);
-  const canSign = !!row && !row.attested_at && status !== "missing" && status !== "expired";
-  const signReason = !row ? "" : row.attested_at ? "Signed off" : status === "missing" ? "Add the file or value first" : status === "expired" ? "Replace the expired item first" : "";
+  const refused = SIGN_OFF_REFUSAL[status];
+  const canSign = !!row && !row.attested_at && !refused;
+  const signReason = !row ? "" : row.attested_at ? "Signed off" : refused || "";
   return (
     <li id={row ? `bid-kit-${row.id}` : undefined} className={`rounded-sm border-hairline px-3 py-3 ${highlighted ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white"}`}>
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -423,9 +424,9 @@ export default function BidKitPage() {
             <Button size="sm" variant={view === "facts" ? "primary" : "secondary"} aria-pressed={view === "facts"} onClick={() => setView("facts")}>Facts sheet</Button>
             {overall && view === "checklist" && (
               <span className="ml-2 text-ui-body font-medium text-zinc-900" data-testid="bid-kit-summary">
-                {overall.ready} of {overall.total} ready
-                {(overall.expired > 0 || overall.expiring > 0 || overall.missing > 0) && (
-                  <span className="font-normal text-ink-secondary"> · {[overall.missing && `${overall.missing} missing`, overall.expired && `${overall.expired} expired`, overall.expiring && `${overall.expiring} expiring soon`].filter(Boolean).join(", ")}</span>
+                {overall.ready} of {overall.total} ready{overall.expiring > 0 && ` · ${overall.expiring} expiring soon`}
+                {(overall.expired > 0 || overall.missing > 0 || overall.needs_expiry > 0) && (
+                  <span className="font-normal text-ink-secondary"> · {[overall.missing && `${overall.missing} missing`, overall.expired && `${overall.expired} expired`, overall.needs_expiry && `${overall.needs_expiry} need an expiry date`].filter(Boolean).join(", ")}</span>
                 )}
               </span>
             )}

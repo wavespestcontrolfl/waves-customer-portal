@@ -112,17 +112,25 @@ const PUBLIC_OR_PRIVATE = ['public', 'private'];
 const SUBSTANTIVE_FIELDS = ['value', 'file_s3_key', 'limits', 'details', 'source_document', 'checked_on', 'expires_on', 'permission_on', 'credential_id'];
 const EXPIRING_DAYS = 30;
 
+// First match wins, in this order. "expiring" means complete and signed off, but expiring within 30 days: it is valid on a bid today.
 const STATUS = {
-  MISSING: 'missing', EXPIRED: 'expired', EXPIRING: 'expiring', NEEDS_PERMISSION: 'needs_permission', UNATTESTED: 'unattested', READY: 'ready',
+  MISSING: 'missing', EXPIRED: 'expired', NEEDS_EXPIRY: 'needs_expiry', NEEDS_PERMISSION: 'needs_permission', UNATTESTED: 'unattested', EXPIRING: 'expiring', READY: 'ready',
 };
-const STATUS_ORDER = [STATUS.MISSING, STATUS.EXPIRED, STATUS.EXPIRING, STATUS.NEEDS_PERMISSION, STATUS.UNATTESTED, STATUS.READY];
+const STATUS_ORDER = [STATUS.MISSING, STATUS.EXPIRED, STATUS.NEEDS_EXPIRY, STATUS.NEEDS_PERMISSION, STATUS.UNATTESTED, STATUS.EXPIRING, STATUS.READY];
 const STATUS_LABEL = {
-  missing: 'Missing', expired: 'Expired', expiring: 'Expiring soon', needs_permission: 'Needs permission', unattested: 'Needs sign-off', ready: 'Ready',
+  missing: 'Missing', expired: 'Expired', needs_expiry: 'Add expiry date', needs_permission: 'Needs permission', unattested: 'Needs sign-off', expiring: 'Expiring soon', ready: 'Ready',
+};
+// Statuses that refuse a sign-off, with the plain words the owner reads.
+const SIGN_OFF_REFUSAL = {
+  missing: 'Add the file or value before you sign off.',
+  expired: 'This item has expired. Replace it before you sign off.',
+  needs_expiry: 'Add the expiry date first.',
 };
 
-// Tax IDs are never stored. A hyphenated EIN (12-3456789), a hyphenated SSN (123-45-6789) or a bare run of nine digits
-// in any typed text is refused, and the message never repeats the text.
-const TAX_ID_PATTERN = /(?<!\d)(?:\d{2}-\d{7}|\d{3}-\d{2}-\d{4}|\d{9})(?!\d)/;
+// Tax IDs are never stored. Refused in any typed text: a hyphenated EIN (12-3456789), a hyphenated SSN (123-45-6789), and a
+// nine-digit run that follows a label (EIN, FEIN, TIN, SSN, "tax id", "taxpayer") by at most 12 characters. A bare nine-digit
+// number with no such label (an insurance policy number) is fine. The message never repeats the text.
+const TAX_ID_PATTERN = /(?<!\d)(?:\d{2}-\d{7}|\d{3}-\d{2}-\d{4})(?!\d)|(?:\b(?:EIN|FEIN|TIN|SSN)\b|tax\s*id|taxpayer)[\s\S]{0,12}?(?<!\d)\d{9}(?!\d)/i;
 const looksLikeTaxId = (text) => typeof text === 'string' && TAX_ID_PATTERN.test(text);
 function containsTaxId(value) {
   if (value == null) return false;
@@ -157,9 +165,10 @@ function daysBetween(from, to) {
 const present = (value) => typeof value === 'string' ? value.trim() !== '' : value != null;
 
 // The status of one row. Pure: pass `today` (an Eastern YYYY-MM-DD) or `now`.
-// First match wins, in this order: missing, expired, expiring, needs_permission, unattested, ready.
+// First match wins, in this order: missing, expired, needs_expiry, needs_permission, unattested, expiring, ready.
 // A row is "there" when it has a file or a value; a reference also counts when it names its entity, and a fact may
-// take its value from the linked credentials row (`credential_number`).
+// take its value from the linked credentials row (`credential_number`). A catalog item that expires (expires: true) and has
+// no expiry date is needs_expiry; custom rows are not held to that.
 function itemStatus(row, { today, now } = {}) {
   const day = today || etToday(now);
   const r = row || {};
@@ -168,17 +177,19 @@ function itemStatus(row, { today, now } = {}) {
   const hasEntity = r.kind === 'reference' && present(r.details && r.details.entity);
   if (!hasFile && !hasValue && !hasEntity) return STATUS.MISSING;
   const expires = dayText(r.expires_on);
-  if (expires) {
-    const left = daysBetween(day, expires);
-    if (left < 0) return STATUS.EXPIRED;
-    if (left <= EXPIRING_DAYS) return STATUS.EXPIRING;
-  }
+  const left = expires ? daysBetween(day, expires) : null;
+  if (left !== null && left < 0) return STATUS.EXPIRED;
+  const entry = ITEM_BY_KEY[r.item_key];
+  if (!expires && entry && entry.expires) return STATUS.NEEDS_EXPIRY;
   if (r.kind === 'reference' && !dayText(r.permission_on)) return STATUS.NEEDS_PERMISSION;
   if (!r.attested_at) return STATUS.UNATTESTED;
+  if (left !== null && left <= EXPIRING_DAYS) return STATUS.EXPIRING;
   return STATUS.READY;
 }
 
-const emptyCounts = () => ({ total: 0, ready: 0, missing: 0, expired: 0, expiring: 0, needs_permission: 0, unattested: 0 });
+// `ready` counts ready and expiring together (both are valid on a bid today); `expiring` is the separate "expiring soon" count
+// and is a part of `ready`, so the other statuses plus `ready` add up to `total`.
+const emptyCounts = () => ({ total: 0, ready: 0, expiring: 0, missing: 0, expired: 0, needs_expiry: 0, needs_permission: 0, unattested: 0 });
 
 // Sections in catalog order, each with its entries: a catalog item with its rows (a row's status is computed), or one
 // virtual entry (row null, status missing) when an item has no row yet. A reference item holds many rows, and its
@@ -215,6 +226,7 @@ function summarize(checklist) {
     for (const entry of section.entries) {
       counts.total += 1;
       counts[entry.status] += 1;
+      if (entry.status === STATUS.EXPIRING) counts.ready += 1;
     }
     sections[section.key] = counts;
     for (const key of Object.keys(counts)) overall[key] += counts[key];
@@ -243,7 +255,7 @@ function changesSubstance(row, patch) {
 module.exports = {
   SECTIONS, ITEMS, ITEM_BY_KEY, KINDS, CUSTOM_KEY, CUSTOM_SECTION,
   LIMIT_KEYS, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, MAX_LIMIT_DOLLARS, REFERENCE_DETAIL_KEYS, PUBLIC_OR_PRIVATE,
-  SUBSTANTIVE_FIELDS, EXPIRING_DAYS, STATUS, STATUS_ORDER, STATUS_LABEL,
+  SUBSTANTIVE_FIELDS, EXPIRING_DAYS, STATUS, STATUS_ORDER, STATUS_LABEL, SIGN_OFF_REFUSAL,
   catalogItem, catalogSections, itemStatus, buildChecklist, summarize, changesSubstance,
   looksLikeTaxId, containsTaxId, etToday, dayText, daysBetween,
 };

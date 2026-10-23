@@ -140,10 +140,10 @@ async function upload(id, { name = 'license.pdf', type = 'application/pdf', byte
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
 const create = async (over = {}) => (await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'business_license_copy', ...over })).body.item;
-// Fill a row so it can be signed off, then sign it off. Returns the signed item.
+// Fill a row (a value and, for a paper that expires, an expiry date) so it can be signed off, then sign it off.
 async function signed(over = {}) {
   const item = await create(over);
-  const withValue = (await call('PATCH', `/api/admin/bid-kit/${item.id}`, { value: 'JB000000', expected_updated_at: item.updated_at })).body.item;
+  const withValue = (await call('PATCH', `/api/admin/bid-kit/${item.id}`, { value: 'JB000000', expires_on: '2999-01-01', expected_updated_at: item.updated_at })).body.item;
   return (await call('POST', `/api/admin/bid-kit/${item.id}/attest`, { expected_updated_at: withValue.updated_at })).body.item;
 }
 
@@ -292,7 +292,7 @@ describe('create and list', () => {
   test.each([
     ['a hyphenated EIN', { value: 'EIN 12-3456789' }],
     ['an SSN', { notes: '123-45-6789' }],
-    ['nine digits', { source_document: '123456789' }],
+    ['a labelled nine-digit tax ID', { source_document: 'Tax ID: 123456789' }],
     ['a label', { label: 'W-9 for 12-3456789' }],
     ['reference details', { details: { entity: '123-45-6789' } }],
   ])('%s is refused without repeating it', async (_name, over) => {
@@ -305,6 +305,16 @@ describe('create and list', () => {
     const patch = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { value: 'EIN 12-3456789', expected_updated_at: item.updated_at });
     expect(patch.status).toBe(400);
     expect(store.rows.get(item.id).value).toBeNull();
+  });
+
+  test('a nine-digit policy number with no tax label is accepted; the same digits after a tax label are not', async () => {
+    const ok = await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'insurance_certificate', value: '123456789', source_document: 'Certificate, policy 987654321' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.item.value).toBe('123456789');
+    const bad = await call('PATCH', `/api/admin/bid-kit/${ok.body.item.id}`, { value: 'FEIN 123456789', expected_updated_at: ok.body.item.updated_at });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toMatch(/tax ID/);
+    expect(JSON.stringify(bad.body)).not.toContain('123456789');
   });
 
   test('a credential link must point at a real credential', async () => {
@@ -359,7 +369,7 @@ describe('patch', () => {
       ['limits', { limits: { glEachOccurrence: 2000000 } }],
       ['source_document', { source_document: 'Certificate dated Oct 1' }],
       ['checked_on', { checked_on: '2026-10-01' }],
-      ['expires_on', { expires_on: '2999-01-01' }],
+      ['expires_on', { expires_on: '2998-01-01' }],
       ['permission_on', { permission_on: '2026-10-03' }],
     ];
     test.each(CASES)('%s', async (_field, change) => {
@@ -409,17 +419,35 @@ describe('attest', () => {
     expect(store.activity.at(-1)).toMatchObject({ action: 'bid_kit_attested', adminUserId: ADMIN });
   });
 
-  test('it is refused for a missing item and for an expired one', async () => {
+  test('it is refused (400, in plain words) for a missing item, an expired one and one with no expiry date', async () => {
     const empty = await create({ item_key: 'w9' });
     const missing = await call('POST', `/api/admin/bid-kit/${empty.id}/attest`, { expected_updated_at: empty.updated_at });
-    expect(missing.status).toBe(409);
+    expect(missing.status).toBe(400);
     expect(missing.body.error).toMatch(/Add the file or value/);
     const old = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
     const expired = await call('POST', `/api/admin/bid-kit/${old.id}/attest`, { expected_updated_at: old.updated_at });
-    expect(expired.status).toBe(409);
+    expect(expired.status).toBe(400);
     expect(expired.body.error).toMatch(/expired/);
+    const license = await create({ item_key: 'business_license_copy', value: 'JB000000' });
+    expect(license.status).toBe('needs_expiry');
+    const noExpiry = await call('POST', `/api/admin/bid-kit/${license.id}/attest`, { expected_updated_at: license.updated_at });
+    expect(noExpiry.status).toBe(400);
+    expect(noExpiry.body.error).toBe('Add the expiry date first.');
     expect(store.rows.get(empty.id).attested_at).toBeNull();
     expect(store.rows.get(old.id).attested_at).toBeNull();
+    expect(store.rows.get(license.id).attested_at).toBeNull();
+    // With the date added, the same item can be signed off.
+    const dated = await call('PATCH', `/api/admin/bid-kit/${license.id}`, { expires_on: '2999-01-01', expected_updated_at: license.updated_at });
+    expect(dated.body.item.status).toBe('unattested');
+    expect((await call('POST', `/api/admin/bid-kit/${license.id}/attest`, { expected_updated_at: dated.body.item.updated_at })).status).toBe(200);
+  });
+
+  test('an item that does not expire needs no expiry date, and a custom item is not held to one', async () => {
+    const w9 = await create({ item_key: 'w9', value: 'On file' });
+    expect(w9.status).toBe('unattested');
+    expect((await call('POST', `/api/admin/bid-kit/${w9.id}/attest`, { expected_updated_at: w9.updated_at })).body.item.status).toBe('ready');
+    const custom = await create({ item_key: 'custom', label: 'County vendor letter', value: 'Letter 7' });
+    expect(custom.status).toBe('unattested');
   });
 
   test('it signs the version the owner looked at: a change in between makes it a 409, and the version is required', async () => {
@@ -430,12 +458,16 @@ describe('attest', () => {
     expect((await call('POST', `/api/admin/bid-kit/${item.id}/attest`, {})).status).toBe(400);
   });
 
-  test('an item that expires soon can be signed off, and stays "expiring"', async () => {
+  test('an item that expires within 30 days can be signed off; it then reads "expiring" and counts as ready, with its own count', async () => {
     const soon = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
     const item = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: soon });
+    expect(item.status).toBe('unattested');
     const res = await call('POST', `/api/admin/bid-kit/${item.id}/attest`, { expected_updated_at: item.updated_at });
     expect(res.status).toBe(200);
     expect(res.body.item.status).toBe('expiring');
+    const list = await call('GET', '/api/admin/bid-kit');
+    expect(list.body.summary.overall).toMatchObject({ ready: 1, expiring: 1 });
+    expect(list.body.summary.sections.registration_tax).toMatchObject({ ready: 1, expiring: 1 });
   });
 });
 
