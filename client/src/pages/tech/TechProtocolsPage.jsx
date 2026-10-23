@@ -299,10 +299,14 @@ function ScriptList({ scripts }) {
 // (server/models/migrations/20260401000026_service_protocols.js); older or
 // hand-entered rows may hold flat strings or { label | name } entries. Both
 // render as groups; this page used to print the seeded shape as raw JSON.
+// `required` stays unknown (undefined) when the row does not say: an older
+// flat row never told the tech an item was optional, and this page must not
+// start saying so.
 function normalizeChecklistItem(entry) {
-  if (typeof entry === 'string') return { item: entry, required: false, note: '' };
-  if (!entry || typeof entry !== 'object') return { item: String(entry ?? ''), required: false, note: '' };
-  return { item: entry.item || entry.label || entry.name || '', required: entry.required === true, note: entry.note || '' };
+  if (typeof entry === 'string') return { item: entry, required: undefined, note: '' };
+  if (!entry || typeof entry !== 'object') return { item: String(entry ?? ''), required: undefined, note: '' };
+  const required = typeof entry.required === 'boolean' ? entry.required : undefined;
+  return { item: entry.item || entry.label || entry.name || '', required, note: entry.note || '' };
 }
 
 export function checklistGroups(items) {
@@ -348,7 +352,7 @@ function EquipmentList({ checklists }) {
                 {group.items.map((item, i) => (
                   <li key={i}>
                     {item.item}
-                    {!item.required && <span style={{ color: DARK.muted }}> (optional)</span>}
+                    {item.required === false && <span style={{ color: DARK.muted }}> (optional)</span>}
                     {item.note && <div style={{ fontSize: 14, color: DARK.muted }}>{item.note}</div>}
                   </li>
                 ))}

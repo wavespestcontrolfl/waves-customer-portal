@@ -108,6 +108,19 @@ describe('assets custody', () => {
     }));
   });
 
+  it('recategorizing a tool as a vehicle clears the truck it rode on', async () => {
+    mountAssets();
+    await screen.findByText(TOOL.name);
+    fireEvent.click(within(cardOf(TOOL.name)).getByRole('button', { name: 'Edit' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    expect(dialog.getByLabelText('Truck')).toHaveValue('v1');
+    fireEvent.change(dialog.getByLabelText('Category'), { target: { value: 'vehicle' } });
+    expect(dialog.queryByLabelText('Truck')).not.toBeInTheDocument();
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0]).toEqual(expect.objectContaining({ category: 'vehicle', assigned_vehicle_id: null }));
+  });
+
   it('a vehicle row is never offered a truck and tool is a category', async () => {
     mountAssets();
     await screen.findByText(TRUCK.name);

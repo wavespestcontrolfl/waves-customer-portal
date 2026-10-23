@@ -596,11 +596,15 @@ function EquipmentEditModal({
     value: l,
     label: l
   }))];
+  // A row that becomes a vehicle stops riding on a truck: the Truck picker
+  // hides, so its stale value must not ride along on save.
+  const setField = (key, value) => onChange({
+    ...e,
+    [key]: value,
+    ...(key === "category" && value === "vehicle" ? { assigned_vehicle_id: null } : {})
+  });
   const field = (key, label, type = "text", opts = null) => <Field label={label} className="min-w-0">
-      {opts ? <Select value={e[key] ?? ""} onChange={ev => onChange({
-      ...e,
-      [key]: ev.target.value
-    })} disabled={saving}>
+      {opts ? <Select value={e[key] ?? ""} onChange={ev => setField(key, ev.target.value)} disabled={saving}>
           {opts.map(o => <option key={o} value={o}>
               {o}
             </option>)}

@@ -425,8 +425,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/equipment-systems/:id/calibrations` | admin-equipment-systems |
 | PUT | `/api/admin/equipment-systems/calibrations/:id` | admin-equipment-systems |
 | POST | `/api/admin/equipment-systems/calibrations/:id/verify` | admin-equipment-systems |
-| POST | `/api/admin/equipment/equipment` | admin-equipment |
-| PUT | `/api/admin/equipment/equipment/:id` | admin-equipment |
 | POST | `/api/admin/equipment/equipment/:id/calibration` | admin-equipment |
 | POST | `/api/admin/equipment/equipment/:id/maintenance` | admin-equipment |
 | POST | `/api/admin/equipment/tank-mixes/:id/recalculate` | admin-equipment |
