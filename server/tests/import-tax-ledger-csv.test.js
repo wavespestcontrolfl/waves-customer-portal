@@ -1100,6 +1100,24 @@ describe('what the portal already holds', () => {
     await expect(run({ file, db, dryRun: true })).resolves.toMatchObject({ counts: { read: 2 } });
   });
 
+  test('a rerun that corrects a review row to a business row the loader would park (no category for its line) carries manualLink onto the held row, so no matching pass links it by itself', async () => {
+    const mystery = (over) => row({ description: 'MYSTERY CHARGE 77', amount: '19.99', ...over });
+    const other = (over) => row({ description: 'OTHER CHARGE 78', amount: '5.00', ...over });
+    const file = fixture(mystery({ class: 'review', category: 'Unknown merchant', sched_c_line: '' }), other({ class: 'review', category: 'Unknown merchant', sched_c_line: '' }));
+    const db = makeFakeDb();
+    await run({ file, db });
+    const stored = (d) => db.tables().bank_transactions.find(b => b.description.startsWith(d));
+    expect(stored('MYSTERY').suggestion.manualLink).toBeUndefined();
+    // line 16b has no category here (mapRow parks it); line 25 maps to Utilities, which this portal lacks (the loader parks it)
+    fs.writeFileSync(file, csv(mystery({ class: 'expense', category: 'Mortgage interest', sched_c_line: '16b' }), other({ class: 'expense', category: 'Utilities', sched_c_line: '25' })));
+    expect((await run({ file, db })).counts).toMatchObject({ held: 2, inserted: 0 });
+    for (const [d, line] of [['MYSTERY', '16b'], ['OTHER', '25']]) {
+      const merged = JSON.parse(stored(d).suggestion.bindings[0]);
+      expect(merged).toMatchObject({ manualLink: true, review: true, ledgerClass: 'expense', schedCLine: line });
+      expect(merged.note).toMatch(/^the ledger file now reads this row as expense/);
+    }
+  });
+
   test('a rerun that changes an open credit between review and refund keeps the refund flag Bank Import keys on in step with the new reading; a settled row is left as decided', async () => {
     const credit = (over) => row({ description: 'ACME SUPPLY CREDIT', amount: '12.50', direction: 'in', sched_c_line: '', ...over });
     const file = fixture(credit({ class: 'review', category: 'Check this' }));

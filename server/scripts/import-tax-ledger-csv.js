@@ -747,7 +747,7 @@ function reconcileRows(mapped, rows, portal) {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
       const reason = reloadReason(prior, m);
-      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, status: prior.status, portalNote: reason.portalNote, conflict: reason.conflict, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion), reading: readingKeys(m.bank.suggestion), category: m.expense ? ledgerCategory(m, categoryIds) : {}, refund: !!(m.bank.suggestion && m.bank.suggestion.refundCredit) });
+      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, status: prior.status, portalNote: reason.portalNote, conflict: reason.conflict, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion), reading: readingKeys(m.bank.suggestion), category: m.expense ? ledgerCategory(m, categoryIds) : {}, refund: !!(m.bank.suggestion && m.bank.suggestion.refundCredit), manualLink: !!(m.bank.suggestion && m.bank.suggestion.manualLink) || !!(m.expense && !categoryIds.has(m.categoryName)) });
       else duplicates += 1;
       return;
     }
@@ -776,6 +776,11 @@ async function noteHeldRows(db, held) {
     // keeps its own, see reloadReason); the conflict record only for a
     // reading that changed
     const patch = { ...h.reading, ...h.category, review: true };
+    // a reading the loader would have parked for the owner (a business row
+    // with no category for its line, or none in the portal; a Stripe fee)
+    // keeps the matcher off it: manualLink rides along, so no pass links a
+    // candidate on its own
+    if (h.manualLink) patch.manualLink = true;
     if (h.portalNote) patch.note = h.portalNote;
     if (h.conflict) patch.ledgerConflict = { at: new Date().toISOString(), loadedAs: h.loadedAs, fileSays: h.fileSays, line: h.line };
     // The refund flag Bank Import's refund flow keys on follows the file's
