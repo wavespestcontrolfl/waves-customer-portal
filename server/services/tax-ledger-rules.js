@@ -259,9 +259,9 @@ async function loadRules(conn = db) {
 // Suggestion-only pass over open rows, in pages, oldest first.
 // - Only rows the matcher has examined: a rule never pre-empts the search
 //   for an expense or payout that already explains the row.
-// - A row the owner decided (suggestion.decision: an Income shelf row) is
-//   never read, and the UPDATE predicate repeats the check so a decision
-//   made during the pass wins.
+// - A row the owner decided (suggestion.decision: a row on the Income or
+//   the Later shelf) is never read, and the UPDATE predicate repeats the
+//   check so a decision made during the pass wins.
 // - Every row a full pass examines gets a rulesAt stamp, matched or not, so
 //   a pass never re-reads the same unmatched rows and newer rows always get
 //   their turn. force re-examines stamped rows too (after a rule changed);
@@ -412,8 +412,10 @@ async function decide({ id, decision, categoryId = null, always = false }) {
   let write;
   let action;
   if (decision === 'later') {
+    // a shelf is a decision: the rule passes skip decided rows, so a later
+    // income rule cannot put the row on both shelves
     action = 'later';
-    write = { suggestion: bankImport.suggestionMerge({ later: true }, ['income', 'decision', 'decidedAt']), updated_at: now };
+    write = { suggestion: bankImport.suggestionMerge({ later: true, decision, decidedAt: now.toISOString() }, ['income']), updated_at: now };
   } else if (decision === 'income') {
     // Stays an open row, on the Income shelf: nothing counts it as revenue
     // yet, and hiding it would understate sales. Dropping the matcher's

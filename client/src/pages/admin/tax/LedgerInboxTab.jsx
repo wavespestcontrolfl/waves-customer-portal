@@ -61,6 +61,13 @@ function fmtAmount(r) {
 function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
   const sug = row.suggestion || null;
   const [categoryId, setCategoryId] = useState(sug?.categoryId || "");
+  const [touched, setTouched] = useState(false);
+  const suggestedCategoryId = sug?.categoryId || "";
+  // a rule pass can refresh the suggestion under a mounted row: an untouched
+  // selection follows it, a selection the owner made stays
+  useEffect(() => {
+    if (!touched) setCategoryId(suggestedCategoryId);
+  }, [suggestedCategoryId, touched]);
   const [always, setAlways] = useState(false);
   const off = busy;
   const chipText = sug
@@ -89,7 +96,7 @@ function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
           style={{ ...s.input, flex: "1 1 160px" }}
           value={categoryId}
           disabled={off}
-          onChange={(e) => setCategoryId(e.target.value)}
+          onChange={(e) => { setTouched(true); setCategoryId(e.target.value); }}
         >
           <option value="">Choose category…</option>
           {categories.map((c) => (

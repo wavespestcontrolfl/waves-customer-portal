@@ -267,16 +267,18 @@ describe('applyRules (suggestion-only)', () => {
       { id: 'b6', txn_date: '2026-01-07', description: 'COSTCO GAS #4', suggestion: { noMatch: true, income: true, decision: 'income', decidedAt: '2026-01-08T00:00:00Z' } },
       // not examined by the matcher yet: the SQL excludes it; the loop guards too
       { id: 'b0', txn_date: '2026-01-08', description: 'COSTCO GAS #5', suggestion: null },
+      // on the Later shelf (a decision): an income rule must not pull it onto the Income shelf too
+      { id: 'bL', txn_date: '2026-01-09', description: 'ZELLE MONEY RECEIVED FROM ACME', direction: 'credit', suggestion: { noMatch: true, later: true, decision: 'later' } },
     ];
   });
 
   test('merges a suggestion on each matching open row after clearing the old classification, stamps every examined row, never touches status, skips a matcher-flagged transfer, counts hits', async () => {
     const out = await svc.applyRules({ limit: 500 });
-    expect(out).toEqual({ examined: 8, suggested: 3, cleared: 0, byKind: { expense: 2, income: 1 }, more: false, cursor: null });
+    expect(out).toEqual({ examined: 9, suggested: 3, cleared: 0, byKind: { expense: 2, income: 1 }, more: false, cursor: null });
     expect(selects()[0].whereRaw).toHaveBeenCalledWith("(suggestion -> 'decision') is null");
     expect(selects()[0].whereRaw).toHaveBeenCalledWith(svc.MATCHER_EXAMINED_SQL);
     expect(state.updates).toHaveLength(6);
-    expect(state.updates.map((u) => u.wheres[0].id)).toEqual(expect.not.arrayContaining(['b6', 'b0']));
+    expect(state.updates.map((u) => u.wheres[0].id)).toEqual(expect.not.arrayContaining(['b6', 'b0', 'bL']));
     const stamps = new Set();
     for (const u of state.updates) {
       expect(u.patch.status).toBeUndefined();
@@ -305,7 +307,7 @@ describe('applyRules (suggestion-only)', () => {
     state.updates = []; state.ruleUpdates = []; mockDb.mockClear();
     const out = await svc.applyRules({ force: true, pattern: 'acme' });
     expect(selects()[0].whereRaw).not.toHaveBeenCalledWith(expect.stringContaining("(suggestion -> 'rulesAt') is null"));
-    expect(out).toEqual({ examined: 8, suggested: 1, cleared: 0, byKind: { income: 1 }, more: false, cursor: null });
+    expect(out).toEqual({ examined: 9, suggested: 1, cleared: 0, byKind: { income: 1 }, more: false, cursor: null });
     expect(state.updates).toHaveLength(1);
     expect(state.updates[0].wheres[0]).toEqual({ id: 'b2', status: 'unmatched' });
     expect(state.updates[0].patch.suggestion.removed).toEqual(svc.CLASSIFICATION_KEYS);
@@ -415,11 +417,12 @@ describe('decide', () => {
     expect(state.inserted).toHaveLength(0);
   });
 
-  test('later only flags the suggestion and clears an income shelf; the row stays open', async () => {
+  test('later is a decision: it shelves the row (rule passes skip decided rows) and clears an income shelf; the row stays open', async () => {
     state.bankRow = open();
     expect(await svc.decide({ id: 'b1', decision: 'later' })).toEqual({ success: true, action: 'later', ruleCreated: false, propagated: true });
     expect(state.updates).toHaveLength(1);
-    expect(state.updates[0].patch).toEqual({ suggestion: { merged: { later: true }, removed: ['income', 'decision', 'decidedAt'] }, updated_at: expect.any(Date) });
+    expect(state.updates[0].patch).toEqual({ suggestion: { merged: { later: true, decision: 'later', decidedAt: expect.any(String) }, removed: ['income'] }, updated_at: expect.any(Date) });
+    expect(state.updates[0].patch.status).toBeUndefined();
     expect(state.updates[0].wheres).toEqual([{ id: 'b1', status: 'unmatched' }, svc.DECIDABLE_SQL]);
   });
 

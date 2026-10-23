@@ -191,3 +191,28 @@ it('a shelf view does not offer its own shelf again: no Later button in the Late
   expect(within(incomeCard).queryByRole('button', { name: 'Income' })).not.toBeInTheDocument();
   expect(within(incomeCard).getByRole('button', { name: 'Later' })).toBeInTheDocument();
 });
+
+it('after Apply rules now, an untouched category selection follows the refreshed suggestion; an edited one stays', async () => {
+  let inboxLoads = 0;
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/inbox')) {
+      inboxLoads += 1;
+      const refreshed = inboxLoads >= 2;
+      return json({ rows: [
+        { ...row, suggestion: { ...row.suggestion, categoryId: refreshed ? 'cat-1' : 'cat-2' } },
+        { ...row, id: 'row-2', description: 'OTHER PAYEE', suggestion: { ...row.suggestion, categoryId: refreshed ? 'cat-1' : 'cat-2' } },
+      ], total: 2 });
+    }
+    if (u.includes('/ledger/rules/apply')) return json({ success: true, examined: 2, suggested: 2, cleared: 0, more: false, cursor: null });
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  const edited = await screen.findByTestId('ledger-row-row-2');
+  fireEvent.change(within(edited).getByLabelText('Category'), { target: { value: 'cat-1' } });
+  fireEvent.change(within(edited).getByLabelText('Category'), { target: { value: 'cat-2' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply rules now' }));
+  await waitFor(() => expect(within(screen.getByTestId('ledger-row-row-1')).getByLabelText('Category')).toHaveValue('cat-1'));
+  expect(within(screen.getByTestId('ledger-row-row-2')).getByLabelText('Category')).toHaveValue('cat-2');
+});
