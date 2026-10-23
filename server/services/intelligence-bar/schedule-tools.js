@@ -9,6 +9,7 @@ const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-
  */
 
 const db = require('../../models/db');
+const { ibTargetRulesV2Live } = require('../../config/feature-gates');
 const logger = require('../logger');
 const { assertAssignableTechnician, applyAssignable } = require('../technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
@@ -790,6 +791,44 @@ async function optimizeTechRoute(input) {
 }
 
 
+// Approved-snapshot drift checks for assign_technician (the pre-lock compare and the
+// locked re-read), kept as named predicates. Each compares one stop against what the
+// operator approved.
+//
+// The owner binds too when the approved snapshot carries it (GATE_IB_TARGET_RULES_V2
+// puts customer_id on each previewed stop): a stop re-pointed to another customer
+// between preview and commit is drift (Codex #6369 r16).
+const stopOwnerChanged = (approved, customerId) => approved?.customer_id !== undefined
+  && String(approved.customer_id) !== String(customerId || '');
+
+const approvedStopMap = (stops) => new Map((stops || []).map((s) => [String(s.id), s]));
+
+const approvedDateStr = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
+
+// Pre-lock compare. Date binds too (GH r9 P1): a stop moved to another day after the
+// confirm re-preview would otherwise pass the tech compare, and the transaction would
+// lock/validate the NEW day rather than the approved one. Grouped membership binds
+// (GH r14 P1): a stop that joined, left, or switched grouped visits after the card was
+// shown gets seam effects (visit adoption/detach) the card never disclosed.
+function assignStopDrifted(approved, stop) {
+  return !approved
+    || String(approved.current_tech || 'Unassigned') !== String(stop.current_tech_name || 'Unassigned')
+    || approvedDateStr(approved.scheduled_date) !== stop.scheduled_date_str
+    || String(approved.grouped_visit_id || '') !== String(stop.visit_id || '')
+    || stopOwnerChanged(approved, stop.customer_id);
+}
+
+// Compare on the locked rows the UPDATE itself will touch: the pre-lock read chose the
+// lock keys, so any drift between it and the locked rows means the fence may not cover
+// the real source day.
+function assignLockedRowDrifted(approved, locked, stop) {
+  return !locked
+    || String(locked.technician_id || '') !== String(stop.current_tech_id || '')
+    || locked.scheduled_date_str !== stop.scheduled_date_str
+    || String(locked.visit_id || '') !== String(stop.visit_id || '')
+    || stopOwnerChanged(approved, locked.customer_id);
+}
+
 async function assignTechnician(input, actionContext = {}) {
   const { service_ids: rawServiceIds, technician_name: techName, confirmed } = input;
   let serviceIds = rawServiceIds;
@@ -804,6 +843,7 @@ async function assignTechnician(input, actionContext = {}) {
       'scheduled_services.id',
       'scheduled_services.status',
       'customers.first_name', 'customers.last_name',
+      'scheduled_services.customer_id',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
       // The window rides the assignment notice's snapshot (Codex r4 P2): a
@@ -853,6 +893,10 @@ async function assignTechnician(input, actionContext = {}) {
     scheduled_date: s.scheduled_date,
     current_tech: s.current_tech_name || 'Unassigned',
     ...(s.visit_id ? { grouped_visit_id: String(s.visit_id) } : {}),
+    // GATE_IB_TARGET_RULES_V2: the stop's owner by id, so owner-direct can tell a named
+    // customer from a same-name one. Only while the gate is on (off = preview unchanged);
+    // the executor's drift check reads id, tech, date and visit only.
+    ...(ibTargetRulesV2Live() && s.customer_id ? { customer_id: String(s.customer_id) } : {}),
   }));
 
   if (confirmed !== true) {
@@ -890,26 +934,10 @@ async function assignTechnician(input, actionContext = {}) {
   // — otherwise a reassignment made during the pending window is silently
   // overwritten by a card that named the OLD assignments (GH r8 P1).
   const approvedStops = Array.isArray(input._verified_stops) ? input._verified_stops : null;
-  const approvedDateStr = (v) => (v instanceof Date
-    ? v.toISOString().slice(0, 10)
-    : (v ? String(v).slice(0, 10) : null));
+  const approvedById = approvedStopMap(approvedStops);
   if (approvedStops) {
-    const approvedById = new Map(approvedStops.map((s) => [String(s.id), s]));
     const drifted = approvedStops.length !== services.length
-      || services.some((s) => {
-        const a = approvedById.get(String(s.id));
-        // Date binds too (GH r9 P1): a stop moved to another day after the
-        // confirm re-preview would otherwise pass the tech compare, and the
-        // transaction would lock/validate the NEW day rather than the
-        // approved one.
-        return !a
-          || String(a.current_tech || 'Unassigned') !== String(s.current_tech_name || 'Unassigned')
-          || approvedDateStr(a.scheduled_date) !== s.scheduled_date_str
-          // Grouped membership binds too (GH r14 P1): a stop that joined,
-          // left, or switched grouped visits after the card was shown gets
-          // seam effects (visit adoption/detach) the card never disclosed.
-          || String(a.grouped_visit_id || '') !== String(s.visit_id || '');
-      });
+      || services.some((s) => assignStopDrifted(approvedById.get(String(s.id)), s));
     if (drifted) {
       return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
     }
@@ -949,19 +977,11 @@ async function assignTechnician(input, actionContext = {}) {
     const live = await trx('scheduled_services')
       .whereIn('id', serviceIds)
       .forUpdate()
-      .select('id', 'status', 'technician_id', 'visit_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"));
+      .select('id', 'status', 'technician_id', 'visit_id', 'customer_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"));
     const liveById = new Map(live.map((r) => [String(r.id), r]));
     if (approvedStops) {
       const changed = live.length !== services.length
-        || services.some((s) => {
-          const l = liveById.get(String(s.id));
-          return !l
-            || String(l.technician_id || '') !== String(s.current_tech_id || '')
-            || l.scheduled_date_str !== s.scheduled_date_str
-            // Same grouped-membership bind as the pre-lock compare (GH r14
-            // P1) — asserted on the rows the UPDATE itself will touch.
-            || String(l.visit_id || '') !== String(s.visit_id || '');
-        });
+        || services.some((s) => assignLockedRowDrifted(approvedById.get(String(s.id)), liveById.get(String(s.id)), s));
       if (changed) {
         const err = new Error('assign_set_changed');
         err.previewChanged = true;

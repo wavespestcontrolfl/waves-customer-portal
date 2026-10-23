@@ -3,6 +3,8 @@
  */
 const db = require('../../models/db');
 const { normalizeEmail } = require('../../utils/contact-normalize');
+const { ibTargetRulesV2Live } = require('../../config/feature-gates');
+const { MAX_LABEL_CHARS, isChoiceLabelShape } = require('./choice-tools');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'phone', 'updated_at', 'deleted_at'];
@@ -92,12 +94,32 @@ const withoutContacts = clause => clause.replace(CONTACT_LITERAL_RE, ' ');
 const setQuantified = prompt => SET_QUANTIFIER_RE.test(normalizeName(withoutContacts(targetClause(prompt))));
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|stop|visit|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
 const CUSTOMER_LOOKUP_LIMIT = 10;
+// GATE_IB_TARGET_RULES_V2 (owner 2026-10-20): a same-name lookup lists up to 25
+// rows. The fetch asks for one more than it lists, so exactly 25 rows are
+// complete and a 26th marks the lookup as capped. Read at call time; off = 10.
+const CUSTOMER_LOOKUP_LISTED_V2 = 25;
+// The 25-row lookup, choice labels and last-visit reads apply to the owner-direct
+// scope only (owner login + GATE_IB_OWNER_DIRECT + the v2 gate); the route passes
+// `ownerDirectScope` to resolve(). Every other admin keeps 10 rows (Codex #6369 r10).
+const targetRulesV2Scope = scope => scope === true && ibTargetRulesV2Live();
+const customerLookupLimit = (scope = true) => (targetRulesV2Scope(scope) ? CUSTOMER_LOOKUP_LISTED_V2 + 1 : CUSTOMER_LOOKUP_LIMIT);
+
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9, r17): in the owner-direct scope every typed-target
+// parse (names, cities, phones, emails, the "First L., City" reply) reads only the first
+// characters of the message: resolve() cuts the prompt once, and typedCustomerIds cuts it again
+// for direct callers. A multi-megabyte prompt cannot make the parse materialize every match; the
+// owner's target is named at the start of a request. Other admins, and owner-direct off, read
+// the whole message as before.
+const TYPED_TARGET_SCAN_CHARS = 4000;
+const boundedPrompt = prompt => String(prompt ?? '').slice(0, TYPED_TARGET_SCAN_CHARS);
 
 function targetClause(prompt, retainRecordConstraints = false) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select a recipient/account.
   let clause = String(prompt).split(/[:;\n“”"]|\bwith\s+(?:(?:the|a|this|following)\s+)*(?:text|body|message|content|notes?|instructions|comments)\b|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing|containing|with|reading)\b|\b(?:saying|regarding|about)\b/i)[0];
-  for (const replacement of clause.matchAll(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/gi)) {
+  // A replacement value is data for every contact phrasing: "phone to", "phone number to", "cell to",
+  // "mobile number to", "number to", "email address to" (Codex #6369 r21).
+  for (const replacement of clause.matchAll(/\b(?:name|address|email(?:\s+address)?|phone(?:\s+number)?|mobile(?:\s+(?:phone|number))?|cell(?:\s+(?:phone|number))?|number|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/gi)) {
     const action = [...clause.slice(0, replacement.index).matchAll(new RegExp(`\\b(?:${PERSON_ACTIONS}|change|set|rename|relabel|add|save|draft|write|post|submit)\\b`, 'gi'))].at(-1)?.[0];
     if (/^(?:change|update|set|rename|relabel|add|save)$/i.test(action || '')) {
       clause = clause.slice(0, replacement.index);
@@ -128,7 +150,8 @@ function explicitSingleNames(prompt, filterWords = null) {
   const otherEvidence = new Set([
     ...references.filter(m => !FOR_SELECTOR_RE.test(m[1])).map(m => m[2]),
     ...[...clause.matchAll(/\b([\p{L}-]+)[’']s\b/giu)].map(m => normalizeName(m[1])),
-    ...(normalized.match(/^([\p{L}'-]+)\s+(?:needs|wants|has|is|should|would|asked)\b/u)?.slice(1, 2) || []),
+    // The leading subject, one or two words: "Jhon needs", "Jhon Smith needs" (Codex #6369 r35).
+    ...(normalized.match(/^([\p{L}'-]+)(?:\s+([\p{L}'-]+))?\s+(?:needs|wants|has|is|should|would|asked)\b/u)?.slice(1, 3).filter(Boolean) || []),
   ]);
   return [...new Set([...references.map(m => m[2]), ...otherEvidence])]
     .filter(word => !NON_PERSON_NAMES.has(word) && !dated.has(word) && !(filterWords?.has(word) && !otherEvidence.has(word)));
@@ -222,7 +245,8 @@ function namesTargetCustomer(clause, customer) {
   return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE}|(?:${READ_SELECTOR_SOURCE})(?:\\s+me)?(?:\\s+(?:${READ_OBJECT_WORDS}))*(?:\\s+(?:with|from|of|to|between))?)$`).test(before);
 }
 
-async function namedCustomers(prompt) {
+async function namedCustomers(prompt, ownerDirectScope = false) {
+  const lookupLimit = customerLookupLimit(ownerDirectScope);
   const normalized = normalizeName(withoutContacts(targetClause(prompt)));
   const words = normalized.split(' ').slice(0, 300);
   const phrases = [];
@@ -238,13 +262,13 @@ async function namedCustomers(prompt) {
   // against the same row before task scope narrows it (Codex r5 P2).
   const columns = ['id', 'first_name', 'last_name', 'phone', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
-    .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
+    .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(lookupLimit).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));
-  const capped = matches.length === CUSTOMER_LOOKUP_LIMIT;
+  const capped = matches.length === lookupLimit;
   const singleLookup = !fullNames.length && singleNames.length && !capped;
   const singles = singleLookup ? await db('customers').whereNull('deleted_at').where(function () {
     this.whereIn(normalizedStoredName('first_name'), singleNames).orWhereIn(normalizedStoredName('last_name'), singleNames);
-  }).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
+  }).limit(lookupLimit).select(columns) : [];
   const accepted = singleLookup ? singles : fullNames;
   // Name evidence that only partly resolved — a customer accepted while some
   // person reference in the request matches nobody, as in "update Jhon Smith
@@ -294,7 +318,7 @@ async function namedCustomers(prompt) {
     ? new Set(singles.flatMap(customer => singleNames.filter(name => [normalizeName(customer.first_name), normalizeName(customer.last_name)].includes(name))))
     : new Set(fullNames.map(customer => normalizeName(`${customer.first_name || ''} ${customer.last_name || ''}`)));
   // Either shape is evidence that can never yield one target: refuse it whole.
-  return { matches: accepted, complete: !capped && singles.length < CUSTOMER_LOOKUP_LIMIT, multiple: partial || stated.size > 1 };
+  return { matches: accepted, complete: !capped && singles.length < lookupLimit, multiple: partial || stated.size > 1 };
 }
 
 // Callers supply only the fixed customer/lead/estimate column expressions below.
@@ -380,66 +404,674 @@ async function loadPage(pageData, prompt) {
   return page;
 }
 
-function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort, nameHint) {
+function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort, nameHint, onScreenPick = null) {
   if (!complete || cohort) return { target: null, targets: [], ambiguous: true };
   if (candidates.length === 1) return { target: candidates[0], targets: candidates, ambiguous: false };
+  // GATE_IB_TARGET_RULES_V2: the owner is viewing one of several same-name customers
+  // and typed that name: the validated on-screen customer is the target, no choices
+  // (Codex #6369 r13). Not a pick when the viewed customer is not among the matches.
+  if (onScreenPick && candidates.some(candidate => candidate.customer_id === onScreenPick.customer_id)) {
+    return { target: onScreenPick, targets: [onScreenPick], ambiguous: false };
+  }
   if (candidates.length > 1) return { target: null, targets: [], ambiguous: true };
   const pageReference = PAGE_REFERENCE_RE.test(targetClause(prompt));
   const target = !nameHint && pageReference ? viewedCustomer : null;
   return { target: target || null, targets: target ? [target] : [], ambiguous: false };
 }
 
-async function resolve({ prompt, pageData, selectedTarget }) {
+// GATE_IB_TARGET_RULES_V2 (owner 2026-10-20). The last visit date of each
+// listed customer, so the model can tell same-name rows apart and offer them as
+// buttons. One grouped read; a failed read leaves the date blank, never fails
+// the request.
+async function withLastVisit(candidates) {
+  if (!candidates.length) return candidates;
+  let dates = new Map();
+  try {
+    // A visit is a completed service record (an office-handoff 'incomplete' row is not; Codex #6369 r2).
+    const rows = await db('service_records').whereIn('customer_id', candidates.map(c => c.customer_id)).where('status', 'completed').groupBy('customer_id')
+      .select('customer_id', db.raw('MAX(service_date) AS last_visit'));
+    dates = new Map(rows.map(row => [String(row.customer_id), row.last_visit]));
+  } catch {
+    // blank dates
+  }
+  const day = value => (value instanceof Date ? value.toISOString().slice(0, 10) : value ? String(value).slice(0, 10) : null);
+  return candidates.map(c => ({ ...c, last_visit: day(dates.get(String(c.customer_id))) }));
+}
+
+// The customers THIS message names: a name the operator typed, or a phone or
+// email they typed. GATE_IB_TARGET_RULES_V2 asks it of an owner-direct edit:
+// the customer the model found by itself (a call log, a search) is not in this
+// list, so that edit keeps its card. A name shared by several customers names
+// none of them, unless a city or phone/email in the message narrows it to one.
+const MAX_CONTACT_LITERALS = 5;
+
+// A city disambiguates only in explicit syntax right after the typed name:
+// "<name> in <City>", "<name> of <City>" or "<name>, <City>". Any other mention of a
+// city word (a technician or a zone later in the message) grounds nobody, and neither
+// does a word that is part of the name itself (Codex #6369 r8, r10). `marked` is the
+// normalized clause with each comma turned into COMMA_TOKEN, so the comma syntax survives
+// normalization.
+const COMMA_TOKEN = 'qqcomma';
+// The text right after this customer's typed name, or null when the name is not typed.
+// `marked` is the normalized clause with commas turned into COMMA_TOKEN.
+function nameTail(customer, marked) {
+  const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
+  const hay = ` ${marked} `;
+  const phrase = [`${first} ${last}`.trim(), first, last].find(name => name && hay.includes(` ${name} `));
+  return phrase ? hay.slice(hay.indexOf(` ${phrase} `) + phrase.length + 2) : null;
+}
+
+// Words that may follow a city in a request ("... in Venice notes", "... in Venice and ..."). A city
+// counts as typed only as a WHOLE phrase: "in Palm Beach Gardens" is not "Palm Beach" (Codex #6369 r23).
+const CITY_FOLLOW_WORDS = new Set(['and', 'then', 'to', 'for', 'as', 'with', 'so', 'please', 'notes', 'note', 'phone', 'email', 'address', 'number', 'now', 'today', 'tomorrow', 'instead']);
+function cityIsTyped(customer, marked) {
+  const tail = nameTail(customer, marked);
+  const city = normalizeName(customer.city);
+  if (!tail || !city) return false;
+  return ['in', 'of', COMMA_TOKEN].some((lead) => {
+    if (!tail.startsWith(`${lead} ${city} `)) return false;
+    const next = tail.slice(`${lead} ${city} `.length).split(' ')[0];
+    return !next || CITY_FOLLOW_WORDS.has(next);
+  });
+}
+
+// ONE place-qualifier test, used for a name and for a contact alike (Codex #6369 r26). A place
+// phrase is a lead word (in / of / at / from / near / around / by / outside / off / on, or a
+// comma) followed by a word that could be a place. Not a place: a determiner, a command word, a
+// time, a weekday, a month, a number ("at 3pm", "on Tuesday", "in the morning", "from now on"),
+// or the typed customer's own name ("notes on Pat Example"). It counts ANYWHERE in the message,
+// and a qualifier that resolves to nobody ("in Tampa") is still a qualifier (r15).
+const PLACE_LEADS = new Set(['in', 'of', 'at', 'from', 'near', 'around', 'by', 'outside', 'off', 'on', COMMA_TOKEN]);
+const NOT_A_PLACE = new Set([
+  'the', 'a', 'an', 'my', 'our', 'this', 'that', 'his', 'her', 'their', 'its', 'your', 'these', 'those', 'to', 'and', 'please',
+  'now', 'once', 'least', 'most', 'all', 'any', 'each', 'every', 'some', 'no', 'time', 'night', 'noon', 'midnight', 'tonight',
+  'today', 'tomorrow', 'yesterday', 'am', 'pm', 'file', 'hold', 'record', 'account', 'screen', 'page', 'list', 'schedule',
+  'route', 'calendar', 'invoice', 'estimate', 'qqname',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'sun',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+]);
+const couldBeAPlace = word => Boolean(word) && /^\p{L}/u.test(word) && !NOT_A_PLACE.has(word) && !PLACE_LEADS.has(word) && !COMMAND_WORD_RE.test(word);
+
+function placeQualifierPresent(clause, customers = []) {
+  let text = ` ${normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `))} `;
+  for (const customer of customers) {
+    for (const name of [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)]) {
+      if (name) text = text.split(` ${name} `).join(' qqname ');
+    }
+  }
+  const words = text.trim().split(' ');
+  return words.some((word, i) => PLACE_LEADS.has(word) && couldBeAPlace(words[i + 1]));
+}
+
+function qualifierTyped(prompt, named) {
+  const clause = targetClause(prompt);
+  return [...clause.matchAll(CONTACT_LITERAL_RE)].length > 0 || placeQualifierPresent(clause, named);
+}
+
+// The distinct phones and emails a clause types, as lookup literals. Collection stops
+// at MAX_CONTACT_LITERALS + 1: the caller only needs to know the budget is exceeded
+// (Codex #6369 r9), so a clause stuffed with literals is never fully materialized.
+function contactLiteralsOf(clause) {
+  const found = new Map();
+  for (const match of clause.matchAll(CONTACT_LITERAL_RE)) {
+    const email = match[0].includes('@');
+    const value = email ? normalizeEmail(match[0]) : match[0].replace(/\D/g, '').slice(-10);
+    if (value && (email || value.length === 10)) found.set(`${email ? 'e' : 'p'}${value}`, email ? { email: value } : { phone: value });
+    if (found.size > MAX_CONTACT_LITERALS) break;
+  }
+  return [...found.values()];
+}
+
+const tenDigits = value => String(value || '').replace(/\D/g, '').slice(-10);
+
+// The ids a typed name (and, narrowed, a typed city) picks out. Fail closed: a name lookup
+// that hit its limit has rows we never saw, so the rows we did see cannot show that a name
+// or a city picks out one customer. Incomplete name evidence names nobody.
+function nameGroundedIds(namedResult, normalized, marked) {
+  const ids = new Set();
+  if (namedResult.complete === false) return ids;
+  const groups = new Map();
+  for (const customer of namedResult.matches || []) {
+    const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
+    // Rows found by a bare first or last name share one group: the name alone cannot tell them apart.
+    const full = `${first} ${last}`.trim();
+    const key = full.includes(' ') && ` ${normalized} `.includes(` ${full} `) ? full : '*bare name';
+    groups.set(key, [...(groups.get(key) || []), customer]);
+  }
+  for (const group of groups.values()) {
+    const only = group.length === 1 ? group : group.filter(customer => cityIsTyped(customer, marked));
+    if (only.length === 1) ids.add(String(only[0].id));
+  }
+  return ids;
+}
+
+// One lookup per literal, bounded at two rows: a second row proves the phone or email is
+// shared, so it names neither account. No combined limit can hide a duplicate behind other
+// literals' rows.
+async function contactRows(literal) {
+  const rows = await db('customers').whereNull('deleted_at').where(function () {
+    if (literal.phone) this.whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [literal.phone]);
+    else this.whereRaw("lower(coalesce(email, '')) = ?", [literal.email]);
+  }).limit(2).select('id', 'phone', 'email', 'first_name', 'last_name');
+  return rows.filter(row => (literal.phone ? tenDigits(row.phone) === literal.phone : normalizeEmail(row.email) === literal.email));
+}
+
+// The customers the typed contacts name (a literal that names nobody or several names none).
+async function resolveContacts(literals) {
+  const owners = new Map();
+  for (const literal of literals) {
+    const found = await contactRows(literal);
+    if (found.length === 1) owners.set(String(found[0].id), found[0]);
+  }
+  return owners;
+}
+
+// The customers THIS message points at, for PICKING a target (the clarification, the card): a
+// typed name, a city after it, a phone or email, a "First L., City" reply. It grants no direct
+// authority: that comes only from directGroundedIds below (Codex #6369 r23).
+async function typedCustomerIds(fullPrompt, namedResult) {
+  const prompt = boundedPrompt(fullPrompt);
+  const clause = targetClause(prompt);
+  const normalized = normalizeName(withoutContacts(clause));
+  const marked = normalizeName(withoutContacts(clause).replace(/,/g, ` ${COMMA_TOKEN} `));
+  const ids = nameGroundedIds(namedResult, normalized, marked);
+  // Work budget (Codex #6369 security P2): a message that types more than MAX_CONTACT_LITERALS
+  // phones or emails runs no contact lookup at all.
+  const literals = contactLiteralsOf(clause);
+  const owners = literals.length > MAX_CONTACT_LITERALS ? new Map() : await resolveContacts(literals);
+  for (const id of owners.keys()) ids.add(id);
+  for (const id of await initialFormIds(prompt)) ids.add(id);
+  return [...ids];
+}
+
+// Does the message carry ANY qualifier beside the name: a phone, an email, a record id, a
+// "First L., City" reply, or city syntax after the name?
+function qualifierPresent(bounded, clause, customer) {
+  return contactLiteralsOf(clause).length > 0 || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded)
+    || placeQualifierPresent(clause, [customer]);
+}
+const RECORD_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+// COMPOUND requests: more than one action verb ANYWHERE in the message, whatever separates them
+// ("and", "then", "also", a semicolon, a comma, a newline). targetClause cuts everything from a
+// replacement field or a separator on, so a later operation's target is invisible to it; a
+// compound request grants no direct authority, typed or on-screen (Codex #6369 pre-push audits, r26).
+// Verbs inside a replacement value or a note body are data and are not counted: the value after
+// "<field> to", a quoted text, or the text after a colon runs up to the next separator that is
+// followed by an action verb ("... notes to gate code 5 and change Sam's phone").
+// The supported action vocabulary (PERSON_ACTIONS and the add / remove / assign family). Words that are
+// just as often nouns (email, text, call, contact, schedule, invoice...) count as verbs only when they
+// start an operation: at the start of the message or right after a separator, "and", "then", "also",
+// "please" or "to" ("update the contact" has no second operation; "also text Sam" has).
+const STRONG_VERBS = ['update', 'change', 'set', 'edit', 'fix', 'add', 'remove', 'move', 'reschedule', 'assign', 'cancel', 'book', 'mark', 'put', 'replace', 'swap', 'switch', 'delete', 'clear',
+  'rename', 'relabel', 'merge', 'archive', 'restore', 'reactivate', 'pause', 'refund', 'notify', 'remind', 'forward', 'resend', 'reply', 'respond', 'send', 'make', 'revise', 'save', 'draft', 'write', 'post', 'submit'];
+const NOUNISH_VERBS = ['email', 'text', 'sms', 'message', 'reminder', 'contact', 'quote', 'schedule', 'call', 'charge', 'invoice', 'credit'];
+const ACTION_VERBS = new Set([...STRONG_VERBS, ...NOUNISH_VERBS]);
+const STRONG_VERB_SET = new Set(STRONG_VERBS);
+// "fixed", "updating", "removing", "changes": an inflected verb of the set is still that verb.
+function verbForm(word, verbs = ACTION_VERBS) {
+  if (verbs.has(word)) return true;
+  const stem = word.replace(/(?:ing|ed|es|s|d)$/, '');
+  return stem !== word && (verbs.has(stem) || verbs.has(`${stem}e`) || verbs.has(stem.replace(/(.)\1$/, '$1')));
+}
+const OPERATION_STARTS = new Set(['qqsep', 'and', 'then', 'also', 'please', 'to']);
+const VALUE_START_RE = /\b(?:lead\s+source|source|stage|tier|name|address|email(?:\s+address)?|phone(?:\s+number)?|mobile(?:\s+(?:phone|number))?|cell(?:\s+(?:phone|number))?|number|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+|:/i;
+// A value ends at a separator followed by an action verb in ANY inflection ("and removing ..."),
+// the same verbForm the compound count uses (Codex #6369 r40).
+const VALUE_SEPARATOR_RE = /(?:[;\n,]|\b(?:and|then|also)\b)\s*(?:(?:please|also|then)\s+)*([\p{L}]+)/giu;
+function valueEnd(tail) {
+  for (const match of tail.matchAll(VALUE_SEPARATOR_RE)) {
+    if (verbForm(match[1].toLowerCase())) return match.index + match[0].length - match[1].length;
+  }
+  return -1;
+}
+
+// strict (the no-card check, Codex #6369 r41): a value ends at its FIRST separator, so a second
+// clause with no verb ("..., Sam Sample's notes to blank") is still read.
+// Allow-list, not a list of separators (r43, after "," r41, ". & + /" r42, "—" r43): the value ends at the first
+// character that is not a letter, digit, space or an in-value mark (' . - @ #), at a spaced hyphen, at a
+// (parentheses end it too, r44: a phone's "(941)" is removed later as a contact)
+// sentence break, or at and/then/also. A period inside a phone or email does not end it.
+// A small word that can introduce the record a value is for ("phone to 941-555-0100 for Alice Example")
+// ends it too, so that target is read (r46).
+const VALUE_FIRST_SEPARATOR_RE = /[^\p{L}\p{N}\s'’.\-@#]|\s-\s|[.!?](?:\s|$)|\b(?:and|then|also|for|of|on|at|with|by|from|in|to|under|about|regarding)\b/iu;
+function withoutValues(text, strict = false) {
+  let rest = text.replace(/“[^”]*”|"[^"]*"/g, ' ');
+  let kept = '';
+  for (let i = 0; i < 50 && rest; i++) {
+    const start = VALUE_START_RE.exec(rest);
+    if (!start) break;
+    kept += `${rest.slice(0, start.index)} `;
+    const tail = rest.slice(start.index + start[0].length);
+    const end = strict ? tail.search(VALUE_FIRST_SEPARATOR_RE) : valueEnd(tail);
+    rest = end < 0 ? '' : tail.slice(end);
+  }
+  return kept + rest;
+}
+
+// Each typed customer's own name is stripped first ("Mark Smith" is not the verb "mark"), but only the
+// ONE span that names them: the first full-name occurrence, else the first first-name or last-name
+// occurrence. A later "mark" is still a verb (Codex #6369 r34).
+function isCompound(bounded, customers = []) {
+  let text = ` ${normalizeName(withoutValues(bounded).replace(/[;,\n]/g, ' qqsep '))} `;
+  for (const customer of customers) {
+    const name = [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)]
+      .find(candidate => candidate && text.includes(` ${candidate} `));
+    if (name) text = text.replace(` ${name} `, ' qqname ');
+  }
+  const words = ['qqsep', ...text.trim().split(' ')];
+  // An inflected strong verb ("removing", "updated") is an operation too (Codex #6369 r39).
+  return words.filter((word, i) => verbForm(word, STRONG_VERB_SET) || (NOUNISH_VERBS.includes(word) && OPERATION_STARTS.has(words[i - 1]))).length > 1;
+}
+
+// DIRECT (no-card) authority from typed evidence, in two simple cases only (Codex #6369 r23,
+// owner ruling 2026-10-22):
+//  1. exactly one typed FULL name that resolves to exactly one customer, and nothing else in the
+//     message that could be a qualifier;
+//  2. no name at all and exactly one contact literal (one phone or one email) that resolves to
+//     exactly one customer, with no city, record id or second contact.
+// Any other qualifier (a city, phone, email, record id or second name beside a name, two
+// contacts, a name that resolves to nobody or to several customers, a set quantifier) grants
+// nothing, so the write is carded. Qualifiers still help PICK a target (typedCustomerIds).
+// targetClause stops at a colon, semicolon, newline or quote, so the text after one is never read for
+// identity. Direct authority is therefore refused when the message has such a cut anywhere other than
+// a field's own colon ("notes: ..."): "941-555-0100: update Jhon Smith's notes" is carded (Codex #6369 r34).
+// A quoted value right after a field's value start ("notes to \"...\"", "notes: \"...\"") is data, not a cut.
+const FIELD_WORDS = ['name', 'address', 'email', 'phone', 'number', 'label', 'notes?', 'instructions', 'message', 'contact', 'comments?', 'text', 'body'].join('|');
+const FIELD_QUOTED_VALUE_RE = new RegExp(`(\\b(?:${FIELD_WORDS})\\s*(?:(?:to|as|is|=)\\s+|:\\s*))(?:“[^”]*”|"[^"]*")`, 'gi');
+const FIELD_COLON_RE = new RegExp(`\\b(?:${FIELD_WORDS})\\s*:`, 'gi');
+const hasUnreadTail = (bounded) => {
+  const text = bounded.replace(FIELD_QUOTED_VALUE_RE, '$1 ');
+  return /[;\n“”"]/.test(text) || /:/.test(text.replace(FIELD_COLON_RE, ' '));
+};
+
+async function directGroundedIds(fullPrompt, namedResult, cohort, nameHint) {
+  const bounded = boundedPrompt(fullPrompt);
+  const clause = targetClause(bounded);
+  const [customer, ...others] = namedResult.matches || [];
+  if (hasUnreadTail(bounded)) return [];
+  if (cohort || namedResult.complete === false || namedResult.multiple || isCompound(bounded, namedResult.matches)) return [];
+  if (!customer) return contactOnlyGroundedIds(bounded, clause, nameHint);
+  const full = fullNameKey(customer);
+  const typedFull = !others.length && full.includes(' ') && ` ${normalizeName(withoutContacts(clause))} `.includes(` ${full} `);
+  // Every other word must be a known request word (r39): "reschedule Alice Example and Bob Sample" is carded.
+  return typedFull && !qualifierPresent(bounded, clause, customer) && !unknownLeadingSubject(bounded, customer) && !unknownWordsIn(bounded, customer) ? [String(customer.id)] : [];
+}
+
+// The second simple case: one contact literal, no typed name (a name that was requested but
+// resolved to nobody is a typed name), and that contact names exactly one customer.
+// Owner ruling 2026-10-22: a contact goes direct only with "no name or other qualifier". So every
+// word beside the contact must be a known word (an action verb, a field or record word, filler or a
+// small preposition); any other word may be a name in a form the name grammar misses ("Pat2
+// Missing") and the request is carded (Codex #6369 r37: allow-list for the whole clause).
+const CONTACT_CLAUSE_WORDS = new Set(['on', 'for', 'of', 'with', 'at', 'by', 'from', 'in', 'system', 'portal', 'app', 'whose', 'who', 'owner', 'owns', 'belongs', 'belonging', 'person', 'one']);
+const WEEKDAY_OR_TIME_RE = /^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:day)?s?$|^(?:morning|afternoon|evening|tonight|week|month|am|pm|noon)$|^\d{1,2}(?::?\d{2})?(?:am|pm)?$/;
+// Common words of an edit request that never name a customer.
+const REQUEST_WORDS = new Set(['as', 'it', 'its', 'new', 'old', 'done', 'complete', 'completed', 'paid', 'won', 'lost', 'last', 'week', 'up', 'out', 'off', 'into', 'onto', 'about', 'there', 'here', 'right', 'away', 'again', 'too', 'only', 'same', 'other', 'wrong', 'correct', 'bad', 'good', 'missing', 'empty', 'blank']);
+const RECORD_ID_WORDS_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const knownRequestWord = word => verbForm(word) || NON_PERSON_NAMES.has(word) || SUBJECT_FILLER.has(word) || SUBJECT_END.has(word)
+  || SUBJECT_PRONOUNS.has(word) || CONTACT_CLAUSE_WORDS.has(word) || REQUEST_WORDS.has(word) || WEEKDAY_OR_TIME_RE.test(word) || /^\d{1,4}(?:st|nd|rd|th)?$/.test(word);
+// A five-digit number may be a ZIP code: place evidence, so it is NOT a known word (Codex #6369 r42).
+
+// THE one check for every no-card path (Codex #6369 r39, after r33-r38 each found one more name form):
+// strip field values, quotes, contacts and record ids, and the ONE span that names `customer` (the
+// typed or on-screen customer the authority is for). Any word left that is not a known request word,
+// or any possessive of a word that is not a record word or the customer's own name, may be a name the
+// grammar misses ("Pat2 Missing", "... and Bob Sample", "Will's"), and the request is carded.
+function unknownWordsIn(bounded, customer = null) {
+  const own = customer ? [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)].filter(Boolean) : [];
+  const raw = withoutContacts(withoutValues(bounded, true).replace(RECORD_ID_WORDS_RE, ' '));
+  const ownParts = new Set(own.flatMap(name => name.split(' ')));
+  if (possessiveNamesSomeone(raw, ownParts)) return true;
+  let text = ` ${normalizeName(raw)} `;
+  const span = own.find(name => text.includes(` ${name} `));
+  if (span) text = text.replace(` ${span} `, ' ');
+  return text.trim().split(' ').filter(Boolean).some(word => !knownRequestWord(word));
+}
+
+// A reference to the on-screen customer ("this customer", "his notes") beside a contact names two
+// customers, so the contact is not used alone (Codex #6369 r44).
+const PAGE_REFERENCE_WORDS = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'his', 'her', 'their', 'him', 'them']);
+const pageReferencePresent = bounded => normalizeName(withoutContacts(withoutValues(bounded, true))).split(' ').some(word => PAGE_REFERENCE_WORDS.has(word));
+
+async function contactOnlyGroundedIds(bounded, clause, nameHint) {
+  const literals = contactLiteralsOf(clause);
+  if (pageReferencePresent(bounded)) return [];
+  // An unknown leading subject is a typed name too (pre-push audit, r36), and so is any unknown word (r37).
+  if (literals.length !== 1 || nameHint || unknownLeadingSubject(bounded) || unknownWordsIn(bounded) || RECORD_ID_RE.test(clause) || INITIAL_FORM_RE.test(bounded) || placeQualifierPresent(clause)) return [];
+  const owners = await resolveContacts(literals);
+  return owners.size === 1 ? [...owners.keys()] : [];
+}
+
+// A choice button the bar offers when "Full Name, City" is over the 40 characters a button
+// holds: "First L., City" (first name, last initial, city). The reply is the whole message.
+// It names a customer only when exactly one customer fits all three parts.
+const INITIAL_FORM_RE = /^\s*([\p{L}'-]+)\s+([\p{L}])\.\s*,\s*([\p{L}][\p{L} .'-]*?)\s*$/u;
+// Customers that fit one "First L., City" reply, at most two (a second row proves the
+// label is shared). Normalized first name, last-name initial and city. One predicate for
+// both directions: initialFormIds resolves a tapped label with it and choiceLabels
+// offers a short label only when it passes it.
+async function initialFormRows(first, initial, city) {
+  return db('customers').whereNull('deleted_at')
+    .whereRaw('? = ?', [normalizedStoredName('first_name'), first])
+    .whereRaw('? LIKE ?', [normalizedStoredName('last_name'), `${initial}%`])
+    .whereRaw('? = ?', [normalizedStoredName('city'), city])
+    .limit(2).select('id');
+}
+
+// The same predicate as initialFormRows for many (first name, last initial, city)
+// triples in ONE query: per triple, how many customers fit and (for a count of one)
+// which. Used by choiceLabels to vet up to 25 short labels at once.
+async function initialFormMatches(triples) {
+  const result = await db.raw(
+    `SELECT t.first, t.initial, t.city, count(*)::int AS n, min(c.id::text) AS id
+     FROM unnest(?::text[], ?::text[], ?::text[]) AS t(first, initial, city)
+     JOIN customers c ON c.deleted_at IS NULL AND ? = t.first AND ? LIKE t.initial || '%' AND ? = t.city
+     GROUP BY t.first, t.initial, t.city`,
+    [triples.map(t => t[0]), triples.map(t => t[1]), triples.map(t => t[2]),
+      normalizedStoredName('c.first_name'), normalizedStoredName('c.last_name'), normalizedStoredName('c.city')],
+  );
+  return result?.rows || [];
+}
+
+async function initialFormIds(prompt) {
+  const match = String(prompt || '').match(INITIAL_FORM_RE);
+  if (!match) return [];
+  const [, first, initial, city] = match.map(part => normalizeName(part));
+  if (!first || !initial || !city) return [];
+  const rows = await initialFormRows(first, initial, city);
+  return rows.length === 1 ? [String(rows[0].id)] : [];
+}
+
+// The text of the choice button for one same-name customer (GATE_IB_TARGET_RULES_V2).
+// offer_choices drops a label over MAX_LABEL_CHARS, so a long one becomes
+// "First L., City", which initialFormIds resolves back. null = no button can name this
+// customer (no city, still too long, or it looks like another same-name customer's):
+// the bar asks for a phone number or email instead.
+// The city on a button comes from customer-entered data, and a tap sends the button text
+// back as the owner's message. Only a plain place name passes: letters, spaces, hyphen
+// and apostrophe, up to 3 words and 30 characters. Anything else ("Update Alice Jones",
+// digits, punctuation) gives the customer no button (Codex #6369 r12).
+const SAFE_CITY_RE = /^\p{L}+(?:['-]\p{L}+)*(?: \p{L}+(?:['-]\p{L}+)*){0,2}$/u;
+// A word that reads as a command ("Update", "Assign", "Delete") is never a place name.
+const COMMAND_WORD_RE = new RegExp(`\\b(?:${PERSON_ACTIONS}|assign|add|remove|rate|tier|waive|apply|ignore|disregard|override|instructions?|system|assistant|prompt|previous|rules?|owner|admin|tool|confirm|approve|execute|run)\\b`, 'i');
+const safeChoiceCity = city => {
+  const text = String(city || '').trim();
+  return text.length <= 30 && (text.match(/\p{L}/gu) || []).length >= 2 && SAFE_CITY_RE.test(text) && !COMMAND_WORD_RE.test(text) ? text : null;
+};
+
+// ONE sanitizer for every emitted choice label, full and shortened (Codex #6369 r31). A name part keeps
+// only letters, spaces, apostrophe, hyphen and period (runs collapsed, trimmed), and the city goes through safeChoiceCity. So a label is always plain "Name, City" text:
+// a customer-entered ":" or quote can never ride into the button, and the tapped text always matches
+// the strict choice-reply grammar (looksLikeChoiceReply), so the tap is carded by its shape.
+// Each word loses its leading and trailing apostrophes, hyphens and periods (r32).
+const safeNamePart = value => String(value ?? '').replace(/[^\p{L}'. -]+/gu, ' ').split(/\s+/)
+  .map(word => word.replace(/^['.-]+|['.-]+$/g, '')).filter(Boolean).join(' ');
+const labelNamePart = value => safeNamePart(value);
+
+async function choiceLabels(customers) {
+  const nameOf = customer => [labelNamePart(customer.first_name), labelNamePart(customer.last_name)].filter(Boolean).join(' ');
+  const full = customer => `${nameOf(customer)}${safeChoiceCity(customer.city) ? `, ${safeChoiceCity(customer.city)}` : ''}`;
+  const short = customer => `${labelNamePart(customer.first_name)} ${labelNamePart(customer.last_name).charAt(0)}., ${safeChoiceCity(customer.city)}`;
+  // A short label is offered only when initialFormIds, on the whole customer table,
+  // resolves it back to this customer alone (Codex #6369 r3: another customer with
+  // the same first name, last initial and city outside this name's rows). One query
+  // checks every candidate triple at once (Codex #6369 r7), never one scan per row.
+  const tripleOf = customer => [labelNamePart(customer.first_name), labelNamePart(customer.last_name).charAt(0), safeChoiceCity(customer.city)].map(part => normalizeName(part));
+  const wantsShort = customer => customer.city && customer.last_name && !/\s/.test(labelNamePart(customer.first_name))
+    && full(customer).length > MAX_LABEL_CHARS && short(customer).length <= MAX_LABEL_CHARS && INITIAL_FORM_RE.test(short(customer))
+    && tripleOf(customer).every(Boolean);
+  const tripleKey = triple => triple.join('\u0000');
+  const triples = [...new Map(customers.filter(wantsShort).map(customer => [tripleKey(tripleOf(customer)), tripleOf(customer)])).values()];
+  const owners = new Map();
+  if (triples.length) {
+    const found = await initialFormMatches(triples);
+    for (const row of found) owners.set(tripleKey([row.first, row.initial, row.city]), row);
+  }
+  // Every candidate label, full or short, must pass the one reply-shape predicate; one that does not
+  // gets no button (the row stays listed as text) - Codex #6369 r32.
+  // A button is emitted only when its label round-trips (Codex #6369 r33): each sanitized name part
+  // normalizes to the stored part, so the tapped name resolves back to this customer. A name the
+  // sanitizer changed ("Pat2" -> "Pat", a leading apostrophe, nothing left) gets no button.
+  const roundTrips = customer => [customer.first_name, customer.last_name].every(part => normalizeName(labelNamePart(part)) === normalizeName(part));
+  const labels = customers.map((customer) => {
+    if (!safeChoiceCity(customer.city) || !roundTrips(customer)) return null;
+    const whole = full(customer);
+    if (whole.length <= MAX_LABEL_CHARS) return isChoiceLabelShape(whole) ? whole : null;
+    if (!wantsShort(customer)) return null;
+    const owner = owners.get(tripleKey(tripleOf(customer)));
+    const label = owner && Number(owner.n) === 1 && String(owner.id) === String(customer.id) ? short(customer) : null;
+    return isChoiceLabelShape(label) ? label : null;
+  });
+  // A label that two customers share (same city and name, or the same first name,
+  // last initial and city) cannot pick one of them.
+  // The count covers every row by its STORED name and city, also the rows that got no button, so a
+  // tap resolves to this customer alone within the candidate set.
+  const key = label => normalizeName(label);
+  const wouldBe = customers.filter(customer => safeChoiceCity(customer.city))
+    .map(customer => key(`${[customer.first_name, customer.last_name].filter(Boolean).join(' ')}, ${safeChoiceCity(customer.city)}`));
+  return labels.map(label => (label && labels.filter(other => other && key(other) === key(label)).length === 1
+    && wouldBe.filter(other => other === key(label)).length <= 1 ? label : null));
+}
+
+// The one customer a capped name's typed phone or email resolved to, or null (a PICK for the
+// card; it grants no authority). The typed name must name that customer too.
+async function contactResolvedCustomer(typedIds, prompt) {
+  const customer = typedIds?.length === 1 ? await customerById(typedIds[0]) : null;
+  return customer && namesTargetCustomer(normalizeName(withoutContacts(targetClause(prompt))), customer) ? customer : null;
+}
+
+// Owner-direct scope only: same-name rows carry a button label and a last visit.
+// Outside the scope the candidates are returned as they are.
+async function labelledCandidates(scope, candidates, named) {
+  if (!scope || candidates.length < 2) return candidates;
+  const labels = await choiceLabels(named);
+  return (await withLastVisit(candidates)).map((candidate, index) => ({ ...candidate, choice_label: labels[index] }));
+}
+
+// Typed identity evidence that FAILED takes the on-screen customer's direct authority too (Codex
+// #6369 r26). Page grounding stands when the message names nobody, or names exactly the page
+// customer (one name resolving to the page customer, no contact, no place phrase, one operation).
+// A name that resolves nowhere or elsewhere, a contact, or a place phrase blocks it.
+// Every explicit record id in the message must be one the validated page context already holds
+// (Codex #6369 r29): the page customer keeps direct authority only if each id typed is one of
+// page.ids (customer, visit, invoice, estimate, property...). An id that is foreign, unresolved,
+// ownerless (a product id) or not on the page fails. Exact match: no owner lookup, no database call.
+const RECORD_ID_GLOBAL_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+function recordIdsAreOnPage(bounded, page) {
+  const onPage = new Set([...Object.values(page?.ids || {}).flat(), page?.customer?.customer_id].filter(Boolean).map(id => String(id).toLowerCase()));
+  return [...bounded.matchAll(RECORD_ID_GLOBAL_RE)].every(match => onPage.has(match[0].toLowerCase()));
+}
+
+// The words a request may open with before its verb without naming anyone: polite and filler words,
+// record nouns, and the NON_PERSON_NAMES vocabulary. Every other leading word is treated as a
+// possible name, so the page customer keeps direct authority only when the subject is plainly
+// "this customer", "the account", "his phone"... (Codex #6369 r36: allow-list, not one more name pattern).
+const SUBJECT_RECORD_WORDS = new Set(['account', 'profile', 'record', 'file', 'card', 'property', 'appointment', 'visit', 'service', 'invoice', 'estimate', 'number', 'cell', 'mobile', 'info', 'information', 'contact', 'gate', 'code']);
+const SUBJECT_FILLER = new Set(['please', 'can', 'could', 'would', 'will', 'you', 'hey', 'ok', 'okay', 'now', 'also', 'then', 'and', 'so', 'just', 'go', 'ahead', 'i', 'we', 'lets', 'let', 'us', 'to', 's', ...SUBJECT_RECORD_WORDS]);
+const SUBJECT_END = new Set(['needs', 'need', 'wants', 'want', 'has', 'have', 'is', 'are', 'should', 'would', 'asked', 'asks', 'must', 'got', 'gets']);
+// The words that may own a possession or be the subject of "needs/has/is" without naming anyone.
+// A filler word in that place is a name ("Will's account", "Will needs ..."): Codex #6369 r38.
+const SUBJECT_PRONOUNS = new Set(['i', 'we', 'you', 'he', 'she', 'they', 'it']);
+const plainSubjectWord = word => NON_PERSON_NAMES.has(word) || SUBJECT_RECORD_WORDS.has(word) || SUBJECT_PRONOUNS.has(word);
+// normalizeName drops "'s", so possession is read from the raw text.
+const possessiveNamesSomeone = (text, ownParts = new Set()) => [...String(text).matchAll(/([\p{L}\p{N}-]+)[’']s\b/gu)]
+  .some((match) => {
+    const word = normalizeName(match[1]);
+    return !plainSubjectWord(word) && !ownParts.has(word);
+  });
+// `customer`: the typed customer the authority is for; their own name span stands for "this customer".
+function unknownLeadingSubject(bounded, customer = null) {
+  const clause = withoutContacts(targetClause(bounded));
+  const own = customer ? [fullNameKey(customer), normalizeName(customer.first_name), normalizeName(customer.last_name)].filter(Boolean) : [];
+  if (possessiveNamesSomeone(clause, new Set(own.flatMap(name => name.split(' '))))) return true;
+  let text = ` ${normalizeName(clause)} `;
+  const span = own.find(name => text.includes(` ${name} `));
+  if (span) text = text.replace(` ${span} `, ' customer ');
+  const words = text.trim().split(' ').filter(Boolean);
+  for (const [i, word] of words.entries()) {
+    if (SUBJECT_END.has(word)) return i > 0 && !plainSubjectWord(words[i - 1]);
+    if (ACTION_VERBS.has(word)) return false;
+    if (!NON_PERSON_NAMES.has(word) && !SUBJECT_FILLER.has(word)) return true;
+  }
+  return false;
+}
+
+// Shapes that take the page's authority whatever the message names: a compound request (pre-push
+// audit, r27), a record id not on the page (r29), text after a cut that is never read for identity (r34).
+function pageAuthorityShapeBlocked(bounded, matches, page) {
+  return isCompound(bounded, matches) || !recordIdsAreOnPage(bounded, page) || hasUnreadTail(bounded);
+}
+
+// Whether the message carries identity evidence about a customer: a requested name, a leading word
+// outside the allow-list (r36), a contact, a place, or a name that resolved even when namesRequested
+// missed its form ("Alice Jones needs notes cleared", r34).
+function pageIdentityEvidence(bounded, nameHint, matches, contacts, place) {
+  return nameHint || unknownLeadingSubject(bounded) || unknownWordsIn(bounded) || contacts || place || matches.length > 0;
+}
+
+function pageGroundingBlocked(fullPrompt, namedResult, cohort, nameHint, page) {
+  const pageCustomerId = page?.customer?.customer_id || page?.ids?.customer_id;
+  const bounded = boundedPrompt(fullPrompt);
+  // Record ids hold phone-like digit runs; the ids are judged by recordIdsAreOnPage, not as contacts.
+  const clause = targetClause(bounded).replace(RECORD_ID_GLOBAL_RE, ' ');
+  const matches = namedResult.matches || [];
+  const contacts = contactLiteralsOf(clause).length > 0;
+  const place = placeQualifierPresent(clause, matches);
+  if (pageAuthorityShapeBlocked(bounded, matches, page)) return true;
+  if (!pageIdentityEvidence(bounded, nameHint, matches, contacts, place)) return false;
+  // With evidence, only the exact page customer, named alone, keeps the page.
+  const exact = !cohort && namedResult.complete !== false && !namedResult.multiple && matches.length === 1
+    && String(matches[0].id) === String(pageCustomerId) && !contacts && !place && !unknownWordsIn(bounded, matches[0]);
+  return !exact;
+}
+
+// Owner-direct scope only: the customers this message points at (typedCustomerIds, for picking) and
+// the one it names in the simplest case (groundedCustomerIds, the only direct authority).
+// typedIds is null outside the scope and `typed` is then empty.
+async function typedTarget(scope, prompt, namedResult, cohort, nameHint, page, truncated = false) {
+  if (!scope) return { typedIds: null, typed: {} };
+  const typedIds = await typedCustomerIds(prompt, namedResult);
+  // A request longer than the scan budget is only partly read, but the model sees all of it: fail
+  // closed, no typed and no page direct authority (pre-push audit, r27).
+  const blocked = truncated || pageGroundingBlocked(prompt, namedResult, cohort, nameHint, page);
+  const grounded = truncated ? [] : await directGroundedIds(prompt, namedResult, cohort, nameHint);
+  return { typedIds, typed: { typedCustomerIds: typedIds, groundedCustomerIds: grounded, ...(blocked ? { pageGroundingBlocked: true } : {}) } };
+}
+
+// resolve() is a short pipeline. `r` is the shared state; each stage owns one
+// concern and returns either a finished result (the pipeline stops) or null (the
+// next stage runs). The last stage always returns the context.
+async function resolveBase({ prompt: fullPrompt, pageData, selectedTarget, ownerDirectScope = false }) {
+  const prompt = targetRulesV2Scope(ownerDirectScope) ? boundedPrompt(fullPrompt) : fullPrompt;
   // Object(null) is {} — an absent or null selection reads as no customer id.
   // Candidate ids come from PostgreSQL in lowercase; a selection may not.
   const selectedId = String(Object(selectedTarget).customer_id || '').toLowerCase() || null;
-  const [page, namedResult, filterWords] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt), verifiedFilterWords(prompt)]);
-  const named = namedResult.matches;
-  const nameHint = namesRequested(prompt, filterWords);
-  // A stale page hint cannot block an unrelated task or an explicitly named
-  // customer. A request relying on the unavailable viewed record still stops.
-  if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
-  const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
+  const [page, namedResult, filterWords] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt, ownerDirectScope), verifiedFilterWords(prompt)]);
+  return { prompt, ownerDirectScope, selectedId, page, namedResult, named: namedResult.matches, nameHint: namesRequested(prompt, filterWords),
+    truncated: prompt.length < String(fullPrompt).length };
+}
+
+const singleTarget = (customer, provenance) => {
+  const target = customerTarget(customer, provenance);
+  return { target, targets: [target], ambiguous: false };
+};
+
+// A stale page hint cannot block an unrelated task or an explicitly named
+// customer. A request relying on the unavailable viewed record still stops.
+const pageErrorStage = r => (r.page.error && PAGE_REFERENCE_RE.test(targetClause(r.prompt)) && !r.named.length ? r.page : null);
+
+// GATE_IB_TARGET_RULES_V2, owner-direct scope: the on-screen customer is the pick among
+// several same-name customers only when the message typed nothing that names a customer.
+// A typed city, phone or email (one customer or several) is explicit evidence: it beats
+// the page, so there is no on-screen pick and the same-name note handles the choice
+// (Codex #6369 r13, pre-push audit). A qualifier typed but resolved to nobody ("in Tampa")
+// is still typed: no on-screen pick either (Codex #6369 r15).
+function sameNamePick(scope, r) {
+  const viewed = r.page.customer;
+  // Only duplicates of ONE typed name are a same-name ambiguity the page can settle; a bare name
+  // that matches different full names never selects the viewed customer (Codex #6369 r20). Any
+  // typed qualifier, resolved or not, leaves the clarification (r23: the qualifier-confirms branch
+  // is retired).
+  return scope && r.sameName && viewed && r.typedIds.length === 0 && !qualifierTyped(r.prompt, r.named) ? viewed : null;
+}
+
+// Candidates, whom this message points at (typedCustomerIds, for picking) and the one it names
+// in the simplest case (groundedCustomerIds, the only direct authority), and the first selection.
+// Are these rows duplicates of ONE typed name: two or more customers with the same
+// normalized full name, and no set quantifier or second named customer in the message?
+// Two DIFFERENT named customers ("Alice Example and Bob Sample") are a cohort, not a
+// same-name ambiguity (Codex #6369 r18).
+const fullNameKey = customer => `${normalizeName(customer.first_name)} ${normalizeName(customer.last_name)}`.trim();
+const isSameNameGroup = (named, cohort) => !cohort && named.length > 1 && new Set(named.map(fullNameKey)).size === 1;
+
+async function candidatesStage(r) {
+  const scope = targetRulesV2Scope(r.ownerDirectScope);
   // A set quantifier, partly resolved name evidence, or two distinct stated
   // recipients never yields a target, and no selection resolves it.
-  const cohort = setQuantified(prompt) || namedResult.multiple;
-  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort, nameHint);
-  if (selectedId) {
-    // A selection is bound to this request's own fresh candidates: it is
-    // accepted only as one of the rows the request resolved to (duplicate-name
-    // disambiguation, the one flow that supplies a selection). A request that
-    // named nobody, matched nothing, hit the lookup cap, or asked for a set
-    // has no candidate to select, so no stale-selection grammar is
-    // load-bearing: an unrecognized phrasing can only over-refuse.
-    const selected = named.some(c => c.id === selectedId) && !cohort && namedResult.complete ? await customerById(selectedId) : null;
-    if (!selected) {
-      // selectable: a fresh customer choice re-resolves this request.
-      return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch', selectable: true };
-    }
-    const target = customerTarget(selected, 'operator_selection');
-    selection = { target, targets: [target], ambiguous: false };
+  r.cohort = setQuantified(r.prompt) || r.namedResult.multiple;
+  r.sameName = scope && isSameNameGroup(r.named, r.cohort);
+  r.candidates = await labelledCandidates(r.sameName, r.named.map(c => customerTarget(c, 'current_request_lookup')), r.named);
+  Object.assign(r, await typedTarget(scope, r.prompt, r.namedResult, r.cohort, r.nameHint, r.page, r.truncated));
+  r.selection = candidateSelection(r.candidates, r.prompt, r.page.customer, r.namedResult.complete, r.cohort, r.nameHint, sameNamePick(scope, r));
+  return null;
+}
+
+// Owner-direct v2 scope only: once a target is settled, only that customer stays in the candidates.
+// With the gate off, or for another admin, the candidates are left exactly as the lookup found them.
+function collapseCandidates(r) {
+  if (targetRulesV2Scope(r.ownerDirectScope)) r.candidates = [r.selection.target];
+}
+
+// A selection is bound to this request's own fresh candidates: it is accepted only
+// as one of the rows the request resolved to (duplicate-name disambiguation, the one
+// flow that supplies a selection). A request that named nobody, matched nothing, hit
+// the lookup cap, or asked for a set has no candidate to select, so no
+// stale-selection grammar is load-bearing: an unrecognized phrasing can only over-refuse.
+async function selectionStage(r) {
+  if (!r.selectedId) return null;
+  const selected = r.named.some(c => c.id === r.selectedId) && !r.cohort && r.namedResult.complete ? await customerById(r.selectedId) : null;
+  // selectable: a fresh customer choice re-resolves this request.
+  if (!selected) return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch', selectable: true };
+  r.selection = singleTarget(selected, 'operator_selection');
+  // A validated operator selection settles the ambiguity: the duplicate rows leave the context, so they
+  // neither reach the model nor trigger the multi-candidate taint and marker (Codex #6369 r30).
+  collapseCandidates(r);
+  return null;
+}
+
+// A lookup at its cap has more rows than it can list, and no listed row can be
+// selected, so the rows are never presented as choices. A phone or email that names
+// exactly one of them resolves that customer (Codex #6369 r10); otherwise the request
+// is answered and closed with the way to identify the customer instead of parked
+// behind buttons that all conflict.
+async function cappedStage(r) {
+  if (r.namedResult.complete || r.cohort || r.selectedId) return null;
+  const pick = await contactResolvedCustomer(r.typedIds, r.prompt);
+  if (pick) {
+    // Only the customer the contact resolved stays in the context: the sentinel rows of the capped
+    // lookup must not reach the model (Codex #6369 r30).
+    r.selection = singleTarget(pick, 'current_request_lookup');
+    collapseCandidates(r);
+    return null;
   }
-  // A lookup at its cap has more rows than it can list, and no listed row can
-  // be selected (the selection check above requires a complete lookup), so
-  // the rows are never presented as choices. The request is answered and
-  // closed with the way to identify the customer instead of parked behind
-  // buttons that all conflict.
-  if (!namedResult.complete && !cohort && !selectedId) {
-    return { page, candidates: [], target: null, targets: [], ambiguous: false,
-      error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
-      code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(prompt)), namesRequested: nameHint };
-  }
-  // Only the leading recipient expression establishes a raw contact. A later
-  // "text <number>" inside a note or an unresolved person's message is data.
-  const recipient = [...targetClause(prompt).matchAll(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/gi)].map(match => match[1]).join('');
-  const readRecipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you)\s+)*(?:(?:show|read|get|find|look up|check|summarize)\s+(?:(?:the|our)\s+)?(?:customer\s+)?(?:conversation|thread|messages|texts|sms|calls|call history|details|history)\s+(?:with|for|from|to|on)|what\s+(?:did|have)\s+we\s+(?:say|send|said|sent)\s+to(?:\s+(?:the\s+)?customer\s+on)?)\s+(.+)/i)?.[1] || '';
+  // sameNameOverflow: the rows are not listed, but the name IS ambiguous, so the owner-direct request is
+  // tainted like a multi-candidate one (Codex #6369 r33).
+  return { page: r.page, candidates: [], target: null, targets: [], ambiguous: false, sameNameOverflow: true,
+    error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
+    code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(r.prompt)), namesRequested: r.nameHint, ...r.typed };
+}
+
+// The record ids the message asks for: "this property" style page references, an
+// explicit review, and explicit child ids that narrow even same-customer operations.
+function requestedRecordFields(prompt, page, nameHint) {
   const reviewClause = targetClause(prompt);
   const [explicitReview] = [...reviewClause.matchAll(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)].map(match => match[1].toLowerCase());
   const reviewReference = explicitReview || (!nameHint
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
   const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|stop|visit|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => { const kind = `${recordKind(match[1])}_id`; return [kind, page.ids[kind] || null]; }));
-  // Explicit current-request child IDs narrow even same-customer operations.
   // Keep all deliberately named records for compound requests; body text never
   // enters this clause and page hints cannot replace the explicit selection.
   const explicitRecords = {};
@@ -453,21 +1085,46 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   for (const [kind, ids] of Object.entries(explicitRecords)) {
     requestedRecords[kind] = ids.filter(id => !Object.hasOwn(requestedRecords, kind) || id === requestedRecords[kind]);
   }
-  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
+  return { requestedRecords, reviewReference: reviewReference || null };
+}
+
+// Only the leading recipient expression establishes a raw contact. A later
+// "text <number>" inside a note or an unresolved person's message is data.
+function recipientFields(prompt) {
+  const recipient = [...targetClause(prompt).matchAll(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/gi)].map(match => match[1]).join('');
+  const readRecipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you)\s+)*(?:(?:show|read|get|find|look up|check|summarize)\s+(?:(?:the|our)\s+)?(?:customer\s+)?(?:conversation|thread|messages|texts|sms|calls|call history|details|history)\s+(?:with|for|from|to|on)|what\s+(?:did|have)\s+we\s+(?:say|send|said|sent)\s+to(?:\s+(?:the\s+)?customer\s+on)?)\s+(.+)/i)?.[1] || '';
+  return {
+    explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
+      .map(match => normalizeEmail(match[1])),
+    explicitPhones: [...recipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
+      .map(match => match[1].replace(/\D/g, '').slice(-10)),
+    explicitReadPhones: [...readRecipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
+      .map(match => match[1].replace(/\D/g, '').slice(-10)),
+  };
+}
+
+function contextStage(r) {
+  const { prompt, page, nameHint } = r;
+  return { page, candidates: r.candidates, ...(r.sameName ? { sameName: true } : {}), ...r.selection, ...r.typed, ...requestedRecordFields(prompt, page, nameHint), requestPhrase: normalizeName(targetClause(prompt)),
     // An explicitly named customer that did not resolve keeps the request
     // target-specific: broad customer-row readers stay refused until it does.
     namesRequested: nameHint,
     // A phone or email literal in the target clause identifies one customer
     // even when no send/read recipient grammar captured it.
     contactRequested: [...targetClause(prompt).matchAll(CONTACT_LITERAL_RE)].length > 0,
-    reviewReference: reviewReference || null,
     bulkLeadRequest: !nameHint && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
-    explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
-      .map(match => normalizeEmail(match[1])),
-    explicitPhones: [...recipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
-      .map(match => match[1].replace(/\D/g, '').slice(-10)),
-    explicitReadPhones: [...readRecipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
-      .map(match => match[1].replace(/\D/g, '').slice(-10)) };
+    ...recipientFields(prompt) };
+}
+
+const RESOLVE_STAGES = [pageErrorStage, candidatesStage, selectionStage, cappedStage, contextStage];
+
+async function resolve(input) {
+  const r = await resolveBase(input);
+  for (const stage of RESOLVE_STAGES) {
+    const result = await stage(r);
+    if (result) return result;
+  }
+  return null;
 }
 
 async function unlinkedRecordIsReferenced(record, context) {
@@ -843,7 +1500,7 @@ async function bindReadAddress(scope, params, input, context, toolName) {
 async function resolveCustomerSelector(params, input, context, schema) {
   const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
   const permitted = new Set(context.targets.map(target => target.customer_id));
-  const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`) : null;
+  const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`, context.ownerDirect === true) : null;
   // A capped name lookup beside another selector cannot be reconciled with
   // it, so it is refused as a conflict the owner-direct fallback never
   // forwards (Codex r6 P2); alone it stays a scope question.
@@ -977,7 +1634,40 @@ function ownerDirectContext(context = {}) {
   const targets = Array.isArray(rest.targets) ? rest.targets : [];
   return { ...rest, page: rest.page || { ids: {}, records: {} }, candidates: rest.candidates || [],
     target: rest.target || null, targets, requestedRecords: rest.requestedRecords || {},
-    ambiguous: false, ownerDirect: true };
+    ambiguous: false, ownerDirect: true,
+    ...(ibTargetRulesV2Live() && context.typedCustomerIds ? sameNameNote(context) : {}) };
+}
+
+// GATE_IB_TARGET_RULES_V2: what the model is told about customers that share
+// the name the owner typed. The rows (name, city, last visit) are already in
+// `candidates`; the note says what to do with them. offer_choices shows 4
+// buttons at most, so a longer list is offered by the most recent visits.
+function sameNameNote(context) {
+  const rows = Array.isArray(context.candidates) ? context.candidates : [];
+  if (context.code === 'target_clarification_required') {
+    return { sameNameNote: `More than ${CUSTOMER_LOOKUP_LISTED_V2} customers share the name the owner typed. Ask for a phone number or an email, or ask the owner to open the customer's page. A name or a city cannot pick one customer from a list this long.` };
+  }
+  if (rows.length < 2 || context.target || context.sameName !== true) return {};
+  // A reply that already narrows the name to one (a choice button sends
+  // "Full Name, City"; a typed phone or email works the same) is the owner's
+  // pick: no second round of choices.
+  const typed = new Set((context.typedCustomerIds || []).map(String));
+  const picked = rows.filter(row => typed.has(String(row.customer_id)));
+  // A pick only when EVERY typed identifier agrees on that one row: a phone or email that names a
+  // customer outside the group contradicts it (Codex #6369 r40).
+  if (picked.length === 1 && typed.size > picked.length) {
+    return { sameNameNote: `The owner's message names more than one customer: a name or city that fits ${picked[0].label} and a phone number or email that belongs to someone else. Do not guess. Ask the owner which customer they mean.` };
+  }
+  if (picked.length === 1) {
+    return { sameNameNote: `The owner's message picks one of the customers who share this name: ${picked[0].label}${safeChoiceCity(picked[0].city) ? `, ${safeChoiceCity(picked[0].city)}` : ''} (customer_id ${picked[0].customer_id}). Use that customer. Do not offer choices again.` };
+  }
+  // offer_choices needs two buttons at least. With fewer than two usable labels, a
+  // button list cannot name the customer: ask for a phone number or email.
+  const usable = rows.filter(row => row.choice_label).length;
+  if (usable < 2) {
+    return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess. Ask the owner for a phone number or an email to tell them apart.` };
+  }
+  return { sameNameNote: `${rows.length} customers share the name the owner typed (see candidates: label, city, last_visit). Do not guess and do not ask for a phone number. Call offer_choices with the choice_label of the best matches (4 at most), most recent last_visit first, each label exactly as written: it is the button text, and a tap sends it back as the owner's reply. A row whose choice_label is null (no city, or it looks like another row) cannot be a button: leave it out and ask for its phone number or email instead.${rows.length > 4 ? ' Say how many more share the name and that a phone number or city finds the rest.' : ''}` };
 }
 
 // A sender block inside a customer-scoped task may only target the task
@@ -996,4 +1686,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { UUID_RE, pageIds, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { choiceLabels, safeChoiceCity, UUID_RE, pageIds, typedCustomerIds, customerLookupLimit, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, ownerDirectContext, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
