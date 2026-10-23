@@ -105,7 +105,6 @@ async function withServer(fn) {
 const getData = (baseUrl) => fetch(`${baseUrl}/estimates/lawnlimitstoken/data`).then((r) => r.json());
 
 
-afterEach(() => { delete process.env.GATE_PREPAY_REFUND_90_DAY; });
 
 const keysOf = (body) => body.beforeYouBook.sections.map((s) => s.key);
 
@@ -147,16 +146,12 @@ describe('GET /:token/data - before you book', () => {
       expect(body.beforeYouBook).toBeDefined();
       const lines = body.beforeYouBook.sections.flatMap((s) => s.lines).join(' ');
       expect(lines).not.toContain('no long-term contract');
-      expect(lines).toContain('follow the agreement you sign');
     });
   });
 
-  test('the conditional prepay refund line follows the 90-day rule, not the payload verdict (Codex #6504 r4)', async () => {
+  test('the conditional prepay refund line prints on any open estimate, not on a payload verdict (Codex #6504 r4)', async () => {
     const refundLine = (body) => body.beforeYouBook.sections.flatMap((x) => x.lines).some((l) => l.includes('If your estimate offers a prepaid year'));
     dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'] }) };
-    await withServer(async (baseUrl) => { expect(refundLine(await getData(baseUrl))).toBe(false); });
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
-    dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'], overrides: { id: 'est-byb-rule' } }) };
     await withServer(async (baseUrl) => { expect(refundLine(await getData(baseUrl))).toBe(true); });
   });
 

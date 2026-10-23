@@ -50,7 +50,7 @@ describe('cancel_plan tool schema', () => {
   });
 });
 
-describe('cancel_plan past the 90-day refund window (GATE_PREPAY_REFUND_90_DAY)', () => {
+describe('cancel_plan past the 90-day refund window', () => {
   const PREPAY = { termId: 't1', termEnd: '2027-05-31', disposition: 'end_now_refund', refund: null, endNowAvailable: false, endNowUnavailableReason: 'past_90_day_window' };
 
   test('an end-now preview with end-now unavailable is a tool failure, not a confirmation card', async () => {
@@ -75,8 +75,8 @@ describe('cancel_plan past the 90-day refund window (GATE_PREPAY_REFUND_90_DAY)'
     expect(result).toEqual(expect.objectContaining({ code: 'end_now_past_refund_window' }));
   });
 
-  test('scoped_covers_prepaid under the rule does not promise a refund', async () => {
-    mockPreview.mockResolvedValue({ ...PREVIEW, wholeAccount: false, scopedSupported: false, scopeError: 'scoped_covers_prepaid', prepayRefund90Day: true });
+  test('scoped_covers_prepaid does not promise a refund', async () => {
+    mockPreview.mockResolvedValue({ ...PREVIEW, wholeAccount: false, scopedSupported: false, scopeError: 'scoped_covers_prepaid' });
     const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, families: ['pest_control'] });
     expect(result.code).toBe('scoped_covers_prepaid');
     expect(result.error).toMatch(/within 90 days/);

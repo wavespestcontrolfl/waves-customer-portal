@@ -70,10 +70,6 @@ const PHRASE = {
   wdo: 'WDO (termite) inspection report',
 };
 
-afterEach(() => {
-  delete process.env.GATE_PREPAY_REFUND_90_DAY;
-});
-
 describe('estimate PDF Before you book page', () => {
   test('an open estimate gets exactly one more page than the same estimate once decided', async () => {
     const est = fixture('byb-on', [pest, lawn]);
@@ -128,17 +124,14 @@ describe('estimate PDF Before you book page', () => {
     expect(extractPdfText(live)).toContain(PHRASE.scheduling);
   });
 
-  test('the prepay refund line is conditional ("if your estimate offers a prepaid year") and follows only the 90-day rule (Codex #6504 r4)', async () => {
+  test('the prepay refund line is conditional ("if your estimate offers a prepaid year") and prints on any open estimate (Codex #6504 r4)', async () => {
     const recurring = fixture('byb-p1', [pest]);
-    expect(extractPdfText(await render(recurring))).not.toContain(PHRASE.prepay);
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     expect(extractPdfText(await render(recurring))).toContain(PHRASE.prepay);
     // worded conditionally, so it needs no prepay verdict: the same line on any open estimate
     expect(extractPdfText(await render(fixture('byb-p3', [pest, termiteBond])))).toContain(PHRASE.prepay);
   });
 
   test('an estimate with every service type still adds exactly one page, scheduling first', async () => {
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     const est = fixture('byb-all', [pest, lawn, termiteBond, rodentTrap], [{ name: 'WDO Inspection' }, { name: 'German Roach Cleanout' }]);
     const off = await render({ ...est, status: 'declined' });
     const on = await render(est);
@@ -152,7 +145,6 @@ describe('estimate PDF Before you book page', () => {
 
   test('every-service page stays above the footer: the last drawn line ends before CONTENT_BOTTOM', async () => {
     const PDFDocument = require('pdfkit');
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     const CONTENT_BOTTOM = 742 - 18;
     const est = fixture('byb-fit', [pest, lawn, termiteBond, rodentTrap], [{ name: 'WDO Inspection' }, { name: 'German Roach Cleanout' }]);
     const offBuf = await render({ ...est, status: 'declined' });
@@ -175,7 +167,6 @@ describe('estimate PDF Before you book page', () => {
   });
 
   test('page text has no dollar sign, "safe", EPA or banned wording', async () => {
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     const est = fixture('byb-copy', [pest, lawn, termiteBond, rodentTrap], [{ name: 'WDO Inspection' }, { name: 'German Roach Cleanout' }]);
     const text = extractPdfText(await render(est));
     const bybText = text.slice(text.indexOf('Before you book'));
@@ -187,7 +178,7 @@ describe('estimate PDF Before you book page', () => {
 });
 
 describe('Before you book copy', () => {
-  const page = buildBeforeYouBook({ planTerms: true }, { prepayRefundOffered: true, phone: '(941) 555-0100' });
+  const page = buildBeforeYouBook({ planTerms: true }, { phone: '(941) 555-0100' });
   const allLines = [...SECTIONS.flatMap((s) => s.lines.map((l) => l.text)), ...page.sections.flatMap((s) => s.lines.map((l) => l.text)), page.closing.text];
 
   test('every line follows the answer book rules', () => {
@@ -248,11 +239,9 @@ describe('Before you book: terms scope, prepay verdict, structured service keys'
     expect(plain).not.toContain(NEUTRAL);
   });
 
-  test('the payload block carries the same conditional refund line with the 90-day rule on', async () => {
+  test('the payload block carries the same conditional refund line', async () => {
     const recurring = fixture('byb-pp1', [pest]);
     const lines = () => (beforeYouBookBlock(recurring, { open: true }).beforeYouBook?.sections || []).flatMap((x) => x.lines).join(' ');
-    expect(lines()).not.toContain(PHRASE.prepay);
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     expect(lines()).toContain(PHRASE.prepay);
   });
 });

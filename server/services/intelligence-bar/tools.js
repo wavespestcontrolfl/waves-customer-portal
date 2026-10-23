@@ -2861,13 +2861,11 @@ async function cancelPlan(input, actionContext = {}) {
       const why = preview.scopeError === 'scope_not_owned'
         ? 'That service is not on the plan any more.'
         : preview.scopeError === 'scoped_covers_prepaid'
-          ? (preview.prepayRefund90Day === true
-            ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (refunded only within 90 days of its start; after that it ends at the end of paid coverage with no refund), or leave the covered service in place.'
-            : 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan, or leave the covered service in place.')
+          ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (refunded only within 90 days of its start; after that it ends at the end of paid coverage with no refund), or leave the covered service in place.'
           : 'The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first.';
       return { error: why, code: preview.scopeError || 'scoped_unsupported' };
     }
-    // GATE_PREPAY_REFUND_90_DAY: past day 90 "end now" is not offered (no
+    // Owner R7: past day 90 "end now" is not offered (no
     // refund is owed, the customer keeps the paid coverage). A card for it
     // would fail on Confirm, so it is a tool failure here, like the other
     // unexecutable previews above.

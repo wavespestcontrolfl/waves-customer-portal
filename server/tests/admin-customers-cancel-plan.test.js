@@ -298,7 +298,7 @@ const postCancel = async (baseUrl, body = {}) => {
 const PROCESSED = { ok: true, cancelledCount: 3, recurrenceStopped: 2, churned: true, errors: [], keptThrough: null, lateFeeWaived: false };
 
 // Frozen calendar (codex r22 P1): the annual-prepay fixtures carry literal
-// term windows (term_start 2026-03-01 → term_end 2027-02-28) that
+// term windows (term_start 2026-06-02 → term_end 2027-02-28) that
 // resolveLiveTerm filters by term_end >= today — after Feb 2027 the terms
 // would silently vanish and the suite would rot without any code change.
 // Only Date is faked; timers stay real (withServer's sockets need them).
@@ -392,14 +392,14 @@ describe('POST /:id/cancel-plan/preview', () => {
 
   test('annual-prepay customer: end_of_coverage names term_end; now computes the C-6 refund from completed covered visits', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active',
     }];
     mockState.scheduled_services = [
-      { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+      { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       // A DIFFERENT service completed in the window (not a coverage row —
       // the canonical helper filters it by service type).
-      { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-05-01', non_coverage: true },
+      { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-07-01', non_coverage: true },
       { id: 's3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
       // Full covered set: coverage_visit_count is 4 and a short set now
       // refuses end_of_coverage (coverage_rows_incomplete).
@@ -726,7 +726,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a HISTORICAL prepaid case never swallows a NEW cancellation — a re-won-back account processes fresh', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'cancelled', renewal_decision: 'cancel',
     }];
@@ -763,7 +763,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a retry that ADDS the fee waiver keeps it when the episode is stamped — the stamp merges into the ratcheted metadata, never a stale copy', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -790,7 +790,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a resolved run inside 24h does NOT echo for a WON-BACK customer — a live row outside that churn episode processes fresh', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -828,7 +828,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a resolved run inside 24h STILL echoes while the customer is churned in that episode on the same boundary — a lost-response retry re-runs nothing', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -863,7 +863,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a STAMPED resolved run outside the 24h window never echoes, even in the same episode — identity narrows the lost-response window, never extends it', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -899,7 +899,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a failed churn-identity read FAILS CLOSED (503 acceptance_check_unavailable) — never a guessed fresh run', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -949,7 +949,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('an UNSTAMPED resolved run (pre-episode / failed stamp) has only the 24h window + a churned row as its identity — a won-back live row processes fresh', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -986,7 +986,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('an UNSTAMPED resolved run inside 24h echoes while the row still reads churned', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -1021,7 +1021,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a corrected coverage boundary inside 24h is a NEW instruction, not a retry — the task and the confirmation re-key on the new date', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -1061,7 +1061,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('an end-of-coverage commit keys the dated task and the end-of-term confirmation on the processor\'s churn EPISODE, and stamps it on the request + case', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -1090,7 +1090,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a churn-episode stamp that fails to persist keeps THIS run request-keyed and does not park the acceptance — its repair resolves to the same identity', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -1122,7 +1122,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a processor run that did not churn (no episode) keeps every side effect request-keyed', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
       status: 'active', renewal_decision: 'cancel',
     }];
@@ -1549,14 +1549,14 @@ describe('POST /:id/cancel-plan', () => {
   describe('annual prepay', () => {
     beforeEach(() => {
       mockState.annual_prepay_terms = [{
-        id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+        id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
         prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
       }];
       // Fully seeded covered set (coverage_visit_count 4): a SHORT set now
       // refuses end_of_coverage (coverage_rows_incomplete) — tests that
       // need a different world overwrite scheduled_services themselves.
       mockState.scheduled_services = [
-        { id: 'cv1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 'cv1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
         { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
         { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-11-01' },
         { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
@@ -1726,7 +1726,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a repair retry after the refunded term LEFT coverage carries the recorded prepay facts — the financial record is never blanked', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       ];
       // Attempt 1: term decided, refund recorded, confirmation failed —
       // the acceptance stays open for a repair.
@@ -1758,7 +1758,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('now + refund: coverage cancelled, refund RECORDED on the case + office task — nothing refunded automatically', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       ];
       const res = await postCancel(baseUrl, { effectiveDate: 'now' });
       expect(res.status).toBe(200);
@@ -1967,7 +1967,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a covered visit completing DURING the commit re-prices the refund from the post-sweep rows and flags the run for review', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
         { id: 's3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
       ];
       // The lock serializes admin commits, not technician completion: s3
@@ -1995,7 +1995,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       ];
       mockState.service_requests = [{
         id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
@@ -2049,8 +2049,8 @@ describe('POST /:id/cancel-plan', () => {
       // A covered visit completed between the attempts: live refund is now
       // 2 remaining ($240), not the recorded 3 ($360).
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
-        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-07-01' },
       ];
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
@@ -2233,7 +2233,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('an unpaid payment_pending prepay invoice refuses the whole-plan cancel — money paid later must not re-activate a churned account', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms = [{
-        id: 'term-p', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+        id: 'term-p', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
         prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
         status: 'payment_pending', renewal_decision: null, prepay_invoice_id: 'inv-p',
       }];
@@ -2363,11 +2363,11 @@ describe('POST /:id/cancel-plan', () => {
 
   test('the prepaid refund computes in integer cents — float drift never shaves a cent off an actionable task', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms = [{
-        id: 'term-c', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+        id: 'term-c', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
         prepay_amount: '10.01', coverage_visit_count: 10, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
       }];
       mockState.scheduled_services = Array.from({ length: 5 }, (_, n) => ({
-        id: `done-${n}`, customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: `2026-0${4 + n}-01`,
+        id: `done-${n}`, customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: `2026-0${6 + (n % 3)}-1${n}`,
       }));
       const body = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
       // 1001¢ × 5 ÷ 10 = 500.5¢ → $5.01 (float dollars round to $5.00).
@@ -2511,8 +2511,8 @@ describe('POST /:id/cancel-plan', () => {
       // Run 1 proposed $360 (3 remaining), lost its task AND its outcome
       // stamp; a covered visit completed since — live is $240.
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
-        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-07-01' },
       ];
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
@@ -2713,11 +2713,11 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a coverage visit completed BEFORE activation (deliberately unstamped) counts as consumed — its slice is never refunded', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
         // Completed inside the pending window: reconciliation settles or
         // credits its invoice; the stamp never lands, but the visit consumed
         // a coverage slice all the same.
-        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-03-05' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-06-05' },
       ];
       const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
@@ -2752,7 +2752,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.invoices = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', stripe_charge_id: null }];
       mockState.payments = [{ id: 'pay-1', status: 'succeeded', refund_status: 'partial', refund_amount: '100.00', metadata: { invoice_id: 'inv-1' } }];
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       ];
       const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ amount: null, needsManualCalc: true, reason: 'prior_refund_activity' }));
@@ -2785,7 +2785,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('an unpaid payment_pending prepay invoice for the SELECTED family refuses the scoped cancel too — paid later, it would reseed the cancelled service', () => withServer(async (baseUrl) => {
       mockState.annual_prepay_terms = [{
-        id: 'term-p', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+        id: 'term-p', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
         prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control',
         status: 'payment_pending', renewal_decision: null, prepay_invoice_id: 'inv-p',
       }];
@@ -2829,9 +2829,9 @@ describe('POST /:id/cancel-plan', () => {
 
     test('refund math ignores completed visits stamped to ANOTHER term (overlapping terms)', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01', annual_prepay_term_id: 'term-1' },
-        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01', annual_prepay_term_id: null },
-        { id: 's3', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-01', annual_prepay_term_id: 'term-OTHER' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15', annual_prepay_term_id: 'term-1' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-07-01', annual_prepay_term_id: null },
+        { id: 's3', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-07-15', annual_prepay_term_id: 'term-OTHER' },
       ];
       const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
@@ -2892,7 +2892,7 @@ describe('POST /:id/cancel-plan', () => {
 
   test('a failed processor run never touches the prepaid term or raises the refund task', () => withServer(async (baseUrl) => {
     mockState.annual_prepay_terms = [{
-      id: 'term-1', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      id: 'term-1', customer_id: 'cust-1', term_start: '2026-06-02', term_end: '2027-02-28', plan_label: 'Annual Pest',
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
     }];
     mockProcess.mockRejectedValueOnce(new Error('sweep down'));
@@ -2920,11 +2920,10 @@ describe('POST /:id/cancel-plan', () => {
   }));
 });
 
-// Owner ruling R7 (2026-10-22): no prepay refund after 90 days, behind
-// GATE_PREPAY_REFUND_90_DAY. With no refund the customer keeps the paid
+// Owner ruling R7 (2026-10-22): no prepay refund after 90 days. With no refund the customer keeps the paid
 // coverage, so "end now" is not offered past day 90. The suite clock is frozen
 // at 2026-08-31 (ET): day 90 after a term start is 2026-06-02, day 91 is 2026-06-01.
-describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 days)', () => {
+describe('owner R7: no end-now, no refund after 90 days', () => {
   const { prepayRefundWindowPassed } = require('../services/admin-cancellation');
   const DAY_90_START = '2026-06-02';
   const DAY_91_START = '2026-06-01';
@@ -2944,10 +2943,8 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
   };
   const previewOf = async (baseUrl, body = { effectiveDate: 'now' }) => (await post(baseUrl, '/cancel-plan/preview', body)).json();
   const refundTasks = () => NotificationService.notifyAdmin.mock.calls.filter((c) => c[0] === 'billing');
-  const gateOn = () => { process.env.GATE_PREPAY_REFUND_90_DAY = 'true'; };
 
   afterEach(() => {
-    delete process.env.GATE_PREPAY_REFUND_90_DAY;
     jest.setSystemTime(TODAY);
   });
 
@@ -2965,31 +2962,8 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     expect(prepayRefundWindowPassed(null, TODAY)).toBe(false);
   });
 
-  test('gate OFF: a 183-day-old term still previews and commits an end-now refund, byte for byte', async () => {
+  test('day 90: end-now is offered and commits the $360 refund task', async () => {
     await withServer(async (baseUrl) => {
-      seedTerm('2026-03-01');
-      const preview = await previewOf(baseUrl);
-      expect(preview.prepay).not.toHaveProperty('endNowAvailable');
-      expect(preview).not.toHaveProperty('prepayRefund90Day');
-      expect(preview.prepay.refund).toEqual(expect.objectContaining({ amount: 360, reason: null }));
-      expect((await postCancel(baseUrl, { effectiveDate: 'now' })).status).toBe(200);
-      expect(refundTasks()).toHaveLength(1);
-      expect(refundTasks()[0][2]).toContain('$360.00');
-    });
-  });
-
-  test('gate OFF: the fingerprint does not move with the date', async () => {
-    await withServer(async (baseUrl) => {
-      seedTerm(DAY_90_START);
-      const today = (await previewOf(baseUrl)).previewFingerprint;
-      jest.setSystemTime(NEXT_DAY);
-      expect((await previewOf(baseUrl)).previewFingerprint).toBe(today);
-    });
-  });
-
-  test('gate ON, day 90: end-now is offered and commits the $360 refund task', async () => {
-    await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_90_START);
       const preview = await previewOf(baseUrl);
       expect(preview.prepay.endNowAvailable).toBe(true);
@@ -3000,21 +2974,18 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 
-  test('gate ON, day 91: the preview reports end-now unavailable (no refund shown), for either effective date', async () => {
+  test('day 91: the preview reports end-now unavailable (no refund shown), for either effective date', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_91_START);
       const now = await previewOf(baseUrl);
       expect(now.prepay).toEqual(expect.objectContaining({ endNowAvailable: false, endNowUnavailableReason: 'past_90_day_window', refund: null }));
-      expect(now.prepayRefund90Day).toBe(true);
       const keep = await previewOf(baseUrl, { effectiveDate: 'end_of_coverage' });
       expect(keep.prepay).toEqual(expect.objectContaining({ endNowAvailable: false, disposition: 'end_at_term', termEnd: '2027-05-31', refund: null }));
     });
   });
 
-  test('gate ON, day 91: a commit asking for end-now is refused 409 end_now_past_refund_window with NO side effects (UI and hand-built calls alike)', async () => {
+  test('day 91: a commit asking for end-now is refused 409 end_now_past_refund_window with NO side effects (UI and hand-built calls alike)', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_91_START);
       const viaDialog = await postCancel(baseUrl, { effectiveDate: 'now' });
       expect(viaDialog.status).toBe(409);
@@ -3030,9 +3001,8 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 
-  test('gate ON, day 91: End of paid coverage still works, with no refund and no billing task', async () => {
+  test('day 91: End of paid coverage still works, with no refund and no billing task', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_91_START);
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-05-31' });
       const res = await postCancel(baseUrl, { effectiveDate: 'end_of_coverage' });
@@ -3044,9 +3014,8 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 
-  test('gate ON: the approved facts change between day 90 and day 91 — a day-90 preview cannot commit a day-91 end-now', async () => {
+  test('the approved facts change between day 90 and day 91 — a day-90 preview cannot commit a day-91 end-now', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_90_START);
       const day90 = (await previewOf(baseUrl)).previewFingerprint;
       jest.setSystemTime(NEXT_DAY);
@@ -3062,7 +3031,6 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
 
   test('accepted on day 90, refund task lost, repaired on day 91: the ORIGINAL refund is raised (open acceptance + case)', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_90_START);
       Object.assign(mockState.annual_prepay_terms[0], { renewal_decision: 'cancel', status: 'cancelled' });
       const accepted = new Date('2026-08-31T12:00:00-04:00');
@@ -3094,7 +3062,6 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
 
   test('accepted on day 90, run RESOLVED with its refund task still missing, repeated on day 91: the duplicate latch repairs the task (the window never applies to it)', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_90_START);
       Object.assign(mockState.annual_prepay_terms[0], { renewal_decision: 'cancel', status: 'cancelled' });
       mockState.customers[0].pipeline_stage = 'churned';
@@ -3124,7 +3091,6 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
 
   test('accepted on day 90, run RESOLVED, refund facts changed since: the repair is PREVIEWED on day 91 with end-now available and the new refund, and its fingerprint commits the task', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_90_START);
       Object.assign(mockState.annual_prepay_terms[0], { renewal_decision: 'cancel', status: 'cancelled' });
       mockState.customers[0].pipeline_stage = 'churned';
@@ -3167,7 +3133,7 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 
-  test('accepted PAST day 90 while the gate was OFF, gate turned ON, retried: the open acceptance finishes end-now with its refund (grandfathered)', async () => {
+  test('accepted PAST day 90 (before the rule), retried: the open acceptance finishes end-now with its refund (grandfathered)', async () => {
     await withServer(async (baseUrl) => {
       seedTerm('2026-03-01');
       mockState.service_requests = [{
@@ -3176,7 +3142,6 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
         metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: false, effectiveDate: 'now', prepayDisposition: 'end_now_refund' } }),
         created_at: new Date('2026-08-30T12:00:00-04:00'),
       }];
-      gateOn();
       const preview = await previewOf(baseUrl);
       expect(preview.repairRetry).toBe(true);
       expect(preview.prepay).toEqual(expect.objectContaining({ endNowAvailable: true, disposition: 'end_now_refund' }));
@@ -3189,7 +3154,7 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 
-  test('accepted PAST day 90 with the gate OFF, run RESOLVED with changed refund facts, gate turned ON: the repair previews available and commits the new refund', async () => {
+  test('accepted PAST day 90 (before the rule), run RESOLVED with changed refund facts: the repair previews available and commits the new refund', async () => {
     await withServer(async (baseUrl) => {
       seedTerm('2026-03-01');
       Object.assign(mockState.annual_prepay_terms[0], { renewal_decision: 'cancel', status: 'cancelled' });
@@ -3210,7 +3175,6 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
         }),
       }];
       mockState.scheduled_services[1].status = 'completed';
-      gateOn();
       const preview = await previewOf(baseUrl);
       expect(preview.prepay).toEqual(expect.objectContaining({ endNowAvailable: true }));
       expect(preview.prepay.refund).toEqual(expect.objectContaining({ amount: 240 }));
@@ -3222,16 +3186,12 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 
-  test('gate ON past day 90: coverage-record errors do not point staff at the refused "cancel effective now"; gate OFF wording is unchanged', async () => {
+  test('past day 90: coverage-record errors do not point staff at the refused "cancel effective now"', async () => {
     await withServer(async (baseUrl) => {
       seedTerm(DAY_91_START);
       const keep = { effectiveDate: 'end_of_coverage' };
       // Incomplete covered set (3 of 4 on the calendar).
       mockState.scheduled_services.pop();
-      const offShort = await post(baseUrl, '/cancel-plan/preview', keep);
-      expect(offShort.status).toBe(409);
-      expect((await offShort.json()).error || '').toMatch(/cancel effective now with the refund/);
-      gateOn();
       const onShort = await post(baseUrl, '/cancel-plan/preview', keep);
       expect(onShort.status).toBe(409);
       const shortBody = await onShort.json();
@@ -3246,7 +3206,7 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
       expect(identityBody.code).toBe('prepay_coverage_unresolvable');
       expect(identityBody.error).not.toMatch(/cancel effective now/);
       expect(identityBody.error).toMatch(/office must repair the term/);
-      // Inside the window the gate-on text still offers ending now.
+      // Inside the window the text still offers ending now.
       seedTerm(DAY_90_START);
       mockState.scheduled_services.pop();
       const inside = await (await post(baseUrl, '/cancel-plan/preview', keep)).json();
@@ -3256,7 +3216,6 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
 
   test('a FRESH end-now on a decided-cancel term whose earlier end-now case is NOT tied (days old) is refused past day 90', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_91_START);
       Object.assign(mockState.annual_prepay_terms[0], { renewal_decision: 'cancel', status: 'cancelled' });
       const old = new Date('2026-08-25T12:00:00-04:00');
@@ -3286,7 +3245,6 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
 
   test('accepted on day 90, run left open, retried on day 91: the retry keeps its end-now refund (open acceptance)', async () => {
     await withServer(async (baseUrl) => {
-      gateOn();
       seedTerm(DAY_90_START);
       mockState.service_requests = [{
         id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
@@ -3335,7 +3293,6 @@ describe('cancel request is bound to its prepay term', () => {
   });
   const STALE_END_NOW = { effectiveDate: 'now', prepayDisposition: 'end_now_refund' };
   const previewOf = async (baseUrl, body = {}) => (await post(baseUrl, '/cancel-plan/preview', body)).json();
-  afterEach(() => { delete process.env.GATE_PREPAY_REFUND_90_DAY; });
 
   test('acceptanceMatchesTerm: a recorded id binds to that term only; no id, or no term, keeps the old reach', () => {
     const row = (plan) => ({ metadata: JSON.stringify({ cancel_plan: plan }) });
@@ -3361,7 +3318,6 @@ describe('cancel request is bound to its prepay term', () => {
   }));
 
   test('a stale open request from an EARLIER term: preview and commit treat the cancel as fresh, nothing is inherited, the stale row is untouched', () => withServer(async (baseUrl) => {
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     seedTerm();
     const stale = openRequest('req-old', { ...STALE_END_NOW, prepayTermId: 'term-old' }, '2026-02-01T12:00:00Z');
     const before = JSON.stringify(stale);
@@ -3382,8 +3338,7 @@ describe('cancel request is bound to its prepay term', () => {
     expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ requestId: body.requestId, keepThrough: '2027-02-28' }));
   }));
 
-  test('a stale end-now request does not grandfather end-now for the new term past day 90 (gate ON)', () => withServer(async (baseUrl) => {
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+  test('a stale end-now request does not grandfather end-now for the new term past day 90', () => withServer(async (baseUrl) => {
     seedTerm();
     mockState.service_requests = [openRequest('req-old', { ...STALE_END_NOW, prepayTermId: 'term-old' }, '2026-02-01T12:00:00Z')];
     const preview = await previewOf(baseUrl, { effectiveDate: 'now' });
@@ -3397,7 +3352,6 @@ describe('cancel request is bound to its prepay term', () => {
   }));
 
   test('a LEGACY open request (no term id) keeps today\'s behavior: it is still the account\'s acceptance and still grandfathers end-now', () => withServer(async (baseUrl) => {
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     seedTerm();
     mockState.service_requests = [openRequest('req-legacy', STALE_END_NOW, '2026-02-01T12:00:00Z')];
     const preview = await previewOf(baseUrl, { effectiveDate: 'end_of_coverage' });

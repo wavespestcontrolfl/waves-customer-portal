@@ -126,8 +126,9 @@ maybeDescribe('Cancel plan prepay coverage (live Postgres, real renewals module)
     const c = await customer();
     n += 1;
     const invoice = await insert('invoices', { customer_id: c.id, token: `${RUN}-${n}`, invoice_number: `${RUN}-${n}`, status: 'paid', paid_at: new Date('2026-01-02T12:00:00Z'), total: 300 });
-    const install = await visit(c, day(-99), { service_type: 'Termite Installation Setup', status: 'completed' });
-    const term = await insert('annual_prepay_terms', { customer_id: c.id, term_start: day(-100), term_end: day(265), status: 'active',
+    // Inside the 90-day refund window, so an end-now preview still computes the refund (owner R7).
+    const install = await visit(c, day(-59), { service_type: 'Termite Installation Setup', status: 'completed' });
+    const term = await insert('annual_prepay_terms', { customer_id: c.id, term_start: day(-60), term_end: day(265), status: 'active',
       prepay_invoice_id: invoice.id, coverage_service_type: 'Termite Bait Station Monitoring', coverage_visit_count: 1, prepay_amount: 300,
       installation_anchor_visit_id: install.id, installation_anchored_at: new Date() });
     await db('scheduled_services').where({ id: install.id }).update({ annual_prepay_term_id: term.id });

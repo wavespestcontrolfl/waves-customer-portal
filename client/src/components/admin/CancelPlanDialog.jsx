@@ -253,9 +253,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
                       {preview.scopeError === "scope_not_owned"
                         ? "That service is not on the plan any more."
                         : preview.scopeError === "scoped_covers_prepaid"
-                          ? (preview.prepayRefund90Day
-                            ? "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (a prepaid plan is refunded only within 90 days of its start; after that it ends at the end of paid coverage, no refund), or leave the covered service in place."
-                            : "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan (which disposes of the term and records the refund), or leave the covered service in place.")
+                          ? "Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (a prepaid plan is refunded only within 90 days of its start; after that it ends at the end of paid coverage, no refund), or leave the covered service in place."
                           : "The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first."}
                     </div>
                   )}

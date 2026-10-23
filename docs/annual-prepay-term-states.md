@@ -112,6 +112,12 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   plan's commit key (`tryHoldCancelCommitLockForTransaction`; a busy key
   waits for the next night). An `end_now_refund` lapse is never reseeded or
   stamped.
+  Owner R7 (no prepay refund after 90 days): Cancel plan refuses a FRESH
+  end-now of a whole-plan term whose cancel date (ET) is more than 90 days
+  after `term_start` (day 90 still allowed; 409 `end_now_past_refund_window`
+  before any write; the preview reports `prepay.endNowAvailable: false`). An
+  open acceptance or a tied recorded run still finishes under what was
+  accepted.
 - `PAYMENT_PENDING_STATUS = 'payment_pending'` — card-expiry exemptions, `getPaymentPendingCustomerIds`.
 - Termite-renewal grace coverage (owner ruling 2026-09-26, P2-4): a
   `payment_pending` termite renewal SUCCESSOR (`renewed_from_term_id NOT
