@@ -12,6 +12,7 @@
  * and credit offers, the approved text per recipient (or the no-text choice), the approved linked visits, the pending
  * action id and the actor. The row commits or rolls back with the cancel. The request then:
  *   liveStart   - takes a 10 minute 'request' lease (so a slow request is not overtaken by the sweep)
+ *   liveFence / liveStandDown - the follow-through runs under the same cancel fence as the sweep's; a refusal stands the request down
  *   liveNotice  - records the text step's outcome the moment handleCancellation returns
  *   liveFinish  - marks the row 'complete' when the follow-through returns (success or terminal skip)
  * A row still pending 10 minutes after it was written (the request is dead) is finished by sweepIbCancelBundles,
@@ -162,6 +163,35 @@ function liveStart(req) {
       lease_until: nowPlusMs(db, LEASE_MS),
       updated_at: db.fn.now(),
     }));
+}
+
+// The cancel fence for the REQUEST's own follow-through (the invoice, credit, linked-visit and tracker steps run after the text):
+// the same proof the sweep uses, with the request's lease name as the token. A request that stalled past its lease (the sweep
+// took the bundle, or the lease simply ran out) or whose visit was restored meanwhile is stopped at its next effect without a
+// write. Returns null (and marks the bundle lost) when the bundle cannot be read: no effect runs unproven.
+async function liveFence(req) {
+  const id = req && req.ibCancelBundleId;
+  if (!id) return null;
+  const row = await guarded('fence', () => db(TABLE).where({ id }).first('scheduled_service_id', 'restorations_seen'), req);
+  if (!row) {
+    req.ibCancelBundleLost = true;
+    return null;
+  }
+  return { visitId: row.scheduled_service_id, restorations: row.restorations_seen, bundleId: id, leaseToken: REQUEST_LEASE, hits: [] };
+}
+
+// The request's follow-through was refused by its fence (or hit a step that failed under it): the request stands down. The
+// sweep owns the outcome now, re-runs the pinned steps (each is idempotent) or abandons them when the visit was restored. The
+// request lease is released so the sweep need not wait it out, unless another owner already holds it. Returns true when stood down.
+async function liveStandDown(req, fence) {
+  if (!fence || !fence.hits.length) return false;
+  req.ibCancelBundleLost = true;
+  if (!fence.hits.includes('lease_lost')) {
+    await guarded('release', () => db(TABLE)
+      .where({ id: fence.bundleId, status: 'pending', lease_owner: REQUEST_LEASE })
+      .update({ lease_owner: null, lease_until: null, updated_at: db.fn.now() }));
+  }
+  return true;
 }
 
 /** handleCancellation's reported outcome -> the stored text state. */
@@ -1138,6 +1168,8 @@ module.exports = {
   insertBundle,
   liveStart,
   liveNotice,
+  liveFence,
+  liveStandDown,
   liveFinish,
   sweepIbCancelBundles,
   classifyNoticeOutcome,

@@ -2585,6 +2585,12 @@ async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, can
     });
   } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
   await cancelBundles.liveNotice(req, outcome);
+  // The text step may have outlasted the request's lease: the sweep can have taken the bundle (and abandoned it after a restore)
+  // meanwhile. Renew the lease, and when ownership is gone run NO money, linked-visit or tracker step.
+  if (!req.ibCancelBundleLost) await cancelBundles.liveStart(req);
+  if (req.ibCancelBundleLost) return outcome;
+  const fence = await cancelBundles.liveFence(req);
+  if (req.ibCancelBundleLost) return outcome;
 
   // Share fee outcome alerts, invoice cleanup, and tracker updates with series cancellations. The helper uses the committed
   // cancellation time so retrying a failed fee check never moves a timely cancel into the window.
@@ -2599,7 +2605,11 @@ async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, can
     // Set only by cancelServiceFromBar: the money effects the card showed (invoices to void at those amounts and PaymentIntents,
     // credits to reverse, no card rail). The follow-through acts on these only.
     ...(req.ibApprovedMoney ? { pinnedEffects: { [svc.id]: req.ibApprovedMoney }, moneyReport: req.ibMoneyReport } : {}),
+    // Set only for a cancel with a recovery record: every step re-proves, in its own transaction, that this request still owns
+    // the bundle and the visit is still the approved cancel. A refusal stands the request down (the sweep owns the outcome).
+    ...(fence ? { cancelFence: fence } : {}),
   });
+  if (await cancelBundles.liveStandDown(req, fence)) return outcome;
   await cancelBundles.liveFinish(req);
   return outcome;
 }

@@ -60,6 +60,8 @@ jest.mock('../models/db', () => {
       modify(cb) { cb(b); return b; },
       select() { return b; },
       async first() {
+        // The recovery record (read by the request's cancel fence): no status, so liveFinish still sees "no open text".
+        if (table === 'ib_cancel_effect_bundles') return { scheduled_service_id: 'svc-bar-1', restorations_seen: 0 };
         const rows = table === 'scheduled_services' ? state.rows : table === 'invoices' ? state.invoices : [];
         const cmp = (a, op, v) => (op === '>=' ? a >= v : op === '>' ? a > v : op === '<=' ? a <= v : op === '<' ? a < v : a === v);
         const found = rows.find((r) => Object.entries(b._where).every(([k, v]) => r[k] === v)
@@ -71,7 +73,9 @@ jest.mock('../models/db', () => {
       async columnInfo() { return { recurring_ongoing: {} }; },
       update(u) {
         state.writes.push({ table, op: 'update', u });
-        return { returning: async () => [], then: (res, rej) => Promise.resolve(table === 'ib_cancel_effect_bundles' && state.bundleChangesNoRow ? 0 : 1).then(res, rej) };
+        if (table === 'ib_cancel_effect_bundles') state.bundleUpdates += 1;
+        const lost = table === 'ib_cancel_effect_bundles' && (state.bundleChangesNoRow || state.bundleLostAtUpdate === state.bundleUpdates);
+        return { returning: async () => [], then: (res, rej) => Promise.resolve(lost ? 0 : 1).then(res, rej) };
       },
       insert(r) {
         state.writes.push({ table, op: 'insert', r });
@@ -112,7 +116,7 @@ beforeEach(() => {
   db.__state.rows = [
     { id: 'svc-bar-1', technician_id: 'tech-2', customer_id: 'cust-bar', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_pattern: 'quarterly', recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null, source_action: null, customer_confirmed: true },
   ];
-  db.__state.writes = []; db.__state.reads = []; db.__state.failInsert = null; db.__state.bundleChangesNoRow = false;
+  db.__state.writes = []; db.__state.reads = []; db.__state.failInsert = null; db.__state.bundleChangesNoRow = false; db.__state.bundleLostAtUpdate = null; db.__state.bundleUpdates = 0;
   jest.clearAllMocks();
 });
 
@@ -329,6 +333,43 @@ describe('the recovery bundle rides the cancel transaction', () => {
     // The sweep owns the effects now: a paused request that resumes sends no text and moves no money.
     expect(mockHandleCancellation).not.toHaveBeenCalled();
     expect(mockRunFollowThrough).not.toHaveBeenCalled();
+  });
+
+  test('a request that loses the bundle during the text step runs no money, linked-visit or tracker step', async () => {
+    // Update 1 is the heartbeat; update 2 is the text outcome, which changes no row (the sweep took the bundle meanwhile).
+    db.__state.bundleLostAtUpdate = 2;
+    const { json } = await run();
+    expect(json.success).toBe(true);
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    expect(mockHandleCancellation).toHaveBeenCalledTimes(1);
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+    expect(bundleWrites().some((w) => w.op === 'update' && w.u.status === 'complete')).toBe(false);
+  });
+
+  test('a lease that cannot be renewed after the text step stops the follow-through too', async () => {
+    db.__state.bundleLostAtUpdate = 3;
+    const { json } = await run();
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+  });
+
+  test('the follow-through runs under the cancel fence carrying the bundle and the request lease', async () => {
+    await run();
+    const args = mockRunFollowThrough.mock.calls[0][0];
+    expect(args.cancelFence).toMatchObject({ visitId: 'svc-bar-1', restorations: 0, bundleId: 'x', leaseToken: 'request', hits: [] });
+  });
+
+  test.each([
+    ['the lease was taken over', 'lease_lost', false],
+    ['the visit was restored meanwhile', 'visit_restored_since', true],
+  ])('a fence refusal in the follow-through (%s) stands the request down: the sweep owns the outcome', async (_label, hit, released) => {
+    mockRunFollowThrough.mockImplementationOnce(async ({ cancelFence }) => { cancelFence.hits.push(hit); });
+    const { json } = await run();
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
+    expect(updates.some((u) => u.status === 'complete')).toBe(false);
+    // The request lease is released unless another owner already holds the bundle.
+    expect(updates.some((u) => u.lease_owner === null && u.lease_until === null)).toBe(released);
   });
 
   test('an approved text with no terminal outcome: the reply carries textRetryScheduled (the sweep sends it)', async () => {

@@ -311,6 +311,42 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       }
     });
 
+    test('the request side: liveFence carries the request lease; a heartbeat keeps it, a takeover or a stall past the lease stands the request down', async () => {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      const req = { ibCancelBundleId: id };
+      await svc.liveStart(req);
+      const fence = await svc.liveFence(req);
+      expect(fence).toMatchObject({ visitId: visit, bundleId: id, leaseToken: 'request', restorations: 0 });
+      await expect(check(fence)).resolves.toBeUndefined();
+      // A stall past the request lease with no takeover: refused (the sweep claims the bundle after the lease), then renewed by a heartbeat.
+      await app(TABLE).where({ id }).update({ lease_until: app.raw("now() - interval '1 second'") });
+      await expect(check({ ...fence, hits: [] })).rejects.toMatchObject({ fenceReason: 'lease_lost' });
+      await svc.liveStart(req);
+      await expect(check({ ...fence, hits: [] })).resolves.toBeUndefined();
+      // The sweep took the bundle: the heartbeat changes no row, the request is lost, and its fence refuses every effect.
+      await app(TABLE).where({ id }).update({ lease_owner: 'sweep-token', lease_until: app.raw("now() + interval '5 minutes'") });
+      const lost = { ibCancelBundleId: id };
+      await svc.liveStart(lost);
+      expect(lost.ibCancelBundleLost).toBe(true);
+      const refused = { ...fence, hits: [] };
+      await expect(check(refused)).rejects.toMatchObject({ fenceReason: 'lease_lost' });
+      // Standing down on a refused fence leaves the sweep's lease alone.
+      expect(await svc.liveStandDown({ ibCancelBundleId: id }, refused)).toBe(true);
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ lease_owner: 'sweep-token', status: 'pending' });
+    });
+
+    test('the request stands down on a restore: its own lease is released so the sweep need not wait, and the bundle stays pending', async () => {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      const req = { ibCancelBundleId: id };
+      await svc.liveStart(req);
+      const fence = await svc.liveFence(req);
+      await app('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() });
+      await expect(check(fence)).rejects.toMatchObject({ fenceReason: 'visit_restored_since' });
+      expect(await svc.liveStandDown(req, fence)).toBe(true);
+      expect(req.ibCancelBundleLost).toBe(true);
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'pending', lease_owner: null, lease_until: null });
+    });
+
     test('a bundle row locked by another transaction (an owner update in flight) fails at once with bundle_busy, never waits', async () => {
       const { id, fence } = await owned();
       const holder = await app.transaction();
