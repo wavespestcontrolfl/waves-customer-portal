@@ -706,6 +706,31 @@ describeDb('mole cricket bait migrations through PostgreSQL', () => {
         await knex('products_catalog').where({ id: other.id }).del();
       });
 
+      test('either order: after 3 lb under the NEW row, a 3 lb application of the pest-control row (same EPA number) is blocked by the same shared yearly cap', async () => {
+        process.env.GATE_LAWN_V13 = 'true';
+        caps.resetV13CapIdentity();
+        const wdg = await knex('products_catalog').where({ id: ids.wdg }).first();
+        expect(caps.v13CountCapFor('Advion WDG Granular')).toBeNull(); // not matched by name: it resolves by its EPA number
+        const limits = await caps.applyV13CountCaps(knex, { id: wdg.id, name: wdg.name }, [], wdg.id);
+        expect(limits.filter((l) => l.match_type === caps.V13_AMOUNT).map((l) => [Number(l.limit_value), l.limit_unit, l.severity])).toEqual([[4.6, 'lb/1000sf/year', 'hard_block']]);
+        await knex('property_application_history').insert({ customer_id: customerId, product_id: product.id, application_date: '2026-06-23', application_rate: 3, rate_unit: 'lb' });
+        const result = await applicationLimits.checkLimits(customerId, wdg.id, JULY, knex, { proposed: { ratePer1000: 3, unit: 'lb' } });
+        expect(result.allowed).toBe(false);
+        expect(amount(result)[0].message).toMatch(/THIS APPLICATION WOULD EXCEED IT/);
+        // A small pest-control placement that fits under the cap is allowed.
+        expect((await applicationLimits.checkLimits(customerId, wdg.id, JULY, knex, { proposed: { ratePer1000: 1, unit: 'lb' } })).allowed).toBe(true);
+      });
+
+      test('the pest-control row\'s own earlier use blocks the pest-control row too (same history set); other products have no Advion entry', async () => {
+        process.env.GATE_LAWN_V13 = 'true';
+        caps.resetV13CapIdentity();
+        await oldRow(3, null);
+        const wdg = await knex('products_catalog').where({ id: ids.wdg }).first();
+        expect((await applicationLimits.checkLimits(customerId, wdg.id, JULY, knex, { proposed: { ratePer1000: 3, unit: 'lb' } })).allowed).toBe(false);
+        const other = await knex('products_catalog').where({ id: ids.ace }).first();
+        expect(await caps.applyV13CountCaps(knex, { id: other.id, name: other.name }, [], other.id)).toEqual([]);
+      });
+
       test('the closeout audit counts the old row too (the same history set): 3 lb under each row is over the yearly maximum', async () => {
         process.env.GATE_LAWN_V13 = 'true';
         const [limit] = (await caps.applyV13CountCaps(knex, { id: product.id, name: NAME }, [], product.id)).filter((l) => l.match_type === caps.V13_AMOUNT);

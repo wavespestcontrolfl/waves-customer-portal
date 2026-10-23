@@ -207,6 +207,12 @@ async function resolveCapIds(database) {
   for (const row of [...catalog].sort((a, b) => Number(b.active !== false) - Number(a.active !== false))) add(row.id, row.name);
   const aliases = await read(database, (k) => k('product_aliases').whereIn('alias_name', V13_LIMITS.map((entry) => entry.name)).select('product_id', 'alias_name'));
   for (const row of aliases) add(row.product_id, row.alias_name);
+  // (4) a cap whose label maximum is shared by every catalog row of one registered product (Advion Insect Granule and the pest-control
+  // Advion WDG Granular: EPA 100-1483): each row resolves to the entry, so the shared yearly amount is judged whichever row is applied next.
+  for (const entry of V13_LIMITS.filter((item) => item.annualAmount && item.annualAmount.sharedEpaRegNumber)) {
+    const shared = await read(database, (k) => k('products_catalog').where({ epa_reg_number: entry.annualAmount.sharedEpaRegNumber }).select('id'));
+    for (const row of shared) if (!ids.has(String(row.id))) ids.set(String(row.id), entry);
+  }
   return ids;
 }
 
