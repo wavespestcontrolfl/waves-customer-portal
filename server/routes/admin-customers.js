@@ -2904,7 +2904,7 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
       // Read once here so the panel mounts per-row area editors only when on.
       propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
       // GATE_LAWN_RECLAIMED_HALF_N: the panel mounts the reclaimed-water control only while it is on; off, the key is not sent at all.
-      ...(require('../config/feature-gates').lawnReclaimedHalfNLive() ? { reclaimedWater: true } : {}),
+      ...((require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true) ? { reclaimedWater: true } : {}),
     });
   } catch (err) { next(err); }
 });
@@ -2929,7 +2929,7 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
 // audited, locked domain writer as the other property edits (editManualProperty: customer comms lock, row locks, a critical audit event
 // with the actor, a verified read-back); answers with the list, like the PATCH above.
 router.put('/:id/properties/:propertyId/reclaimed-water', requireAdmin, async (req, res, next) => {
-  if (!require('../config/feature-gates').lawnReclaimedHalfNLive()) return res.status(404).json({ error: 'Not found' });
+  if (!(require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true)) return res.status(404).json({ error: 'Not found' });
   try {
     const value = req.body?.reclaimed;
     if (value !== null && typeof value !== 'boolean') return res.status(400).json({ error: 'reclaimed must be true, false or null' });

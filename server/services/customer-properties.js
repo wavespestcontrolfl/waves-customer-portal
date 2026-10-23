@@ -78,7 +78,7 @@ async function listProperties(customerId, conn = db) {
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
   const customer = await conn('customers').where({ id: customerId }).first('contact_role');
   // GATE_LAWN_RECLAIMED_HALF_N off: the old payload exactly, without the three reclaimed-water columns.
-  const showReclaimed = require('../config/feature-gates').lawnReclaimedHalfNLive();
+  const showReclaimed = (require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true);
   // Gate on: each row carries the answer the plan uses, including one inherited from a merged-away copy of the address.
   const rows = showReclaimed
     ? await Promise.all(properties.map(property => require('./lawn-reclaimed-water').effectiveReclaimedRow(conn, property)))
@@ -241,7 +241,7 @@ const validCoordinates = (lat, lng) => Number.isFinite(coordinateNumber(lat)) &&
 const roundCoordinate = (value) => Math.round(coordinateNumber(value) * 1e7) / 1e7;
 // The address picker's coordinates as insert columns: a validated pair, rounded, or nothing. They feed only the reclaimed-water meter
 // match, so GATE_LAWN_RECLAIMED_HALF_N off stores nothing (the old insert exactly).
-const pickerCoordinateColumns = (lat, lng) => (require('../config/feature-gates').lawnReclaimedHalfNLive() && validCoordinates(lat, lng)
+const pickerCoordinateColumns = (lat, lng) => ((require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true) && validCoordinates(lat, lng)
   ? { latitude: roundCoordinate(lat), longitude: roundCoordinate(lng) } : {});
 
 async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, latitude = null, longitude = null, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
@@ -519,7 +519,7 @@ function keepsCountyReclaimedPin(from, to) {
   const countyAnswer = from.reclaimed_water_source === 'county_meter'
     || (from.reclaimed_water_source == null && from.reclaimed_water_checked_at != null);
   return countyAnswer && from.latitude != null && from.longitude != null && !addressMoved(from, to)
-    && require('../config/feature-gates').lawnReclaimedHalfNLive();
+    && (require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true);
 }
 
 /**
@@ -941,7 +941,7 @@ const EDITABLE_FIELDS = {
   } },
   reclaimed_water: {
     normalize: (value, kind) => {
-      if (kind !== 'edit' || !require('../config/feature-gates').lawnReclaimedHalfNLive()) throw propertyActionError('reclaimed_water cannot be set here');
+      if (kind !== 'edit' || !(require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true)) throw propertyActionError('reclaimed_water cannot be set here');
       if (value !== null && typeof value !== 'boolean') throw propertyActionError('reclaimed_water must be true, false or null');
       return value;
     },
