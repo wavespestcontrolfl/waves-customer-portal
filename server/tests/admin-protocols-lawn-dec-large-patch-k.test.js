@@ -21,6 +21,9 @@ const mockLoadActive = jest.fn();
 jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
+  // The rules ask for a LARGE PATCH area (loadActiveLargePatch); this store answers for it with the areas the test sets. The evidence itself
+  // (the newest fungicide target at the place) is tested against real rows in lawn-trouble-areas-large-patch.db.test.js.
+  loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
 const db = require('../models/db');

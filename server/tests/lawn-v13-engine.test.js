@@ -63,24 +63,52 @@ describe('gate and loader', () => {
 
   test('gate off hands every reader protocols.json lawn itself; on hands v13', () => {
     expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
-    // Gate on, bermuda removal gate off: v13 without the per-visit addOns blocks.
-    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, ...visit }) => visit) }]));
+    // Gate on, bermuda removal gate off and the December swap gate off: v13 without the per-visit addOns and swaps blocks.
+    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, swaps, ...visit }) => visit) }]));
     expect(withGate('true', () => lawnProtocols())).toEqual(stripped);
     expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+    expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('"swaps":');
   });
 
   test('the bermuda removal addOns reach the shared reader only while GATE_LAWN_BERMUDA_REMOVAL is on', () => {
     const saved = process.env.GATE_LAWN_BERMUDA_REMOVAL;
     try {
       process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
-      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      // (the December swap gate is off, so the swaps blocks are still left out)
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('addOns');
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('"swaps":');
       // The removal gate cannot surface the add-on while v13 itself is off.
       expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
       delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
     } finally {
       if (saved === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = saved;
+    }
+  });
+
+  test('the December swaps block reaches the shared reader only while GATE_LAWN_DEC_LARGE_PATCH_K (and the trouble-area gates it needs) is on; both blocks on gives v13 itself', () => {
+    const names = ['GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS'];
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    try {
+      for (const name of names) process.env[name] = 'true';
+      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('largePatchPotassium');
+      // The swap gate off, or one gate it needs off: no swaps, and the bermuda add-ons are unaffected.
+      for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_TROUBLE_AREAS']) {
+        process.env[name] = 'true';
+        delete process.env[name];
+        const view = JSON.stringify(withGate('true', () => lawnProtocols()));
+        expect(view).not.toContain('"swaps":');
+        expect(view).toContain('addOns');
+        process.env[name] = 'true';
+      }
+      // The visits without the blocks keep their own objects (identity).
+      for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K']) delete process.env[name];
+      const view = withGate('true', () => lawnProtocols());
+      expect(view.zoysia.visits[0]).toBe(v13.zoysia.visits[0]);
+      expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
+    } finally {
+      for (const name of names) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
     }
   });
 
@@ -156,7 +184,7 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
-      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, ...visit }) => visit) });
+      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, swaps, ...visit }) => visit) });
     });
   });
 

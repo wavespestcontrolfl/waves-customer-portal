@@ -14,6 +14,7 @@ const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROP
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
 const NOTE = 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
 const day = etDateString(addETDays(new Date(), -1));
+const LARGE = 'Large patch';
 
 describeDb('November large patch nitrogen through PostgreSQL', () => {
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
@@ -53,11 +54,13 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   }, 90000);
   afterAll(async () => { if (owned) await owned.dispose(); });
-  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); });
+  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); });
   afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
-  // A November visit at a fresh lawn, optionally with mapped areas ({ type, status }).
-  async function novemberVisit(areas = []) {
+  // A November visit at a fresh lawn, optionally with mapped areas ({ type, status, target }). `target` is the disease the newest fungicide
+  // spot application at the area's place recorded (property_application_history.target_pest); a fungus area with no `target` has no
+  // disease on record. `ledger` adds more application rows ({ place, target, daysAgo, category, retracted }).
+  async function novemberVisit(areas = [], { ledger = [] } = {}) {
     const f = await fixture(knex);
     await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
     await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, grass_type: 'bermuda', track_key: 'bermuda', lawn_sqft: 10000 });
@@ -65,6 +68,13 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
       await knex('lawn_trouble_areas').insert({
         customer_id: f.customerId, property_id: f.property.id, place: ['front', 'back', 'left_side', 'right_side'][index], type: area.type, status: area.status || 'active',
         source: 'tech_tap', first_seen_on: day, last_seen_on: day,
+      });
+      if (area.target) ledger = [{ place: ['front', 'back', 'left_side', 'right_side'][index], target: area.target }, ...ledger];
+    }
+    for (const row of ledger) {
+      await knex('property_application_history').insert({
+        customer_id: f.customerId, property_id: f.property.id, application_date: etDateString(addETDays(new Date(), -(row.daysAgo ?? 1))), category: row.category || 'fungicide',
+        treated_place: row.place, target_pest: row.target, retracted_at: row.retracted ? new Date() : null,
       });
     }
     return f.visit(0, { scheduled_date: '2026-11-10' });
@@ -77,7 +87,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   test('active fungus, gate on: 2.083 lb per 1,000 (20.83 lb on 10,000 sq ft) in the plan item, the completion default and the limit read, with the note', async () => {
     const spy = limitsSpy();
     try {
-      const result = await plan(await novemberVisit([{ type: 'fungus' }]));
+      const result = await plan(await novemberVisit([{ type: 'fungus', target: LARGE }]));
       const item = bagOf(result.mixCalculator.items);
       expect(item.mix).toMatchObject({ rateSource: 'target_n_analysis', targetNPer1000: 0.5, amountUnit: 'lb' });
       expect(item.mix.ratePer1000).toBeCloseTo(2.0833, 3);
@@ -114,6 +124,34 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     } finally { spy.mockRestore(); }
   });
 
+  // Owner 2026-10-23 (the December potassium PR): the November cut used the generic "fungus" area, which also stands for gray leaf spot,
+  // Pythium, dollar spot, fairy ring and rust. It now asks for the large patch evidence, like the December rule. Behavior change.
+  describe('only a LARGE PATCH lawn is cut (a "fungus" area also stands for the other diseases)', () => {
+    const rateOf = async (visit) => bagOf((await plan(visit)).mixCalculator.items).mix.ratePer1000;
+
+    test.each(['Gray leaf spot', 'Pythium root rot', 'Dollar spot', 'Fairy ring', 'Rust'])('a fungus area treated for %s: 0.75 lb N (3.125 lb), no cut', async (target) => {
+      const result = await plan(await novemberVisit([{ type: 'fungus', target }]));
+      expect(bagOf(result.mixCalculator.items).mix.ratePer1000).toBeCloseTo(3.125, 3);
+      expect(JSON.stringify(result)).not.toContain('activeFungusNitrogen');
+    });
+
+    test('a fungus area whose disease is not on record (no application, or no target on it): no cut (fails closed)', async () => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }]))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: '' }] }))).toBeCloseTo(3.125, 3);
+    });
+
+    test.each(['Large patch', 'Brown patch', 'Rhizoctonia'])('target %j: the cut applies (0.5 lb N)', async (target) => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target }]))).toBeCloseTo(2.0833, 3);
+    });
+
+    test('the newest named target at the place decides; a retracted or non-fungicide row is not evidence', async () => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Dollar spot', daysAgo: 0 }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: 'Dollar spot' }], { ledger: [{ place: 'front', target: LARGE, daysAgo: 0 }] }))).toBeCloseTo(2.0833, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, retracted: true }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, category: 'herbicide' }] }))).toBeCloseTo(3.125, 3);
+    });
+  });
+
   describe('a November visit pinned to v13 after v13 is ARCHIVED (codex #6256 r2 P1)', () => {
     const archive = async (status) => knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).update({ status });
     afterEach(() => archive('staged'));
@@ -125,7 +163,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
 
     test('active fungus: the planned items and the completion defaults survive, at the reduced rate', async () => {
       await archive('archived');
-      const result = await plan(await pinned([{ type: 'fungus' }]));
+      const result = await plan(await pinned([{ type: 'fungus', target: LARGE }]));
       expect(result.protocol.structured.status).toBe('archived');
       expect(result.propertyGate.blocks.map((block) => block.code)).not.toContain('lawn_archived_recipe_unavailable');
       const item = bagOf(result.mixCalculator.items);
@@ -155,7 +193,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   });
 
   test('active fungus but the gate is off, or the trouble-areas gate is off: the old plan, no fungus note anywhere', async () => {
-    const visit = await novemberVisit([{ type: 'fungus' }]);
+    const visit = await novemberVisit([{ type: 'fungus', target: LARGE }]);
     setGates(GATES.filter((name) => name !== 'GATE_LAWN_NOV_LARGE_PATCH_N'));
     const gateOff = await plan(visit);
     setGates(GATES.filter((name) => name !== 'GATE_LAWN_TROUBLE_AREAS'));
@@ -169,7 +207,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   });
 
   test('inside a transaction (packet closeout) the plan reads the areas through a savepoint and still cuts', async () => {
-    const visit = await novemberVisit([{ type: 'fungus' }]);
+    const visit = await novemberVisit([{ type: 'fungus', target: LARGE }]);
     const result = await knex.transaction((trx) => buildPlanForService(visit.id, { db: trx, includeCompletionDefaults: true }));
     expect(bagOf(result.mixCalculator.items).mix.ratePer1000).toBeCloseTo(2.0833, 3);
   });
@@ -177,7 +215,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   // Codex #6256 r4 P1: the strict plan (completion defaults, the job card) never plans the normal target off a failed area read;
   // the lenient plan (the Lawn plan panel, the forecast) keeps the normal target and still builds.
   test('a failed trouble-area read: the strict plan throws, the lenient plan keeps the normal target and still builds', async () => {
-    const visit = await novemberVisit([{ type: 'fungus' }]);
+    const visit = await novemberVisit([{ type: 'fungus', target: LARGE }]);
     const areas = require('../services/lawn-trouble-areas');
     const spy = jest.spyOn(areas, 'loadActive').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     try {

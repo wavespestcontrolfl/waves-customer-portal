@@ -1296,7 +1296,7 @@ describe('the November nitrogen target on the lawn brief', () => {
   let propertyOf;
   beforeEach(() => {
     for (const name of GATES) process.env[name] = 'true';
-    loadActive = jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
+    loadActive = jest.spyOn(areas, 'loadActiveLargePatch').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
     propertyOf = jest.spyOn(areas, 'propertyOf').mockResolvedValue('7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d');
   });
   afterEach(() => { for (const name of GATES) delete process.env[name]; loadActive.mockRestore(); propertyOf.mockRestore(); });
@@ -1380,7 +1380,7 @@ describe('the December large patch bag on the lawn brief', () => {
   let propertyOf;
   beforeEach(() => {
     for (const name of GATES) process.env[name] = 'true';
-    loadActive = jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
+    loadActive = jest.spyOn(areas, 'loadActiveLargePatch').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
     propertyOf = jest.spyOn(areas, 'propertyOf').mockResolvedValue('7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d');
   });
   afterEach(() => { for (const name of GATES) delete process.env[name]; loadActive.mockRestore(); propertyOf.mockRestore(); });
@@ -1414,6 +1414,37 @@ describe('the December large patch bag on the lawn brief', () => {
     december();
     loadActive.mockResolvedValue([{ id: 'b', type: 'take_all' }]);
     expect(entryOf(await guidanceFor(), TEN).gates).toEqual(NORMAL);
+  });
+
+  test('gate off (or a gate it needs off): the new 0-0-24 row is not in the brief at all, and the brief equals the one built without the row', async () => {
+    const withoutRow = () => {
+      december();
+      const summary = mockSummarize();
+      mockSummarize.mockReturnValue({ ...summary, products: summary.products.filter((p) => p.productName !== BLACK_OUT) });
+    };
+    withoutRow();
+    delete process.env.GATE_LAWN_DEC_LARGE_PATCH_K;
+    const baseline = await guidanceFor();
+    for (const name of [null, ...GATES]) {
+      for (const g of GATES) process.env[g] = 'true';
+      delete process.env.GATE_LAWN_DEC_LARGE_PATCH_K;
+      if (name && name !== 'GATE_LAWN_DEC_LARGE_PATCH_K') delete process.env[name];
+      december();
+      const guidance = await guidanceFor();
+      expect(entryOf(guidance, BLACK_OUT)).toBeUndefined();
+      expect(JSON.stringify(guidance)).not.toContain(BLACK_OUT);
+      expect(guidance).toEqual(baseline);
+      expect(loadActive).not.toHaveBeenCalled();
+    }
+    // The swap gate on but the trouble-area gate off is off too (lawnDecLargePatchKLive needs it).
+    for (const g of GATES) process.env[g] = 'true';
+    delete process.env.GATE_LAWN_TROUBLE_AREAS;
+    december();
+    expect(entryOf(await guidanceFor(), BLACK_OUT)).toBeUndefined();
+    // All gates on: the row is listed, as a conditional product with its trigger.
+    for (const g of GATES) process.env[g] = 'true';
+    december();
+    expect(entryOf(await guidanceFor(), BLACK_OUT)).toMatchObject({ conditional: true, trigger: 'active_large_patch_mapped' });
   });
 
   test('a failed trouble-area read aborts the generation (strict, like the November target): nothing is stored', async () => {

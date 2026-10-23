@@ -737,17 +737,20 @@ function parseVisitNutrientTargets(notes) {
   };
 }
 
-// GATE_LAWN_NOV_LARGE_PATCH_N: does the visit's property have an ACTIVE mapped trouble area of this type? A gate that is off or a
-// visit with no property is "no" (the normal target stands). A read that fails is "no" too, with its code logged, UNLESS `strict`
-// (a persisted or fail-closed reader: the previsit brief, the strict plan): then it THROWS, so nothing stores the normal target as if
-// it were the answer. The property resolution and the read share ONE savepoint either way, so a query that fails inside either
-// cannot leave a transaction (packet closeout) aborted for the queries after it.
-async function hasActiveTroubleArea(knex, service, type, { strict = false } = {}) {
+// GATE_LAWN_NOV_LARGE_PATCH_N / GATE_LAWN_DEC_LARGE_PATCH_K: does the visit's property have an ACTIVE mapped trouble area of this type
+// that carries the rule's evidence? `evidence: 'large_patch'` asks lawn-trouble-areas loadActiveLargePatch: a "fungus" area also stands
+// for gray leaf spot, Pythium, dollar spot, fairy ring and rust, so only an area whose newest fungicide application names large patch
+// counts, and an unknown disease is "no". A gate that is off or a visit with no property is "no" (the normal target stands). A read that
+// fails is "no" too, with its code logged, UNLESS `strict` (a persisted or fail-closed reader: the previsit brief, the strict plan): then
+// it THROWS, so nothing stores the normal target as if it were the answer. The property resolution and the read share ONE savepoint
+// either way, so a query that fails inside either cannot leave a transaction (packet closeout) aborted for the queries after it.
+async function hasActiveTroubleArea(knex, service, type, { strict = false, evidence = null } = {}) {
   const areas = require('./lawn-trouble-areas');
   try {
     const found = await savepointRead(knex, async (k) => {
       const propertyId = await areas.propertyOf(k, service, { strict });
-      return propertyId ? areas.loadActive(k, propertyId) : [];
+      if (!propertyId) return [];
+      return evidence === 'large_patch' ? areas.loadActiveLargePatch(k, propertyId) : areas.loadActive(k, propertyId);
     });
     return found.some((area) => area.type === type);
   } catch (err) {
@@ -781,7 +784,7 @@ function fungusAdjustedVisit(visit, cut) {
 async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Active, strict = false }) {
   if (!v13Active || !featureGates.lawnNovLargePatchNLive()) return null;
   const rule = V13_TROUBLE_N_TARGETS.find((entry) => entry.month === monthNumber);
-  if (!rule || !(targetN > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict }))) return null;
+  if (!rule || !(targetN > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict, evidence: rule.evidence }))) return null;
   return rule.targetNPer1000;
 }
 
@@ -794,7 +797,7 @@ async function troubleProductSwap(knex, service, { visit, monthNumber, v13Active
   const rule = V13_TROUBLE_PRODUCT_SWAPS.find((entry) => entry.month === monthNumber);
   if (!rule || featureGates[rule.gate]?.() !== true) return null;
   const hasFrom = String(visit.primary || '').split('\n').some((line) => line.split(' \u2014 ')[0].trim() === rule.from);
-  if (!hasFrom || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict }))) return null;
+  if (!hasFrom || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict, evidence: rule.evidence }))) return null;
   return rule;
 }
 

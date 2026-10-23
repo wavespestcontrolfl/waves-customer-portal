@@ -126,6 +126,39 @@ async function loadActive(knex, propertyId) {
   }));
 }
 
+// ── large patch evidence ────────────────────────────────────────────────────
+
+// An area of type 'fungus' stands for ANY fungicide spot treatment (large patch, gray leaf spot, Pythium, dollar spot, fairy ring, rust):
+// the store records no disease. The disease is on the APPLICATION: the sheet's target (service_products.targets, written by the
+// completion into the ledger as property_application_history.target_pest, GATE_LAWN_SPOT_TARGET) names it. A rule that must be sure the
+// area is a large patch (the November nitrogen cut, the December potassium bag) asks for the target to read large patch, brown patch or
+// Rhizoctonia (the same disease; lawn-visit-customer-copy and the diagnostic read all three as one).
+const LARGE_PATCH_TARGET = /\b(large[\s_-]*patch|brown[\s_-]*patch|rhizoctonia)\b/i;
+const isLargePatchTarget = (value) => LARGE_PATCH_TARGET.test(String(value || ''));
+
+/**
+ * The property's ACTIVE fungus areas that are known to be a LARGE PATCH, as loadActive shows them. The evidence is the newest
+ * fungicide application at the area's place (the ledger, retractions left out) that records a target: the area is a large patch only
+ * when that target names large patch. An area with no application, with an application that names no target, or whose newest named
+ * target is another disease (gray leaf spot, Pythium, dollar spot, fairy ring, rust) is NOT returned: the answer fails closed when the
+ * disease is unknown. A read failure throws, like loadActive.
+ */
+async function loadActiveLargePatch(knex, propertyId) {
+  const areas = (await module.exports.loadActive(knex, propertyId)).filter((area) => area.type === 'fungus');
+  if (!areas.length) return [];
+  const rows = await knex('property_application_history')
+    .where({ property_id: propertyId })
+    .whereNull('retracted_at')
+    .whereIn('treated_place', [...new Set(areas.map((area) => area.place))])
+    .whereRaw("lower(category) = 'fungicide'")
+    .whereRaw("btrim(coalesce(target_pest, '')) <> ''")
+    .orderByRaw('application_date DESC, created_at DESC')
+    .select('treated_place', 'target_pest');
+  const newest = new Map();
+  for (const row of rows) if (!newest.has(row.treated_place)) newest.set(row.treated_place, row.target_pest);
+  return areas.filter((area) => isLargePatchTarget(newest.get(area.place)));
+}
+
 /**
  * Writes the store from a completion's spot rows. `rows` are `{ place, type, source }` (already validated:
  * a closed-list place and type), one entry per treated spot. The first writer wins per (property, place,
@@ -542,6 +575,8 @@ module.exports = {
   placeChoices,
   troubleTypeFor,
   loadActive,
+  loadActiveLargePatch,
+  isLargePatchTarget,
   recordFromCompletion,
   clearArea,
   areaRowsOf,

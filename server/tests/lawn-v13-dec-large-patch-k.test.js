@@ -7,10 +7,13 @@ const mockLoadActive = jest.fn();
 jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
+  // The rules ask for a LARGE PATCH area (loadActiveLargePatch); this store answers for it with the areas the test sets. The evidence itself
+  // (the newest fungicide target at the place) is tested against real rows in lawn-trouble-areas-large-patch.db.test.js.
+  loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
 const featureGates = require('../config/feature-gates');
-const { V13_TROUBLE_PRODUCT_SWAPS, PRODUCT_SWAP_NOTE_KEY, DEC_FROM, DEC_K_PRODUCT } = require('../config/lawn-v13-trouble-product-swaps');
+const { V13_TROUBLE_PRODUCT_SWAPS, PRODUCT_SWAP_NOTE_KEY, DEC_FROM, DEC_K_PRODUCT, SWAP_KEY, swapRecipeProblems } = require('../config/lawn-v13-trouble-product-swaps');
 const engine = require('../services/waveguard-plan-engine');
 const v13 = require('../config/lawn-protocol-v13.json');
 const { validateRule } = require('../services/service-report/lawn-watering-rule');
@@ -53,20 +56,72 @@ describe('lawnDecLargePatchKLive', () => {
 describe('the rule and the recipe', () => {
   test('one entry: December, fungus, the 10-0-22 out, the 0-0-24 in, 0 lb N; frozen', () => {
     expect(V13_TROUBLE_PRODUCT_SWAPS).toHaveLength(1);
-    expect(V13_TROUBLE_PRODUCT_SWAPS[0]).toMatchObject({ month: 12, troubleType: 'fungus', gate: 'lawnDecLargePatchKLive', from: DEC_FROM, to: DEC_K_PRODUCT, targetN: 0 });
+    expect(V13_TROUBLE_PRODUCT_SWAPS[0]).toMatchObject({ month: 12, troubleType: 'fungus', evidence: 'large_patch', gate: 'lawnDecLargePatchKLive', from: DEC_FROM, to: DEC_K_PRODUCT, targetN: 0 });
     expect(Object.isFrozen(V13_TROUBLE_PRODUCT_SWAPS)).toBe(true);
     expect(Object.isFrozen(V13_TROUBLE_PRODUCT_SWAPS[0])).toBe(true);
     expect(migration.NEW_NAME).toBe(DEC_K_PRODUCT);
     expect(migration.FROM_NAME).toBe(DEC_FROM);
   });
 
-  test('every track: the recipe December line is the 10-0-22 at 4.5 lb (0.45 lb N, 0.99 lb K2O); the recipe file does not name the 0-0-24', () => {
+  test('every track: the recipe December line is the 10-0-22 at 4.5 lb (0.45 lb N, 0.99 lb K2O); the 0-0-24 appears only inside the conditional swaps block', () => {
     for (const track of TRACKS) {
       const dec = decOf(track);
-      expect(dec.primary).toBe(`${DEC_FROM} — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`);
+      expect(dec.primary).toBe(`${DEC_FROM} \u2014 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`);
       expect(engine.parseVisitNutrientTargets(dec.notes)).toEqual({ targetNPer1000: 0.45, targetKPer1000: 0.99 });
+      // Not a line the plan parses: the secondary list and the notes do not name the bag.
+      expect(dec.secondary).not.toContain('Black Out');
+      expect(dec.notes).not.toContain('Black Out');
+      expect(Object.keys(dec.swaps)).toEqual([SWAP_KEY]);
     }
-    expect(JSON.stringify(v13)).not.toContain('Black Out');
+    // Every other visit of every track is free of it.
+    for (const track of TRACKS) for (const visit of v13[track].visits.filter((entry) => entry.month !== 'Dec')) expect(JSON.stringify(visit)).not.toContain('Black Out');
+  });
+
+  test('the recipe block and the overlay agree on all three tracks (they cannot drift): swapRecipeProblems() is empty', () => {
+    expect(swapRecipeProblems()).toEqual([]);
+    const block = decOf('zoysia').swaps[SWAP_KEY];
+    expect(block).toMatchObject({
+      gate: 'GATE_LAWN_DEC_LARGE_PATCH_K', replaces: DEC_FROM, targetN: 0, trigger: { troubleType: 'fungus', evidence: 'large_patch' },
+      primary: `${DEC_K_PRODUCT} \u2014 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active large patch mapped`,
+    });
+    expect(block.summary).toContain(`${DEC_K_PRODUCT} \u2014 4.1 lb per 1,000 sq ft (0 N, 0.99 lb K2O) in place of the LESCO 10-0-22`);
+    // The three tracks carry the same block.
+    expect(decOf('bermuda').swaps).toEqual(decOf('st_augustine').swaps);
+    expect(decOf('zoysia').swaps).toEqual(decOf('st_augustine').swaps);
+  });
+
+  test.each([
+    ['one track loses the block', (r) => { delete r.bermuda.visits[11].swaps; }, /bermuda: the December visit has no swaps/],
+    ['one track names another bag to replace', (r) => { r.zoysia.visits[11].swaps[SWAP_KEY].replaces = 'LESCO 24-0-11 with PolyPlus OPTI'; }, /zoysia: replaces/],
+    ['the line names another product', (r) => { r.st_augustine.visits[11].swaps[SWAP_KEY].primary = r.st_augustine.visits[11].swaps[SWAP_KEY].primary.replace('Black Out 0-0-24', 'Black Out 0-0-25'); }, /the line names/],
+    ['the nitrogen target changes', (r) => { r.bermuda.visits[11].swaps[SWAP_KEY].targetN = 0.1; }, /targetN 0\.1/],
+    ['the line states other nitrogen', (r) => { r.zoysia.visits[11].swaps[SWAP_KEY].primary = r.zoysia.visits[11].swaps[SWAP_KEY].primary.replace('(0 lb N,', '(0.2 lb N,'); }, /the line does not state 0 lb N|the line differs/],
+    ['the December primary is no longer the replaced bag', (r) => { r.st_augustine.visits[11].primary = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader'; }, /not the bag the swap replaces/],
+    ['the trigger changes', (r) => { r.bermuda.visits[11].swaps[SWAP_KEY].trigger.evidence = 'any'; }, /the trigger differs/],
+    ['the technician note changes', (r) => { r.zoysia.visits[11].swaps[SWAP_KEY].note = 'Other.'; }, /the technician note differs/],
+  ])('drift is caught: %s', (_label, mutate, expected) => {
+    const copy = JSON.parse(JSON.stringify(v13));
+    mutate(copy);
+    expect(swapRecipeProblems(copy).join('\n')).toMatch(expected);
+  });
+
+  test('the shared reader hands out the block only while the swap gate is live; gate off, the recipe readers see the old December exactly', () => {
+    const { lawnProtocols } = require('../services/lawn-program');
+    const names = [...GATES, 'GATE_LAWN_BERMUDA_REMOVAL'];
+    try {
+      process.env.GATE_LAWN_DEC_LARGE_PATCH_K = 'true';
+      expect(lawnProtocols().zoysia.visits[11].swaps[SWAP_KEY]).toBeDefined();
+      delete process.env.GATE_LAWN_DEC_LARGE_PATCH_K;
+      for (const track of TRACKS) {
+        const dec = lawnProtocols()[track].visits[11];
+        expect(dec).not.toHaveProperty('swaps');
+        const { swaps, ...old } = decOf(track);
+        expect(dec).toEqual(old);
+        expect(JSON.stringify(dec)).not.toContain('Black Out');
+      }
+    } finally {
+      for (const name of names) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+    }
   });
 
   test('the figures: 4.1 lb of a 24% bag is 0.984 lb K2O (the 10-0-22 gives 0.99); the plan derives 4.125 lb; no nitrogen', () => {

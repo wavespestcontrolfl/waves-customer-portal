@@ -18,6 +18,7 @@ const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROP
 const NOTE = 'Active large patch mapped: potassium-only bag, no nitrogen (4.1 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22.';
 const TEN_LINE = `${TEN} — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`;
 const day = etDateString(addETDays(new Date(), -1));
+const LARGE = 'Large patch';
 
 describeDb('December large patch potassium bag through PostgreSQL', () => {
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
@@ -60,11 +61,13 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   }, 90000);
   afterAll(async () => { if (owned) await owned.dispose(); });
-  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('products_catalog').where({ id: boProduct.id }).update({ best_price: null }); });
+  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); await knex('products_catalog').where({ id: boProduct.id }).update({ best_price: null }); });
   afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
-  // A December visit at a fresh lawn, optionally with mapped areas ({ type, status }).
-  async function decemberVisit(areas = [], { city } = {}) {
+  // A December visit at a fresh lawn, optionally with mapped areas ({ type, status, target }). `target` is the disease the newest fungicide
+  // spot application at the area's place recorded (property_application_history.target_pest, from the sheet's target); a fungus area
+  // with no `target` has no disease on record. `ledger` adds more application rows ({ place, target, daysAgo, category, retracted }).
+  async function decemberVisit(areas = [], { city, ledger = [] } = {}) {
     const f = await fixture(knex);
     await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: city || f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
     await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, grass_type: 'bermuda', track_key: 'bermuda', lawn_sqft: 10000 });
@@ -72,6 +75,13 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       await knex('lawn_trouble_areas').insert({
         customer_id: f.customerId, property_id: f.property.id, place: ['front', 'back', 'left_side', 'right_side'][index], type: area.type, status: area.status || 'active',
         source: 'tech_tap', first_seen_on: day, last_seen_on: day,
+      });
+      if (area.target) ledger = [{ place: ['front', 'back', 'left_side', 'right_side'][index], target: area.target }, ...ledger];
+    }
+    for (const row of ledger) {
+      await knex('property_application_history').insert({
+        customer_id: f.customerId, property_id: f.property.id, application_date: etDateString(addETDays(new Date(), -(row.daysAgo ?? 1))), category: row.category || 'fungicide',
+        treated_place: row.place, target_pest: row.target, retracted_at: row.retracted ? new Date() : null,
       });
     }
     return f.visit(0, { scheduled_date: '2026-12-10' });
@@ -84,7 +94,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
   test('active large patch, gate on: the 0-0-24 at 4.125 lb per 1,000 (41.25 lb on 10,000 sq ft) in the plan item, the completion default and the limit read, with the note and 0 lb N', async () => {
     const spy = limitsSpy();
     try {
-      const result = await plan(await decemberVisit([{ type: 'fungus' }]));
+      const result = await plan(await decemberVisit([{ type: 'fungus', target: LARGE }]));
       const item = itemOf(result.mixCalculator.items, BO);
       expect(item.mix).toMatchObject({ rateSource: 'target_k_analysis', targetKPer1000: 0.99, amountUnit: 'lb' });
       expect(item.mix.ratePer1000).toBeCloseTo(4.125, 3);
@@ -114,7 +124,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
   });
 
   test('the cost line: unpriced the bag has no cost; priced from the SiteOne $30.06 / 50 lb it costs $24.80 for the visit', async () => {
-    const visit = await decemberVisit([{ type: 'fungus' }]);
+    const visit = await decemberVisit([{ type: 'fungus', target: LARGE }]);
     const unpriced = itemOf((await plan(visit)).mixCalculator.items, BO);
     expect(unpriced.mix.materialCost).toBeNull();
     await knex('products_catalog').where({ id: boProduct.id }).update({ best_price: 30.06 });
@@ -147,7 +157,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
   });
 
   test('active large patch but the gate is off, or the trouble-areas gate is off: the old plan, byte for byte the same as a lawn with no patch', async () => {
-    const visit = await decemberVisit([{ type: 'fungus' }]);
+    const visit = await decemberVisit([{ type: 'fungus', target: LARGE }]);
     const clean = await decemberVisit([]);
     const strip = (result) => JSON.parse(JSON.stringify(result.mixCalculator.items.map(({ product, mix, raw, gateNotes, selected }) => ({ name: product?.name, ratePer1000: mix?.ratePer1000, amount: mix?.amount, raw, gateNotes, selected }))));
     setGates(GATES.filter((name) => name !== 'GATE_LAWN_DEC_LARGE_PATCH_K'));
@@ -171,7 +181,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       restricted_end_month: 12, restricted_end_day: 31, restricted_nitrogen: true, source_url: 'https://example.invalid/fixture', source_name: 'Synthetic test', source_checked_at: '2026-01-01',
     }).returning('id');
     try {
-      const swapped = await plan(await decemberVisit([{ type: 'fungus' }]));
+      const swapped = await plan(await decemberVisit([{ type: 'fungus', target: LARGE }]));
       expect(itemOf(swapped.mixCalculator.items, BO)).toBeTruthy();
       expect(swapped.propertyGate.blocks.map((block) => block.code)).not.toContain('nitrogen_blackout');
       const control = await plan(await decemberVisit([]));
@@ -192,7 +202,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
 
     test('active large patch: the planned items and the completion defaults survive with the 0-0-24 (the 10-0-22 is not expected)', async () => {
       await archive('archived');
-      const result = await plan(await pinned([{ type: 'fungus' }]));
+      const result = await plan(await pinned([{ type: 'fungus', target: LARGE }]));
       expect(result.protocol.structured.status).toBe('archived');
       expect(result.propertyGate.blocks.map((block) => block.code)).not.toContain('lawn_archived_recipe_unavailable');
       expect(itemOf(result.mixCalculator.items, BO).mix.ratePer1000).toBeCloseTo(4.125, 3);
@@ -211,7 +221,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       const stored = await knex('lawn_protocol_products').where({ product_id: boProduct.id }).first('id', 'gates');
       await knex('lawn_protocol_products').where({ id: stored.id }).update({ gates: JSON.stringify({ targetK: '0.5 lb K2O/1000', trigger: 'active_large_patch_mapped' }) });
       try {
-        const result = await plan(await pinned([{ type: 'fungus' }]));
+        const result = await plan(await pinned([{ type: 'fungus', target: LARGE }]));
         expect(result.propertyGate.blocks.map((block) => block.code)).toContain('lawn_archived_recipe_unavailable');
         expect(result.mixCalculator.items).toEqual([]);
       } finally {
@@ -220,14 +230,61 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
     });
   });
 
+  describe('only a LARGE PATCH counts (a "fungus" area also stands for the other diseases)', () => {
+    const swapped = async (visit) => !!itemOf((await plan(visit)).mixCalculator.items, BO);
+    const normal = async (visit) => {
+      const result = await plan(visit);
+      expect(itemOf(result.mixCalculator.items, TEN).mix.ratePer1000).toBeCloseTo(4.5, 3);
+      expect(itemOf(result.mixCalculator.items, BO)).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain('activeLargePatchPotassium');
+    };
+
+    test.each(['Gray leaf spot', 'Pythium root rot', 'Dollar spot', 'Fairy ring', 'Rust'])('a fungus area treated for %s: the 10-0-22, no change', async (target) => {
+      await normal(await decemberVisit([{ type: 'fungus', target }]));
+    });
+
+    test('a fungus area whose disease is not on record (no application, or an application with no target): the 10-0-22, no change (fails closed)', async () => {
+      await normal(await decemberVisit([{ type: 'fungus' }]));
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: '  ' }] }));
+    });
+
+    test.each(['Large patch', 'large patch (fungal) activity', 'Brown patch', 'Rhizoctonia blight'])('target %j: the swap applies', async (target) => {
+      expect(await swapped(await decemberVisit([{ type: 'fungus', target }]))).toBe(true);
+    });
+
+    test('the NEWEST named target at the place decides: a later gray leaf spot treatment after a large patch one means no swap; the reverse means the swap', async () => {
+      const lateOther = await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Gray leaf spot', daysAgo: 0 }] });
+      await normal(lateOther);
+      const lateLarge = await decemberVisit([{ type: 'fungus', target: 'Dollar spot' }], { ledger: [{ place: 'front', target: LARGE, daysAgo: 0 }] });
+      expect(await swapped(lateLarge)).toBe(true);
+    });
+
+    test('a retracted large patch application, one at another place, a non-fungicide row and another property\'s row are not evidence', async () => {
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, retracted: true }] }));
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'back', target: LARGE }] }));
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, category: 'herbicide' }] }));
+      const other = await decemberVisit([{ type: 'fungus', target: LARGE }]);
+      await normal(await decemberVisit([{ type: 'fungus' }]));
+      expect(await swapped(other)).toBe(true);
+    });
+
+    test('a take-all area with a large patch application at its place is still take-all: no swap', async () => {
+      await normal(await decemberVisit([{ type: 'take_all', target: LARGE }]));
+    });
+
+    test('a large patch application but no ACTIVE fungus area (cleared): no swap', async () => {
+      await normal(await decemberVisit([{ type: 'fungus', status: 'cleared', target: LARGE }]));
+    });
+  });
+
   test('inside a transaction (packet closeout) the plan reads the areas through a savepoint and still swaps', async () => {
-    const visit = await decemberVisit([{ type: 'fungus' }]);
+    const visit = await decemberVisit([{ type: 'fungus', target: LARGE }]);
     const result = await knex.transaction((trx) => buildPlanForService(visit.id, { db: trx, includeCompletionDefaults: true }));
     expect(itemOf(result.mixCalculator.items, BO).mix.ratePer1000).toBeCloseTo(4.125, 3);
   });
 
   test('a failed trouble-area read: the strict plan throws, the lenient plan keeps the 10-0-22 and still builds', async () => {
-    const visit = await decemberVisit([{ type: 'fungus' }]);
+    const visit = await decemberVisit([{ type: 'fungus', target: LARGE }]);
     const areas = require('../services/lawn-trouble-areas');
     const spy = jest.spyOn(areas, 'loadActive').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     try {

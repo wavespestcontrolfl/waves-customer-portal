@@ -5,6 +5,9 @@ const mockLoadActive = jest.fn();
 jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
+  // The rules ask for a LARGE PATCH area (loadActiveLargePatch); this store answers for it with the areas the test sets. The evidence itself
+  // (the newest fungicide target at the place) is tested against real rows in lawn-trouble-areas-large-patch.db.test.js.
+  loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
 const featureGates = require('../config/feature-gates');
@@ -44,7 +47,7 @@ describe('lawnNovLargePatchNLive', () => {
 
 describe('the rule', () => {
   test('one entry: November, fungus, 0.5 lb N; the closed type list names fungus and keeps take-all separate', () => {
-    expect(V13_TROUBLE_N_TARGETS).toEqual([{ month: 11, troubleType: 'fungus', targetNPer1000: 0.5 }]);
+    expect(V13_TROUBLE_N_TARGETS).toEqual([{ month: 11, troubleType: 'fungus', evidence: 'large_patch', targetNPer1000: 0.5 }]);
     expect(TYPES.map((type) => type.id)).toEqual(expect.arrayContaining(['fungus', 'take_all']));
     expect(() => { V13_TROUBLE_N_TARGETS.push({}); }).toThrow();
   });

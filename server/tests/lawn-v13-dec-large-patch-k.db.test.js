@@ -66,6 +66,26 @@ describe('December 0-0-24: the catalog spec (no database)', () => {
   });
 });
 
+describe('the first file name stays as an inert migration', () => {
+  const inert = require('../models/migrations/20261023120000_lawn_v13_dec_large_patch_potassium');
+
+  test('20261023120000 is kept (a database that recorded it needs the file) and does nothing in either direction', async () => {
+    const knex = jest.fn(() => { throw new Error('the inert migration must not touch the database'); });
+    knex.schema = { hasTable: jest.fn(() => { throw new Error('the inert migration must not touch the database'); }) };
+    await expect(inert.up(knex)).resolves.toBeUndefined();
+    await expect(inert.down(knex)).resolves.toBeUndefined();
+    expect(knex).not.toHaveBeenCalled();
+    expect(knex.schema.hasTable).not.toHaveBeenCalled();
+    expect(Object.keys(inert).sort()).toEqual(['down', 'up']);
+    expect(require('fs').readFileSync(require('path').join(__dirname, '../models/migrations/20261023120000_lawn_v13_dec_large_patch_potassium.js'), 'utf8')).toMatch(/Superseded by 20261023121000/i);
+  });
+
+  test('the real migration is the later file, and exactly these two share the name', () => {
+    const files = require('fs').readdirSync(require('path').join(__dirname, '../models/migrations')).filter((name) => /dec_large_patch_potassium/.test(name)).sort();
+    expect(files).toEqual(['20261023120000_lawn_v13_dec_large_patch_potassium.js', '20261023121000_lawn_v13_dec_large_patch_potassium_v2.js']);
+  });
+});
+
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 
 describeDb('v13 December 0-0-24 migration through PostgreSQL', () => {
