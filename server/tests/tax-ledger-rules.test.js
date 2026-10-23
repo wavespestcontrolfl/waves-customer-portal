@@ -464,7 +464,8 @@ describe('applyRules (suggestion-only)', () => {
     expect(compiled.map((r) => r.id)).toEqual(['fast1', 'evil', 'fast2']);
     // 290 z characters: the match is on the description's first 300 characters, like the in-process check
     const subjects = ['WAWA 1', `${'z'.repeat(290)} COSTCO`];
-    await expect(svc.matchPage(compiled, subjects, { capMs: 150 })).resolves.toEqual([[0], [2]]);
+    // an explicit, generous page deadline: this test is about isolating the one slow rule, not about the deadline (tested below)
+    await expect(svc.matchPage(compiled, subjects, { capMs: 150, deadline: Date.now() + 10000 })).resolves.toEqual([[0], [2]]);
     expect(state.ruleUpdates).toHaveLength(1);
     expect(state.ruleUpdates[0].wheres).toContainEqual({ id: 'evil', enabled: true });
     expect(state.ruleUpdates[0].patch).toMatchObject({ enabled: false, note: 'disabled: too slow on real descriptions (typo)', updated_at: expect.any(Date) });
