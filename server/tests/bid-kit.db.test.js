@@ -423,12 +423,12 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect(refused.status).toBe(400);
       expect(JSON.stringify(refused.body)).not.toContain('123456789');
       expect((await rowOf(first.body.item.id)).value).toBeNull();
-      const second = await call('POST', '', { kind: 'fact', item_key: 'custom', label: 'Policy number', value: '123456789' });
+      const second = await call('POST', '', { kind: 'fact', item_key: 'custom', label: 'Policy number', value: '1234 56789' });
       expect(second.status).toBe(201);
       expect((await call('PATCH', `/${second.body.item.id}`, { label: 'EIN', expected_updated_at: second.body.item.updated_at })).status).toBe(400);
       expect((await rowOf(second.body.item.id)).label).toBe('Policy number');
       // Stored jsonb details are read back as fields too.
-      const reference = await call('POST', '', { kind: 'reference', item_key: 'reference', details: { entity: 'Sample District', annualValue: '123456789' } });
+      const reference = await call('POST', '', { kind: 'reference', item_key: 'reference', details: { entity: 'Sample District', annualValue: '12345 6789' } });
       expect(reference.status).toBe(201);
       expect((await call('PATCH', `/${reference.body.item.id}`, { label: 'Taxpayer ID', expected_updated_at: reference.body.item.updated_at })).status).toBe(400);
     });
@@ -519,6 +519,35 @@ describeDb('Bid kit (PostgreSQL)', () => {
     });
   });
 
+  test('a custom item never puts its label, value, notes or details into the activity log, on any write', async () => {
+    const name = 'Maria Fixture';
+    const phone = '941-555-0199';
+    const address = '100 Fixture Way, Sampleville';
+    const label = `${name}, ${phone}, ${address}`;
+    const created = await call('POST', '', { kind: 'fact', item_key: 'custom', label, value: `Call ${name} at ${phone}`, notes: address });
+    expect(created.status).toBe(201);
+    const id = created.body.item.id;
+    const edited = await call('PATCH', `/${id}`, { label: `${label} again`, value: `${address} gate`, notes: `${name} ${phone}`, expected_updated_at: created.body.item.updated_at });
+    expect(edited.status).toBe(200);
+    const signed = await call('POST', `/${id}/attest`, { expected_updated_at: edited.body.item.updated_at });
+    expect(signed.status).toBe(200);
+    expect((await archive(id)).status).toBe(200);
+    const doc = await call('POST', '', { kind: 'document', item_key: 'custom', label: `${name} letter ${phone}`, source_document: address });
+    expect((await upload(doc.body.item.id, 'letter.pdf', doc.body.item.updated_at)).status).toBe(200);
+    const rows = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).orderBy('created_at').select('action', 'description', 'metadata');
+    expect(rows.map((row) => row.action)).toEqual(['bid_kit_created', 'bid_kit_updated', 'bid_kit_attested', 'bid_kit_archived', 'bid_kit_created', 'bid_kit_file_uploaded']);
+    const everything = JSON.stringify(rows);
+    for (const text of [name, 'Maria', phone, '555-0199', address, 'Fixture Way', 'Sampleville', 'gate']) expect(everything).not.toContain(text);
+    expect(rows[0].description).toBe('custom item (custom) created');
+    expect(rows[1].description).toBe('custom item (custom) updated: label, value, notes');
+    expect(rows[1].metadata).toMatchObject({ bid_kit_item_id: id, item_key: 'custom', fields: ['label', 'value', 'notes'] });
+    // A catalog item is named by its catalog label.
+    const catalogItem = await create({ item_key: 'w9' });
+    const named = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).whereRaw("metadata->>'bid_kit_item_id' = ?", [catalogItem.id]).select('description', 'metadata');
+    expect(named.map((row) => row.description)).toEqual(['W-9 (w9) created']);
+    expect(named[0].metadata).toMatchObject({ item_key: 'w9' });
+  });
+
   describe('the daily expiry job', () => {
     test('rings once for each expired or soon-expiring item, with a spec the notification rules accept, and not for the rest', async () => {
       const expired = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' }));
@@ -528,7 +557,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
       const gone = await withFile(await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: '2000-01-01' }));
       await archive(gone.id);
       const result = await runBidKitExpiryCheck();
-      expect(result).toEqual({ scanned: 2, rang: 2, closed: 0 });
+      expect(result).toEqual({ scanned: 2, rang: 2, closed: 0, overflow: 0 });
       const rung = episodes.raiseAdminAlertWithReopen.mock.calls.map(([category, , , opts]) => ({ category, id: opts.metadata.subject.id, key: opts.dedupeKey, window: opts.dedupeWindowMs }));
       expect(rung).toEqual(expect.arrayContaining([
         { category: 'system', id: expired.id, key: `bid-kit:expiry:${expired.id}`, window: 7 * 86400000 },

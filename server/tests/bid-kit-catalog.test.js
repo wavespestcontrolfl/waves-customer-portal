@@ -290,20 +290,27 @@ describe('tax IDs are never stored: one detector', () => {
     ['EIN 1234 56789', true, 'split 4-5'], ['EIN 123 456 789', true, 'split 3-3-3'], ['EIN 123.456.789', true, 'split with dots'],
     ['EIN 12345 6789', true, 'split 5-4'], ['TIN 1 2 3 4 5 6 7 8 9', true, 'every digit apart'], ['tax id 123/456/789', true, 'split with slashes'],
     ['W9 1234–56789', true, 'split with an en dash'],
-    // the label reach: at most 12 characters between the label and the digits
-    [`SSN${' '.repeat(12)}123456789`, true, '12 characters between'], [`SSN${' '.repeat(13)}123456789`, false, '13 characters between'],
-    // a label that follows the digits, at most 12 characters after them
+    // a tax phrase anywhere in the text refuses a grouped nine-digit number: before it, after it, or far away
     ['123456789 EIN', true, 'EIN after the digits'], ['123456789 Tax ID', true, 'Tax ID after the digits'], ['123456789 (TIN)', true, 'TIN in parentheses after the digits'],
-    ['123 456 789, w-9', true, 'W-9 after grouped digits'], ['123456789 taxpayer', true, 'taxpayer after the digits'], ['123456789 SSN', true, 'SSN after the digits'],
-    [`123456789${' '.repeat(12)}EIN`, true, 'label starts 12 characters after'], ['1234 56789 FEIN', true, 'FEIN after split digits'],
+    ['123 456 789, w-9', true, 'W-9 after grouped digits'], ['123456789 taxpayer', true, 'taxpayer after the digits'], ['1234 56789 FEIN', true, 'FEIN after split digits'],
+    ['Tax Identification Number: 123456789', true, 'full phrase, contiguous digits'], ['Employer Identification Number: 123456789', true, 'full employer phrase'],
+    ['Tax Identification Number: 123 456 789', true, 'full phrase, grouped digits'], ['Employer Identification Number: 12345 6789', true, 'full employer phrase, 5-4'],
+    ['Federal Tax ID No. 123 456 789', true, 'federal tax id no'], ['Taxpayer Identification No 1234 56789', true, 'taxpayer identification no'],
+    ['Social Security 1234 56789', true, 'social security'], ['ITIN 1234 56789', true, 'ITIN'], ['tax # 1234 56789', true, 'tax #'], ['Tax No. 123 456 789', true, 'tax no'],
+    ['Tax number 123.456.789', true, 'tax number'], ['federal id 123.456.789', true, 'federal id'], ['employer ID 1234 56789', true, 'employer id'], ['federal tax 1234 56789', true, 'federal tax'],
+    ['W-9 on file with the office manager, policy 123-456-789', true, 'phrase far before the grouped digits'],
+    ['123 456 789 is on file with the W-9 and the insurance certificate', true, 'phrase far after the grouped digits'],
+    [`123 456 789${' '.repeat(40)}EIN`, true, 'phrase 40 characters after'],
+    // exactly nine contiguous digits: refused with no phrase at all (a number with no letters cannot be stored)
+    ['123456789', true, 'bare nine digits'], ['Policy 123456789', true, 'policy number'], ['POL 987654321', true, 'policy number, other digits'],
+    ['Certificate 123456789 dated Sep 1', true, 'nine digits in a sentence'], ['Policy 123456789 issued', true, 'nine digits between words'], ['123456789 policy', true, 'nine digits then a word'],
+    ['W-9 on file with the office manager, policy 123456789', true, 'phrase far before'], ['EIN is on file with the W-9 and the insurance certificate, policy 123456789', true, 'phrases far before'],
+    ['id 123456789 and 12345', true, 'nine digits beside a short number'],
     // not refused
-    [`123456789${' '.repeat(13)}EIN`, false, 'label starts 13 characters after'], ['123456789 policy', false, 'a word that is no label after the digits'],
-    ['Policy 123456789 issued', false, 'policy number between words'], ['123456789 on file with the W-9 and the insurance certificate', false, 'label far after the digits'],
-    ['EIN 12345678',  false, 'eight digits after a label'], ['EIN 12345678901', false, 'eleven digits after a label'], ['TIN 1234567890', false, 'ten digits'],
-    ['Policy 123456789', false, 'policy number, no label'], ['POL 987654321', false, 'policy number'], ['123456789', false, 'bare nine digits, no label'],
-    ['Certificate 123456789 dated Sep 1', false, 'policy number in a sentence'], ['Policy number 123-456-789', false, 'policy number, grouped'],
-    ['W-9 on file with the office manager, policy 123456789', false, 'label too far from the digits'],
-    ['EIN is on file with the W-9 and the insurance certificate, policy 123456789', false, 'label too far'],
+    ['EIN 12345678',false, 'eight digits after a label'], ['EIN 12345678901', false, 'eleven digits after a label'], ['TIN 1234567890', false, 'ten digits'],
+    ['Policy number 123-456-789', false, 'grouped number, no phrase'], ['Local business tax receipt 2025-12345', false, 'bare tax is no phrase'],
+    ['34202-1234', false, 'zip plus four, no phrase'], ['1250000.00', false, 'amount with cents'], ['$1,250,000.00', false, 'amount with commas'],
+    ['Policy 1234 56789', false, 'grouped number, no phrase'], ['Tax receipt 123 456 789', false, 'grouped number beside bare tax'],
     ['EIN on the W-9 only', false, 'label with no number'], ['the tin roof', false, 'tin as a word with no number'], ['tax identification is on the W-9', false, 'words only'],
     ['2026-10-23', false, 'date'], ['10/23/2026', false, 'date, slashes'], ['23.10.2026', false, 'date, dots'], ['2026-10-23 14:30', false, 'date and time'],
     ['Oct 23, 2026', false, 'date in words'], ['20261023', false, 'compact date'],
@@ -343,8 +350,8 @@ describe('tax IDs are never stored: one detector', () => {
     for (const [text] of TYPED) {
       if (detectTaxId(text)) expect(detectTaxId(text, { fileName: true })).toBe(true);
     }
-    expect(detectTaxId('Policy 123456789')).toBe(false);
-    expect(detectTaxId('Policy 123456789', { fileName: true })).toBe(true);
+    expect(detectTaxId('Policy 123 456 789')).toBe(false);
+    expect(detectTaxId('Policy 123 456 789', { fileName: true })).toBe(true);
   });
 
   test('anything that is not a string is not a tax ID', () => {
@@ -370,13 +377,18 @@ describe('tax IDs are never stored: one detector', () => {
       expect(has({ label: 'Sample District', details: { contactRole: 'EIN', annualValue: 123456789 } })).toBe(true);
       expect(has({ label: 'EIN', details: { entity: '123456789' } })).toBe(true);
       expect(has({ label: 'Sample District', details: { entity: 'Sample District', phone: '941-555-0100', annualValue: '24000' } })).toBe(false);
-      expect(has({ label: 'Sample District', details: { annualValue: 123456789 } })).toBe(false);
+      expect(has({ label: 'Sample District', details: { annualValue: 123456789 } })).toBe(true); // nine digits and no letters
+      expect(has({ label: 'Sample District', details: { annualValue: 1250000.5 } })).toBe(false);
     });
 
-    test('an ordinary number with no tax label near it passes', () => {
-      expect(has({ label: 'Policy number', value: '123456789' })).toBe(false);
+    test('a nine-digit number with no letters is refused; a grouped number passes with no tax phrase and fails with one anywhere in the pair', () => {
+      expect(has({ label: 'Policy number', value: '123456789' })).toBe(true);
+      expect(has({ label: 'Certificate of insurance', value: '987654321', source_document: 'Certificate dated Sep 1' })).toBe(true);
       expect(has({ label: 'Policy number', value: '123-456-789' })).toBe(false);
-      expect(has({ label: 'Certificate of insurance', value: '987654321', source_document: 'Certificate dated Sep 1' })).toBe(false);
+      expect(has({ label: 'Local business tax receipt', value: '2025-12345' })).toBe(false);
+      expect(has({ label: 'Local business tax receipt', value: '2025-12345', notes: 'W-9 is separate' })).toBe(true);
+      expect(has({ label: 'Policy number', value: '34202-1234' })).toBe(false);
+      expect(has({ label: 'Amount', value: '1250000.00' })).toBe(false);
       expect(has({ label: 'FDACS license number', value: 'JB000000' })).toBe(false);
       expect(has({ label: 'Phone', value: '941-555-0100' })).toBe(false);
       expect(has({})).toBe(false);

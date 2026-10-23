@@ -27,21 +27,24 @@ const DETAIL_LABEL = {
 const INSURANCE_KEYS = ["insurance_certificate", "pollution_coverage"];
 const ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const CONFLICT_MESSAGE = "Someone else changed this item. Here is the latest version; make your change again.";
-const NEW_REFERENCE = "new:reference";
+const UNCONFIRMED_MESSAGE = "Could not confirm the save. The list below shows what the server has now.";
+const NEW_REFERENCE = "new:add-reference"; // its own id: never the same as the empty reference row's
 const NEW_CUSTOM = "new:custom";
 const CUSTOM_ENTRY = { item: { key: "custom", kind: "document", label: "", expires: true, why: "" }, row: null, status: "missing" };
 
+// explicit: the server answered with its own error sentence (a refusal). A bare HTTP status from a proxy or gateway is not.
 class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, explicit = true) {
     super(message);
     this.status = status;
+    this.explicit = explicit;
   }
 }
 
 async function api(path, options = {}) {
   const res = await adminFetch(`/admin/bid-kit${path}`, options);
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(body.error || `HTTP ${res.status}`, res.status);
+  if (!res.ok) throw new ApiError(body.error || `HTTP ${res.status}`, res.status, Boolean(body.error));
   return body;
 }
 
@@ -485,7 +488,6 @@ function Row({ entry, busy, editing, highlighted, handlers }) {
 }
 
 function Section({ section, counts, editing, busy, focusId, handlers }) {
-  const hasRows = section.entries.some((entry) => entry.row);
   return (
     <section aria-labelledby={`bid-kit-section-${section.key}`}>
       <h2 id={`bid-kit-section-${section.key}`} className="mb-2 text-ui-body font-medium text-zinc-900">
@@ -501,7 +503,7 @@ function Section({ section, counts, editing, busy, focusId, handlers }) {
       {section.key === "references" && (
         <>
           <Button size="sm" variant="secondary" className="mt-2" disabled={busy} onClick={() => handlers.setEditing(NEW_REFERENCE)}>Add a reference</Button>
-          {editing === NEW_REFERENCE && hasRows && (
+          {editing === NEW_REFERENCE && (
             <Editor
               entry={{ ...section.entries[0], row: null }} busy={busy}
               onSave={(body, extra) => handlers.save({ item: section.entries[0].item, row: null }, body, extra)} onArchive={() => {}} onCancel={handlers.cancel}
@@ -569,7 +571,9 @@ function useKitActions(load, closeEditors) {
         await load();
         return false;
       }
-      setMessage({ text: `Not saved: ${err.message}${err.note ? ` ${err.note}` : ""}`, error: true });
+      // Only an answer from the server can say "not saved". With no answer at all (network error, timeout) the save may
+      // have landed, so the page says it could not confirm and reads the list again.
+      setMessage({ text: err instanceof ApiError && err.explicit ? `Not saved: ${err.message}${err.note ? ` ${err.note}` : ""}` : UNCONFIRMED_MESSAGE, error: true });
       // After any failure the list is read again, so the page shows what the server holds (a lost answer, a row just
       // created) and never acts on a row it only remembers.
       await load();

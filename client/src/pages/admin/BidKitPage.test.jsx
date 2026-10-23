@@ -378,7 +378,8 @@ it("a lost answer after a successful upload archives nothing: the reload shows t
   renderPage();
   await screen.findByText("FDACS business license copy");
   fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [pdf()] } });
-  expect(await screen.findByText(/Not saved: Failed to fetch/)).toBeInTheDocument();
+  expect(await screen.findByText("Could not confirm the save. The list below shows what the server has now.")).toBeInTheDocument();
+  expect(screen.queryByText(/Not saved/)).toBeNull();
   await waitFor(() => expect(within(rowFor("IPM plan")).getByText("ipm.pdf")).toBeInTheDocument());
   expect(within(rowFor("IPM plan")).getByRole("button", { name: "Open file" })).toBeInTheDocument();
   expect(archive).not.toHaveBeenCalled();
@@ -636,4 +637,53 @@ it("a custom document shows a saved expiry date and never the missing-expiry war
   renderPage();
   await screen.findByText("FDACS business license copy");
   expect(within(rowFor("FDACS business license copy")).getByText(/No expiry date saved/)).toBeInTheDocument();
+});
+
+it("a save with no answer from the server says it could not confirm and reads the list again; only a refusal says Not saved", async () => {
+  const UNCONFIRMED = "Could not confirm the save. The list below shows what the server has now.";
+  let reads = 0;
+  let saves = 0;
+  const outcomes = [() => Promise.reject(new TypeError("Failed to fetch")), () => reply({}, { ok: false, status: 502 }), () => reply({ error: "Legal name is too long" }, { ok: false, status: 400 })];
+  route({
+    "GET /admin/bid-kit/": () => { reads += 1; return reply(payload()); },
+    "PATCH /admin/bid-kit/i6": () => outcomes[saves++](),
+  });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  const save = async () => {
+    fireEvent.click(within(rowFor("Legal name")).getByRole("button", { name: "Edit" }));
+    fireEvent.change(within(rowFor("Legal name")).getByLabelText("Value"), { target: { value: `Example Pest Services ${saves}` } });
+    fireEvent.click(within(rowFor("Legal name")).getByRole("button", { name: "Save" }));
+  };
+  await save(); // no answer at all
+  expect(await screen.findByText(UNCONFIRMED)).toBeInTheDocument();
+  expect(screen.queryByText(/Not saved/)).toBeNull();
+  await waitFor(() => expect(reads).toBe(2));
+  await save(); // a gateway error is not a refusal either
+  await waitFor(() => expect(saves).toBe(2));
+  expect(await screen.findByText(UNCONFIRMED)).toBeInTheDocument();
+  await waitFor(() => expect(reads).toBe(3));
+  await save(); // the server refused
+  expect(await screen.findByText("Not saved: Legal name is too long")).toBeInTheDocument();
+  expect(screen.queryByText(UNCONFIRMED)).toBeNull();
+  await waitFor(() => expect(reads).toBe(4));
+});
+
+it("with no references yet, Add a reference opens the form and saving it creates the row", async () => {
+  const withoutReferences = ITEMS.filter((entry) => entry.kind !== "reference");
+  const created = row({ id: "ref1", kind: "reference", item_key: "reference", label: "Customer reference", file: null, status: "needs_permission", details: { entity: "Sample District" }, expires_on: null, source_document: null, checked_on: null });
+  let saved = false;
+  const create = vi.fn(() => { saved = true; return reply({ item: created }, { status: 201 }); });
+  route({ "GET /admin/bid-kit/": () => reply(payload(saved ? [...withoutReferences, created] : withoutReferences)), "POST /admin/bid-kit/": create });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  expect(screen.queryByLabelText("Entity")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Add a reference" }));
+  const entity = await screen.findByLabelText("Entity");
+  fireEvent.change(entity, { target: { value: "Sample District" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+  expect(create.mock.calls[0][0].body).toMatchObject({ kind: "reference", item_key: "reference", details: { entity: "Sample District" } });
+  await waitFor(() => expect(within(rowFor("Customer reference")).getByText(/Sample District/)).toBeInTheDocument());
+  expect(screen.queryByLabelText("Entity")).toBeNull(); // the editor closed after the save
 });

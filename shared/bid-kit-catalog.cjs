@@ -130,58 +130,58 @@ const SIGN_OFF_REFUSAL = {
 // A tax ID or Social Security number is never stored: the W-9 file is the only place one lives. Every path asks this one
 // function (typed fields, the merged-row pairs, reference details, uploaded file names, the signed-link name fallback).
 //
-// A separator is any run of space, hyphen, en dash, dot, underscore or slash. Refused:
-//   - SSN shape: 3 digits, separator, 2 digits, separator, 4 digits (label or not);
-//   - EIN shape: 2 digits, separator, 7 digits (label or not);
-//   - a plain nine-digit run, digits possibly split by separators into other groupings ("123456789", "1234 56789",
-//     "123.456.789"), when a tax label (EIN, FEIN, TIN, SSN, "tax id", "taxpayer", W9, W-9, W 9) ends at most 12 characters
-//     before it. In a FILE NAME ({ fileName: true }) any such nine-digit run is refused, label or not.
-// Not refused: runs of 8 digits or of 10 or more, dates, phone numbers, and an ordinary policy number with no tax label.
-// A run is a maximal chain of digit groups joined by separators; nine digits means some consecutive groups of the chain add up to
-// exactly nine. The refusal never repeats the text.
+// A separator is any run of space, hyphen, en dash, dot, underscore or slash. In typed text (a number counts as its digits),
+// each field alone and each label/value pair read together, these are refused:
+//   (A) the SSN shape: 3 digits, separator, 2 digits, separator, 4 digits, label or not;
+//   (B) the EIN shape: 2 digits, separator, 7 digits, label or not;
+//   (C) exactly nine contiguous digits that are not part of a longer digit run, label or not;
+//   (D) nine digits in any other grouping ("1234 56789", "123.456.789"), when a tax phrase appears anywhere in the same text.
+// There is no reach: a phrase before the digits, after them or far away all count. The phrases are EIN, FEIN, TIN, ITIN, SSN,
+// taxpayer, tax id, tax identification, tax number, tax no, tax #, federal id, federal tax, employer id, employer
+// identification, social security, W9, W-9 and W 9. Bare "tax" is no phrase ("Local business tax receipt" is fine).
+// In a FILE NAME ({ fileName: true }) any nine-digit run in any grouping is refused, phrase or not.
+// Not refused: runs of 8 digits or of 10 or more, dates, phone numbers, and a grouped number with no tax phrase.
+// A run is a maximal chain of digit groups joined by separators; nine digits means some consecutive groups of the chain add up
+// to exactly nine. The refusal never repeats the text.
 const SEPARATOR = '[\\s\\-\\u2013._/]+';
 const SSN_SHAPE = new RegExp(`(?<!\\d)\\d{3}${SEPARATOR}\\d{2}${SEPARATOR}\\d{4}(?!\\d)`);
 const EIN_SHAPE = new RegExp(`(?<!\\d)\\d{2}${SEPARATOR}\\d{7}(?!\\d)`);
+const NINE_CONTIGUOUS = /(?<!\d)\d{9}(?!\d)/;
 const DIGIT_CHAIN = new RegExp(`\\d+(?:${SEPARATOR}\\d+)*`, 'g');
-const TAX_LABEL = /\b(?:EIN|FEIN|TIN|SSN)\b|\bW[-\s]?9\b|tax\s*id|taxpayer/gi;
-const LABEL_REACH = 12;
-const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID.';
+const TAX_PHRASE = new RegExp([
+  '\\b(?:EIN|FEIN|TIN|ITIN|SSN)\\b', '\\bW[-\\s]?9\\b', '\\btaxpayer', '\\btax\\s*id\\b', '\\btax\\s+identification', '\\btax\\s+number',
+  '\\btax\\s+no\\b', '\\btax\\s*#', '\\bfederal\\s+id\\b', '\\bfederal\\s+tax', '\\bemployer\\s+id\\b', '\\bemployer\\s+identification', '\\bsocial\\s+security',
+].join('|'), 'i');
+const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID. A nine-digit number with no letters cannot be stored: save it with its letters, or keep it in the file.';
 
-// Where each nine-digit run starts and ends: any consecutive groups in a chain that add up to exactly nine digits.
-function nineDigitRunStarts(text) {
-  const starts = [];  // { start, end } offsets
+// True when some consecutive digit groups of a separator-joined chain add up to exactly nine digits.
+function hasNineDigitGrouping(text) {
   for (const chain of text.matchAll(DIGIT_CHAIN)) {
-    const groups = [...chain[0].matchAll(/\d+/g)].map((group) => ({ start: chain.index + group.index, length: group[0].length }));
-    for (let from = 0; from < groups.length; from += 1) {
+    const lengths = [...chain[0].matchAll(/\d+/g)].map((group) => group[0].length);
+    for (let from = 0; from < lengths.length; from += 1) {
       let sum = 0;
-      for (let to = from; to < groups.length && sum < 9; to += 1) {
-        sum += groups[to].length;
-        if (sum === 9) starts.push({ start: groups[from].start, end: groups[to].start + groups[to].length });
+      for (let to = from; to < lengths.length && sum < 9; to += 1) {
+        sum += lengths[to];
+        if (sum === 9) return true;
       }
     }
   }
-  return starts;
+  return false;
 }
 
 // True when the text holds a tax ID or an SSN. An underscore counts as a space ("EIN_123456789.pdf" reads as "EIN 123456789").
 function detectTaxId(text, { fileName = false } = {}) {
   if (typeof text !== 'string') return false;
   const t = text.replace(/_/g, ' ');
-  if (SSN_SHAPE.test(t) || EIN_SHAPE.test(t)) return true;
-  const runs = nineDigitRunStarts(t);
-  if (!runs.length) return false;
-  if (fileName) return true;
-  return [...t.matchAll(TAX_LABEL)].some((label) => {
-    const labelEnd = label.index + label[0].length;
-    return runs.some((run) => (run.start >= labelEnd && run.start - labelEnd <= LABEL_REACH)
-      || (label.index >= run.end && label.index - run.end <= LABEL_REACH));
-  });
+  if (SSN_SHAPE.test(t) || EIN_SHAPE.test(t) || NINE_CONTIGUOUS.test(t)) return true;
+  if (!hasNineDigitGrouping(t)) return false;
+  return fileName || TAX_PHRASE.test(t);
 }
 
 // A whole item as it will be stored (stored values with an edit applied). Each text field is screened alone, and every
 // ordered pair of text fields is screened as one string, so a tax label in one field and the digits in another (the label
-// "EIN" with the value 123456789, or the same built across two edits) cannot get past the label rule. A reference's details
-// are fields too (a number counts as its digits). A number with no tax label near it passes.
+// "EIN" with the value 1234 56789, or the same built across two edits) cannot get past the phrase rule. A reference's details
+// are fields too (a number counts as its digits).
 function rowHasTaxId(row) {
   const r = row || {};
   const details = r.details && typeof r.details === 'object' ? Object.values(r.details) : [];

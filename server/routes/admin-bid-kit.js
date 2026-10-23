@@ -126,10 +126,16 @@ const statusRow = (row) => ({ ...row, has_file: row.has_file === true });
 
 const sameInstant = (a, b) => new Date(a).getTime() === new Date(b).getTime();
 
+// The activity log never holds a custom label, value or detail (a custom label can hold a name, phone, email or address):
+// a catalog item is named by its catalog label, a custom row by the fixed words "custom item", and an edit lists the
+// changed field NAMES only. The metadata keeps the id, the item key and those field names.
 async function activity(req, action, row, changed) {
+  const entry = catalog.catalogItem(row.item_key);
+  const name = entry ? entry.label : 'custom item';
+  const fields = changed && changed.length ? changed : null;
   await store.logActivity(req.technicianId, action,
-    `${row.label} (${row.item_key}) ${action.replace('bid_kit_', '').replace('_', ' ')}${changed && changed.length ? `: ${changed.join(', ')}` : ''}`,
-    { bid_kit_item_id: row.id, item_key: row.item_key, ...(changed && changed.length ? { fields: changed } : {}) });
+    `${name} (${entry ? row.item_key : 'custom'}) ${action.replace('bid_kit_', '').replace('_', ' ')}${fields ? `: ${fields.join(', ')}` : ''}`,
+    { bid_kit_item_id: row.id, item_key: entry ? row.item_key : 'custom', ...(fields ? { fields } : {}) });
 }
 
 router.get('/', async (req, res, next) => {

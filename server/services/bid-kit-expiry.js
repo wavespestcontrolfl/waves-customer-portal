@@ -5,6 +5,7 @@
 // moves out of the window) or archived, at once on the save and again on the daily run. The audience is the admin bell
 // only; nothing is sent to a customer, an agency or anyone else. Gate off = the job returns before any query.
 const { bidKitLive } = require('../config/feature-gates');
+const crypto = require('node:crypto');
 const db = require('../models/db');
 const store = require('./bid-kit-store');
 const episodes = require('./admin-alert-episodes');
@@ -17,6 +18,11 @@ const { fitAction, shortDateET } = require('./admin-alert-names');
 const AREA = 'Estimates';
 const CATEGORY = 'system';
 const DEDUPE_DAYS = 7;
+
+// docs/admin-notifications.md rule 3: a class that would push past the daily ring budget becomes a standing count. One run
+// raises at most this many per-item bells; the rest are one quiet Activity-only row (a standing count) with the list in detail.
+const MAX_NEW_BELLS = 3;
+const OVERFLOW_KEY = 'bid-kit:expiry-overflow'; // not under KEY_PREFIX: the per-item sweep never sees it
 
 const KEY_PREFIX = 'bid-kit:expiry:';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -135,8 +141,48 @@ async function closeIfNoLongerDue(key, today) {
   });
 }
 
-// The daily job: one bell per qualifying item, and every open bell whose item no longer qualifies is closed.
-// Returns { skipped } with the gate off; otherwise { scanned, rang, closed }.
+// Soonest expiry first, so an expired paper comes before one that expires later.
+const byUrgency = (a, b) => (a.expires_on < b.expires_on ? -1 : a.expires_on > b.expires_on ? 1 : String(a.id).localeCompare(String(b.id)));
+
+// The standing count for items past the per-run bell budget: one row, never rung, rewritten while the overflow changes, and
+// closed when it reaches zero. Same shape as the overdue-promises backlog (notify with metadata.feed = 'activity').
+async function syncOverflowRow(overflow, today, standing) {
+  if (!overflow.length) {
+    if (!standing) return 0;
+    return withItemLock(OVERFLOW_KEY, (trx) => episodes.closeAdminAlertKeys(trx, [OVERFLOW_KEY], 'count_zero', { resolution: 'Cleared: no expiring paper is waiting without a bell' }));
+  }
+  const n = overflow.length;
+  const spec = {
+    area: AREA,
+    action: `renew ${n} more bid ${n === 1 ? 'paper' : 'papers'}`,
+    why: cutAtWord(`${n} more ${n === 1 ? 'paper expires' : 'papers expire'} within 30 days; the full list is under Show full text.`, MAX_WHY_CHARS),
+    severity: 'needs-you',
+    link: '/admin/bid-kit',
+    subject: { type: 'check', id: 'bid-kit-expiry-overflow' },
+    doneWhen: 'count_zero',
+    who: 'person',
+  };
+  const composed = composeAdminAlert(spec);
+  const lines = overflow.map((item) => `${nameOf(item)}: ${catalog.daysBetween(today, item.expires_on) < 0 ? 'expired' : 'expires'} ${shortDateET(new Date(`${item.expires_on}T12:00:00Z`))}`);
+  const ids = overflow.map((item) => item.id).sort();
+  await withItemLock(OVERFLOW_KEY, (trx) => episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
+    // bell: true admits the row under the admin bell policy (a bell:false row is dropped there); metadata.feed = 'activity'
+    // keeps it off the bell list, its unread count and mark-all-read, exactly like the overdue-promises backlog row.
+    bell: true,
+    dedupeKey: OVERFLOW_KEY,
+    dedupeVersion: crypto.createHash('sha256').update(ids.join(',')).digest('hex'),
+    refreshOnDedupe: true,
+    detail: `Bid kit: ${lines.join('; ')}`,
+    link: composed.link,
+    trx,
+    metadata: { ...composed.metadata, count: n, itemKeys: ids, feed: 'activity', quiet: true },
+  }));
+  return 0;
+}
+
+// The daily job. Per run it raises at most MAX_NEW_BELLS per-item bells (expired first, then soonest expiry); items with no
+// open bell that did not fit become the standing count. Every open bell whose item no longer qualifies is closed.
+// Returns { skipped } with the gate off; otherwise { scanned, rang, closed, overflow }.
 async function runBidKitExpiryCheck({ now = new Date() } = {}) {
   if (!bidKitLive()) return { skipped: 'gate_off' };
   const today = catalog.etToday(now);
@@ -145,21 +191,42 @@ async function runBidKitExpiryCheck({ now = new Date() } = {}) {
     rows = await store.listItems();
   } catch (err) {
     logger.warn(`[bid-kit] expiry scan failed: ${errorTag(err)}`);
-    return { scanned: 0, rang: 0, closed: 0 };
+    return { scanned: 0, rang: 0, closed: 0, overflow: 0 };
   }
-  const due = rows.filter((row) => qualifies(row, today));
+  const due = rows.filter((row) => qualifies(row, today)).sort(byUrgency);
+  let holders = new Set();
+  let standing = false;
+  try {
+    // One read of every open bid-kit expiry row: the per-item bells and the standing count.
+    const open = await episodes.openAdminAlertKeys(db, 'bid-kit:expiry');
+    holders = new Set(open.filter((key) => key.startsWith(KEY_PREFIX)));
+    standing = open.includes(OVERFLOW_KEY);
+  } catch (err) {
+    logger.warn(`[bid-kit] reading open expiry bells failed: ${errorTag(err)}`);
+  }
   let rang = 0;
+  const overflow = [];
   for (const item of due) {
+    // Out of budget: an item with a bell already waits (it only rings again after its 7-day window); one with none is counted.
+    if (rang >= MAX_NEW_BELLS) {
+      if (!holders.has(keyFor(item))) overflow.push(item);
+      continue;
+    }
     try {
       if (await raiseIfStillDue(item, today)) rang += 1;
     } catch (err) {
       logger.warn(`[bid-kit] expiry alert failed: ${errorTag(err)}`);
     }
   }
+  try {
+    await syncOverflowRow(overflow, today, standing);
+  } catch (err) {
+    logger.warn(`[bid-kit] standing expiry count failed: ${errorTag(err)}`);
+  }
   let closed = 0;
   try {
     const live = new Set(due.map(keyFor));
-    const stale = (await episodes.openAdminAlertKeys(db, KEY_PREFIX)).filter((key) => !live.has(key));
+    const stale = [...holders].filter((key) => !live.has(key));
     for (const key of stale) {
       try {
         closed += await closeIfNoLongerDue(key, today);
@@ -170,8 +237,8 @@ async function runBidKitExpiryCheck({ now = new Date() } = {}) {
   } catch (err) {
     logger.warn(`[bid-kit] closing stale expiry bells failed: ${errorTag(err)}`);
   }
-  logger.info(`[bid-kit] expiry check scanned=${due.length} rang=${rang} closed=${closed}`);
-  return { scanned: due.length, rang, closed };
+  logger.info(`[bid-kit] expiry check scanned=${due.length} rang=${rang} closed=${closed} overflow=${overflow.length}`);
+  return { scanned: due.length, rang, closed, overflow: overflow.length };
 }
 
-module.exports = { runBidKitExpiryCheck, syncExpiryBell, qualifies, specFor, keyFor, KEY_PREFIX, DEDUPE_DAYS };
+module.exports = { runBidKitExpiryCheck, syncExpiryBell, qualifies, specFor, keyFor, KEY_PREFIX, DEDUPE_DAYS, MAX_NEW_BELLS, OVERFLOW_KEY };
