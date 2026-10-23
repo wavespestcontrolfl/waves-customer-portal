@@ -1353,6 +1353,13 @@ function hasUnresolvedBankChange(row) {
   return !!(row && row.suggestion && (row.suggestion.plaidModified || row.suggestion.plaidRemoved));
 }
 
+// The matcher writes its transfer flag only on a row that carries no flag
+// and no owner ruling: tax-ledger-rules replaces the flag with the owner's
+// classification (or an Income decision) and keeps the examination evidence
+// under 'examined', so a rescan must not relabel that row as an internal
+// transfer in Bank Import. The human actions on it are still refreshed.
+function transferFlagWanted(sug) { return !sug || (!sug.ignore && !sug.examined); }
+
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const reconciliation = await retryPendingReconciliations();
@@ -1370,7 +1377,10 @@ async function runDeterministicMatching({ limit } = {}) {
   // jsonb_exists_any = the function form of the ?| any-key operator —
   // knex.raw treats bare ? (and ??) as binding placeholders and would eat
   // the operator, silently binding the LIMIT value into it.
-  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch'])";
+  // 'examined' is the ledger's marker (tax-ledger-rules): an owner rule or
+  // an Income decision replaced this pass's transfer flag and kept the
+  // examination evidence under that key, so the row is not a fresh row.
+  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch','examined'])";
   // A processed row that produced NOTHING (no candidates at all, or a
   // credit the matcher never matches) must still leave the fresh pool, or a
   // bounded pass would rescan the same oldest rows forever while
@@ -1499,7 +1509,7 @@ async function runDeterministicMatching({ limit } = {}) {
       const staleActionKeys = row.direction === 'credit'
         ? ['refundCandidates', 'refundCandidatesTotal']
         : ['candidates', 'candidatesTotal'];
-      if (!row.suggestion || !row.suggestion.ignore) {
+      if (transferFlagWanted(row.suggestion)) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({

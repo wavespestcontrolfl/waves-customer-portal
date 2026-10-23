@@ -749,6 +749,47 @@ describe('runDeterministicMatching', () => {
     expect(second.expensesLinked).toBe(1);
   });
 
+  test('an owner rule that replaced the transfer flag (examined, no ignore) is NOT re-flagged on rescan — candidates still refresh', async () => {
+    // tax-ledger-rules: an owner Always-Business rule removes the matcher's
+    // ignore flag and keeps the evidence under examined; the next upload or
+    // Plaid rescan must not relabel the owner's expense as a transfer
+    state.bankRows = [{
+      id: 'bt-1', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank',
+      suggestion: { examined: true, rule: { id: 'rule-1', kind: 'expense', source: 'owner', pattern: '\\bcrcardpmt\\b' }, categoryId: 'cat-1', categorySource: 'rule', rulesAt: '2026-08-09T00:00:00.000Z' },
+    }];
+    state.expenses = [{ id: 'exp-1', amount: '500.00', description: 'card payment', vendor_name: 'Capital One', expense_date: '2026-08-08', payment_method: 'ach' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.transferFlagged).toBe(0);
+    expect(summary.expensesLinked).toBe(0); // transfer-shaped rows still never auto-link
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+    expect(state.updates.find(u => sugOf(u) && sugOf(u).ignore)).toBeUndefined();
+    const refreshed = state.updates.find(u => sugOf(u) && sugOf(u).candidates);
+    expect(sugOf(refreshed).candidates).toHaveLength(1); // the manual-link action is kept current
+    expect(sugOf(refreshed).reason).toBeUndefined();
+  });
+
+  test('a transfer-shaped credit the owner decided as Income (examined, no ignore) keeps that reading across a rescan', async () => {
+    state.bankRows = [{
+      id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card',
+      suggestion: { examined: true, income: true, decision: 'income', decidedAt: '2026-08-12T00:00:00.000Z' },
+    }];
+    state.expenses = [{ id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.transferFlagged).toBe(0);
+    expect(state.updates.find(u => sugOf(u) && sugOf(u).ignore)).toBeUndefined();
+    const refreshed = state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates);
+    expect(sugOf(refreshed).refundCandidates).toHaveLength(1); // the refund action stays offered
+  });
+
+  test('a bounded pass serves an examined (owner-overridden) row from the examined pool, not as a fresh row', async () => {
+    state.bankRows = [];
+    await runDeterministicMatching({ limit: 5 });
+    const pools = state.builders.filter(x => x.table === 'bank_transactions').flatMap(x => x.b.whereRaw.mock.calls.map(c => String(c[0])));
+    const examinedPool = pools.filter(r => /jsonb_exists_any\(suggestion/.test(r));
+    expect(examinedPool.length).toBeGreaterThan(0);
+    for (const r of examinedPool) expect(r).toContain("'examined'");
+  });
+
   test('a transfer-flagged CREDIT still parks refund candidates — Ignore is never the only action', async () => {
     // vendor refund whose descriptor contains a transfer word
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card', suggestion: null }];

@@ -299,8 +299,9 @@ async function loadRules(conn = db) {
 //   unrelated rows are neither written nor stamped.
 // - A row the matcher already flagged as an internal transfer (ignore
 //   without a rule) is left as it is by a seed; an owner rule outranks the
-//   heuristic and writes its classification alongside the flag (the flag
-//   stays: the matcher's rescan would only put it back).
+//   heuristic: it replaces the flag and keeps the examination evidence under
+//   'examined', which the matcher's rescan honors (it never puts the flag
+//   back on an examined row).
 // - after = {txn_date, id} continues a pass past its row budget: the result
 //   carries more:true and the cursor to send back.
 const NOT_DECIDED_SQL = "(suggestion -> 'decision') is null";
