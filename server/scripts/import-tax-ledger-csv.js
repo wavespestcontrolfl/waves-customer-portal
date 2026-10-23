@@ -479,8 +479,15 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
   existingExpenses.forEach(e => { const k = expenseKey(e.expense_date, e.amount); if (!expenseLeft.has(k)) expenseLeft.set(k, []); expenseLeft.get(k).push(e); });
   // an expense linked to a bank row carries that row's account: it can only
   // match a ledger row of the same account (an unlinked, hand-entered
-  // expense has no account and matches on day, amount and payee alone)
+  // expense has no account and matches on day, amount and payee alone). The
+  // linked row may sit outside the file's date range (an expense dated by
+  // the receipt, a bank row by the posting), so it is looked up by id.
   const bankByExpense = new Map(existingBank.filter(f => f.matched_expense_id).map(f => [f.matched_expense_id, f]));
+  const unresolved = existingExpenses.map(e => e.id).filter(id => !bankByExpense.has(id));
+  for (const part of chunk(unresolved, HASH_LOOKUP_CHUNK)) {
+    const links = await db('bank_transactions').whereIn('matched_expense_id', part).select('id', 'account_label', 'matched_expense_id', 'txn_date', 'description', 'amount', 'direction');
+    links.forEach(f => { if (!bankByExpense.has(f.matched_expense_id)) bankByExpense.set(f.matched_expense_id, f); });
+  }
   const accountFits = (source, e) => !bankByExpense.has(e.id) || sameAccount(source, bankByExpense.get(e.id).account_label, masks);
   // A bank row and the expense it is linked to are ONE transaction: using
   // either takes the other out of its pool, so a second identical ledger
@@ -494,7 +501,7 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
   const dropBankLinkedTo = (expenseId) => {
     for (const [k, list] of bankLeft) {
       const j = list.findIndex(f => f.matched_expense_id === expenseId);
-      if (j !== -1) { list.splice(j, 1); if (!list.length) bankLeft.delete(k); return; }
+      if (j !== -1) { const [used] = list.splice(j, 1); if (!list.length) bankLeft.delete(k); dropLoose(used); return; }
     }
   };
 

@@ -671,6 +671,23 @@ describe('--skip-existing against expenses', () => {
     expect(db.tables().expenses[0].vendor_name).toBe('DEBIT CARD PURCHASE - WAWA 5519 BRADENTON FL');
   });
 
+  test('an expense linked to a bank row outside the file range still carries that account; a bank row used through its expense leaves every pool', async () => {
+    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50' }));
+    const db = makeFakeDb();
+    const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
+    // the expense sits in range; its bank row posted a week later, in ANOTHER account
+    db.tables().expenses.push({ id: 'exp-late', expense_date: first.date, amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
+    db.tables().bank_transactions.push({ id: 'b-late', row_hash: 'hl', source: 'csv', account_label: 'card-9731', txn_date: '2030-01-01', description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-late' });
+    const out = await run({ file, db, skipExisting: true });
+    expect(out.counts).toEqual({ read: 2, inserted: 2, duplicates: 0, overlaps: 0, held: 0, unsure: 0 });
+    // same account: one ledger row is left out for the expense, and its bank row is gone from the loose pool too
+    const db2 = makeFakeDb();
+    db2.tables().expenses.push({ id: 'exp-same', expense_date: first.date, amount: '12.50', vendor_name: 'Acme Supply', description: 'x' });
+    db2.tables().bank_transactions.push({ id: 'b-same', row_hash: 'hs', source: 'plaid', account_label: 'card-3098', txn_date: first.date, description: 'Acme', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-same' });
+    const out2 = await run({ file, db: db2, skipExisting: true });
+    expect(out2.counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0 });
+  });
+
   test('parseArgs reads --skip-existing', () => {
     expect(parseArgs(['--file', 'x.csv', '--skip-existing', '--dry-run'])).toEqual({ file: 'x.csv', dryRun: true, skipExisting: true });
   });
