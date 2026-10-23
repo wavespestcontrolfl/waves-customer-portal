@@ -171,3 +171,26 @@ describe('GET /equipment', () => {
     expect(chain.calls.some((c) => c[0] === 'where' && c[1] === 'equipment.assigned_vehicle_id')).toBe(false);
   });
 });
+
+// PR 2: the kit key rides with the custody columns and the dialog's
+// suggestions come from the truck kit's vocabulary.
+jest.mock('../services/truck-kit', () => ({ kitKeyVocabulary: jest.fn(async () => [{ kit_key: 'moisture_meter', label: 'Moisture meter' }]) }));
+
+describe('kit key', () => {
+  test('is normalized to snake_case, cleared when blank, refused when not a key', async () => {
+    let res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { kit_key: ' Moisture Meter ' } });
+    expect(res.statusCode).toBe(200);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ kit_key: 'moisture_meter' }));
+    res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { kit_key: '' } });
+    expect(db.__state.updated).toEqual(expect.objectContaining({ kit_key: null }));
+    res = await run('post', '/equipment', { body: { name: 'Synthetic duster', kit_key: 'bad key!' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/kit_key/);
+    expect(db.__state.inserted).toBeNull();
+  });
+
+  test('GET /kit-keys answers the vocabulary', async () => {
+    const res = await run('get', '/kit-keys');
+    expect(res.body).toEqual({ keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });
+  });
+});

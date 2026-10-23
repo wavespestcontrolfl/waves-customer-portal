@@ -1,12 +1,22 @@
 import { ArrowRight, BookOpen, Camera, ChevronRight, ClipboardList, CloudRain, FileText, Leaf, MapPin, Navigation, RefreshCw, Truck, Wrench } from 'lucide-react';
 import { serviceWindowLabel, stopPropertyAlerts, stopStatusLabel, stopSummaryLabel, stopWindow, stopHasCustomerSentPhotos } from './routeStops';
 
-function StopCard({ stop, onOpen, disabled, featured = false, index }) {
+// Today's tool gaps (GATE_TRUCK_KIT, /api/tech/truck-check `gaps`) by the
+// stop's services: the names of the tools a visit's checklist requires that
+// the technician's truck lacks.
+function gapNamesFor(stop, gaps) {
+  if (!Array.isArray(gaps) || !gaps.length) return [];
+  const ids = new Set(stop.services.map((row) => String(row.id)));
+  return [...new Set(gaps.filter((gap) => ids.has(String(gap.serviceId))).flatMap((gap) => gap.missing || []))];
+}
+
+function StopCard({ stop, onOpen, disabled, featured = false, index, gaps }) {
   const service = stop.primary;
   const name = service.customerName || service.customer_name || 'Customer';
   const active = stop.services.some((row) => ['on_site', 'en_route'].includes(row.status));
   const serviceLabel = stopSummaryLabel(stop) || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';
   const customerSentPhotos = stopHasCustomerSentPhotos(stop);
+  const toolGap = gapNamesFor(stop, gaps);
   if (!featured) return (
     <button type="button" className="tf-stop" onClick={() => onOpen(stop)} disabled={disabled}>
       <span className="tf-stop-number">{index + 1}</span>
@@ -16,6 +26,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
         <span className="tf-muted">{service.address}</span>
         <span className="tf-muted">{serviceLabel}</span>
         {customerSentPhotos && <span className="tf-tag">📷 Customer sent photos</span>}
+        {toolGap.length > 0 && <span className="tf-tag">Tool not on truck</span>}
       </span>
       <ChevronRight size={20} aria-hidden="true" />
     </button>
@@ -28,6 +39,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
         <h2>{name}</h2>
         <p className="tf-muted">{service.address}</p>
         <div className="tf-tags"><span className="tf-tag">{serviceLabel}</span>{customerSentPhotos && <span className="tf-tag">📷 Customer sent photos</span>}</div>
+        {toolGap.length > 0 && <div className="tf-alert tf-error">Not on your truck: {toolGap.join(', ')}</div>}
         {stopPropertyAlerts(stop).map((alert, i) => (
           <div key={i} className={`tf-alert ${alert?.type === 'chemical' ? 'tf-error' : ''}`}>
             {typeof alert === 'string' ? alert : alert.text}
@@ -40,7 +52,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
   );
 }
 
-export default function TechFieldHome({ section, truckCheck, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null, onboarding, heldVisits }) {
+export default function TechFieldHome({ section, truckCheck, toolGaps, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null, onboarding, heldVisits }) {
   if (section === 'tools') return (
     <div className="tf-page">
       <div className="tf-page-heading"><div><h1>Tools</h1><p className="tf-muted">Field references and reporting</p></div><Wrench aria-hidden="true" /></div>
@@ -87,10 +99,10 @@ export default function TechFieldHome({ section, truckCheck, stops, nextStop, lo
         <div className="tf-col">
         <div className="tf-area-next">
           {loading ? <p role="status">Loading your route…</p> : !error && (nextStop
-            ? <StopCard stop={nextStop} featured onOpen={onOpen} disabled={busy} />
+            ? <StopCard stop={nextStop} featured onOpen={onOpen} disabled={busy} gaps={toolGaps} />
             : <div className="tf-card tf-card-main"><MapPin aria-hidden="true" /><h2>{stops.length === 0 ? 'No stops scheduled today' : completed === stops.length ? 'All stops completed' : 'No remaining stops'}</h2><p className="tf-muted">Refresh to check for schedule updates.</p></div>)}
         </div>
-        {!loading && !error && stops.length > 0 && <section className="tf-area-route"><h2 className="tf-overline">Your route</h2><div className="tf-route">{stops.map((stop, index) => <StopCard key={stop.key} stop={stop} index={index} onOpen={onOpen} disabled={busy} />)}</div></section>}
+        {!loading && !error && stops.length > 0 && <section className="tf-area-route"><h2 className="tf-overline">Your route</h2><div className="tf-route">{stops.map((stop, index) => <StopCard key={stop.key} stop={stop} index={index} onOpen={onOpen} disabled={busy} gaps={toolGaps} />)}</div></section>}
         </div>
         <div className="tf-col">
           {scheduleChanges && <div className="tf-area-changes">{scheduleChanges}</div>}

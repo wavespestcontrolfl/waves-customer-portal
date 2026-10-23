@@ -50,3 +50,16 @@ it('puts the onboarding card at the top of Today, above the route, and not on To
   rerender(<TechFieldHome section="tools" stops={stops} tools={[]} onboarding={<div data-testid="onboarding-slot" />} />);
   expect(screen.queryByTestId('onboarding-slot')).not.toBeInTheDocument();
 });
+
+// Truck kit (GATE_TRUCK_KIT, PR 2): a stop whose checklist needs a tool the
+// truck lacks says so on the Up next card and carries a tag in the route list.
+it('names the tools a stop needs that are not on the truck, and only on that stop', () => {
+  const stops = groupServicesIntoStops([row('one', 'confirmed'), row('two', 'confirmed')]);
+  const gaps = [{ serviceId: 'one', serviceType: 'Termite Inspection', missing: ['Moisture meter', 'Hammer drill'] }];
+  render(<TechFieldHome section="today" stops={stops} nextStop={nextStopOf(stops)} onOpen={vi.fn()} toolGaps={gaps} />);
+  expect(screen.getByText('Not on your truck: Moisture meter, Hammer drill')).toBeInTheDocument();
+  expect(screen.getAllByText('Tool not on truck')).toHaveLength(1);
+  cleanup();
+  render(<TechFieldHome section="today" stops={stops} nextStop={nextStopOf(stops)} onOpen={vi.fn()} />);
+  expect(screen.queryByText(/Not on your truck/)).not.toBeInTheDocument();
+});

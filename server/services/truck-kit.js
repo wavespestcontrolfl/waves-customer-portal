@@ -28,6 +28,8 @@ const { reportEquipmentIssue } = require('./equipment-maintenance');
 const { raiseAdminAlert } = require('./admin-alert-compose');
 const { fitAction, tidyName } = require('./admin-alert-names');
 const { truncateAtWord } = require('./ops-digest');
+const { detectServiceLine } = require('./service-report/service-line-configs');
+const { normalizeKitKey } = require('./kit-key');
 
 // A truck check is due this many days after the last one (owner decision 2,
 // docs/tool-inventory-tracker-scope.md: weekly plus ad hoc).
@@ -42,6 +44,9 @@ const DEAD_VEHICLE_STATUSES = ['retired', 'sold', 'lost'];
 // active (equipment-maintenance.js checkMaintenanceDue reads both).
 const KIT_STATUSES = ['active', 'in_service'];
 const NOTE_MAX = 300;
+// A visit still ahead of the technician today (mirrors the Schedule readiness
+// poll, client/src/components/schedule/useDispatchReadiness.js).
+const LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const CATEGORY = 'truck_kit';
 const LINK = '/admin/equipment?tab=maintenance';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -77,7 +82,7 @@ async function kitForTruck(vehicleId, conn = db) {
     .where({ assigned_vehicle_id: vehicleId })
     .whereIn('status', KIT_STATUSES)
     .orderBy([{ column: 'category' }, { column: 'name' }])
-    .select('id', 'name', 'asset_tag', 'category', 'serial_number', 'condition_rating');
+    .select('id', 'name', 'asset_tag', 'category', 'serial_number', 'condition_rating', 'kit_key');
   if (!rows.length) return [];
   const open = await conn('maintenance_alerts')
     .whereIn('equipment_id', rows.map((r) => r.id))
@@ -103,16 +108,118 @@ function checkDue(lastCheckedAt, now = new Date()) {
   return !Number.isFinite(at) || now.getTime() - at >= CHECK_INTERVAL_DAYS * 86400000;
 }
 
-// What the field workspace shows: the truck, its kit, the last check and
-// whether a check is due (only when there is something on the list).
+const parseGroups = (value) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+  try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+};
+
+// The tools a service line's checklists require, by kit key (PR 2). An item
+// without a key, or marked optional, is display-only and never a gap.
+async function requiredToolsForLine(serviceLine, conn = db) {
+  if (!serviceLine) return [];
+  const rows = await conn('equipment_checklists').where({ service_line: serviceLine }).select('checklist_items');
+  const byKey = new Map();
+  for (const row of rows) {
+    for (const group of parseGroups(row.checklist_items)) {
+      for (const item of Array.isArray(group?.items) ? group.items : []) {
+        const key = normalizeKitKey(item?.kit_key);
+        if (!key || item.required === false || byKey.has(key)) continue;
+        byKey.set(key, { kit_key: key, label: String(item.item || key) });
+      }
+    }
+  }
+  return [...byKey.values()];
+}
+
+// Every key in use, for the Assets dialog's suggestions: the checklist items
+// (with their text as the label) and the keys already on equipment rows.
+async function kitKeyVocabulary(conn = db) {
+  const byKey = new Map();
+  for (const row of await conn('equipment_checklists').select('checklist_items')) {
+    for (const group of parseGroups(row.checklist_items)) {
+      for (const item of Array.isArray(group?.items) ? group.items : []) {
+        const key = normalizeKitKey(item?.kit_key);
+        if (key && !byKey.has(key)) byKey.set(key, { kit_key: key, label: String(item.item || key) });
+      }
+    }
+  }
+  for (const row of await conn('equipment').whereNotNull('kit_key').distinct('kit_key')) {
+    const key = normalizeKitKey(row.kit_key);
+    if (key && !byKey.has(key)) byKey.set(key, { kit_key: key, label: key.replace(/_/g, ' ') });
+  }
+  return [...byKey.values()].sort((a, b) => a.kit_key.localeCompare(b.kit_key));
+}
+
+// The keyed tools a truck carries today: keyed live rows minus any with an open
+// tool alert (reported missing or damaged on the last check).
+const keysOnTruck = (kit) => new Set(kit.filter((item) => item.kit_key && !item.open_issue).map((item) => normalizeKitKey(item.kit_key)));
+
+// What a truck lacks for a service line. Empty when the truck has no keyed row
+// at all (keys are not set up for it) or the line requires nothing keyed.
+async function toolGapsForTruck(vehicleId, serviceLine, conn = db) {
+  const kit = await kitForTruck(vehicleId, conn);
+  if (!kit.some((item) => item.kit_key)) return [];
+  const required = await requiredToolsForLine(serviceLine, conn);
+  if (!required.length) return [];
+  const onTruck = keysOnTruck(kit);
+  return required.filter((tool) => !onTruck.has(tool.kit_key));
+}
+
+function toolGapLabel(gaps) {
+  const names = gaps.map((gap) => gap.label);
+  if (names.length === 1) return `Truck lacks ${names[0]}`;
+  if (names.length === 2) return `Truck lacks ${names[0]} and ${names[1]}`;
+  return `Truck lacks ${names.length} tools`;
+}
+
+// The Schedule readiness strip's exception for one visit (job-card.js
+// dispatchReadiness), or null: a required tool the assigned truck lacks is a
+// hold like company stock or weather.
+async function toolGapIssue({ technicianId, serviceLine }, conn = db) {
+  if (!truckKitLive() || !technicianId || !serviceLine) return null;
+  const truck = await truckForTechnician(technicianId, conn);
+  if (!truck) return null;
+  const gaps = await toolGapsForTruck(truck.id, serviceLine, conn);
+  if (!gaps.length) return null;
+  return { kind: 'tools', status: 'hold', label: toolGapLabel(gaps), tools: gaps.map((gap) => gap.kit_key) };
+}
+
+// Today's visits of the technician that need a tool their truck lacks (the
+// Today page's Up next line), keyed by scheduled service.
+async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = db } = {}) {
+  const visits = await conn('scheduled_services')
+    .where({ technician_id: technicianId, scheduled_date: etDateString(now) })
+    .whereIn('status', LIVE_VISIT_STATUSES)
+    .select('id', 'service_type');
+  if (!visits.length) return [];
+  const kit = await kitForTruck(truck.id, conn);
+  if (!kit.some((item) => item.kit_key)) return [];
+  const onTruck = keysOnTruck(kit);
+  const requiredByLine = new Map();
+  const out = [];
+  for (const visit of visits) {
+    const line = detectServiceLine(visit.service_type);
+    if (!requiredByLine.has(line)) requiredByLine.set(line, await requiredToolsForLine(line, conn));
+    const missing = requiredByLine.get(line).filter((tool) => !onTruck.has(tool.kit_key));
+    if (missing.length) out.push({ serviceId: visit.id, serviceType: visit.service_type, missing: missing.map((tool) => tool.label) });
+  }
+  return out;
+}
+
+// What the field workspace shows: the truck, its kit, the last check, whether
+// a check is due (only when there is something on the list) and today's gaps.
 async function truckKitStatus(technicianId, { now = new Date(), conn = db } = {}) {
   const truck = await truckForTechnician(technicianId, conn);
-  if (!truck) return { enabled: true, truck: null, kit: [], lastCheck: null, due: false, intervalDays: CHECK_INTERVAL_DAYS };
-  const [kit, lastCheck] = await Promise.all([kitForTruck(truck.id, conn), lastCheckForTruck(truck.id, conn)]);
+  if (!truck) return { enabled: true, truck: null, kit: [], lastCheck: null, due: false, intervalDays: CHECK_INTERVAL_DAYS, gaps: [] };
+  const [kit, lastCheck, gaps] = await Promise.all([
+    kitForTruck(truck.id, conn), lastCheckForTruck(truck.id, conn), toolGapsForToday(technicianId, truck, { now, conn }),
+  ]);
   return {
     enabled: true, truck, kit, lastCheck,
     due: kit.length > 0 && checkDue(lastCheck?.checked_at, now),
     intervalDays: CHECK_INTERVAL_DAYS,
+    gaps,
   };
 }
 
@@ -281,4 +388,9 @@ module.exports = {
   recordTruckCheck,
   closeTruckBellIfClear,
   bellSpec,
+  requiredToolsForLine,
+  kitKeyVocabulary,
+  toolGapsForTruck,
+  toolGapIssue,
+  toolGapsForToday,
 };

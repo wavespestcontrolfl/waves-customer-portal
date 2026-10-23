@@ -851,6 +851,7 @@ export default function TechHomePage({ section = 'today' }) {
           heldVisits={techRole === 'admin' ? <TechHeldVisits /> : null}
           timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
           truckCheck={<TechTruckCheckCard kit={truckKit.data} base={base} visitSearch={visitSearch} />}
+          toolGaps={truckKit.data?.gaps}
           onboarding={<OnboardingCard available={documentsAvailable} base={base} visitSearch={visitSearch} />}
           timekeeping={<>
             <div className="tf-existing"><TimecardSignoffCard techName={techName} /></div>

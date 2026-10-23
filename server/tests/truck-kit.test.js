@@ -16,7 +16,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ truckKitLive: jest.fn(() => true), gateEnvValue: jest.fn(() => false), isEnabled: jest.fn(() => false) }));
 jest.mock('../models/db', () => {
-  const state = { equipment: [], maintenance_alerts: [], equipment_checks: [], technicians: [] };
+  const state = { equipment: [], maintenance_alerts: [], equipment_checks: [], technicians: [], equipment_checklists: [], scheduled_services: [] };
   const norm = (col) => String(col).split('.').pop();
   const chain = (name) => {
     const table = String(name).split(' as ')[0];
@@ -30,6 +30,8 @@ jest.mock('../models/db', () => {
     c.whereIn = (col, vals) => add((r) => vals.includes(r[norm(col)]));
     c.whereNotIn = (col, vals) => add((r) => !vals.includes(r[norm(col)]));
     c.whereNull = (col) => add((r) => r[norm(col)] == null);
+    c.whereNotNull = (col) => add((r) => r[norm(col)] != null);
+    c.distinct = (...cols) => { c.cols = cols; c.distinctOn = cols; return c; };
     c.leftJoin = (...args) => { c.joins.push(args); return c; };
     c.join = (...args) => { c.joins.push(args); return c; };
     c.orderBy = (...args) => {
@@ -83,6 +85,7 @@ jest.mock('../models/db', () => {
         for (const r of state[table]) if (c.preds.every((p) => p(r))) { Object.assign(r, c.patch); out += 1; }
       } else {
         out = rows().map((r) => project(r, c.cols || []));
+        if (c.distinctOn) out = out.filter((r, i, all) => all.findIndex((x) => JSON.stringify(x) === JSON.stringify(r)) === i);
       }
       return Promise.resolve(out).then(resolve, reject);
     };
@@ -134,6 +137,8 @@ function seed({ truckAssigned = true } = {}) {
   ];
   s.maintenance_alerts = [];
   s.equipment_checks = [];
+  s.equipment_checklists = [];
+  s.scheduled_services = [];
 }
 
 beforeEach(() => {
@@ -144,7 +149,7 @@ beforeEach(() => {
 describe('truckKitStatus', () => {
   test('no truck assigned: nothing due, nothing listed', async () => {
     seed({ truckAssigned: false });
-    expect(await truckKit.truckKitStatus(TECH, { now: NOW })).toEqual({ enabled: true, truck: null, kit: [], lastCheck: null, due: false, intervalDays: 7 });
+    expect(await truckKit.truckKitStatus(TECH, { now: NOW })).toEqual({ enabled: true, truck: null, kit: [], lastCheck: null, due: false, intervalDays: 7, gaps: [] });
   });
 
   test('lists the live rows on the truck, never a retired one, and is due with no check on record', async () => {
@@ -279,4 +284,86 @@ test('checkDue: never checked, or 7 or more days ago', () => {
   expect(truckKit.checkDue(daysAgo(6.9), NOW)).toBe(false);
   expect(truckKit.checkDue(daysAgo(7), NOW)).toBe(true);
   expect(truckKit.checkDue('not a date', NOW)).toBe(true);
+});
+
+// PR 2: the job-type gap check. Keys on checklist items name required tools;
+// a truck with keyed rows that lacks one is a gap, for the readiness strip and
+// the technician's Today page.
+describe('tool gaps by kit key', () => {
+  const CHECKLIST = (line, items) => ({ id: `c-${line}`, service_line: line, checklist_items: JSON.stringify([{ category: 'Inspection', items }]) });
+  const seedKeys = () => {
+    db.__state.equipment_checklists = [
+      CHECKLIST('termite', [
+        { item: 'Moisture meter', required: true, kit_key: 'moisture_meter' },
+        { item: 'Foam drill kit', required: false, kit_key: 'foam_drill_kit' },
+        { item: 'Product label available', required: true },
+      ]),
+      CHECKLIST('pest', [{ item: 'B&G 1 gal sprayer (interior)', required: true, kit_key: 'bg_sprayer' }, { item: 'Flashlight', required: true, kit_key: 'flashlight' }]),
+    ];
+    db.__state.scheduled_services = [];
+  };
+  beforeEach(seedKeys);
+
+  test('requiredToolsForLine keeps only keyed, required items, once per key', async () => {
+    expect(await truckKit.requiredToolsForLine('termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
+    expect(await truckKit.requiredToolsForLine('lawn')).toEqual([]);
+    expect(await truckKit.requiredToolsForLine(null)).toEqual([]);
+  });
+
+  test('a truck with no keyed row is never judged; with keys, a missing or flagged tool is a gap', async () => {
+    expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([]);
+    db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
+    expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
+    expect(await truckKit.toolGapsForTruck(TRUCK, 'pest')).toEqual([{ kit_key: 'flashlight', label: 'Flashlight' }]);
+    db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
+    expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([]);
+    // Reported missing on the last check: not on the truck until found.
+    db.__state.maintenance_alerts.push({ id: 'a1', equipment_id: METER, alert_type: 'tool_missing', status: 'new' });
+    expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
+  });
+
+  test('toolGapIssue is a hold with a readable label, and nothing behind the gate or without a truck', async () => {
+    db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).toEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });
+    db.__state.equipment_checklists.push(CHECKLIST('termite', [{ item: 'Hammer drill', required: true, kit_key: 'hammer_drill' }]));
+    expect((await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).label).toBe('Truck lacks Moisture meter and Hammer drill');
+    db.__state.equipment_checklists.push(CHECKLIST('termite', [{ item: 'Ladder', required: true, kit_key: 'ladder' }]));
+    expect((await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).label).toBe('Truck lacks 3 tools');
+    expect((await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'pest' })).label).toBe('Truck lacks Flashlight');
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'lawn' })).toBeNull();
+    seed({ truckAssigned: false });
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).toBeNull();
+    const gates = require('../config/feature-gates');
+    gates.truckKitLive.mockReturnValueOnce(false);
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).toBeNull();
+  });
+
+  test("today's gaps cover the technician's live visits today only, by their service line", async () => {
+    const today = require('../utils/datetime-et').etDateString(NOW);
+    db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
+    db.__state.scheduled_services = [
+      { id: 'v1', technician_id: TECH, scheduled_date: today, status: 'confirmed', service_type: 'Termite Inspection' },
+      { id: 'v2', technician_id: TECH, scheduled_date: today, status: 'completed', service_type: 'Termite Inspection' },
+      { id: 'v3', technician_id: TECH, scheduled_date: '2000-01-01', status: 'confirmed', service_type: 'Termite Inspection' },
+      { id: 'v4', technician_id: 'someone-else', scheduled_date: today, status: 'confirmed', service_type: 'Termite Inspection' },
+      { id: 'v5', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Quarterly Pest Control' },
+    ];
+    const status = await truckKit.truckKitStatus(TECH, { now: NOW });
+    expect(status.gaps).toEqual([
+      { serviceId: 'v1', serviceType: 'Termite Inspection', missing: ['Moisture meter'] },
+      { serviceId: 'v5', serviceType: 'Quarterly Pest Control', missing: ['Flashlight'] },
+    ]);
+  });
+
+  test('the key vocabulary merges checklist keys (with their text) and keys on rows', async () => {
+    db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
+    db.__state.equipment.find((e) => e.id === METER).kit_key = 'hammer_drill';
+    expect(await truckKit.kitKeyVocabulary()).toEqual([
+      { kit_key: 'bg_sprayer', label: 'B&G 1 gal sprayer (interior)' },
+      { kit_key: 'flashlight', label: 'Flashlight' },
+      { kit_key: 'foam_drill_kit', label: 'Foam drill kit' },
+      { kit_key: 'hammer_drill', label: 'hammer drill' },
+      { kit_key: 'moisture_meter', label: 'Moisture meter' },
+    ]);
+  });
 });

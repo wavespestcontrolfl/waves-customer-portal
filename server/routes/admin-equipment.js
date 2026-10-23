@@ -12,6 +12,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
 const { etDateString } = require('../utils/datetime-et');
+const { normalizeKitKey, isValidKitKey } = require('../services/kit-key');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -56,6 +57,11 @@ async function custodyFields(body, { selfId = null } = {}) {
       }
       values.condition_rating = rating;
     }
+  }
+  if (body.kit_key !== undefined) {
+    const key = normalizeKitKey(body.kit_key);
+    if (key && !isValidKitKey(key)) return { error: 'kit_key must be letters, digits and underscores, 2 to 60 characters' };
+    values.kit_key = key;
   }
   if (body.assigned_vehicle_id !== undefined) {
     if (body.assigned_vehicle_id === null || body.assigned_vehicle_id === '') {
@@ -123,6 +129,16 @@ router.get('/equipment', async (req, res, next) => {
     });
 
     res.json({ equipment: enriched });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /kit-keys — every kit key in use (checklist items and equipment rows),
+// for the Assets dialog's suggestions (docs/tool-inventory-tracker-scope.md PR 2).
+router.get('/kit-keys', async (req, res, next) => {
+  try {
+    res.json({ keys: await require('../services/truck-kit').kitKeyVocabulary() });
   } catch (err) {
     next(err);
   }

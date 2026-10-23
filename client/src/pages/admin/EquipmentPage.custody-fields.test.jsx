@@ -124,3 +124,34 @@ describe('assets custody', () => {
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/admin/timetracking/technicians'))).toBe(false);
   });
 });
+
+// PR 2: the kit key names what a tool is; the dialog suggests the keys the
+// checklists use and saves the typed key with the other custody fields.
+describe('kit key', () => {
+  it('offers the checklist keys as suggestions and saves the typed key', async () => {
+    const stub = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => {
+      if (String(url).includes('/admin/equipment/kit-keys')) return ok({ keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });
+      return stub(url, options);
+    });
+    mountAssets();
+    await screen.findByText(TOOL.name);
+    fireEvent.click(within(cardOf(TOOL.name)).getByRole('button', { name: 'Edit' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    const key = dialog.getByLabelText('Kit key');
+    expect(key).toHaveAttribute('list', 'equipment-kit-keys');
+    await waitFor(() => expect(document.querySelector('#equipment-kit-keys option[value="moisture_meter"]')).not.toBeNull());
+    fireEvent.change(key, { target: { value: 'moisture_meter' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0]).toEqual(expect.objectContaining({ kit_key: 'moisture_meter' }));
+  });
+
+  it('a vehicle row has no kit key', async () => {
+    mountAssets();
+    await screen.findByText(TRUCK.name);
+    fireEvent.click(within(cardOf(TRUCK.name)).getByRole('button', { name: 'Edit' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    expect(dialog.queryByLabelText('Kit key')).not.toBeInTheDocument();
+  });
+});

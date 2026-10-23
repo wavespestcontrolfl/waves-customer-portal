@@ -252,6 +252,7 @@ const EMPTY_EQUIP = {
   asset_tag: "",
   location: "van",
   assigned_vehicle_id: "",
+  kit_key: "",
   condition_rating: 8,
   purchase_date: "",
   purchase_price: "",
@@ -311,6 +312,9 @@ function EquipmentTab({
   // Holder picker options (admin only: the dialog is admin only). A failed
   // read leaves the picker with the current holder alone.
   const [technicians, setTechnicians] = useState([]);
+  // Kit key suggestions: the keyed checklist items and the keys already in use
+  // (admin only, with the dialog). A failed read leaves plain typing.
+  const [kitKeys, setKitKeys] = useState([]);
   // "" = every row, a vehicle id = that truck's roster, "none" = on no truck.
   const [vehicleFilter, setVehicleFilter] = useState("");
   const loadSeq = useRef(0);
@@ -341,6 +345,11 @@ function EquipmentTab({
     }).catch(() => {
       if (!cancelled) setTechnicians([]);
     });
+    adminFetch("/admin/equipment/kit-keys").then(d => {
+      if (!cancelled) setKitKeys(d.keys || []);
+    }).catch(() => {
+      if (!cancelled) setKitKeys([]);
+    });
     return () => {
       cancelled = true;
     };
@@ -362,7 +371,7 @@ function EquipmentTab({
         ["purchase_price", "current_hours", "next_service_hours", "book_value", "condition_rating"].forEach(k => {
           payload[k] = payload[k] === "" || payload[k] == null ? null : Number(payload[k]);
         });
-        ["assigned_to", "assigned_vehicle_id", "asset_tag", "location"].forEach(k => {
+        ["assigned_to", "assigned_vehicle_id", "asset_tag", "location", "kit_key"].forEach(k => {
           if (payload[k] === "" || payload[k] == null) payload[k] = null;
         });
         if (!payload.purchase_date) payload.purchase_date = null;
@@ -486,6 +495,7 @@ function EquipmentTab({
                   location: e.location ?? "",
                   assigned_vehicle_id: e.assigned_vehicle_id ?? "",
                   assigned_to: e.assigned_to ?? "",
+                  kit_key: e.kit_key ?? "",
                   condition_rating: e.condition_rating ?? ""
                 });
               }} type="button" variant="secondary" className="min-w-11" disabled={saving}>
@@ -534,13 +544,14 @@ function EquipmentTab({
             </Card>;
       })}
       </div>
-      {editing && <EquipmentEditModal equipment={editing} vehicles={vehicles} technicians={technicians} onChange={setEditing} onClose={() => setEditing(null)} onSave={save} saving={saving} error={actionError} />}
+      {editing && <EquipmentEditModal equipment={editing} vehicles={vehicles} technicians={technicians} kitKeys={kitKeys} onChange={setEditing} onClose={() => setEditing(null)} onSave={save} saving={saving} error={actionError} />}
     </>;
 }
 function EquipmentEditModal({
   equipment: e,
   vehicles = [],
   technicians = [],
+  kitKeys = [],
   onChange,
   onClose,
   onSave,
@@ -620,6 +631,12 @@ function EquipmentEditModal({
           {field("asset_tag", "Asset tag")}
           {field("status", "Status", "text", STATUSES)}
           {e.category !== "vehicle" && choice("assigned_vehicle_id", "Truck", truckOptions)}
+          {e.category !== "vehicle" && <Field label="Kit key" help="What this tool is, matching the checklist item it satisfies" className="min-w-0">
+              <Input list="equipment-kit-keys" value={e.kit_key ?? ""} onChange={ev => onChange({
+          ...e,
+          kit_key: ev.target.value
+        })} disabled={saving} />
+            </Field>}
           {choice("location", "Kept", locationOptions)}
           {field("condition_rating", "Condition (1 to 10)", "number")}
           {field("purchase_date", "Purchase Date", "date")}
@@ -631,6 +648,11 @@ function EquipmentEditModal({
           {choice("assigned_to", "Assigned To", holderOptions)}
         </div>
         <div className="mt-3">{field("notes", "Notes", "textarea")}</div>
+        <datalist id="equipment-kit-keys">
+          {kitKeys.map(k => <option key={k.kit_key} value={k.kit_key}>
+              {k.label}
+            </option>)}
+        </datalist>
       </DialogBody>
       <DialogFooter className="grid grid-cols-2">
         <Button variant="secondary" disabled={saving} onClick={onClose}>
