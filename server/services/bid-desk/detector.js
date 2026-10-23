@@ -340,7 +340,10 @@ function groupKeys(fields) {
   const org = normalizeTitle(fields.gc_or_agency);
   const title = normalizeTitle(fields.project_title);
   if (!org || !title) return { org: org || null, group_base: null, group_key: null };
-  const base = `${keyPart(org)}|${keyPart(title)}`;
+  // A template that names the solicitation number (VendorLink) keeps two solicitations of one agency and title (a
+  // yearly re-bid) apart; a repeat notice of the same number still joins its bid.
+  const number = normalizeTitle(fields.solicitation_number);
+  const base = `${keyPart(org)}|${keyPart(title)}${number ? `|${keyPart(number)}` : ''}`;
   const pkg = normalizeTitle(fields.package_name);
   return { org, group_base: base, group_key: pkg ? `${base}#${keyPart(pkg)}` : base };
 }

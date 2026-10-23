@@ -358,6 +358,14 @@ describe('VendorLink solicitation broadcasts', () => {
     expect(parseBidEmail(vlNotice({ provider_verified: false }))).toMatchObject({ template: null, due_at: null });
   });
 
+  test('a repeat notice of the same bid number groups with it; a new number of the same title is its own bid', () => {
+    const first = parseBidEmail(vlNotice());
+    expect(parseBidEmail(vlNotice({ gmail_thread_id: 't-2' })).group_key).toBe(first.group_key);
+    const rebid = parseBidEmail(vlNotice({ body_text: VL_BODY().replace('ITB 27-001', 'ITB 28-001') }));
+    expect(rebid.group_key).not.toBe(first.group_key);
+    expect(rebid.group_base).not.toBe(first.group_base);
+  });
+
   test('HA eProcurement and MyFloridaMarketPlace mail with bid words counts as government mail', () => {
     for (const from of ['notices@ha.internationaleprocurement.com', 'MFMP.NoReply@dms.myflorida.com']) {
       expect(detectBidEmail(email({ from_address: from, subject: 'New RFP: Pest Control' }))).toMatchObject({ bid: true, source: 'gov_email' });
