@@ -437,6 +437,10 @@ severity noted.
   mechanism for a purpose an existing one serves is P1 unless the PR body
   names the existing mechanism and why it can't be extended (instances
   rated P0 above, e.g. a second Stripe webhook mount, keep P0).
+- **Admin UI copy: avoid unnecessary secondary labels and descriptions.
+  Let the layout do the explaining.** `/admin/*` only — never customer or
+  tech surfaces. Keep units, prices, and legal/compliance wording.
+  Advisory; not a review finding.
 
 ## Out of scope (do not flag)
 
