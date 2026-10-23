@@ -165,6 +165,12 @@ describe('lawn_care guide (revised prep & service guide)', () => {
   };
   const isBermudaHeading = (h) => /^Bermuda removal from St\. Augustine/.test(h || '');
 
+  test('Re-service row says grass lost to a plant virus is not covered (owner 2026-10-22)', async () => {
+    const lawn = await buildServiceDetailsContent('lawn_care', {});
+    const text = lawnStrings(lawn).join('\n');
+    expect(text).toContain('Grass lost to a plant virus (sugarcane mosaic virus) is not covered, because no treatment cures it');
+  });
+
   test('carries ordered sections including a Bermuda section with a table', async () => {
     const lawn = await withBermudaGate('true', () => buildServiceDetailsContent('lawn_care', BERMUDA_ESTIMATE));
     expect(Array.isArray(lawn.sections)).toBe(true);

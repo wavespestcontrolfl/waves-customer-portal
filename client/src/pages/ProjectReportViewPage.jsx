@@ -933,7 +933,9 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
   // action needs some recorded warranty.
   const warranty = String(f.warranty_type || '').trim();
   const renewableContract = /renewable/i.test(warranty);
-  const noWarranty = !warranty || /^no warranty$/i.test(warranty);
+  const noWarranty = certificateHasNoWarranty(f);
+  // The warranty call to action needs a recorded warranty (blank hides it, as before).
+  const hideWarrantyCta = noWarranty || !warranty;
 
   return (
     <div data-testid="termite-notice-sticker" style={{
@@ -1036,7 +1038,12 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
           Building Code 1816 / R318 and rules established by the Florida Department of Agriculture &amp; Consumer Services
           {renewableContract ? ', placed under a retreatment contract renewable by payment of an annual fee.' : '.'}
           {' '}The owner is hereby advised to have the property inspected annually by Waves Pest Control, LLC.
-          {' '}Annual reinspection and renewal of the treatment contract are needed to keep this protection in place.
+          {/* FBC 105.11: every notice names the need for reinspection and
+              contract renewal; with no warranty it recommends one instead of
+              pointing at a contract that does not exist. */}
+          {noWarranty
+            ? ' No retreatment contract covers this treatment. Annual reinspection and a renewable treatment contract are recommended to keep this protection in place.'
+            : ' Annual reinspection and renewal of the treatment contract are needed to keep this protection in place.'}
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
           Florida law (s. 482.226, F.S.) protects wood-destroying organism notices. Only the property owner may remove this notice.
@@ -1056,7 +1063,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
       }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700 }}>
-            {noWarranty ? 'Questions about your termite protection' : 'Activate your termite warranty'}
+            {hideWarrantyCta ? 'Questions about your termite protection' : 'Activate your termite warranty'}
           </div>
           <div style={{ fontSize: 14, opacity: 0.8, marginTop: 2 }}>
             Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
@@ -1064,7 +1071,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
         </div>
         <div style={{ fontSize: 16, fontWeight: 600, textAlign: 'right' }}>
           <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>{WAVES_PHONE_DISPLAY}</a>
-          {!noWarranty && (
+          {!hideWarrantyCta && (
             <>
               <br />
               <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>wavespestcontrol.com/register</a>
@@ -1168,12 +1175,12 @@ function CertificateFieldGrid({ fields, compact }) {
   );
 }
 
-// "09/14/2026 · Termidor SC / Fipronil · applied by <name>" — the later
+// "09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by <name>" — the later
 // exterior visit's own record, kept apart from the slab-day attestation.
 function finalExteriorLine(f) {
   const materials = [f.final_exterior_product, f.final_exterior_active_ingredient].filter(Boolean).join(' / ');
   const parts = [
-    stickerDate(f.final_exterior_date),
+    [stickerDate(f.final_exterior_date), formatAppointmentTime(f.final_exterior_time)].filter(Boolean).join(' '),
     materials,
     f.final_exterior_applicator_name ? `applied by ${f.final_exterior_applicator_name}` : '',
   ].filter(Boolean);
@@ -1245,6 +1252,8 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ]),
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', warrantyLine],
+    // The staff send validates this record on both layouts, so both print it.
+    ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
   ];
   return { fields, applications, multiApplication };
 }
@@ -1292,6 +1301,15 @@ function CertificateHeader({ detailsOnly }) {
       {!detailsOnly && <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />}
     </div>
   );
+}
+
+// Staff recorded that no warranty applies: the legacy "No warranty" choice
+// or an addition to an existing building (Rule 5E-14.105(3)(d)). A blank
+// warranty is missing data, not "no contract", so it gets neither the
+// no-contract sentence nor a hidden gate-off footer.
+function certificateHasNoWarranty(f) {
+  const warranty = String(f?.warranty_type || '').trim();
+  return /^no warranty$/i.test(warranty) || /^addition to an existing building/i.test(warranty);
 }
 
 function CertificateWarrantyFooter() {
@@ -1383,7 +1401,7 @@ function CertificateSignature({ f, technicianName, projectDateLabel, detailsOnly
         ) : null}
         {/* The final exterior visit comes later, often by another
             applicator: this signature never vouches for it. */}
-        {detailsOnly && finalExteriorLine(f) ? (
+        {finalExteriorLine(f) ? (
           <>
             <br />
             <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
@@ -1511,7 +1529,7 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
       )}
 
       {/* The sticker above already carries the warranty footer. */}
-      {detailsOnly ? <div style={{ height: 24 }} /> : <CertificateWarrantyFooter />}
+      {detailsOnly || certificateHasNoWarranty(f) ? <div style={{ height: 24 }} /> : <CertificateWarrantyFooter />}
 
       {/* Form-ID stamp — bottom right, matches v10 "WV-001" treatment */}
       <div style={{

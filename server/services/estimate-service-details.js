@@ -447,7 +447,7 @@ const SERVICE_DETAILS_COPY = {
         ['Every visit', 'Inspect first. Then turf-specific fertilization, weed and sedge control, and insect or disease treatment when the evidence supports it'],
         ['Covered insects', 'Chinch bugs, sod webworms, armyworms, white grubs, mole crickets — checked every visit, treated on evidence. Fire ants only when your proposal includes them'],
         ['Disease', 'Scouted every visit. Fungicide is applied when disease is present or the risk is documented, on comprehensive plans; fertilization-only and weed-only plans quote it separately'],
-        ['Re-service', 'Covered issues are re-serviced at no charge while your plan is active. Report a concern any time'],
+        ['Re-service', 'Covered issues are re-serviced at no charge while your plan is active. Report a concern any time. Grass lost to a plant virus (sugarcane mosaic virus) is not covered, because no treatment cures it'],
         ['Documentation', 'A digital report every visit: findings, photos, exact products, watering and mowing instructions, and your lawn-health trend in the Waves app'],
       ],
       note: 'Your estimate and service agreement control scope, covered pests, and guarantee terms. Turf-specific program · Re-service for covered issues per your program terms · Every visit documented.',

@@ -123,7 +123,7 @@ const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_c
 // screen runs here at write time: a claim ("pet-safe", "EPA-approved") or an
 // access code is refused, not stored. reports-public blanks the same keys at
 // egress, and the detail payload names them for the staff preview.
-const { failingFinalExteriorKeys } = require('../services/final-exterior-screen');
+const { failingFinalExteriorKeys, isClockTime } = require('../services/final-exterior-screen');
 // The final exterior date is a completed treatment on a legal document:
 // blank, or a real YYYY-MM-DD no later than today (ET), like project_date,
 // and never before the initial treatment (same day allowed).
@@ -161,7 +161,40 @@ function finalExteriorRejectionForUpdate(project, updates, current) {
     project.project_type,
     updates.findings !== undefined ? updates.findings : current.findings,
     updates.project_date !== undefined ? updates.project_date : current.project_date,
-  );
+  ) || publishedCertificateEditRejection(project, updates, current);
+}
+
+// The public link reads the live findings, so an edit to a certificate that
+// already has a link must not leave a staff-send field failing that the edit
+// touched (a cleared warranty, a garbage time, "No warranty" -> "None"). A
+// legacy certificate that already fails keeps saving edits to OTHER fields.
+function publishedCertificateEditRejection(project, updates, current) {
+  if (project.project_type !== 'pre_treatment_termite_certificate' || updates.findings === undefined) return null;
+  if (!(current.report_token || current.sent_at || project.report_token || project.sent_at)) return null;
+  const before = normalizeFindings(current.findings);
+  const after = normalizeFindings(updates.findings);
+  const failing = pretreatStaffSendChecks(after, getProjectType(project.project_type))
+    .filter((c) => !c.ok && String(after[c.field] ?? '') !== String(before[c.field] ?? ''));
+  if (!failing.length) return null;
+  return {
+    error: `This certificate is already published — complete ${failing.map((c) => c.label).join('; ')} before saving.`,
+    code: 'published_certificate_incomplete',
+    missing: failing.map(({ key, label }) => ({ key, label })),
+  };
+}
+
+// Re-judges the staff-send checks on the row as it stands after the send
+// claim (an edit can land between the first read and the claim; edits are
+// fenced once the row is 'sending'). Throws an operational 422; both send
+// routes' catch blocks release every claim they took.
+async function assertPretreatStillSendable(projectId, projectType) {
+  if (projectType !== 'pre_treatment_termite_certificate') return;
+  const row = await db('projects').select('findings').where({ id: projectId }).first();
+  const missing = pretreatStaffSendChecks(normalizeFindings(row?.findings), getProjectType(projectType)).filter((c) => !c.ok);
+  if (!missing.length) return;
+  throw Object.assign(new Error(`Project report is missing required compliance details (cannot be overridden): ${missing.map((c) => c.label).join('; ')}`), {
+    isOperational: true, statusCode: 422, status: 422, code: 'missing_compliance_details',
+  });
 }
 
 // Create-path checks on a legal document's dates, first failure wins: the
@@ -186,7 +219,14 @@ function finalExteriorRejection(projectType, rawFindings, projectDate) {
       code: 'final_exterior_date_invalid', field: 'final_exterior_date',
     };
   }
-  const [failingKey] = failingFinalExteriorKeys(findings);
+  const failingKeys = failingFinalExteriorKeys(findings);
+  if (failingKeys.includes('final_exterior_time')) {
+    return {
+      error: 'The final exterior treatment time must be a clock time (HH:MM).',
+      code: 'final_exterior_time_invalid', field: 'final_exterior_time',
+    };
+  }
+  const [failingKey] = failingKeys;
   if (failingKey) {
     return {
       error: 'The final exterior treatment fields print on the customer notice — remove the claim or code and save again.',
@@ -747,7 +787,31 @@ function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
   ];
 }
 
-function evaluateProjectSendReadiness({ project, customer }) {
+// Rule 5E-14.105(3) F.A.C.: a pre-construction treatment for a new building
+// carries a retreatment warranty (at least 1 year, renewable 4 more); only
+// work attached to an existing building is exempt (owner 2026-10-23, "follow
+// the law"). Only the form's own choices pass, so a legacy "No warranty" or a
+// free-text value written through the update route does not.
+function pretreatWarrantyOk(value, typeCfg) {
+  const field = (typeCfg?.findingsFields || []).find((item) => item.key === 'warranty_type');
+  return (field?.options || []).includes(String(value || '').trim());
+}
+
+// Checks added 2026-10-23 run only on a staff send (/send, /send-with-invoice),
+// never on the automatic release of a paid held report: a certificate held
+// before these checks existed must still deliver once paid (see the note in
+// certApplicationChecks). The final exterior fields are not here: they fill
+// the notice's reference blank, and the later visit's full FBC 105.10 record
+// (area, concentration, gallons) is its own certificate.
+function pretreatStaffSendChecks(findings, typeCfg) {
+  return [
+    { key: 'cert_warranty', field: 'warranty_type', label: 'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)', ok: pretreatWarrantyOk(findings.warranty_type, typeCfg), hard: true },
+    // FBC 105.10 lists the time and date of the treatment.
+    { key: 'cert_treatment_time', field: 'treatment_time', label: 'Time of treatment', ok: isClockTime(findings.treatment_time), hard: true },
+  ];
+}
+
+function evaluateProjectSendReadiness({ project, customer, staffSend = false }) {
   const typeCfg = getProjectType(project?.project_type);
   const findings = normalizeFindings(project?.findings);
   // Recommendations are optional. Some report types render cleanly from
@@ -796,6 +860,7 @@ function evaluateProjectSendReadiness({ project, customer }) {
       // requirement when paired with the typed name + FDACS ID + date.
       { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
+    required.push(...(staffSend ? pretreatStaffSendChecks(findings, typeCfg) : []));
   }
 
   // Termite Phase-3 compliance content (Codex P1 r2 on #2703): the termite
@@ -3406,7 +3471,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       ? await loadProjectCustomer(project.customer_id)
       : null;
 
-    const readiness = evaluateProjectSendReadiness({ project, customer });
+    const readiness = evaluateProjectSendReadiness({ project, customer, staffSend: true });
     // Statutory compliance blockers are not overridable (Codex P1 r3) —
     // override_reason exists for judgment calls, not FS/FAC omissions.
     if (readiness.hardMissing.length > 0) {
@@ -3534,6 +3599,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         .catch((err) => logger.warn(`[projects] manual hold claim revert failed for ${project.id}: ${err.message}`));
     };
     revertManualHoldClaimOnError = revertManualHoldClaim;
+
+    await assertPretreatStillSendable(project.id, project.project_type);
 
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
       logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
@@ -4728,7 +4795,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
 
     // Readiness gate mirrors /send so we never email an incomplete report.
-    const readiness = evaluateProjectSendReadiness({ project, customer });
+    const readiness = evaluateProjectSendReadiness({ project, customer, staffSend: true });
     // Statutory compliance blockers are not overridable (Codex P1 r3) —
     // mirrors /send.
     if (readiness.hardMissing.length > 0) {
@@ -4944,6 +5011,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       });
     }
     deliveryClaim = { previousStatus: previousDeliveryStatus, token: deliveryClaimToken };
+
+    // Same post-claim re-judge as /send (the catch below releases the claims).
+    await assertPretreatStillSendable(project.id, project.project_type);
 
     // Report link + portal visibility — mirror /send so a token_only WDO report
     // never leaks into the customer portal via the `portal_visible IS NULL` +
@@ -6137,6 +6207,8 @@ router._private = {
   isMissingS3ObjectError,
   logProjectActivity,
   evaluateProjectSendReadiness,
+  pretreatWarrantyOk,
+  publishedCertificateEditRejection,
   completeProjectBackedService,
   dropStaleCertTreatmentDate,
   reportHoldBackoffMinutes,
