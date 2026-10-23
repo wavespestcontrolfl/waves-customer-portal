@@ -1380,6 +1380,33 @@ describe('cancel with a cancelFence (the cancel recovery sweep)', () => {
     expect(fence.hits).toEqual(['tech_state_busy']);
   });
 
+  test('a busy first attempt (the tracker flip already committed) is finished by the retry on the already-cancelled path', async () => {
+    const trx = jest.fn(() => query(1));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    const fence = { ...FENCE, hits: [] };
+    // First attempt: the tracker flips to cancelled, the tech_status row is busy.
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1' }));
+    clearTechCurrentJob.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: fence })).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(clearTechCurrentJob).toHaveBeenCalledTimes(1);
+    // The retry finds the tracker already cancelled and still runs the fenced cleanup, then finishes.
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1', track_state: 'cancelled', cancelled_at: new Date() }));
+    clearTechCurrentJob.mockResolvedValueOnce({});
+    const retry = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: { ...FENCE, hits: [] } });
+    expect(retry).toMatchObject({ ok: true, state: 'cancelled' });
+    expect(clearTechCurrentJob).toHaveBeenCalledTimes(2);
+    expect(clearTechCurrentJob).toHaveBeenLastCalledWith(expect.objectContaining({ tech_id: 'tech-1', current_job_id: 'job-1', conn: trx, noWait: true }));
+  });
+
+  test('without a fence the already-cancelled path still does not touch the technician state (unchanged)', async () => {
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1', track_state: 'cancelled', cancelled_at: new Date() }));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    await trackTransitions.cancel('job-1', { reason: 'x' });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  });
+
   test('a restore detected just before the stale refresh suppresses it (already-cancelled tracker path too)', async () => {
     const trackerDone = { ...svc, track_state: 'cancelled', cancelled_at: new Date() };
     db.mockReturnValueOnce(query(trackerDone));

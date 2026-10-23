@@ -1573,6 +1573,25 @@ async function clearTechStateUnderFence(svc, cancelFence) {
   }
 }
 
+// The technician's current-job cleanup of a cancelled visit. Without a fence it is the ordinary best-effort clear (errors are
+// logged). With a fence it runs under the generation proof; returns false when the fence refused it (the visit changed or a row
+// was busy), so the caller stops and the sweep abandons or retries. It also runs on the already-cancelled path, so a retry after
+// a busy first attempt (the tracker flip had already committed) still finishes it.
+async function clearTechStateOnCancel(svc, cancelFence) {
+  if (!svc.technician_id) return true;
+  try {
+    if (cancelFence) {
+      await clearTechStateUnderFence(svc, cancelFence);
+    } else {
+      await clearTechCurrentJob({ tech_id: svc.technician_id, current_job_id: svc.id, status: 'idle' });
+    }
+  } catch (err) {
+    if (err && err.code === 'CANCEL_FENCE') return false;
+    logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
+  }
+  return true;
+}
+
 async function approvedCancelStillStands(cancelFence) {
   if (!cancelFence) return true;
   const { assertCancelGeneration, isCancelFence } = require('./cancel-generation-fence');
@@ -1608,6 +1627,7 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
     // Continue below when an older writer advanced only track_state; the
     // canonical status transition will repair it and append history.
     if (svc.status === 'cancelled') {
+      if (cancelFence && !(await clearTechStateOnCancel(svc, cancelFence))) return { ok: false, reason: 'cancel_fence' };
       await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
       if (!(await approvedCancelStillStands(cancelFence))) return { ok: false, reason: 'cancel_fence' };
       emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
@@ -1685,22 +1705,7 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
     emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
     return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
-  if (svc.technician_id) {
-    try {
-      if (cancelFence) {
-        await clearTechStateUnderFence(svc, cancelFence);
-      } else {
-        await clearTechCurrentJob({
-          tech_id: svc.technician_id,
-          current_job_id: svc.id,
-          status: 'idle',
-        });
-      }
-    } catch (err) {
-      if (err && err.code === 'CANCEL_FENCE') return { ok: false, reason: 'cancel_fence' };
-      logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
-    }
-  }
+  if (!(await clearTechStateOnCancel(svc, cancelFence))) return { ok: false, reason: 'cancel_fence' };
   await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
   if (!(await approvedCancelStillStands(cancelFence))) return { ok: false, reason: 'cancel_fence' };
   emitCustomerTrackRefresh(svc, 'cancelled', now);
