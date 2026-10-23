@@ -697,7 +697,10 @@ describe('customer pricing AI helpers', () => {
       propertySeed: null,
     });
     const review = (r) => r.options?.[0]?.manualReview;
-    expect(review(await run(null))).toBe(true);
+    // A stub that returns nothing, never null: a null propertyLookup falls
+    // back to the real performPropertyLookup (live geocode + county GIS),
+    // which timed this test out in CI.
+    expect(review(await run(async () => null))).toBe(true);
     expect(review(await run(async () => { throw new Error('lookup down'); }))).toBe(true);
     expect(review(await run(async () => ({ enriched: { lotSqFt: 30000, stories: 1, storiesSource: 'verified' }, propertyRecord: {} })))).toBe(true);
     // A vouched building prices as before.
