@@ -93,6 +93,55 @@ describeDb('reclaimed water through PostgreSQL', () => {
     expect(await p.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
   });
 
+  test('an address change on the primary property drops the stored answer in the real table; a formatting-only edit keeps it', async () => {
+    const { syncPrimaryAddress } = require('../services/customer-properties');
+    const p = await property(offset(0, 5), { reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_checked_at: new Date() });
+    const row = await p.read();
+    const customer = (change) => ({ id: p.customerId, address_line1: row.address_line1, address_line2: row.address_line2, city: row.city, state: row.state, zip: row.zip, ...change });
+    await syncPrimaryAddress(customer({ address_line1: '100 Fixture St' }), knex);
+    expect(await p.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'office' });
+    await syncPrimaryAddress(customer({ address_line1: '212 Fixture Street' }), knex);
+    expect(await p.read()).toMatchObject({ address_line1: '212 Fixture Street', reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+  });
+
+  test('a refresh whose match pass failed is finished by the next tick: properties checked before the stored layer are matched again', async () => {
+    await knex('customer_properties').update({ active: false });
+    const p = await property(offset(0, 5));
+    await meters.runDailyTick({ knex, fetchImpl: async () => layerOf([offset(-500, -500), ...filler]), now: T0 }); // layer A: a meter 700 m away, none at p
+    expect(await p.read()).toMatchObject({ reclaimed_water: false, reclaimed_water_source: 'county_meter' });
+    const later = new Date(T0.getTime() + 7 * 86400000);
+    const failing = Object.assign((...args) => knex(...args), {
+      transaction: (...args) => knex.transaction(...args),
+      raw: (...args) => (String(args[0]).includes('UPDATE customer_properties') ? Promise.reject(new Error('match cut short')) : knex.raw(...args)),
+    });
+    await expect(meters.runDailyTick({ knex: failing, fetchImpl: async () => layer(offset(0, 0)), now: later })).rejects.toThrow('match cut short');
+    expect(Number((await knex('reclaimed_water_meters').count('* as n').first()).n)).toBe(meters.MIN_PLAUSIBLE_METERS + 1); // layer B is stored (it dropped the far meter, added one at p)
+    expect((await p.read()).reclaimed_water).toBe(false); // ... but p was never matched against it
+    const fetchImpl = jest.fn();
+    const retry = await meters.runDailyTick({ knex, fetchImpl, now: new Date(later.getTime() + 3600000) });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(retry).toMatchObject({ refreshed: null, checked: 1, reclaimed: 1 });
+    expect(await p.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
+  });
+
+  test('a property that moved between the read and the write is not given the old location\'s answer, and stays unchecked for the next tick', async () => {
+    const p = await property(offset(0, 5));
+    await knex('customer_properties').whereNot({ id: p.id }).update({ active: false }); // only this property is in play
+    await meters.storeMeters([offset(0, 0), ...filler].map((point, i) => ({ objectid: i + 1, lat: point.lat, lng: point.lng })), { knex, now: T0 });
+    // The office moves the address (coordinates cleared) just after the match read its coordinates: wrap the first UPDATE.
+    let moved = false;
+    const racing = Object.assign((...args) => knex(...args), {
+      raw: (...args) => {
+        if (moved || !String(args[0]).includes('UPDATE customer_properties')) return knex.raw(...args);
+        moved = true;
+        return knex('customer_properties').where({ id: p.id }).update({ latitude: null, longitude: null, address_line1: '1 Moved Way' }).then(() => knex.raw(...args));
+      },
+    });
+    const result = await meters.matchProperties({ knex: racing, now: T0, all: true });
+    expect({ moved, ...result }).toMatchObject({ moved: true, checked: 1, reclaimed: 1, written: 0 });
+    expect(await p.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+  });
+
   test('the setter only touches the customer\'s own active property', async () => {
     const a = await property(offset(0, 5));
     const b = await property(offset(0, 5));

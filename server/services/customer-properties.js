@@ -455,17 +455,32 @@ async function completePrimaryCore(customerId, call, conn) {
 // directory's own street normalizer: USPS suffix and directional spellings,
 // unit tails; city/state case and ZIP+4 ignored), so a unit-only or
 // format-only edit ("100 Bay Cove" → "100 Bay Cv") clears nothing.
-function neighborhoodResetOnMove(from, to) {
+function addressMoved(from, to) {
   const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
   // sameStreetLine compares the street only, so the house number is its own test.
   const houseNumber = (line) => (String(line || '').match(/^\s*(\d+)/) || [])[1] || '';
-  const moved = houseNumber(from.address_line1) !== houseNumber(to.address_line1)
+  return houseNumber(from.address_line1) !== houseNumber(to.address_line1)
     || !sameStreetLine(stripTrailingUnit(from.address_line1), stripTrailingUnit(to.address_line1))
     || !same(from.city, to.city)
     || !same(from.state, to.state)
     || normalizeZip(from.zip) !== normalizeZip(to.zip);
-  return moved
+}
+
+function neighborhoodResetOnMove(from, to) {
+  return addressMoved(from, to)
     ? { neighborhood_id: null, neighborhood_source: null, county_subdivision: null, neighborhood_checked_at: null }
+    : {};
+}
+
+// GATE_LAWN_RECLAIMED_HALF_N: whether a lawn is watered with reclaimed water belongs to the HOME, not the row. A genuine street/locality
+// move (the same canonical test as the neighborhood reset: a unit-only or format-only edit clears nothing) drops the answer, whoever gave
+// it (county, office or customer), so the next county tick settles the new address and the office is asked again. Cleared whatever the
+// gate says, so a value saved while the gate was on cannot outlive the address it described. Only when the row has a value to clear, so a
+// property that never had one is not written to (and a database without the columns is not touched).
+function reclaimedResetOnMove(from, to) {
+  const hasValue = from.reclaimed_water != null || from.reclaimed_water_source != null || from.reclaimed_water_checked_at != null;
+  return hasValue && addressMoved(from, to)
+    ? { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null }
     : {};
 }
 
@@ -530,7 +545,7 @@ async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = fal
   // A street/locality move takes the property out of its neighborhood (and
   // the shared gate code) — an office pick included — so clear it for a later
   // relink, whatever the caller does with coords.
-  Object.assign(next, neighborhoodResetOnMove(primary, next));
+  Object.assign(next, neighborhoodResetOnMove(primary, next), reclaimedResetOnMove(primary, next));
   next.updated_at = new Date();
   // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
   // mirror edit + surface a 409 on a unique address-index collision rather than

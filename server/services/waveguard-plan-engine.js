@@ -760,8 +760,7 @@ async function hasActiveTroubleArea(knex, service, type, { strict = false } = {}
 // with the amount the plan computes. Rewrites only the shapes the v13 recipe uses; a line or note the pattern does not match stays as
 // written (the cut and the line note still apply: the amount and the note are never dependent on this text). `why` is the reason in
 // the words the line states it with: 'active fungus mapped' (GATE_LAWN_NOV_LARGE_PATCH_N) or 'reclaimed water, half' (GATE_LAWN_RECLAIMED_HALF_N).
-// A bag that also states potassium ("(0.45 lb N, 0.99 lb K2O)", December) is sized from its nitrogen, so its stated K2O moves with it.
-const NITROGEN_LINE = /(\d+(?:\.\d+)?) lb per 1,000 sq ft \((\d+(?:\.\d+)?) lb N((?:, [^)]*)?)\)/;
+const NITROGEN_LINE = /(\d+(?:\.\d+)?) lb per 1,000 sq ft \((\d+(?:\.\d+)?) lb N\)/;
 const NITROGEN_NOTE = /\bN\s+rate:?\s*(\d+(?:\.\d+)?)\s*lb\s*N/i;
 const CUT_WHY = Object.freeze({ fungus: 'active fungus mapped', reclaimed: 'reclaimed water, half' });
 function nitrogenAdjustedVisit(visit, cut, why) {
@@ -769,8 +768,7 @@ function nitrogenAdjustedVisit(visit, cut, why) {
     const found = line.match(NITROGEN_LINE);
     if (!found || !(Number(found[2]) > cut)) return line;
     const rate = ((Number(found[1]) * cut) / Number(found[2])).toFixed(1);
-    const rest = found[3].replace(/(\d+(?:\.\d+)?) lb K2O/, (_whole, k) => `${Number(((Number(k) * cut) / Number(found[2])).toFixed(3))} lb K2O`);
-    return `${line.replace(found[0], `${rate} lb per 1,000 sq ft (${cut} lb N${rest})`)}, ${why}`;
+    return `${line.replace(found[0], `${rate} lb per 1,000 sq ft (${cut} lb N)`)}, ${why}`;
   }).join('\n');
   const notes = typeof visit.notes !== 'string' ? visit.notes
     : visit.notes.replace(NITROGEN_NOTE, (whole, normal) => (Number(normal) > cut ? `N rate: ${cut} lb N (${why}; normal ${normal} lb N)` : whole));
@@ -793,22 +791,30 @@ async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Activ
 const PRE_EMERGENT_BAG = /\bPre-?Emergent Plus Fertilizer\b/i;
 const isPreEmergentBag = (text) => PRE_EMERGENT_BAG.test(String(text ?? ''));
 
-// GATE_LAWN_RECLAIMED_HALF_N (owner 2026-10-05, 2026-10-23): half of the visit's nitrogen target at a property marked reclaimed
-// (lawn-reclaimed-water.js), `{ cut }`; or `{ kept: true }` when the visit's bag is a pre-emergent plus fertilizer (October and the
-// 9x April Dimension): halving it would halve the pre-emergent, so it keeps its full rate and the line says so. null = not reclaimed,
-// gate off, not a v13 plan, or a visit with no nitrogen target above zero (no read at all in the last three cases).
-async function reclaimedNitrogenCut(knex, service, { targetN, v13Active, preEmergentBag, strict = false }) {
-  if (!v13Active || !featureGates.lawnReclaimedHalfNLive() || !(targetN > 0)) return null;
-  if (!(await require('./lawn-reclaimed-water').isReclaimedService(knex, service, { strict }))) return null;
-  return preEmergentBag ? { kept: true } : { cut: Number((targetN * RECLAIMED_N_FRACTION).toFixed(3)) };
+// What keeps a bag at its full rate on a reclaimed lawn (GATE_LAWN_RECLAIMED_HALF_N): a bag whose rate is set by something other than its
+// nitrogen. 'pre_emergent': a pre-emergent plus fertilizer (October and the 9x April Dimension): halving N would halve the pre-emergent.
+// 'potash': a visit that states a potassium target (December 10-0-22): reclaimed water adds N, not K, and the potash is for cold weather and
+// large patch, so halving the bag would halve the K2O. null: an ordinary nitrogen bag, which is halved.
+function keptBagReason({ primary, targetK }) {
+  if (isPreEmergentBag(primary)) return 'pre_emergent';
+  return targetK > 0 ? 'potash' : null;
 }
 
-// Both nitrogen rules as ONE decision (the plan, the tank sheet and the previsit brief all call this): `{ cut, why, reclaimed }` or
-// null. `cut` is the reduced target, the SMALLER of the rules that apply (never raised), else null; `why` names the rule that set
-// it (a CUT_WHY key); `reclaimed` is 'half' when the reclaimed rule set the cut and 'kept' when it left a pre-emergent bag at full rate.
-async function nitrogenDecision(knex, service, { targetN, monthNumber, v13Active, preEmergentBag = false, strict = false }) {
+// GATE_LAWN_RECLAIMED_HALF_N (owner 2026-10-05, 2026-10-23): half of the visit's nitrogen target at a property marked reclaimed
+// (lawn-reclaimed-water.js), `{ cut }`; or `{ kept }` (a keptBagReason) when the visit's bag keeps its full rate and the line says so.
+// null = not reclaimed, gate off, not a v13 plan, or a visit with no nitrogen target above zero (no read at all in the last three cases).
+async function reclaimedNitrogenCut(knex, service, { targetN, v13Active, keep = null, strict = false }) {
+  if (!v13Active || !featureGates.lawnReclaimedHalfNLive() || !(targetN > 0)) return null;
+  if (!(await require('./lawn-reclaimed-water').isReclaimedService(knex, service, { strict }))) return null;
+  return keep ? { kept: keep } : { cut: Number((targetN * RECLAIMED_N_FRACTION).toFixed(3)) };
+}
+
+// Both nitrogen rules as ONE decision (the plan, the tank sheet and the previsit brief all call this): `{ cut, why, reclaimed, keptFor }`
+// or null. `cut` is the reduced target, the SMALLER of the rules that apply (never raised), else null; `why` names the rule that set
+// it (a CUT_WHY key); `reclaimed` is 'half' when the reclaimed rule set the cut and 'kept' when it left a bag at full rate (`keptFor` says why).
+async function nitrogenDecision(knex, service, { targetN, monthNumber, v13Active, keep = null, strict = false }) {
   const fungus = await fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Active, strict });
-  const water = await reclaimedNitrogenCut(knex, service, { targetN, v13Active, preEmergentBag, strict });
+  const water = await reclaimedNitrogenCut(knex, service, { targetN, v13Active, keep, strict });
   const half = water?.cut ?? null;
   if (fungus == null && half == null && !water) return null;
   const byWater = half != null && (fungus == null || half <= fungus);
@@ -816,6 +822,7 @@ async function nitrogenDecision(knex, service, { targetN, monthNumber, v13Active
     cut: byWater ? half : fungus,
     why: byWater ? 'reclaimed' : 'fungus',
     reclaimed: byWater ? 'half' : (water?.kept ? 'kept' : null),
+    ...(water?.kept ? { keptFor: water.kept } : {}),
   };
 }
 
@@ -823,14 +830,15 @@ async function nitrogenDecision(knex, service, { targetN, monthNumber, v13Active
 // yearly limit check and the Fast Complete planned amount all read the same number. Returns the visit the lines are parsed from (an
 // adjusted copy when the nitrogen target was cut: nitrogenDecision; else the visit itself), its targets, and `nitrogenCut` (the
 // reduced N target, else null). `reclaimedWater` is added only when the reclaimed rule applied: 'half' (it set the cut) or 'kept' (a
-// pre-emergent bag left at full rate). Call it BEFORE the visit's lines are parsed.
+// pre-emergent or potash bag left at full rate, `keptFor`: 'pre_emergent' | 'potash'). Call it BEFORE the visit's lines are parsed.
 async function visitNutrientTargets(knex, service, { visit, month, v13Active, strict = false }) {
   const targets = parseVisitNutrientTargets(visit?.notes);
   const decision = visit ? await nitrogenDecision(knex, service, {
-    targetN: targets.targetNPer1000, monthNumber: MONTH_ABBR.indexOf(month) + 1, v13Active, preEmergentBag: isPreEmergentBag(visit.primary), strict,
+    targetN: targets.targetNPer1000, monthNumber: MONTH_ABBR.indexOf(month) + 1, v13Active,
+    keep: keptBagReason({ primary: visit.primary, targetK: targets.targetKPer1000 }), strict,
   }) : null;
   if (!decision) return { visit, targets, nitrogenCut: null };
-  const water = decision.reclaimed ? { reclaimedWater: decision.reclaimed } : {};
+  const water = decision.reclaimed ? { reclaimedWater: decision.reclaimed, ...(decision.keptFor ? { keptFor: decision.keptFor } : {}) } : {};
   if (decision.cut == null) return { visit, targets, nitrogenCut: null, ...water };
   return { visit: nitrogenAdjustedVisit(visit, decision.cut, CUT_WHY[decision.why]), targets: { ...targets, targetNPer1000: decision.cut }, nitrogenCut: decision.cut, ...water };
 }
@@ -847,14 +855,18 @@ function fungusNitrogenNotes(mix, nitrogenCut) {
 }
 
 // The reclaimed-water line notes (GATE_LAWN_RECLAIMED_HALF_N): "half nitrogen today" on the bag the halved target sized, and on a
-// pre-emergent plus fertilizer bag the reason it was not halved. `found` is what visitNutrientTargets returned.
+// bag that keeps its rate (pre-emergent plus fertilizer, winter potash) the reason it was not halved. `found` is what visitNutrientTargets returned.
 function reclaimedNitrogenNotes(mix, product, found) {
   if (found?.reclaimedWater === 'half') {
     if (mix?.rateSource !== 'target_n_analysis' || mix.targetNPer1000 !== found.nitrogenCut) return [];
     return [{ key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: `Reclaimed water: half nitrogen today (${found.nitrogenCut} lb N, ${Number(mix.ratePer1000).toFixed(1)} lb per 1,000).` }];
   }
-  if (found?.reclaimedWater === 'kept' && isPreEmergentBag(product?.name)) {
-    return [{ key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.' }];
+  if (found?.reclaimedWater === 'kept') {
+    const text = found.keptFor === 'potash' && Number(product?.analysis_k) > 0
+      ? 'Reclaimed water: this bag carries the winter potash, so its full rate stays today.'
+      : (found.keptFor === 'pre_emergent' && isPreEmergentBag(product?.name)
+        ? 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.' : null);
+    if (text) return [{ key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text }];
   }
   return [];
 }

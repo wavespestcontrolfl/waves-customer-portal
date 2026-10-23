@@ -6,7 +6,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
-jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()), v13GateNotes: jest.fn(() => []) }));
+jest.mock('../services/waveguard-plan-engine', () => ({
+  buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()), v13GateNotes: jest.fn(() => []),
+  // GATE_LAWN_RECLAIMED_HALF_N: the swap bag asks the engine's own decision; the real one, so the sheet and the plan cannot drift.
+  nitrogenDecision: (...args) => jest.requireActual('../services/waveguard-plan-engine').nitrogenDecision(...args),
+  nitrogenCutNotes: (...args) => jest.requireActual('../services/waveguard-plan-engine').nitrogenCutNotes(...args),
+}));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -240,6 +245,46 @@ describe('loadSodForContext', () => {
       const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: visitRow({ scheduled_date: '2026-04-14' }), planned: OCT() });
       expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 2.1 });
       expect(out.plannedProducts.items[1]).toMatchObject({ amount: 10.5, ratePer1000: 2.1 });
+    });
+
+    // GATE_LAWN_RECLAIMED_HALF_N: the swap bag is plain 24-0-11 (no pre-emergent), so a reclaimed lawn gets half its nitrogen.
+    describe('on a reclaimed lawn (GATE_LAWN_RECLAIMED_HALF_N)', () => {
+      const water = require('../services/lawn-reclaimed-water');
+      let reclaimed;
+      const realRead = water.isReclaimedService;
+      beforeEach(() => { process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true'; reclaimed = jest.spyOn(water, 'isReclaimedService').mockResolvedValue(true); });
+      afterEach(() => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; reclaimed.mockRestore(); });
+      const NOTE = (n, rate) => `Reclaimed water: half nitrogen today (${n} lb N, ${rate} lb per 1,000).`;
+
+      test('October: 1.25 lb per 1,000 (0.3 lb N) instead of 2.5, the amount follows, the Dimension bag is still held, and the line says why', async () => {
+        const out = await load({ record, planned: OCT() });
+        expect(out.newSod.swap).toEqual({ resolved: true, forProductId: P_DIM_BAG, productId: P_BAG24, name: SOD_SWAP_BAG.name, lbPer1000: 1.25, reason: 'New sod: no pre-emergent yet.' });
+        expect(out.plannedProducts.items[1]).toMatchObject({
+          productId: P_BAG24, amount: 6.25, amountUnit: 'lb', treatedSqft: 5000, ratePer1000: 1.25, rateUnit: 'lb', gateNotes: [NOTE(0.3, '1.3')],
+          sodSwap: { forProductId: P_DIM_BAG, reason: 'New sod: no pre-emergent yet.' },
+        });
+        expect(lineOf(out, P_DIM_BAG).held).toBe(true);
+        expect(reclaimed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: VISIT }), expect.anything());
+      });
+
+      test('April on the 9-visit plan: 1.05 lb per 1,000 (0.25 lb N) instead of 2.1', async () => {
+        const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: visitRow({ scheduled_date: '2026-04-14' }), planned: OCT() });
+        expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 1.05 });
+        expect(out.plannedProducts.items[1]).toMatchObject({ amount: 5.25, ratePer1000: 1.05, gateNotes: [NOTE(0.25, '1.1')] });
+      });
+
+      test.each([
+        ['not reclaimed', () => reclaimed.mockResolvedValue(false)],
+        ['a failed property read (the real reader, a query that throws)', () => reclaimed.mockImplementation((_knex, svc, options) => realRead(() => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); }, svc, options))],
+        ['the gate off (the engine is not asked at all)', () => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; reclaimed.mockClear(); }],
+      ])('%s: the bag as it was, 2.5 lb per 1,000, no note', async (_label, arrange) => {
+        arrange();
+        const out = await load({ record, planned: OCT() });
+        expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 2.5 });
+        expect(out.plannedProducts.items[1]).toMatchObject({ amount: 12.5, ratePer1000: 2.5 });
+        expect(out.plannedProducts.items[1]).not.toHaveProperty('gateNotes');
+        if (process.env.GATE_LAWN_RECLAIMED_HALF_N !== 'true') expect(reclaimed).not.toHaveBeenCalled();
+      });
     });
 
     test('a swap bag the catalog cannot resolve is never invented: the bag is held with "by hand" words', async () => {

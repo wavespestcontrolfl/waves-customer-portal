@@ -12,6 +12,8 @@ jest.setTimeout(60000);
 const KEY = 'fixture_v13_lawn_reclaimed';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
+const POTASH = 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer';
+const POTASH_NOTE = 'Reclaimed water: this bag carries the winter potash, so its full rate stays today.';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
 const HALF_NOTE = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
@@ -60,6 +62,15 @@ describeDb('reclaimed water half nitrogen through PostgreSQL', () => {
     await knex('lawn_protocol_products').insert({
       lawn_protocol_window_id: oct.id, product_id: dimension.id, product_name: DIMENSION, role: 'nutrition', application_mode: 'broadcast',
       default_in_plan: true, rate_per_1000: 4.04, rate_unit: 'lb', gates: JSON.stringify({ targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', blackoutSensitive: true }),
+    });
+    const [potash] = await knex('products_catalog').insert({
+      name: POTASH, category: 'fertilizer', product_type: 'fertilizer', default_rate_per_1000: 4.5, rate_unit: 'lb', analysis_n: 10, analysis_p: 0, analysis_k: 22,
+      label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'lb', active: true,
+    }).returning('*');
+    const [dec] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: staged.id, month: 12, window_key: 'dec_v13_spreader_potash', title: 'December', visit_type: 'granular_production_plus_spots' }).returning('*');
+    await knex('lawn_protocol_products').insert({
+      lawn_protocol_window_id: dec.id, product_id: potash.id, product_name: POTASH, role: 'nutrition', application_mode: 'broadcast',
+      default_in_plan: true, rate_per_1000: null, rate_unit: 'lb_n', gates: JSON.stringify({ targetN: '0.45 lb N/1000', targetK2O: '0.99 lb K2O/1000', blackoutSensitive: true }),
     });
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
@@ -150,6 +161,17 @@ describeDb('reclaimed water half nitrogen through PostgreSQL', () => {
     expect(item.raw).toContain('4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O)');
     const plain = bagOf((await plan(await visitOn('2026-10-14'))).mixCalculator.items, DIMENSION);
     expect(plain.mix.ratePer1000).toBeCloseTo(4.04, 3);
+    expect(JSON.stringify(plain.gateNotes)).not.toContain('reclaimedNitrogen');
+  });
+
+  test('December 10-0-22 (a lb_n row that states K2O) keeps its 4.5 lb on a reclaimed lawn and says why; not reclaimed is the same amount without the note', async () => {
+    const item = bagOf((await plan(await visitOn('2026-12-10', { water: COUNTY }))).mixCalculator.items, POTASH);
+    expect(item).toBeDefined();
+    expect(item.mix.ratePer1000).toBeCloseTo(4.5, 3);
+    expect(item.mix.targetNPer1000).toBe(0.45);
+    expect(item.gateNotes).toContainEqual({ key: 'reclaimedNitrogen', severity: 'note', text: POTASH_NOTE });
+    const plain = bagOf((await plan(await visitOn('2026-12-10'))).mixCalculator.items, POTASH);
+    expect(plain.mix.ratePer1000).toBeCloseTo(4.5, 3);
     expect(JSON.stringify(plain.gateNotes)).not.toContain('reclaimedNitrogen');
   });
 

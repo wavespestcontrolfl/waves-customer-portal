@@ -1397,6 +1397,15 @@ describe('the nitrogen target on the lawn brief for a reclaimed property', () =>
     expect((await bagFor('2026-10-14', DIMENSION)).gates.targetN).toBe('0.73 lb N/1000');
   });
 
+  test('the December potash bag (states K2O) keeps its stated target', async () => {
+    mockSummarize.mockReturnValue({
+      version: LAWN_V13_VERSION,
+      window: { key: 'dec', month: 12, title: 'December', visitType: 'granular', goal: 'Feed' },
+      products: [{ productName: 'LESCO 10-0-22 50% PolyPlus OPTI45', productId: 'p1', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, gates: { targetN: '0.45 lb N/1000', targetK2O: '0.99 lb K2O/1000', blackoutSensitive: true } }],
+    });
+    expect((await bagFor('2026-12-10', 'LESCO 10-0-22 50% PolyPlus OPTI45')).gates.targetN).toBe('0.45 lb N/1000');
+  });
+
   test('a lawn that is not reclaimed, and the gate off (no read), keep the stored target', async () => {
     visit(2, BAG, '0.75 lb N/1000');
     reclaimed.mockResolvedValue(false);

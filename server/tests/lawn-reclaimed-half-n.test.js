@@ -48,11 +48,10 @@ describe('lawnReclaimedHalfNLive', () => {
   });
 });
 
-describe('every N visit of a reclaimed lawn is halved (all three tracks, the same visit lines)', () => {
+describe('every N visit of a reclaimed lawn is halved (all three tracks)', () => {
   test.each([
     ['Feb', 0.75, 0.375],
     ['Nov', 0.75, 0.375],
-    ['Dec', 0.45, 0.225],
   ])('%s: %s lb N becomes %s lb N, the visit text states it, potassium is untouched', async (month, normal, half) => {
     for (const track of Object.keys(v13)) {
       const found = await run(REC(), month, { visit: visitOf(month, track) });
@@ -61,7 +60,7 @@ describe('every N visit of a reclaimed lawn is halved (all three tracks, the sam
       expect(found.targets.targetNPer1000).toBe(half);
       expect(found.targets.targetKPer1000).toBe(engine.parseVisitNutrientTargets(visitOf(month, track).notes).targetKPer1000);
       expect(found.visit.notes).toContain(`N rate: ${half} lb N (reclaimed water, half; normal ${normal} lb N)`);
-      expect(found.visit.primary).toMatch(new RegExp(`\\(${half} lb N[,)]`));
+      expect(found.visit.primary).toContain(`(${half} lb N)`);
       expect(found.visit.primary).toContain(', reclaimed water, half');
       expect(engine.parseVisitNutrientTargets(found.visit.notes).targetNPer1000).toBe(half);
     }
@@ -71,12 +70,6 @@ describe('every N visit of a reclaimed lawn is halved (all three tracks, the sam
     const found = await run(REC(), 'Apr');
     expect(found.nitrogenCut).toBe(0.5);
     expect(found.visit.primary).toContain('1.1 lb per 1,000 sq ft (0.5 lb N)');
-  });
-
-  test('December states potassium too: the bag is sized from its nitrogen, so the line states the K2O that bag now delivers', async () => {
-    const found = await run(REC(), 'Dec');
-    expect(found.visit.primary).toContain('2.3 lb per 1,000 sq ft (0.225 lb N, 0.495 lb K2O), spreader, reclaimed water, half');
-    expect(found.targets.targetKPer1000).toBe(0.99);
   });
 
   test('the fraction is one half and nothing else', () => {
@@ -151,9 +144,10 @@ describe('the pre-emergent plus fertilizer bags keep their rate (the pre-emergen
     const found = await engine.visitNutrientTargets(knex, service, { visit, month: visit === OCT() ? 'Oct' : 'Apr', v13Active: true });
     expect(found.nitrogenCut).toBeNull();
     expect(found.reclaimedWater).toBe('kept');
+    expect(found.keptFor).toBe('pre_emergent');
     expect(found.visit).toBe(visit);
     expect(found.targets.targetNPer1000).toBe(engine.parseVisitNutrientTargets(visit.notes).targetNPer1000);
-    const dimension = { name: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer' };
+    const dimension = { analysis_k: 10, name: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer' };
     expect(engine.nitrogenCutNotes({ rateSource: 'protocol_rate' }, dimension, found)).toEqual([{
       key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.',
     }]);
@@ -167,9 +161,50 @@ describe('the pre-emergent plus fertilizer bags keep their rate (the pre-emergen
   });
 
   test('the previsit brief names the same bag from its catalog name', async () => {
-    const decide = (preEmergentBag) => engine.nitrogenDecision(REC(), service, { targetN: 0.73, monthNumber: 10, v13Active: true, preEmergentBag });
-    expect(await decide(true)).toEqual({ cut: null, why: 'fungus', reclaimed: 'kept' });
-    expect(await decide(false)).toEqual({ cut: 0.365, why: 'reclaimed', reclaimed: 'half' });
+    const decide = (keep) => engine.nitrogenDecision(REC(), service, { targetN: 0.73, monthNumber: 10, v13Active: true, keep });
+    expect(await decide('pre_emergent')).toEqual({ cut: null, why: 'fungus', reclaimed: 'kept', keptFor: 'pre_emergent' });
+    expect(await decide(null)).toEqual({ cut: 0.365, why: 'reclaimed', reclaimed: 'half' });
+  });
+});
+
+describe('the winter potash bag keeps its rate (reclaimed water adds N, not K)', () => {
+  const DEC = (track = 'st_augustine') => visitOf('Dec', track);
+
+  test.each(['st_augustine', 'bermuda', 'zoysia'])('%s December 10-0-22 (0.45 lb N, 0.99 lb K2O): not halved, the visit is returned as it is, and it says so', async (track) => {
+    const visit = DEC(track);
+    expect(engine.parseVisitNutrientTargets(visit.notes)).toEqual({ targetNPer1000: 0.45, targetKPer1000: 0.99 });
+    const found = await engine.visitNutrientTargets(REC(), service, { visit, month: 'Dec', v13Active: true });
+    expect(found).toEqual({ visit, targets: { targetNPer1000: 0.45, targetKPer1000: 0.99 }, nitrogenCut: null, reclaimedWater: 'kept', keptFor: 'potash' });
+    expect(found.visit).toBe(visit);
+    const bag = { name: 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', analysis_n: 10, analysis_k: 22 };
+    expect(engine.nitrogenCutNotes({ rateSource: 'target_n_analysis' }, bag, found)).toEqual([{
+      key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: 'Reclaimed water: this bag carries the winter potash, so its full rate stays today.',
+    }]);
+    // A line with no potassium in it gets no such note.
+    expect(engine.nitrogenCutNotes({ rateSource: 'target_n_analysis' }, { name: 'Bag', analysis_n: 24, analysis_k: 0 }, found)).toEqual([]);
+  });
+
+  test('a pre-emergent bag that also states K2O (October) keeps the pre-emergent reason, not the potash one', async () => {
+    const found = await engine.visitNutrientTargets(REC(), service, { visit: visitOf('Oct'), month: 'Oct', v13Active: true });
+    expect(found.keptFor).toBe('pre_emergent');
+  });
+
+  test('a not-reclaimed lawn, or the gate off, leaves December exactly as it was', async () => {
+    expect(await engine.visitNutrientTargets(NOT_REC(), service, { visit: DEC(), month: 'Dec', v13Active: true })).toEqual({ visit: DEC(), targets: { targetNPer1000: 0.45, targetKPer1000: 0.99 }, nitrogenCut: null });
+    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+    const knex = REC();
+    expect(await engine.visitNutrientTargets(knex, service, { visit: DEC(), month: 'Dec', v13Active: true })).toEqual({ visit: DEC(), targets: { targetNPer1000: 0.45, targetKPer1000: 0.99 }, nitrogenCut: null });
+    expect(knex.calls).toEqual([]);
+  });
+
+  test('an ordinary N bag (no potassium target, no pre-emergent) is still halved: February and November', async () => {
+    for (const month of ['Feb', 'Nov']) expect(engine.parseVisitNutrientTargets(visitOf(month).notes).targetKPer1000).toBeNull();
+  });
+
+  test('the previsit brief keeps a bag that states K2O, and halves one that does not', async () => {
+    const decide = (keep) => engine.nitrogenDecision(REC(), service, { targetN: 0.45, monthNumber: 12, v13Active: true, keep });
+    expect(await decide('potash')).toEqual({ cut: null, why: 'fungus', reclaimed: 'kept', keptFor: 'potash' });
+    expect(await decide(null)).toEqual({ cut: 0.225, why: 'reclaimed', reclaimed: 'half' });
   });
 });
 
@@ -252,9 +287,11 @@ describe('the property read (isReclaimedService)', () => {
 });
 
 describe('the recipe text', () => {
-  test('all three tracks say the app halves N when the property is marked reclaimed, and no track says the app does not adjust it', () => {
+  test('all three tracks say the amount is set by the app when the property is marked reclaimed (true with the gate off or on: it names the line note, not the property mark), and no track says the app does not adjust it', () => {
     for (const track of Object.values(v13)) {
-      expect(track.notes.join(' ')).toContain('the app halves it when the property is marked reclaimed');
+      const exact = 'get half the N at every N visit, except bags that carry the pre-emergent or the winter potassium, which keep their full rate. A line that shows "Reclaimed water: half nitrogen today" is already halved by the app; otherwise the tech logs half.';
+      expect(track.notes.join(' ')).toContain(`Reclaimed-water lawns (purple pipes or caps) ${exact}`);
+      expect(track.safety_rules[6]).toContain(`reclaimed-water lawns ${exact}`);
       expect(JSON.stringify(track)).not.toContain('does not adjust it yet');
     }
   });

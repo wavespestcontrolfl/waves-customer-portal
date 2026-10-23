@@ -14,11 +14,11 @@ const BASE = { lat: 27.5, lng: -82.4 };
 const offset = (northM, eastM) => ({ lat: BASE.lat + northM / 111320, lng: BASE.lng + eastM / 98650 });
 
 describe('the request', () => {
-  test('is the constant layer query: where 1=1, OBJECTID only, geometry in 4326, json, ordered, 2000 a page', () => {
+  test('is the constant layer query: where 1=1, OBJECTID plus the two in-service fields, geometry in 4326, json, ordered, 2000 a page', () => {
     const url = new URL(meters.pageUrl(4000));
     expect(`${url.origin}${url.pathname}`).toBe('https://www.mymanatee.org/gisutil/rest/services/Reclaim_UN_Breakdown/MapServer/5/query');
     expect(Object.fromEntries(url.searchParams)).toEqual({
-      where: '1=1', outFields: 'OBJECTID', returnGeometry: 'true', outSR: '4326', f: 'json', orderByFields: 'OBJECTID', resultOffset: '4000', resultRecordCount: '2000',
+      where: '1=1', outFields: 'OBJECTID,LIFECYCLESTATUS,RETIREDDATE', returnGeometry: 'true', outSR: '4326', f: 'json', orderByFields: 'OBJECTID', resultOffset: '4000', resultRecordCount: '2000',
     });
   });
 
@@ -69,6 +69,31 @@ describe('the paging parser', () => {
     const all = await meters.fetchAllMeters({ fetchImpl });
     expect(all.map((p) => p.objectid).sort()).toEqual([1, 2, 3, 4]);
     expect(fetchImpl.mock.calls.map(([url]) => new URL(url).searchParams.get('resultOffset'))).toEqual(['0', '2', '4']);
+  });
+
+  test('counts a meter only while it is in service: a retired date, or a lifecycle status other than the layer\'s in-service 8, drops it', () => {
+    const withAttrs = (objectid, extra) => ({ attributes: { OBJECTID: objectid, ...extra }, geometry: { x: -82.4, y: 27.5 } });
+    const page = meters.parsePage({ features: [
+      withAttrs(1, { LIFECYCLESTATUS: 8, RETIREDDATE: null }),
+      withAttrs(2, { LIFECYCLESTATUS: 8 }),
+      withAttrs(3, {}),
+      withAttrs(4, { LIFECYCLESTATUS: 8, RETIREDDATE: 1700000000000 }),
+      withAttrs(5, { LIFECYCLESTATUS: 9, RETIREDDATE: null }),
+      withAttrs(6, { LIFECYCLESTATUS: 0 }),
+    ] });
+    expect(page.points.map((p) => p.objectid)).toEqual([1, 2, 3]);
+    expect(page.received).toBe(6);
+    expect(meters.IN_SERVICE_LIFECYCLE).toBe(8);
+  });
+
+  test('a retired meter does not mark a property reclaimed', async () => {
+    const retired = { attributes: { OBJECTID: 1, LIFECYCLESTATUS: 8, RETIREDDATE: 1700000000000 }, geometry: { x: -82.4, y: 27.5 } };
+    const live = { attributes: { OBJECTID: 2, LIFECYCLESTATUS: 8, RETIREDDATE: null }, geometry: { x: -82.4 + 0.01, y: 27.5 } };
+    const west = { attributes: { OBJECTID: 3, LIFECYCLESTATUS: 8 }, geometry: { x: -82.41, y: 27.5 } };
+    const all = await meters.fetchAllMeters({ fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ features: [retired, live, west] }) }) });
+    const index = meters.buildIndex(all);
+    expect(meters.judgePoint(index, 27.5, -82.4)).toEqual({ reclaimed: false });
+    expect(meters.judgePoint(index, 27.5, -82.39)).toEqual({ reclaimed: true });
   });
 
   test('an answer that never ends is an error, not a loop', async () => {

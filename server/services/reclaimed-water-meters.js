@@ -20,6 +20,14 @@ const REQUEST_TIMEOUT_MS = 30000;
 const USER_AGENT = 'Mozilla/5.0 (compatible; WavesPestControlPortal/1.0; +https://www.wavespestcontrol.com)';
 const SOURCE = 'manatee_county';
 
+// A meter counts only while it is in service. Checked 2026-10-23 on all 40,347 points of the layer: RETIREDDATE is empty on every one, and
+// LIFECYCLESTATUS is 8 on every one (the county publishes no code list for it: the field has no domain, no subtypes, and queryDomains is empty).
+// So 8 is the in-service value of this layer, and the rule is: no RETIRED date, and a status of 8 (or none stated). Any other status code, or any
+// retired date, drops the meter, and a layer that drops too many is refused whole by storeMeters (MIN_PLAUSIBLE_METERS), keeping the stored copy.
+const IN_SERVICE_LIFECYCLE = 8;
+const isInService = (attributes) => attributes?.RETIREDDATE == null
+  && (attributes?.LIFECYCLESTATUS == null || Number(attributes.LIFECYCLESTATUS) === IN_SERVICE_LIFECYCLE);
+
 // A property is "at a meter" within 30 m. The meter sits at the curb, so its own lot's geocode is one front setback
 // (about 7 to 10 m) plus the geocoder's error (rooftop about 5 m, parcel centroid up to about 15 m) away: 25 m at most.
 // Wider than that starts to reach the next lot's meter (lots are 18 m wide or more), and the next lot on a street with
@@ -46,13 +54,13 @@ function distanceM(lat1, lng1, lat2, lng2) {
 function pageUrl(offset) {
   const url = new URL(LAYER_QUERY_URL);
   url.search = new URLSearchParams({
-    where: '1=1', outFields: 'OBJECTID', returnGeometry: 'true', outSR: '4326', f: 'json',
+    where: '1=1', outFields: 'OBJECTID,LIFECYCLESTATUS,RETIREDDATE', returnGeometry: 'true', outSR: '4326', f: 'json',
     orderByFields: 'OBJECTID', resultOffset: String(offset), resultRecordCount: String(PAGE_SIZE),
   }).toString();
   return url.toString();
 }
 
-// One ArcGIS answer to points. A feature with no usable geometry is dropped; the server reports its own error as a 200 body.
+// One ArcGIS answer to points. A feature with no usable geometry, or one that is retired or not in service, is dropped; the server reports its own error as a 200 body.
 function parsePage(body) {
   if (!body || typeof body !== 'object') throw Object.assign(new Error('county layer answered with no body'), { code: 'bad_body' });
   if (body.error) throw Object.assign(new Error(`county layer error ${body.error.code || ''}`.trim()), { code: 'layer_error' });
@@ -64,6 +72,7 @@ function parsePage(body) {
     const lat = Number(feature?.geometry?.y);
     if (!Number.isInteger(objectid) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     if (Math.abs(lat) > 90 || Math.abs(lng) > 180) continue;
+    if (!isInService(feature.attributes)) continue;
     points.push({ objectid, lat, lng });
   }
   return { points, received: features.length, more: body.exceededTransferLimit === true };
@@ -168,32 +177,43 @@ async function loadIndex(knex) {
 
 /**
  * Settle the county value of the properties that have coordinates and no office or customer value. `all: false` only
- * visits properties never checked (a new property, or one the office handed back to automatic). Writes only the
- * county-owned columns, never updated_at, and never a row whose source is 'office' or 'customer'. Safe to run twice.
+ * visits properties never checked (a new property, or one the office handed back to automatic) or checked before the stored layer was fetched. Writes only the
+ * county-owned columns, never updated_at, and never a row whose source is 'office' or 'customer' or whose coordinates changed since they were read. Safe to run twice.
  */
 async function matchProperties({ knex = defaultDb, now = new Date(), all = true } = {}) {
   const index = await loadIndex(knex);
+  const layerAt = (await knex('reclaimed_water_meters').max('fetched_at as latest').first())?.latest || now;
   if (!index.extent) return { checked: 0, reclaimed: 0, notFound: 0, outside: 0, skipped: 'no_meters' };
   const rows = await knex('customer_properties')
     .where({ active: true })
     .whereNotNull('latitude').whereNotNull('longitude')
     .where((q) => q.whereNull('reclaimed_water_source').orWhere('reclaimed_water_source', 'county_meter'))
-    .modify((q) => { if (!all) q.whereNull('reclaimed_water_checked_at'); })
+    // Not `all`: the properties never checked, and those last checked BEFORE the stored layer was fetched (a refresh whose match pass failed or
+    // was cut short is finished by the next tick, not left stale until the next download).
+    .modify((q) => { if (!all) q.where((w) => w.whereNull('reclaimed_water_checked_at').orWhere('reclaimed_water_checked_at', '<', layerAt)); })
     .select('id', 'latitude', 'longitude');
   const groups = { true: [], false: [], null: [] };
-  for (const row of rows) groups[String(judgePoint(index, Number(row.latitude), Number(row.longitude)).reclaimed)].push(row.id);
-  for (const [value, ids] of Object.entries(groups)) {
-    const patch = value === 'null'
-      ? { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: now }
-      : { reclaimed_water: value === 'true', reclaimed_water_source: 'county_meter', reclaimed_water_checked_at: now };
-    for (let i = 0; i < ids.length; i += CHUNK) {
-      // The source test is repeated in the UPDATE: an office value saved after the SELECT above is never overwritten.
-      await knex('customer_properties').whereIn('id', ids.slice(i, i + CHUNK))
-        .where((q) => q.whereNull('reclaimed_water_source').orWhere('reclaimed_water_source', 'county_meter'))
-        .update(patch);
+  for (const row of rows) groups[String(judgePoint(index, Number(row.latitude), Number(row.longitude)).reclaimed)].push(row);
+  let written = 0;
+  for (const [value, group] of Object.entries(groups)) {
+    const verdict = value === 'null' ? { water: null, source: null } : { water: value === 'true', source: 'county_meter' };
+    for (let i = 0; i < group.length; i += CHUNK) {
+      const chunk = group.slice(i, i + CHUNK);
+      // The write is guarded by what the verdict was judged on: the same coordinates (an address move clears or replaces them and drops the
+      // answer, customer-properties.js reclaimedResetOnMove), an active row, and still no office or customer value. A row that changed
+      // meanwhile is skipped and stays unchecked for the next tick, never given the old location's answer.
+      const result = await knex.raw(
+        `UPDATE customer_properties AS cp
+            SET reclaimed_water = ?::boolean, reclaimed_water_source = ?::varchar, reclaimed_water_checked_at = ?::timestamptz
+           FROM (VALUES ${chunk.map(() => '(?::uuid, ?::numeric, ?::numeric)').join(', ')}) AS v(id, lat, lng)
+          WHERE cp.id = v.id AND cp.latitude = v.lat AND cp.longitude = v.lng AND cp.active
+            AND (cp.reclaimed_water_source IS NULL OR cp.reclaimed_water_source = 'county_meter')`,
+        [verdict.water, verdict.source, now.toISOString(), ...chunk.flatMap((row) => [row.id, row.latitude, row.longitude])],
+      );
+      written += result?.rowCount ?? 0;
     }
   }
-  return { checked: rows.length, reclaimed: groups.true.length, notFound: groups.false.length, outside: groups.null.length };
+  return { checked: rows.length, written, reclaimed: groups.true.length, notFound: groups.false.length, outside: groups.null.length };
 }
 
 /**
@@ -216,7 +236,7 @@ async function runDailyTick({ knex = defaultDb, fetchImpl = globalThis.fetch, no
 }
 
 module.exports = {
-  LAYER_QUERY_URL, PAGE_SIZE, MATCH_RADIUS_M, USER_AGENT, REFRESH_AFTER_MS, MIN_PLAUSIBLE_METERS,
+  LAYER_QUERY_URL, PAGE_SIZE, IN_SERVICE_LIFECYCLE, MATCH_RADIUS_M, USER_AGENT, REFRESH_AFTER_MS, MIN_PLAUSIBLE_METERS,
   distanceM, pageUrl, parsePage, fetchPage, fetchAllMeters, storeMeters, layerIsStale,
   buildIndex, nearestMeter, judgePoint, matchProperties, runDailyTick,
 };

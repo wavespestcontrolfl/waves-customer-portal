@@ -389,7 +389,9 @@ async function projectNitrogenCut(dbh, svc, entries, summary) {
   for (const entry of entries) {
     const stated = String(entry.gates.targetN || '').match(/^\s*(\d+(?:\.\d+)?)\s*lb N\/1000/i);
     const decision = stated ? await nitrogenDecision(dbh, svc, {
-      targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, preEmergentBag: /\bPre-?Emergent Plus Fertilizer\b/i.test(entry.shapedEntry?.name || ''), strict: true,
+      targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, strict: true,
+      keep: /\bPre-?Emergent Plus Fertilizer\b/i.test(entry.shapedEntry?.name || '') ? 'pre_emergent'
+        : (Number(String(entry.gates.targetK2O || '').match(/^\s*(\d+(?:\.\d+)?)/)?.[1]) > 0 ? 'potash' : null),
     }) : null;
     if (decision?.cut != null) {
       const why = decision.why === 'reclaimed' ? 'reclaimed water, half' : 'active fungus mapped';
