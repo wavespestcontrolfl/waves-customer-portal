@@ -393,6 +393,25 @@ async function projectFungusNitrogenCut(dbh, svc, entries, summary) {
   }
 }
 
+// GATE_LAWN_DEC_LARGE_PATCH_K: for a visit where the plan swaps the whole-lawn bag (waveguard-plan-engine troubleProductSwap, the plan's
+// own decision) the brief says the swapped product replaces the normal bag, so the pocket reference agrees with the plan. Gate off, not
+// v13 or no swap: the entries are left as they are (no read). Strict, like projectFungusNitrogenCut.
+async function projectProductSwap(dbh, svc, entries, summary) {
+  const { troubleProductSwap } = require('./waveguard-plan-engine');
+  const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
+  const { V13_TROUBLE_PRODUCT_SWAPS } = require('../config/lawn-v13-trouble-product-swaps');
+  const month = Number(summary.window?.month);
+  if (!v13Active || !V13_TROUBLE_PRODUCT_SWAPS.some((rule) => rule.month === month)) return;
+  const names = entries.map((entry) => entry.shapedEntry.name);
+  const candidates = V13_TROUBLE_PRODUCT_SWAPS.filter((rule) => rule.month === month && names.includes(rule.from));
+  for (const rule of candidates) {
+    const normalBag = entries.find((entry) => entry.shapedEntry.name === rule.from);
+    const visit = { primary: `${rule.from} \u2014 brief` };
+    const swap = await troubleProductSwap(dbh, svc, { visit, monthNumber: month, v13Active, strict: true });
+    if (swap) normalBag.gates = { ...normalBag.gates, swappedForActiveLargePatch: `use ${swap.to} instead while a large patch is mapped (${swap.targetN} lb N)` };
+  }
+}
+
 // Lawn visits: ONLY the products active for the visit's protocol window —
 // the owner's bounded-product constraint. Window resolution order:
 //   1. the visit's ASSIGNED window (scheduled_services.lawn_protocol_
@@ -508,6 +527,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
       }))
       .filter((p) => p.shapedEntry.name);
     await projectFungusNitrogenCut(dbh, svc, shaped, summary);
+    await projectProductSwap(dbh, svc, shaped, summary);
 
     // Customer-specific application limits (annual max apps, cumulative
     // rate, minimum interval, MOA rotation — application-limits.js, the

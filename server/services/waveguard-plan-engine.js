@@ -5,6 +5,7 @@ const { lawnProhibitedProductBlock, treatedPropertyType } = require('./lawn-proh
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
 const { V13_TROUBLE_N_TARGETS, FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
+const { V13_TROUBLE_PRODUCT_SWAPS, PRODUCT_SWAP_NOTE_KEY } = require('../config/lawn-v13-trouble-product-swaps');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
@@ -784,15 +785,51 @@ async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Activ
   return rule.targetNPer1000;
 }
 
+// GATE_LAWN_DEC_LARGE_PATCH_K: the ONE decision whether a visit's whole-lawn bag is swapped for a mapped trouble area
+// (config/lawn-v13-trouble-product-swaps.js), for every reader that states it (the plan, the tank sheet, the previsit brief): the
+// matching rule, else null. Gate first: with the gate off (or not a v13 program) nothing is read. The visit's own recipe line must be
+// the rule's `from` product, so a recipe that moved on is never half-swapped. `strict`: a failed area read throws (see hasActiveTroubleArea).
+async function troubleProductSwap(knex, service, { visit, monthNumber, v13Active, strict = false }) {
+  if (!v13Active || !visit) return null;
+  const rule = V13_TROUBLE_PRODUCT_SWAPS.find((entry) => entry.month === monthNumber);
+  if (!rule || featureGates[rule.gate]?.() !== true) return null;
+  const hasFrom = String(visit.primary || '').split('\n').some((line) => line.split(' \u2014 ')[0].trim() === rule.from);
+  if (!hasFrom || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict }))) return null;
+  return rule;
+}
+
+// The visit as a swap states it: the rule's line in place of the `from` line, and the nitrogen target the rule sets (the normal one
+// stays visible in the note).
+function swappedVisit(visit, rule) {
+  const primary = String(visit.primary).split('\n').map((line) => (line.split(' \u2014 ')[0].trim() === rule.from ? rule.line : line)).join('\n');
+  const notes = typeof visit.notes !== 'string' ? visit.notes
+    : visit.notes.replace(NITROGEN_NOTE, (whole, normal) => `N rate: ${rule.targetN} lb N (active large patch mapped; normal ${normal} lb N)`);
+  return { ...visit, primary, notes };
+}
+
 // A visit's nutrient targets, for the plan and the tank sheet alike, so the plan amount, the mix sheet, the completion defaults, the
 // yearly limit check and the Fast Complete planned amount all read the same number. Returns the visit the lines are parsed from (an
-// adjusted copy when the nitrogen target was cut: fungusNitrogenCut; else the visit itself), its targets, and `nitrogenCut` (the
-// reduced N target, else null). Call it BEFORE the visit's lines are parsed.
+// adjusted copy when the nitrogen target was cut: fungusNitrogenCut, or the whole-lawn bag was swapped: troubleProductSwap; else the
+// visit itself), its targets, `nitrogenCut` (the reduced N target, else null) and, only when a swap applied, `productSwap` (the rule).
+// Without a swap the result is the same three keys as before, so a gate that is off changes nothing a reader can see.
+// Call it BEFORE the visit's lines are parsed.
 async function visitNutrientTargets(knex, service, { visit, month, v13Active, strict = false }) {
   const targets = parseVisitNutrientTargets(visit?.notes);
-  const cut = visit ? await fungusNitrogenCut(knex, service, { targetN: targets.targetNPer1000, monthNumber: MONTH_ABBR.indexOf(month) + 1, v13Active, strict }) : null;
+  const monthNumber = MONTH_ABBR.indexOf(month) + 1;
+  const swap = await troubleProductSwap(knex, service, { visit, monthNumber, v13Active, strict });
+  if (swap) {
+    const swapped = swappedVisit(visit, swap);
+    return { visit: swapped, targets: parseVisitNutrientTargets(swapped.notes), nitrogenCut: null, productSwap: swap };
+  }
+  const cut = visit ? await fungusNitrogenCut(knex, service, { targetN: targets.targetNPer1000, monthNumber, v13Active, strict }) : null;
   if (cut == null) return { visit, targets, nitrogenCut: null };
   return { visit: fungusAdjustedVisit(visit, cut), targets: { ...targets, targetNPer1000: cut }, nitrogenCut: cut };
+}
+
+// The line note for the swapped bag (in the line's gateNotes, like the nitrogen cut's). [] for every other line.
+function productSwapNotes(product, productSwap) {
+  if (!productSwap || !product || product.name !== productSwap.to) return [];
+  return [{ key: PRODUCT_SWAP_NOTE_KEY, severity: 'note', text: productSwap.note }];
 }
 
 // The line note for a nitrogen bag sized for the reduced target (in the line's gateNotes, the way the Fast Complete sheet and the
@@ -1877,7 +1914,7 @@ async function visitOnV13Protocol(knex, visit, { trackKey }) {
 // visit is pinned to (under the completion defaults, as selectProtocolVisit does) or else the month of the service date, so the cut
 // applies only to a visit that is on v13 and either unpinned or asked for in the month the plan reads.
 async function sheetReadsPlansStep(knex, visit, { trackKey, month }) {
-  if (featureGates.lawnV13Live?.() !== true || !featureGates.lawnNovLargePatchNLive()) return false;
+  if (featureGates.lawnV13Live?.() !== true || !(featureGates.lawnNovLargePatchNLive() || featureGates.lawnDecLargePatchKLive?.())) return false;
   const { onV13, windowMonth } = await visitOnV13Protocol(knex, visit, { trackKey });
   if (!onV13) return false;
   if (windowMonth == null) return true;
@@ -2125,8 +2162,9 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  // The visit the lines are parsed from: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N) its copy with the cut nitrogen stated.
-  const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
+  // The visit the lines are parsed from: the recipe step, or its copy with the cut nitrogen stated (GATE_LAWN_NOV_LARGE_PATCH_N) or the
+  // whole-lawn bag swapped (GATE_LAWN_DEC_LARGE_PATCH_K).
+  const { visit, targets: nutrientTargets, nitrogenCut, productSwap } = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
@@ -2202,7 +2240,9 @@ async function buildPlanForService(serviceId, options = {}) {
     return {
       ...planLineFields(item),
       // Gate off: no v13 field at all, the payload is the old one.
-      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, fungusNitrogenNotes(mix, nitrogenCut)) : {}),
+      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, [...fungusNitrogenNotes(mix, nitrogenCut), ...productSwapNotes(plannedProduct, productSwap)]) : {}),
+      // GATE_LAWN_DEC_LARGE_PATCH_K: the swapped-in bag is the visit's default whole-lawn product though its staged row is not a default.
+      ...(productSwap && plannedProduct?.name === productSwap.to ? { productSwapIn: true } : {}),
       matched: !!plannedProduct,
       product: planProductSnapshot(plannedProduct, mix),
       substitution: planSubstitutionSnapshot(substitution),
@@ -2221,7 +2261,7 @@ async function buildPlanForService(serviceId, options = {}) {
     productOf: (id) => products.find((product) => String(product.id) === String(id)) || null,
   });
   planItems = bermudaProjection.items;
-  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut == null ? null : { from: parseVisitNutrientTargets(recipeStep?.notes).targetNPer1000, to: nitrogenCut });
+  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut == null ? null : { from: parseVisitNutrientTargets(recipeStep?.notes).targetNPer1000, to: nitrogenCut }, productSwap || null);
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
   const v13PlanBlock = lawnV13PlanBlock({ trackKey, service, structuredProtocol });
@@ -2525,6 +2565,8 @@ module.exports = {
   fungusNitrogenCut,
   sheetReadsPlansStep,
   fungusNitrogenNotes,
+  troubleProductSwap,
+  productSwapNotes,
   summarizeMaterialCost,
   effectiveAreaFactor,
   v13ProtocolRows,

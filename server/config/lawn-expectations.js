@@ -111,6 +111,8 @@ const PRODUCT_CLASS_ENTRIES = [
   ['LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', FAMILY.GRANULAR_N],
   // April feeding on the 12x plan (v13): a 100% polymer-coated slow-release nitrogen bag; the same expectation line the 24-0-11 gave there.
   ['LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', FAMILY.GRANULAR_N],
+  // December feeding on a lawn with a mapped large patch (v13, GATE_LAWN_DEC_LARGE_PATCH_K): a granular potassium bag with no nitrogen.
+  ['LESCO Black Out 0-0-24 AM Spar-TECH', FAMILY.POTASSIUM],
   ['LESCO 24-2-11', FAMILY.GRANULAR_N],
   ['LESCO 24-2-11 50% NOS Plus BIO 6% Fe', FAMILY.GRANULAR_N],
 
