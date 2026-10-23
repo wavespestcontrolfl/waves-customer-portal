@@ -221,8 +221,11 @@ function buildCommercialManualQuoteResult(service, property = {}, options = {}) 
     serviceKey === 'lawn' ||
     serviceKey === 'lawn_care' ||
     serviceKey === 'commercial_lawn_treatment';
+  // The mosquito misting system (GATE_MOSQUITO_MISTING) keeps its own identity on the manual-quote rail: the row
+  // rides the existing commercial_pest manual shape (nothing downstream changes) but names what was asked for.
+  const isMisting = serviceKey === 'mosquito_misting';
   const canonicalService = isLawn ? 'commercial_lawn' : 'commercial_pest';
-  const originalRequestedService = isLawn ? 'lawn_care' : 'pest_control';
+  const originalRequestedService = isLawn ? 'lawn_care' : (isMisting ? 'mosquito_misting' : 'pest_control');
   const commercialSubtype = options.commercialSubtype || property.commercialSubtype || null;
   const manualReviewReasons = unique([
     'commercial_property_manual_quote_required',
@@ -240,9 +243,12 @@ function buildCommercialManualQuoteResult(service, property = {}, options = {}) 
     requiresManualReview: true,
     autoQuoteRequiresAdminApproval: true,
     manualReviewReasons,
+    ...(isMisting ? { label: 'Mosquito Misting System (commercial)' } : {}),
     reason: isLawn
       ? 'Commercial turf treatment requires manual quote or commercial pilot pricing.'
-      : 'Commercial pest requires manual quote or commercial pilot pricing.',
+      : (isMisting
+        ? 'A commercial mosquito misting system requires a manual quote.'
+        : 'Commercial pest requires manual quote or commercial pilot pricing.'),
     price: null,
     monthly: null,
     annual: null,

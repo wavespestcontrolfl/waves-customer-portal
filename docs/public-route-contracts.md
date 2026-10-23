@@ -1984,6 +1984,28 @@ gated (its replay would throw). `GET /:token/data` is unchanged: it serves the s
 Bermuda-gated estimate. With the gate on, or with no add-on on the estimate, every body and status on these routes is unchanged.
 An estimate that carries both a gated Bermuda add-on and a gated area add-on answers the Bermuda body.
 
+**Mosquito misting gate (`GATE_MOSQUITO_MISTING`, 2026-10-23, dark).** An estimate that carries a persisted mosquito misting
+system (a stored `services.mosquitoMisting` / `mosquito_misting` engine input, a mapped `mosquito_misting` recurring row, a
+`mosquito_misting_installation` one-time item, a raw `mosquito_misting` engine line, or an itemized proposal line of either
+key) while the gate is off is refused on the SAME rail and at the SAME position as the area add-on gate above, on the same
+endpoints: `PUT /:token/accept` (pre-transaction check and the locked in-transaction recheck), `GET /:token/available-slots`,
+`POST /:token/find-slots`, `POST /:token/reserve`, `POST /:token/card-hold-intent`, `POST /:token/recurring-card-intent` and
+`POST /:token/reserve/:scheduledServiceId/extend`. Refusal: HTTP 409 with the same customer text as the area add-on refusal and
+`"code": "MOSQUITO_MISTING_GATED"` (reason `mosquito_misting_disabled`). Precedence among gated add-ons: Bermuda, then misting,
+then area add-ons. A gated misting estimate is never priced for the park check (its replay throws a fail-closed 400 carrying the
+same code); the deposit webhook records nothing for it (reason `mosquito_misting_disabled`). `GET /:token/data` is unchanged.
+**Misting acceptance pending (misting PR 1, code-owned `MOSQUITO_MISTING_CONVERSION_READY = false`).** Even with the gate ON,
+an estimate that carries a PRICED misting system (the mapped plan row, the install item, the raw engine line, an itemized
+proposal line, or a selected stored input when no stored row exists; an unpriced quote-required-only row, such as an oversize
+layout, does not count) cannot be accepted: the series seeding, the install on the acceptance invoice and the refill billing
+are not built until misting PR 2. The same endpoints as above answer HTTP 409 with the same customer text and
+`"code": "MOSQUITO_MISTING_ACCEPT_PENDING"` (reason `mosquito_misting_conversion_pending`); Mark Won / manual acceptance and the
+schedule booking preflight refuse it with the staff text; the deposit webhook records nothing for it (reason
+`mosquito_misting_conversion_pending`). `GET /:token/data` and staff send stay allowed so the quote can be shown. Precedence:
+Bermuda, misting gated (gate off), misting acceptance pending, then area add-ons. Lifted by misting PR 2.
+With the gate on and no priced misting row, or with no misting row on the estimate, every body and status on these routes is
+unchanged. The gate is off by default, so today no public response changes.
+
 Which stored rows count (Codex round 17; no new status or body): the add-on rows are read from the estimate's AUTHORITATIVE result
 container only (`storedAreaAddOnRows`, `server/services/estimate-result-container.js`, the pick the Bermuda evidence detector uses: a
 revision's own `result` wins over the raw `engineResult` it left behind, a SERVER-priced `result` wins even when it prices nothing, and an
@@ -4870,6 +4892,16 @@ from the tier sweep the same way the lawn row above dropped its retired
 instead of the old 4/6/9 wording; since the 2026-09-27 typical-job
 narrowing above, the published low is Standard's list-price floor on a
 typical lot (`low` ≈ $36), not a bundle-discounted value.
+Mosquito misting rows (2026-10-22, dark): with `GATE_MOSQUITO_MISTING`
+set (`1`/`true`/`on`, read at call time through the gated-row map in
+`server/services/pricing-engine/public-ranges.js`) the payload gains two
+rows, `mosquito_misting_install` (per installation) and
+`mosquito_misting_plan` (per application, monthly), swept from `priceMosquitoMisting`
+over both system tiers at 20, 35 and 50 nozzles. The numbers are the DRAFT
+price list in ~/mosquito-misting-scope-20260924.md §4.3 (dealer cost
+unknown); the gate stays off until the owner launches the service, so the
+public payload is byte-identical today. The gate also feeds the payload's
+cache signature and the blog price-card exclusion like the other gated rows.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public

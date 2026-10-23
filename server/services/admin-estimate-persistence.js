@@ -1294,6 +1294,9 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const termiteKnobs = require('./estimate-tree-shrub-knob-replay')
       .termiteKnobSignalForReplay(estimateData);
     if (termiteKnobs) v1Input.termitePricingKnobs = termiteKnobs;
+    // Mosquito misting quote-time snapshot: the same reader the public replay uses.
+    const mistingKnobs = require('./estimate-tree-shrub-knob-replay').mistingKnobSignalForReplay(estimateData);
+    if (mistingKnobs) v1Input.mistingPricingKnobs = mistingKnobs;
     // A customer restore deleted the old termite result row on removal, so
     // the ordinary reader above has no quote-time stamp to recover. The
     // service-mix route passes the server-captured removal provenance for
