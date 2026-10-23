@@ -3,8 +3,8 @@
 // Skips without DATABASE_URL.
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261023100000_reclaimed_water');
+const resetMigration = require('../models/migrations/20261023110000_reclaimed_water_coordinate_reset');
 const meters = require('../services/reclaimed-water-meters');
-const reclaimed = require('../services/lawn-reclaimed-water');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 jest.setTimeout(60000);
@@ -32,8 +32,10 @@ describeDb('reclaimed water through PostgreSQL', () => {
   beforeAll(async () => {
     owned = await createLawnHistoryDb(); knex = owned.knex;
     // CI's database already ran this migration; the owned copies start without it so the real up() runs here either way.
+    await resetMigration.down(knex);
     await migration.down(knex);
     await migration.up(knex);
+    await resetMigration.up(knex);
   }, 90000);
   afterAll(async () => { if (owned) await owned.dispose(); });
   beforeEach(async () => { await knex('reclaimed_water_meters').del(); });
@@ -45,12 +47,15 @@ describeDb('reclaimed water through PostgreSQL', () => {
     expect(await p.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
     await migration.up(knex);
     await expect(knex('customer_properties').where({ id: p.id }).update({ reclaimed_water_source: 'bogus' })).rejects.toThrow();
+    await resetMigration.down(knex);
     await migration.down(knex);
     expect(await knex.schema.hasTable('reclaimed_water_meters')).toBe(false);
     expect(await knex.schema.hasColumn('customer_properties', 'reclaimed_water')).toBe(false);
     expect((await p.read()).address_line1).toBe('100 Fixture Street');
     await migration.down(knex);
     await migration.up(knex);
+    await resetMigration.up(knex);
+    await resetMigration.up(knex);
     expect(await knex.schema.hasColumn('customer_properties', 'reclaimed_water_source')).toBe(true);
   });
 
@@ -80,10 +85,10 @@ describeDb('reclaimed water through PostgreSQL', () => {
 
   test('the office handing a property back to automatic (null) lets the county settle it at the next tick', async () => {
     const p = await property(offset(0, 5));
-    expect(await reclaimed.setPropertyReclaimed(p.customerId, p.id, false, { knex })).toBe(true);
+    await knex('customer_properties').where({ id: p.id }).update({ reclaimed_water: false, reclaimed_water_source: 'office', reclaimed_water_checked_at: new Date() });
     await meters.runDailyTick({ knex, fetchImpl: async () => layer(offset(0, 0)), now: T0 });
     expect(await p.read()).toMatchObject({ reclaimed_water: false, reclaimed_water_source: 'office' });
-    expect(await reclaimed.setPropertyReclaimed(p.customerId, p.id, null, { knex })).toBe(true);
+    await knex('customer_properties').where({ id: p.id }).update({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
     expect(await p.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
     // The layer is fresh, so the tick does not download again; it matches the property never checked.
     const fetchImpl = jest.fn();
@@ -124,6 +129,74 @@ describeDb('reclaimed water through PostgreSQL', () => {
     expect(await p.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
   });
 
+  describe('a county verdict never outlives its coordinates (one trigger, every coordinate writer)', () => {
+    const COUNTY = { reclaimed_water: true, reclaimed_water_source: 'county_meter' };
+    const CLEARED = { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null };
+    const settled = async (point, source = 'county_meter', water = true) => {
+      const p = await property(point, { reclaimed_water: water, reclaimed_water_source: source, reclaimed_water_checked_at: new Date() });
+      return p;
+    };
+
+    test.each([
+      ['the geocode review clearing the mirrors (clearLocationMirrors)', (p, row) => knex('customer_properties').where({ id: p.id, latitude: row.latitude, longitude: row.longitude }).update({ latitude: null, longitude: null, updated_at: new Date() })],
+      ['a re-geocode or manual pin replacing the coordinates', (p) => knex('customer_properties').where({ id: p.id }).update({ latitude: 27.61, longitude: -82.41 })],
+      ['syncPrimaryAddress clearing them on an address move', async (p) => {
+        const { syncPrimaryAddress } = require('../services/customer-properties');
+        const row = await p.read();
+        await syncPrimaryAddress({ id: p.customerId, address_line1: '9 Moved Way', address_line2: null, city: row.city, state: row.state, zip: row.zip }, knex);
+      }],
+      ['only the longitude changing', (p) => knex('customer_properties').where({ id: p.id }).update({ longitude: -82.5 })],
+    ])('%s clears a county verdict', async (_label, write) => {
+      const p = await settled(offset(0, 5));
+      await write(p, await p.read());
+      expect(await p.read()).toMatchObject(CLEARED);
+    });
+
+    test.each([['office', true], ['office', false], ['customer', true], ['customer', false]])('a %s answer (%s) stays when the coordinates change', async (source, water) => {
+      const p = await settled(offset(0, 5), source, water);
+      await knex('customer_properties').where({ id: p.id }).update({ latitude: null, longitude: null });
+      expect(await p.read()).toMatchObject({ reclaimed_water: water, reclaimed_water_source: source });
+      await knex('customer_properties').where({ id: p.id }).update({ latitude: 27.7, longitude: -82.3 });
+      expect(await p.read()).toMatchObject({ reclaimed_water: water, reclaimed_water_source: source });
+    });
+
+    test('a write that leaves the coordinates alone, or restates the same numbers, keeps the verdict; so does one that writes a fresh verdict with them', async () => {
+      const p = await settled(offset(0, 5));
+      const row = await p.read();
+      await knex('customer_properties').where({ id: p.id }).update({ label: 'Back lot', updated_at: new Date() });
+      await knex('customer_properties').where({ id: p.id }).update({ latitude: row.latitude, longitude: row.longitude });
+      expect(await p.read()).toMatchObject(COUNTY);
+      // The county job's own write (verdict, same coordinates) and a statement that moves the pin AND judges it are not reset.
+      const checked = new Date('2026-10-23T09:00:00Z');
+      await knex('customer_properties').where({ id: p.id }).update({ latitude: 27.62, longitude: -82.42, reclaimed_water: false, reclaimed_water_source: 'county_meter', reclaimed_water_checked_at: checked });
+      expect(await p.read()).toMatchObject({ reclaimed_water: false, reclaimed_water_source: 'county_meter' });
+    });
+
+    test('the county\'s "outside the layer" result (no source, checked_at stamped) is invalidated by a pin move too, and the new location is judged at the next tick', async () => {
+      await knex('customer_properties').update({ active: false });
+      const p = await property(offset(-60000, 0), { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: new Date() });
+      await knex('customer_properties').where({ id: p.id }).update({ latitude: offset(0, 5).lat, longitude: offset(0, 5).lng });
+      expect(await p.read()).toMatchObject(CLEARED);
+      const result = await meters.runDailyTick({ knex, fetchImpl: async () => layer(offset(0, 0)), now: T0 });
+      expect(result).toMatchObject({ checked: 1, reclaimed: 1 });
+      expect(await p.read()).toMatchObject(COUNTY);
+      // An unchecked property (nothing stamped) is untouched by a move.
+      const fresh = await property(offset(0, 5));
+      await knex('customer_properties').where({ id: fresh.id }).update({ latitude: 27.9, longitude: -82.1 });
+      expect(await fresh.read()).toMatchObject(CLEARED);
+    });
+
+    test('after the pin moved the county job judges the NEW location at the next tick', async () => {
+      await knex('customer_properties').update({ active: false });
+      const p = await settled(offset(5000, 5000), 'county_meter', false);
+      await knex('customer_properties').where({ id: p.id }).update({ latitude: offset(0, 5).lat, longitude: offset(0, 5).lng });
+      expect(await p.read()).toMatchObject(CLEARED);
+      const result = await meters.runDailyTick({ knex, fetchImpl: async () => layer(offset(0, 0)), now: T0 });
+      expect(result).toMatchObject({ checked: 1, reclaimed: 1 });
+      expect(await p.read()).toMatchObject(COUNTY);
+    });
+  });
+
   test('a property that moved between the read and the write is not given the old location\'s answer, and stays unchecked for the next tick', async () => {
     const p = await property(offset(0, 5));
     await knex('customer_properties').whereNot({ id: p.id }).update({ active: false }); // only this property is in play
@@ -140,13 +213,6 @@ describeDb('reclaimed water through PostgreSQL', () => {
     const result = await meters.matchProperties({ knex: racing, now: T0, all: true });
     expect({ moved, ...result }).toMatchObject({ moved: true, checked: 1, reclaimed: 1, written: 0 });
     expect(await p.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
-  });
-
-  test('the setter only touches the customer\'s own active property', async () => {
-    const a = await property(offset(0, 5));
-    const b = await property(offset(0, 5));
-    expect(await reclaimed.setPropertyReclaimed(a.customerId, b.id, true, { knex })).toBe(false);
-    expect((await b.read()).reclaimed_water).toBeNull();
   });
 
   test('the tick is idempotent: a second run the same day downloads nothing and changes no row', async () => {

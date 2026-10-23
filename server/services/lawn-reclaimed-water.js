@@ -8,11 +8,8 @@
  *   NULL / NULL             nobody knows (the plan treats it as not reclaimed).
  * The plan engine reads this through isReclaimedService (waveguard-plan-engine.js nitrogenDecision) and halves the N.
  */
-const defaultDb = require('../models/db');
 const logger = require('./logger');
 const { savepointRead } = require('../utils/savepoint-read');
-
-const PERSON_SOURCES = ['office', 'customer'];
 
 // The property a visit is for: the visit's own link, else the resolver the whole lawn program uses (null = unresolvable).
 async function propertyIdOf(knex, svc) {
@@ -42,19 +39,4 @@ async function isReclaimedService(knex, svc, { strict = false } = {}) {
   }
 }
 
-/**
- * Set a person's answer on one property: true or false is saved with its source and the time; null hands the property back
- * to the county match (both columns cleared, so the next daily tick settles it). Returns false when the customer has no such
- * active property.
- */
-async function setPropertyReclaimed(customerId, propertyId, value, { source = 'office', knex = defaultDb, now = new Date() } = {}) {
-  if (value !== null && typeof value !== 'boolean') throw Object.assign(new Error('reclaimed must be true, false or null'), { status: 400 });
-  if (value !== null && !PERSON_SOURCES.includes(source)) throw Object.assign(new Error('source must be office or customer'), { status: 400 });
-  const patch = value === null
-    ? { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null }
-    : { reclaimed_water: value, reclaimed_water_source: source, reclaimed_water_checked_at: now };
-  const updated = await knex('customer_properties').where({ id: propertyId, customer_id: customerId, active: true }).update(patch);
-  return updated === 1;
-}
-
-module.exports = { PERSON_SOURCES, propertyIdOf, isReclaimedService, setPropertyReclaimed };
+module.exports = { propertyIdOf, isReclaimedService };

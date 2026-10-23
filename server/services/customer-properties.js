@@ -68,6 +68,8 @@ function isNewAddress(existingProps, candidate = {}) {
   return !(existingProps || []).some((p) => addressKey(p) === key);
 }
 
+const RECLAIMED_COLUMNS = ['reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at'];
+
 /** Active properties for a customer, primary first. */
 async function listProperties(customerId, conn = db) {
   if (!customerId) return [];
@@ -75,9 +77,13 @@ async function listProperties(customerId, conn = db) {
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
   const customer = await conn('customers').where({ id: customerId }).first('contact_role');
+  // GATE_LAWN_RECLAIMED_HALF_N off: the old payload exactly, without the three reclaimed-water columns.
+  const showReclaimed = require('../config/feature-gates').lawnReclaimedHalfNLive();
   return properties.map(property => {
     const unavailable = primaryPropertyUnavailable(property, customer);
-    return { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
+    const row = { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
+    if (!showReclaimed) for (const column of RECLAIMED_COLUMNS) delete row[column];
+    return row;
   });
 }
 
@@ -906,6 +912,13 @@ function manualPropertyFields(kind, input = {}) {
     if (!relationship.ok) throw propertyActionError('invalid relationship');
     changes.relationship = relationship.value;
   }
+  // GATE_LAWN_RECLAIMED_HALF_N: the office's answer for the lawn water (true, false, or null = back to the county match). It changes a
+  // nitrogen dose, so it goes through this audited writer; the source and time are written with it (editManualProperty).
+  if (input.reclaimed_water !== undefined) {
+    if (kind !== 'edit' || !require('../config/feature-gates').lawnReclaimedHalfNLive()) throw propertyActionError('reclaimed_water cannot be set here');
+    if (input.reclaimed_water !== null && typeof input.reclaimed_water !== 'boolean') throw propertyActionError('reclaimed_water must be true, false or null');
+    changes.reclaimed_water = input.reclaimed_water;
+  }
   if (kind !== 'add') return changes;
   if (!String(input.address_line1 || '').trim()) throw propertyActionError('address_line1 is required');
   if (!String(input.city || '').trim() || !String(input.zip || '').trim()) throw propertyActionError('city and zip are required');
@@ -963,7 +976,7 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
       if (!Object.keys(changes).length) throw propertyActionError('nothing to update');
       preview = { ...base, property: { id: target.id, address: propertyAddressLabel(target) },
         before: Object.fromEntries(Object.keys(changes).map(key => [key, target[key]])), changes,
-        effects: 'Updates only this saved property’s label, relationship or occupancy. Account, billing, appointment and recurring-service addresses are unchanged.' };
+        effects: 'Updates only this saved property’s label, relationship, occupancy or reclaimed-water answer. Account, billing, appointment and recurring-service addresses are unchanged.' };
     } else if (TARGET_PREVIEWS[kind]) {
       preview = { ...base, ...await TARGET_PREVIEWS[kind](conn, customerId, target, primary, customer, properties) };
     } else throw propertyActionError('Unknown property operation');
@@ -1211,7 +1224,12 @@ async function writeManualProperty(customerId, kind, input, propertyId, options,
     const savedId = await apply(trx, loaded, changes);
     const auditId = await require('./audit-log').recordAuditEvent({
       actor_type: 'admin', actor_id: options.actorId || null, action: `customer_property_${kind}`,
-      resource_type: 'customer_property', resource_id: savedId, metadata: { customer_id: customerId, fields: Object.keys(changes) },
+      resource_type: 'customer_property', resource_id: savedId,
+      metadata: {
+        customer_id: customerId, fields: Object.keys(changes),
+        // A dose-changing edit records the answer and what it replaced (the property's reclaimed water, GATE_LAWN_RECLAIMED_HALF_N).
+        ...('reclaimed_water' in changes ? { reclaimed_water: changes.reclaimed_water, reclaimed_water_before: preview.before?.reclaimed_water ?? null } : {}),
+      },
       critical: true, trx,
     });
     const properties = await listProperties(customerId, trx);
@@ -1247,8 +1265,13 @@ async function addManualProperty(customerId, input, options = {}) {
 
 async function editManualProperty(customerId, propertyId, input, options = {}) {
   return writeManualProperty(customerId, 'edit', input, propertyId, options, async (trx, _loaded, changes) => {
+    // The office's reclaimed-water answer carries its source and time; null hands the property back to the county match.
+    const reclaimed = 'reclaimed_water' in changes ? {
+      reclaimed_water_source: changes.reclaimed_water === null ? null : 'office',
+      reclaimed_water_checked_at: changes.reclaimed_water === null ? null : trx.fn.now(),
+    } : {};
     await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
-      .update({ ...changes, updated_at: trx.fn.now() });
+      .update({ ...changes, ...reclaimed, updated_at: trx.fn.now() });
     return propertyId;
   });
 }

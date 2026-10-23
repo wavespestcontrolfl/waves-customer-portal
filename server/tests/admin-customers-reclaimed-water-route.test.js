@@ -20,10 +20,10 @@ jest.mock('../models/db', () => {
   db.schema = { hasTable: jest.fn(async () => false) };
   return db;
 });
-const mockSet = jest.fn(async () => true);
-jest.mock('../services/lawn-reclaimed-water', () => ({ setPropertyReclaimed: (...args) => mockSet(...args) }));
-const mockList = jest.fn(async () => [{ id: 'p1', reclaimed_water: true, reclaimed_water_source: 'office' }]);
+const mockEdit = jest.fn(async () => ({ success: true, propertyId: 'p1', properties: [{ id: 'p1', reclaimed_water: true, reclaimed_water_source: 'office' }] }));
+const mockList = jest.fn(async () => [{ id: 'p1' }]);
 jest.mock('../services/customer-properties', () => ({
+  editManualProperty: (...args) => mockEdit(...args),
   listProperties: (...args) => mockList(...args),
   ensurePrimaryProperty: jest.fn(async () => ({})),
   OCCUPANCY_TYPES: ['unknown'],
@@ -45,7 +45,7 @@ const put = (baseUrl, body) => fetch(`${baseUrl}/admin/customers/cust-1/properti
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
 
-beforeEach(() => { jest.clearAllMocks(); mockGate.on = true; mockSet.mockResolvedValue(true); });
+beforeEach(() => { jest.clearAllMocks(); mockGate.on = true; });
 
 test.each([[true], [false], [null]])('saves %s as the office answer and answers with the property list', async (value) => {
   await withServer(async (baseUrl) => {
@@ -53,7 +53,8 @@ test.each([[true], [false], [null]])('saves %s as the office answer and answers 
     expect(res.status).toBe(200);
     expect((await res.json()).properties).toHaveLength(1);
   });
-  expect(mockSet).toHaveBeenCalledWith('cust-1', 'p1', value, { source: 'office' });
+  // The audited, locked domain writer, with the actor (the same writer the PATCH above uses).
+  expect(mockEdit).toHaveBeenCalledWith('cust-1', 'p1', { reclaimed_water: value }, { actorId: 'admin-1' });
 });
 
 test.each([[{}], [{ reclaimed: 'yes' }], [{ reclaimed: 1 }], [undefined]])('refuses %j before writing', async (body) => {
@@ -61,24 +62,26 @@ test.each([[{}], [{ reclaimed: 'yes' }], [{ reclaimed: 1 }], [undefined]])('refu
     const res = await put(baseUrl, body ?? {});
     expect(res.status).toBe(400);
   });
-  expect(mockSet).not.toHaveBeenCalled();
+  expect(mockEdit).not.toHaveBeenCalled();
 });
 
-test('a property the customer does not have is a 404', async () => {
-  mockSet.mockResolvedValue(false);
+test('a property the writer does not find is its 404, passed through', async () => {
+  mockEdit.mockRejectedValue(Object.assign(new Error('property not found'), { status: 404 }));
   await withServer(async (baseUrl) => { expect((await put(baseUrl, { reclaimed: true })).status).toBe(404); });
 });
 
 test('the gate off: 404 and nothing is written', async () => {
   mockGate.on = false;
   await withServer(async (baseUrl) => { expect((await put(baseUrl, { reclaimed: true })).status).toBe(404); });
-  expect(mockSet).not.toHaveBeenCalled();
+  expect(mockEdit).not.toHaveBeenCalled();
 });
 
-test('the list answer carries the gate for the panel', async () => {
+test('the list answer carries the gate for the panel while it is on; off, the key is not sent and the body is the old one', async () => {
   await withServer(async (baseUrl) => {
     expect((await (await fetch(`${baseUrl}/admin/customers/cust-1/properties`)).json()).reclaimedWater).toBe(true);
     mockGate.on = false;
-    expect((await (await fetch(`${baseUrl}/admin/customers/cust-1/properties`)).json()).reclaimedWater).toBe(false);
+    const off = await (await fetch(`${baseUrl}/admin/customers/cust-1/properties`)).json();
+    expect(off).not.toHaveProperty('reclaimedWater');
+    expect(Object.keys(off).sort()).toEqual(['canChangeAppointmentAddress', 'canChangePrimary', 'properties', 'propertyServiceAreas']);
   });
 });

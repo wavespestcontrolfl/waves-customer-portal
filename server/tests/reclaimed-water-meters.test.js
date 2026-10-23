@@ -96,6 +96,26 @@ describe('the paging parser', () => {
     expect(meters.judgePoint(index, 27.5, -82.39)).toEqual({ reclaimed: true });
   });
 
+  test('a page with no features array, or an empty page that still claims more, is an error: it never ends the download early', async () => {
+    expect(() => meters.parsePage({})).toThrow();
+    expect(() => meters.parsePage({ features: 'x' })).toThrow();
+    for (const bad of [{}, { features: null }]) {
+      let call = 0;
+      const fetchImpl = async () => { call += 1; return call === 1 ? body([feature(1, -82.4, 27.5)], true) : { ok: true, status: 200, json: async () => bad }; };
+      await expect(meters.fetchAllMeters({ fetchImpl })).rejects.toMatchObject({ code: 'bad_body' });
+    }
+    let call = 0;
+    const emptyButMore = async () => { call += 1; return call === 1 ? body([feature(1, -82.4, 27.5)], true) : { ok: true, status: 200, json: async () => ({ features: [], exceededTransferLimit: true }) }; };
+    await expect(meters.fetchAllMeters({ fetchImpl: emptyButMore })).rejects.toMatchObject({ code: 'empty_page' });
+  });
+
+  test('a malformed later page keeps the stored layer (nothing is replaced from a partial pull)', async () => {
+    let call = 0;
+    const full = Array.from({ length: 2000 }, (_, i) => feature(i + 1, -82.4 - i * 0.00001, 27.5));
+    const fetchImpl = async () => { call += 1; return call < 12 ? body(full.map((f) => ({ ...f, attributes: { OBJECTID: f.attributes.OBJECTID + call * 2000 } })), true) : { ok: true, status: 200, json: async () => ({}) }; };
+    await expect(meters.fetchAllMeters({ fetchImpl })).rejects.toMatchObject({ code: 'bad_body' });
+  });
+
   test('an answer that never ends is an error, not a loop', async () => {
     const fetchImpl = async () => body([feature(1, -82.4, 27.5)], true);
     await expect(meters.fetchAllMeters({ fetchImpl })).rejects.toMatchObject({ code: 'too_many_pages' });

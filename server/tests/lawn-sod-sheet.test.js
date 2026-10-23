@@ -11,6 +11,7 @@ jest.mock('../services/waveguard-plan-engine', () => ({
   // GATE_LAWN_RECLAIMED_HALF_N: the swap bag asks the engine's own decision; the real one, so the sheet and the plan cannot drift.
   nitrogenDecision: (...args) => jest.requireActual('../services/waveguard-plan-engine').nitrogenDecision(...args),
   nitrogenCutNotes: (...args) => jest.requireActual('../services/waveguard-plan-engine').nitrogenCutNotes(...args),
+  visitOnV13Protocol: jest.fn((...args) => jest.requireActual('../services/waveguard-plan-engine').visitOnV13Protocol(...args)),
 }));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
@@ -252,8 +253,10 @@ describe('loadSodForContext', () => {
       const water = require('../services/lawn-reclaimed-water');
       let reclaimed;
       const realRead = water.isReclaimedService;
-      beforeEach(() => { process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true'; reclaimed = jest.spyOn(water, 'isReclaimedService').mockResolvedValue(true); });
-      afterEach(() => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; reclaimed.mockRestore(); });
+      beforeEach(() => { process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true'; process.env.GATE_LAWN_V13 = 'true'; reclaimed = jest.spyOn(water, 'isReclaimedService').mockResolvedValue(true); });
+      afterEach(() => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; delete process.env.GATE_LAWN_V13; reclaimed.mockRestore(); });
+      const VISIT_UNPINNED = () => visitRow();
+      const VISIT_PINNED = () => visitRow({ lawn_protocol_key: 'fixture_v13', lawn_protocol_version: '2026.05', lawn_protocol_window_key: 'oct_v13_spreader_fall' });
       const NOTE = (n, rate) => `Reclaimed water: half nitrogen today (${n} lb N, ${rate} lb per 1,000).`;
 
       test('October: 1.25 lb per 1,000 (0.3 lb N) instead of 2.5, the amount follows, the Dimension bag is still held, and the line says why', async () => {
@@ -271,6 +274,28 @@ describe('loadSodForContext', () => {
         const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: visitRow({ scheduled_date: '2026-04-14' }), planned: OCT() });
         expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 1.05 });
         expect(out.plannedProducts.items[1]).toMatchObject({ amount: 5.25, ratePer1000: 1.05, gateNotes: [NOTE(0.25, '1.1')] });
+      });
+
+      // v13 is the visit's actual protocol: the planner's own test (GATE_LAWN_V13 live, and a pin to another version or an unresolvable pin is not v13).
+      test.each([
+        ['GATE_LAWN_V13 off', () => { delete process.env.GATE_LAWN_V13; }, VISIT_UNPINNED],
+        ['a visit pinned to an older protocol version', () => require('../services/waveguard-plan-engine').visitOnV13Protocol.mockResolvedValueOnce({ onV13: false, windowMonth: 10 }), VISIT_PINNED],
+        ['a visit pinned to a protocol that cannot be resolved', () => require('../services/waveguard-plan-engine').visitOnV13Protocol.mockResolvedValueOnce({ onV13: false, windowMonth: null }), VISIT_PINNED],
+      ])('%s: the bag as it was, 2.5 lb per 1,000, no note, and the property is not read', async (_label, arrange, visit) => {
+        arrange();
+        const out = await load({ record, planned: OCT(), visit: visit() });
+        expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 2.5 });
+        expect(out.plannedProducts.items[1]).toMatchObject({ amount: 12.5, ratePer1000: 2.5 });
+        expect(out.plannedProducts.items[1]).not.toHaveProperty('gateNotes');
+        expect(reclaimed).not.toHaveBeenCalled();
+      });
+
+      test('a visit pinned to v13 is halved, and the pin is passed to the planner\'s own lookup with the lawn\'s track', async () => {
+        const engine = require('../services/waveguard-plan-engine');
+        engine.visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 10 });
+        const out = await load({ record, planned: OCT(), visit: VISIT_PINNED() });
+        expect(out.plannedProducts.items[1]).toMatchObject({ amount: 6.25, ratePer1000: 1.25 });
+        expect(engine.visitOnV13Protocol).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lawn_protocol_key: 'fixture_v13', lawn_protocol_version: '2026.05' }), { trackKey: 'st_augustine' });
       });
 
       test.each([

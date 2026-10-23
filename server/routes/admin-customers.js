@@ -2903,8 +2903,8 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
       properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
       // Read once here so the panel mounts per-row area editors only when on.
       propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
-      // GATE_LAWN_RECLAIMED_HALF_N: the panel mounts the reclaimed-water control only while it is on.
-      reclaimedWater: require('../config/feature-gates').lawnReclaimedHalfNLive(),
+      // GATE_LAWN_RECLAIMED_HALF_N: the panel mounts the reclaimed-water control only while it is on; off, the key is not sent at all.
+      ...(require('../config/feature-gates').lawnReclaimedHalfNLive() ? { reclaimedWater: true } : {}),
     });
   } catch (err) { next(err); }
 });
@@ -2924,18 +2924,17 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
   } catch (err) { next(err); }
 });
 
-// GATE_LAWN_RECLAIMED_HALF_N: the office says a property's water is reclaimed (true), not reclaimed (false), or hands it back to the
-// automatic county meter match (null). The office value always wins over the county's. Answers with the list, like the PATCH above.
+// GATE_LAWN_RECLAIMED_HALF_N: the office says a property's water is reclaimed (true), not (false), or hands it back to the automatic
+// county meter match (null). The office value always wins over the county's. It changes a nitrogen dose, so it goes through the same
+// audited, locked domain writer as the other property edits (editManualProperty: customer comms lock, row locks, a critical audit event
+// with the actor, a verified read-back); answers with the list, like the PATCH above.
 router.put('/:id/properties/:propertyId/reclaimed-water', requireAdmin, async (req, res, next) => {
   if (!require('../config/feature-gates').lawnReclaimedHalfNLive()) return res.status(404).json({ error: 'Not found' });
   try {
     const value = req.body?.reclaimed;
     if (value !== null && typeof value !== 'boolean') return res.status(400).json({ error: 'reclaimed must be true, false or null' });
-    const saved = await require('../services/lawn-reclaimed-water').setPropertyReclaimed(req.params.id, req.params.propertyId, value, { source: 'office' });
-    if (!saved) return res.status(404).json({ error: 'Property not found' });
-    logger.info(`[lawn-reclaimed-water] ${req.technicianId || 'office'} set property ${req.params.propertyId} reclaimed=${value}`);
-    const properties = await require('../services/customer-properties').listProperties(req.params.id);
-    return res.json({ properties });
+    const result = await require('../services/customer-properties').editManualProperty(req.params.id, req.params.propertyId, { reclaimed_water: value }, { actorId: req.technicianId });
+    return res.json(result);
   } catch (err) { next(err); }
 });
 

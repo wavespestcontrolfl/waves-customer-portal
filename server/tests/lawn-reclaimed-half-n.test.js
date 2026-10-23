@@ -267,23 +267,6 @@ describe('the property read (isReclaimedService)', () => {
     expect(await reclaimed.isReclaimedService(trx, service)).toBe(true);
     expect(log).toEqual(['SAVEPOINT SP', 'customer_properties', 'RELEASE SAVEPOINT SP']);
   });
-
-  test('the person writer: true and false carry their source; null hands the property back to automatic', async () => {
-    const updates = [];
-    const knex = () => ({ where: (w) => ({ update: async (patch) => { updates.push({ where: w, patch }); return 1; } }) });
-    const now = new Date('2026-10-23T12:00:00Z');
-    expect(await reclaimed.setPropertyReclaimed('c1', 'p1', true, { knex, now })).toBe(true);
-    expect(await reclaimed.setPropertyReclaimed('c1', 'p1', false, { knex, now, source: 'customer' })).toBe(true);
-    expect(await reclaimed.setPropertyReclaimed('c1', 'p1', null, { knex, now })).toBe(true);
-    expect(updates.map((u) => u.patch)).toEqual([
-      { reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_checked_at: now },
-      { reclaimed_water: false, reclaimed_water_source: 'customer', reclaimed_water_checked_at: now },
-      { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null },
-    ]);
-    expect(updates[0].where).toEqual({ id: 'p1', customer_id: 'c1', active: true });
-    await expect(reclaimed.setPropertyReclaimed('c1', 'p1', 'yes', { knex })).rejects.toThrow('true, false or null');
-    await expect(reclaimed.setPropertyReclaimed('c1', 'p1', true, { knex, source: 'county_meter' })).rejects.toThrow('office or customer');
-  });
 });
 
 describe('the recipe text', () => {

@@ -1947,8 +1947,11 @@ async function visitOnV13Protocol(knex, visit, { trackKey }) {
 // version and window for the visit. The sheet shows the recipe of the REQUESTED month; the plan reads the month of the window the
 // visit is pinned to (under the completion defaults, as selectProtocolVisit does) or else the month of the service date, so the cut
 // applies only to a visit that is on v13 and either unpinned or asked for in the month the plan reads.
+// v13 eligibility is decided here and nowhere else, independently of WHICH nitrogen rule asks: each rule checks its own gate inside
+// nitrogenDecision (fungusNitrogenCut: GATE_LAWN_NOV_LARGE_PATCH_N; reclaimedNitrogenCut: GATE_LAWN_RECLAIMED_HALF_N). So the lookup is made
+// when either rule is on, and the answer never depends on the other rule's gate.
 async function sheetReadsPlansStep(knex, visit, { trackKey, month }) {
-  if (featureGates.lawnV13Live?.() !== true || !featureGates.lawnNovLargePatchNLive()) return false;
+  if (featureGates.lawnV13Live?.() !== true || !(featureGates.lawnNovLargePatchNLive() || featureGates.lawnReclaimedHalfNLive())) return false;
   const { onV13, windowMonth } = await visitOnV13Protocol(knex, visit, { trackKey });
   if (!onV13) return false;
   if (windowMonth == null) return true;
@@ -2596,6 +2599,7 @@ module.exports = {
   visitNutrientTargets,
   fungusNitrogenCut,
   sheetReadsPlansStep,
+  visitOnV13Protocol,
   fungusNitrogenNotes,
   nitrogenCutNotes,
   nitrogenDecision,

@@ -64,7 +64,10 @@ function pageUrl(offset) {
 function parsePage(body) {
   if (!body || typeof body !== 'object') throw Object.assign(new Error('county layer answered with no body'), { code: 'bad_body' });
   if (body.error) throw Object.assign(new Error(`county layer error ${body.error.code || ''}`.trim()), { code: 'layer_error' });
-  const features = Array.isArray(body.features) ? body.features : [];
+  // A page with no features array is a broken answer, never an empty last page: accepting it would end the download early and let a partial layer
+  // replace the stored one.
+  if (!Array.isArray(body.features)) throw Object.assign(new Error('county layer answered with no features'), { code: 'bad_body' });
+  const features = body.features;
   const points = [];
   for (const feature of features) {
     const objectid = Number(feature?.attributes?.OBJECTID);
@@ -94,6 +97,8 @@ async function fetchAllMeters({ fetchImpl = globalThis.fetch } = {}) {
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const { points, received, more } = await fetchPage(offset, fetchImpl);
     for (const point of points) byId.set(point.objectid, point);
+    // An empty page that still advertises more results is a broken answer too.
+    if (!received && more) throw Object.assign(new Error('county layer returned an empty page that claims more'), { code: 'empty_page' });
     if (!received || !more) return [...byId.values()];
     offset += received;
   }
