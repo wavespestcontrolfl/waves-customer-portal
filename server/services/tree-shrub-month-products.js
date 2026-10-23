@@ -61,7 +61,7 @@ const PROTOCOL_PRODUCTS = [
 // Same for a line whose label or dose is still unverified ("exact bag label
 // needed; hold dose", Codex r3 #5089): the sheet cannot show that hold, so the
 // product is not offered until the recipe is confirmed. No program line says
-// that today: the 13-0-13 bag label was read 2026-10-22 (its April and October
+// that today: the 13-0-13 bag label was read 2026-10-22 (its Feb-May and Oct-Dec
 // primary line now carries the dose, and the sheet suggests it through the
 // 13-0-13 due rule in tree-shrub-completion-defaults.js), and Sequestar is a
 // symptom-only secondary line, which this table never reads.

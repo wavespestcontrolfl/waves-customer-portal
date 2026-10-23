@@ -122,6 +122,21 @@ describe('13-0-13 bed fertilizer due rule (label read 2026-10-22)', () => {
     expect(due([application(orn, '2028-04-20')], '2028-10-01')).toBeNull();
     expect(due([application(orn, '2028-05-20')], '2028-10-01')).toMatch(/less than five months/);
   });
+  test('every cadence gets a spring and a fall feeding: the rule picks the visit, not the month card', () => {
+    // A spring feeding in February holds the March and April cards, skips the summer, and clears for the fall cards.
+    const spring = [application(orn, '2028-02-20')];
+    expect(due(spring, '2028-04-15')).toMatch(/less than five months/);
+    expect(due(spring, '2028-07-24')).toMatch(/June 1 to September 30/);
+    expect(due(spring, '2028-10-10')).toBeNull();
+    expect(due(spring, '2028-11-10')).toBeNull();
+    // A March feeding clears on August 20, so the first card that offers it again is October.
+    expect(due([application(orn, '2028-03-20')], '2028-10-10')).toBeNull();
+    // A fall feeding in November holds December and the winter cards, and clears for the spring cards.
+    const fall = [application(orn, '2027-11-12')];
+    expect(due(fall, '2028-02-10')).toMatch(/less than five months/);
+    expect(due(fall, '2028-04-14')).toBeNull();
+    expect(due(fall, '2028-05-15')).toBeNull();
+  });
   test('at most two in twelve months', () => {
     expect(due([application(orn, '2028-04-15'), application(orn, '2028-10-15')], '2029-03-30')).toMatch(/Two 13-0-13/);
     expect(due([application(orn, '2027-10-15'), application(orn, '2028-04-15')], '2028-10-16')).toBeNull();
@@ -355,7 +370,7 @@ describe('13-0-13 and Sequestar guide entries (labels read 2026-10-22)', () => {
     expect(orn.rates[0][1]).toMatch(/0\.98 lb nitrogen per 1,000 sq ft/);
     expect(orn.rates[1][1]).toMatch(/Never more than 0\.75 lb per 100 sq ft of the area under it/);
     expect(orn.rates[2][1]).toMatch(/1\.3 lb nitrogen per 1,000 sq ft, over the county limit/);
-    expect(orn.limits.join('\n')).toMatch(/April and October, at least 5 months apart/);
+    expect(orn.limits.join('\n')).toMatch(/spring and late fall, at least 5 months apart/);
     expect(orn.limits.join('\n')).toMatch(/No nitrogen or phosphorus fertilizer June 1 to Sept\. 30/);
     expect(orn.summary).toBe('0.75 lb / 100 sq ft beds · ½ lb / inch trunk');
   });

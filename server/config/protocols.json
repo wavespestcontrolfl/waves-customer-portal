@@ -862,7 +862,7 @@
       "Visits start on the customer's signup date (6x about every 60 days, 9x about every 40). Each visit uses the card for its calendar month; the palm 3-month rule, Snapshot 60-day/quarter rule and the June 1–Sept 30 N/P blackout decide what is due.",
       "After a freeze: no extra palm feeding and no foliar micronutrient spray. Leave brown fronds until the cold season ends. Tug each spear leaf. Spear pulls out: photo, note and call the office; do not drench the bud, because no copper label for a palm bud drench is verified yet. Spear firm: no treatment. Tell the customer the result shows in 4 to 7 months.",
       "Account that also has mosquito service: check for scale, sooty mold and mites at every visit; photo any find.",
-      "LESCO 13-0-13 bed fertilizer: April and October only, at most twice a year and at least 5 months apart, never June 1 to Sept. 30. Beds 0.75 lb per 100 sq ft; trees and large shrubs ½ lb per inch of trunk diameter, never more than 0.75 lb per 100 sq ft of the area under the canopy. The bag allows 1 to 1½ lb per 100 sq ft, but that is over the county 1 lb nitrogen per 1,000 sq ft limit, so do not raise the rate. Sequestar 6% Fe EDDHA is for iron chlorosis only, once a year per plant."
+      "LESCO 13-0-13 bed fertilizer: On the Feb, Mar, Apr, May, Oct, Nov and Dec cards, only when due: spring and late fall, at most twice in 12 months, at least 5 months apart, never June 1 to Sept. 30. Beds 0.75 lb per 100 sq ft; trees and large shrubs ½ lb per inch of trunk diameter, never more than 0.75 lb per 100 sq ft of the area under the canopy. The bag allows 1 to 1½ lb per 100 sq ft, but that is over the county 1 lb nitrogen per 1,000 sq ft limit, so do not raise the rate. Sequestar 6% Fe EDDHA is for iron chlorosis only, once a year per plant."
     ],
     "safety_rules": [
       "CRM ordinance zone required before fertilizer",
@@ -912,7 +912,7 @@
         "4.6 lb/1,000 sq ft: listed high-rate weeds"
       ],
       "palm_fertilizer_rate": "LESCO 8-0-12 #511542; LESCO 0-0-16 #510513 for the summer feeding. width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb)",
-      "ornamental_fertilizer_rate": "LESCO 13-0-13 (SiteOne 510245WB): beds 0.75 lb per 100 sq ft (7.5 lb per 1,000 sq ft = 0.98 lb N; a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter under the drip line, never more than 0.75 lb per 100 sq ft of the area under it. The bag says 1 to 1½ lb per 100 sq ft (1.3 to 2.0 lb N per 1,000 sq ft), over the county 1 lb N limit, so Waves runs the lower rate. Two feedings a year, April and October, at least 5 months apart; none June 1 to Sept. 30."
+      "ornamental_fertilizer_rate": "LESCO 13-0-13 (SiteOne 510245WB): beds 0.75 lb per 100 sq ft (7.5 lb per 1,000 sq ft = 0.98 lb N; a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter under the drip line, never more than 0.75 lb per 100 sq ft of the area under it. The bag says 1 to 1½ lb per 100 sq ft (1.3 to 2.0 lb N per 1,000 sq ft), over the county 1 lb N limit, so Waves runs the lower rate. Two feedings a year, spring and late fall, at least 5 months apart; none June 1 to Sept. 30."
     },
     "mixing_order": [
       "Fill tank 25-50% with clean water.",
@@ -1052,7 +1052,7 @@
         "month": "Feb",
         "visit_type": "Foliar PHC visit",
         "main_goal": "Clean up scale/mites/whitefly pressure, correct micros, and avoid unnecessary systemics.",
-        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nKelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)",
+        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks\nKelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)",
         "secondary": "Conserve SC: target-specific label rate; no generic mix range\nSequestar 6% Fe EDDHA: only for iron chlorosis (yellow new leaves with green veins; ixora, gardenia and others on high-pH soil near slabs); 2 oz per small shrub, up to 2 oz per inch of trunk diameter on large shrubs and trees, or up to 2 oz per 100 sq ft of bed; dissolve in water, pour at the root zone and water in; once a year per plant, in spring before new growth or when symptoms appear; never tank-mix with oil\nFloramite 4-8 fl oz/100 gal for confirmed mites ($6.02)\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate\nManganese sulfate (Southern Ag): palms with frizzle-top on new fronds only; label size class, spread under the canopy\nTriTek spray oil 1.0–1.5% on live scale crawlers, nymphs or mites only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap ($6.08)",
         "material_cost": null,
         "labor_cost": "standard",
@@ -1072,6 +1072,10 @@
             {
               "key": "f8012",
               "where": "Every palm, when due"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds, when due"
             }
           ],
           "conditional": [
@@ -1124,7 +1128,7 @@
         "month": "Mar",
         "visit_type": "Foliar/systemic PHC visit",
         "main_goal": "Break whitefly/scale cycles before summer without back-to-back 4A pressure.",
-        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nMainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: whiteflies 6–8 fl oz/100 gal at the label volume of 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 with 21 to 28 days between; scale: HOLD, call the office first (the label's yearly limit for scale is unclear) ($16.52)",
+        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks\nMainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: whiteflies 6–8 fl oz/100 gal at the label volume of 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 with 21 to 28 days between; scale: HOLD, call the office first (the label's yearly limit for scale is unclear) ($16.52)",
         "secondary": "Zylam rescue only for severe documented pressure; log as 4A/neonic pressure and apply pollinator gate ($17.63)\nNutriRoot and Cytogro are premium/stressed-account support, not universal ($10.47)\nInspect ficus and spiraling whitefly undersides, honeydew, and sooty mold\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft\nReliant Systemic Fungicide (phosphite) only on beds with root-rot history or replacement plantings; foliar spray 2–4 tsp/gal, repeat at 14–21 days; not on dormant, heat-stressed or drought-stressed plants; not when rain is forecast within 24 hours; keep people and pets out until the spray dries; no tank mix with copper; no soil drench on the program; FRAC P07\nAcelepryn Insecticide: 2–16 fl oz/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; no more than 0.37 fl oz per 1,000 sq ft in one spray and 0.88 fl oz per 1,000 sq ft a year, lawn Acelepryn on the same area included; at least 1 gal of mix per 1,000 sq ft; not when rain is forecast within 48 hours; keep people and pets out until the spray dries; at least 7 days between sprays ($5.66)",
         "material_cost": null,
         "labor_cost": "standard",
@@ -1144,6 +1148,10 @@
             {
               "key": "f8012",
               "where": "Every palm, when due"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds, when due"
             }
           ],
           "conditional": [
@@ -1198,7 +1206,7 @@
         "month": "Apr",
         "visit_type": "Granular bed visit + optional targeted foliar",
         "main_goal": "Visible bed cleanup, Q2 nutrition, spring crawler check, and route-speed discipline.",
-        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, April and October, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks",
+        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks",
         "secondary": "Distance IGR on live whitefly finds only: whiteflies 6–8 fl oz/100 gal at the label volume of 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 with 21 to 28 days between; scale: HOLD, call the office first (the label's yearly limit for scale is unclear) ($16.52)\nShortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0–1.5% on live scale crawlers, nymphs or mites only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap ($6.08)\nAcelepryn Insecticide: 2–16 fl oz/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; no more than 0.37 fl oz per 1,000 sq ft in one spray and 0.88 fl oz per 1,000 sq ft a year, lawn Acelepryn on the same area included; at least 1 gal of mix per 1,000 sq ft; not when rain is forecast within 48 hours; keep people and pets out until the spray dries; at least 7 days between sprays ($5.66)\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
         "material_cost": null,
         "labor_cost": "standard",
@@ -1266,7 +1274,7 @@
         "month": "May",
         "visit_type": "Nutrition + systemic PHC",
         "main_goal": "Finish legal nutrition before June blackout in Sarasota/Manatee and use non-neonic systemic rotation.",
-        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nMainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago and before the June 1 blackout",
+        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nMainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago and before the June 1 blackout\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks",
         "secondary": "Floramite for confirmed mites ($6.02)\nSequestar 6% Fe EDDHA: only for iron chlorosis (yellow new leaves with green veins; ixora, gardenia and others on high-pH soil near slabs); 2 oz per small shrub, up to 2 oz per inch of trunk diameter on large shrubs and trees, or up to 2 oz per 100 sq ft of bed; dissolve in water, pour at the root zone and water in; once a year per plant, in spring before new growth or when symptoms appear; never tank-mix with oil\nPalm weevil and decline inspection: photo and note crown, trunk-wound, or decline symptoms and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)\nManganese sulfate (Southern Ag): palms with frizzle-top on new fronds only; label size class, spread under the canopy\nAcelepryn Insecticide: 2–16 fl oz/100 gal for leaf-feeding caterpillars, live finds only; not for whitefly; no more than 0.37 fl oz per 1,000 sq ft in one spray and 0.88 fl oz per 1,000 sq ft a year, lawn Acelepryn on the same area included; at least 1 gal of mix per 1,000 sq ft; not when rain is forecast within 48 hours; keep people and pets out until the spray dries; at least 7 days between sprays ($5.66)",
         "material_cost": null,
         "labor_cost": "standard",
@@ -1286,6 +1294,10 @@
             {
               "key": "f8012",
               "where": "Every palm, before June 1"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds, when due"
             }
           ],
           "conditional": [
@@ -1606,7 +1618,7 @@
         "month": "Oct",
         "visit_type": "Granular bed visit + optional disease/root PHC",
         "main_goal": "Restart legal nutrition after blackout, reset beds, and protect fall disease/root-prone ornamentals.",
-        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, April and October, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks",
+        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks",
         "secondary": "Distance IGR on live whitefly finds only: whiteflies 6–8 fl oz/100 gal at the label volume of 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 with 21 to 28 days between; scale: HOLD, call the office first (the label's yearly limit for scale is unclear) ($16.52)\nFall scale flush inspection\nHigh-value palms: offer injection assessment, not automatic injection\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate\nReliant Systemic Fungicide (phosphite) only on beds with root-rot history or replacement plantings; foliar spray 2–4 tsp/gal, repeat at 14–21 days; not on dormant, heat-stressed or drought-stressed plants; not when rain is forecast within 24 hours; keep people and pets out until the spray dries; no tank mix with copper; no soil drench on the program; FRAC P07",
         "material_cost": null,
         "labor_cost": "standard",
@@ -1666,7 +1678,7 @@
         "month": "Nov",
         "visit_type": "Foliar cleanup + root/add-on work",
         "main_goal": "Cool-season cleanup, micronutrient correction, root support, and diagnosed injection add-on opportunities.",
-        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nNutriRoot: label rate where site supports root nutrition ($5.65)\nOrganic acidifier (Espoma) only where pH/chlorosis data supports it ($17.72)",
+        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks\nNutriRoot: label rate where site supports root nutrition ($5.65)\nOrganic acidifier (Espoma) only where pH/chlorosis data supports it ($17.72)",
         "secondary": "Mn-Jet Fe add-on for diagnosed palm Mn/Fe deficiency pattern ($11.50)\nPalm-Jet Mg add-on for diagnosed Mg deficiency ($12.56)\nPropizol only for labeled diagnosed tree disease ($11.83)\nManganese sulfate (Southern Ag): palms with frizzle-top on new fronds only; label size class, spread under the canopy\nTriTek spray oil 1.0–1.5% on live scale crawlers, nymphs or mites only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap ($6.08)\nSequestar 6% Fe EDDHA: only for iron chlorosis (yellow new leaves with green veins; ixora, gardenia and others on high-pH soil near slabs); 2 oz per small shrub, up to 2 oz per inch of trunk diameter on large shrubs and trees, or up to 2 oz per 100 sq ft of bed; dissolve in water, pour at the root zone and water in; once a year per plant, in spring before new growth or when symptoms appear; never tank-mix with oil",
         "material_cost": null,
         "labor_cost": "standard",
@@ -1686,6 +1698,10 @@
             {
               "key": "f8012",
               "where": "Every palm, when due"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds, when due"
             }
           ],
           "conditional": [
@@ -1720,7 +1736,7 @@
         "month": "Dec",
         "visit_type": "Scout/report + selective nutrition/systemic",
         "main_goal": "Retention, customer proof of value, winter palm nutrition where due, and next-year correction plan.",
-        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nCytogro: label rate for premium/stressed accounts ($4.82)\nAnnual health report with photos, IRAC/FRAC history, Snapshot history, fertility dates, pest pressure, and next-year plan",
+        "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer (LESCO 13-0-13, 50 lb): beds 0.75 lb per 100 sq ft (a 1,200 sq ft bed is 9 lb); trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0.75 lb per 100 sq ft of the area under it; Waves runs below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft; only when due (2 a year, spring and late fall, at least 5 months apart; none June 1 to Sept. 30); sweep granules off walks\nCytogro: label rate for premium/stressed accounts ($4.82)\nAnnual health report with photos, IRAC/FRAC history, Snapshot history, fertility dates, pest pressure, and next-year plan",
         "secondary": "Zylam only if pest history/pressure and 4A log allow ($17.63)\nDo not treat blooming plants with bee-toxic systemic/contact products while bees forage\nInspect declining palms: photo, note, and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible (see the palm diagnosis note)\nNote soil pH, irrigation water, or salt issues for chronic chlorosis\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft\nSequestar 6% Fe EDDHA: only for iron chlorosis (yellow new leaves with green veins; ixora, gardenia and others on high-pH soil near slabs); 2 oz per small shrub, up to 2 oz per inch of trunk diameter on large shrubs and trees, or up to 2 oz per 100 sq ft of bed; dissolve in water, pour at the root zone and water in; once a year per plant, in spring before new growth or when symptoms appear; never tank-mix with oil",
         "material_cost": null,
         "labor_cost": "report",
@@ -1740,6 +1756,10 @@
             {
               "key": "f8012",
               "where": "Every palm, when due"
+            },
+            {
+              "key": "f13013",
+              "where": "Beds, when due"
             }
           ],
           "conditional": [
