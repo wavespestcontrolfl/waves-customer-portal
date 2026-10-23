@@ -1,7 +1,7 @@
 /**
  * Misting PR 2a follow-ups from the pre-push audit:
  *  P0: the install line carries a durable marker in invoices.line_items and prepay coverage readers exclude it;
- *  P1: a refill add-on is priced from the plan's solution through ONE helper at the booking pricing site.
+ *  (Refill booking and billing ship in misting PR 2c.)
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
@@ -14,9 +14,7 @@ const mapper = require('../services/pricing-engine/v1-legacy-mapper');
 const converter = require('../services/estimate-converter');
 const renewals = require('../services/annual-prepay-renewals');
 const misting = require('../utils/mosquito-misting-system');
-const refillPricing = require('../services/misting-refill-pricing');
 const constants = require('../services/pricing-engine/constants');
-const { applyMosquitoMistingPricingConfig, defaultMosquitoMistingPricingData } = require('../services/pricing-engine/mosquito-misting-config');
 
 const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 const PROPERTY = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, propertyType: 'single_family' };
@@ -119,144 +117,6 @@ describe('P0: the install line has a durable identity and prepay coverage exclud
   });
 });
 
-describe('P1: a refill add-on takes the plan solution price through one helper', () => {
-  afterEach(() => { applyMosquitoMistingPricingConfig(null, constants.MOSQUITO_MISTING); });
-
-  test('the solution is read from a mapped row, from a raw engine line, and from the chosen input; unknown reads standard', () => {
-    for (const solution of ['standard', 'natural', 'premium']) {
-      const data = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution });
-      expect(refillPricing.mistingRefillSolutionFromEstimateData(data)).toBe(solution);
-      expect(refillPricing.mistingRefillSolutionFromEstimateData(JSON.stringify(data))).toBe(solution);
-    }
-    const mappedOnly = { result: { recurring: { services: [{ service: 'mosquito_misting', pricingKnobs: { refillSolution: 'premium' } }] } } };
-    expect(refillPricing.mistingRefillSolutionFromEstimateData(mappedOnly)).toBe('premium');
-    const rawLine = { engineResult: { lineItems: [{ service: 'mosquito_misting', refill: { solution: 'natural' } }] } };
-    expect(refillPricing.mistingRefillSolutionFromEstimateData(rawLine)).toBe('natural');
-    const inputOnly = { engineInputs: { services: { mosquitoMisting: { solution: 'premium' } } } };
-    expect(refillPricing.mistingRefillSolutionFromEstimateData(inputOnly)).toBe('premium');
-    expect(refillPricing.mistingRefillSolutionFromEstimateData({ result: { recurring: { services: [{ service: 'mosquito_misting', solution: 'bleach' }] } } })).toBe('standard');
-    expect(refillPricing.mistingRefillSolutionFromEstimateData(null)).toBe('standard');
-    expect(refillPricing.mistingRefillSolutionFromEstimateData({ result: {} })).toBe('standard');
-  });
-
-  const dbReturning = (estimates) => {
-    const database = jest.fn(() => {
-      const q = {
-        cond: {},
-        where(cond) { q.cond = { ...q.cond, ...cond }; return q; },
-        orderBy() { return q; },
-        limit() { return q; },
-        first: async () => estimates.find((e) => String(e.id) === String(q.cond.id)),
-        select: async () => estimates
-          .filter((e) => Object.entries(q.cond).every(([k, v]) => e[k] === undefined || String(e[k]) === String(v)))
-          // newest accepted first, as the real query orders (accepted_at desc, id desc)
-          .sort((x, y) => String(y.accepted_at || '').localeCompare(String(x.accepted_at || '')) || Number(y.id) - Number(x.id)),
-      };
-      return q;
-    });
-    return database;
-  };
-
-  test('mistingRefillSolutionForVisit: source_estimate_id first (unchanged); an unreadable lookup leaves the price to staff (null)', async () => {
-    const natural = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' });
-    const premium = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'premium' });
-    const database = dbReturning([
-      { id: 11, customer_id: 'c1', status: 'draft', estimate_data: JSON.stringify(natural) },
-      { id: 12, customer_id: 'c2', status: 'declined', estimate_data: premium },
-    ]);
-    // the explicit link is trusted whatever the estimate status is
-    expect(await refillPricing.mistingRefillSolutionForVisit({ source_estimate_id: 11 }, database)).toBe('natural');
-    expect(await refillPricing.mistingRefillSolutionForVisit({ source_estimate_id: 12 }, database)).toBe('premium');
-    expect(await refillPricing.mistingRefillSolutionForVisit({}, database)).toBeNull();
-    expect(await refillPricing.mistingRefillSolutionForVisit(null, database)).toBeNull();
-    const broken = jest.fn(() => { throw new Error('db down'); });
-    expect(await refillPricing.mistingRefillSolutionForVisit({ source_estimate_id: 11 }, broken)).toBeNull();
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, broken)).toBeNull();
-  });
-
-  test('no source link: the ACCEPTED plan decides, not the newest quote (accepted Natural + a newer draft Standard -> Natural / 219)', async () => {
-    const natural = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' });
-    const standard = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'standard' });
-    const database = dbReturning([
-      { id: 20, customer_id: 'c1', status: 'accepted', accepted_at: '2027-01-05', property_id: 'p1', estimate_data: natural },
-      { id: 21, customer_id: 'c1', status: 'draft', accepted_at: null, property_id: 'p1', estimate_data: standard },
-      { id: 22, customer_id: 'c1', status: 'sent', accepted_at: null, property_id: 'p1', estimate_data: standard },
-    ]);
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, database)).toBe('natural');
-    expect(await refillPricing.resolveAddonUnitPrice({ serviceKey: 'mosquito_misting_refill', price: 129, catalogBasePrice: 129 }, { customer_id: 'c1' }, database)).toBe(219);
-  });
-
-  test('declined / unaccepted quotes only: nothing is established (null) and the price is left untouched', async () => {
-    const standard = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'premium' });
-    const database = dbReturning([
-      { id: 30, customer_id: 'c1', status: 'declined', estimate_data: standard },
-      { id: 31, customer_id: 'c1', status: 'expired', estimate_data: standard },
-      { id: 32, customer_id: 'c1', status: 'draft', estimate_data: standard },
-    ]);
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, database)).toBeNull();
-    const refill = (price) => ({ serviceKey: 'mosquito_misting_refill', price, catalogBasePrice: 129 });
-    expect(await refillPricing.resolveAddonUnitPrice(refill(129), { customer_id: 'c1' }, database)).toBe(129);
-    expect(await refillPricing.resolveAddonUnitPrice(refill(null), { customer_id: 'c1' }, database)).toBeNull();
-    // an accepted estimate with no misting plan establishes nothing either
-    const pest = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })) };
-    const noMisting = dbReturning([{ id: 33, customer_id: 'c1', status: 'accepted', estimate_data: pest }]);
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, noMisting)).toBeNull();
-  });
-
-  test('two properties: the visit property decides (an accepted quote for another property never prices this visit)', async () => {
-    const natural = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' });
-    const premium = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'premium' });
-    const database = dbReturning([
-      { id: 40, customer_id: 'c1', status: 'accepted', accepted_at: '2027-01-05', property_id: 'home', estimate_data: natural },
-      { id: 41, customer_id: 'c1', status: 'accepted', accepted_at: '2027-02-05', property_id: 'rental', estimate_data: premium },
-    ]);
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1', property_id: 'home' }, database)).toBe('natural');
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1', property_id: 'rental' }, database)).toBe('premium');
-    // a property with no accepted misting plan establishes nothing
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1', property_id: 'cabin' }, database)).toBeNull();
-    // no property on the visit: the newest accepted plan
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, database)).toBe('premium');
-  });
-
-  test('resolveAddonUnitPrice: natural 219 / premium 319 / standard 129 for a refill at the catalog price or no price; typed prices stay', async () => {
-    const mk = (solution) => dbReturning([{ id: 1, customer_id: 'c1', estimate_data: estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution }) }]);
-    const refill = (price) => ({ serviceKey: 'mosquito_misting_refill', price, catalogBasePrice: 129 });
-    expect(await refillPricing.resolveAddonUnitPrice(refill(129), { source_estimate_id: 1 }, mk('natural'))).toBe(219);
-    expect(await refillPricing.resolveAddonUnitPrice(refill(null), { source_estimate_id: 1 }, mk('premium'))).toBe(319);
-    expect(await refillPricing.resolveAddonUnitPrice(refill(129), { source_estimate_id: 1 }, mk('standard'))).toBe(129);
-    expect(await refillPricing.resolveAddonUnitPrice(refill(150), { source_estimate_id: 1 }, mk('premium'))).toBe(150);
-  });
-
-  test('resolveAddonUnitPrice follows a pricing_config edit', async () => {
-    const database = dbReturning([{ id: 1, customer_id: 'c1', estimate_data: estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'premium' }) }]);
-    const row = defaultMosquitoMistingPricingData();
-    row.refills.premium.price = 349;
-    expect(applyMosquitoMistingPricingConfig(row, constants.MOSQUITO_MISTING).applied).toBe(true);
-    expect(await refillPricing.resolveAddonUnitPrice({ serviceKey: 'mosquito_misting_refill', price: 129, catalogBasePrice: 129 }, { source_estimate_id: 1 }, database)).toBe(349);
-  });
-
-  test('a non-misting add-on is returned exactly as given (and never touches the database)', async () => {
-    const database = jest.fn(() => { throw new Error('must not be called'); });
-    for (const price of [null, 0, 45, 129, '129.00']) {
-      expect(await refillPricing.resolveAddonUnitPrice({ serviceKey: 'mosquito_one_time', price, catalogBasePrice: 129 }, { source_estimate_id: 1 }, database)).toBe(price);
-    }
-    expect(await refillPricing.resolveAddonUnitPrice({ price: 45 }, null, database)).toBe(45);
-    expect(await refillPricing.resolveAddonUnitPrice(null, null, database)).toBeNull();
-  });
-
-  test('the add-on pricing site in admin-schedule goes through the helper, with the booking link passed in', () => {
-    const src = read('routes/admin-schedule.js');
-    expect(src).toContain("const { resolveAddonUnitPrice } = require('../services/misting-refill-pricing');");
-    expect(src).toContain("if (addonService?.service_key === 'mosquito_misting_refill') {");
-    expect(src).toContain('base = await resolveAddonUnitPrice({ serviceKey: addonService.service_key, price: base, catalogBasePrice: addonService.base_price }');
-    expect(src).toContain('parentVisit: { source_estimate_id: linkedEstimateId, customer_id: customer?.id, property_id: bookingProperty?.property_id || null },');
-    // the visit edit passes the visit's own link and property (only the columns that exist)
-    expect(src).toContain("first(...['source_estimate_id', 'customer_id', 'property_id'].filter((column) => cols[column]))");
-    // the add-on reads of stored rows (restack, rebase, copy to child visits) keep the price the booking resolved
-    expect((src.match(/resolveAddonUnitPrice\(/g) || [])).toHaveLength(2);
-  });
-});
-
 describe('P0 (audit 3): invoice-mode acceptance bills the marked install line', () => {
   // estimate-public pulls a very large module graph; load the pure draft builder lazily with the db mocked above.
   const { buildEstimateInvoiceModeDraft } = require('../routes/estimate-public');
@@ -301,74 +161,6 @@ describe('P0 (audit 3): invoice-mode acceptance bills the marked install line', 
   test('the accept handler passes the frozen install into the draft (not for a one-time acceptance)', () => {
     const src = read('routes/estimate-public.js');
     expect(src).toContain("mistingInstall: treatAsOneTime\n            ? null\n            : require('../services/estimate-converter').frozenMistingInstall(acceptedEstDataForPricing),");
-  });
-});
-
-describe('P1 (audit 3): a refill newly added on a visit edit takes the plan solution price', () => {
-  const adminSchedule = require('../routes/admin-schedule');
-  const natural = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' });
-
-  function editDb({ addonRows = [] } = {}) {
-    const tables = {
-      services: [
-        { id: 'svc-refill', service_key: 'mosquito_misting_refill', category: 'mosquito', name: 'Mosquito Misting Refill', base_price: 129, is_active: true },
-        { id: 'svc-other', service_key: 'mosquito_one_time', category: 'mosquito', name: 'Mosquito One Time', base_price: 129, is_active: true },
-      ],
-      scheduled_services: [{ id: 'visit-1', customer_id: 'c1', source_estimate_id: 5 }],
-      scheduled_service_addons: addonRows,
-      estimates: [{ id: 5, customer_id: 'c1', estimate_data: natural }],
-    };
-    const database = (table) => {
-      const conds = [];
-      let inCol = null;
-      const rows = () => (tables[table] || []).filter((r) => conds.every((c) => Object.entries(c).every(([k, v]) => r[k] === undefined || r[k] === v))
-        && (!inCol || inCol.values.includes(r[inCol.col])));
-      const q = {
-        where(c) { conds.push(c); return q; },
-        whereIn(col, values) { inCol = { col, values }; return q; },
-        orderBy() { return q; },
-        limit() { return q; },
-        select: async () => rows().map((r) => ({ ...r })),
-        first: async () => { const hit = rows()[0]; return hit ? { ...hit } : undefined; },
-        columnInfo: async () => ({}),
-      };
-      return q;
-    };
-    return database;
-  }
-  const run = (addons, addonRows) => adminSchedule.normalizeUpdateDetailsAddons({
-    db: editDb({ addonRows }), id: 'visit-1', addons, updates: {}, isRecurring: false, serviceType: 'Mosquito Misting Service Plan', scheduledDate: '2027-03-10',
-  });
-
-  test('a NEW refill line posted at the catalog Standard price is repriced to the Natural plan price (219)', async () => {
-    const out = await run([{ serviceId: 'svc-refill', serviceName: 'Mosquito Misting Refill', basePrice: 129 }], []);
-    expect(out.normalizedAddons).toHaveLength(1);
-    expect(out.normalizedAddons[0]).toMatchObject({ serviceKey: 'mosquito_misting_refill', base: 219, price: 219 });
-  });
-
-  test('a refill that already exists on the visit keeps its stored (override) price', async () => {
-    const out = await run(
-      [{ id: 'row-1', serviceId: 'svc-refill', serviceName: 'Mosquito Misting Refill', basePrice: 150 }],
-      [{ id: 'row-1', scheduled_service_id: 'visit-1', service_id: 'svc-refill', base_price: 150, estimated_price: 150 }],
-    );
-    expect(out.normalizedAddons[0]).toMatchObject({ base: 150, price: 150 });
-  });
-
-  test('a new refill whose price staff changed from the catalog price keeps that price', async () => {
-    const out = await run([{ serviceId: 'svc-refill', serviceName: 'Mosquito Misting Refill', basePrice: 175 }], []);
-    expect(out.normalizedAddons[0]).toMatchObject({ base: 175, price: 175 });
-  });
-
-  test('a non-misting add-on is unchanged', async () => {
-    const out = await run([{ serviceId: 'svc-other', serviceName: 'Mosquito One Time', basePrice: 129 }], []);
-    expect(out.normalizedAddons[0]).toMatchObject({ serviceKey: 'mosquito_one_time', base: 129, price: 129 });
-  });
-
-  test('both add-on pricing sites go through the one helper', () => {
-    const src = read('routes/admin-schedule.js');
-    expect(src).toContain("gross = await resolveAddonUnitPrice({ serviceKey: catalogService.service_key, price: gross, catalogBasePrice: catalogService.base_price }, visitPricingLink || {}, db);");
-    expect(src).toContain("if (catalogService?.service_key === 'mosquito_misting_refill' && !(a.id && existingAddonDiscountById.has(a.id))) {");
-    expect((src.match(/resolveAddonUnitPrice\(/g) || [])).toHaveLength(2);
   });
 });
 
@@ -502,7 +294,7 @@ describe('audit 5: the customer previews carry the install line the invoices bil
 
   test('the payload field is built from the helper, labeled by the tier, and omitted when there is no install', () => {
     const src = read('routes/estimate-public.js');
-    expect(src).toContain('const previewOneTimeLines = require(\'../services/estimate-converter\').frozenPrepayOneTimeLines(estData);');
+    expect(src).toContain('const previewOneTimeLines = require(\'../services/estimate-converter\').frozenPrepayOneTimeLines(withSupplementedRecurringServices(estData) || estData);');
     expect(src).toContain("const mistingInstallFeeField = previewOneTimeLines.mistingInstall > 0");
     expect(src).toContain("service: 'mosquito_misting_installation',\n        amount: previewOneTimeLines.mistingInstall,");
     expect(src).toContain("label: previewOneTimeLines.mistingInstallDescription || 'Mosquito Misting System Installation',");
@@ -714,5 +506,116 @@ describe('audit 7: several sold installs bill once each; a refill is due once', 
       expect((src.match(/filterAddonLinesForDate\(parentAddons/g) || []).length).toBeGreaterThanOrEqual(3);
       expect(src).toContain("|| serviceKey === 'mosquito_misting_refill';");
     });
+  });
+});
+
+describe('audit 8: the install resolves for an inputs-only estimate and fails closed otherwise', () => {
+  const inputsOnly = () => {
+    const input = { ...PROPERTY, services: { mosquitoMisting: { tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' } } };
+    return { engineInputs: input };
+  };
+  const noInstall = () => {
+    const data = estimateData();
+    return { ...data, result: { ...data.result, oneTime: { ...(data.result.oneTime || {}), items: [] } } };
+  };
+  const { withSupplementedRecurringServices } = require('../routes/estimate-public');
+
+  test('an inputs-only misting estimate: the engine replay carries the install into the accepted data, so it resolves and bills', () => {
+    const raw = inputsOnly();
+    expect(converter.frozenMistingInstall(raw)).toBeNull(); // nothing is stored to read
+    const accepted = withSupplementedRecurringServices(raw);
+    const install = converter.frozenMistingInstall(accepted);
+    expect(install).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    // standard / prepay lines, the quote helper and the invoice-mode draft all see it
+    expect(misting.mistingInstallInvoiceLines(install).every(misting.isMistingInstallLine)).toBe(true);
+    expect(converter.frozenPrepayOneTimeLines(accepted).mistingInstall).toBe(INSTALL);
+    const { buildEstimateInvoiceModeDraft } = require('../routes/estimate-public');
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: { id: 70, monthly_total: 59 }, recurringSvcList: [{ name: 'Mosquito Misting Service Plan' }], recurringFirstVisitAmount: 59,
+      effectiveBillingCadence: { frequencyLabel: 'Monthly' }, selectedFrequency: { label: 'Monthly' }, mistingInstall: install,
+    });
+    expect(draft.amount).toBe(Math.round((59 + INSTALL) * 100) / 100);
+    // the accepted data persists in the mapped shape, so a re-read (the converter) resolves it again
+    expect(converter.frozenMistingInstall(JSON.parse(JSON.stringify(accepted))).amount).toBe(INSTALL);
+    // and it is not refused, raw or supplemented
+    expect(mapper.estimateMistingInstallUnresolved(raw)).toBe(false);
+    expect(mapper.estimateMistingInstallUnresolved(accepted)).toBe(false);
+    expect(mapper.gatedAddOnCustomerRefusal(raw)).toBeNull();
+    expect(mapper.gatedAddOnCustomerRefusal(accepted)).toBeNull();
+  });
+
+  test('an inputs-only misting estimate raises the install bell on the accepted data', async () => {
+    const accepted = withSupplementedRecurringServices(inputsOnly());
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 1 });
+    try {
+      const database = jest.fn(() => ({ insert: async () => [1] }));
+      const out = await converter.raiseMistingInstallBell(database, { run: jest.fn((meta, fn) => fn()) }, {}, {
+        estimateId: 71, customerId: 'c1', customer: { first_name: 'A', last_name: 'B' }, estimateData: accepted,
+      });
+      expect(out).toBeNull();
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][3]).toMatchObject({ dedupeKey: 'misting_install_schedule:71', bell: true });
+    } finally { spy.mockRestore(); }
+  });
+
+  test('a stored estimate with a priced plan and NO install evidence is refused with the new code (customer and staff), after accept-pending', () => {
+    const data = noInstall();
+    expect(converter.frozenMistingInstall(data)).toBeNull();
+    expect(mapper.estimateMistingInstallUnresolved(data)).toBe(true);
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({
+      code: 'MOSQUITO_MISTING_INSTALL_UNRESOLVED', reason: 'mosquito_misting_install_unresolved',
+      error: mapper.AREA_ADDONS_GATED_CUSTOMER_MESSAGE,
+    });
+    expect(mapper.gatedAddOnStaffRefusal(data, 'accepting')).toEqual({
+      code: 'MOSQUITO_MISTING_INSTALL_UNRESOLVED',
+      reason: 'mosquito_misting_install_unresolved',
+      message: "This estimate's misting installation amount cannot be read from the stored quote; re-send the estimate so the install is frozen before accepting.",
+    });
+    // view and staff send are never blocked
+    expect(mapper.gatedAddOnCustomerRefusal(data, { allowAcceptPending: true })).toBeNull();
+    expect(mapper.gatedAddOnStaffRefusal(data, 'sending', { allowAcceptPending: true })).toBeNull();
+    // precedence: the gate-off refusal wins, then accept-pending, then the unresolved install
+    delete process.env.GATE_MOSQUITO_MISTING;
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_GATED' });
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    constants.MOSQUITO_MISTING_CONVERSION_READY = false;
+    try { expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' }); } finally { constants.MOSQUITO_MISTING_CONVERSION_READY = true; }
+    // a normal estimate (install present), an unpriced oversize layout, no misting, and a one-time-shaped read are unaffected
+    expect(mapper.estimateMistingInstallUnresolved(estimateData())).toBe(false);
+    expect(mapper.gatedAddOnCustomerRefusal(estimateData())).toBeNull();
+    expect(mapper.estimateMistingInstallUnresolved(estimateData({ nozzles: 120 }))).toBe(false);
+    const none = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })) };
+    expect(mapper.estimateMistingInstallUnresolved(none)).toBe(false);
+    expect(mapper.estimateMistingInstallUnresolved(null)).toBe(false);
+  });
+
+  test('an authored proposal that prices the plan but not the install is refused; one that prices both is not', () => {
+    const planOnly = { proposal: { enabled: true, buildings: [{ lineItems: [{ service: 'mosquito_misting', description: 'Mosquito Misting Service Plan', unitPrice: 59, quantity: 1, amount: 59 }] }] } };
+    expect(mapper.estimateMistingInstallUnresolved(planOnly)).toBe(true);
+    const both = { proposal: { enabled: true, buildings: [{ lineItems: [
+      { service: 'mosquito_misting', description: 'Mosquito Misting Service Plan', unitPrice: 59, quantity: 1, amount: 59 },
+      { service: 'mosquito_misting_installation', description: 'Smart system Installation', unitPrice: 5200, quantity: 1, amount: 5200 },
+    ] }] } };
+    expect(mapper.estimateMistingInstallUnresolved(both)).toBe(false);
+  });
+
+  test('the accept, slots, card intents, deposits and the staff paths all go through the shared refusals', () => {
+    const route = read('routes/estimate-public.js');
+    expect((route.match(/gatedAddOnCustomerRefusal\(/g) || []).length).toBeGreaterThanOrEqual(3);
+    expect(read('routes/estimate-slots-public.js')).toMatch(/gatedAddOnCustomerRefusal/);
+    expect(read('services/estimate-deposits.js')).toContain("reason: 'mosquito_misting_install_unresolved'");
+    expect(read('services/estimate-manual-acceptance.js')).toMatch(/gatedAddOnStaffRefusal/);
+    const client = fs.readFileSync(path.join(__dirname, '..', '..', 'client/src/pages/EstimateViewPage.jsx'), 'utf8');
+    expect(client).toContain("'MOSQUITO_MISTING_INSTALL_UNRESOLVED'");
+  });
+
+  test('refill booking and billing are not part of this PR (misting PR 2c): no resolver module, no price helper, no add-on link', () => {
+    expect(fs.existsSync(path.join(__dirname, '..', 'services/misting-refill-pricing.js'))).toBe(false);
+    expect(require('../services/pricing-engine/mosquito-misting-config').mistingRefillPriceFor).toBeUndefined();
+    const migration = require('../models/migrations/20261023100000_mosquito_misting_catalog_rows');
+    expect(read('models/migrations/20261023100000_mosquito_misting_catalog_rows.js')).not.toMatch(/linkRefillAddon|service_addons'\)\.insert/);
+    const refill = migration.SERVICES.find((row) => row.service_key === 'mosquito_misting_refill');
+    expect(refill).toMatchObject({ customer_visible: false, booking_enabled: false, public_quote_selectable: false });
   });
 });

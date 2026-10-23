@@ -11,7 +11,6 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
-const { resolveAddonUnitPrice } = require('../services/misting-refill-pricing');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
@@ -2794,7 +2793,7 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
   return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, parentVisit = null, conn = db }) {
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, conn = db }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
@@ -2843,11 +2842,6 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price, { recurringOverride: recurringMembershipBooking });
       const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
       if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
-    }
-    // A misting refill takes the plan's solution price (Standard / Natural / Premium) instead of the catalog Standard price; every other
-    // add-on goes through unchanged (misting PR 2a, services/misting-refill-pricing.js).
-    if (addonService?.service_key === 'mosquito_misting_refill') {
-      base = await resolveAddonUnitPrice({ serviceKey: addonService.service_key, price: base, catalogBasePrice: addonService.base_price }, parentVisit || { customer_id: customer?.id }, conn);
     }
     const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
       serviceKey: addonService?.service_key,
@@ -8756,7 +8750,6 @@ async function scheduleCreateHandler(req, res, next) {
       discountAmount,
       customer,
       recurringMembershipBooking,
-      parentVisit: { source_estimate_id: linkedEstimateId, customer_id: customer?.id, property_id: bookingProperty?.property_id || null },
     });
 
     // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
@@ -12257,7 +12250,7 @@ async function normalizeUpdateDetailsAddons({
         .map((addon) => addon?.serviceId)
         .filter(Boolean)));
       const addonServices = addonServiceIds.length > 0
-        ? await db('services').whereIn('id', addonServiceIds).select('id', 'service_key', 'category', 'base_price')
+        ? await db('services').whereIn('id', addonServiceIds).select('id', 'service_key', 'category')
         : [];
       const addonServiceById = new Map(addonServices.map((service) => [service.id, service]));
       // Lines picked from the modal's static fallback list carry a name but
@@ -12269,7 +12262,7 @@ async function normalizeUpdateDetailsAddons({
         .map((addon) => String(addon.serviceName || addon.name || '').trim())
         .filter(Boolean)));
       const addonServicesByName = addonFallbackNames.length > 0
-        ? await db('services').whereIn('name', addonFallbackNames).where({ is_active: true }).select('id', 'service_key', 'category', 'name', 'base_price').catch(() => [])
+        ? await db('services').whereIn('name', addonFallbackNames).where({ is_active: true }).select('id', 'service_key', 'category', 'name').catch(() => [])
         : [];
       const addonServiceByName = new Map(addonServicesByName.map((service) => [service.name, service]));
       const addonFallbackKeys = Array.from(new Set(addons
@@ -12277,7 +12270,7 @@ async function normalizeUpdateDetailsAddons({
         .map((addon) => String(addon.serviceKey).trim().toLowerCase())
         .filter(Boolean)));
       const addonServicesByKey = addonFallbackKeys.length > 0
-        ? await db('services').whereIn('service_key', addonFallbackKeys).where({ is_active: true }).select('id', 'service_key', 'category', 'name', 'base_price').catch(() => [])
+        ? await db('services').whereIn('service_key', addonFallbackKeys).where({ is_active: true }).select('id', 'service_key', 'category', 'name').catch(() => [])
         : [];
       const addonServiceByKey = new Map(addonServicesByKey.map((service) => [service.service_key, service]));
       if (addonServices.length !== addonServiceIds.length) {
@@ -12368,7 +12361,6 @@ async function normalizeUpdateDetailsAddons({
         return membershipContextPromise;
       };
       const normalizedAddons = [];
-      let visitPricingLink = null;
       for (const a of addons) {
         // GitHub Codex round 12 P1 (#4657, :9970): the save transaction
         // REPLACES every add-on row (delete + reinsert), so a row id is
@@ -12395,14 +12387,7 @@ async function normalizeUpdateDetailsAddons({
           : (addonServiceByKey.get(String(a.serviceKey || '').trim().toLowerCase())
             || addonServiceByName.get(serviceName)
             || null);
-        let gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
-        // A NEWLY ADDED misting refill takes the plan's solution price (Standard / Natural / Premium) instead of the catalog Standard
-        // default. A line the visit already has, and a price staff typed that differs from the catalog price, keep exactly what was
-        // posted (misting PR 2a, services/misting-refill-pricing.js). Every other add-on goes through unchanged.
-        if (catalogService?.service_key === 'mosquito_misting_refill' && !(a.id && existingAddonDiscountById.has(a.id))) {
-          if (!visitPricingLink) visitPricingLink = await db('scheduled_services').where({ id }).first(...['source_estimate_id', 'customer_id', 'property_id'].filter((column) => cols[column]));
-          gross = await resolveAddonUnitPrice({ serviceKey: catalogService.service_key, price: gross, catalogBasePrice: catalogService.base_price }, visitPricingLink || {}, db);
-        }
+        const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
         let net = gross;
@@ -28833,5 +28818,3 @@ module.exports.createScheduleBooking = createScheduleBooking;
 // Same handler as PUT /:id/update-details — see updateVisitDetails above.
 module.exports.updateVisitDetails = updateVisitDetails;
 module.exports.assertApprovedRepriceState = assertApprovedRepriceState;
-// Exported for server/tests/mosquito-misting-conversion-followups.test.js (refill solution pricing on a visit edit).
-module.exports.normalizeUpdateDetailsAddons = normalizeUpdateDetailsAddons;

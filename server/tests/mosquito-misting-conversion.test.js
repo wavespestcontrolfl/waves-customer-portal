@@ -2,7 +2,7 @@
  * Misting PR 2a: an accepted priced misting estimate (GATE_MOSQUITO_MISTING on) converts. The accept-pending refusal is gone while
  * the code-owned constant is true (and stays reachable through it), the plan seeds a monthly series under the catalog row, the
  * install is a named invoice line and a covered one-time install visit, protocols and the job card route by catalog key, and the
- * refill price helper reads the live table.
+ * (Refill billing ships in misting PR 2c.)
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
@@ -17,7 +17,6 @@ const converter = require('../services/estimate-converter');
 const seeder = require('../services/recurring-appointment-seeder');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const protocols = require('../config/protocols.json');
-const { mistingRefillPriceFor, applyMosquitoMistingPricingConfig, defaultMosquitoMistingPricingData } = require('../services/pricing-engine/mosquito-misting-config');
 
 const PROPERTY = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, propertyType: 'single_family' };
 const OPTS = { tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' };
@@ -303,30 +302,5 @@ describe('report and trace lanes', () => {
     for (const serviceKey of ['mosquito_misting_service', 'mosquito_misting_install', 'mosquito_misting_refill']) {
       expect(resolveTraceEligibility({ serviceKey })).toMatchObject({ eligible: false, reason: 'misting_system_lane' });
     }
-  });
-});
-
-describe('refills', () => {
-  afterEach(() => { applyMosquitoMistingPricingConfig(null, constants.MOSQUITO_MISTING); });
-
-  test('the per-refill-application price is read from the live table by solution; unknown reads Standard', () => {
-    expect(mistingRefillPriceFor('standard')).toBe(129);
-    expect(mistingRefillPriceFor('Natural')).toBe(219);
-    expect(mistingRefillPriceFor('premium')).toBe(319);
-    expect(mistingRefillPriceFor('bleach')).toBe(129);
-    expect(mistingRefillPriceFor(undefined)).toBe(129);
-  });
-
-  test('it follows a pricing_config edit (DB-authoritative)', () => {
-    const row = defaultMosquitoMistingPricingData();
-    row.refills.premium.price = 349;
-    expect(applyMosquitoMistingPricingConfig(row, constants.MOSQUITO_MISTING).applied).toBe(true);
-    expect(mistingRefillPriceFor('premium')).toBe(349);
-  });
-
-  test('the catalog refill base_price is the Standard price (migration pinned to the table)', () => {
-    const migration = require('../models/migrations/20261023100000_mosquito_misting_catalog_rows');
-    const refill = migration.SERVICES.find((s) => s.service_key === 'mosquito_misting_refill');
-    expect(refill.base_price).toBe(mistingRefillPriceFor('standard'));
   });
 });

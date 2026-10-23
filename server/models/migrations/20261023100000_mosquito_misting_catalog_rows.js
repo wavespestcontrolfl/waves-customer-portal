@@ -7,9 +7,11 @@
  *                              riser count; base_price is the Smart list and the range runs Essential list to open-ended.
  *   mosquito_misting_service   the monthly service plan: 12 applications a year, one fixed price per application
  *                              (MOSQUITO_MISTING.plan.monthly, 59 at the draft price list).
- *   mosquito_misting_refill    a refill add-on billed per refill application when the tech refills the tank; the solution
- *                              tier sets the price (Standard 129, Natural 219, Premium 319). base_price is the Standard
- *                              price; a service-plan visit can carry it as a scheduled_service_addons row.
+ *   mosquito_misting_refill    a refill billed per refill application when the tech refills the tank; the solution tier
+ *                              sets the price (Standard 129, Natural 219, Premium 319). base_price is the Standard price.
+ *                              Refill billing (per-application pricing by solution, series prepay, preview) ships in misting
+ *                              PR 2c; until then the row is dormant: hidden from customers, not bookable, not selectable on
+ *                              the public quote, and NOT linked as an add-on of the plan, so no add-on picker offers it.
  *
  * The lead-only design-visit row mosquito_misting_system (20260924000020) is NOT touched and stays the only key
  * isMistingDesignConsultation recognizes.
@@ -25,15 +27,13 @@
  *  - Completion lane: install and service are the generic Service Report (service_report, NULL project_type, auto_send,
  *    creates_service_record), registered in completion-lane-registry.js (one-time and recurring generic by design). The
  *    refill is a billing rider on its parent visit (internal_only, delivery disabled), registered in BILLING_RIDER_KEYS.
- *  - service_addons: the refill is linked as an add-on of the service plan (addon_price NULL = the add-on's own price), when
- *    that table exists.
  *  - service_discount_rules: all three are excluded from percentage discounts and are not tier qualifiers, mirroring
  *    constants.js WAVEGUARD.excludedFromPercentDiscount.mosquito_misting.
  *
  * Idempotent and self-healing, same contract as 20260924000020 and 20261008200000: a pre-existing row (same service_key) is
  * left untouched; a missing profile, tax row or rule is added for an explicitly active service. up() records what it inserted
  * in a system_settings state row; down() removes only that: services by recorded UUID (retained and deactivated when anything
- * references them), profiles, tax rows and rules by key AND an insertion marker in notes, the add-on link by recorded id.
+ * references them), profiles, tax rows and rules by key AND an insertion marker in notes.
  * The prices are the draft list (dealer cost unknown); they are inlined here because a pushed migration is frozen, and a test
  * pins them equal to constants.js MOSQUITO_MISTING.
  */
@@ -138,7 +138,7 @@ const SERVICES = [
     icon: '🦟',
     color: '#0ea5e9',
     sort_order: 27,
-    internal_notes: 'Billed per refill application when the tech refills the tank; the solution tier sets the price (Standard 129, Natural 219, Premium 319; draft). base_price is the Standard price. Attachable to a service-plan visit as an add-on (scheduled_service_addons).',
+    internal_notes: 'Billed per refill application when the tech refills the tank; the solution tier sets the price (Standard 129, Natural 219, Premium 319; draft). base_price is the Standard price. Dormant until misting PR 2c (refill billing); no add-on link is created.',
   },
 ];
 
@@ -155,7 +155,7 @@ const MARKER = '[mosquito_misting_catalog_action=inserted]';
 const STATUTE = 'FL §212.05(1)(i)1';
 const RULE_NOTES = `${MARKER} Misting system lines are excluded from percentage discounts and are not WaveGuard tier qualifiers.`;
 
-const emptyState = () => ({ services: [], profiles: [], taxability: [], rules: [], addons: [] });
+const emptyState = () => ({ services: [], profiles: [], taxability: [], rules: [] });
 
 async function recordState(knex, state) {
   if (!(await knex.schema.hasTable('system_settings'))) return;
@@ -169,15 +169,12 @@ async function recordState(knex, state) {
   try { prior = { ...emptyState(), ...JSON.parse(existing.value) }; } catch { /* keep empty */ }
   const byId = new Map();
   for (const entry of [...prior.services, ...state.services]) if (entry && entry.id) byId.set(entry.id, entry);
-  const addonById = new Map();
-  for (const entry of [...prior.addons, ...state.addons]) if (entry && entry.id) addonById.set(entry.id, entry);
   await knex('system_settings').where({ key: STATE_KEY }).update({
     value: JSON.stringify({
       services: [...byId.values()],
       profiles: [...new Set([...prior.profiles, ...state.profiles])],
       taxability: [...new Set([...prior.taxability, ...state.taxability])],
       rules: [...new Set([...prior.rules, ...state.rules])],
-      addons: [...addonById.values()],
     }),
   });
 }
@@ -260,20 +257,6 @@ async function insertRules(knex, inserted) {
   }
 }
 
-// The refill is an add-on of the service plan (so the schedule's add-on picker offers it on a plan visit).
-async function linkRefillAddon(knex, inserted) {
-  const plan = await knex('services').where({ service_key: 'mosquito_misting_service' }).first('id');
-  const refill = await knex('services').where({ service_key: 'mosquito_misting_refill' }).first('id');
-  if (!plan || !refill) return;
-  if (await knex('service_addons').where({ parent_service_id: plan.id, addon_service_id: refill.id }).first('id')) return;
-  const returned = await knex('service_addons').insert({
-    parent_service_id: plan.id, addon_service_id: refill.id, is_default: false, addon_price: null, sort_order: 0,
-  }).returning('id');
-  const first = Array.isArray(returned) ? returned[0] : returned;
-  const id = first && typeof first === 'object' ? first.id : first;
-  if (id) inserted.addons.push({ id, parent: plan.id, addon: refill.id });
-}
-
 exports.SERVICES = SERVICES;
 exports.PROFILES = PROFILES;
 exports.STATE_KEY = STATE_KEY;
@@ -293,13 +276,12 @@ exports.up = async function up(knex) {
   if (hasTaxResidential) await insertTaxability(knex, inserted);
   else console.warn('[mosquito-misting-conversion-catalog] service_taxability (or its residential_taxable column) absent - skipping taxability');
   if (await knex.schema.hasTable('service_discount_rules')) await insertRules(knex, inserted);
-  if (await knex.schema.hasTable('service_addons')) await linkRefillAddon(knex, inserted);
   await recordState(knex, inserted);
 };
 
-// Anything that points at a service forces retention (deactivate, keep links). The add-on link THIS migration made is
-// not a reference that blocks the removal; every other add-on link is.
-async function countReferences(knex, entry, ownedAddonIds) {
+// Anything that points at a service forces retention (deactivate, keep its profile, tax row and rule). This migration creates no
+// add-on link, so any service_addons link naming the service is someone else's reference.
+async function countReferences(knex, entry) {
   const tables = [
     ['service_package_items', 'service_id', entry.id], ['service_discount_rules', 'service_key', entry.key],
     ['discounts', 'service_key_filter', entry.key], ['scheduled_services', 'service_id', entry.id],
@@ -315,7 +297,7 @@ async function countReferences(knex, entry, ownedAddonIds) {
       ...(await knex('service_addons').where({ parent_service_id: entry.id }).select('id')),
       ...(await knex('service_addons').where({ addon_service_id: entry.id }).select('id')),
     ];
-    refs += links.filter((link) => !ownedAddonIds.has(link.id)).length;
+    refs += links.length;
   }
   if (await knex.schema.hasTable('leads') && await knex.schema.hasColumn('leads', 'service_key')) {
     refs += (await knex('leads').where({ service_key: entry.key }).pluck('id')).length;
@@ -358,49 +340,16 @@ exports.down = async function down(knex) {
       }
     }
   }
-  const ownedAddonIds = new Set((state.addons || []).map((entry) => entry && entry.id).filter(Boolean));
   const retained = new Set();
   const removableIds = [];
   for (const entry of state.services) {
     if (!entry || !entry.id) continue;
-    if ((await countReferences(knex, entry, ownedAddonIds)) > 0) {
+    if ((await countReferences(knex, entry)) > 0) {
       retained.add(entry.key);
       await knex('services').where({ id: entry.id }).update({ is_active: false });
       console.warn(`[mosquito-misting-conversion-catalog] down: ${entry.key} (${entry.id}) is referenced - service retained and deactivated`);
     } else {
       removableIds.push(entry.id);
-    }
-  }
-  // The two endpoints of a preserved add-on link are ONE unit: both service_addons foreign keys are ON DELETE CASCADE, so deleting
-  // an endpoint would delete the link a retained endpoint still keeps. If either endpoint is retained, retain both (the other is
-  // deactivated with it, its profile, tax row and rule stay) and say so.
-  if (ownedAddonIds.size) {
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const link of state.addons || []) {
-        if (!link || !link.parent || !link.addon) continue;
-        const parent = state.services.find((entry) => entry && entry.id === link.parent);
-        const addon = state.services.find((entry) => entry && entry.id === link.addon);
-        if (!parent || !addon) continue;
-        const [kept, pulled] = retained.has(parent.key) && !retained.has(addon.key) ? [parent, addon]
-          : (retained.has(addon.key) && !retained.has(parent.key) ? [addon, parent] : [null, null]);
-        if (!kept) continue;
-        retained.add(pulled.key);
-        const at = removableIds.indexOf(pulled.id);
-        if (at >= 0) removableIds.splice(at, 1);
-        await knex('services').where({ id: pulled.id }).update({ is_active: false });
-        console.warn(`[mosquito-misting-conversion-catalog] down: ${pulled.key} (${pulled.id}) is the other end of the add-on link kept by ${kept.key} - service retained and deactivated so the link survives`);
-        changed = true;
-      }
-    }
-  }
-  // The add-on link goes only when both of its services go; a retained service keeps its link, profile, tax row and rule.
-  if (ownedAddonIds.size && (await knex.schema.hasTable('service_addons'))) {
-    const retainedIds = new Set(state.services.filter((entry) => entry && retained.has(entry.key)).map((entry) => entry.id));
-    for (const link of state.addons) {
-      if (!link || !link.id || retainedIds.has(link.parent) || retainedIds.has(link.addon)) continue;
-      await knex('service_addons').where({ id: link.id }).del();
     }
   }
   await removeMarked(knex, 'service_completion_profiles', state.profiles, 'profile', retained);

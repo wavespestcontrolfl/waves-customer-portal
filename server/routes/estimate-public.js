@@ -21719,13 +21719,17 @@ function withSupplementedRecurringServices(estData) {
   // Replay here too so the accept path / EstimateConverter see the same recurring
   // rows; otherwise such a foam quote accepts with a locked total but an empty
   // recurring list (no schedule, follow-ups, or invoice).
+  // The replayed engine result also carries the misting INSTALLATION (a one-time charge the recurring rows do not hold). Without it
+  // the accepted data would hold the plan but no install, and the acceptance invoices would bill the plan without it (misting PR 2a).
+  let replayedOneTimeItems = [];
   if (!services.length && !hasResult && !engineResult) {
     const engineInputs = extractEngineInputs(estData);
     if (engineInputs) {
       try {
-        services = uniqueRecurringServiceRows(
-          recurringServicesWithSupplements(generateEstimate(engineInputs)),
-        );
+        const replayed = generateEstimate(engineInputs);
+        services = uniqueRecurringServiceRows(recurringServicesWithSupplements(replayed));
+        replayedOneTimeItems = (require('../services/pricing-engine/v1-legacy-mapper').mapV1ToLegacyShape(replayed).oneTime?.items || [])
+          .filter((item) => item && item.service === 'mosquito_misting_installation');
       } catch (err) {
         logger.error(`[estimate-data] recurring supplement engine replay failed: ${err.message}`);
       }
@@ -21738,6 +21742,9 @@ function withSupplementedRecurringServices(estData) {
       ...(result.recurring || {}),
       services,
     },
+    ...(replayedOneTimeItems.length
+      ? { oneTime: { ...(result.oneTime || {}), items: [...(Array.isArray(result.oneTime?.items) ? result.oneTime.items : []), ...replayedOneTimeItems] } }
+      : {}),
   };
   if (!hasResult) return nextResult;
   const nextData = { ...estData, result: nextResult };
@@ -28787,7 +28794,8 @@ async function buildPricingBundleInner(estimate) {
   // legacy row may carry only stored totals — acceptance bills the frozen
   // setup for all of them, so all of them must preview it. Omitted entirely
   // when no setup was disclosed (payload byte-identical).
-  const previewOneTimeLines = require('../services/estimate-converter').frozenPrepayOneTimeLines(estData);
+  // An engineInputs-only estimate holds no stored install: read it from the same supplemented data the accept uses.
+  const previewOneTimeLines = require('../services/estimate-converter').frozenPrepayOneTimeLines(withSupplementedRecurringServices(estData) || estData);
   const frozenRodentSetupForPreview = previewOneTimeLines.rodentSetup;
   const rodentBaitSetupFeeField = frozenRodentSetupForPreview > 0
     ? { rodentBaitSetupFee: { service: 'rodent_bait_setup', amount: frozenRodentSetupForPreview, label: 'Bait Station Setup', waivedWithPrepay: false } }

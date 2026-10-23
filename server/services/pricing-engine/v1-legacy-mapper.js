@@ -1776,6 +1776,40 @@ function estimateMistingAcceptBlocked(estimateDataRaw, options) {
     || !require('./constants').MOSQUITO_MISTING_CONVERSION_READY;
 }
 
+// FAIL CLOSED on the install (misting PR 2a): when the stored quote carries a PRICED misting plan (a priced plan row or raw engine line
+// in the authoritative container, or a priced plan line of an authored proposal) but the installation amount cannot be read from
+// the same stored data (frozenMistingInstall resolves nothing), acceptance would create the plan and bill no install. It is refused
+// instead, so staff re-send the estimate and the install is frozen. An engineInputs-only estimate (no stored rows) is not refused
+// here: the accept path replays the engine and carries the install into the accepted data (withSupplementedRecurringServices).
+// An unpriced / oversize (quote-required) misting row is not a priced plan.
+const MOSQUITO_MISTING_INSTALL_UNRESOLVED_CODE = 'MOSQUITO_MISTING_INSTALL_UNRESOLVED';
+const MOSQUITO_MISTING_INSTALL_UNRESOLVED_REASON = 'mosquito_misting_install_unresolved';
+const MOSQUITO_MISTING_INSTALL_UNRESOLVED_STAFF_MESSAGE = 'This estimate\'s misting installation amount cannot be read from the stored quote; re-send the estimate so the install is frozen before accepting.';
+function estimateMistingInstallUnresolved(estimateDataRaw, options) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  if (!estimateDataCarriesPricedMisting(d, options)) return false;
+  const { mistingProposalIdentity } = require('../../utils/mosquito-misting-system');
+  const numberOf = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  let pricedPlan;
+  if (proposalIsAuthoritative(d) && proposalIsItemized(d.proposal)) {
+    const lines = [
+      ...(d.proposal.buildings || []).flatMap((building) => building?.lineItems || []),
+      ...(d.proposal.programs || []), ...(d.proposal.correctiveWork || []),
+    ];
+    pricedPlan = lines.some((line) => mistingProposalIdentity(line) === 'mosquito_misting'
+      && (numberOf(line.unitPrice) > 0 || numberOf(line.amount) > 0 || numberOf(line.pricePerApplication) > 0));
+  } else {
+    const rows = storedMistingRows(d, { pricingAuthority: options && options.pricingAuthority });
+    pricedPlan = rows.some((row) => String(row.service || '').toLowerCase() === 'mosquito_misting' && row.quoteRequired !== true);
+  }
+  if (!pricedPlan) return false;
+  return !require('../estimate-converter').frozenMistingInstall(d, { pricingAuthority: options && options.pricingAuthority });
+}
+
 // The persisted-boundary guard for area add-ons, shared by every route and
 // service that already guards the Bermuda add-on: true when the stored estimate
 // carries an add-on AND GATE_AREA_ADDONS is off (read at call time; unset =
@@ -1815,6 +1849,13 @@ function gatedAddOnStaffRefusal(estimateDataRaw, action, options) {
       message: MOSQUITO_MISTING_ACCEPT_PENDING_STAFF_MESSAGE,
     };
   }
+  if (!(options && options.allowAcceptPending) && estimateMistingInstallUnresolved(estimateDataRaw, options)) {
+    return {
+      code: MOSQUITO_MISTING_INSTALL_UNRESOLVED_CODE,
+      reason: MOSQUITO_MISTING_INSTALL_UNRESOLVED_REASON,
+      message: MOSQUITO_MISTING_INSTALL_UNRESOLVED_STAFF_MESSAGE,
+    };
+  }
   return estimateAreaAddOnsGated(estimateDataRaw, options)
     ? { code: AREA_ADDONS_GATED_CODE, message: areaAddOnsGatedStaffMessage(action) } : null;
 }
@@ -1840,6 +1881,9 @@ function gatedAddOnCustomerRefusal(estimateDataRaw, options) {
   if (!(options && options.allowAcceptPending) && estimateMistingAcceptBlocked(estimateDataRaw, options)) {
     return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: MOSQUITO_MISTING_ACCEPT_PENDING_CODE, reason: MOSQUITO_MISTING_ACCEPT_PENDING_REASON };
   }
+  if (!(options && options.allowAcceptPending) && estimateMistingInstallUnresolved(estimateDataRaw, options)) {
+    return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: MOSQUITO_MISTING_INSTALL_UNRESOLVED_CODE, reason: MOSQUITO_MISTING_INSTALL_UNRESOLVED_REASON };
+  }
   return estimateAreaAddOnsGated(estimateDataRaw, options)
     ? { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE } : null;
 }
@@ -1864,7 +1908,10 @@ module.exports = {
   estimateDataCarriesMosquitoMisting,
   estimateMistingGated,
   estimateMistingAcceptBlocked,
+  estimateMistingInstallUnresolved,
   estimateDataCarriesPricedMisting,
+  MOSQUITO_MISTING_INSTALL_UNRESOLVED_CODE,
+  MOSQUITO_MISTING_INSTALL_UNRESOLVED_REASON,
   MOSQUITO_MISTING_ACCEPT_PENDING_CODE,
   MOSQUITO_MISTING_ACCEPT_PENDING_REASON,
   MOSQUITO_MISTING_GATED_CODE,

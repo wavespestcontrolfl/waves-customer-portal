@@ -35,16 +35,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       pluck: async (col) => rowsNow().filter(rowMatch).map((r) => r[col]),
       columnInfo: async () => Object.fromEntries((db.__columns?.[table] || Object.keys(rowsNow()[0] || {})).map((c) => [c, {}])),
       update: async (patch) => { const hits = rowsNow().filter(rowMatch); hits.forEach((r) => Object.assign(r, patch)); return hits.length; },
-      del: async () => {
-        const hits = rowsNow().filter(rowMatch);
-        db[table] = rowsNow().filter((r) => !hits.includes(r));
-        // Both service_addons foreign keys are ON DELETE CASCADE: deleting a service deletes the links that name it.
-        if (table === 'services' && db.service_addons) {
-          const gone = new Set(hits.map((r) => r.id));
-          db.service_addons = db.service_addons.filter((l) => !gone.has(l.parent_service_id) && !gone.has(l.addon_service_id));
-        }
-        return hits.length;
-      },
+      del: async () => { const hits = rowsNow().filter(rowMatch); db[table] = rowsNow().filter((r) => !hits.includes(r)); return hits.length; },
       insert: (row) => {
         const stored = { id: `${table}-${rowsNow().length + 1}`, ...row };
         (db[table] = rowsNow()).push(stored);
@@ -146,7 +137,7 @@ describe('the catalog rows', () => {
 });
 
 describe('up()', () => {
-  test('inserts the rows, profiles, tax rows, discount rules and the refill add-on link, and records state', async () => {
+  test('inserts the rows, profiles, tax rows and discount rules, creates NO add-on link, and records state', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
     expect(db.services).toHaveLength(3);
@@ -159,10 +150,11 @@ describe('up()', () => {
     expect(db.service_taxability.find((t) => t.service_key === 'mosquito_misting_service').service_label).toBe('Mosquito Misting Service Plan');
     expect(db.service_discount_rules).toHaveLength(3);
     expect(db.service_discount_rules[0]).toMatchObject({ tier_qualifier: false, exclude_from_pct_discount: true });
-    expect(db.service_addons).toEqual([expect.objectContaining({ parent_service_id: svc(db, 'mosquito_misting_service').id, addon_service_id: svc(db, 'mosquito_misting_refill').id, addon_price: null })]);
+    // refill billing ships in misting PR 2c: the refill row is dormant and no add-on picker offers it
+    expect(db.service_addons).toEqual([]);
     const s = state(db);
     expect(s.services.map((e) => e.key).sort()).toEqual([...KEYS].sort());
-    expect(s.addons).toHaveLength(1);
+    expect(s.addons).toBeUndefined();
   });
 
   test('is idempotent', async () => {
@@ -172,7 +164,7 @@ describe('up()', () => {
     expect(db.services).toHaveLength(3);
     expect(db.service_completion_profiles).toHaveLength(3);
     expect(db.service_taxability).toHaveLength(3);
-    expect(db.service_addons).toHaveLength(1);
+    expect(db.service_addons).toEqual([]);
   });
 
   test('leaves a pre-existing row untouched and heals only an explicitly active one', async () => {
@@ -211,7 +203,7 @@ describe('down()', () => {
     expect(state(db)).toBeUndefined();
   });
 
-  test('a service referenced by a scheduled visit is retained and deactivated, with its profile, tax row, rule and link', async () => {
+  test('a service referenced by a scheduled visit is retained and deactivated, with its profile, tax row and rule; the unreferenced rows are removed', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
     const plan = svc(db, 'mosquito_misting_service');
@@ -220,39 +212,18 @@ describe('down()', () => {
     expect(svc(db, 'mosquito_misting_service')).toMatchObject({ is_active: false });
     expect(db.service_completion_profiles.map((p) => p.service_key)).toContain('mosquito_misting_service');
     expect(db.service_taxability.map((t) => t.service_key)).toContain('mosquito_misting_service');
-    expect(db.service_addons).toHaveLength(1);
     expect(svc(db, 'mosquito_misting_install')).toBeUndefined();
+    expect(svc(db, 'mosquito_misting_refill')).toBeUndefined();
   });
 
-  test('the two ends of the kept add-on link are one unit: a retained plan keeps the refill row too, so the cascade cannot delete the link', async () => {
-    const db = emptyDb();
-    await migration.up(fakeKnex(db));
-    const plan = svc(db, 'mosquito_misting_service');
-    db.scheduled_services.push({ id: 'v1', service_id: plan.id, service_type: 'Mosquito Misting Service Plan' });
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    await migration.down(fakeKnex(db));
-    expect(svc(db, 'mosquito_misting_service')).toMatchObject({ is_active: false });
-    expect(svc(db, 'mosquito_misting_refill')).toMatchObject({ is_active: false });
-    expect(db.service_addons).toHaveLength(1);
-    expect(db.service_addons[0]).toMatchObject({ parent_service_id: plan.id, addon_service_id: svc(db, 'mosquito_misting_refill').id });
-    expect(db.service_completion_profiles.map((p) => p.service_key)).toEqual(expect.arrayContaining(['mosquito_misting_service', 'mosquito_misting_refill']));
-    expect(warn.mock.calls.map((c) => c[0]).join('\n')).toMatch(/mosquito_misting_refill .* other end of the add-on link kept by mosquito_misting_service/);
-    // the unrelated install row is still removed
-    expect(svc(db, 'mosquito_misting_install')).toBeUndefined();
-    warn.mockRestore();
-  });
-
-  test('and the other way round: a referenced refill keeps the plan row and the link', async () => {
+  test('another admin-made add-on link naming a service counts as a reference: that service is retained', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
     const refill = svc(db, 'mosquito_misting_refill');
-    db.scheduled_service_addons.push({ id: 'a1', service_id: refill.id, service_name: 'Mosquito Misting Refill' });
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    db.service_addons.push({ id: 'link-x', parent_service_id: 'someone-else', addon_service_id: refill.id });
     await migration.down(fakeKnex(db));
     expect(svc(db, 'mosquito_misting_refill')).toMatchObject({ is_active: false });
-    expect(svc(db, 'mosquito_misting_service')).toMatchObject({ is_active: false });
-    expect(db.service_addons).toHaveLength(1);
-    warn.mockRestore();
+    expect(svc(db, 'mosquito_misting_service')).toBeUndefined();
   });
 
   test('an admin-replaced profile (no marker) is left alone, and an unreadable state removes nothing', async () => {
