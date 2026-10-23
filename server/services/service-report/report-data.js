@@ -7041,6 +7041,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           const buildRescheduleLink = planReschedule ? require('../reschedule-link').buildRescheduleLink : null;
           const visits = await Promise.all(matched.map(async (row) => {
             let rescheduleUrl = null;
+            let reschedulePreview = false;
             if (planReschedule) {
               try {
                 // The public reschedule page's own verdict first (codex #6088 r1/r2):
@@ -7048,10 +7049,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 // dispatch-owned booking (source_action + customer_confirmed)
                 // would show a dead button.
                 const verdict = require('../reschedule-eligibility').eligibility(row);
-                if (verdict && verdict.ok) {
-                  // Preview: previewOnly never mints a short link (reuseExisting alone falls through to the mint
-                  // when none exists); it hands back the existing one or a placeholder.
-                  const link = await buildRescheduleLink(row.id, { customerId: service.customer_id || null, reuseExisting: true, previewOnly: preview });
+                if (verdict && verdict.ok && preview) {
+                  // Preview: no URL leaves the server at all. An existing short link is the customer's
+                  // LIVE reschedule flow, so the admin preview would step into it (pre-push P1); the
+                  // page renders a disabled Reschedule button from this marker instead.
+                  reschedulePreview = true;
+                } else if (verdict && verdict.ok) {
+                  const link = await buildRescheduleLink(row.id, { customerId: service.customer_id || null, reuseExisting: true });
                   if (link && link.url && !link.tooSoonToMove) rescheduleUrl = link.url;
                 }
               } catch { /* best-effort: no link, no button */ }
@@ -7063,6 +7067,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 : String(row.scheduled_date).slice(0, 10),
               windowStart: row.window_start || null,
               ...(planReschedule ? { rescheduleUrl } : {}),
+              ...(reschedulePreview ? { reschedulePreview: true } : {}),
             };
           }));
           // `merged: true` tells the client to fold the visits into the

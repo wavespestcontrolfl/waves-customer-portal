@@ -54,6 +54,20 @@ describe('ReportViewPage — admin preview', () => {
     expect(calls.filter((c) => /\/reports\//.test(c.url))).toEqual([]);
   });
 
+  it('renders Reschedule as a disabled control, never a link into the live customer flow', async () => {
+    renderPreview({
+      ok: true, status: 200,
+      json: async () => ({
+        ...lawnReportV2, preview: true, token: null, pdfUrl: null, mapSvgUrl: null,
+        upcomingVisitsCard: { merged: true, visits: [{ serviceType: 'Lawn Care Treatment', scheduledDate: '2099-11-10', windowStart: '08:00:00', rescheduleUrl: null, reschedulePreview: true }] },
+      }),
+    });
+    const control = await screen.findByText('Reschedule');
+    expect(control.tagName).toBe('SPAN');
+    expect(control).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.queryByRole('link', { name: /reschedule/i })).toBeNull();
+  });
+
   it('says why there is no preview when the visit is already completed', async () => {
     renderPreview({ ok: false, status: 409, json: async () => ({ error: 'This visit is already completed. Open its real report instead.' }) });
     expect(await screen.findByText(/already completed/i)).toBeInTheDocument();

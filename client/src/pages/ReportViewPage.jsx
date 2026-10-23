@@ -3138,6 +3138,19 @@ export function PlanSummaryCard({ data, mode }) {
                     Reschedule
                   </a>
                 )}
+                {/* Admin preview: the server sends no live link (it would open the customer's real
+                    reschedule flow), only this marker. Same look, not a link, cannot be clicked. */}
+                {visit.reschedulePreview === true && !visit.rescheduleUrl && (
+                  <span
+                    className="plan-visit-reschedule"
+                    aria-disabled="true"
+                    title="Turned off in the preview"
+                    data-glass-accent=""
+                    style={{ ...actionButtonStyle('plain'), minHeight: 44, padding: '0 14px', opacity: 0.55, cursor: 'not-allowed', display: 'inline-flex', alignItems: 'center' }}
+                  >
+                    Reschedule
+                  </span>
+                )}
               </div>
             ))}
           </div>
