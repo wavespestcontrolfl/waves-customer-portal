@@ -1123,6 +1123,17 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       // described the promoted property) keeps it, like the lawn measurement above.
       const sameHomeFlip = !!formerHomeKey && formerHomeKey === addressKey(newPrimary);
       await require('./customer-address-fanout').markSprinklerSettingsMoved(customerId, trx, { clearNewSod: !sameHomeFlip });
+      // The move marker just cleared the confirmation ledger. The promoted property's own reviewed lawn (or, on a
+      // same-address flip, the lawn the turf row already described) IS the current home's area, so re-establish it
+      // for the weekly plan's gallons line at once (its own ledger entry — codex #6498 r1 P2).
+      if (await hasAreaMeasurementsColumn(trx)) {
+        const promotedLawn = reviewedAreas(newPrimary).lawn?.sqft ?? null;
+        const keptLawn = sameHomeFlip ? (await trx('customer_turf_profiles').where({ customer_id: customerId }).first('lawn_sqft'))?.lawn_sqft : null;
+        if (Number(promotedLawn) > 0 || Number(keptLawn) > 0) {
+          const { confirmIrrigationFields, LAWN_SQFT_CONFIRMED_FIELD } = require('./irrigation-schedule-confirmation');
+          await confirmIrrigationFields(trx, customerId, [LAWN_SQFT_CONFIRMED_FIELD]);
+        }
+      }
       applied += 1;
       continue;
     }

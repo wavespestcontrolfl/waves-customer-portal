@@ -19,6 +19,7 @@
 
 const { buildTreeShrubVisualCategories, scoreStatus } = require('./tree-shrub-visual-categories');
 const { buildTreatmentSummary } = require('./treatment-summary');
+const { colorTrendComparable } = require('../tree-shrub-lighting');
 const { buildTreeShrubInsightCards } = require('./tree-shrub-report-insights');
 const {
   applyTechFindingsToAssessment, diagnosisOverride,
@@ -201,7 +202,13 @@ function buildTrends(assessment) {
   const add = (key, series) => { if (series.length >= 2) out[key] = series; };
   add('overall', seriesFrom(trend, 'overallScore'));
   add('foliage', seriesFrom(trend, 'foliageFullness'));
-  add('color', seriesFrom(trend, 'leafColorVigor'));
+  // GATE_TS_LIGHTING (the loader sets colorTrendLightAware only while the gate is
+  // on): the color series states a latest-versus-previous reading, so it stays only
+  // when those two visits were read in known, compatible light. It is whole or
+  // absent, never rebuilt. The other series are raw readings and stay.
+  if (!assessment?.colorTrendLightAware || colorTrendComparable(trend, monthLabel)) {
+    add('color', seriesFrom(trend, 'leafColorVigor'));
+  }
   add('pest', seriesFrom(trend, 'pestActivity'));
   add('water', seriesFrom(trend, 'waterHeatStress'));
   return out;

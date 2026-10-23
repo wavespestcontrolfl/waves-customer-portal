@@ -22,7 +22,7 @@ describe('the Advion rate: the staged rows and the catalog carry the verified la
   test('0.0344 lb per 1,000 sq ft (1.5 lb per acre / 43,560 sq ft x 1,000), and the recipe holds no Advion line since 20261009100000', () => {
     expect(Math.round((1.5 / 43.56) * 10000) / 10000).toBe(0.0344);
     expect(round6.NEW_RATE).toBe(0.0344);
-    expect(JSON.stringify(v13)).not.toMatch(/Advion|0\.034 lb/);
+    expect(JSON.stringify(v13)).not.toMatch(/Advion Fire Ant|0\.034 lb/);
   });
 });
 

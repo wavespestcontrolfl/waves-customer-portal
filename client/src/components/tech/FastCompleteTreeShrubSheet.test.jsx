@@ -551,6 +551,19 @@ describe('photos and the photo read', () => {
     });
   });
 
+  test('GATE_TS_LIGHTING: the signed light read from the preview is echoed back in the review', async () => {
+    const photoLights = [{ lighting: 'overcast', hard_shadows: false }, { lighting: 'open_shade', hard_shadows: false }];
+    const request = makeRequest({ preview: { ...PREVIEW, photoLights, lightSignature: 'light-sig-1' } });
+    await openSheet(request);
+    await addBothPhotos();
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze photos' }));
+    expect(await screen.findByText('Pest-pressure signals')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Good' }));
+    const body = await completeBody(request);
+    expect(body.treeShrubReview).toMatchObject({ signature: 'sig-1', photoLights, lightSignature: 'light-sig-1' });
+
+  });
+
   test("last time's bare oz on a liquid reads as fluid ounces, never grams", async () => {
     const context = {
       ...CONTEXT,

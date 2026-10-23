@@ -5180,6 +5180,11 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
     // can verify the review came from this preview for these images.
     const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));
     result.signature = treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations);
+    // GATE_TS_LIGHTING: the per-photo light read (present only while the gate is on)
+    // is signed on its own, so the signature above is the same whether or not it is.
+    if (Array.isArray(result.photoLights)) {
+      result.lightSignature = require('../services/tree-shrub-lighting').lightSignature(result.photoLights, req.params.serviceId, photosHash);
+    }
     // Fast Complete's condition suggestion — the tech confirms it; not part of
     // the signed review.
     result.suggestedCondition = suggestLandscapeCondition(result.scores?.overallScore);
