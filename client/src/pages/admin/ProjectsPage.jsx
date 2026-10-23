@@ -624,17 +624,17 @@ function evaluateProjectReadiness({
         },
         {
           label: "Final exterior product",
-          ok: hasMeaningfulValue(findings?.final_exterior_product),
+          ok: typeof findings?.final_exterior_product === "string" && findings.final_exterior_product.trim().length > 0,
           hard: true,
         },
         {
           label: "Final exterior active ingredient",
-          ok: hasMeaningfulValue(findings?.final_exterior_active_ingredient),
+          ok: typeof findings?.final_exterior_active_ingredient === "string" && findings.final_exterior_active_ingredient.trim().length > 0,
           hard: true,
         },
         {
           label: "Final exterior applicator",
-          ok: hasMeaningfulValue(findings?.final_exterior_applicator_name),
+          ok: typeof findings?.final_exterior_applicator_name === "string" && findings.final_exterior_applicator_name.trim().length > 0,
           hard: true,
         },
       );

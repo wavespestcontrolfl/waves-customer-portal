@@ -225,6 +225,9 @@ describe('admin project route guards', () => {
       'cert_final_exterior_product', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator',
     ]);
     expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_time: 'gate code 1234' }, true))).toEqual(['cert_final_exterior_time']);
+    expect(hardKeys(evaluate({
+      ...complete, ...exterior, final_exterior_product: false, final_exterior_active_ingredient: false, final_exterior_applicator_name: 7,
+    }, true))).toEqual(['cert_final_exterior_product', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator']);
 
     // A certificate held before these checks existed still releases once paid.
     const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '', final_exterior_date: '2026-06-01' }, false);

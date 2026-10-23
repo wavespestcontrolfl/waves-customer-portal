@@ -794,6 +794,13 @@ function pretreatWarrantyOk(value, typeCfg) {
   return (field?.options || []).includes(String(value || '').trim());
 }
 
+// The final exterior names print on the record line, so they must be real
+// text: an API-written false or number would pass hasMeaningfulValue and
+// then render as nothing.
+function isFilledText(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 const FINAL_EXTERIOR_RECORD_KEYS = ['final_exterior_date', 'final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name', 'final_exterior_time'];
 
 // Checks added 2026-10-23 run only on a staff send (/send, /send-with-invoice),
@@ -811,9 +818,9 @@ function pretreatStaffSendChecks(findings, typeCfg) {
       { key: 'cert_final_exterior_date', label: 'Date of final exterior treatment', ok: hasMeaningfulValue(findings.final_exterior_date), hard: true },
       { key: 'cert_final_exterior_time', label: 'Time of final exterior treatment', ok: isClockTime(findings.final_exterior_time), hard: true },
       // The later treatment is its own record (FBC 105.10): product, chemical and applicator too.
-      { key: 'cert_final_exterior_product', label: 'Final exterior product', ok: hasMeaningfulValue(findings.final_exterior_product), hard: true },
-      { key: 'cert_final_exterior_active_ingredient', label: 'Final exterior active ingredient', ok: hasMeaningfulValue(findings.final_exterior_active_ingredient), hard: true },
-      { key: 'cert_final_exterior_applicator', label: 'Final exterior applicator', ok: hasMeaningfulValue(findings.final_exterior_applicator_name), hard: true },
+      { key: 'cert_final_exterior_product', label: 'Final exterior product', ok: isFilledText(findings.final_exterior_product), hard: true },
+      { key: 'cert_final_exterior_active_ingredient', label: 'Final exterior active ingredient', ok: isFilledText(findings.final_exterior_active_ingredient), hard: true },
+      { key: 'cert_final_exterior_applicator', label: 'Final exterior applicator', ok: isFilledText(findings.final_exterior_applicator_name), hard: true },
     );
   }
   return checks;
