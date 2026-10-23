@@ -675,6 +675,25 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(await app(TABLE).where({ id: checked.id }).first()).toBeUndefined();
     });
 
+    test('a request receipt that says the text is still being sent (text_retry_pending) is replaced by the sweep receipt; a real receipt is not', async () => {
+      const { recordResult } = jest.requireActual('../services/intelligence-bar/pending-actions');
+      const read = async (id) => (await app('ib_pending_actions').where({ id }).first()).result;
+      const pending = randomUUID();
+      const real = randomUUID();
+      await app('ib_pending_actions').insert([
+        { id: pending, result: null },
+        { id: real, result: JSON.stringify({ success: true, from: 'request' }) },
+      ]);
+      // The route's save of the provisional result (onlyIfEmpty), then the sweep's final receipt.
+      await recordResult(pending, { success: true, recovery_owns_outcome: true, text_retry_pending: true, warning: 'retrying' }, { onlyIfEmpty: true });
+      expect(await read(pending)).toMatchObject({ text_retry_pending: true });
+      await recordResult(pending, { success: true, customer_text_sent: true, recovered_after_interruption: true }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
+      expect(await read(pending)).toMatchObject({ customer_text_sent: true });
+      expect((await read(pending)).text_retry_pending).toBeUndefined();
+      await recordResult(real, { from: 'sweep' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
+      expect(await read(real)).toEqual({ success: true, from: 'request' });
+    });
+
     test('a row completed 3 minutes ago is left to the request', async () => {
       mockRecordResult.mockImplementation(writeLikeRecordResult);
       await completeWithoutReceipt({ finished_at: app.raw("now() - interval '3 minutes'") });

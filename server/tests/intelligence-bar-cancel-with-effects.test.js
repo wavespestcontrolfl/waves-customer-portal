@@ -232,6 +232,8 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(result.customer_text_sent).toBe(false);
     expect(result.warning).toMatch(/has not gone out yet\. The system retries it within about 15 minutes/);
     expect(result.warning).not.toMatch(/will not be retried automatically/);
+    // Provisional: the route saves it only if the action has none, and the sweep's final receipt may replace it.
+    expect(result).toMatchObject({ recovery_owns_outcome: true, text_retry_pending: true });
   });
 
   test('a text that the handler could not send is reported as a warning, not hidden', async () => {

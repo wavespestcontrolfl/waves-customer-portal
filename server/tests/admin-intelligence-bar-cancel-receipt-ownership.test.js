@@ -103,6 +103,12 @@ describe('/confirm-action receipt for a cancel the recovery sweep took over', ()
     expect(body.result.recovery_owns_outcome).toBe(true);
   });
 
+  test('a provisional "text is still being sent" result is saved only if the action has none', async () => {
+    executeTool.mockResolvedValue({ success: true, appointment_id: 'svc-1', recovery_owns_outcome: true, text_retry_pending: true, warning: 'The system retries it.' });
+    await confirm();
+    expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ text_retry_pending: true }), { onlyIfEmpty: true });
+  });
+
   test('an ordinary result is saved exactly as before (no options)', async () => {
     executeTool.mockResolvedValue({ success: true, appointment_id: 'svc-1' });
     await confirm();

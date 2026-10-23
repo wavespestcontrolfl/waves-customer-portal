@@ -4715,7 +4715,13 @@ function cancelReplayWarnings(json, sendText) {
 
 // The recovery sweep took this cancel's saved steps over while this request ran: its receipt and office alert are the record.
 // The route then saves this result only if the action has none (and the sweep may replace it). Otherwise just the warnings.
+// A receipt that says the system is still sending the approved text is PROVISIONAL too (text_retry_pending): it carries
+// recovery_owns_outcome, so /confirm-action saves it only if the action has none and the sweep's final receipt (sent, partial,
+// abandoned...) replaces it. A real final receipt is never replaced.
 function recoveryOwnedFields(json, warnings) {
+  if (!json.recoveryOwnsOutcome && json.textRetryScheduled === true) {
+    return { recovery_owns_outcome: true, text_retry_pending: true, warning: warnings.join(' ') };
+  }
   if (!json.recoveryOwnsOutcome) return warnings.length ? { warning: warnings.join(' ') } : {};
   return {
     recovery_owns_outcome: true,
