@@ -804,12 +804,16 @@ function pretreatStaffSendChecks(findings, typeCfg) {
   const checks = [
     { key: 'cert_warranty', label: 'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)', ok: pretreatWarrantyOk(findings.warranty_type, typeCfg), hard: true },
     // FBC 105.10 lists the time and date of each treatment.
-    { key: 'cert_treatment_time', label: 'Time of treatment', ok: hasMeaningfulValue(findings.treatment_time), hard: true },
+    { key: 'cert_treatment_time', label: 'Time of treatment', ok: isClockTime(findings.treatment_time), hard: true },
   ];
   if (FINAL_EXTERIOR_RECORD_KEYS.some((key) => hasMeaningfulValue(findings[key]))) {
     checks.push(
       { key: 'cert_final_exterior_date', label: 'Date of final exterior treatment', ok: hasMeaningfulValue(findings.final_exterior_date), hard: true },
       { key: 'cert_final_exterior_time', label: 'Time of final exterior treatment', ok: isClockTime(findings.final_exterior_time), hard: true },
+      // The later treatment is its own record (FBC 105.10): product, chemical and applicator too.
+      { key: 'cert_final_exterior_product', label: 'Final exterior product', ok: hasMeaningfulValue(findings.final_exterior_product), hard: true },
+      { key: 'cert_final_exterior_active_ingredient', label: 'Final exterior active ingredient', ok: hasMeaningfulValue(findings.final_exterior_active_ingredient), hard: true },
+      { key: 'cert_final_exterior_applicator', label: 'Final exterior applicator', ok: hasMeaningfulValue(findings.final_exterior_applicator_name), hard: true },
     );
   }
   return checks;

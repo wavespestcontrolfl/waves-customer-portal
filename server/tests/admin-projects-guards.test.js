@@ -211,11 +211,20 @@ describe('admin project route guards', () => {
     expect(hardKeys(evaluate({ ...complete, warranty_type: 'None' }, true))).toEqual(['cert_warranty']);
     // FBC 105.10 lists the time of treatment.
     expect(hardKeys(evaluate({ ...complete, treatment_time: '' }, true))).toEqual(['cert_treatment_time']);
-    // A recorded final exterior treatment needs its own date and time.
-    expect(hardKeys(evaluate({ ...complete, final_exterior_product: 'Termidor SC' }, true))).toEqual(['cert_final_exterior_date', 'cert_final_exterior_time']);
-    expect(hardKeys(evaluate({ ...complete, final_exterior_date: '2026-06-01' }, true))).toEqual(['cert_final_exterior_time']);
-    expect(evaluate({ ...complete, final_exterior_date: '2026-06-01', final_exterior_time: '09:30' }, true).missing).toEqual([]);
-    expect(hardKeys(evaluate({ ...complete, final_exterior_date: '2026-06-01', final_exterior_time: 'gate code 1234' }, true))).toEqual(['cert_final_exterior_time']);
+    expect(hardKeys(evaluate({ ...complete, treatment_time: '25:99' }, true))).toEqual(['cert_treatment_time']);
+    // A recorded final exterior treatment is its own full record.
+    const exterior = {
+      final_exterior_date: '2026-06-01', final_exterior_time: '09:30', final_exterior_product: 'Termidor SC',
+      final_exterior_active_ingredient: 'Fipronil', final_exterior_applicator_name: 'Sam Tester',
+    };
+    expect(evaluate({ ...complete, ...exterior }, true).missing).toEqual([]);
+    expect(hardKeys(evaluate({ ...complete, final_exterior_product: 'Termidor SC' }, true))).toEqual([
+      'cert_final_exterior_date', 'cert_final_exterior_time', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator',
+    ]);
+    expect(hardKeys(evaluate({ ...complete, final_exterior_date: '2026-06-01', final_exterior_time: '09:30' }, true))).toEqual([
+      'cert_final_exterior_product', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator',
+    ]);
+    expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_time: 'gate code 1234' }, true))).toEqual(['cert_final_exterior_time']);
 
     // A certificate held before these checks existed still releases once paid.
     const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '', final_exterior_date: '2026-06-01' }, false);
@@ -230,7 +239,7 @@ describe('admin project route guards', () => {
     expect(publishedCertificateEditRejection(project, { findings: { ...legacy, comments: 'new' } }, { findings: legacy })).toBeNull();
     // Adding an undated final exterior record is a new failure.
     expect(publishedCertificateEditRejection(project, { findings: { ...legacy, final_exterior_product: 'Termidor SC' } }, { findings: legacy }).missing
-      .map((m) => m.key)).toEqual(['cert_final_exterior_date', 'cert_final_exterior_time']);
+      .map((m) => m.key)).toEqual(['cert_final_exterior_date', 'cert_final_exterior_time', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator']);
     // A draft (no link yet) is judged at send, not on save.
     expect(publishedCertificateEditRejection({ project_type: 'pre_treatment_termite_certificate' }, { findings: {} }, { findings: legacy })).toBeNull();
   });

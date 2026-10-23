@@ -464,6 +464,12 @@ function meaningfulApplicationRows(findings) {
   );
 }
 
+// Mirrors server/services/final-exterior-screen.js isClockTime ("HH:MM").
+function isClockTime(value) {
+  const match = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(String(value ?? "").trim());
+  return Boolean(match) && Number(match[1]) < 24 && Number(match[2]) < 60;
+}
+
 function evaluateProjectReadiness({
   project,
   typeCfg,
@@ -592,7 +598,7 @@ function evaluateProjectReadiness({
       },
       {
         label: "Time of treatment",
-        ok: hasMeaningfulValue(findings?.treatment_time),
+        ok: isClockTime(findings?.treatment_time),
         hard: true,
       },
     );
@@ -613,7 +619,22 @@ function evaluateProjectReadiness({
         },
         {
           label: "Time of final exterior treatment",
-          ok: hasMeaningfulValue(findings?.final_exterior_time),
+          ok: isClockTime(findings?.final_exterior_time),
+          hard: true,
+        },
+        {
+          label: "Final exterior product",
+          ok: hasMeaningfulValue(findings?.final_exterior_product),
+          hard: true,
+        },
+        {
+          label: "Final exterior active ingredient",
+          ok: hasMeaningfulValue(findings?.final_exterior_active_ingredient),
+          hard: true,
+        },
+        {
+          label: "Final exterior applicator",
+          ok: hasMeaningfulValue(findings?.final_exterior_applicator_name),
           hard: true,
         },
       );
