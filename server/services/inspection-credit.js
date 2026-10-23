@@ -1680,6 +1680,158 @@ async function findLiveSeriesChildForReversal(offer, scheduledServiceId) {
   return { seriesChild, probeFailed };
 }
 
+// True when an invoice for the cancelled booking still holds money (or the check failed): the offer is then left bound,
+// with an office alert in the first case. Neither reversing nor rebinding runs.
+async function deferForUnresolvedInvoice(offer, scheduledServiceId, cancelFence) {
+  // FIRST (PR #3178 r17 P1): an invoice for this cancelled booking
+  // still holding money — paid, processing, unverifiable PI,
+  // anything outside the resolved set — may have the credit
+  // EMBEDDED in it. Neither reversing NOR rebinding is safe then: a
+  // blind negative movement would consume UNRELATED balance, and a
+  // rebind would claim the credit belongs to another booking while
+  // it sits in this one's invoice. Flag the office once and leave
+  // the offer bound; when the office resolves the invoice, the
+  // hourly sweep retries and rebind/reversal proceeds normally.
+  // Fail CLOSED on a failed check — never move money blind.
+  try {
+    const unresolved = await require('./invoice')
+      .unresolvedInvoicesForCancelledService(db, scheduledServiceId)
+      .first('id');
+    if (unresolved) {
+      await alertReversalNeedsOffice(offer, scheduledServiceId, {
+        reason: 'invoice_unresolved',
+        body: `A $${round2(offer.amount).toFixed(2)} inspection credit is tied to a cancelled booking whose invoice still holds money. Reversing automatically could take unrelated balance — resolve the invoice, then collect or write off the credit.`,
+      }, cancelFence);
+      return true;
+    }
+  } catch (checkErr) {
+    logger.error(`[inspection-credit] invoice-state check failed for offer ${offer.id} — reversal deferred: ${checkErr.message}`);
+    return true;
+  }
+  return false;
+}
+
+// True when the offer was rebound to a live booking (or series child) that still earns the credit: nothing is reversed.
+// A fence refusal inside the rebind THROWS (rebindRedeemedOffer), so it can never fall through to the reversal.
+async function rebindToLiveBooking(offer, scheduledServiceId, cancelFence) {
+  // The credit was earned by BOOKING inside the window. If another
+  // live booking still stands in that window, the customer is still
+  // entitled to it — rebind rather than claw it back (Codex #3178
+  // P1): cancelling one of two bookings must not cost them the credit.
+  // A PROVEN customer booking only — read from the booking-event
+  // table so it stays true after this offer has redeemed (marking
+  // offers was circular, Codex #3178 r4 P0).
+  const alternate = await provenBookingInWindow({
+    customerId: offer.customer_id,
+    from: offer.created_at,
+    to: offer.expires_at,
+    excludeIds: [scheduledServiceId, offer.source_scheduled_service_id],
+  });
+  if (alternate && await rebindRedeemedOffer(offer.id, alternate.id, cancelFence)) {
+    logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
+    return true;
+  }
+  const { seriesChild } = await findLiveSeriesChildForReversal(offer, scheduledServiceId);
+  if (seriesChild && await rebindRedeemedOffer(offer.id, seriesChild.id, cancelFence)) {
+    logger.info(`[inspection-credit] offer ${offer.id} rebound to live series child ${seriesChild.id} — anchor cancelled, series continues`);
+    return true;
+  }
+  return false;
+}
+
+// The reversal itself: claim the offer and move the money back in one transaction (fenced for the recovery sweep).
+async function claimAndReverseOffer(offer, { scheduledServiceId, createdBy, now, cancelFence }) {
+  await db.transaction(async (trx) => {
+    if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelFence);
+    // Claim the reversal first: status-guarded so two cancellations
+    // can't both give the money back — and bound to the LIFECYCLE this
+    // sweep actually read (Codex #3178 r21 P1): a delayed attempt can
+    // straddle a reverse-then-re-redeem by another worker, and an
+    // id+status guard alone would then reverse the NEW booking's
+    // credit while that booking is still live. The claim requires the
+    // offer to still be bound to THIS cancelled booking and to the
+    // ledger entry read at the top; any concurrent transition makes
+    // it a silent claim_lost.
+    const claimed = await trx('inspection_credit_offers')
+      .where({
+        id: offer.id,
+        status: 'redeemed',
+        redeemed_scheduled_service_id: scheduledServiceId,
+        credit_ledger_id: offer.credit_ledger_id,
+      })
+      .update({
+        // Reopens ONLY while the original window still stands; a
+        // lapsed one closes out instead of dangling.
+        status: new Date(offer.expires_at) >= now ? 'offered' : 'expired',
+        redeemed_at: null,
+        redeemed_scheduled_service_id: null,
+        credit_ledger_id: null,
+        // A successful reversal starts a fresh alert cycle (Codex
+        // #3178 r9 P2): a stale marker from an earlier FAILED attempt
+        // would suppress the one alert a future spent-credit failure
+        // on the reopened offer is allowed to raise.
+        reversal_alerted_at: null,
+        updated_at: trx.fn.now(),
+      });
+    if (claimed !== 1) {
+      const e = new Error('reversal claim lost a race');
+      e.inspectionCreditSkip = 'claim_lost';
+      throw e;
+    }
+    await postCreditMovement({
+      customerId: offer.customer_id,
+      delta: -round2(offer.amount),
+      source: 'inspection_credit',
+      note: 'Inspection credit returned — the booking it was applied to was cancelled',
+      createdBy,
+    }, trx);
+  });
+}
+
+// One offer's reversal failure. Never throws for a skip; the hourly sweep retries everything else.
+async function handleOfferReversalError(err, offer, scheduledServiceId, cancelFence) {
+  if (err?.inspectionCreditSkip === 'claim_lost') return;
+  if (err?.code === 'CANCEL_FENCE') {
+    // The booking is no longer (or not provably) the approved cancel: this offer is left exactly as it is.
+    logger.info(`[inspection-credit] offer ${offer.id} left untouched: ${err.message}`);
+    return;
+  }
+  logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
+  // The office alert is reserved for the one failure that is a
+  // BILLING fact, not an operational one (PR #3178 r18 P2): the
+  // typed insufficient-balance refusal from postCreditMovement —
+  // the credit is fungible, so once spent the balance can't cover
+  // the reversal, the money cannot be clawed back automatically,
+  // and it becomes an OFFICE decision (collect or write off) rather
+  // than a log line nobody reads (Codex #3175 r4 P0). A deadlock,
+  // dropped connection or ledger fault is NOT that: the balance may
+  // be fine, the hourly sweep retries it, and telling the office to
+  // collect $75 that was never missing would be a false instruction
+  // a later successful retry cannot retract.
+  if (err?.code === 'INSUFFICIENT_CREDIT') {
+    await alertReversalNeedsOffice(offer, scheduledServiceId, {
+      reason: 'credit_already_spent',
+      body: `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
+    }, cancelFence);
+  }
+}
+
+// One redeemed offer: returns 1 when its credit was reversed, 0 when it was deferred, rebound, left for the sweep or skipped.
+async function reverseOneOffer(offer, { scheduledServiceId, createdBy, now, pinnedReversalOfferIds, cancelFence }) {
+  // Recovery sweep only: no office alert, rebind or reversal for a booking that is no longer the approved cancel
+  // (a point-in-time check; every write below re-proves the generation inside its own transaction).
+  if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(db, cancelFence);
+  if (await deferForUnresolvedInvoice(offer, scheduledServiceId, cancelFence)) return 0;
+  if (await rebindToLiveBooking(offer, scheduledServiceId, cancelFence)) return 0;
+  if (Array.isArray(pinnedReversalOfferIds) && !pinnedReversalOfferIds.map(String).includes(String(offer.id))) {
+    logger.info(`[inspection-credit] offer ${offer.id} not reversed — the confirmed cancel card did not show it; left for the hourly sweep`);
+    return 0;
+  }
+  await claimAndReverseOffer(offer, { scheduledServiceId, createdBy, now, cancelFence });
+  logger.info(`[inspection-credit] offer ${offer.id} reversed — booking ${scheduledServiceId} went non-live`);
+  return 1;
+}
+
 async function reverseInspectionCreditForBooking({
   scheduledServiceId,
   createdBy = 'system:inspection_credit_reversal',
@@ -1709,132 +1861,9 @@ async function reverseInspectionCreditForBooking({
     let reversed = 0;
     for (const offer of redeemedOffers) {
       try {
-        // Recovery sweep only: no office alert, rebind or reversal for a booking that is no longer the approved cancel
-        // (a point-in-time check; every write below re-proves the generation inside its own transaction).
-        if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(db, cancelFence);
-        // FIRST (PR #3178 r17 P1): an invoice for this cancelled booking
-        // still holding money — paid, processing, unverifiable PI,
-        // anything outside the resolved set — may have the credit
-        // EMBEDDED in it. Neither reversing NOR rebinding is safe then: a
-        // blind negative movement would consume UNRELATED balance, and a
-        // rebind would claim the credit belongs to another booking while
-        // it sits in this one's invoice. Flag the office once and leave
-        // the offer bound; when the office resolves the invoice, the
-        // hourly sweep retries and rebind/reversal proceeds normally.
-        // Fail CLOSED on a failed check — never move money blind.
-        try {
-          const unresolved = await require('./invoice')
-            .unresolvedInvoicesForCancelledService(db, scheduledServiceId)
-            .first('id');
-          if (unresolved) {
-            await alertReversalNeedsOffice(offer, scheduledServiceId, {
-              reason: 'invoice_unresolved',
-              body: `A $${round2(offer.amount).toFixed(2)} inspection credit is tied to a cancelled booking whose invoice still holds money. Reversing automatically could take unrelated balance — resolve the invoice, then collect or write off the credit.`,
-            }, cancelFence);
-            continue;
-          }
-        } catch (checkErr) {
-          logger.error(`[inspection-credit] invoice-state check failed for offer ${offer.id} — reversal deferred: ${checkErr.message}`);
-          continue;
-        }
-        // The credit was earned by BOOKING inside the window. If another
-        // live booking still stands in that window, the customer is still
-        // entitled to it — rebind rather than claw it back (Codex #3178
-        // P1): cancelling one of two bookings must not cost them the credit.
-        // A PROVEN customer booking only — read from the booking-event
-        // table so it stays true after this offer has redeemed (marking
-        // offers was circular, Codex #3178 r4 P0).
-        const alternate = await provenBookingInWindow({
-          customerId: offer.customer_id,
-          from: offer.created_at,
-          to: offer.expires_at,
-          excludeIds: [scheduledServiceId, offer.source_scheduled_service_id],
-        });
-        if (alternate && await rebindRedeemedOffer(offer.id, alternate.id, cancelFence)) {
-          logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
-          continue;
-        }
-        const { seriesChild } = await findLiveSeriesChildForReversal(offer, scheduledServiceId);
-        if (seriesChild && await rebindRedeemedOffer(offer.id, seriesChild.id, cancelFence)) {
-          logger.info(`[inspection-credit] offer ${offer.id} rebound to live series child ${seriesChild.id} — anchor cancelled, series continues`);
-          continue;
-        }
-        if (Array.isArray(pinnedReversalOfferIds) && !pinnedReversalOfferIds.map(String).includes(String(offer.id))) {
-          logger.info(`[inspection-credit] offer ${offer.id} not reversed — the confirmed cancel card did not show it; left for the hourly sweep`);
-          continue;
-        }
-        await db.transaction(async (trx) => {
-          if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelFence);
-          // Claim the reversal first: status-guarded so two cancellations
-          // can't both give the money back — and bound to the LIFECYCLE this
-          // sweep actually read (Codex #3178 r21 P1): a delayed attempt can
-          // straddle a reverse-then-re-redeem by another worker, and an
-          // id+status guard alone would then reverse the NEW booking's
-          // credit while that booking is still live. The claim requires the
-          // offer to still be bound to THIS cancelled booking and to the
-          // ledger entry read at the top; any concurrent transition makes
-          // it a silent claim_lost.
-          const claimed = await trx('inspection_credit_offers')
-            .where({
-              id: offer.id,
-              status: 'redeemed',
-              redeemed_scheduled_service_id: scheduledServiceId,
-              credit_ledger_id: offer.credit_ledger_id,
-            })
-            .update({
-              // Reopens ONLY while the original window still stands; a
-              // lapsed one closes out instead of dangling.
-              status: new Date(offer.expires_at) >= now ? 'offered' : 'expired',
-              redeemed_at: null,
-              redeemed_scheduled_service_id: null,
-              credit_ledger_id: null,
-              // A successful reversal starts a fresh alert cycle (Codex
-              // #3178 r9 P2): a stale marker from an earlier FAILED attempt
-              // would suppress the one alert a future spent-credit failure
-              // on the reopened offer is allowed to raise.
-              reversal_alerted_at: null,
-              updated_at: trx.fn.now(),
-            });
-          if (claimed !== 1) {
-            const e = new Error('reversal claim lost a race');
-            e.inspectionCreditSkip = 'claim_lost';
-            throw e;
-          }
-          await postCreditMovement({
-            customerId: offer.customer_id,
-            delta: -round2(offer.amount),
-            source: 'inspection_credit',
-            note: 'Inspection credit returned — the booking it was applied to was cancelled',
-            createdBy,
-          }, trx);
-        });
-        reversed += 1;
-        logger.info(`[inspection-credit] offer ${offer.id} reversed — booking ${scheduledServiceId} went non-live`);
+        reversed += await reverseOneOffer(offer, { scheduledServiceId, createdBy, now, pinnedReversalOfferIds, cancelFence });
       } catch (err) {
-        if (err?.inspectionCreditSkip === 'claim_lost') continue;
-        if (err?.code === 'CANCEL_FENCE') {
-          // The booking is no longer (or not provably) the approved cancel: this offer is left exactly as it is.
-          logger.info(`[inspection-credit] offer ${offer.id} left untouched: ${err.message}`);
-          continue;
-        }
-        logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
-        // The office alert is reserved for the one failure that is a
-        // BILLING fact, not an operational one (PR #3178 r18 P2): the
-        // typed insufficient-balance refusal from postCreditMovement —
-        // the credit is fungible, so once spent the balance can't cover
-        // the reversal, the money cannot be clawed back automatically,
-        // and it becomes an OFFICE decision (collect or write off) rather
-        // than a log line nobody reads (Codex #3175 r4 P0). A deadlock,
-        // dropped connection or ledger fault is NOT that: the balance may
-        // be fine, the hourly sweep retries it, and telling the office to
-        // collect $75 that was never missing would be a false instruction
-        // a later successful retry cannot retract.
-        if (err?.code === 'INSUFFICIENT_CREDIT') {
-          await alertReversalNeedsOffice(offer, scheduledServiceId, {
-            reason: 'credit_already_spent',
-            body: `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
-          }, cancelFence);
-        }
+        await handleOfferReversalError(err, offer, scheduledServiceId, cancelFence);
       }
     }
     return { reversed };
