@@ -1282,7 +1282,7 @@ describe('sweep', () => {
 describe('the November nitrogen target on the lawn brief', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');
   const areas = require('../services/lawn-trouble-areas');
-  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
   const BAG = 'LESCO 24-0-11 with PolyPlus OPTI';
   const november = (version = LAWN_V13_VERSION) => mockSummarize.mockReturnValue({
     version,
@@ -1296,7 +1296,7 @@ describe('the November nitrogen target on the lawn brief', () => {
   let propertyOf;
   beforeEach(() => {
     for (const name of GATES) process.env[name] = 'true';
-    loadActive = jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
+    loadActive = jest.spyOn(areas, 'loadActiveLargePatch').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
     propertyOf = jest.spyOn(areas, 'propertyOf').mockResolvedValue('7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d');
   });
   afterEach(() => { for (const name of GATES) delete process.env[name]; loadActive.mockRestore(); propertyOf.mockRestore(); });
@@ -1310,7 +1310,7 @@ describe('the November nitrogen target on the lawn brief', () => {
   test('active fungus: the bag states 0.5 lb N/1000 with the reason and the normal figure; nothing else changes', async () => {
     november();
     const guidance = await guidanceFor();
-    expect(bagOf(guidance).gates).toEqual({ targetN: '0.5 lb N/1000 (active fungus mapped; normal 0.75 lb N/1000)', blackoutSensitive: true });
+    expect(bagOf(guidance).gates).toEqual({ targetN: '0.5 lb N/1000 (active large patch mapped; normal 0.75 lb N/1000)', blackoutSensitive: true });
     expect(JSON.stringify(guidance)).not.toContain('"targetN":"0.75');
     expect(guidance.conditional_products.find((p) => p.name === 'Velista').gates).toEqual({ trigger: 'large patch' });
   });
@@ -1487,6 +1487,101 @@ describe('the May Tetrino rate on the lawn brief', () => {
     const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2027-05-10', property_id: PROPERTY }] }));
     await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('db down');
     expect(global.__dispatch).not.toHaveBeenCalled();
+    expect(state.updates.scheduled_services || []).toEqual([]);
+  });
+});
+
+// GATE_LAWN_DEC_LARGE_PATCH_K (owner 2026-10-23): the brief says the December potassium bag replaces the 10-0-22 the way the plan does.
+describe('the December large patch bag on the lawn brief', () => {
+  const { LAWN_V13_VERSION } = require('../services/lawn-program');
+  const areas = require('../services/lawn-trouble-areas');
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+  const TEN = 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer';
+  const BLACK_OUT = 'LESCO Black Out 0-0-24 AM Spar-TECH';
+  const december = (version = LAWN_V13_VERSION, month = 12) => mockSummarize.mockReturnValue({
+    version,
+    window: { key: 'dec_v13_spreader_feeding', month, title: 'December', visitType: 'granular', goal: 'Feed' },
+    products: [
+      { productName: TEN, productId: 't22', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, gates: { targetN: '0.45 lb N/1000', targetK2O: '0.99 lb K2O/1000', blackoutSensitive: true } },
+      { productName: BLACK_OUT, productId: 'bo', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_k', defaultInPlan: false, gates: { targetK: '0.99 lb K2O/1000', trigger: 'active_large_patch_mapped' } },
+    ],
+  });
+  let loadActive;
+  let propertyOf;
+  beforeEach(() => {
+    for (const name of GATES) process.env[name] = 'true';
+    loadActive = jest.spyOn(areas, 'loadActiveLargePatch').mockResolvedValue([{ id: 'a', type: 'fungus' }]);
+    propertyOf = jest.spyOn(areas, 'propertyOf').mockResolvedValue('7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d');
+  });
+  afterEach(() => { for (const name of GATES) delete process.env[name]; loadActive.mockRestore(); propertyOf.mockRestore(); });
+  const guidanceFor = async () => {
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2026-12-10', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }] }));
+    expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+    return storedBrief(state).brief.product_guidance;
+  };
+  const entryOf = (guidance, name) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === name);
+  const NORMAL = { targetN: '0.45 lb N/1000', targetK2O: '0.99 lb K2O/1000', blackoutSensitive: true };
+
+  test('active large patch: the 10-0-22 entry says the 0-0-24 replaces it; the 0-0-24 keeps its trigger; the stored rows are not edited', async () => {
+    december();
+    const summary = mockSummarize();
+    const guidance = await guidanceFor();
+    expect(entryOf(guidance, TEN).gates).toEqual({ ...NORMAL, swappedForActiveLargePatch: `use ${BLACK_OUT} instead while a large patch is mapped (0 lb N)` });
+    expect(entryOf(guidance, BLACK_OUT).gates).toEqual({ targetK: '0.99 lb K2O/1000', trigger: 'active_large_patch_mapped' });
+    expect(summary.products[0].gates).toEqual(NORMAL);
+  });
+
+  test('no change, and no trouble-area read, when the gate is off, the program is not v13 or the month is not December; no change for take-all', async () => {
+    december();
+    delete process.env.GATE_LAWN_DEC_LARGE_PATCH_K;
+    expect(entryOf(await guidanceFor(), TEN).gates).toEqual(NORMAL);
+    process.env.GATE_LAWN_DEC_LARGE_PATCH_K = 'true';
+    december('2026.05');
+    expect(entryOf(await guidanceFor(), TEN).gates).toEqual(NORMAL);
+    december(LAWN_V13_VERSION, 11);
+    expect(entryOf(await guidanceFor(), TEN).gates).toEqual(NORMAL);
+    expect(loadActive).not.toHaveBeenCalled();
+    december();
+    loadActive.mockResolvedValue([{ id: 'b', type: 'take_all' }]);
+    expect(entryOf(await guidanceFor(), TEN).gates).toEqual(NORMAL);
+  });
+
+  test('gate off (or a gate it needs off): the new 0-0-24 row is not in the brief at all, and the brief equals the one built without the row', async () => {
+    const withoutRow = () => {
+      december();
+      const summary = mockSummarize();
+      mockSummarize.mockReturnValue({ ...summary, products: summary.products.filter((p) => p.productName !== BLACK_OUT) });
+    };
+    withoutRow();
+    delete process.env.GATE_LAWN_DEC_LARGE_PATCH_K;
+    const baseline = await guidanceFor();
+    for (const name of [null, ...GATES]) {
+      for (const g of GATES) process.env[g] = 'true';
+      delete process.env.GATE_LAWN_DEC_LARGE_PATCH_K;
+      if (name && name !== 'GATE_LAWN_DEC_LARGE_PATCH_K') delete process.env[name];
+      december();
+      const guidance = await guidanceFor();
+      expect(entryOf(guidance, BLACK_OUT)).toBeUndefined();
+      expect(JSON.stringify(guidance)).not.toContain(BLACK_OUT);
+      expect(guidance).toEqual(baseline);
+      expect(loadActive).not.toHaveBeenCalled();
+    }
+    // The swap gate on but the trouble-area gate off is off too (lawnDecLargePatchKLive needs it).
+    for (const g of GATES) process.env[g] = 'true';
+    delete process.env.GATE_LAWN_TROUBLE_AREAS;
+    december();
+    expect(entryOf(await guidanceFor(), BLACK_OUT)).toBeUndefined();
+    // All gates on: the row is listed, as a conditional product with its trigger.
+    for (const g of GATES) process.env[g] = 'true';
+    december();
+    expect(entryOf(await guidanceFor(), BLACK_OUT)).toMatchObject({ conditional: true, trigger: 'active_large_patch_mapped' });
+  });
+
+  test('a failed trouble-area read aborts the generation (strict, like the November target): nothing is stored', async () => {
+    december();
+    loadActive.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2026-12-10', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }] }));
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('db down');
     expect(state.updates.scheduled_services || []).toEqual([]);
   });
 });

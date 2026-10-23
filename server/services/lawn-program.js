@@ -25,15 +25,23 @@ const LAWN_V13_VERSION = '2026.10-v13';
 
 // `?.()`: many suites mock feature-gates with a partial object. A reader the
 // mock lacks reads as off, the fail-closed answer.
-// The v13 recipe as every reader below GATE_LAWN_BERMUDA_REMOVAL sees it: the
-// per-visit `addOns` blocks (the bermuda removal step) are left out, so with that
-// gate off no reader, the programs route, the protocol reader or the estimate
-// tools included, sees an add-on. Built once.
-const v13WithoutAddOns = Object.fromEntries(Object.entries(v13).map(([track, program]) => [
-  track,
-  // A visit with no add-on keeps its own object (identity), so a reader that holds one sees the recipe's.
-  { ...program, visits: program.visits.map((visit) => (visit.addOns ? (({ addOns, ...rest }) => rest)(visit) : visit)) },
-]));
+// The v13 recipe as every reader sees it: a visit's optional conditional blocks are left out unless their gate is live, so with the gate
+// off no reader, the programs route, the protocol reader or the estimate tools included, sees one.
+//   addOns  GATE_LAWN_BERMUDA_REMOVAL  the bermuda removal step
+//   swaps   GATE_LAWN_DEC_LARGE_PATCH_K  the December potassium bag for a mapped large patch (config/lawn-v13-trouble-product-swaps.js)
+// A visit with none of the removed keys keeps its own object (identity), so a reader that holds one sees the recipe's. Built once per
+// combination.
+const views = new Map();
+function v13View({ addOns, swaps }) {
+  const key = `${addOns ? 'a' : '-'}${swaps ? 's' : '-'}`;
+  if (key === 'as') return v13;
+  if (!views.has(key)) {
+    const drop = [...(addOns ? [] : ['addOns']), ...(swaps ? [] : ['swaps'])];
+    const strip = (visit) => (drop.some((name) => visit[name]) ? Object.fromEntries(Object.entries(visit).filter(([name]) => !drop.includes(name))) : visit);
+    views.set(key, Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(strip) }])));
+  }
+  return views.get(key);
+}
 
 // GATE_LAWN_RECLAIMED_HALF_N: the two reclaimed-water sentences of the recipe (one line in every track's notes and one in its safety_rules) say what the TECH does.
 // The JSON holds the wording that is true with the gate off ("the app does not adjust it yet"); with the gate on, the reader gets the wording
@@ -53,14 +61,17 @@ const reword = (line) => RECLAIMED_WORDING.reduce((text, [from, to]) => text.rep
 const withReclaimedWording = (program) => Object.fromEntries(Object.entries(program).map(([track, recipe]) => [track, {
   ...recipe, notes: recipe.notes.map(reword), safety_rules: recipe.safety_rules.map(reword),
 }]));
-const v13Reclaimed = withReclaimedWording(v13);
-const v13WithoutAddOnsReclaimed = withReclaimedWording(v13WithoutAddOns);
+// The reclaimed wording over each recipe view, built once per view (memoized: the readers keep identity per gate combination).
+const reclaimedViews = new Map();
+const reclaimedView = (view) => {
+  if (!reclaimedViews.has(view)) reclaimedViews.set(view, withReclaimedWording(view));
+  return reclaimedViews.get(view);
+};
 
 function lawnProtocols() {
   if (!featureGates.lawnV13Live?.()) return protocols.lawn;
-  const reclaimed = featureGates.lawnReclaimedHalfNLive?.() === true;
-  if (featureGates.lawnBermudaRemovalLive?.() === true) return reclaimed ? v13Reclaimed : v13;
-  return reclaimed ? v13WithoutAddOnsReclaimed : v13WithoutAddOns;
+  const view = v13View({ addOns: featureGates.lawnBermudaRemovalLive?.() === true, swaps: featureGates.lawnDecLargePatchKLive?.() === true });
+  return featureGates.lawnReclaimedHalfNLive?.() === true ? reclaimedView(view) : view;
 }
 
 // v13 is one program for every grass, still filed under the three track keys.

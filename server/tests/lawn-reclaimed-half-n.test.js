@@ -5,6 +5,7 @@ const mockLoadActive = jest.fn();
 jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
+  loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
 const featureGates = require('../config/feature-gates');
@@ -13,7 +14,7 @@ const engine = require('../services/waveguard-plan-engine');
 const reclaimed = require('../services/lawn-reclaimed-water');
 const v13 = require('../config/lawn-protocol-v13.json');
 
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const service = { id: 'svc-1', property_id: PROPERTY };
@@ -219,19 +220,38 @@ describe('the winter potash bag keeps its rate (reclaimed water adds N, not K)',
 describe('with the November large patch cut too: the smaller target wins, not both', () => {
   beforeEach(() => { mockLoadActive.mockResolvedValue([{ id: 'a', type: 'fungus' }]); });
 
+  test('December with GATE_LAWN_DEC_LARGE_PATCH_K: a reclaimed lawn with an active large patch gets the potassium-only swap; no nitrogen rule touches it', async () => {
+    const savedK = process.env.GATE_LAWN_DEC_LARGE_PATCH_K;
+    process.env.GATE_LAWN_DEC_LARGE_PATCH_K = 'true';
+    try {
+      const found = await run(REC(), 'Dec');
+      expect(found.productSwap).toMatchObject({ targetN: 0 });
+      expect(found.nitrogenCut).toBeNull();
+      expect(found).not.toHaveProperty('reclaimedWater');
+      expect(found.visit.primary).toContain('Black Out 0-0-24');
+      // Without the large patch the 10-0-22 stays, and the reclaimed rule keeps it at full rate (winter potash).
+      mockLoadActive.mockResolvedValue([]);
+      const plain = await run(REC(), 'Dec');
+      expect(plain).not.toHaveProperty('productSwap');
+      expect(plain).toMatchObject({ reclaimedWater: 'kept', keptFor: 'potash', nitrogenCut: null });
+    } finally {
+      if (savedK === undefined) delete process.env.GATE_LAWN_DEC_LARGE_PATCH_K; else process.env.GATE_LAWN_DEC_LARGE_PATCH_K = savedK;
+    }
+  });
+
   test('reclaimed + active fungus in November is 0.375, not 0.25 and not 0.5', async () => {
     const found = await run(REC(), 'Nov');
     expect(found.nitrogenCut).toBe(0.375);
     expect(found.reclaimedWater).toBe('half');
     expect(found.fungusAlso).toBe(true);
     // The visit text names both reasons; the target is the smaller one.
-    expect(found.visit.notes).toContain('N rate: 0.375 lb N (reclaimed water, half; active fungus mapped; normal 0.75 lb N)');
+    expect(found.visit.notes).toContain('N rate: 0.375 lb N (reclaimed water, half; active large patch mapped; normal 0.75 lb N)');
     // Both notes reach the bag the halved target sized: the half-nitrogen note, and the fungus spreader instruction without its own (larger) figures.
     const f24 = { id: 'f24', analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
     const mix = engine.calculateProductAmount({ product: f24, lawnSqft: 10000, areaFactor: 1, ...found.targets, ...engine.v13RateOptions({ ratePer1000: null, rateUnit: 'lb_n' }) });
     expect(engine.nitrogenCutNotes(mix, f24, found)).toEqual([
       { key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).' },
-      { key: FUNGUS_NITROGEN_NOTE_KEY, severity: 'note', text: 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.' },
+      { key: FUNGUS_NITROGEN_NOTE_KEY, severity: 'note', text: 'Active large patch mapped. Close the spreader over the patch and 6 ft around it.' },
     ]);
     // A line the halved target did not size gets neither.
     expect(engine.nitrogenCutNotes({ rateSource: 'protocol_rate', targetNPer1000: 0.375 }, f24, found)).toEqual([]);
@@ -243,7 +263,7 @@ describe('with the November large patch cut too: the smaller target wins, not bo
     const f24 = { id: 'f24', analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
     const mix = engine.calculateProductAmount({ product: f24, lawnSqft: 10000, areaFactor: 1, ...found.targets, ...engine.v13RateOptions({ ratePer1000: null, rateUnit: 'lb_n' }) });
     expect(engine.nitrogenCutNotes(mix, f24, found).map((note) => note.text)).toEqual([
-      'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.',
+      'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.',
     ]);
   });
 
@@ -256,7 +276,7 @@ describe('with the November large patch cut too: the smaller target wins, not bo
     const found = await run(NOT_REC(), 'Nov');
     expect(found.nitrogenCut).toBe(0.5);
     expect(found.reclaimedWater).toBeUndefined();
-    expect(found.visit.notes).toContain('active fungus mapped; normal 0.75 lb N');
+    expect(found.visit.notes).toContain('active large patch mapped; normal 0.75 lb N');
   });
 
   test('reclaimed with the large patch gate off is the half cut and reads no area', async () => {
@@ -401,13 +421,17 @@ describe('the recipe text the readers get (lawnProtocols), true with the gate of
     }
   });
 
-  test('the original text is the object the readers held before when bermuda removal is on (identity kept), and the variant is memoized', () => {
+  test('gate off serves the same recipe view on every call (identity kept), and the reclaimed variant is memoized', () => {
     process.env.GATE_LAWN_V13 = 'true';
     process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
     delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    expect(programs.lawnProtocols()).toBe(v13);
+    // Gate off: the view the readers held before (main's per-gate recipe view), the same object on every call.
+    const off = programs.lawnProtocols();
+    expect(programs.lawnProtocols()).toBe(off);
+    expect(JSON.stringify(off)).not.toMatch(/half nitrogen today/);
     process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
     expect(programs.lawnProtocols()).toBe(programs.lawnProtocols());
+    expect(programs.lawnProtocols()).not.toBe(off);
   });
 
   test('strict opt-in: only exactly true swaps the wording, and GATE_LAWN_V13 off serves the old program regardless', () => {

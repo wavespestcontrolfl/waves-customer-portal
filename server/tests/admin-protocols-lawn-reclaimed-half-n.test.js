@@ -20,6 +20,7 @@ const mockLoadActive = jest.fn();
 jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
+  loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
 const db = require('../models/db');
@@ -35,9 +36,9 @@ const CATALOG = [
 const V13_SUMMARY = { version: LAWN_V13_VERSION, products: [{ productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} }] };
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
-const FUNGUS_NOTE = 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
+const FUNGUS_NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
 const HALF_NOTE = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
 
@@ -108,7 +109,7 @@ describe('each nitrogen gate alone activates its own adjustment on the tank shee
   });
 
   test('large patch gate alone (reclaimed OFF): 0.5 lb N with the fungus note, no property read', async () => {
-    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N');
+    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N');
     const body = await sheet();
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
     expect(bag(body).gateNotes).toContainEqual({ key: 'activeFungusNitrogen', severity: 'note', text: FUNGUS_NOTE });
@@ -116,20 +117,20 @@ describe('each nitrogen gate alone activates its own adjustment on the tank shee
   });
 
   test('both on, a reclaimed lawn with fungus: the smaller target (0.375), only the reclaimed note', async () => {
-    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N');
+    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N');
     const body = await sheet();
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(1.5625, 4);
     // Both notes: the half-nitrogen note and the fungus spreader instruction (without the fungus rule's own, larger, figures).
     expect(bag(body).gateNotes).toEqual(expect.arrayContaining([
       { key: 'reclaimedNitrogen', severity: 'note', text: HALF_NOTE },
-      { key: 'activeFungusNitrogen', severity: 'note', text: 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.' },
+      { key: 'activeFungusNitrogen', severity: 'note', text: 'Active large patch mapped. Close the spreader over the patch and 6 ft around it.' },
     ]));
     expect(JSON.stringify(bag(body).gateNotes)).not.toContain('reduced to 0.5');
-    expect(bag(body).raw).toContain('reclaimed water, half; active fungus mapped');
+    expect(bag(body).raw).toContain('reclaimed water, half; active patch mapped');
   });
 
   test('both on but the lawn is not reclaimed: the fungus cut alone; large patch without trouble areas + reclaimed on: the half alone', async () => {
-    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N');
+    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N');
     reclaimed.mockResolvedValue(false);
     expect(await rate()).toBeCloseTo(2.0833, 3);
     reclaimed.mockResolvedValue(true);

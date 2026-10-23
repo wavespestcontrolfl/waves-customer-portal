@@ -23,6 +23,8 @@ const TERMINAL_STATUSES = ['cancelled', 'completed', 'no_show', 'skipped', 'resc
 // who counts as a member.
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 
+const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
+
 function membershipTierKey(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
@@ -117,7 +119,8 @@ function toQualifyingKeys(raw) {
   // (\bpalms?\b never matches "palmetto", so palmetto-bug pest names pass.)
   const palmService = /\bpalms?\b/.test(s);
   if (!palmService && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) keys.add('tree_shrub');
-  if (s.includes('mosquito')) keys.add('mosquito');
+  // The misting system is not the barrier program and not a WaveGuard qualifier.
+  if (s.includes('mosquito') && !isMistingSystemIdentity(s)) keys.add('mosquito');
   if (s.includes('termite') && s.includes('bait')) keys.add('termite_bait');
   // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive): a
   // rodent-LED bait/station/monitoring row is a qualifier. Separators are
@@ -577,6 +580,16 @@ async function filterRowsToStreet(database, rows, streetScope) {
 //  - termite counts ONLY for bait/station/monitoring products — a recurring
 //    termite BOND (termite_bond_1yr) is a distinct warranty product and must
 //    not block a bait-monitoring quote (codex #3253 r3).
+// The commercial auto-priced families a row OWNS (never qualifies): each check is independent, so a combined
+// "Commercial Tree & Shrub + Mosquito" row owns both (Codex #6503 r10); a misting-system row is owned under its own key
+// by the caller and never claims barrier mosquito here.
+function addCommercialOwnedFamilies(s, raw, add) {
+  if (s.includes('pest') && !isRodentLedText(s)) add('pest_control');
+  if (s.includes('lawn') || s.includes('turf')) add('lawn_care');
+  if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
+  if (s.includes('mosquito') && !isMistingSystemIdentity(raw)) add('mosquito');
+}
+
 function ownershipFamiliesFromText(raw) {
   // Key-shaped text ('rodent_bait', 'pest_rodent_quarterly' in an unlinked
   // row's service_type) must match the token regexes — underscores are word
@@ -592,13 +605,11 @@ function ownershipFamiliesFromText(raw) {
   if (/one[\s_-]?time|onetime/.test(s)) return [];
   const keys = toQualifyingKeys(s);
   const add = (key) => { if (!keys.includes(key)) keys.push(key); };
-  if (s.includes('commercial')) {
-    const rodentLed = isRodentLedText(s);
-    if (s.includes('pest') && !rodentLed) add('pest_control');
-    if (s.includes('lawn') || s.includes('turf')) add('lawn_care');
-    if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
-    if (s.includes('mosquito')) add('mosquito');
-  }
+  // The misting system is OWNED under its own canonical key, residential or commercial (plan context, recommendations and
+  // duplicate-coverage checks see the live plan), but never claims barrier-mosquito ownership and never qualifies for a
+  // WaveGuard tier: toQualifyingKeys above leaves it out (Codex #6503 r9).
+  if (isMistingSystemIdentity(raw)) add('mosquito_misting');
+  if (s.includes('commercial')) addCommercialOwnedFamilies(s, raw, add);
   // Rodent ownership means the BAIT-MONITORING product (codex #3253 r4):
   // trapping / exclusion / rodent_general_one_time are distinct specialties
   // (estimate-converter maps only bait|station|monitor identities to

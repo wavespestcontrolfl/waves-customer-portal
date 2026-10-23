@@ -15,7 +15,7 @@ const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Eme
 const POTASH = 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer';
 const POTASH_NOTE = 'Reclaimed water: this bag carries the winter potash, so its full rate stays today.';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
-  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
+  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
 const HALF_NOTE = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
 const KEPT_NOTE = 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.';
 const day = etDateString(addETDays(new Date(), -1));
@@ -76,10 +76,11 @@ describeDb('reclaimed water half nitrogen through PostgreSQL', () => {
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   }, 90000);
   afterAll(async () => { if (owned) await owned.dispose(); });
-  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); });
+  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); });
   afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
-  // A visit on `date` at a fresh lawn; `water` sets the property's reclaimed value ({ value, source }), else the column stays NULL.
+  // A visit on `date` at a fresh lawn; `water` sets the property's reclaimed value ({ value, source }), else the column stays NULL. An area's
+  // `target` records the disease on its fungicide application (the large patch evidence).
   async function visitOn(date, { water = null, areas = [] } = {}) {
     const f = await fixture(knex);
     await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
@@ -90,6 +91,13 @@ describeDb('reclaimed water half nitrogen through PostgreSQL', () => {
         customer_id: f.customerId, property_id: f.property.id, place: ['front', 'back', 'left_side', 'right_side'][index], type: area.type, status: 'active',
         source: 'tech_tap', first_seen_on: day, last_seen_on: day,
       });
+      // The large patch evidence the November cut reads: the fungicide spot application at that place recorded the disease.
+      if (area.target) {
+        await knex('property_application_history').insert({
+          customer_id: f.customerId, property_id: f.property.id, application_date: day, category: 'fungicide',
+          treated_place: ['front', 'back', 'left_side', 'right_side'][index], target_pest: area.target,
+        });
+      }
     }
     return f.visit(0, { scheduled_date: date });
   }
@@ -144,12 +152,12 @@ describeDb('reclaimed water half nitrogen through PostgreSQL', () => {
   });
 
   test('reclaimed with active fungus in November: the smaller target (0.375), BOTH notes (half nitrogen and the fungus spreader instruction), in the plan and the completion defaults', async () => {
-    const result = await plan(await visitOn('2026-11-10', { water: COUNTY, areas: [{ type: 'fungus' }] }));
+    const result = await plan(await visitOn('2026-11-10', { water: COUNTY, areas: [{ type: 'fungus', target: 'Large patch' }] }));
     const item = bagOf(result.mixCalculator.items);
     expect(item.mix.targetNPer1000).toBe(0.375);
     expect(item.gateNotes).toEqual(expect.arrayContaining([
       { key: 'reclaimedNitrogen', severity: 'note', text: HALF_NOTE },
-      { key: 'activeFungusNitrogen', severity: 'note', text: 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.' },
+      { key: 'activeFungusNitrogen', severity: 'note', text: 'Active large patch mapped. Close the spreader over the patch and 6 ft around it.' },
     ]));
     const defaulted = bagOf(result.completionDefaults.items);
     expect(defaulted.gateNotes.map((note) => note.key)).toEqual(expect.arrayContaining(['reclaimedNitrogen', 'activeFungusNitrogen']));
