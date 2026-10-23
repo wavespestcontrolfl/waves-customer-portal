@@ -279,12 +279,27 @@ function linkInTextVerdict(text, depth) {
   return hostedTextVerdict(text, depth) || relativeTextVerdict(text);
 }
 
+// True when the text holds a link of any of the four shapes linkInTextVerdict judges (absolute,
+// protocol-relative, scheme-less host, relative). It judges nothing: it only says "a link is in here".
+function holdsLink(text) {
+  if (text.match(URL_IN_TEXT_RE) || text.match(PROTOCOL_RELATIVE_RE)) return true;
+  for (const match of text.match(HOST_LINK_RE) || []) {
+    const { link } = splitTail(match);
+    if (/[/?#]/.test(link) || /^www\./i.test(link)) return true;
+  }
+  return (text.match(RELATIVE_LINK_RE) || []).some(match => splitTail(match).link.length > 1);
+}
+
 function wrappedLinkVerdict(url, depth) {
-  if (depth >= MAX_WRAP_DEPTH) return null;
   // The outer path itself is never judged here (/pay/info, /review/us stay): only a path that EMBEDS an
   // encoded or absolute target (%2F, %3A, http, //) is read (Codex #6375 r24).
   const embeddedPath = /%2f|%3a|https?|\/\//i.test(url.pathname) ? [decodeOnce(url.pathname)] : [];
   const parts = [...url.searchParams.values(), url.hash.replace(/^#/, ''), ...embeddedPath];
+  // Past the depth limit a link that still wraps another link cannot be judged: it fails closed and the
+  // whole link goes, so a customer link under three or more wrappers never comes back (follow-up to #6375).
+  if (depth >= MAX_WRAP_DEPTH) {
+    return parts.some(part => decodedForms(part).some(holdsLink)) ? REDACTED_PRIVATE_LINK : null;
+  }
   for (const part of parts) {
     for (const text of decodedForms(part)) {
       const verdict = linkInTextVerdict(text, depth + 1);

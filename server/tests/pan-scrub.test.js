@@ -2,7 +2,7 @@
 // Luhn-gated scrubber plus the processor's three-artifact wrapper
 // (transcript string + diarized segments + contact-pass stream).
 
-const { luhnValid, scrubPans, scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
+const { luhnValid, scrubPans, scrubPansDetailed, scrubSegments, createEditTracker, scrubPansTracked, trackedEditList } = require('../utils/pan-scrub');
 
 // The processor's wrapper is exercised via the _test export (harness
 // convention — see call-transcription-hallucination-guard.test.js).
@@ -248,6 +248,21 @@ describe('scrubSegments — diarized-segment scrub with cross-boundary bridging 
 });
 
 describe('scrubPans — CVV context redaction', () => {
+  it('masks the equals form exactly like the colon form (#6375 follow-up)', () => {
+    for (const [input, expected] of [
+      ['cvv=123', 'cvv=[code removed]'],
+      ['CVV = 123', 'CVV = [code removed]'],
+      ['CVV2=4321', 'CVV2=[code removed]'],
+      ['cvc =987 ok', 'cvc =[code removed] ok'],
+      ['card security code=123', 'card security code=[code removed]'],
+      ['cvv=one two three', 'cvv=[code removed]'],
+    ]) {
+      expect(scrubPans(input)).toBe(expected);
+      expect(scrubPans(input.replace('=', ':'))).toBe(expected.replace('=', ':'));
+    }
+    expect(scrubPans('cvv=none')).toBe('cvv=none');
+    expect(scrubPans('cv=123')).toBe('cv=123');
+  });
   it('masks a numeric CVV named in context', () => {
     expect(scrubPans('the cvv is 123 thanks')).toBe('the cvv is [code removed] thanks');
     expect(scrubPans('card security code 4 5 6 7.')).toBe('card security code [code removed].');
@@ -576,5 +591,47 @@ describe('scrubStructuredTranscript (fallback-heal for legacy transcript_structu
     expect(scrubStructuredTranscript('not-json{')).toEqual({ json: 'not-json{', count: 0 });
     const clean = JSON.stringify({ segments: [{ text: 'hi' }] });
     expect(scrubStructuredTranscript(clean)).toEqual({ json: clean, count: 0 });
+  });
+});
+
+describe('scrubPansTracked — edits in input coordinates (#6375 follow-up)', () => {
+  const edits = (text) => {
+    const { tracker, count } = scrubPansTracked(createEditTracker(text));
+    return { out: tracker.text, count, list: trackedEditList(tracker) };
+  };
+
+  it('reports only the card span, the absorbed expiry/CVV included', () => {
+    const text = 'before 4111 1111 1111 1111 12 28 123 after';
+    const { out, list } = edits(text);
+    expect(out).toBe('before [card ending 1111] [code removed] after');
+    expect(list).toEqual([{ start: 7, end: 36, text: '[card ending 1111] [code removed]' }]);
+    expect(text.slice(0, 7) + list[0].text + text.slice(36)).toBe(out);
+  });
+
+  it('reports each card as its own edit and leaves the text between them', () => {
+    const text = 'a 4111 1111 1111 1111 b 5555 5555 5555 4444 c';
+    expect(edits(text).list).toEqual([
+      { start: 2, end: 21, text: '[card ending 1111]' },
+      { start: 24, end: 43, text: '[card ending 4444]' },
+    ]);
+  });
+
+  it('gives a CVV keyword edit only the code', () => {
+    const text = 'x cvv=123 y';
+    expect(edits(text).list).toEqual([{ start: 6, end: 9, text: '[code removed]' }]);
+  });
+
+  it('applying the edits to the input gives the scrubPansDetailed text', () => {
+    for (const text of [
+      'card 4111 1111 1111 1111 and 5555 5555 5555 4444 12/28 cvv: 123 end',
+      'four one one one one one one one one one one one one one one one then cvc is one two three',
+      'nothing here, call 941 555 0100',
+    ]) {
+      const { list } = edits(text);
+      let rebuilt = '';
+      let cursor = 0;
+      for (const edit of list) { rebuilt += text.slice(cursor, edit.start) + edit.text; cursor = edit.end; }
+      expect(rebuilt + text.slice(cursor)).toBe(scrubPansDetailed(text).text);
+    }
   });
 });
