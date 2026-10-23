@@ -574,8 +574,11 @@ async function closeFoundAlerts({ present, technician, now, conn }) {
 }
 
 async function raiseTruckBell({ truck, technician, missing, damaged, check, trx }) {
+  // Item names and tags only: a technician's free-text note never rides in
+  // the bell (the owner's assistant reads bell detail; the note stays on the
+  // maintenance alert, where the office reads it as text).
   const detail = [...missing, ...damaged]
-    .map((line) => `${issueWord(line.state)}: ${line.name}${line.assetTag ? ` (${line.assetTag})` : ''}${line.note ? ` · ${line.note}` : ''}`)
+    .map((line) => `${issueWord(line.state)}: ${line.name}${line.assetTag ? ` (${line.assetTag})` : ''}`)
     .join('\n');
   return raiseAdminAlert(CATEGORY, bellSpec({ truck, technician, missing, damaged }), {
     dedupeKey: bellKey(truck.id),
