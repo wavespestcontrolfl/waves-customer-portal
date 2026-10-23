@@ -892,7 +892,7 @@ function reportFactsContextKeys() {
 async function carpetgrassCelsiusWarningKey(svc, knex) {
   if (featureGates.estimateLawnLimitsLive?.() !== true) return {};
   const lawnLimits = require('./estimate-lawn-limits');
-  const { otherGrasses } = await lawnLimits.loadLawnLimitFlags(svc.customer_id, knex);
+  const { otherGrasses } = await lawnLimits.loadLawnLimitFlags(svc.customer_id, svc.property_id, knex);
   return otherGrasses.includes('carpetgrass') ? { carpetgrassCelsiusWarning: lawnLimits.CARPETGRASS_CELSIUS_WARNING } : {};
 }
 

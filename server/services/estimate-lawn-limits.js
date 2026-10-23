@@ -73,31 +73,75 @@ function estimateHasRecurringLawn(estimate) {
   }
 }
 
-// The customer's two flags. The turf profile is one row per customer. No
-// customer, no profile, or a read error: no flags (the fixed paragraph still
-// prints, because it is true of every lawn estimate).
-async function loadLawnLimitFlags(customerId, knex = db) {
-  if (!customerId) return { otherGrasses: [], virusStreaksSuspected: false };
+// Grasses the fixed paragraph is NOT true for: it talks about clearing weeds "out of St.
+// Augustine", so a lawn recorded as one of these gets no block at all. An unknown, blank
+// or unrecognised grass keeps the block (nearly every lawn is St. Augustine). 'mixed' is
+// a recorded answer that is not St. Augustine, so it counts as not St. Augustine.
+const NOT_ST_AUGUSTINE = Object.freeze(new Set(['bermuda', 'zoysia', 'bahia', 'mixed']));
+
+const NO_FLAGS = Object.freeze({ otherGrasses: [], virusStreaksSuspected: false, grassKey: null });
+
+// Does the customer-level turf profile speak for THIS property? customer_turf_profiles has no
+// property column (one row per customer), and the repo already treats it as the customer's
+// only active property, else the primary one (lawn-bermuda-removal profilePropertyScope: the
+// same rule the bermuda removal switch uses). So the profile applies only when the estimate's
+// or visit's property IS that property, or names none and the customer has one property. A
+// customer with several properties and no named property, a different property, or a failed
+// read: it does not apply (fail closed). A customer with no active property rows at all and no
+// named property is a legacy single home, so it applies.
+async function profileAppliesToProperty(knex, customerId, propertyId) {
+  const scope = await require('./lawn-bermuda-removal').profilePropertyScope(knex, customerId, propertyId || null, false);
+  return scope.ok === true || (scope.count === 0 && !propertyId);
+}
+
+// The grass the lawn is recorded as, as a lawn-grass-context key (st_augustine, bermuda,
+// zoysia, bahia, mixed, unknown) or null: the profile's grass, then its track, then the
+// customer's legacy lawn text.
+async function recordedGrassKey(knex, customerId, profile) {
+  const { normalizeGrassType } = require('./lawn-grass-context');
+  const fromProfile = normalizeGrassType(profile?.grass_type) || normalizeGrassType(profile?.track_key);
+  if (fromProfile) return fromProfile;
   try {
-    const row = await knex('customer_turf_profiles')
-      .where({ customer_id: customerId })
-      .first('other_grasses', 'virus_streaks_suspected');
-    return {
-      otherGrasses: normalizeOtherGrasses(row?.other_grasses),
-      virusStreaksSuspected: row?.virus_streaks_suspected === true,
-    };
+    const customer = await knex('customers').where({ id: customerId }).first('lawn_type');
+    return normalizeGrassType(customer?.lawn_type);
   } catch (err) {
-    logger.warn?.(`[estimate-lawn-limits] flag read failed for customer ${customerId}: ${err.message}`);
-    return { otherGrasses: [], virusStreaksSuspected: false };
+    logger.warn?.(`[estimate-lawn-limits] lawn type read failed for customer ${customerId}: ${err.message}`);
+    return null;
   }
 }
 
-// The block for one estimate row, or null: gate off, or not a recurring lawn
-// estimate. Every surface (the /data payload and both PDF paths) calls this.
+// The flags and the recorded grass for one property of one customer. Only the ACTIVE turf
+// profile counts (the canonical loader's scope: active, or the legacy NULL), and only when it
+// speaks for `propertyId`. No customer, no profile, an inactive profile, another property's
+// profile or a read error: no flags and an unknown grass, so the fixed paragraph still prints
+// (it is true of every St. Augustine lawn estimate) and no flag line or warning does.
+async function loadLawnLimitFlags(customerId, propertyId = null, knex = db) {
+  if (!customerId) return NO_FLAGS;
+  try {
+    if (!(await profileAppliesToProperty(knex, customerId, propertyId))) return NO_FLAGS;
+    const found = await require('./customer-pricing-ai').loadTurfProfile(knex, customerId);
+    // The loader answers [] on a failed read; only a row is a profile.
+    const profile = found && !Array.isArray(found) && typeof found === 'object' ? found : null;
+    return {
+      otherGrasses: normalizeOtherGrasses(profile?.other_grasses),
+      virusStreaksSuspected: profile?.virus_streaks_suspected === true,
+      grassKey: await recordedGrassKey(knex, customerId, profile),
+    };
+  } catch (err) {
+    logger.warn?.(`[estimate-lawn-limits] flag read failed for customer ${customerId}: ${err.message}`);
+    return NO_FLAGS;
+  }
+}
+
+// The block for one estimate row, or null: gate off, not a recurring lawn estimate, or a lawn
+// recorded as a grass other than St. Augustine. Every surface (the /data payload and every
+// PDF path) calls this. The estimate's own property decides which property's profile counts.
 async function lawnLimitsForEstimate(estimate, { knex = db } = {}) {
   if (featureGates.estimateLawnLimitsLive?.() !== true) return null;
   if (!estimate || !estimateHasRecurringLawn(estimate)) return null;
-  return buildLawnLimits(await loadLawnLimitFlags(estimate.customer_id, knex));
+  const flags = await loadLawnLimitFlags(estimate.customer_id, estimate.property_id, knex);
+  if (NOT_ST_AUGUSTINE.has(flags.grassKey)) return null;
+  return buildLawnLimits(flags);
 }
 
 // The /data payload fragment: `{ lawnLimits }` or nothing, so a gate-off or
@@ -118,6 +162,8 @@ module.exports = {
   buildLawnLimits,
   estimateHasRecurringLawn,
   loadLawnLimitFlags,
+  profileAppliesToProperty,
+  NOT_ST_AUGUSTINE,
   lawnLimitsForEstimate,
   lawnLimitsBlock,
 };

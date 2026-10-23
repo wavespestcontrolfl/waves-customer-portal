@@ -17,19 +17,50 @@ const pestEstimate = () => ({
   estimate_data: { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', visitsPerYear: 4 }] } } },
 });
 
-// A knex stand-in: knex('customer_turf_profiles').where(...).first(...) -> row.
-const fakeKnex = (row, { fail = false } = {}) => {
+// A small in-memory knex: tables are arrays of rows; where({..}), where(fn) with where/orWhere/
+// orWhereNull inside (the active scope), select(), first() and awaiting the builder all work.
+function memKnex(tables, { failOn = null } = {}) {
   const calls = [];
   const knex = (table) => {
     calls.push(table);
+    const rows = tables[table] || [];
+    const eq = [];
+    const groups = [];
     const q = {};
-    q.where = jest.fn(() => q);
-    q.first = jest.fn(async () => { if (fail) throw new Error('db down'); return row; });
+    const recorder = (target) => ({
+      where(o) { target.push(['eq', o]); return this; },
+      orWhere(o) { target.push(['eq', o]); return this; },
+      orWhereNull(c) { target.push(['null', c]); return this; },
+    });
+    q.where = (arg) => {
+      if (typeof arg === 'function') { const alts = []; arg.call(recorder(alts)); groups.push(alts); } else eq.push(arg);
+      return q;
+    };
+    q.select = () => q;
+    const has = (row, o) => Object.entries(o).every(([k, v]) => row[k] === v);
+    const match = (row) => eq.every((o) => has(row, o))
+      && groups.every((alts) => alts.some(([kind, x]) => (kind === 'eq' ? has(row, x) : row[x] == null)));
+    const run = () => { if (failOn === table) throw new Error('db down'); return rows.filter(match); };
+    q.first = async () => run()[0];
+    q.then = (resolve, reject) => { try { return Promise.resolve(run()).then(resolve, reject); } catch (e) { return Promise.reject(e).then(resolve, reject); } };
     return q;
   };
   knex.calls = calls;
   return knex;
-};
+}
+
+const PROP_A = 'prop-a';
+const PROP_B = 'prop-b';
+const ONE_PROPERTY = [{ id: PROP_A, customer_id: 'cust-1', active: true, is_primary: true }];
+const TWO_PROPERTIES = [
+  { id: PROP_A, customer_id: 'cust-1', active: true, is_primary: true },
+  { id: PROP_B, customer_id: 'cust-1', active: true, is_primary: false },
+];
+const profile = (over = {}) => ({ customer_id: 'cust-1', active: true, grass_type: 'st_augustine', other_grasses: null, virus_streaks_suspected: null, ...over });
+const world = ({ props = ONE_PROPERTY, profiles = [profile()], customers = [{ id: 'cust-1', lawn_type: null }] } = {}) => memKnex({
+  customer_properties: props, customer_turf_profiles: profiles, customers,
+});
+const keysOf = (block) => block.paragraphs.map((p) => p.key);
 
 afterEach(() => { delete process.env.GATE_ESTIMATE_LAWN_LIMITS; });
 
@@ -88,16 +119,16 @@ describe('which estimates carry it', () => {
     expect(limits.estimateHasRecurringLawn(null)).toBe(false);
   });
 
-  test('gate off: null, and the turf profile is never read', async () => {
-    const knex = fakeKnex({ other_grasses: ['carpetgrass'], virus_streaks_suspected: true });
+  test('gate off: null, and nothing is read', async () => {
+    const knex = world({ profiles: [profile({ other_grasses: ['carpetgrass'], virus_streaks_suspected: true })] });
     expect(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex })).toBeNull();
     expect(await limits.lawnLimitsBlock(lawnEstimate(), { knex })).toEqual({});
     expect(knex.calls).toEqual([]);
   });
 
-  test('gate on, non-lawn estimate: null and no profile read', async () => {
+  test('gate on, non-lawn estimate: null and nothing is read', async () => {
     process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
-    const knex = fakeKnex({ other_grasses: ['carpetgrass'], virus_streaks_suspected: true });
+    const knex = world({ profiles: [profile({ other_grasses: ['carpetgrass'] })] });
     expect(await limits.lawnLimitsForEstimate(pestEstimate(), { knex })).toBeNull();
     expect(await limits.lawnLimitsBlock(pestEstimate(), { knex })).toEqual({});
     expect(knex.calls).toEqual([]);
@@ -105,37 +136,143 @@ describe('which estimates carry it', () => {
 
   test.each(['1', 'on', 'TRUE', ''])('the gate reads on only for exactly "true" (%p)', async (value) => {
     process.env.GATE_ESTIMATE_LAWN_LIMITS = value;
-    expect(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: fakeKnex(null) })).toBeNull();
+    expect(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: world() })).toBeNull();
   });
 
   test('gate on, lawn estimate, flags set: the fixed paragraph plus one line per flag', async () => {
     process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
-    const knex = fakeKnex({ other_grasses: ['bahiagrass', 'torpedograss'], virus_streaks_suspected: true });
+    const knex = world({ profiles: [profile({ other_grasses: ['bahiagrass', 'torpedograss'], virus_streaks_suspected: true })] });
     const block = await limits.lawnLimitsForEstimate(lawnEstimate(), { knex });
     expect(block.heading).toBe("What we can and can't fix");
-    expect(block.paragraphs.map((p) => p.key)).toEqual(['always', 'bahiagrass', 'torpedograss', 'virus_streaks']);
+    expect(keysOf(block)).toEqual(['always', 'bahiagrass', 'torpedograss', 'virus_streaks']);
     expect(await limits.lawnLimitsBlock(lawnEstimate(), { knex })).toEqual({ lawnLimits: block });
   });
 
   test('gate on, lawn estimate, no profile or NULL flags: the fixed paragraph alone', async () => {
     process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
-    for (const row of [undefined, { other_grasses: null, virus_streaks_suspected: null }]) {
-      const block = await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: fakeKnex(row) });
-      expect(block.paragraphs.map((p) => p.key)).toEqual(['always']);
+    for (const profiles of [[], [profile()]]) {
+      const block = await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: world({ profiles }) });
+      expect(keysOf(block)).toEqual(['always']);
     }
   });
 
-  test('an estimate with no customer reads no profile and still gets the fixed paragraph', async () => {
+  test('an estimate with no customer reads nothing and still gets the fixed paragraph', async () => {
     process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
-    const knex = fakeKnex({ other_grasses: ['carpetgrass'] });
+    const knex = world({ profiles: [profile({ other_grasses: ['carpetgrass'] })] });
     const block = await limits.lawnLimitsForEstimate(lawnEstimate({ customer_id: null }), { knex });
-    expect(block.paragraphs.map((p) => p.key)).toEqual(['always']);
+    expect(keysOf(block)).toEqual(['always']);
     expect(knex.calls).toEqual([]);
   });
 
-  test('a failed profile read still gives the fixed paragraph, never throws', async () => {
+  test('a failed read still gives the fixed paragraph, never throws', async () => {
     process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
-    const block = await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: fakeKnex(null, { fail: true }) });
-    expect(block.paragraphs.map((p) => p.key)).toEqual(['always']);
+    for (const failOn of ['customer_turf_profiles', 'customer_properties']) {
+      const knex = memKnex({ customer_properties: ONE_PROPERTY, customer_turf_profiles: [profile({ other_grasses: ['carpetgrass'] })] }, { failOn });
+      expect(keysOf(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex }))).toEqual(['always']);
+    }
+  });
+});
+
+describe('only the ACTIVE turf profile counts', () => {
+  beforeEach(() => { process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true'; });
+
+  test('an inactive profile gives no flag lines', async () => {
+    const knex = world({ profiles: [profile({ active: false, other_grasses: ['carpetgrass'], virus_streaks_suspected: true })] });
+    expect(keysOf(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex }))).toEqual(['always']);
+  });
+
+  test('an inactive profile of a bermuda lawn does not hide the block either', async () => {
+    const knex = world({ profiles: [profile({ active: false, grass_type: 'bermuda' })] });
+    expect(keysOf(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex }))).toEqual(['always']);
+  });
+
+  test('a legacy profile with active NULL counts, as in the canonical loader', async () => {
+    const knex = world({ profiles: [profile({ active: null, other_grasses: ['dallisgrass'] })] });
+    expect(keysOf(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex }))).toEqual(['always', 'dallisgrass']);
+  });
+
+  test('the tech-sheet flag read follows the same scope', async () => {
+    expect((await limits.loadLawnLimitFlags('cust-1', PROP_A, world({ profiles: [profile({ active: false, other_grasses: ['carpetgrass'] })] }))).otherGrasses).toEqual([]);
+    expect((await limits.loadLawnLimitFlags('cust-1', PROP_A, world({ profiles: [profile({ other_grasses: ['carpetgrass'] })] }))).otherGrasses).toEqual(['carpetgrass']);
+  });
+});
+
+describe('the profile speaks for one property only', () => {
+  beforeEach(() => { process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true'; });
+  const flagged = [profile({ other_grasses: ['carpetgrass'], virus_streaks_suspected: true })];
+
+  test('one property, estimate names none: the profile applies', async () => {
+    const block = await limits.lawnLimitsForEstimate(lawnEstimate({ property_id: null }), { knex: world({ profiles: flagged }) });
+    expect(keysOf(block)).toEqual(['always', 'carpetgrass', 'virus_streaks']);
+  });
+
+  test('one property, estimate names it: the profile applies', async () => {
+    const block = await limits.lawnLimitsForEstimate(lawnEstimate({ property_id: PROP_A }), { knex: world({ profiles: flagged }) });
+    expect(keysOf(block)).toEqual(['always', 'carpetgrass', 'virus_streaks']);
+  });
+
+  test('several properties, estimate is for the one the profile speaks for (the primary): applies', async () => {
+    const block = await limits.lawnLimitsForEstimate(lawnEstimate({ property_id: PROP_A }), { knex: world({ props: TWO_PROPERTIES, profiles: flagged }) });
+    expect(keysOf(block)).toEqual(['always', 'carpetgrass', 'virus_streaks']);
+  });
+
+  test('several properties, estimate is for another property: fixed paragraph only', async () => {
+    const block = await limits.lawnLimitsForEstimate(lawnEstimate({ property_id: PROP_B }), { knex: world({ props: TWO_PROPERTIES, profiles: flagged }) });
+    expect(keysOf(block)).toEqual(['always']);
+  });
+
+  test('several properties, estimate names no property: fails closed, fixed paragraph only', async () => {
+    const block = await limits.lawnLimitsForEstimate(lawnEstimate({ property_id: null }), { knex: world({ props: TWO_PROPERTIES, profiles: flagged }) });
+    expect(keysOf(block)).toEqual(['always']);
+  });
+
+  test('a property the customer does not have: fixed paragraph only', async () => {
+    const block = await limits.lawnLimitsForEstimate(lawnEstimate({ property_id: 'prop-elsewhere' }), { knex: world({ profiles: flagged }) });
+    expect(keysOf(block)).toEqual(['always']);
+  });
+
+  test('a customer with no property rows and an estimate naming none is a legacy single home: applies', async () => {
+    const block = await limits.lawnLimitsForEstimate(lawnEstimate({ property_id: null }), { knex: world({ props: [], profiles: flagged }) });
+    expect(keysOf(block)).toEqual(['always', 'carpetgrass', 'virus_streaks']);
+  });
+
+  test('the tech-sheet read: wrong property and several-properties-no-property give no flags', async () => {
+    const two = world({ props: TWO_PROPERTIES, profiles: flagged });
+    expect((await limits.loadLawnLimitFlags('cust-1', PROP_B, two)).otherGrasses).toEqual([]);
+    expect((await limits.loadLawnLimitFlags('cust-1', null, two)).otherGrasses).toEqual([]);
+    expect((await limits.loadLawnLimitFlags('cust-1', PROP_A, two)).otherGrasses).toEqual(['carpetgrass']);
+  });
+});
+
+describe('the St. Augustine paragraph only goes on St. Augustine lawns', () => {
+  beforeEach(() => { process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true'; });
+
+  test.each(['bermuda', 'zoysia', 'bahia', 'mixed'])('a %s lawn gets no block at all', async (grass) => {
+    const knex = world({ profiles: [profile({ grass_type: grass, other_grasses: ['carpetgrass'], virus_streaks_suspected: true })] });
+    expect(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex })).toBeNull();
+    expect(await limits.lawnLimitsBlock(lawnEstimate(), { knex })).toEqual({});
+  });
+
+  test.each([['st_augustine'], ['unknown'], [null], ['']])('grass %p keeps the block', async (grass) => {
+    const knex = world({ profiles: [profile({ grass_type: grass })] });
+    expect(keysOf(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex }))).toEqual(['always']);
+  });
+
+  test('no profile and no legacy lawn text: unknown grass keeps the block', async () => {
+    expect(keysOf(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: world({ profiles: [] }) }))).toEqual(['always']);
+  });
+
+  test('a profile with no grass falls back to its track, then the customer legacy lawn text', async () => {
+    const byTrack = world({ profiles: [profile({ grass_type: null, track_key: 'zoysia' })] });
+    expect(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: byTrack })).toBeNull();
+    const byText = world({ profiles: [profile({ grass_type: null })], customers: [{ id: 'cust-1', lawn_type: 'Empire Zoysia' }] });
+    expect(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: byText })).toBeNull();
+    const augustineText = world({ profiles: [], customers: [{ id: 'cust-1', lawn_type: 'Floratam full sun' }] });
+    expect(keysOf(await limits.lawnLimitsForEstimate(lawnEstimate(), { knex: augustineText }))).toEqual(['always']);
+  });
+
+  test('the recorded grass of another property is not used: several properties, wrong property keeps the block', async () => {
+    const knex = world({ props: TWO_PROPERTIES, profiles: [profile({ grass_type: 'bermuda' })] });
+    expect(keysOf(await limits.lawnLimitsForEstimate(lawnEstimate({ property_id: PROP_B }), { knex }))).toEqual(['always']);
   });
 });

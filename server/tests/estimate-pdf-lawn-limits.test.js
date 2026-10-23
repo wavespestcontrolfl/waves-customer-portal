@@ -61,11 +61,15 @@ const pestEstimate = () => ({
   estimate_data: { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', visitsPerYear: 4 }] } } },
 });
 
-function profileRow(row) {
-  db.mockImplementation(() => {
+// The fake database: the customer's properties (one primary by default), the turf profile row,
+// and the customer's legacy lawn text.
+function profileRow(row, { props = [{ id: 'prop-a', is_primary: true }], lawnType = null } = {}) {
+  db.mockImplementation((table) => {
     const q = {};
     q.where = jest.fn(() => q);
-    q.first = jest.fn(async () => row);
+    q.select = jest.fn(() => q);
+    q.first = jest.fn(async () => (table === 'customer_turf_profiles' ? row : table === 'customers' ? { lawn_type: lawnType } : undefined));
+    q.then = (resolve, reject) => Promise.resolve(table === 'customer_properties' ? props : []).then(resolve, reject);
     return q;
   });
 }
@@ -127,5 +131,25 @@ describe('estimate-pdf lawn limits (pdfkit fallback)', () => {
     const block = await limits.lawnLimitsForEstimate(lawnEstimate());
     expect(block.paragraphs.map((p) => p.key)).toEqual(['always', 'bahiagrass']);
     expect(await render(lawnEstimate())).toContain('We saw bahiagrass mixed into your St. Augustine');
+  });
+
+  test('a bermuda or zoysia lawn gets no block at all', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    for (const grass of ['bermuda', 'zoysia']) {
+      profileRow({ grass_type: grass, other_grasses: ['carpetgrass'], virus_streaks_suspected: true });
+      const text = await render(lawnEstimate());
+      expect(text).not.toContain(PHRASE.always);
+      expect(text).not.toContain(PHRASE.fixed);
+    }
+  });
+
+  test('an estimate for a property the profile does not speak for prints the fixed paragraph only', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const props = [{ id: 'prop-a', is_primary: true }, { id: 'prop-b', is_primary: false }];
+    profileRow({ other_grasses: ['carpetgrass'], virus_streaks_suspected: true }, { props });
+    const text = await render({ ...lawnEstimate(), property_id: 'prop-b' });
+    expect(text).toContain(PHRASE.fixed);
+    expect(text).not.toContain(PHRASE.carpetgrass);
+    expect(text).not.toContain(PHRASE.virus);
   });
 });

@@ -38,8 +38,9 @@ const visit = {
   id: VISIT, customer_id: CUSTOMER, property_id: null, service_type: 'Lawn Care', service_id: CATALOG,
   scheduled_date: '2026-10-05', status: 'confirmed', visit_id: null, technician_id: null,
 };
-const world = ({ assessment, photos = [], turf } = {}) => fakeKnex({
-  scheduled_services: visit,
+const world = ({ assessment, photos = [], turf, props, propertyId = null } = {}) => fakeKnex({
+  scheduled_services: { ...visit, property_id: propertyId },
+  customer_properties: props,
   services: { service_key: 'lawn_care_monthly', name: 'Lawn Care', category: 'lawn_care', billing_type: 'recurring' },
   service_completion_profiles: {
     service_key: 'lawn_care_monthly', category: 'lawn_care', billing_type: 'recurring', completion_mode: 'service_report',
@@ -52,7 +53,9 @@ const world = ({ assessment, photos = [], turf } = {}) => fakeKnex({
 });
 
 
-const context = async (turf) => buildLawnFastContext(VISIT, { knex: world({ assessment: {}, turf }) });
+const context = async (turf, options = {}) => buildLawnFastContext(VISIT, { knex: world({ assessment: {}, turf, ...options }) });
+const TWO = [{ id: 'prop-a', is_primary: true }, { id: 'prop-b', is_primary: false }];
+const FLAGGED = { id: 'tp1', active: true, other_grasses: ['carpetgrass'] };
 const SAVED = process.env.GATE_ESTIMATE_LAWN_LIMITS;
 afterEach(() => {
   if (SAVED === undefined) delete process.env.GATE_ESTIMATE_LAWN_LIMITS; else process.env.GATE_ESTIMATE_LAWN_LIMITS = SAVED;
@@ -91,5 +94,29 @@ describe('carpetgrassCelsiusWarning on the lawn Fast Complete context', () => {
     const on = await context({ id: 'tp1', active: true, other_grasses: ['carpetgrass'] });
     expect(on.eligible).toBe(off.eligible);
     expect(on.reason).toBe(off.reason);
+  });
+
+  test('the profile speaks for one property: the primary one gets the warning', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    expect((await context(FLAGGED, { props: TWO, propertyId: 'prop-a' })).carpetgrassCelsiusWarning).toBe(CARPETGRASS_CELSIUS_WARNING);
+  });
+
+  test('a visit at another property of a several-property customer gets no warning', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const ctx = await context(FLAGGED, { props: TWO, propertyId: 'prop-b' });
+    expect(ctx.ok).toBe(true);
+    expect(ctx).not.toHaveProperty('carpetgrassCelsiusWarning');
+  });
+
+  test('a visit with no property at a several-property customer fails closed: no warning', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    expect(await context(FLAGGED, { props: TWO, propertyId: null })).not.toHaveProperty('carpetgrassCelsiusWarning');
+  });
+
+  test('a single-property customer gets the warning for a visit with or without the property', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const one = [{ id: 'prop-a', is_primary: true }];
+    expect(await context(FLAGGED, { props: one, propertyId: null })).toHaveProperty('carpetgrassCelsiusWarning');
+    expect(await context(FLAGGED, { props: one, propertyId: 'prop-a' })).toHaveProperty('carpetgrassCelsiusWarning');
   });
 });

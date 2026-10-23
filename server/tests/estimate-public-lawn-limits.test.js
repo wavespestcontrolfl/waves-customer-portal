@@ -57,10 +57,11 @@ function chainFor(result) {
     select: jest.fn(() => chain),
     orderBy: jest.fn(() => chain),
     limit: jest.fn(() => chain),
-    first: jest.fn().mockResolvedValue(result),
+    first: jest.fn().mockResolvedValue(Array.isArray(result) ? result[0] : result),
     update: jest.fn(async () => 1),
     insert: jest.fn().mockResolvedValue([1]),
-    then: undefined,
+    // Awaiting a builder yields the rows (customer_properties is read as a list).
+    then: Array.isArray(result) ? (resolve, reject) => Promise.resolve(result).then(resolve, reject) : undefined,
   };
   return chain;
 }
@@ -104,12 +105,13 @@ async function withServer(fn) {
 }
 const getData = (baseUrl) => fetch(`${baseUrl}/estimates/lawnlimitstoken/data`).then((r) => r.json());
 
-const PROFILE = { other_grasses: ['carpetgrass', 'dallisgrass'], virus_streaks_suspected: true };
+const PROFILE = { active: true, grass_type: 'st_augustine', other_grasses: ['carpetgrass', 'dallisgrass'], virus_streaks_suspected: true };
+const PROPERTIES = [{ id: 'prop-a', customer_id: 'cust-synthetic-1', active: true, is_primary: true }];
 
 afterEach(() => { delete process.env.GATE_ESTIMATE_LAWN_LIMITS; });
 
 describe('GET /:token/data — lawn limits (GATE_ESTIMATE_LAWN_LIMITS)', () => {
-  beforeEach(() => { dbRows = { estimates: estimateRow({ services: ['lawn_care'] }), customer_turf_profiles: PROFILE }; });
+  beforeEach(() => { dbRows = { estimates: estimateRow({ services: ['lawn_care'] }), customer_turf_profiles: PROFILE, customer_properties: PROPERTIES, customers: { lawn_type: null } }; });
 
   test('gate off: no lawnLimits key', async () => {
     await withServer(async (baseUrl) => {
@@ -132,7 +134,34 @@ describe('GET /:token/data — lawn limits (GATE_ESTIMATE_LAWN_LIMITS)', () => {
 
   test('gate on, lawn estimate, no flags set: the fixed paragraph alone', async () => {
     process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
-    dbRows = { ...dbRows, customer_turf_profiles: { other_grasses: null, virus_streaks_suspected: null } };
+    dbRows = { ...dbRows, customer_turf_profiles: { ...PROFILE, other_grasses: null, virus_streaks_suspected: null } };
+    await withServer(async (baseUrl) => {
+      expect((await getData(baseUrl)).lawnLimits.paragraphs.map((p) => p.key)).toEqual(['always']);
+    });
+  });
+
+  test('gate on, bermuda lawn: no lawnLimits key', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    dbRows = { ...dbRows, customer_turf_profiles: { ...PROFILE, grass_type: 'bermuda' } };
+    await withServer(async (baseUrl) => {
+      const body = await getData(baseUrl);
+      expect(body.estimate).toBeDefined();
+      expect(body).not.toHaveProperty('lawnLimits');
+    });
+  });
+
+  test('gate on, inactive profile: the fixed paragraph only', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    // The fake database does not run the active filter, so an inactive-only customer is no row.
+    dbRows = { ...dbRows, customer_turf_profiles: undefined };
+    await withServer(async (baseUrl) => {
+      expect((await getData(baseUrl)).lawnLimits.paragraphs.map((p) => p.key)).toEqual(['always']);
+    });
+  });
+
+  test('gate on, several properties and the estimate names none: the fixed paragraph only', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    dbRows = { ...dbRows, customer_properties: [...PROPERTIES, { id: 'prop-b', customer_id: 'cust-synthetic-1', active: true, is_primary: false }] };
     await withServer(async (baseUrl) => {
       expect((await getData(baseUrl)).lawnLimits.paragraphs.map((p) => p.key)).toEqual(['always']);
     });
