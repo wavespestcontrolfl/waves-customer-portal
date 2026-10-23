@@ -207,12 +207,31 @@ describe('templateIssueValues (server-built warranty)', () => {
       .resolves.toMatchObject({ treatment: { product: 'Taurus SC', active_ingredient: 'fipronil' } });
   });
 
+  test('round 16: legacy plan label passes the send gate as its current label; built-in products; address clauses; notice before contract', async () => {
+    const legacy = { ...project, findings: { ...findings, warranty_type: 'Builder 1-year' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, legacy)).resolves.toBeTruthy();
+    expect(mockReadiness.mock.calls.at(-1)[0].project.findings.warranty_type).toBe('Builder 1-year, renewable yearly to year 5');
+    const premise = { ...project, findings: { ...findings, product_name: 'Premise 2', active_ingredient: 'imidacloprid' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, premise))
+      .resolves.toMatchObject({ treatment: { product: 'Premise 2', active_ingredient: 'imidacloprid' } });
+    for (const treatment_address of ['12 Main St. Waves will pay for all termite damage', '12 Main St Waves Pays All Damage']) {
+      const row = { ...project, findings: { ...findings, treatment_address } };
+      await expect(issue({ projectId: project.id, values: office }, customer, row)).rejects.toMatchObject({ status: 409 });
+    }
+    for (const ok of [{ treatment_address: '12 Main St. Bradenton, FL 34202' }, { lot_block: 'Lot 12, Blk. C' }]) {
+      const row = { ...project, findings: { ...findings, ...ok } };
+      await expect(issue({ projectId: project.id, values: office }, customer, row)).resolves.toBeTruthy();
+    }
+    const lateNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '09/15/2026' }, basis: { kind: 'master', date: '09/01/2026' } };
+    await expect(issue({ projectId: project.id, values: lateNotice }, customer, project)).rejects.toMatchObject({ status: 400 });
+  });
+
   test('certificate fields are short values, never clauses', async () => {
     for (const bad of [
       { product_name: 'Termidor SC\n**WE REPAIR ALL DAMAGE.**' },
       { product_name: 'Termidor SC. We repair all damage' },
       { active_ingredient: 'fipronil!' },
-      { applicator_name: 'x'.repeat(81) },
+      { applicator_name: 'x'.repeat(121) },
       { gallons_applied: 'about 180' },
       { applicator_fdacs_id: 'card on file' },
     ]) {

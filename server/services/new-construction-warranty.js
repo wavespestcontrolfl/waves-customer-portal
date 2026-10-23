@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
+const { getProjectType } = require('./project-types');
 
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
@@ -80,6 +81,8 @@ const PLAN_YEARS = {
   'Renewable 5-year retreatment bond': 5,
   'Renewable 10-year retreatment bond': 10,
 };
+// A pre-#6490 label and the current label of the same plan.
+const LEGACY_PLAN_LABELS = { 'Builder 1-year': 'Builder 1-year, renewable yearly to year 5' };
 // payer comes from the office: the certificate's builder is not always the
 // party who paid for the treatment.
 const OFFICE_FIELDS = ['structures', 'notice_location', 'payer', 'treatment_price', 'plan_price', 'renewal_fee', 'consumer_notice_date'];
@@ -207,6 +210,9 @@ function officeFields(body, initial) {
   if (out.plan_price !== PLAN_PRICE_INCLUDED) out.plan_price = money(out.plan_price, 'plan price');
   const notice = parseUs(out.consumer_notice_date);
   if (!notice || key(notice) > key(initial)) throw bad('The FDACS-13692 date must be a real date on or before the treatment date.');
+  // Rule 5E-14.105(1): the signed consumer notice comes before the contract.
+  const basis = parseUs(body?.values?.basis?.date);
+  if (basis && key(notice) > key(basis)) throw bad('The FDACS-13692 date must be on or before the contract basis date.');
   out.consumer_notice_date = us(notice);
   return out;
 }
@@ -231,11 +237,15 @@ function withoutUnit(value, unit) {
 // Certificate fields that print inside the treatment description are
 // short values, never clauses: one line, no "**", no second sentence, no
 // "!" or "?". Amounts print as numbers once their unit is removed.
-const SHORT_TEXT_FIELDS = ['product_name', 'product_name_other', 'active_ingredient', 'applicator_name', 'builder_contractor', 'permit_number', 'lot_block', 'subdivision'];
+const SHORT_TEXT_FIELDS = ['treatment_address', 'product_name', 'product_name_other', 'active_ingredient', 'applicator_name', 'builder_contractor', 'permit_number', 'lot_block', 'subdivision'];
+// Words that make a value a promise, not a name or an address.
+const CLAUSE_WORDS = /\b(pay|pays|paid|repair\w*|damage\w*|warrant\w*|guarantee\w*|refund\w*|cover\w*|liab\w*|free|will|shall|must)\b/i;
 const AMOUNT_FIELDS = { concentration_pct: 'concentration', gallons_applied: 'gallons', square_footage: 'sq_ft', linear_feet: 'linear_ft' };
 function isShortText(value) {
   const raw = String(value ?? '');
-  return raw.length <= 80 && !/[\r\n]|\*\*|[!?]|\.\s+\S/.test(raw);
+  // A period then two words, the second lower case, is a sentence ("St.
+  // Waves will pay"); "12 Main St. Bradenton" and "Blk. C" are not.
+  return raw.length <= 120 && !/[\r\n]|\*\*|[!?]|\.\s+\S+\s+[a-z]/.test(raw) && !CLAUSE_WORDS.test(raw);
 }
 function assertStructuredCertificate(findings) {
   const failing = [
@@ -350,9 +360,17 @@ function assertCustomerPrintable(customer) {
 // The product prints as its catalog entry, never as typed text: a typed
 // name could carry a clause ("Termidor SC WE REPAIR ALL DAMAGE"). The
 // catalog's active ingredient wins when it has one.
+// The certificate's built-in product choices print as offered when the
+// catalog has no row for them (a fresh database seeds none).
+const BUILT_IN_PRODUCTS = (getProjectType('pre_treatment_termite_certificate')?.findingsFields || [])
+  .find((field) => field.key === 'product_name')?.options || [];
 async function catalogProduct(conn, treatment) {
   const row = await conn('products_catalog').whereRaw('lower(name) = ?', [treatment.product.toLowerCase()]).first('name', 'active_ingredient');
-  if (!row) throw bad(`Pick the product from the product catalog on the certificate (found "${treatment.product}").`, 409);
+  if (!row) {
+    const builtIn = BUILT_IN_PRODUCTS.find((name) => name.toLowerCase() === treatment.product.toLowerCase());
+    if (builtIn) return { product: builtIn };
+    throw bad(`Pick the product from the product catalog on the certificate (found "${treatment.product}").`, 409);
+  }
   return { product: oneLine(row.name), active_ingredient: oneLine(row.active_ingredient) || treatment.active_ingredient };
 }
 
@@ -384,7 +402,12 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   // An edit after the send can still clear a field, so the certificate as it
   // stands now must pass the same staff send gate (lazy: the route module).
   const { evaluateProjectSendReadiness } = require('../routes/admin-projects')._private;
-  const { missing } = evaluateProjectSendReadiness({ project, customer, staffSend: true });
+  // The send gate knows only today's plan labels; a legacy one is read as
+  // the plan it names (PLAN_YEARS keeps both).
+  const current = parseFindings(project.findings);
+  const plan = LEGACY_PLAN_LABELS[oneLine(current.warranty_type)];
+  const asSent = plan ? { ...project, findings: { ...current, warranty_type: plan } } : project;
+  const { missing } = evaluateProjectSendReadiness({ project: asSent, customer, staffSend: true });
   if (missing.length) throw bad(`Complete the certificate first: ${missing.map((item) => item.label).join('; ')}.`, 409);
   const findings = parseFindings(project.findings);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
