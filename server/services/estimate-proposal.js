@@ -150,6 +150,8 @@ function normalizeCorrectiveWorkItem(raw = {}) {
   // costs one treatment's COGS, and operator text decides the family.
   const visits = num(raw.visits ?? raw.visitsPerYear, 0);
   return {
+    // A stable id (same shape as a line's) so an editor save can carry the misting identity by id.
+    ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
     label: cleanString(raw.label ?? raw.description, 160),
     // Same clamp rationale as normalizeLineItem: commercial quote amounts are
     // never negative, and this normalizer is what totals + persistence read.
@@ -157,6 +159,7 @@ function normalizeCorrectiveWorkItem(raw = {}) {
     taxable: raw.taxable === true,
     includes: cleanStringList(raw.includes, { maxItems: 12, maxLen: 200 }),
     service: cleanString(raw.service, 80) || null,
+    ...(raw.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}),
     visits: visits > 0 ? Math.min(Math.round(visits), 52) : null,
   };
 }
@@ -212,12 +215,15 @@ function carryMistingIdentity(incoming = {}, saved = {}) {
     ...(line?.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}),
   });
   const savedById = new Map();
+  const remember = (line) => {
+    const identity = identityOf(line);
+    if (line?.id && Object.keys(identity).length) savedById.set(line.id, identity);
+  };
   for (const building of Array.isArray(saved?.buildings) ? saved.buildings : []) {
-    for (const line of Array.isArray(building?.lineItems) ? building.lineItems : []) {
-      const identity = identityOf(line);
-      if (line?.id && Object.keys(identity).length) savedById.set(line.id, identity);
-    }
+    for (const line of Array.isArray(building?.lineItems) ? building.lineItems : []) remember(line);
   }
+  // Corrective-work rows carry the same identity fields (pre-push audit P1): carried by id like a line.
+  for (const work of Array.isArray(saved?.correctiveWork) ? saved.correctiveWork : []) remember(work);
   const carryLine = (line) => {
     const carried = line && typeof line === 'object' && line.id ? savedById.get(line.id) : null;
     if (!carried) return line;
@@ -232,6 +238,7 @@ function carryMistingIdentity(incoming = {}, saved = {}) {
       return key ? { ...building, [key]: building[key].map(carryLine) } : building;
     });
   }
+  if (Array.isArray(incoming.correctiveWork)) out.correctiveWork = incoming.correctiveWork.map(carryLine);
   const savedPrograms = Array.isArray(saved?.programs) ? saved.programs : [];
   if (Array.isArray(incoming.programs) && savedPrograms.some((program) => program?.identity === 'mosquito_misting')) {
     // Carry by STABLE ID only (pre-push audit P1: a same-length array with a removed misting program and a new one

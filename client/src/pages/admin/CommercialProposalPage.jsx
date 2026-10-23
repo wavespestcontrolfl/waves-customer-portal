@@ -334,6 +334,9 @@ function CommercialProposalEditor() {
     generatedRespByFamilyRef.current = p.generatedResponsibilities || null;
     if (data.familyRegistry) familyRegistryRef.current = data.familyRegistry;
     setCorrectiveWork((p.correctiveWork || []).map((w) => ({
+      id: w.id || crypto.randomUUID(),
+      ...(w.service ? { service: w.service } : {}),
+      ...(w.originalRequestedService ? { originalRequestedService: w.originalRequestedService } : {}),
       label: w.label || '',
       amount: w.amount ?? 0,
       taxable: w.taxable === true,
@@ -469,6 +472,8 @@ function CommercialProposalEditor() {
       }
       if (draft?.correctiveWork?.length && !monetaryInstallBlocked) {
         setCorrectiveWork(draft.correctiveWork.map((w) => ({
+          id: w.id || crypto.randomUUID(),
+          ...(w.service ? { service: w.service } : {}),
           label: w.label,
           amount: w.amount,
           taxable: w.taxable === true,
@@ -727,6 +732,9 @@ function CommercialProposalEditor() {
       }));
     const work = f.correctiveWork
       .map((w) => ({
+        ...(w.id ? { id: w.id } : {}),
+        ...(w.service ? { service: w.service } : {}),
+        ...(w.originalRequestedService ? { originalRequestedService: w.originalRequestedService } : {}),
         label: w.label.trim(),
         amount: Number(w.amount) || 0,
         taxable: w.taxable === true,
@@ -1519,7 +1527,7 @@ function CommercialProposalEditor() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { label: '', amount: 0, taxable: false, includesText: '' }]); }}>
+                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { id: crypto.randomUUID(), label: '', amount: 0, taxable: false, includesText: '' }]); }}>
                   <Plus size={14} /> Add corrective work
                 </Button>
               )}

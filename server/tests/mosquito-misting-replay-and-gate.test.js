@@ -519,6 +519,21 @@ describe('the proposal editor cannot launder the misting identity away', () => {
     expect(normalizePrograms([{ id: 'm1', service: 'mosquito', identity: 'mosquito_misting', label: 'Misting plan', frequencyPerYear: 12, pricePerApplication: 59 }])[0]).toMatchObject({ id: 'm1', identity: 'mosquito_misting' });
   });
 
+  test('a corrective-work row carries the identity by id through a save; a new row carries nothing', () => {
+    const { normalizeCorrectiveWork } = require('../services/estimate-proposal');
+    const saved = { enabled: true, buildings: [], correctiveWork: normalizeCorrectiveWork([{ id: 'cw-1', service: 'mosquito_misting_installation', label: 'Install', amount: 4000 }]) };
+    expect(saved.correctiveWork[0]).toMatchObject({ id: 'cw-1', service: 'mosquito_misting_installation' });
+    const incoming = { correctiveWork: [{ id: 'cw-1', label: 'Install', amount: 4000 }, { id: 'cw-new', label: 'Gutter', amount: 50 }] };
+    const persisted = { enabled: true, buildings: [], correctiveWork: normalizeCorrectiveWork(carryMistingIdentity(incoming, saved).correctiveWork) };
+    expect(persisted.correctiveWork[0].service).toBe('mosquito_misting_installation');
+    expect(persisted.correctiveWork[1].service).toBeNull();
+    const data = { result: { recurring: { services: [{ service: 'pest_control' }] } }, proposal: persisted };
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+    const lost = { ...data, proposal: { enabled: true, buildings: [], correctiveWork: normalizeCorrectiveWork(incoming.correctiveWork) } };
+    expect(mapper.gatedAddOnCustomerRefusal(lost)).toBeNull();
+  });
+
   test('text fallback: the install labels the mapper emits are recognized without any service field', () => {
     for (const label of ['Essential system (drum) Installation', 'Smart system (tankless + app) Installation']) {
       expect(mistingProposalIdentity({ description: label })).toBe('mosquito_misting_installation');
