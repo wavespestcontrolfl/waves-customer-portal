@@ -2336,7 +2336,9 @@ router.post('/bank-import/suggest', async (req, res, next) => {
           // from the pre-call snapshot would erase them (same guard the
           // expenses auto-categorize path applies to its post-model write)
           await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-            suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning })]),
+            // provenance moves to the model: a category a ledger rule wrote
+            // before is replaced, and the kill switch no longer owns it
+            suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null })]),
             updated_at: new Date(),
           });
           results.push({ id: row.id, category: ai.categoryName, applied: true });

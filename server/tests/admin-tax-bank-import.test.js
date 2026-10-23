@@ -1236,6 +1236,18 @@ describe('AI suggest eligibility follows the ledger kill switch', () => {
     expect(raws).toContainEqual(expect.stringContaining("(suggestion->>'categorySource') = 'rule'"));
     expect(raws).toContainEqual(expect.stringContaining("(suggestion->'rule'->>'kind') = 'transfer'"));
   });
+  test('an AI category written over a rule category carries its own provenance', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    state.listRows = [{ id: 'bt-7', description: 'WAWA 5211', amount: '58.12', suggestion: { categoryId: 'cat-old', categorySource: 'rule', rule: { id: 'r', kind: 'expense' } } }];
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+    state.bankUpdates = [];
+    const res = await post('/admin/tax/bank-import/suggest', { ids: ['bt-7'] });
+    expect((await res.json()).processed).toBe(1);
+    const merged = JSON.parse(state.bankUpdates[0].patch.suggestion.bindings[0]);
+    expect(merged).toEqual(expect.objectContaining({ categoryId: 'cat-meals', categorySource: 'ai' }));
+  });
+
   test('gate on: the stored category and flag count as they are', async () => {
     process.env.GATE_TAX_LEDGER = 'true'; mockDb.mockClear();
     expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
