@@ -560,7 +560,8 @@ async function reportEquipmentIssue({ equipmentId, technicianId, description, se
       });
     }
 
-    logger.info(`${tag} Issue reported on ${equipment.name} by ${techName}: ${description}`);
+    // Ids only: a field note may name a customer or an address (AGENTS.md: no PII in logs).
+    logger.info(`${tag} Issue reported on equipment ${equipmentId} (${alertType}, ${severity}) by technician ${technicianId || 'unknown'}`);
     return inserted;
   } catch (err) {
     logger.error(`${tag} Error:`, err);

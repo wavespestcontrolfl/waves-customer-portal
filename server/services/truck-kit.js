@@ -91,15 +91,22 @@ class TruckCheckError extends Error {
   }
 }
 
+// One live truck per technician. Two is a data error the office must fix
+// (the Assets dialog refuses it, routes/admin-equipment.js); a check or a
+// readiness read never guesses which roster to use.
 async function truckForTechnician(technicianId, conn = db) {
   if (!technicianId) return null;
-  const row = await conn('equipment')
+  const rows = await conn('equipment')
     .where({ category: 'vehicle', assigned_to: technicianId })
     .whereNotIn('status', DEAD_VEHICLE_STATUSES)
     .orderBy('name')
-    .first('id', 'name', 'asset_tag');
-  return row || null;
+    .limit(2)
+    .select('id', 'name', 'asset_tag');
+  if (rows.length > 1) throw new TruckCheckError('ambiguous_truck', 'More than one truck is assigned to you. Ask the office to fix the assignment.');
+  return rows[0] || null;
 }
+
+const AMBIGUOUS_HOLD = { kind: 'tools', status: 'hold', label: 'Two trucks assigned to the technician', tools: [] };
 
 // The truck's kit with each item's open tool alert, if any, so the check
 // defaults a still-missing tool to missing instead of silently finding it.
@@ -232,7 +239,11 @@ async function toolGapIssue({ technicianId, serviceLine, serviceType }, conn = d
   if (!truckKitLive() || !technicianId) return null;
   const lines = serviceType ? serviceLinesFor(serviceType) : [serviceLine].filter(Boolean);
   if (!lines.length) return null;
-  const truck = await truckForTechnician(technicianId, conn);
+  let truck;
+  try { truck = await truckForTechnician(technicianId, conn); } catch (err) {
+    if (err.code === 'ambiguous_truck') return AMBIGUOUS_HOLD;
+    throw err;
+  }
   if (!truck) return null;
   const gaps = await toolGapsForTruck(truck.id, lines, conn);
   if (!gaps.length) return null;

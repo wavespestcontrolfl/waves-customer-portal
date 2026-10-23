@@ -11,11 +11,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/equipment-maintenance', () => ({}));
 jest.mock('../models/db', () => {
-  const state = { vehicles: {}, rows: {}, riders: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
+  const state = { vehicles: {}, rows: {}, riders: {}, trucksOf: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
   const chain = (table) => {
     const c = { table, calls: [], cond: null };
     const rec = (name) => jest.fn((...args) => { c.calls.push([name, ...args]); return c; });
-    for (const m of ['leftJoin', 'select', 'orderBy', 'whereNull']) c[m] = rec(m);
+    for (const m of ['leftJoin', 'select', 'orderBy', 'whereNull', 'whereNotIn', 'whereNot']) c[m] = rec(m);
     c.where = jest.fn((...args) => {
       c.calls.push(['where', ...args]);
       if (args.length === 1 && typeof args[0] === 'object') c.cond = { ...(c.cond || {}), ...args[0] };
@@ -23,6 +23,7 @@ jest.mock('../models/db', () => {
     });
     c.first = jest.fn(async (...args) => {
       c.calls.push(['first', ...args]);
+      if (table === 'equipment' && c.cond && c.cond.assigned_to && c.cond.category === 'vehicle') return state.trucksOf[c.cond.assigned_to] || null;
       if (table === 'equipment' && c.cond && c.cond.category === 'vehicle') return state.vehicles[c.cond.id] || null;
       if (table === 'equipment' && c.cond && c.cond.id && c.cond.category === undefined) return state.rows[c.cond.id] || null;
       if (table === 'equipment' && c.cond && c.cond.assigned_vehicle_id) return state.riders[c.cond.assigned_vehicle_id] || null;
@@ -81,6 +82,8 @@ beforeEach(() => {
   s.vehicles = { [VEHICLE]: { id: VEHICLE } };
   s.rows = { [TOOL]: { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE }, [OTHER]: { id: OTHER, category: 'vehicle' } };
   s.riders = { [VEHICLE]: { id: TOOL } };
+  s.trucksOf = {};
+  s.rows[VEHICLE] = { id: VEHICLE, category: 'vehicle', assigned_to: 'tech-1', status: 'active' };
   s.inserted = null;
   s.updated = null;
   s.fail = null;
@@ -263,6 +266,32 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     expect(res.body.error).toMatch(/open truck check alert/);
     expect(db.__state.updated).toBeNull();
     expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
+  });
+
+  test('an item with an open truck check alert cannot go lost, retired or sold from the dialog', async () => {
+    truckKit.openToolAlertFor.mockResolvedValue({ id: 'alert-1' });
+    for (const status of ['lost', 'retired', 'sold']) {
+      const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status, assigned_vehicle_id: VEHICLE } });
+      expect(res.statusCode).toBe(409);
+      expect(res.body.error).toMatch(/Found \/ Lost/);
+    }
+    expect(db.__state.updated).toBeNull();
+    // Any other edit of that item still saves.
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed', assigned_vehicle_id: VEHICLE } })).statusCode).toBe(200);
+    truckKit.openToolAlertFor.mockResolvedValue(null);
+  });
+
+  test('a technician never holds two live trucks', async () => {
+    db.__state.trucksOf['tech-1'] = { id: VEHICLE };
+    let res = await run('post', '/equipment', { body: { name: 'Second van', category: 'vehicle', assigned_to: 'tech-1' } });
+    expect(res.statusCode).toBe(409);
+    expect(db.__state.inserted).toBeNull();
+    res = await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: 'tech-1' } });
+    expect(res.statusCode).toBe(409);
+    expect(db.__state.updated).toBeNull();
+    // A retired second vehicle, or a tool, is fine.
+    expect((await run('post', '/equipment', { body: { name: 'Old van', category: 'vehicle', assigned_to: 'tech-1', status: 'retired' } })).statusCode).toBe(201);
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_to: 'tech-1' } })).statusCode).toBe(200);
   });
 
   test('handing a truck to another technician takes the truck lock', async () => {

@@ -16,14 +16,18 @@ const truckKit = require('../services/truck-kit');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-const ERROR_STATUS = { no_truck: 404, invalid_results: 400, kit_changed: 409 };
+const ERROR_STATUS = { no_truck: 404, invalid_results: 400, kit_changed: 409, ambiguous_truck: 409 };
 
 router.get('/', async (req, res, next) => {
   if (!truckKit.truckKitEnabled()) return res.status(404).json({ enabled: false });
   try {
     res.set('Cache-Control', 'private, no-store');
     res.json(await truckKit.truckKitStatus(req.technicianId));
-  } catch (err) { next(err); }
+  } catch (err) {
+    const status = ERROR_STATUS[err.code];
+    if (!status) return next(err);
+    res.status(status).json({ error: err.message, code: err.code });
+  }
 });
 
 router.post('/', async (req, res, next) => {

@@ -96,6 +96,17 @@ async function custodyFields(body, { selfId = null } = {}) {
   return { values };
 }
 
+// A technician holds one live truck: a second vehicle assigned to the same
+// person would leave the truck check guessing which roster is theirs.
+const DEAD_ITEM_STATUSES = ['lost', 'retired', 'sold'];
+const SECOND_TRUCK_ERROR = 'That technician already has a truck. Unassign the other vehicle first.';
+async function secondLiveTruck({ category, assigned_to, status }, selfId, conn = db) {
+  if (category !== 'vehicle' || !assigned_to || DEAD_ITEM_STATUSES.includes(status)) return null;
+  let q = conn('equipment').where({ category: 'vehicle', assigned_to }).whereNotIn('status', DEAD_ITEM_STATUSES);
+  if (selfId) q = q.whereNot('id', selfId);
+  return (await q.first('id')) || null;
+}
+
 // Postgres unique violation on equipment.asset_tag (the only unique column a
 // caller can set): answered as a 409 instead of a 500.
 function isAssetTagConflict(err) {
@@ -183,6 +194,7 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
     if (!name) return res.status(400).json({ error: 'Equipment name is required' });
     const custody = await custodyFields(req.body);
     if (custody.error) return res.status(400).json({ error: custody.error });
+    if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null)) return res.status(409).json({ error: SECOND_TRUCK_ERROR });
 
     const [record] = await db('equipment').insert({
       ...custody.values,
@@ -243,25 +255,32 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     // trucks' locks, in the same transaction as the move (truck-kit.js).
     const record = await db.transaction(async (trx) => {
       const truckKit = require('../services/truck-kit');
+      const before = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category', 'assigned_to', 'status');
+      if (!before) return null;
       let oldTruck = null;
       if (updates.assigned_vehicle_id !== undefined) {
-        const before = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id');
-        oldTruck = before?.assigned_vehicle_id || null;
+        oldTruck = before.assigned_vehicle_id || null;
         if (oldTruck === updates.assigned_vehicle_id) oldTruck = null;
         for (const truckId of [oldTruck, updates.assigned_vehicle_id].filter(Boolean).sort()) await truckKit.lockTruck(trx, truckId);
-        // An unresolved tool alert belongs to the truck it was found on:
-        // the office resolves it before the tool moves, so no bell is lost.
-        if (oldTruck && await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
       }
+      // An unresolved tool alert belongs to the truck it was found on and
+      // closes only through the office's outcome (Found / Lost, Repaired /
+      // Retired, routes/admin-equipment-maintenance.js): the item neither
+      // moves nor goes lost, retired or sold from the dialog while one is open.
+      if ((oldTruck || DEAD_ITEM_STATUSES.includes(updates.status)) && await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
       // Handing a truck to another technician takes the truck's own lock, so
-      // a check in flight on it finishes (or fails ownership) first.
+      // a check in flight on it finishes (or fails ownership) first; and a
+      // technician never holds two live trucks (truck-kit.js would refuse to guess).
       if (updates.assigned_to !== undefined) await truckKit.lockTruck(trx, req.params.id);
+      const live = { category: updates.category ?? before.category, assigned_to: updates.assigned_to ?? before.assigned_to, status: updates.status ?? before.status };
+      if (await secondLiveTruck(live, req.params.id, trx)) return 'second-truck';
       const [row] = await trx('equipment').where({ id: req.params.id }).update(updates).returning('*');
       if (row && oldTruck) await truckKit.closeTruckBellIfClear(oldTruck, new Date(), trx);
       return row || null;
     });
 
-    if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance before moving the item.' });
+    if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
+    if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });
     if (!record) return res.status(404).json({ error: 'Equipment not found' });
 
     logger.info(`Equipment updated: ${record.name} (${record.id})`);

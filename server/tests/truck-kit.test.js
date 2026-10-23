@@ -33,6 +33,7 @@ jest.mock('../models/db', () => {
     c.whereNotNull = (col) => add((r) => r[norm(col)] != null);
     c.whereNot = (col, val) => add((r) => r[norm(col)] !== val);
     c.distinct = (...cols) => { c.cols = cols; c.distinctOn = cols; return c; };
+    c.limit = (n) => { c.lim = n; return c; };
     c.leftJoin = (...args) => { c.joins.push(args); return c; };
     c.join = (...args) => { c.joins.push(args); return c; };
     c.orderBy = (...args) => {
@@ -71,7 +72,7 @@ jest.mock('../models/db', () => {
           return dir === 'desc' ? -cmp : cmp;
         });
       }
-      return list;
+      return c.lim ? list.slice(0, c.lim) : list;
     };
     c.first = async (...cols) => { const row = rows()[0]; return row ? project(row, cols) : null; };
     c.returning = async () => {
@@ -204,6 +205,15 @@ describe('recordTruckCheck', () => {
   test('refuses a technician with no truck', async () => {
     seed({ truckAssigned: false });
     await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: [], now: NOW })).rejects.toMatchObject({ code: 'no_truck' });
+  });
+
+  test('two live trucks on one technician: the check and the status refuse, readiness shows a hold', async () => {
+    db.__state.equipment.push({ id: '77777777-2222-4333-8444-555555555555', name: 'Second van', category: 'vehicle', status: 'active', assigned_to: TECH });
+    await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: results('present', 'present'), now: NOW })).rejects.toMatchObject({ code: 'ambiguous_truck' });
+    await expect(truckKit.truckKitStatus(TECH, { now: NOW })).rejects.toMatchObject({ code: 'ambiguous_truck' });
+    db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).toEqual({ kind: 'tools', status: 'hold', label: 'Two trucks assigned to the technician', tools: [] });
+    expect(db.__state.equipment_checks).toHaveLength(0);
   });
 
   test('a truck handed to someone else while the check was open writes nothing', async () => {

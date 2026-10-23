@@ -77,6 +77,12 @@ test('POST maps the service errors: no truck 404, bad results 400, changed kit 4
   const res = await run('post');
   expect(res.statusCode).toBe(409);
   expect(res.body).toEqual({ error: 'kit_changed', code: 'kit_changed', kit: [{ id: 'e2' }] });
+  truckKit.recordTruckCheck.mockRejectedValueOnce(fail('ambiguous_truck'));
+  expect((await run('post')).statusCode).toBe(409);
+  truckKit.truckKitStatus.mockRejectedValueOnce(fail('ambiguous_truck'));
+  const two = await run('get');
+  expect(two.statusCode).toBe(409);
+  expect(two.body).toEqual({ error: 'ambiguous_truck', code: 'ambiguous_truck' });
   truckKit.recordTruckCheck.mockRejectedValueOnce(new Error('db down'));
   await expect(run('post')).rejects.toThrow('db down');
 });
