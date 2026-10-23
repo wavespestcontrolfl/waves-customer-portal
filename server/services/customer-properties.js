@@ -229,7 +229,14 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source, lockWait
  * customers.address_* (filled only when empty), so the ~310 mirror readers see a
  * service address. Returns { created, propertyId }.
  */
-async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
+// A coordinate pair the picker selected: both finite numbers (or numeric strings) inside the globe; anything else is ignored, never an error
+// (the coordinates are a bonus on the address, not part of what staff typed). Rounded to the column's 7 decimals.
+const coordinateNumber = (value) => (value === null || value === '' || typeof value === 'boolean' ? NaN : Number(value));
+const validCoordinates = (lat, lng) => Number.isFinite(coordinateNumber(lat)) && Number.isFinite(coordinateNumber(lng))
+  && Math.abs(coordinateNumber(lat)) <= 90 && Math.abs(coordinateNumber(lng)) <= 180 && !(coordinateNumber(lat) === 0 && coordinateNumber(lng) === 0);
+const roundCoordinate = (value) => Math.round(coordinateNumber(value) * 1e7) / 1e7;
+
+async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, latitude = null, longitude = null, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
   const street = String(address_line1 || '').trim();
   if (!customerId || !street) return { created: false, propertyId: null };
 
@@ -289,6 +296,9 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
     city: city || null,
     state: state || 'FL',
     zip: zip || null,
+    // The address picker's selected coordinates (staff-added address), when the caller has validated ones: the county reclaimed-water match
+    // and the route planner read them. Absent = the property stays coordinate-less until an enrichment sets them, as before.
+    ...(validCoordinates(latitude, longitude) ? { latitude: roundCoordinate(latitude), longitude: roundCoordinate(longitude) } : {}),
     address_key: key,
     source,
     active: true,
@@ -1267,7 +1277,7 @@ async function addManualProperty(customerId, input, options = {}) {
   return writeManualProperty(customerId, 'add', input, null, options, async (trx, _loaded, changes) => {
     await completePrimaryFromCall(customerId, changes, { conn: trx });
     await ensurePrimaryProperty(customerId, { conn: trx });
-    const result = await recordCallProperty({ customerId, ...changes, occupancyType: changes.occupancy_type, source: 'manual', conn: trx });
+    const result = await recordCallProperty({ customerId, ...changes, latitude: input?.latitude, longitude: input?.longitude, occupancyType: changes.occupancy_type, source: 'manual', conn: trx });
     if (!result.created) throw propertyActionError('A property with that street already exists for this customer', 409, 'property_exists');
     return result.propertyId;
   });

@@ -179,6 +179,27 @@ describeDb('reclaimed water half nitrogen through PostgreSQL', () => {
     expect(JSON.stringify(plain.gateNotes)).not.toContain('reclaimedNitrogen');
   });
 
+  test('after a customer merge the visit still points at the loser\'s deactivated property: the winner\'s active property at the same address decides', async () => {
+    const visit = await visitOn('2026-11-10', { water: COUNTY });
+    const key = require('../services/customer-properties').addressKey({ address_line1: '100 Fixture Street', city: 'Fixture City', zip: '34201' });
+    await knex('customer_properties').where({ id: visit.property_id }).update({ address_key: key });
+    const active = await knex('customer_properties').where({ id: visit.property_id }).first();
+    // The merge keeps the loser's row as inactive history (same address key, no verdict of its own) and the visit keeps pointing at it.
+    const [loser] = await knex('customer_properties').insert({
+      customer_id: active.customer_id, address_line1: active.address_line1, city: active.city, state: active.state, zip: active.zip,
+      address_key: active.address_key, source: 'backfill', active: false, is_primary: false,
+    }).returning('*');
+    await knex('scheduled_services').where({ id: visit.id }).update({ property_id: loser.id });
+    expect(bagOf((await plan(visit)).mixCalculator.items).mix.ratePer1000).toBeCloseTo(1.5625, 4);
+    // The winner's property is not reclaimed: the normal target, whatever the inactive row says.
+    await knex('customer_properties').where({ id: loser.id }).update({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
+    await knex('customer_properties').where({ id: active.id }).update({ reclaimed_water: false, reclaimed_water_source: 'office' });
+    expect(bagOf((await plan(visit)).mixCalculator.items).mix.ratePer1000).toBeCloseTo(3.125, 3);
+    // No active property at that address at all: fail closed.
+    await knex('customer_properties').where({ id: active.id }).update({ active: false });
+    expect(bagOf((await plan(visit)).mixCalculator.items).mix.ratePer1000).toBeCloseTo(3.125, 3);
+  });
+
   test('inside a transaction (packet closeout) the plan reads the property through a savepoint and still halves', async () => {
     const visit = await visitOn('2026-11-10', { water: COUNTY });
     const result = await knex.transaction((trx) => buildPlanForService(visit.id, { db: trx, includeCompletionDefaults: true }));

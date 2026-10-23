@@ -29,6 +29,13 @@ function formatPropertyAddress(p) {
   return [street, locality].filter(Boolean).join(", ");
 }
 
+function selectedCoordinates(selected, form) {
+  if (!selected || selected.lat == null || selected.lng == null) return {};
+  const same = (a, b) => String(a || "").toLowerCase().replace(/[^a-z0-9]/g, "") === String(b || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const unchanged = same(selected.line1, form.address_line1) && same(selected.city, form.city) && String(selected.zip || "").slice(0, 5) === String(form.zip || "").slice(0, 5);
+  return unchanged ? { latitude: selected.lat, longitude: selected.lng } : {};
+}
+
 // The reclaimed-water control (GATE_LAWN_RECLAIMED_HALF_N). A person's answer (office or customer) is shown as the choice; with no
 // answer the control reads "Automatic" and the line under it says what the county meter match found.
 function reclaimedChoice(p) {
@@ -172,6 +179,9 @@ export default function CustomerPropertiesPanelV2({
           city: form.city.trim(),
           state: stateCode,
           zip: form.zip.trim(),
+          // The selected address's coordinates, only while the typed street, city and ZIP are still the ones selected (an edited address would
+          // otherwise keep the old pin); the server validates them and ignores a bad pair.
+          ...selectedCoordinates(selectedAddressRef.current, form),
           occupancy_type: form.occupancy_type || "unknown",
           relationship: form.relationship || null,
           label: form.label.trim() || null,
@@ -463,6 +473,9 @@ export default function CustomerPropertiesPanelV2({
                     city: parts.city || form.city,
                     state: parts.state || form.state,
                     zip: parts.zip || form.zip,
+                    // The picker's own coordinates for THIS selection (null when the lookup returned none).
+                    lat: Number.isFinite(parts.lat) ? parts.lat : null,
+                    lng: Number.isFinite(parts.lng) ? parts.lng : null,
                   };
                   setForm((f) => ({
                     ...f,

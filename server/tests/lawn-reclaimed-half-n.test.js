@@ -19,11 +19,19 @@ const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const service = { id: 'svc-1', property_id: PROPERTY };
 
 // A knex whose customer_properties read answers `row`; every call is recorded.
-function fakeKnex(row) {
+// `rows` is the answer of each successive customer_properties read (a single row answers every read).
+function fakeKnex(rows) {
   const calls = [];
+  const queue = Array.isArray(rows) ? [...rows] : null;
   const knex = (table) => {
     calls.push(table);
-    return { where: () => ({ first: async () => { if (row instanceof Error) throw row; return row; } }) };
+    const answer = async () => {
+      const row = queue ? queue.shift() : rows;
+      if (row instanceof Error) throw row;
+      return row;
+    };
+    const query = { where: () => query, first: answer };
+    return query;
   };
   knex.calls = calls;
   return knex;
@@ -272,6 +280,45 @@ describe('the property read (isReclaimedService)', () => {
     expect(await reclaimed.isReclaimedService(fakeKnex({ reclaimed_water: true }), service)).toBe(true);
     expect(await reclaimed.isReclaimedService(fakeKnex({ reclaimed_water: false }), service)).toBe(false);
     expect(await reclaimed.isReclaimedService(fakeKnex({ reclaimed_water: null }), service)).toBe(false);
+  });
+
+  describe('a visit pointing at a property a customer merge deactivated (repointCustomerProperties keeps the loser\'s row as history)', () => {
+    const MERGED = { id: 'svc-m', property_id: PROPERTY, customer_id: 'winner-1' };
+    const inactive = { reclaimed_water: null, active: false, address_key: 'k-12-sample-lane' };
+
+    test('the verdict is the winning customer\'s active property at the same address', async () => {
+      const knex = fakeKnex([inactive, { reclaimed_water: true }]);
+      expect(await reclaimed.isReclaimedService(knex, MERGED)).toBe(true);
+      expect(knex.calls).toEqual(['customer_properties', 'customer_properties']);
+      expect(await reclaimed.isReclaimedService(fakeKnex([inactive, { reclaimed_water: false }]), MERGED)).toBe(false);
+      expect(await reclaimed.isReclaimedService(fakeKnex([inactive, { reclaimed_water: null }]), MERGED)).toBe(false);
+    });
+
+    test('the inactive row\'s own old verdict is never trusted: the loser\'s answer does not carry over', async () => {
+      expect(await reclaimed.isReclaimedService(fakeKnex([{ ...inactive, reclaimed_water: true }, { reclaimed_water: false }]), MERGED)).toBe(false);
+    });
+
+    test.each([
+      ['no active property at that address', [inactive, undefined]],
+      ['no address key to match on', [{ reclaimed_water: true, active: false, address_key: null }]],
+    ])('%s: fail closed, the normal target stands', async (_label, rows) => {
+      expect(await reclaimed.isReclaimedService(fakeKnex(rows), MERGED)).toBe(false);
+    });
+
+    test('a visit with no customer cannot be resolved to an active property: fail closed', async () => {
+      expect(await reclaimed.isReclaimedService(fakeKnex([inactive, { reclaimed_water: true }]), { id: 'svc-x', property_id: PROPERTY })).toBe(false);
+    });
+
+    test('an active property is read as before, in one read', async () => {
+      const knex = fakeKnex([{ reclaimed_water: true, active: true, address_key: 'k' }]);
+      expect(await reclaimed.isReclaimedService(knex, MERGED)).toBe(true);
+      expect(knex.calls).toEqual(['customer_properties']);
+    });
+
+    test('the plan decision halves through the winner\'s property', async () => {
+      const found = await engine.visitNutrientTargets(fakeKnex([inactive, { reclaimed_water: true }]), MERGED, { visit: visitOf('Nov'), month: 'Nov', v13Active: true });
+      expect(found).toMatchObject({ nitrogenCut: 0.375, reclaimedWater: 'half' });
+    });
   });
 
   test('a failed read keeps the normal target and logs the code only; strict throws', async () => {

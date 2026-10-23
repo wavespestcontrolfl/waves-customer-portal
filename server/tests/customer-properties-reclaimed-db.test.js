@@ -71,4 +71,40 @@ suite('reclaimed water edits against isolated Postgres', () => {
     expect(on.body.properties[0]).toHaveProperty('reclaimed_water');
     expect(address(1)).toBeTruthy();
   }, 30000);
+
+  describe('a staff-added service address keeps the picker\'s coordinates', () => {
+    const post = (body) => api(`/api/admin/customers/${customerA}/properties`, body, 'POST');
+    const rowOf = (id) => db('customer_properties').where({ id }).first();
+    let n = 7000;
+    const next = () => ({ ...address((n += 1)), state: 'FL' });
+
+    test('valid coordinates are stored (7 decimals); the insert does not trip the coordinate-change trigger, and a later pin move still clears a county verdict', async () => {
+      const res = await post({ ...next(), latitude: 27.58211234, longitude: '-82.42763456' });
+      expect(res.status).toBe(201);
+      const row = await rowOf(res.body.propertyId);
+      expect(Number(row.latitude)).toBeCloseTo(27.5821123, 6);
+      expect(Number(row.longitude)).toBeCloseTo(-82.4276346, 6);
+      // BEFORE UPDATE trigger only: an insert leaves the three reclaimed columns as the insert wrote them (NULL).
+      expect(row).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+      // A later pin move on a county-judged row does clear the verdict (the trigger works on rows born with coordinates too).
+      await db('customer_properties').where({ id: row.id }).update({ reclaimed_water: true, reclaimed_water_source: 'county_meter', reclaimed_water_checked_at: new Date() });
+      await db('customer_properties').where({ id: row.id }).update({ latitude: 27.6, longitude: -82.4 });
+      expect(await rowOf(row.id)).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
+    });
+
+    test.each([
+      ['no coordinates', {}],
+      ['only a latitude', { latitude: 27.5 }],
+      ['not numbers', { latitude: 'north', longitude: 'west' }],
+      ['out of range', { latitude: 127.5, longitude: -82.4 }],
+      ['null, zero and booleans', { latitude: 0, longitude: 0 }],
+      ['booleans', { latitude: true, longitude: false }],
+    ])('%s: the address is saved without coordinates', async (_label, coords) => {
+      const res = await post({ ...next(), ...coords });
+      expect(res.status).toBe(201);
+      const row = await rowOf(res.body.propertyId);
+      expect(row.latitude).toBeNull();
+      expect(row.longitude).toBeNull();
+    });
+  });
 });

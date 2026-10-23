@@ -112,6 +112,9 @@ const AUTO_PRIMARY_COLUMNS = new Set([
 // The automatic neighborhood lookup (neighborhood-access.js) stamps these
 // with source 'county'; any other source is an office entry.
 const AUTO_NEIGHBORHOOD_COLUMNS = ['neighborhood_id', 'neighborhood_source', 'county_subdivision', 'neighborhood_checked_at'];
+// The county meter job (reclaimed-water-meters.js, GATE_LAWN_RECLAIMED_HALF_N) stamps these when it matches the property to a reclaimed meter.
+// Derived like the neighborhood stamp: only while the source is 'county_meter'. An office or customer answer is a person's entry, real history.
+const AUTO_RECLAIMED_COLUMNS = ['reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at'];
 
 const isBlank = (v) => v === null || v === undefined || v === false || String(v).trim() === ''
   || (typeof v === 'object' && !(v instanceof Date) && Object.keys(v).length === 0);
@@ -158,6 +161,7 @@ function primaryPropertyEdits(property, customer) {
   if (property.neighborhood_source && property.neighborhood_source !== 'county') edits.push('an office neighborhood entry');
   for (const [column, value] of Object.entries(property)) {
     if (AUTO_PRIMARY_COLUMNS.has(column) || AUTO_NEIGHBORHOOD_COLUMNS.includes(column)) continue;
+    if (AUTO_RECLAIMED_COLUMNS.includes(column) && property.reclaimed_water_source === 'county_meter') continue;
     if (!isBlank(value)) edits.push(column);
   }
   return edits;
