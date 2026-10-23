@@ -1290,6 +1290,29 @@ describe('unlink (gate on)', () => {
   });
 });
 
+describe('generic Ignore and the ledger Income shelf', () => {
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; state.bankUpdates = []; state.bankUpdateResult = 1; });
+  afterEach(() => { delete process.env.GATE_TAX_LEDGER; state.bankUpdateResult = 1; });
+  test('with the ledger on, a row on the Income shelf is not ignored from Bank Import: 409 with the way out', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankUpdateResult = 0;
+    state.bankRow = { id: 'bt-1', status: 'unmatched', suggestion: { noMatch: true, income: true, rule: { id: 'r', kind: 'income' } } };
+    const res = await post('/admin/tax/bank-import/bt-1/ignore', {});
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/Income shelf.*Recorded/);
+    expect(state.bankUpdates[0].wheres).toContainEqual(["not coalesce(suggestion->>'income','') = 'true'", undefined]);
+    // any other refused row keeps the plain answer
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: null };
+    expect((await (await post('/admin/tax/bank-import/bt-1/ignore', {})).json()).error).toMatch(/only unmatched rows/);
+  });
+  test('with the ledger off there is no shelf: the update carries no Income guard', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    state.bankRow = { id: 'bt-1', status: 'unmatched', suggestion: { income: true, decision: 'income' } };
+    expect((await post('/admin/tax/bank-import/bt-1/ignore', {})).status).toBe(200);
+    expect(JSON.stringify(state.bankUpdates[0].wheres)).not.toContain("'income'");
+  });
+});
+
 describe('AI suggest eligibility follows the ledger kill switch', () => {
   beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; state.listRows = []; });
   afterAll(() => { delete process.env.GATE_TAX_LEDGER; });

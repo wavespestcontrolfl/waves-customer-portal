@@ -120,12 +120,13 @@ function BusinessAction({ row, categories, categoryId, onCategory, busy, onAct }
 }
 
 // The shelf and park actions a row may take: no Income on money out, no
-// Later while Always is checked (Later never makes a rule), and never the
-// shelf the row is already on.
+// Later or Recorded while Always is checked (neither makes a rule: the
+// server would save the decision and no rule, and the owner would believe
+// the payee is handled), and never the shelf the row is already on.
 // A receipt on the Income shelf can also be marked recorded once its sale
 // (invoice and payment) is in the portal: that settles the row.
 function shelfActions(row, view, always) {
-  const all = ["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), ...(always ? [] : ["later"]), ...(view === "income" ? ["recorded"] : [])];
+  const all = ["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), ...(always ? [] : ["later"]), ...(view === "income" && !always ? ["recorded"] : [])];
   return all.filter((d) => d !== view);
 }
 
@@ -170,7 +171,7 @@ function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
         <ShelfActions row={row} view={view} always={always} busy={busy} onAct={act} />
         <Checkbox
           id={`always-${row.id}`}
-          label="Always treat this payee this way (not for Later)"
+          label="Always treat this payee this way (not for Later or Recorded)"
           checked={always}
           disabled={busy}
           onChange={(e) => setAlways(e.target.checked)}
@@ -416,6 +417,10 @@ export default function LedgerInboxTab() {
   // where the last Apply rules now stopped (null = it finished): the next
   // click continues from there instead of starting over
   const resumeRef = useRef(null);
+  // rows this view settled locally: a full reload (after an Always
+  // decision) may have read the list before another row's decision
+  // committed, and its response must not bring that row back
+  const settledRef = useRef(new Set());
   useEffect(() => { viewRef.current = view; }, [view]);
 
   const loadStatus = useCallback(() => {
@@ -431,8 +436,10 @@ export default function LedgerInboxTab() {
     return adminFetch(`${T}/ledger/inbox?limit=${PAGE}&offset=${offset}&view=${v}`)
       .then((d) => {
         if (my !== seq.current) return;
-        setRows((prev) => (offset === 0 ? d.rows || [] : [...prev, ...(d.rows || [])]));
-        setTotal(d.total || 0);
+        const fresh = (d.rows || []).filter((r) => !settledRef.current.has(r.id));
+        const revived = (d.rows || []).length - fresh.length;
+        setRows((prev) => (offset === 0 ? fresh : [...prev, ...fresh]));
+        setTotal(Math.max(0, (d.total || 0) - revived));
       })
       .catch((e) => { if (my === seq.current) setLoadError(e.message); })
       .finally(() => { if (my === seq.current) setLoading(false); });
@@ -452,6 +459,7 @@ export default function LedgerInboxTab() {
   // a view change shows nothing of the previous shelf while the new one loads
   useEffect(() => {
     if (!enabled) return;
+    settledRef.current = new Set();
     setRows([]);
     setTotal(0);
     loadRows(view, 0);
@@ -490,6 +498,7 @@ export default function LedgerInboxTab() {
       } else if (decision === view || always) {
         await loadRows(view, 0);
       } else {
+        settledRef.current.add(row.id);
         setRows((prev) => prev.filter((r) => r.id !== row.id));
         setTotal((t) => Math.max(0, t - 1));
       }

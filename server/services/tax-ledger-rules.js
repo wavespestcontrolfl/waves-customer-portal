@@ -215,7 +215,12 @@ function canonicalPattern(pattern) {
 // class the grammar admits, repeated to MAX_DESCRIPTION, with and without a
 // late match) under a hard budget, and is terminated when it overruns. The
 // grammar bounds the shape; this bounds the time, whatever the shape.
+// The budget is regex time as the worker measures it (startup, scheduling
+// and message delivery excluded: on a busy server they alone can pass 150
+// ms). The hard cap is wall clock: a backtracking pattern that never
+// reports is terminated there.
 const PROBE_BUDGET_MS = 150;
+const PROBE_HARD_CAP_MS = 2000;
 function probeStrings(pattern) {
   const n = MAX_DESCRIPTION;
   const fills = [' ', 'a', '1', '-', 'a ', 'a1', ' -', '\t'];
@@ -246,11 +251,11 @@ function releaseProbe() {
   if (next) next(); // the slot passes to the next waiter: running stays the same
   else probeGate.running -= 1;
 }
-async function probePattern(pattern, budgetMs) {
+async function probePattern(pattern, budgetMs, hardCapMs) {
   const { Worker } = require('worker_threads');
   const worker = new Worker(require.resolve('./tax-ledger-pattern-probe-worker'), { workerData: { pattern: String(pattern), strings: probeStrings(String(pattern)) } });
   const verdict = await new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ slow: true }), budgetMs);
+    const timer = setTimeout(() => resolve({ slow: true }), Math.max(hardCapMs, budgetMs));
     worker.once('message', (msg) => { clearTimeout(timer); resolve(msg); });
     worker.once('error', (err) => { clearTimeout(timer); resolve({ error: err.message }); });
     worker.once('exit', () => { clearTimeout(timer); resolve({ exited: true }); });
@@ -258,11 +263,11 @@ async function probePattern(pattern, budgetMs) {
   await worker.terminate().catch(() => {});
   return verdict;
 }
-async function assertPatternFast(pattern, { budgetMs = PROBE_BUDGET_MS } = {}) {
+async function assertPatternFast(pattern, { budgetMs = PROBE_BUDGET_MS, hardCapMs = PROBE_HARD_CAP_MS } = {}) {
   await acquireProbe();
   let verdict;
-  try { verdict = await probePattern(pattern, budgetMs); } finally { releaseProbe(); }
-  if (verdict.slow) throw httpError(400, `pattern is too slow on a long description (it must finish within ${budgetMs} ms); simplify it`);
+  try { verdict = await probePattern(pattern, budgetMs, hardCapMs); } finally { releaseProbe(); }
+  if (verdict.slow || (Number.isFinite(verdict.ms) && verdict.ms > budgetMs)) throw httpError(400, `pattern is too slow on a long description (it must finish within ${budgetMs} ms); simplify it`);
   if (verdict.error) throw httpError(400, `pattern is not a valid regular expression: ${verdict.error}`);
   return true;
 }
@@ -345,7 +350,11 @@ const STOP = new Set(['the', 'and', 'inc', 'llc', 'ltd', 'corp', 'com', 'www', '
 const TOKEN_RE = /[a-z][a-z&'.\-]*/g;
 const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function patternFromDescription(description) {
-  const s = String(description || '').toLowerCase().replace(PREFIX_RE, '');
+  // built from, and checked against, the same prefix matching reads
+  // (matchRule cuts every description at MAX_DESCRIPTION): a payee that
+  // starts past it would make a rule that never matches its own row
+  const source = String(description || '').slice(0, MAX_DESCRIPTION);
+  const s = source.toLowerCase().replace(PREFIX_RE, '');
   const kept = [];
   let firstStart = -1;
   let lastEnd = -1;
@@ -373,7 +382,7 @@ function patternFromDescription(description) {
     const words = kept.slice(0, n).map(escapeRe).join('\\W*');
     const trailing = n === kept.length && digitAfter ? '\\d*' : '';
     const pattern = `\\b${digitBefore ? '\\d*' : ''}${words}${trailing}\\b`;
-    if (fitsGrammar(pattern) && new RegExp(pattern, 'i').test(description)) return pattern;
+    if (fitsGrammar(pattern) && new RegExp(pattern, 'i').test(source)) return pattern;
   }
   return null;
 }
@@ -611,7 +620,11 @@ function visibleSuggestion(suggestion) {
   const decided = !!out.decision;
   for (const k of RULE_OWNED_KEYS) if (!(decided && (k === 'income' || k === 'personal'))) delete out[k];
   if (out.categorySource === 'rule') for (const k of ['categoryId', 'categoryName', 'irsLine', 'categorySource']) delete out[k];
-  if (suggestion.rule.kind === 'transfer' && !decided) { delete out.ignore; delete out.reason; }
+  // a transfer rule's flag and reason are the rule's: hidden unless the
+  // owner's own decision is Transfer. A Later decision defers the row and
+  // affirms nothing (the flag would otherwise read as the matcher's own,
+  // and a rescan never touches a decided row)
+  if (suggestion.rule.kind === 'transfer' && (!decided || out.decision === 'later')) { delete out.ignore; delete out.reason; }
   else if (!decided) delete out.reason;
   return out;
 }

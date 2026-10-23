@@ -589,6 +589,8 @@ async function activate(itemId, overrides = {}) {
 
   test('the hourly run keeps matching while work remains, even when nothing new synced', async () => {
     const bankImport = require('../services/bank-import');
+    const taxLedgerRules = require('../services/tax-ledger-rules');
+    const rulePass = jest.spyOn(taxLedgerRules, 'applyAfterImport').mockResolvedValue(null);
     const itemId = await connect();
     await activate(itemId);
     plaid.transactionsSync.mockResolvedValueOnce(page([], [], [], 'cursor-1'));
@@ -601,6 +603,9 @@ async function activate(itemId, overrides = {}) {
     expect(out).toMatchObject({ items: 1, matchingPasses: 3, matchingError: null });
     expect(out.results[0]).toMatchObject({ inserted: 0, matching: null }); // no per-item pass in the cron
     expect(bankImport.runDeterministicMatching).toHaveBeenCalledTimes(3);
+    // the rule pass gets the budget the matcher used this cycle (3 passes × 500), not a fixed 2,000
+    expect(rulePass).toHaveBeenCalledWith('hourly sync', { budget: 1500 });
+    rulePass.mockRestore();
     await plaidSync.disconnectItem(itemId);
   });
 

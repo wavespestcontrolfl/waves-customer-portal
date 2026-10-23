@@ -2353,39 +2353,38 @@ router.post('/bank-import/suggest', async (req, res, next) => {
     if (ids && ids.length) q = q.whereIn('id', ids);
     const rows = await q;
     const results = [];
-    for (const row of rows) {
-      try {
-        const ai = await autoCategorizeExpense(null, row.description, row.amount);
-        if (ai?.categoryId) {
-          // atomic jsonb merge: the matching pass can write transfer flags
-          // or candidates into suggestion DURING the model call — a rebuild
-          // from the pre-call snapshot would erase them (same guard the
-          // expenses auto-categorize path applies to its post-model write)
-          // the eligibility is repeated at the write: a ledger pass can mark
-          // the row personal or a transfer during the model call, and an AI
-          // category on top of that would recreate the contradiction
-          const { flagState, dropKeys } = aiWriteFlagState(row.suggestion, ledgerOn);
-          const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(noCategory).whereRaw(notIgnored).whereRaw(flagState).update({
-            // provenance moves to the model: a category a ledger rule wrote
-            // before is replaced, and the kill switch no longer owns it. The
-            // rule's own keys go with it (rule, its stamp, personal/review
-            // notes, the override marker): a dormant rule must not resurface
-            // next to the model's category when the gate comes back on
-            suggestion: bankImport.suggestionMerge({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null }, dropKeys),
-            updated_at: new Date(),
-          });
-          if (landed) results.push({ id: row.id, category: ai.categoryName, applied: true });
-          else results.push({ id: row.id, applied: false, error: 'the row was classified or settled meanwhile' });
-        } else {
-          results.push({ id: row.id, applied: false, error: 'no matching category' });
-        }
-      } catch (err) {
-        results.push({ id: row.id, applied: false, error: err.message });
-      }
-    }
+    for (const row of rows) results.push(await aiSuggestRow(row, { noCategory, notIgnored, ledgerOn }));
     res.json({ success: true, processed: results.length, results });
   } catch (err) { next(err); }
 });
+
+// One row of the AI pass: the model's category is written with an atomic
+// jsonb merge (the matching pass can write transfer flags or candidates
+// into suggestion DURING the model call; a rebuild from the pre-call
+// snapshot would erase them, the same guard the expenses auto-categorize
+// path applies). The eligibility is repeated at the write: a ledger pass
+// can mark the row personal or a transfer during the model call, and an AI
+// category on top of that would recreate the contradiction.
+async function aiSuggestRow(row, { noCategory, notIgnored, ledgerOn }) {
+  try {
+    const ai = await autoCategorizeExpense(null, row.description, row.amount);
+    if (!ai?.categoryId) return { id: row.id, applied: false, error: 'no matching category' };
+    const { flagState, dropKeys } = aiWriteFlagState(row.suggestion, ledgerOn);
+    const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(noCategory).whereRaw(notIgnored).whereRaw(flagState).update({
+      // provenance moves to the model: a category a ledger rule wrote
+      // before is replaced, and the kill switch no longer owns it. The
+      // rule's own keys go with it (rule, its stamp, personal/review
+      // notes, the override marker): a dormant rule must not resurface
+      // next to the model's category when the gate comes back on
+      suggestion: bankImport.suggestionMerge({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null }, dropKeys),
+      updated_at: new Date(),
+    });
+    if (landed) return { id: row.id, category: ai.categoryName, applied: true };
+    return { id: row.id, applied: false, error: 'the row was classified or settled meanwhile' };
+  } catch (err) {
+    return { id: row.id, applied: false, error: err.message };
+  }
+}
 
 // every manual claim below refuses a Plaid row with an unresolved bank
 // change: it still holds the pre-correction values (bankImport.hasUnresolvedBankChange)
@@ -2791,12 +2790,21 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const INCOME_SHELF_IGNORE = 'this receipt is on the ledger Inbox\'s Income shelf: nothing has counted it as revenue yet. Mark it Recorded there once its sale is in the portal, or decide it Personal or Transfer there';
 router.post('/bank-import/:id/ignore', async (req, res, next) => {
   try {
-    const changed = await db('bank_transactions')
-      .where({ id: req.params.id }).whereIn('status', ['unmatched'])
-      .update({ status: 'ignored', updated_at: new Date() });
-    if (!changed) return res.status(409).json({ error: 'only unmatched rows can be ignored' });
+    // a receipt on the ledger's Income shelf (an Income decision, or an
+    // income rule's pre-fill) is not ignored from here while the ledger is
+    // on: the shelf exists so that nothing leaves it uncounted
+    const ledgerOn = taxLedgerRules.isOn();
+    let q = db('bank_transactions').where({ id: req.params.id }).whereIn('status', ['unmatched']);
+    if (ledgerOn) q = q.whereRaw(`not ${taxLedgerRules.ON_INCOME_SHELF_SQL}`);
+    const changed = await q.update({ status: 'ignored', updated_at: new Date() });
+    if (!changed) {
+      const row = ledgerOn ? await db('bank_transactions').where({ id: req.params.id }).first('status', 'suggestion') : null;
+      if (row && row.status === 'unmatched' && String(row.suggestion?.income) === 'true') return res.status(409).json({ error: INCOME_SHELF_IGNORE });
+      return res.status(409).json({ error: 'only unmatched rows can be ignored' });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });

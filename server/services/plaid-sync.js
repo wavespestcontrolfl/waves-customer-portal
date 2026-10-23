@@ -32,7 +32,8 @@ const { etDateString } = require('../utils/datetime-et');
 
 const MAX_SYNC_PAGES = 400;             // 400 × 500 = 200k transactions per run (two years for a small business is a few thousand)
 const MAX_PAGINATION_RESTARTS = 3;
-const MAX_MATCHING_PASSES = 20;           // × 500 rows per hourly run; the next hour continues
+const MATCHING_PASS_ROWS = 500;           // rows one matcher pass examines
+const MAX_MATCHING_PASSES = 20;           // × MATCHING_PASS_ROWS per hourly run; the next hour continues
 const MAX_AMOUNT = 9999999999.99;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;       // numeric(12,2) ceiling, as the CSV parser
 
@@ -855,7 +856,7 @@ async function syncItem(itemId, { runMatching = true } = {}) {
   // a correction replaces its row (updated) — fresh values to match too
   if (runMatching && (result.inserted > 0 || result.updated > 0)) {
     try {
-      matching = await bankImport.runDeterministicMatching({ limit: 500 });
+      matching = await bankImport.runDeterministicMatching({ limit: MATCHING_PASS_ROWS });
       await taxLedgerRules.applyAfterImport(`plaid item ${itemId}`);
     } catch (err) {
       logger.warn(`[plaid-sync] item ${itemId} synced but the matching pass failed: ${err.message}`);
@@ -888,9 +889,11 @@ async function syncAllItems() {
       let more = true;
       while (more && matchingPasses < MAX_MATCHING_PASSES) {
         matchingPasses++;
-        more = (await bankImport.runDeterministicMatching({ limit: 500 })).moreRemaining;
+        more = (await bankImport.runDeterministicMatching({ limit: MATCHING_PASS_ROWS })).moreRemaining;
       }
-      await taxLedgerRules.applyAfterImport('hourly sync');
+      // the rule pass gets the budget the matcher just used: every row this
+      // cycle examined gets its pre-fill now, not an hour later
+      await taxLedgerRules.applyAfterImport('hourly sync', { budget: matchingPasses * MATCHING_PASS_ROWS });
     } catch (err) {
       logger.warn(`[plaid-sync] hourly matching pass failed: ${err.message}`);
       matchingError = err.message;

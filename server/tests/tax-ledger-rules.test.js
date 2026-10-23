@@ -281,11 +281,22 @@ describe('seed rules', () => {
   });
 });
 
+describe('patternFromDescription reads the prefix matching reads', () => {
+  test('a payee that starts past MAX_DESCRIPTION makes no rule; one inside it does', () => {
+    const noise = '1234567890 '.repeat(28); // 308 characters with no payee word
+    expect(svc.patternFromDescription(`${noise}WAWA 5519`)).toBeNull();
+    expect(svc.patternFromDescription(`WAWA 5519 ${noise}`)).toBe('\\bwawa\\b');
+  });
+});
+
 describe('assertPatternFast (worker probe)', () => {
   test('every seed and a plain owner pattern finish within the budget; an overrun is a 400 and the worker is stopped', async () => {
     await expect(svc.assertPatternFast('wawa')).resolves.toBe(true);
     for (const r of seeds.SEED_RULES) await expect(svc.assertPatternFast(r.pattern)).resolves.toBe(true);
-    await expect(svc.assertPatternFast('wawa', { budgetMs: 0 })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/too slow/) });
+    // the budget is the worker's own regex time: a benign pattern passes a budget far below any worker start-up time
+    await expect(svc.assertPatternFast('wawa', { budgetMs: 5 })).resolves.toBe(true);
+    // a backtracking pattern never reports (its probe strings include 299 a's then x): the wall-clock cap terminates it
+    await expect(svc.assertPatternFast('(a+)+$', { budgetMs: 50, hardCapMs: 400 })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/too slow/) });
     // the adversarial strings cover every character class the grammar admits, at full length
     const strings = svc.probeStrings('costco\\W*gas');
     expect(strings.length).toBeGreaterThan(20);
@@ -829,6 +840,9 @@ describe('visibleSuggestion (the kill switch)', () => {
     process.env.GATE_BANK_IMPORT = 'true'; delete process.env.GATE_TAX_LEDGER;
     expect(svc.visibleSuggestion(ruleSug)).toEqual({ noMatch: true, candidates: [{ id: 1 }] });
     expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'transfer' }, ignore: true, reason: 'transfer per ledger rule', rulesAt: 't' })).toEqual({});
+    // a Later decision on a transfer-rule row affirms nothing: the rule's flag and reason go with the rule; a Transfer decision keeps its own
+    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'transfer' }, ignore: true, reason: 'transfer per ledger rule', rulesAt: 't', later: true, decision: 'later', decidedAt: 'd' })).toEqual({ later: true, decision: 'later', decidedAt: 'd' });
+    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'transfer' }, ignore: true, reason: 'transfer per the owner', rulesAt: 't', decision: 'transfer', decidedAt: 'd' })).toEqual({ ignore: true, reason: 'transfer per the owner', decision: 'transfer', decidedAt: 'd' });
     // the matcher's own transfer flag (no rule key) is not a rule's
     const matcher = { ignore: true, reason: 'internal transfer?' };
     expect(svc.visibleSuggestion(matcher)).toBe(matcher);

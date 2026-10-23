@@ -92,7 +92,7 @@ it('Business with Always posts decide, then create-expense with the chosen categ
   render(<LedgerInboxTab />);
   const card = await screen.findByTestId('ledger-row-row-1');
   fireEvent.change(within(card).getByLabelText('Category'), { target: { value: 'cat-1' } });
-  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later)'));
+  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later or Recorded)'));
   fireEvent.click(within(card).getByRole('button', { name: 'Business' }));
   await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
   const p = posts();
@@ -198,7 +198,7 @@ it('an Always decision whose payee pass stopped short (propagated:false) keeps t
   }));
   render(<LedgerInboxTab />);
   await screen.findByText('ACME HARDWARE 123');
-  fireEvent.click(screen.getByLabelText('Always treat this payee this way (not for Later)'));
+  fireEvent.click(screen.getByLabelText('Always treat this payee this way (not for Later or Recorded)'));
   fireEvent.click(screen.getByRole('button', { name: 'Personal' }));
   expect(await screen.findByText(/Decision saved, but not every open row of this payee was updated yet\. Click Apply rules now to finish\./)).toBeInTheDocument();
   expect(calls.find((c) => c.url.includes('/ledger/decide')).body).toEqual({ id: 'row-1', decision: 'personal', always: true });
@@ -259,6 +259,42 @@ it('a page load and a decision never overlap: Load more disables the rows, a row
   expect(screen.getByRole('button', { name: 'Load more' })).not.toBeDisabled();
 });
 
+it('a full reload after an Always decision never brings back a row decided while the reload was in flight', async () => {
+  const base = fetch;
+  const second = { ...row, id: 'row-2', description: 'OTHER SHOP 55' };
+  let resolveSecond;
+  let resolveReload;
+  let inboxCalls = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/inbox')) {
+      inboxCalls += 1;
+      if (inboxCalls === 1) return json({ rows: [row, second], total: 2 });
+      // the reload read the list before row-2's decision committed
+      return new Promise((r) => { resolveReload = () => r(json({ rows: [second], total: 1 })); });
+    }
+    if (u.includes('/ledger/decide')) {
+      const body = JSON.parse(opts.body);
+      if (body.id === 'row-2') return new Promise((r) => { resolveSecond = () => r(json({ success: true, action: 'ignored', ruleCreated: false })); });
+      return json({ success: true, action: 'ignored', ruleCreated: true, propagated: true });
+    }
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByText('OTHER SHOP 55');
+  const card = (id) => screen.getByTestId(`ledger-row-${id}`);
+  fireEvent.click(within(card('row-2')).getByRole('button', { name: 'Personal' })); // in flight
+  fireEvent.click(within(card('row-1')).getByLabelText('Always treat this payee this way (not for Later or Recorded)'));
+  fireEvent.click(within(card('row-1')).getByRole('button', { name: 'Personal' })); // answers at once: a full reload starts
+  await waitFor(() => expect(inboxCalls).toBe(2));
+  await act(async () => { resolveSecond(); });
+  await waitFor(() => expect(screen.queryByText('OTHER SHOP 55')).not.toBeInTheDocument());
+  await act(async () => { resolveReload(); });
+  await waitFor(() => expect(screen.queryByText('Loading…')).not.toBeInTheDocument());
+  expect(screen.queryByText('OTHER SHOP 55')).not.toBeInTheDocument(); // the stale snapshot does not revive it
+  expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument();
+});
+
 it('the Income view offers Recorded, which settles the row with the recorded decision; other views do not', async () => {
   const base = fetch;
   const credit = { ...row, direction: 'credit', amount: 120, suggestion: { noMatch: true, income: true, decision: 'income' } };
@@ -273,6 +309,10 @@ it('the Income view offers Recorded, which settles the row with the recorded dec
   expect(screen.queryByRole('button', { name: 'Recorded' })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Income view' }));
   await screen.findByText('ACME HARDWARE 123');
+  // Always makes no rule for Recorded: while it is checked the action is not offered
+  fireEvent.click(screen.getByLabelText('Always treat this payee this way (not for Later or Recorded)'));
+  expect(screen.queryByRole('button', { name: 'Recorded' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText('Always treat this payee this way (not for Later or Recorded)'));
   fireEvent.click(await screen.findByRole('button', { name: 'Recorded' }));
   await waitFor(() => expect(calls.find((c) => c.url.includes('/ledger/decide'))).toBeTruthy());
   expect(calls.find((c) => c.url.includes('/ledger/decide')).body).toEqual({ id: 'row-1', decision: 'recorded', always: false });
@@ -355,7 +395,7 @@ it('checking Always removes the Later action, and a decided row shows the decisi
   render(<LedgerInboxTab />);
   const card = await screen.findByTestId('ledger-row-row-1');
   expect(within(card).getByRole('button', { name: 'Later' })).toBeInTheDocument();
-  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later)'));
+  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later or Recorded)'));
   expect(within(card).queryByRole('button', { name: 'Later' })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Income view' }));
   const decided = await screen.findByTestId('ledger-row-row-4');
@@ -377,7 +417,7 @@ it('an Always decision reloads the view so sibling rows show the new rule', asyn
   }));
   render(<LedgerInboxTab />);
   const card = await screen.findByTestId('ledger-row-row-1');
-  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later)'));
+  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later or Recorded)'));
   fireEvent.click(within(card).getByRole('button', { name: 'Personal' }));
   await waitFor(() => expect(inboxLoads).toBeGreaterThanOrEqual(2));
   const sibling = await screen.findByTestId('ledger-row-row-5');
