@@ -311,3 +311,50 @@ describe('equipment system asset-link route guards', () => {
     expect(source).toContain('invalid_fields');
   });
 });
+
+// Scope PR 3, decision 7: EQUIPMENT_TAX_DE_MINIMIS_USD. A priced row at or
+// under the threshold is expensed, not tax-register work: no info finding,
+// not counted as unlinked, counted as below the de minimis instead.
+describe('tax de minimis threshold', () => {
+  const { taxDeMinimisUsd } = require('../services/equipment-reconciliation');
+  const rows = [
+    { id: 'eq-cheap', name: 'Hand duster', category: 'tool', status: 'active', purchase_price: 45 },
+    { id: 'eq-edge', name: 'Moisture meter', category: 'tool', status: 'active', purchase_price: 200 },
+    { id: 'eq-dear', name: 'Backpack sprayer', category: 'sprayer', status: 'active', purchase_price: 900 },
+    { id: 'eq-free', name: 'Loaner', category: 'tool', status: 'active', purchase_price: null },
+  ];
+  const linkIssues = (report) => report.issues.filter((i) => i.type === 'equipment_missing_tax_link').map((i) => i.id).sort();
+  const afterEnv = process.env.EQUIPMENT_TAX_DE_MINIMIS_USD;
+  afterEach(() => { if (afterEnv === undefined) delete process.env.EQUIPMENT_TAX_DE_MINIMIS_USD; else process.env.EQUIPMENT_TAX_DE_MINIMIS_USD = afterEnv; });
+
+  test('unset: every priced row is judged, as before', () => {
+    delete process.env.EQUIPMENT_TAX_DE_MINIMIS_USD;
+    const report = buildEquipmentReconciliation({ equipment: rows, taxRegister: [] });
+    expect(linkIssues(report)).toEqual(['eq-cheap', 'eq-dear', 'eq-edge']);
+    expect(report.summary).toMatchObject({ equipment_without_tax_link: 3, tax_de_minimis_usd: 0, equipment_below_tax_de_minimis: 0 });
+  });
+
+  test('a threshold silences rows at or under it and counts them apart', () => {
+    process.env.EQUIPMENT_TAX_DE_MINIMIS_USD = '200';
+    const report = buildEquipmentReconciliation({ equipment: rows, taxRegister: [] });
+    expect(linkIssues(report)).toEqual(['eq-dear']);
+    expect(report.summary).toMatchObject({ equipment_without_tax_link: 1, tax_de_minimis_usd: 200, equipment_below_tax_de_minimis: 2 });
+    expect(report.summary.equipment_with_tax_link).toBe(0);
+  });
+
+  test('an explicit option wins over the variable; a bad or negative variable reads as 0', () => {
+    process.env.EQUIPMENT_TAX_DE_MINIMIS_USD = '200';
+    expect(linkIssues(buildEquipmentReconciliation({ equipment: rows, taxRegister: [], taxDeMinimisUsd: 50 }))).toEqual(['eq-dear', 'eq-edge']);
+    process.env.EQUIPMENT_TAX_DE_MINIMIS_USD = 'lots';
+    expect(taxDeMinimisUsd()).toBe(0);
+    process.env.EQUIPMENT_TAX_DE_MINIMIS_USD = '-5';
+    expect(taxDeMinimisUsd()).toBe(0);
+  });
+
+  test('a stale tax link is still a warning whatever the threshold', () => {
+    process.env.EQUIPMENT_TAX_DE_MINIMIS_USD = '10000';
+    const report = buildEquipmentReconciliation({ equipment: [{ ...rows[0], tax_equipment_id: 'gone' }], taxRegister: [] });
+    expect(report.issues.map((i) => i.type)).toContain('equipment_stale_tax_link');
+  });
+});
+

@@ -11,11 +11,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/equipment-maintenance', () => ({}));
 jest.mock('../models/db', () => {
-  const state = { vehicles: {}, rows: {}, riders: {}, trucksOf: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
+  const state = { vehicles: {}, rows: {}, riders: {}, trucksOf: {}, receiptLines: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
   const chain = (table) => {
     const c = { table, calls: [], cond: null };
     const rec = (name) => jest.fn((...args) => { c.calls.push([name, ...args]); return c; });
-    for (const m of ['leftJoin', 'select', 'orderBy', 'whereNull', 'whereNotIn', 'whereNot']) c[m] = rec(m);
+    for (const m of ['leftJoin', 'select', 'orderBy', 'whereNull', 'whereNotIn', 'whereNot', 'forUpdate']) c[m] = rec(m);
     c.where = jest.fn((...args) => {
       c.calls.push(['where', ...args]);
       if (args.length === 1 && typeof args[0] === 'object') c.cond = { ...(c.cond || {}), ...args[0] };
@@ -27,6 +27,7 @@ jest.mock('../models/db', () => {
       if (table === 'equipment' && c.cond && c.cond.category === 'vehicle') return state.vehicles[c.cond.id] || null;
       if (table === 'equipment' && c.cond && c.cond.id && c.cond.category === undefined) return state.rows[c.cond.id] ? { ...state.rows[c.cond.id] } : null;
       if (table === 'equipment' && c.cond && c.cond.assigned_vehicle_id) return state.riders[c.cond.assigned_vehicle_id] || null;
+      if (table === 'purchase_receipt_lines' && c.cond) return state.receiptLines[c.cond.id] ? { ...state.receiptLines[c.cond.id] } : null;
       return null;
     });
     c.insert = jest.fn((row) => { c.calls.push(['insert', row]); state.inserted = row; return c; });
@@ -83,6 +84,7 @@ beforeEach(() => {
   s.rows = { [TOOL]: { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE }, [OTHER]: { id: OTHER, category: 'vehicle' } };
   s.riders = { [VEHICLE]: { id: TOOL } };
   s.trucksOf = {};
+  s.receiptLines = {};
   s.rows[VEHICLE] = { id: VEHICLE, category: 'vehicle', assigned_to: 'tech-1', status: 'active' };
   s.inserted = null;
   s.updated = null;
@@ -462,3 +464,63 @@ describe('kit key', () => {
     expect(dark.body).toEqual({ enabled: false });
   });
 });
+
+// PR 3: the inventory agent's equipment bell links to the Assets dialog with
+// receipt_line_id; the save files the purchase line under the row.
+describe('receipt_line_id (receipt → equipment link)', () => {
+  const LINE = '44444444-2222-4333-8444-555555555555';
+  const lineUpdate = () => db.__state.chains.find((c) => c.table === 'purchase_receipt_lines' && c.calls.some(([m]) => m === 'update'));
+  const lineClaim = () => db.__state.chains.find((c) => c.table === 'purchase_receipt_lines' && c.calls.some(([m]) => m === 'forUpdate'));
+
+  test('POST claims the line under lock, inserts, then files the line under the new row', async () => {
+    db.__state.receiptLines[LINE] = { id: LINE, status: 'agent_equipment', equipment_id: null };
+    const res = await run('post', '/equipment', { body: { name: 'Synthetic moisture meter', category: 'tool', receipt_line_id: LINE } });
+    expect(res.statusCode).toBe(201);
+    expect(db.__state.inserted).toEqual(expect.objectContaining({ name: 'Synthetic moisture meter' }));
+    expect(lineClaim()).toBeTruthy();
+    expect(lineUpdate().calls).toEqual(expect.arrayContaining([['update', { equipment_id: 'row-1' }]]));
+  });
+
+  test('POST with a line that is gone or not an equipment line writes nothing (409)', async () => {
+    db.__state.receiptLines[LINE] = { id: LINE, status: 'logged', equipment_id: null };
+    const res = await run('post', '/equipment', { body: { name: 'Synthetic duster', category: 'tool', receipt_line_id: LINE } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/receipt line/);
+    expect(db.__state.inserted).toBeNull();
+    const missing = await run('post', '/equipment', { body: { name: 'Synthetic duster', category: 'tool', receipt_line_id: '55555555-2222-4333-8444-555555555555' } });
+    expect(missing.statusCode).toBe(409);
+    expect(db.__state.inserted).toBeNull();
+  });
+
+  test('PUT files the line under the edited row; a line filed under another row is refused', async () => {
+    db.__state.receiptLines[LINE] = { id: LINE, status: 'agent_equipment', equipment_id: null };
+    let res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Synthetic meter', receipt_line_id: LINE } });
+    expect(res.statusCode).toBe(200);
+    expect(lineUpdate().calls).toEqual(expect.arrayContaining([['update', { equipment_id: TOOL }]]));
+    db.__state.chains.length = 0;
+    db.__state.updated = null;
+    db.__state.receiptLines[LINE] = { id: LINE, status: 'agent_equipment', equipment_id: OTHER };
+    res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Synthetic meter', receipt_line_id: LINE } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/already filed/);
+    expect(db.__state.updated).toBeNull();
+    // The same row again (a retry) is fine.
+    db.__state.receiptLines[LINE] = { id: LINE, status: 'agent_equipment', equipment_id: TOOL };
+    res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Synthetic meter', receipt_line_id: LINE } });
+    expect(res.statusCode).toBe(200);
+  });
+
+  test('receipt_line_id needs the gate and a uuid; an empty value is ignored', async () => {
+    truckKit.truckKitEnabled.mockReturnValueOnce(false);
+    let res = await run('post', '/equipment', { body: { name: 'Synthetic duster', receipt_line_id: LINE } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/GATE_TRUCK_KIT/);
+    res = await run('post', '/equipment', { body: { name: 'Synthetic duster', receipt_line_id: 'not-a-uuid' } });
+    expect(res.statusCode).toBe(400);
+    expect(db.__state.inserted).toBeNull();
+    res = await run('post', '/equipment', { body: { name: 'Synthetic duster', receipt_line_id: '' } });
+    expect(res.statusCode).toBe(201);
+    expect(lineClaim()).toBeUndefined();
+  });
+});
+

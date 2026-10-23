@@ -108,6 +108,12 @@ Use for: "how do I treat chinch bugs in St. Augustine?", "what causes brown patc
     },
   },
   {
+    name: 'get_my_truck_kit',
+    description: `What rides on the tech's own truck: every item, any open missing/damaged alert, when the last truck check was and whether one is due, and today's tool gaps ("Not on your truck").
+Use for: "what's on my truck?", "is my truck check due?", "am I missing anything for today?"`,
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
     name: 'get_weather_conditions',
     description: `Get current weather for the service area. Shows temp, wind, rain probability — relevant for spray decisions.
 Use for: "should I spray today?", "what's the wind like?", "rain probability?"`,
@@ -194,6 +200,7 @@ async function executeTechTool(toolName, input, techContext) {
       case 'check_customer_status': return await checkCustomerStatus(input, techId);
       case 'search_knowledge_base': return await searchKnowledgeBase(input.query, { forTech });
       case 'get_weather_conditions': return await getWeatherConditions();
+      case 'get_my_truck_kit': return await getMyTruckKit(techContext);
       default: return { error: `Unknown tech tool: ${toolName}` };
     }
   } catch (err) {
@@ -631,6 +638,28 @@ async function searchKnowledgeBase(query, { forTech = false } = {}) {
   }
 }
 
+
+// The tech's own truck (resolved from the login, never from input), behind
+// GATE_TRUCK_KIT; an admin borrowing the tech reads has no truck.
+async function getMyTruckKit(techContext) {
+  const truckKit = require('../truck-kit');
+  if (!truckKit.truckKitEnabled()) return { enabled: false, error: 'Truck kit is off (GATE_TRUCK_KIT)' };
+  const techId = techContext?.techId || null;
+  if (!techId) return { error: 'This read needs a technician login' };
+  try {
+    const status = await truckKit.truckKitStatus(techId);
+    if (!status.truck) return { truck: null, note: 'No truck is assigned to you. Ask the office.' };
+    return {
+      truck: status.truck, due: status.due, interval_days: status.intervalDays,
+      last_check: status.lastCheck ? { at: status.lastCheck.checked_at, missing: status.lastCheck.missing_count, damaged: status.lastCheck.damaged_count } : null,
+      items: status.kit.map((k) => ({ name: k.name, category: k.category, kit_key: k.kit_key || null, open_issue: k.open_issue || null })),
+      today_gaps: status.gaps,
+    };
+  } catch (err) {
+    if (err instanceof truckKit.TruckCheckError) return { error: err.message, code: err.code };
+    throw err;
+  }
+}
 
 async function getWeatherConditions() {
   try {

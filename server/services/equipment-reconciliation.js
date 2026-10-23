@@ -162,7 +162,21 @@ function compactTaxAsset(row) {
   };
 }
 
-function buildEquipmentReconciliation({ systems = [], equipment = [], taxRegister = [], calibrations = [] }) {
+// Tax de minimis (docs/tool-inventory-tracker-scope.md decision 7): a priced
+// row at or under EQUIPMENT_TAX_DE_MINIMIS_USD is expensed, not a tax-register
+// asset, so it raises no missing-link finding and is not counted as unlinked.
+// Read at call time; unset, 0 or not a number = every priced row is judged
+// (the behavior before the threshold existed). The number is the owner's and
+// the accountant's; the code never picks one.
+function taxDeMinimisUsd() {
+  const n = Number(process.env.EQUIPMENT_TAX_DE_MINIMIS_USD || 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+const priceOf = (row) => Number(row.purchase_price || 0);
+// A priced row above the de minimis needs a tax register link.
+const needsTaxLink = (row, threshold) => priceOf(row) > 0 && priceOf(row) > threshold;
+
+function buildEquipmentReconciliation({ systems = [], equipment = [], taxRegister = [], calibrations = [], taxDeMinimisUsd: threshold = taxDeMinimisUsd() }) {
   const equipmentById = new Map(equipment.map(row => [row.id, row]));
   const taxById = new Map(taxRegister.map(row => [row.id, row]));
   const calibrationBySystem = new Map(calibrations.map(row => [row.equipment_system_id, row]));
@@ -273,7 +287,7 @@ function buildEquipmentReconciliation({ systems = [], equipment = [], taxRegiste
         name: row.name,
         message: `${row.name} points at missing tax register row ${row.tax_equipment_id}.`,
       });
-    } else if (active && !row.tax_equipment_id && Number(row.purchase_price || 0) > 0) {
+    } else if (active && !row.tax_equipment_id && needsTaxLink(row, threshold)) {
       issues.push({
         severity: 'info',
         type: 'equipment_missing_tax_link',
@@ -341,7 +355,9 @@ function buildEquipmentReconciliation({ systems = [], equipment = [], taxRegiste
       equipment_active: activeEquipment.length,
       equipment_linked_to_systems: activeEquipment.filter(row => activeLinkedEquipmentIds.has(row.id)).length,
       equipment_with_tax_link: activeEquipment.filter(row => row.tax_equipment_id && taxById.has(row.tax_equipment_id)).length,
-      equipment_without_tax_link: activeEquipment.filter(row => (!row.tax_equipment_id || !taxById.has(row.tax_equipment_id)) && Number(row.purchase_price || 0) > 0).length,
+      equipment_without_tax_link: activeEquipment.filter(row => (!row.tax_equipment_id || !taxById.has(row.tax_equipment_id)) && needsTaxLink(row, threshold)).length,
+      tax_de_minimis_usd: threshold,
+      equipment_below_tax_de_minimis: activeEquipment.filter(row => !row.tax_equipment_id && priceOf(row) > 0 && !needsTaxLink(row, threshold)).length,
       tax_register_total: taxRegister.length,
       tax_register_active: activeTax.length,
       tax_register_linked_to_equipment: activeTax.filter(row => linkedTaxIds.has(row.id)).length,
@@ -356,6 +372,7 @@ function buildEquipmentReconciliation({ systems = [], equipment = [], taxRegiste
 }
 
 module.exports = {
+  taxDeMinimisUsd,
   SYSTEM_ASSET_FIELDS,
   COMPONENT_ASSET_FIELDS,
   SYSTEM_ASSET_LABELS,
