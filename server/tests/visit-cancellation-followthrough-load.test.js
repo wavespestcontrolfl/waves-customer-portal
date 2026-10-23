@@ -518,6 +518,17 @@ describe('cancelFence (the cancel recovery sweep)', () => {
     expect(require('../services/track-transitions').cancel).not.toHaveBeenCalled();
   });
 
+  it('a restore that lands while the money step reads (no refusal recorded) raises no fee alert and cancels no tracker', async () => {
+    mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
+    // The start-of-visit proof passes; the proof right before the alert is refused.
+    mockFence.mockReset();
+    mockFence.mockResolvedValueOnce(undefined).mockRejectedValue(Object.assign(new Error('cancellation fence: visit_restored_since'), { code: 'CANCEL_FENCE', fenceReason: 'visit_restored_since' }));
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: { ...FENCE, hits: [] } }));
+    expect(mockAlertUnresolved).not.toHaveBeenCalled();
+    expect(require('../services/track-transitions').cancel).not.toHaveBeenCalled();
+  });
+
   it('with no refusal the same unresolved invoice still raises the fee alert (the suppression is only for fence hits)', async () => {
     mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
     const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');

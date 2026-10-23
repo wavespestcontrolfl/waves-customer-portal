@@ -258,6 +258,10 @@ async function runVisitCancellationFollowThrough({
     // A fence refusal during the money step means the visit changed (or is busy): the bundle's own restoration alert or
     // retry owns it, so no generic fee alert and no tracker cancel on top.
     if (cancelFence && cancelFence.hits.length) continue;
+    // A restore can also land while the money step reads (no refusal recorded, a fee_step_error outcome): prove the cancel
+    // again right before the alert, so a live visit never gets a "cancellation fee" alert. (The tracker cancel proves it
+    // again inside its own transaction.)
+    if (cancelFence && !(await cancelFenceStands(cancelFence))) continue;
     // One normalized outcome for BOTH rails and thrown failures. The alert
     // service ignores clean outcomes, so no duplicate decision tree here.
     await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: feeOutcome });
