@@ -563,6 +563,30 @@ describe('send-with-invoice hold_report_until_paid', () => {
     });
   });
 
+  test('an edit that lands before the delivery claim is re-judged after it (pre-treat staff-send checks)', async () => {
+    const project = preTreatmentProject();
+    const { updates } = mockTables({
+      project,
+      // The claim takes the row; an edit committed just before it cleared the time.
+      projectUpdateResult: (payload) => {
+        if (payload.delivery_status === 'sending') project.findings = { ...project.findings, treatment_time: '' };
+        return 1;
+      },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.missing.map((m) => m.key)).toEqual(['cert_treatment_time']);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_token)).toBe(false);
+    });
+  });
+
   test('phone-only certificate hold promises automatic release by text, not email', async () => {
     mockTables({
       project: preTreatmentProject(),

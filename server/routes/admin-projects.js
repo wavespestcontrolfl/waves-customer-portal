@@ -161,7 +161,37 @@ function finalExteriorRejectionForUpdate(project, updates, current) {
     project.project_type,
     updates.findings !== undefined ? updates.findings : current.findings,
     updates.project_date !== undefined ? updates.project_date : current.project_date,
-  );
+  ) || publishedCertificateEditRejection(project, updates, current);
+}
+
+// The public link reads the live findings, so an edit to a certificate that
+// already has a link must not add a staff-send failure (a cleared warranty
+// or time, an undated final exterior record). A legacy certificate that
+// already fails keeps saving other edits: only NEW failures are refused.
+function publishedCertificateEditRejection(project, updates, current) {
+  if (project.project_type !== 'pre_treatment_termite_certificate' || updates.findings === undefined) return null;
+  if (!(current.report_token || current.sent_at || project.report_token || project.sent_at)) return null;
+  const typeCfg = getProjectType(project.project_type);
+  const failing = (findings) => pretreatStaffSendChecks(normalizeFindings(findings), typeCfg).filter((c) => !c.ok);
+  const before = new Set(failing(current.findings).map((c) => c.key));
+  const added = failing(updates.findings).filter((c) => !before.has(c.key));
+  if (!added.length) return null;
+  return {
+    error: `This certificate is already published — complete ${added.map((c) => c.label).join('; ')} before saving.`,
+    code: 'published_certificate_incomplete',
+    missing: added.map(({ key, label }) => ({ key, label })),
+  };
+}
+
+// Re-judges the staff-send checks on the row as it stands after the send
+// claim (an edit can land between the first read and the claim; edits are
+// fenced once the row is 'sending').
+async function pretreatClaimedSendMissing(projectId, projectType) {
+  if (projectType !== 'pre_treatment_termite_certificate') return [];
+  const row = await db('projects').select('findings').where({ id: projectId }).first();
+  return pretreatStaffSendChecks(normalizeFindings(row?.findings), getProjectType(projectType))
+    .filter((c) => !c.ok)
+    .map(({ key, label }) => ({ key, label }));
 }
 
 // Create-path checks on a legal document's dates, first failure wins: the
@@ -3574,6 +3604,16 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     };
     revertManualHoldClaimOnError = revertManualHoldClaim;
 
+    const claimedMissing = await pretreatClaimedSendMissing(project.id, project.project_type);
+    if (claimedMissing.length) {
+      await revertManualHoldClaim();
+      await revertSendClaim();
+      return res.status(422).json({
+        error: 'Project report is missing required compliance details (cannot be overridden)',
+        missing: claimedMissing,
+      });
+    }
+
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
       logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
       return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
@@ -4984,6 +5024,21 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     deliveryClaim = { previousStatus: previousDeliveryStatus, token: deliveryClaimToken };
 
+    // Same post-claim re-judge as /send: an edit between the first read and
+    // this claim must not slip past the staff-send certificate checks.
+    const claimedMissing = await pretreatClaimedSendMissing(project.id, project.project_type);
+    if (claimedMissing.length) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+      claimedInvoice = null;
+      await reverseProjectCreditOnAbort();
+      await revertDeliveryClaimOnAbort(project.id);
+      return res.status(422).json({
+        error: 'Project report is missing required compliance details (cannot be overridden)',
+        missing: claimedMissing,
+      });
+    }
+
     // Report link + portal visibility — mirror /send so a token_only WDO report
     // never leaks into the customer portal via the `portal_visible IS NULL` +
     // 'sent' legacy-visible path in documents.js.
@@ -6177,6 +6232,7 @@ router._private = {
   logProjectActivity,
   evaluateProjectSendReadiness,
   pretreatWarrantyOk,
+  publishedCertificateEditRejection,
   completeProjectBackedService,
   dropStaleCertTreatmentDate,
   reportHoldBackoffMinutes,

@@ -613,6 +613,28 @@ describe('pre-treat final exterior fields: customer copy screen (GATE_PRETREAT_S
     expect(projects.update).not.toHaveBeenCalled();
   });
 
+  test('PUT on a published certificate refuses an edit that clears its warranty (422 published_certificate_incomplete)', async () => {
+    const published = () => ({
+      ...certificate(),
+      report_token: 'tok-published',
+      findings: { treatment_date: '2026-06-10', treatment_time: '08:40', warranty_type: 'Renewable 5-year retreatment bond' },
+    });
+    const projects = chain({ first: jest.fn().mockResolvedValue(published()) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: { treatment_date: '2026-06-10', treatment_time: '08:40', warranty_type: '' } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('published_certificate_incomplete');
+      expect(body.missing.map((m) => m.key)).toEqual(['cert_warranty']);
+    });
+    expect(projects.update).not.toHaveBeenCalled();
+  });
+
   test('PUT refuses a final exterior time that is not a clock time (422 final_exterior_time_invalid)', async () => {
     const projects = chain({ first: jest.fn().mockResolvedValue(certificate()) });
     mockTables({ projects });

@@ -933,7 +933,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
   // action needs some recorded warranty.
   const warranty = String(f.warranty_type || '').trim();
   const renewableContract = /renewable/i.test(warranty);
-  const noWarranty = !warranty || /^no warranty$/i.test(warranty) || /^addition to an existing building/i.test(warranty);
+  const noWarranty = certificateHasNoWarranty(f);
 
   return (
     <div data-testid="termite-notice-sticker" style={{
@@ -1294,6 +1294,14 @@ function CertificateHeader({ detailsOnly }) {
   );
 }
 
+// No warranty recorded: blank, legacy "No warranty", or an addition to an
+// existing building (Rule 5E-14.105(3)(d)). Both layouts then drop the
+// warranty call to action.
+function certificateHasNoWarranty(f) {
+  const warranty = String(f?.warranty_type || '').trim();
+  return !warranty || /^no warranty$/i.test(warranty) || /^addition to an existing building/i.test(warranty);
+}
+
 function CertificateWarrantyFooter() {
   return (
     <div style={{
@@ -1511,7 +1519,7 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
       )}
 
       {/* The sticker above already carries the warranty footer. */}
-      {detailsOnly ? <div style={{ height: 24 }} /> : <CertificateWarrantyFooter />}
+      {detailsOnly || certificateHasNoWarranty(f) ? <div style={{ height: 24 }} /> : <CertificateWarrantyFooter />}
 
       {/* Form-ID stamp — bottom right, matches v10 "WV-001" treatment */}
       <div style={{

@@ -247,6 +247,14 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
+  it('gate off: an addition to an existing building drops the warranty footer', async () => {
+    const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      findings: { ...findings, warranty_type: 'Addition to an existing building (no warranty required)' },
+    }));
+    await findAllByText(/Pre-Construction Termite Protection/i);
+    expect(queryByText(/Activate Your Termite Warranty/i)).not.toBeInTheDocument();
+  });
+
   it('gate off: the certificate stays today\'s document even with final exterior values stored', async () => {
     const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       findings: {

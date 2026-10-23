@@ -19,6 +19,7 @@ const {
   detectedImageMime,
   validateUploadedImage,
   evaluateProjectSendReadiness,
+  publishedCertificateEditRejection,
   dropStaleCertTreatmentDate,
   resolveWdoInspectionFee,
   wdoAddendumPhotoCaption,
@@ -220,6 +221,18 @@ describe('admin project route guards', () => {
     const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '', final_exterior_date: '2026-06-01' }, false);
     expect(legacy.missing).toEqual([]);
     expect(legacy.hardMissing).toEqual([]);
+  });
+
+  test('an edit to a published certificate may not add a staff-send failure, but a legacy one still saves other edits', () => {
+    const project = { project_type: 'pre_treatment_termite_certificate', report_token: 'tok' };
+    const legacy = { warranty_type: 'No warranty', comments: 'old' };
+    // Already failing on warranty + time: editing a note adds nothing new.
+    expect(publishedCertificateEditRejection(project, { findings: { ...legacy, comments: 'new' } }, { findings: legacy })).toBeNull();
+    // Adding an undated final exterior record is a new failure.
+    expect(publishedCertificateEditRejection(project, { findings: { ...legacy, final_exterior_product: 'Termidor SC' } }, { findings: legacy }).missing
+      .map((m) => m.key)).toEqual(['cert_final_exterior_date', 'cert_final_exterior_time']);
+    // A draft (no link yet) is judged at send, not on save.
+    expect(publishedCertificateEditRejection({ project_type: 'pre_treatment_termite_certificate' }, { findings: {} }, { findings: legacy })).toBeNull();
   });
 
   test('certificate send readiness requires a finished-solution concentration only for liquid soil barriers', () => {
