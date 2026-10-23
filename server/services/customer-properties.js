@@ -1241,6 +1241,8 @@ async function previewPropertyRemoval(conn, customerId, target, _primary, custom
 
 const TARGET_PREVIEWS = { primary: previewPrimaryPropertyChange, remove: previewPropertyRemoval };
 
+const appliedResult = (applied) => (applied && typeof applied === 'object' ? applied : { id: applied });
+
 async function writeManualProperty(customerId, kind, input, propertyId, options, apply) {
   const changes = manualPropertyFields(kind, input);
   return db.transaction(async trx => {
@@ -1253,11 +1255,13 @@ async function writeManualProperty(customerId, kind, input, propertyId, options,
     if (options.expectedVersion && options.expectedVersion !== preview._version) {
       throw propertyActionError('The customer or properties changed. Request a fresh preview.', 409, 'preview_changed');
     }
-    const savedId = await apply(trx, loaded, changes);
+    // apply returns the property id, or { id, audit } when the write also changed rows the preview does not show (their before-state goes
+    // into the audit metadata).
+    const { id: savedId, audit: auditExtra } = appliedResult(await apply(trx, loaded, changes));
     const auditId = await require('./audit-log').recordAuditEvent({
       actor_type: 'admin', actor_id: options.actorId || null, action: `customer_property_${kind}`,
       resource_type: 'customer_property', resource_id: savedId,
-      metadata: { customer_id: customerId, fields: Object.keys(changes), values: changes, before: preview.before || null },
+      metadata: { customer_id: customerId, fields: Object.keys(changes), values: changes, before: preview.before || null, ...auditExtra },
       critical: true, trx,
     });
     const properties = await listProperties(customerId, trx);
@@ -1296,8 +1300,10 @@ async function editManualProperty(customerId, propertyId, input, options = {}) {
     const stamps = Object.assign({}, ...Object.keys(changes).map(field => EDITABLE_FIELDS[field].columns?.(changes[field], trx)));
     await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
       .update({ ...changes, ...stamps, updated_at: trx.fn.now() });
-    if ('reclaimed_water' in changes) await supersedeMergedReclaimedAnswers(trx, customerId, propertyId);
-    return propertyId;
+    if (!('reclaimed_water' in changes)) return propertyId;
+    const superseded = await supersedeMergedReclaimedAnswers(trx, customerId, propertyId);
+    // The answer the plan used before this edit may have been one of these inherited answers: the audit keeps them.
+    return superseded.length ? { id: propertyId, audit: { superseded_reclaimed_answers: superseded } } : propertyId;
   });
 }
 
@@ -1306,11 +1312,17 @@ async function editManualProperty(customerId, propertyId, input, options = {}) {
 // really hands the home back to the county match instead of reviving the old answer.
 async function supersedeMergedReclaimedAnswers(trx, customerId, propertyId) {
   const { address_key: addressKey } = await trx('customer_properties').where({ id: propertyId }).first('address_key') || {};
-  if (!addressKey) return;
-  await trx('customer_properties')
+  if (!addressKey) return [];
+  const rows = await trx('customer_properties')
     .where({ customer_id: customerId, active: false, address_key: addressKey })
     .whereIn('reclaimed_water_source', ['office', 'customer'])
+    .forUpdate()
+    .select('id', 'reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at');
+  if (!rows.length) return [];
+  await trx('customer_properties').whereIn('id', rows.map(row => row.id))
     .update({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null, updated_at: trx.fn.now() });
+  return rows.map(row => ({ property_id: row.id, reclaimed_water: row.reclaimed_water, reclaimed_water_source: row.reclaimed_water_source,
+    reclaimed_water_checked_at: row.reclaimed_water_checked_at }));
 }
 
 async function removeManualProperty(customerId, propertyId, options = {}) {

@@ -55,6 +55,10 @@ suite('reclaimed water edits against isolated Postgres', () => {
       expect(reset.status).toBe(200);
       expect(reset.body.properties.find((p) => p.id === property.id)).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
       expect(reset.body.properties.find((p) => p.id === property.id)).not.toHaveProperty('reclaimed_water_inherited');
+      // The audit keeps the inherited answer the reset replaced, so the dose change is traceable.
+      expect((await auditOf(property.id))[0].metadata.superseded_reclaimed_answers).toEqual([
+        expect.objectContaining({ property_id: mergedId, reclaimed_water: true, reclaimed_water_source: 'office' }),
+      ]);
       expect(await db('customer_properties').where({ id: mergedId }).first()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
       expect(await isReclaimedService(db, visit)).toBe(false);
     } finally {
