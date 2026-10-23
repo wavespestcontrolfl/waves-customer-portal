@@ -5,6 +5,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
+import { IssueWarrantyAction } from "../../components/admin/IssueWarrantyDialog";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
@@ -3393,6 +3394,14 @@ export function ProjectDetail({
                 : "Send report + invoice"}
             </button>
           )}
+        <IssueWarrantyAction
+          project={project}
+          findings={editFindings}
+          allowed={canAdminActions}
+          blocked={actionsBlocked}
+          unsaved={dirty}
+          buttonStyle={btnSecondary}
+        />
       </div>{" "}
       {confirmDialog}
     </div>

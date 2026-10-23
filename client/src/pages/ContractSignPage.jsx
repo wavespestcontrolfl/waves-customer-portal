@@ -67,6 +67,21 @@ function AgreementRow({ checked, onChange, children }) {
 // reference) — minHeight 48 / 16px text (no iOS focus zoom).
 const inputStyle = docInput();
 
+// A line wrapped in ** renders bold (F.S. 482.227 wants termite-contract
+// statements and headings in bold type); same rule as the contract PDF.
+// A body with no such line renders exactly as before.
+function ContractBodyText({ text }) {
+  const raw = String(text || '');
+  const lines = raw.split('\n').map((line) => {
+    const match = /^\*\*(.+)\*\*$/.exec(line.trim());
+    return match ? { text: match[1].trim(), bold: true } : { text: line, bold: false };
+  });
+  if (!lines.some((line) => line.bold)) return raw;
+  return lines.map((line, i) => (
+    <div key={i} style={line.bold ? { fontWeight: FW.bold } : undefined}>{line.text || '\u00a0'}</div>
+  ));
+}
+
 export default function ContractSignPage() {
   const { token } = useParams();
   // Always reflects the active token so an in-flight sign POST can tell if the
@@ -294,7 +309,7 @@ export default function ContractSignPage() {
                 lineHeight: LH.body,
                 color: DOC.ink,
               }}>
-                {contract.contractTextSnapshot}
+                <ContractBodyText text={contract.contractTextSnapshot} />
               </div>
               {/* In-card Download link superseded by the DocumentActionBar
                   at the top of the page (owner 2026-07-09). */}
