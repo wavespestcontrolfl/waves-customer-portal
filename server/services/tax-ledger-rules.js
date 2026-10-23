@@ -40,6 +40,25 @@ const MAX_EXAMINE = 20000;
 const MAX_ENABLED_RULES = 250;
 const PASS_TIME_BUDGET_MS = 500;    // one applyRules call: one request's worth
 const LOOP_TIME_BUDGET_MS = 2000;   // applyAfterImport / applyRulesForPattern, all rounds together
+// One pass at a time in this process, PASS_QUEUE more wait their turn, the
+// rest are refused: every pass selects the same rows and runs the same
+// regexes, so a burst of Apply rules now requests would otherwise queue
+// minutes of event-loop work for one landed write. A refused pass is a
+// 429 to the Inbox; the import hooks and the Always propagation log it
+// and leave the rows for the next pass.
+const PASS_CONCURRENCY = 1;
+const PASS_QUEUE = 4;
+const passGate = { running: 0, waiting: [] };
+function acquirePass() {
+  if (passGate.running < PASS_CONCURRENCY) { passGate.running += 1; return Promise.resolve(); }
+  if (passGate.waiting.length >= PASS_QUEUE) return Promise.reject(httpError(429, 'a rule pass is already running; try again in a moment'));
+  return new Promise((resolve) => passGate.waiting.push(resolve));
+}
+function releasePass() {
+  const next = passGate.waiting.shift();
+  if (next) next(); // the slot passes to the next waiter: running stays the same
+  else passGate.running -= 1;
+}
 
 // The suggestion keys a classification owns. A new classification removes
 // them before it merges, so a row never carries two answers at once; the
@@ -610,7 +629,11 @@ function rowBudget(limit) {
 function startCursor(start) {
   return start && start.id && start.txn_date ? { txn_date: ymd(start.txn_date), id: String(start.id) } : null;
 }
-async function applyRules({ limit = PAGE, force = false, pattern = null, after: start = null, now = Date.now, deadline = null } = {}) {
+async function applyRules(options = {}) {
+  await acquirePass();
+  try { return await runPass(options); } finally { releasePass(); }
+}
+async function runPass({ limit = PAGE, force = false, pattern = null, after: start = null, now = Date.now, deadline = null } = {}) {
   const stopAt = deadline || now() + PASS_TIME_BUDGET_MS;
   const counts = { examined: 0, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null };
   let compiled = compileRules(await loadRules());
@@ -882,7 +905,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 }
 
 module.exports = {
-  KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON, MAX_ENABLED_RULES, PASS_TIME_BUDGET_MS, LOOP_TIME_BUDGET_MS,
+  KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON, MAX_ENABLED_RULES, PASS_TIME_BUDGET_MS, LOOP_TIME_BUDGET_MS, PASS_CONCURRENCY, PASS_QUEUE,
   NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, assertPatternFast, probeStrings, PROBE_CONCURRENCY, PROBE_QUEUE, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,

@@ -449,6 +449,16 @@ describe('applyRules (suggestion-only)', () => {
     expect((await svc.applyRules({ limit: 500 })).more).toBe(false);
   });
 
+  test('passes are serialized: PASS_CONCURRENCY run, PASS_QUEUE wait, the rest are a 429 at once; the slot is handed on', async () => {
+    const burst = svc.PASS_CONCURRENCY + svc.PASS_QUEUE;
+    const passes = [];
+    for (let i = 0; i < burst; i += 1) passes.push(svc.applyRules({ limit: 500 }));
+    await expect(svc.applyRules({ limit: 500 })).rejects.toMatchObject({ status: 429, message: expect.stringMatching(/rule pass is already running/) });
+    const outs = await Promise.all(passes);
+    expect(outs.every((o) => o.examined === 9)).toBe(true);
+    await expect(svc.applyRules({ limit: 500 })).resolves.toMatchObject({ examined: 9 }); // every slot released afterwards
+  });
+
   test('counts and rule hits book only the classifications whose guarded UPDATE landed', async () => {
     state.casResult = 0; // every row changed after the page was read (a decision, a matcher flag, a link)
     const out = await svc.applyRules({ limit: 500 });

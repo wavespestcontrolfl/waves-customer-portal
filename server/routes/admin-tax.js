@@ -3262,7 +3262,11 @@ router.post('/bank-import/ledger/rules/apply', async (req, res, next) => {
     // client follows the cursor for the rest
     const out = await taxLedgerRules.applyRules({ limit: Number.isFinite(rawLimit) ? Math.min(rawLimit, 1000) : 1000, force: req.body?.force === undefined ? true : !!req.body.force, after });
     res.json({ success: true, ...out });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // 429: another pass holds the process-wide slot and the queue is full
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 router.put('/bank-import/ledger/rules/:id', async (req, res, next) => {

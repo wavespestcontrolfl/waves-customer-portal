@@ -230,6 +230,11 @@ describe('gate on', () => {
     expect(ledger.applyRules).toHaveBeenLastCalledWith({ limit: 1000, force: true, after: { txn_date: '2026-03-01', id: '11111111-1111-4111-8111-111111111111' } });
     res = await send('POST', `${P}/rules/apply`, { after: { txn_date: 'yesterday', id: '1 or 1=1' } });
     expect(res.status).toBe(400);
+    // the service refuses a pass when one is running and its queue is full: a 429 with its message, not a 500
+    ledger.applyRules.mockRejectedValueOnce(httpError(429, 'a rule pass is already running; try again in a moment'));
+    res = await send('POST', `${P}/rules/apply`, {});
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ error: 'a rule pass is already running; try again in a moment' });
   });
 });
 
