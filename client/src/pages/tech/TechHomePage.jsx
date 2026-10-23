@@ -71,6 +71,8 @@ import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal
 import { detectServiceCategory } from '../../lib/service-colors';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
 import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards';
+import TechTruckCheckCard from '../../components/tech/TechTruckCheckCard';
+import useTruckKit from '../../components/tech/useTruckKit';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
@@ -367,6 +369,9 @@ export default function TechHomePage({ section = 'today' }) {
   const [stopDetail, setStopDetail] = useState({});
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
+  // Truck check (GATE_TRUCK_KIT): the Tools tile and the Today card read this
+  // one status; gate off or unreadable, neither renders.
+  const truckKit = useTruckKit();
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
   // The tech's station map: a station visit opens the sheet only once the
   // flag has loaded and is off (isTypedReportEligible).
@@ -805,6 +810,7 @@ export default function TechHomePage({ section = 'today' }) {
   };
   const fieldTools = [
     { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
+    ...(truckKit.data?.enabled ? [{ label: 'Truck check', description: 'Confirm what is on your truck', icon: 'truck', onClick: () => navigate(`${base}/truck-check${visitSearch}`) }] : []),
     { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
     projectReportTool({ saved, projectServices, loading, onClick: handleProjectQuickAction }),
     ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
@@ -844,6 +850,7 @@ export default function TechHomePage({ section = 'today' }) {
           scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
           heldVisits={techRole === 'admin' ? <TechHeldVisits /> : null}
           timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
+          truckCheck={<TechTruckCheckCard kit={truckKit.data} base={base} visitSearch={visitSearch} />}
           onboarding={<OnboardingCard available={documentsAvailable} base={base} visitSearch={visitSearch} />}
           timekeeping={<>
             <div className="tf-existing"><TimecardSignoffCard techName={techName} /></div>

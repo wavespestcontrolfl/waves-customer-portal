@@ -382,6 +382,7 @@ const AdminAssessmentsHubPage = lazyWithRetry(() => import('./pages/admin/Assess
 const AdminRecruitingPage = lazyWithRetry(() => import('./pages/admin/RecruitingPage'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
 const TechSocialPostPage = lazyWithRetry(() => import('./pages/tech/TechSocialPostPage'));
+const TechTruckCheckPage = lazyWithRetry(() => import('./pages/tech/TechTruckCheckPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
 const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
@@ -853,6 +854,7 @@ export default function App() {
               <Route path="pay-growth" element={<Suspense fallback={<RouteFallback label="Loading pay and growth…" />}><PayGrowth /></Suspense>} />
               <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
               <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
+              <Route path="truck-check" element={<Suspense fallback={<RouteFallback label="Loading truck check…" />}><TechTruckCheckPage /></Suspense>} />
             </Route>
           </Route>
           <Route

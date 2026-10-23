@@ -7,6 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const truckKit = require('../services/truck-kit');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
@@ -686,10 +687,27 @@ router.get('/alerts', async (req, res, next) => {
   }
 });
 
+// Resolving a truck-check alert (services/truck-kit.js) may carry an outcome:
+// lost and retired also set the item's status; found, repaired and replaced
+// only close the alert. The truck's office bell closes once no tool alert on
+// it is open. Admin only: an item's status is an office call.
+const TOOL_OUTCOME_STATUS = { found: null, repaired: null, replaced: null, lost: 'lost', retired: 'retired' };
+
 // PUT /alerts/:id — update alert status
 router.put('/alerts/:id', async (req, res, next) => {
   try {
-    const { status, resolved_by } = req.body;
+    const { status, resolved_by, outcome } = req.body;
+    const existing = await db('maintenance_alerts').where('id', req.params.id).first();
+    if (!existing) return res.status(404).json({ error: 'Alert not found' });
+    const toolAlert = truckKit.TOOL_ALERT_TYPES.includes(existing.alert_type);
+    if (outcome !== undefined) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+      if (!toolAlert) return res.status(400).json({ error: 'outcome applies to truck check alerts only' });
+      if (!Object.prototype.hasOwnProperty.call(TOOL_OUTCOME_STATUS, outcome)) {
+        return res.status(400).json({ error: 'outcome must be found, repaired, replaced, lost or retired' });
+      }
+      if (status !== 'resolved') return res.status(400).json({ error: 'an outcome resolves the alert' });
+    }
     const updates = { status, updated_at: db.fn.now() };
     if (status === 'resolved') {
       updates.resolved_at = db.fn.now();
@@ -702,6 +720,12 @@ router.put('/alerts/:id', async (req, res, next) => {
       .returning('*');
 
     if (!record) return res.status(404).json({ error: 'Alert not found' });
+    if (status === 'resolved' && toolAlert) {
+      const nextStatus = outcome ? TOOL_OUTCOME_STATUS[outcome] : null;
+      if (nextStatus) await db('equipment').where('id', record.equipment_id).update({ status: nextStatus, updated_at: db.fn.now() });
+      const item = await db('equipment').where('id', record.equipment_id).first('assigned_vehicle_id');
+      if (item?.assigned_vehicle_id) await truckKit.closeTruckBellIfClear(item.assigned_vehicle_id);
+    }
     res.json({ alert: record });
   } catch (err) {
     next(err);

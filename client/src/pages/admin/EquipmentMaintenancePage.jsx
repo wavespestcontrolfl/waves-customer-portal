@@ -141,6 +141,29 @@ function StatCard({
 // ═══════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════
+// A truck-check alert (server/services/truck-kit.js) resolves with an outcome:
+// Lost and Retired also set the item's status on the server; Found, Repaired
+// and Replaced only close the alert. Every other alert keeps Dismiss.
+const TOOL_ALERT_OUTCOMES = {
+  tool_missing: [{
+    label: "Found",
+    outcome: "found"
+  }, {
+    label: "Lost",
+    outcome: "lost"
+  }],
+  tool_damaged: [{
+    label: "Repaired",
+    outcome: "repaired"
+  }, {
+    label: "Retired",
+    outcome: "retired"
+  }]
+};
+const DISMISS_ONLY = [{
+  label: "Dismiss",
+  outcome: null
+}];
 function hasFleetData(overview, equipment, alerts) {
   return overview != null || equipment.length > 0 || alerts.length > 0;
 }
@@ -252,7 +275,7 @@ export default function EquipmentMaintenancePage({
     return list;
   }, [equipment, filterCat, filterStatus, sortBy]);
   const categories = useMemo(() => [...new Set(equipment.map(e => e.category).filter(Boolean))].sort(), [equipment]);
-  const dismissAlert = async id => {
+  const dismissAlert = async (id, outcome = null) => {
     if (actionRef.current) return;
     actionRef.current = true;
     setActionError("");
@@ -263,7 +286,10 @@ export default function EquipmentMaintenancePage({
           method: "PUT",
           body: JSON.stringify({
             status: "resolved",
-            resolved_by: "admin"
+            resolved_by: "admin",
+            ...(outcome ? {
+              outcome
+            } : {})
           })
         });
         setAlerts(prev => prev.filter(a => a.id !== id));
@@ -395,9 +421,12 @@ function FleetTab({
         }}>
                 {a.title}
               </span>{" "}
-              {!readOnly && <Button onClick={() => dismissAlert(a.id)} disabled={!!resolvingAlert} loading={resolvingAlert === a.id} type="button" variant="secondary" className="min-w-11">
-                Dismiss
-              </Button>}{" "}
+              {!readOnly && (TOOL_ALERT_OUTCOMES[a.alert_type] || DISMISS_ONLY).map(({
+          label,
+          outcome
+        }) => <Button key={label} onClick={() => dismissAlert(a.id, outcome)} disabled={!!resolvingAlert} loading={resolvingAlert === a.id} type="button" variant="secondary" className="min-w-11">
+                  {label}
+                </Button>)}{" "}
             </div>)}
           {alerts.length > 5 && <div style={{
         fontSize: 14,

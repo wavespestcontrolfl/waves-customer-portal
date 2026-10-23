@@ -1,4 +1,4 @@
-import { ArrowRight, BookOpen, Camera, ChevronRight, ClipboardList, CloudRain, FileText, Leaf, MapPin, Navigation, RefreshCw, Wrench } from 'lucide-react';
+import { ArrowRight, BookOpen, Camera, ChevronRight, ClipboardList, CloudRain, FileText, Leaf, MapPin, Navigation, RefreshCw, Truck, Wrench } from 'lucide-react';
 import { serviceWindowLabel, stopPropertyAlerts, stopStatusLabel, stopSummaryLabel, stopWindow, stopHasCustomerSentPhotos } from './routeStops';
 
 function StopCard({ stop, onOpen, disabled, featured = false, index }) {
@@ -40,12 +40,12 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
   );
 }
 
-export default function TechFieldHome({ section, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null, onboarding, heldVisits }) {
+export default function TechFieldHome({ section, truckCheck, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null, onboarding, heldVisits }) {
   if (section === 'tools') return (
     <div className="tf-page">
       <div className="tf-page-heading"><div><h1>Tools</h1><p className="tf-muted">Field references and reporting</p></div><Wrench aria-hidden="true" /></div>
       <div className="tf-tool-grid">{tools.map(({ label, description, icon, onClick, disabled }) => {
-        const Icon = { protocol: BookOpen, lawn: Leaf, social: Camera, project: FileText, estimate: ClipboardList }[icon];
+        const Icon = { protocol: BookOpen, lawn: Leaf, social: Camera, project: FileText, estimate: ClipboardList, truck: Truck }[icon];
         return <button type="button" key={label} className="tf-card tf-tool" onClick={onClick} disabled={disabled}><Icon aria-hidden="true" /><span><strong>{label}</strong><small>{description}</small></span><ChevronRight aria-hidden="true" /></button>;
       })}</div>
     </div>
@@ -94,6 +94,7 @@ export default function TechFieldHome({ section, stops, nextStop, loading, refre
         </div>
         <div className="tf-col">
           {scheduleChanges && <div className="tf-area-changes">{scheduleChanges}</div>}
+          {truckCheck && <div className="tf-area-truck">{truckCheck}</div>}
           {timeClock && <div className="tf-area-clock">{timeClock}</div>}
           <div className="tf-area-follow">{followThrough}</div>
         </div>
