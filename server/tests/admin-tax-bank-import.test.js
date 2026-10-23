@@ -428,8 +428,8 @@ describe('create-expense (gate on)', () => {
     expect(claim.wheres).toContainEqual(["coalesce(suggestion ->> 'decision', '') <> 'income'", undefined]);
     // Business is offered on the Later shelf: the claim drops that decision and its shelf key with the booking
     for (const k of ['later', 'decision', 'decidedAt']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
-    // and the rule reading the row carried: the owner's decision supersedes it, so a reopened row (expense deleted) gets a fresh rule pass
-    for (const k of ['rule', 'rulesAt', 'examined']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
+    // and the rule reading the row carried, category included: the owner's decision supersedes it, so a reopened row (expense deleted) gets a fresh rule pass with no stale default
+    for (const k of ['rule', 'rulesAt', 'examined', 'categoryId', 'categoryName', 'irsLine', 'categorySource']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
     // the plain Bank Import path: an Income item is never an expense; a Later row may still be booked
     state.bankUpdates = []; state.insertedExpenses = [];
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);
@@ -1393,7 +1393,8 @@ describe('AI suggest eligibility follows the ledger kill switch', () => {
     expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
     const raws = scopeRaws();
     expect(raws).toContainEqual("(suggestion is null or (suggestion->>'categoryId') is null)");
-    expect(raws).toContainEqual("coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true'");
+    // a review rule's row (card interest, a dues split) is the owner's to categorize: not the model's
+    expect(raws).toContainEqual("coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true' and coalesce(suggestion->>'review','') <> 'true'");
   });
   test('gate off: the hidden personal key does not take the row out of the AI pass', async () => {
     delete process.env.GATE_TAX_LEDGER; mockDb.mockClear();

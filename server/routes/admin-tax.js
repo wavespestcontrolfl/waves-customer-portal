@@ -2348,8 +2348,11 @@ router.post('/bank-import/suggest', async (req, res, next) => {
     // either (an AI category on top of it would read "personal · category");
     // the owner overrides the rule first. With the gate off that key is
     // hidden too, so it does not count there.
+    // nor a row a review rule reserved for the owner (card interest, a
+    // dues-or-education split): the model's category would replace the
+    // warning. The write repeats this predicate.
     const notIgnored = ledgerOn
-      ? "coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true'"
+      ? "coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true' and coalesce(suggestion->>'review','') <> 'true'"
       : "(coalesce(suggestion->>'ignore','') <> 'true' or ((suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null))";
     let q = db('bank_transactions')
       .where({ status: 'unmatched', direction: 'debit' })
@@ -2476,7 +2479,7 @@ async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnP
       // (and the Later keys): a row reopened later (its expense deleted)
       // starts clean, so the next rule pass classifies it afresh instead
       // of skipping a stale stamp
-      patch.suggestion = bankImport.suggestionMerge({}, [...taxLedgerRules.LATER_KEYS, ...bankImport.LEDGER_RULE_KEYS]);
+      patch.suggestion = bankImport.suggestionMerge({}, [...taxLedgerRules.LATER_KEYS, ...bankImport.LEDGER_RULE_KEYS, ...bankImport.LEDGER_RULE_CATEGORY_KEYS]);
     }
     const claimed = await claim.update(patch);
     if (!claimed) {

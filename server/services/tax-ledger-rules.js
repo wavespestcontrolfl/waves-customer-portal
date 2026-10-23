@@ -313,12 +313,20 @@ function compileRules(rules) {
 // An income rule (a customer receipt) only fits money in and an expense
 // rule only fits money out (a credit from a business merchant is a refund
 // to review, never an expense); the next rule that fits wins.
+// Money in from a business merchant (an expense rule hit on a credit) is a
+// refund to apply in Bank Import, or income: never an expense, and never a
+// later, broader personal rule's. The business evidence wins, as a review
+// item with the expense rule's identity (its hit is counted).
+function creditOfMerchant(rule) {
+  return { ...rule, kind: 'review', category_id: null, category_name: null, irs_line: null, note: `money in from a business merchant (${rule.note || rule.pattern}): a refund to apply in Bank Import, or income` };
+}
 function matchRule(description, compiled, direction = null) {
   const d = String(description || '').slice(0, MAX_DESCRIPTION);
   for (const r of compiled) {
     if (direction && r.kind === 'income' && direction !== 'credit') continue;
-    if (direction && r.kind === 'expense' && direction !== 'debit') continue;
-    if (r.re.test(d)) return r;
+    if (!r.re.test(d)) continue;
+    if (direction === 'credit' && r.kind === 'expense') return creditOfMerchant(r);
+    return r;
   }
   return null;
 }

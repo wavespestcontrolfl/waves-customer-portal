@@ -177,10 +177,17 @@ describe('compileRules / matchRule', () => {
     expect(svc.matchRule('ACME SUPPLY', compiled, 'credit').id).toBe('inc');
     expect(svc.matchRule('ACME SUPPLY', compiled, 'debit').id).toBe('exp');
     expect(svc.matchRule('ACME SUPPLY', compiled).id).toBe('inc');
-    // an expense rule never labels money in (a merchant refund is a review item, not an expense)
-    const onlyExpense = svc.compileRules([{ id: 'exp', pattern: 'home depot', kind: 'expense', priority: 100 }]);
-    expect(svc.matchRule('HOME DEPOT REFUND', onlyExpense, 'credit')).toBeNull();
+    // an expense rule never labels money in: a merchant refund is a review item (refund to apply, or income) carrying that rule's identity
+    const onlyExpense = svc.compileRules([{ id: 'exp', pattern: 'home depot', kind: 'expense', priority: 100, note: 'Hardware store' }]);
+    expect(svc.matchRule('HOME DEPOT REFUND', onlyExpense, 'credit')).toMatchObject({ id: 'exp', kind: 'review', category_id: null, note: expect.stringMatching(/^money in from a business merchant \(Hardware store\): a refund to apply in Bank Import, or income$/) });
     expect(svc.matchRule('HOME DEPOT 123', onlyExpense, 'debit').id).toBe('exp');
+    // ...and a broader personal rule behind it never gets the credit: the business evidence wins
+    const overlap = svc.compileRules([
+      { id: 'sup', pattern: 'target\\W*specialty', kind: 'expense', priority: 90 },
+      { id: 'per', pattern: 'target', kind: 'personal', priority: 100 },
+    ]);
+    expect(svc.matchRule('TARGET SPECIALTY REFUND', overlap, 'credit')).toMatchObject({ id: 'sup', kind: 'review' });
+    expect(svc.matchRule('TARGET 0042', overlap, 'credit').id).toBe('per');
   });
 });
 
@@ -565,7 +572,8 @@ describe('applyRules (suggestion-only)', () => {
 
   test('pages by (txn_date, id) keyset until the row budget is spent', async () => {
     state.bankRows = Array.from({ length: 500 }, (_, i) => ({ id: `b${i}`, txn_date: '2026-01-01', description: 'UNKNOWN', suggestion: { noMatch: true } }));
-    const out = await svc.applyRules({ limit: 1000 });
+    const frozen = () => 0; // keyset paging is what this test checks, never the machine's speed
+    const out = await svc.applyRules({ limit: 1000, now: frozen });
     expect(out.examined).toBe(1000);
     const pages = selects();
     expect(pages).toHaveLength(2);
@@ -576,12 +584,12 @@ describe('applyRules (suggestion-only)', () => {
     expect(out.more).toBe(true);
     expect(out.cursor).toEqual({ txn_date: '2026-01-01', id: 'b499' });
     mockDb.mockClear();
-    const next = await svc.applyRules({ limit: 1000, after: out.cursor });
+    const next = await svc.applyRules({ limit: 1000, after: out.cursor, now: frozen });
     expect(selects()[0].whereRaw).toHaveBeenCalledWith(expect.stringContaining('(txn_date, id) > (?::date, ?::uuid)'), ['2026-01-01', 'b499']);
     expect(next.more).toBe(true);
     // a short last page ends the pass: no cursor
     state.bankRows = state.bankRows.slice(0, 10);
-    const last = await svc.applyRules({ limit: 1000 });
+    const last = await svc.applyRules({ limit: 1000, now: frozen });
     expect(last).toEqual(expect.objectContaining({ examined: 10, more: false, cursor: null }));
   });
 
@@ -589,12 +597,12 @@ describe('applyRules (suggestion-only)', () => {
     state.rules = [{ id: 'r-u', pattern: 'unknown', kind: 'personal', priority: 10, enabled: true }];
     state.bankRows = Array.from({ length: 500 }, (_, i) => ({ id: `b${i}`, txn_date: '2026-01-01', description: 'UNKNOWN', suggestion: { noMatch: true } }));
     // the mock always returns a full page: three rounds of 1000 rows, then it stops short
-    const out = await svc.applyRulesForPattern('unknown', { budget: 1000, maxRounds: 3 });
+    const out = await svc.applyRulesForPattern('unknown', { budget: 1000, maxRounds: 3, now: () => 0 });
     expect(out).toEqual({ examined: 3000, suggested: 3000, complete: false });
     expect(selects()).toHaveLength(6);
     expect(selects()[2].whereRaw).toHaveBeenCalledWith(expect.stringContaining('(txn_date, id) > (?::date, ?::uuid)'), ['2026-01-01', 'b499']);
     state.bankRows = state.bankRows.slice(0, 10); mockDb.mockClear();
-    expect(await svc.applyRulesForPattern('unknown', { budget: 1000, maxRounds: 3 })).toEqual({ examined: 10, suggested: 10, complete: true });
+    expect(await svc.applyRulesForPattern('unknown', { budget: 1000, maxRounds: 3, now: () => 0 })).toEqual({ examined: 10, suggested: 10, complete: true });
     expect(selects()).toHaveLength(1);
   });
 
