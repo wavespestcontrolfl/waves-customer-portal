@@ -933,7 +933,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
   // action needs some recorded warranty.
   const warranty = String(f.warranty_type || '').trim();
   const renewableContract = /renewable/i.test(warranty);
-  const noWarranty = !warranty || /^no warranty$/i.test(warranty);
+  const noWarranty = !warranty || /^no warranty$/i.test(warranty) || /^addition to an existing building/i.test(warranty);
 
   return (
     <div data-testid="termite-notice-sticker" style={{

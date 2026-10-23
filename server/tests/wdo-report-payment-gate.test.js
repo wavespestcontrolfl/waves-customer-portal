@@ -267,6 +267,8 @@ const FINDINGS = {
 
 const PRE_TREATMENT_FINDINGS = {
   treatment_address: '456 Palm Dr, Sarasota, FL 34236',
+  treatment_time: '08:40',
+  warranty_type: 'Renewable 5-year retreatment bond',
   treatment_method: 'Soil barrier (chemical)',
   product_name: 'Termidor SC',
   active_ingredient: 'fipronil',

@@ -262,6 +262,17 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
   });
 
+  it('gate on: an addition to an existing building reads like "No warranty" (Rule 5E-14.105(3)(d))', async () => {
+    const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: { ...findings, warranty_type: 'Addition to an existing building (no warranty required)' },
+    }));
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).not.toHaveTextContent('retreatment contract');
+    expect(sticker).not.toHaveTextContent('Activate your termite warranty');
+    expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
+  });
+
   it('gate on: a later exterior visit gets its own record line and the signature is scoped to the initial treatment', async () => {
     const { findByText, getByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       pretreatStickerReport: true,

@@ -580,6 +580,18 @@ function evaluateProjectReadiness({
         label: "Applicator attestation",
         ok: hasMeaningfulValue(findings?.applicator_attestation),
       },
+      // Mirrors the server's staff-send checks (Rule 5E-14.105(3); FBC 105.10).
+      {
+        label:
+          'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)',
+        ok:
+          hasMeaningfulValue(findings?.warranty_type) &&
+          !/^no warranty$/i.test(String(findings?.warranty_type).trim()),
+      },
+      {
+        label: "Time of treatment",
+        ok: hasMeaningfulValue(findings?.treatment_time),
+      },
     );
   }
 

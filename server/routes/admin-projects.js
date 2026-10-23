@@ -747,7 +747,29 @@ function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
   ];
 }
 
-function evaluateProjectSendReadiness({ project, customer }) {
+// Rule 5E-14.105(3) F.A.C.: a pre-construction treatment for a new building
+// carries a retreatment warranty (at least 1 year, renewable 4 more); only
+// work attached to an existing building is exempt. The legacy "No warranty"
+// choice no longer passes a staff send (owner 2026-10-23, "follow the law").
+const PRETREAT_LEGACY_NO_WARRANTY_RE = /^no warranty$/i;
+function pretreatWarrantyOk(value) {
+  const warranty = String(value || '').trim();
+  return Boolean(warranty) && !PRETREAT_LEGACY_NO_WARRANTY_RE.test(warranty);
+}
+
+// Checks added 2026-10-23 run only on a staff send (/send, /send-with-invoice),
+// never on the automatic release of a paid held report: a certificate held
+// before these checks existed must still deliver once paid (see the note in
+// certApplicationChecks).
+function pretreatStaffSendChecks(findings) {
+  return [
+    { key: 'cert_warranty', label: 'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)', ok: pretreatWarrantyOk(findings.warranty_type), hard: true },
+    // FBC 105.10 lists the time of treatment on the certificate.
+    { key: 'cert_treatment_time', label: 'Time of treatment', ok: hasMeaningfulValue(findings.treatment_time), hard: true },
+  ];
+}
+
+function evaluateProjectSendReadiness({ project, customer, staffSend = false }) {
   const typeCfg = getProjectType(project?.project_type);
   const findings = normalizeFindings(project?.findings);
   // Recommendations are optional. Some report types render cleanly from
@@ -796,6 +818,7 @@ function evaluateProjectSendReadiness({ project, customer }) {
       // requirement when paired with the typed name + FDACS ID + date.
       { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
+    if (staffSend) required.push(...pretreatStaffSendChecks(findings));
   }
 
   // Termite Phase-3 compliance content (Codex P1 r2 on #2703): the termite
@@ -3406,7 +3429,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       ? await loadProjectCustomer(project.customer_id)
       : null;
 
-    const readiness = evaluateProjectSendReadiness({ project, customer });
+    const readiness = evaluateProjectSendReadiness({ project, customer, staffSend: true });
     // Statutory compliance blockers are not overridable (Codex P1 r3) —
     // override_reason exists for judgment calls, not FS/FAC omissions.
     if (readiness.hardMissing.length > 0) {
@@ -4728,7 +4751,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
 
     // Readiness gate mirrors /send so we never email an incomplete report.
-    const readiness = evaluateProjectSendReadiness({ project, customer });
+    const readiness = evaluateProjectSendReadiness({ project, customer, staffSend: true });
     // Statutory compliance blockers are not overridable (Codex P1 r3) —
     // mirrors /send.
     if (readiness.hardMissing.length > 0) {
@@ -6137,6 +6160,7 @@ router._private = {
   isMissingS3ObjectError,
   logProjectActivity,
   evaluateProjectSendReadiness,
+  pretreatWarrantyOk,
   completeProjectBackedService,
   dropStaleCertTreatmentDate,
   reportHoldBackoffMinutes,

@@ -1175,7 +1175,7 @@ const PROJECT_TYPES = {
       // FDACS ID + treatment date is the standard pattern for portal-
       // generated certificates accepted by Florida building departments.
       { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', section: 'Applicator certification', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).'] },
-      { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', section: 'Warranty & notes', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'No warranty'] },
+      { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', section: 'Warranty & notes', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'Addition to an existing building (no warranty required)'] },
       { key: 'renewal_due', label: 'Renewal due by', type: 'text', section: 'Warranty & notes', placeholder: 'YYYY-MM-DD', disableDictation: true },
       { key: 'comments', label: 'Additional notes', type: 'textarea', section: 'Warranty & notes', placeholder: 'Pre-pour conditions, weather, retreatment triggers, etc.' },
     ],

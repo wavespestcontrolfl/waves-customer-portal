@@ -173,6 +173,48 @@ describe('admin project route guards', () => {
     }
   });
 
+  test('a staff send of a pre-treat certificate needs a lawful warranty and the time of treatment; the paid release does not re-check them', () => {
+    const complete = {
+      treatment_address: '12 Test Lane, Bradenton, FL 34202',
+      treatment_method: 'Soil barrier (chemical)',
+      product_name: 'Termidor SC',
+      active_ingredient: 'fipronil',
+      concentration_pct: '0.060',
+      square_footage: '1800',
+      gallons_applied: '90',
+      applicator_name: 'Sam Tester',
+      applicator_fdacs_id: 'JF000000',
+      applicator_attestation: 'I attest.',
+      treatment_time: '08:40',
+      warranty_type: 'Renewable 5-year retreatment bond',
+    };
+    const evaluate = (findings, staffSend) => evaluateProjectSendReadiness({
+      project: {
+        id: 'project-cert',
+        customer_id: 'customer-1',
+        project_date: '2026-05-18',
+        project_type: 'pre_treatment_termite_certificate',
+        findings,
+      },
+      customer: { id: 'customer-1' },
+      staffSend,
+    });
+    const hardKeys = (r) => r.hardMissing.map((m) => m.key);
+
+    expect(evaluate(complete, true).missing).toEqual([]);
+    // Rule 5E-14.105(3): only an addition to an existing building may go without a warranty.
+    expect(evaluate({ ...complete, warranty_type: 'Addition to an existing building (no warranty required)' }, true).missing).toEqual([]);
+    expect(hardKeys(evaluate({ ...complete, warranty_type: 'No warranty' }, true))).toEqual(['cert_warranty']);
+    expect(hardKeys(evaluate({ ...complete, warranty_type: '' }, true))).toEqual(['cert_warranty']);
+    // FBC 105.10 lists the time of treatment.
+    expect(hardKeys(evaluate({ ...complete, treatment_time: '' }, true))).toEqual(['cert_treatment_time']);
+
+    // A certificate held before these checks existed still releases once paid.
+    const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '' }, false);
+    expect(legacy.missing).toEqual([]);
+    expect(legacy.hardMissing).toEqual([]);
+  });
+
   test('certificate send readiness requires a finished-solution concentration only for liquid soil barriers', () => {
     const baseCertFindings = {
       treatment_address: '123 Main St, Bradenton, FL 34202',
