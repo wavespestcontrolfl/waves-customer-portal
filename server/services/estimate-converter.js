@@ -10,7 +10,6 @@
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
-const { createScheduledService } = require('./booking/create-scheduled-service');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
@@ -2242,77 +2241,71 @@ function frozenMistingInstall(estimateData = {}) {
   return null;
 }
 
-// Mosquito misting install visit (misting PR 2a). The accepted install is a one-time job under the catalog row
-// mosquito_misting_install, scheduled on the same day as the first service-plan visit (the plan visit is seeded at the normal lead
-// time and the office confirms the real install day with the customer after the design visit; the install physically comes first).
-// The visit is NOT billed again: the install amount is already on the acceptance invoice (frozenMistingInstall), so the row is
-// stamped with that amount as covered (estimated_price + prepaid_amount, method 'acceptance_invoice'), which is the existing
-// "covered visit" posture the completion mint honors. Idempotent per estimate (a retried accept never doubles it). Returns the
-// inserted row id, or null (no priced install, or the row is already there). A failure throws to the caller, which logs it and
-// never blocks the acceptance.
-async function scheduleMistingInstallVisit(database, { estimateId, customerId, estimateData, fallbackDate = null } = {}) {
+// Mosquito misting install office bell (misting PR 2a). The install amount is already a named line on the acceptance invoice
+// (frozenMistingInstall); no install visit row is created here (a scheduled install visit with a proper billed-on-invoice link is a
+// later PR). The office books the install day with the customer after the design visit, before the first plan application. Composed
+// with the canonical admin-alert helper; dispatched post-commit by the caller that dispatches the other accept bells, so a rolled-back
+// accept never pages. Dedupe key: one bell per estimate. Pure.
+function mistingInstallSchedulePayload({ estimateId, customerId, customerName = '', amount, firstPlanDate = null } = {}) {
+  const who = String(customerName || '').trim();
+  const money = `$${Number(amount).toFixed(2)}`;
+  const spec = {
+    area: 'Schedule',
+    action: who ? `Book ${who}'s misting install` : 'Book the misting install',
+    why: `The ${money} install is on the acceptance invoice; book the install day after the design visit.`,
+    severity: 'needs-you',
+    who: 'person',
+    subject: { type: 'estimate', id: String(estimateId) },
+    doneWhen: 'misting_install_booked',
+    link: `/admin/customers?customerId=${customerId}`,
+  };
+  const options = {
+    link: spec.link,
+    bell: true,
+    dedupeKey: `misting_install_schedule:${estimateId}`,
+    metadata: { estimateId, customerId, amount: Number(amount), firstPlanDate },
+  };
+  const body = `Estimate #${estimateId} was accepted with a misting system. The ${money} installation is on the acceptance invoice; `
+    + `book the install day with the customer after the design visit, before the first plan application on ${firstPlanDate || 'the first plan visit'}. No install visit was created.`;
+  try {
+    const { composeAdminAlert } = require('./admin-alert-compose');
+    const composed = composeAdminAlert(spec);
+    options.metadata = { ...options.metadata, ...composed.metadata };
+    return { type: 'estimate_converted', title: composed.headline, body: `${composed.why} ${body}`, finalBody: true, options };
+  } catch (err) {
+    logger.warn(`[estimate-converter] misting install alert compose failed (raw payload used): ${err.message}`);
+    return { type: 'estimate_converted', title: `Schedule — ${spec.action}`.slice(0, 60), body, finalBody: true, options };
+  }
+}
+
+// Raises the misting install office bell and writes the activity note (no install visit row is created). Returns the payload for an
+// in-transaction caller to dispatch after commit (opts.deferCommercialScheduleNotification), else null. Never throws: a failure is
+// logged and never blocks the accept.
+async function raiseMistingInstallBell(database, fx, opts, { estimateId, customerId, customer, estimateData, firstPlanDate = null } = {}) {
   const install = frozenMistingInstall(estimateData);
   if (!install) return null;
-  const catalog = await database('services')
-    .where({ service_key: 'mosquito_misting_install' })
-    .first('id', 'name', 'default_duration_minutes');
-  const serviceType = catalog?.name || 'Mosquito Misting System Installation';
-  const existing = await database('scheduled_services')
-    .where({ source_estimate_id: estimateId, customer_id: customerId, service_type: serviceType })
-    .first('id');
-  if (existing) return existing.id;
-  // The first plan visit's date: the earliest row this accept created under the misting service plan.
-  const plan = await database('services').where({ service_key: 'mosquito_misting_service' }).first('id', 'name');
-  let firstPlanDate = null;
+  let deferred = null;
   try {
-    const planRows = await database('scheduled_services')
-      .where({ source_estimate_id: estimateId, customer_id: customerId })
-      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
-      .select('scheduled_date', 'service_id', 'service_type');
-    const dates = planRows
-      .filter((row) => (plan && row.service_id === plan.id) || (plan && row.service_type === plan.name) || row.service_type === 'Mosquito Misting Service Plan')
-      .map((row) => row.scheduled_date)
-      .filter(Boolean)
-      .sort();
-    firstPlanDate = dates[0] || null;
-  } catch (dateErr) {
-    logger.warn(`[estimate-converter] misting install: first plan visit date lookup failed for estimate ${estimateId}: ${dateErr.message}`);
-  }
-  const cols = await database('scheduled_services').columnInfo();
-  const columns = Object.keys(cols);
-  const row = {
-    customer_id: customerId,
-    scheduled_date: firstPlanDate || fallbackDate || etDateString(),
-    service_type: serviceType,
-    status: 'pending',
-    notes: `Auto-created from accepted estimate #${estimateId}. Misting system installation: the office confirms the install day with the customer after the design visit. The install amount ($${install.amount.toFixed(2)}) is already on the acceptance invoice — do not invoice it again.`,
-    source_estimate_id: estimateId,
-    estimated_price: install.amount,
-    estimated_duration_minutes: Number(catalog?.default_duration_minutes) > 0 ? Number(catalog.default_duration_minutes) : 480,
-    prepaid_amount: install.amount,
-    prepaid_method: 'acceptance_invoice',
-    ...(catalog?.id ? { service_id: catalog.id } : {}),
-  };
-  const insertable = Object.fromEntries(Object.entries(row).filter(([key]) => columns.includes(key)));
-  // The booking stamping contract owns the field stamping and the source attribution for every new visit row.
-  const created = await createScheduledService({
-    trx: database,
-    insertData: insertable,
-    cols,
-    source: { sourceAction: 'estimate_accept_misting_install' },
-  });
-  const insertedId = created && typeof created === 'object' ? created.id : created;
-  try {
+    const payload = mistingInstallSchedulePayload({
+      estimateId,
+      customerId,
+      customerName: customer?.first_name ? `${customer.first_name} ${customer.last_name || ''}`.trim() : '',
+      amount: install.amount,
+      firstPlanDate: firstPlanDate ? String(firstPlanDate).slice(0, 10) : null,
+    });
+    deferred = dispatchOrDeferAcceptBell(fx, opts || {}, {
+      target: 'misting_install_schedule', payload, failLabel: 'misting install admin notify',
+    });
     await database('activity_log').insert({
       customer_id: customerId,
-      action: 'misting_install_visit_created',
-      description: `Estimate #${estimateId}: misting installation visit created (${serviceType}, ${insertable.scheduled_date}). The office confirms the install day with the customer; the $${install.amount.toFixed(2)} install is on the acceptance invoice.`,
-      metadata: JSON.stringify({ estimateId, scheduledServiceId: insertedId, amount: install.amount }),
+      action: 'misting_install_schedule_needed',
+      description: `Estimate #${estimateId}: the $${install.amount.toFixed(2)} misting installation is on the acceptance invoice. No install visit was created; the office books the install day.`,
+      metadata: JSON.stringify({ estimateId, amount: install.amount }),
     });
-  } catch (noteErr) {
-    logger.warn(`[estimate-converter] misting install activity note failed: ${noteErr.message}`);
+  } catch (installErr) {
+    logger.error(`[estimate-converter] Failed to raise the misting install bell for estimate ${estimateId}: ${installErr.message}`);
   }
-  return insertedId || null;
+  return deferred;
 }
 
 function estimateLineItemsFromData(estimateData = {}) {
@@ -7850,17 +7843,15 @@ const EstimateConverter = {
       if (earliestScheduledUnitDate) termStartDate = earliestScheduledUnitDate;
     }
 
-    // Mosquito misting install visit (misting PR 2a, GATE_MOSQUITO_MISTING): one one-time job beside the plan series. Skipped when
-    // the caller scheduled nothing itself (manual Mark Won) or recurring conversion is suppressed; a failure never blocks the accept.
-    if (!skipAutoSchedule && !suppressRecurringConversion && frozenMistingInstall(estimateData)) {
-      try {
-        await scheduleMistingInstallVisit(database, {
-          estimateId, customerId, estimateData, fallbackDate: earliestScheduledUnitDate || termStartDate || null,
-        });
-      } catch (installErr) {
-        logger.error(`[estimate-converter] Failed to create the misting install visit for estimate ${estimateId}: ${installErr.message}`);
-      }
-    }
+    // Mosquito misting install (misting PR 2a, GATE_MOSQUITO_MISTING): the install is billed on the acceptance invoice; the office
+    // gets ONE bell to book the install day (no install visit row is created). Skipped when the caller scheduled nothing itself
+    // (manual Mark Won) or recurring conversion is suppressed. In-transaction callers get the payload back and dispatch it after
+    // commit. A failure is logged and never blocks the accept.
+    const mistingInstallNotification = (!skipAutoSchedule && !suppressRecurringConversion)
+      ? await raiseMistingInstallBell(database, fx, opts, {
+        estimateId, customerId, customer, estimateData, firstPlanDate: earliestScheduledUnitDate || termStartDate || null,
+      })
+      : null;
 
     // B06/B17 office alert: a multi-program accept whose auto-scheduled series
     // could not be priced per unit. The single-unit park bell above needs
@@ -9066,6 +9057,8 @@ const EstimateConverter = {
       commercialScheduleNotification,
       // Same deferral contract as commercialScheduleNotification (DATA-001).
       perApplicationFeeNotification,
+      // Misting install office bell: same deferral contract as commercialScheduleNotification.
+      mistingInstallNotification,
       // Same deferral contract as commercialScheduleNotification.
       tierUpgradeNotification,
       planRateReviewNotification,
@@ -9251,4 +9244,5 @@ module.exports.funnelKeyForEstimateId = funnelKeyForEstimateId;
 module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
 module.exports.frozenMistingInstall = frozenMistingInstall;
-module.exports.scheduleMistingInstallVisit = scheduleMistingInstallVisit;
+module.exports.mistingInstallSchedulePayload = mistingInstallSchedulePayload;
+module.exports.raiseMistingInstallBell = raiseMistingInstallBell;

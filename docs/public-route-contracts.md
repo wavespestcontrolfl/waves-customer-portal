@@ -1999,7 +1999,7 @@ refused, even with the gate ON, any estimate that carries a PRICED misting syste
 engine line, an itemized proposal line, or a selected stored input when no stored row exists; an unpriced quote-required-only row, such
 as an oversize layout, does not count) because the conversion was not built. Misting PR 2a ships the conversion (catalog rows
 `mosquito_misting_install`, `mosquito_misting_service` and `mosquito_misting_refill`; the plan converts to a monthly series of 12
-applications; the install is a named line on the acceptance invoice and an install visit; see `docs/gates-and-env.md`), so the constant
+applications; the install is a named line on the acceptance invoice and one office bell books the install day, with no install visit row; see `docs/gates-and-env.md`), so the constant
 is now `true` and an accepted misting estimate converts. The refusal is KEPT reachable through the constant, not deleted: with it `false`
 the same endpoints answer HTTP 409 with the same customer text and `"code": "MOSQUITO_MISTING_ACCEPT_PENDING"` (reason
 `mosquito_misting_conversion_pending`); Mark Won / manual acceptance and the schedule booking preflight refuse it with the staff text; the

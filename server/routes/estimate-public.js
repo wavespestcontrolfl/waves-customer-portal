@@ -15149,6 +15149,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.error(`[estimate-accept] tier-upgrade admin notify setup failed: ${e.message}`);
       }
     }
+    // Misting install office bell (misting PR 2a) — same deferred post-commit contract. Posted through the converter's own accept-bell
+    // emitter (it never throws), so this route gains no raw notifyAdmin call.
+    if (acceptConversion?.mistingInstallNotification) {
+      void require('../services/estimate-converter').sendAcceptBell(acceptConversion.mistingInstallNotification, `misting install admin notify for estimate ${estimate.id}`);
+    }
     // Plan-rate review alert — same deferred post-commit contract as the
     // tier alert above (multi-plan legacy customer's un-splittable scalar
     // was replaced; owner eyeballs the rate once).

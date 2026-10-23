@@ -116,7 +116,7 @@ describe('the plan converts to a monthly series under the catalog row', () => {
   });
 });
 
-describe('the install: a named line on the acceptance invoice and a covered install visit', () => {
+describe('the install: a named line on the acceptance invoice and one office bell', () => {
   test('frozenMistingInstall reads the STORED one-time row (the quote figure), named by the tier label', () => {
     const data = estimateData();
     expect(converter.frozenMistingInstall(data)).toEqual({ amount: INSTALL, description: 'Essential system (drum) Installation' });
@@ -150,83 +150,98 @@ describe('the install: a named line on the acceptance invoice and a covered inst
     expect(route).toContain('treatAsOneTime ? null : EstimateConverter.frozenMistingInstall');
   });
 
-  function fakeDb({ withCatalog = true, existing = [], planDate = '2027-03-10' } = {}) {
-    const tables = {
-      services: withCatalog
-        ? [{ id: 'svc-install', service_key: 'mosquito_misting_install', name: 'Mosquito Misting System Installation', default_duration_minutes: 480 },
-          { id: 'svc-plan', service_key: 'mosquito_misting_service', name: 'Mosquito Misting Service Plan' }]
-        : [],
-      scheduled_services: [
-        ...existing,
-        { id: 'plan-1', customer_id: 'c1', source_estimate_id: 9, service_id: 'svc-plan', service_type: 'Mosquito Misting Service Plan', status: 'pending', scheduled_date: planDate },
-        { id: 'plan-2', customer_id: 'c1', source_estimate_id: 9, service_id: 'svc-plan', service_type: 'Mosquito Misting Service Plan', status: 'pending', scheduled_date: '2027-04-10' },
-      ],
-      activity_log: [],
-    };
-    const columns = {
-      scheduled_services: ['id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'notes', 'source_estimate_id', 'estimated_price', 'estimated_duration_minutes', 'prepaid_amount', 'prepaid_method', 'service_id', 'source_action', 'booking_source'],
-    };
-    const db = (table) => {
-      let filters = [];
-      let notIn = null;
-      const rows = () => tables[table] || [];
-      const match = (r) => filters.every((f) => Object.entries(f).every(([k, v]) => r[k] === v)) && (!notIn || !notIn.values.includes(r[notIn.col]));
-      const q = {
-        where(c) { filters.push(c); return q; },
-        whereNotIn(col, values) { notIn = { col, values }; return q; },
-        first: async () => { const hit = rows().find(match); return hit ? { ...hit } : undefined; },
-        select: async () => rows().filter(match).map((r) => ({ ...r })),
-        columnInfo: async () => Object.fromEntries((columns[table] || []).map((c) => [c, {}])),
-        insert: (row) => {
-          const stored = { id: `${table}-${rows().length + 1}`, ...row };
-          (tables[table] = rows()).push(stored);
-          const p = Promise.resolve([1]);
-          p.returning = async () => [stored];
-          return p;
+  describe('the office bell (no install visit row)', () => {
+    const NotificationService = require('../services/notification-service');
+    const customer = { first_name: 'Test', last_name: 'Customer' };
+    const makeDb = (failActivity = false) => {
+      const inserts = [];
+      const database = jest.fn((table) => ({
+        insert: async (row) => {
+          inserts.push({ table, row });
+          if (failActivity) throw new Error('activity down');
+          return [1];
         },
-      };
-      return q;
+      }));
+      database.inserts = inserts;
+      return database;
     };
-    db.tables = tables;
-    return db;
-  }
+    const fx = () => ({ run: jest.fn((meta, fn) => fn()) });
+    let notifySpy;
+    beforeEach(() => { notifySpy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 1 }); });
+    afterEach(() => notifySpy.mockRestore());
 
-  test('the install visit lands on the first plan visit date as a covered one-time job under the catalog row, once per estimate', async () => {
-    const db = fakeDb();
-    const id = await converter.scheduleMistingInstallVisit(db, { estimateId: 9, customerId: 'c1', estimateData: estimateData() });
-    const visit = db.tables.scheduled_services.find((r) => r.id === id);
-    expect(visit).toMatchObject({
-      customer_id: 'c1', scheduled_date: '2027-03-10', service_type: 'Mosquito Misting System Installation', status: 'pending',
-      service_id: 'svc-install', source_estimate_id: 9, estimated_duration_minutes: 480,
-      estimated_price: INSTALL, prepaid_amount: INSTALL, prepaid_method: 'acceptance_invoice',
-      source_action: 'estimate_accept_misting_install',
+    test('the payload carries the amount, the customer link, needs-you, a bell and the per-estimate dedupe key', () => {
+      const payload = converter.mistingInstallSchedulePayload({ estimateId: 9, customerId: 'c1', customerName: 'Test Customer', amount: INSTALL, firstPlanDate: '2027-03-10' });
+      expect(payload.title).toBe("Schedule \u2014 Book Test Customer's misting install");
+      expect(payload.title.length).toBeLessThanOrEqual(60);
+      expect(payload.body).toContain(`$${INSTALL.toFixed(2)}`);
+      expect(payload.body).toContain('before the first plan application on 2027-03-10');
+      expect(payload.body).toContain('No install visit was created');
+      expect(payload.options).toMatchObject({
+        bell: true, link: '/admin/customers?customerId=c1', dedupeKey: 'misting_install_schedule:9',
+        metadata: expect.objectContaining({ estimateId: 9, amount: INSTALL, severity: 'needs-you', area: 'Schedule' }),
+      });
+      const open = converter.mistingInstallSchedulePayload({ estimateId: 9, customerId: 'c1', amount: INSTALL });
+      expect(open.body).toContain('on the first plan visit');
     });
-    expect(visit.notes).toMatch(/already on the acceptance invoice/);
-    expect(db.tables.activity_log[0]).toMatchObject({ action: 'misting_install_visit_created' });
-    // a retried accept never doubles it
-    const again = await converter.scheduleMistingInstallVisit(db, { estimateId: 9, customerId: 'c1', estimateData: estimateData() });
-    expect(again).toBe(id);
-    expect(db.tables.scheduled_services.filter((r) => r.service_type === 'Mosquito Misting System Installation')).toHaveLength(1);
+
+    test('an in-transaction accept gets the payload back to send after commit; nothing is posted yet; the activity note says no visit was created', async () => {
+      const database = makeDb();
+      const out = await converter.raiseMistingInstallBell(database, fx(), { deferCommercialScheduleNotification: true }, {
+        estimateId: 9, customerId: 'c1', customer, estimateData: estimateData(), firstPlanDate: '2027-03-10',
+      });
+      expect(out).toMatchObject({ options: { dedupeKey: 'misting_install_schedule:9', bell: true } });
+      expect(notifySpy).not.toHaveBeenCalled();
+      const note = database.inserts.filter((i) => i.table === 'activity_log');
+      expect(note).toHaveLength(1);
+      expect(note[0].row).toMatchObject({ customer_id: 'c1', action: 'misting_install_schedule_needed' });
+      expect(note[0].row.description).toBe(`Estimate #9: the $${INSTALL.toFixed(2)} misting installation is on the acceptance invoice. No install visit was created; the office books the install day.`);
+      // no scheduled_services insert for the install
+      expect(database.inserts.some((i) => i.table === 'scheduled_services')).toBe(false);
+    });
+
+    test('a direct caller posts the bell once, with the dedupe key, and gets null back', async () => {
+      const database = makeDb();
+      const out = await converter.raiseMistingInstallBell(database, fx(), {}, {
+        estimateId: 9, customerId: 'c1', customer, estimateData: estimateData(),
+      });
+      expect(out).toBeNull();
+      expect(notifySpy).toHaveBeenCalledTimes(1);
+      expect(notifySpy.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: 'misting_install_schedule:9' });
+      expect(notifySpy.mock.calls[0][2]).toContain(`$${INSTALL.toFixed(2)}`);
+    });
+
+    test('no priced install (no misting, or an oversize layout): no bell, no note', async () => {
+      for (const data of [estimateData({ pest: { frequency: 'quarterly' } }), estimateData({ mosquitoMisting: { nozzles: 120 } })]) {
+        const database = makeDb();
+        expect(await converter.raiseMistingInstallBell(database, fx(), {}, { estimateId: 9, customerId: 'c1', customer, estimateData: data })).toBeNull();
+        expect(notifySpy).not.toHaveBeenCalled();
+        expect(database.inserts).toHaveLength(0);
+      }
+    });
+
+    test('a failure in the bell or the note is swallowed (never blocks the accept)', async () => {
+      notifySpy.mockRejectedValue(new Error('bell down'));
+      await expect(converter.raiseMistingInstallBell(makeDb(true), fx(), {}, {
+        estimateId: 9, customerId: 'c1', customer, estimateData: estimateData(),
+      })).resolves.toBeNull();
+      const throwingFx = { run: () => { throw new Error('fx down'); } };
+      await expect(converter.raiseMistingInstallBell(makeDb(), throwingFx, {}, {
+        estimateId: 9, customerId: 'c1', customer, estimateData: estimateData(),
+      })).resolves.toBeNull();
+    });
   });
 
-  test('no priced install: no visit; an absent catalog row still schedules by name; no plan visit falls back to the given date', async () => {
-    const none = fakeDb();
-    expect(await converter.scheduleMistingInstallVisit(none, { estimateId: 9, customerId: 'c1', estimateData: estimateData({ pest: { frequency: 'quarterly' } }) })).toBeNull();
-    const noCatalog = fakeDb({ withCatalog: false });
-    const id = await converter.scheduleMistingInstallVisit(noCatalog, { estimateId: 9, customerId: 'c1', estimateData: estimateData(), fallbackDate: '2027-05-01' });
-    const visit = noCatalog.tables.scheduled_services.find((r) => r.id === id);
-    expect(visit).toMatchObject({ service_type: 'Mosquito Misting System Installation', estimated_duration_minutes: 480 });
-    expect(visit).not.toHaveProperty('service_id');
-    const noPlan = fakeDb();
-    noPlan.tables.scheduled_services.length = 0;
-    const id2 = await converter.scheduleMistingInstallVisit(noPlan, { estimateId: 9, customerId: 'c1', estimateData: estimateData(), fallbackDate: '2027-05-01' });
-    expect(noPlan.tables.scheduled_services.find((r) => r.id === id2).scheduled_date).toBe('2027-05-01');
-  });
-
-  test('the converter creates it after scheduling, never on a manual Mark Won, and a failure never blocks the accept', () => {
+  test('the converter has no install-visit writer; the hook skips manual Mark Won and suppressed recurring conversion; the accept routes post the deferred bell', () => {
     const src = read('services/estimate-converter.js');
-    expect(src).toContain('if (!skipAutoSchedule && !suppressRecurringConversion && frozenMistingInstall(estimateData)) {');
-    expect(src).toMatch(/catch \(installErr\) \{\s*logger\.error\(`\[estimate-converter\] Failed to create the misting install visit/);
+    expect(src).not.toContain('scheduleMistingInstallVisit');
+    expect(src).not.toContain('estimate_accept_misting_install');
+    expect(src).not.toContain("prepaid_method: 'acceptance_invoice'");
+    expect(src).toContain('const mistingInstallNotification = (!skipAutoSchedule && !suppressRecurringConversion)');
+    expect(src).toMatch(/\n      mistingInstallNotification,\n/);
+    expect(read('routes/estimate-public.js')).toContain(".sendAcceptBell(acceptConversion.mistingInstallNotification");
+    expect(read('services/one-tap-purchase.js')).toContain("'mistingInstallNotification'");
+    expect(read('services/termite-annual-activation.js')).toContain("'mistingInstallNotification'");
   });
 });
 
