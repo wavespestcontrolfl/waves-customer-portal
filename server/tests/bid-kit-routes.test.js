@@ -228,7 +228,7 @@ describe('gate off', () => {
     expect((await call('GET', '/api/admin/feature-flags')).body.flags.bid_kit).toBeUndefined(); // even a stray per-user row cannot show it
   });
 
-  test('every answer carries no-store, the dark-gate 404 and the sign-in refusals included', async () => {
+  test('every signed-in answer carries no-store, the dark-gate 404 included; sign-in is checked first', async () => {
     delete process.env.GATE_BID_KIT;
     const id = '11111111-2222-4333-8444-555555555555';
     for (const [method, url] of [['GET', '/api/admin/bid-kit'], ['GET', '/api/admin/bid-kit/facts-sheet'], ['PATCH', `/api/admin/bid-kit/${id}`], ['GET', `/api/admin/bid-kit/${id}/file`]]) {
@@ -236,11 +236,9 @@ describe('gate off', () => {
       expect(off.status).toBe(404);
       expect(off.headers.get('cache-control')).toBe('no-store');
       const anonymous = await call(method, url, method === 'PATCH' ? {} : undefined, { 'Content-Type': 'application/json' });
-      expect(anonymous.status).toBe(401);
-      expect(anonymous.headers.get('cache-control')).toBe('no-store');
+      expect(anonymous.status).toBe(401); // the shared admin guard answers before anything of the bid kit runs
       const tech = await call(method, url, method === 'PATCH' ? {} : undefined, { Authorization: 'Bearer tech', 'Content-Type': 'application/json' });
       expect(tech.status).toBe(403);
-      expect(tech.headers.get('cache-control')).toBe('no-store');
     }
     process.env.GATE_BID_KIT = 'true';
     expect((await call('GET', '/api/admin/bid-kit')).headers.get('cache-control')).toBe('no-store');

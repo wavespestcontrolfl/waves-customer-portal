@@ -15,10 +15,10 @@ const { validCalendarDate } = require('../utils/datetime-et');
 // file, limits, source, dates and the owner's sign-off. Nothing here is public and nothing is sent to anyone.
 // A file is never returned as a key or a stored address: only GET /:id/file, a signed link good for 5 minutes.
 const router = express.Router();
-// Private records: nothing is cached by the browser or a proxy. First, so every answer carries it: the sign-in refusals and
-// the dark-gate 404 as well as the data.
-router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(adminAuthenticate, requireAdmin);
+// Private records: nothing is cached by the browser or a proxy, the dark-gate 404 as well as the data. It runs after the
+// auth guard (like every admin router): a middleware ahead of the guard would make the surface read as public.
+router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 // Gate off = the whole surface answers 404, exactly as if it were not mounted.
 router.use((req, res, next) => (bidKitLive() ? next() : res.status(404).json({ error: 'Not found' })));
 
