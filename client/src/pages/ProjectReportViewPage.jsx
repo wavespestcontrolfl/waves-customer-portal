@@ -1036,7 +1036,12 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
           Building Code 1816 / R318 and rules established by the Florida Department of Agriculture &amp; Consumer Services
           {renewableContract ? ', placed under a retreatment contract renewable by payment of an annual fee.' : '.'}
           {' '}The owner is hereby advised to have the property inspected annually by Waves Pest Control, LLC.
-          {' '}Annual reinspection and renewal of the treatment contract are needed to keep this protection in place.
+          {/* FBC 105.11: every notice names the need for reinspection and
+              contract renewal; with no warranty it recommends one instead of
+              pointing at a contract that does not exist. */}
+          {noWarranty
+            ? ' No retreatment contract covers this treatment. Annual reinspection and a renewable treatment contract are recommended to keep this protection in place.'
+            : ' Annual reinspection and renewal of the treatment contract are needed to keep this protection in place.'}
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
           Florida law (s. 482.226, F.S.) protects wood-destroying organism notices. Only the property owner may remove this notice.

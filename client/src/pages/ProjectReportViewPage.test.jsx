@@ -280,11 +280,13 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
       findings: { ...findings, warranty_type: 'No warranty' },
     }));
     const sticker = await findByTestId('termite-notice-sticker');
-    expect(sticker).not.toHaveTextContent('retreatment contract');
+    expect(sticker).not.toHaveTextContent('placed under a retreatment contract');
     expect(sticker).not.toHaveTextContent('Activate your termite warranty');
     expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
-    // FBC 105.11: every notice names the need for reinspection and contract renewal.
-    expect(sticker).toHaveTextContent('Annual reinspection and renewal of the treatment contract are needed');
+    // FBC 105.11: every notice names reinspection and contract renewal; with no
+    // warranty it recommends a contract rather than naming one.
+    expect(sticker).toHaveTextContent('No retreatment contract covers this treatment');
+    expect(sticker).not.toHaveTextContent('renewal of the treatment contract are needed');
     expect(sticker).toHaveTextContent('Posted per FL Building Code 105.11');
   });
 
@@ -294,9 +296,10 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
       findings: { ...findings, warranty_type: 'Addition to an existing building (no warranty required)' },
     }));
     const sticker = await findByTestId('termite-notice-sticker');
-    expect(sticker).not.toHaveTextContent('retreatment contract');
+    expect(sticker).not.toHaveTextContent('placed under a retreatment contract');
     expect(sticker).not.toHaveTextContent('Activate your termite warranty');
     expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
+    expect(sticker).toHaveTextContent('No retreatment contract covers this treatment');
   });
 
   it('gate on: a later exterior visit gets its own record line and the signature is scoped to the initial treatment', async () => {
