@@ -2,7 +2,7 @@
 
 // ============================================================
 // estimate-before-you-book.js — the "Before you book" page on the estimate PDF
-// (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK, owner answer book 2026-10-21/23).
+// (owner answer book 2026-10-21/23).
 //
 // ONE plain page, appended after the last page of the estimate PDF. Every
 // section prints; each service section is worded for "if your estimate
@@ -20,7 +20,6 @@
 // line goes first.
 // ============================================================
 
-const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
@@ -179,10 +178,10 @@ const DOC_TITLE_PX = 40;
 const DOC_PAGE_PX = 820;
 
 // The `/data` payload fragment: `{ beforeYouBook: { title, sections: [{ key, heading, lines: [text] }],
-// closing } }`, already chosen and trimmed for this estimate, or nothing (gate off, or the estimate is
-// accepted, declined or expired), so a gate-off response is byte-identical to before. Copy only: no prices. Never throws: a failure is "no page".
+// closing } }`, already chosen and trimmed for this estimate, or nothing when the estimate is accepted,
+// declined or expired. Copy only: no prices. Never throws: a failure is "no page".
 function beforeYouBookBlock(estimate, { open = estimateIsOpen(estimate) } = {}) {
-  if (featureGates.estimateBeforeYouBookLive?.() !== true || open !== true) return {};
+  if (open !== true) return {};
   try {
     const { normalizeProposal } = require('./estimate-proposal');
     const page = trimByRank(beforeYouBookForEstimate(estimate, normalizeProposal(estimate)), {

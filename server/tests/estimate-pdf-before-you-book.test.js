@@ -1,4 +1,4 @@
-// GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK on the pdfkit estimate PDF: one plain "Before you book" page
+// The pdfkit estimate PDF: one plain "Before you book" page
 // from the owner's answer book, only the sections that match what the estimate quotes, never more
 // than one added page, and the document exactly as before with the gate off.
 const zlib = require('zlib');
@@ -59,7 +59,6 @@ const termiteBond = { service: 'termite_bond', name: 'Termite Bond', visitsPerYe
 const rodentTrap = { service: 'rodent', name: 'Rodent Trapping' };
 
 const render = (estimate) => buildEstimateProposalPDFBuffer(estimate, { billsPerApplication: false });
-const HEAD = 'BEFORE YOU BOOK';
 const PHRASE = {
   scheduling: 'SCHEDULING AND PAYING',
   pest: 'IF YOUR ESTIMATE INCLUDES PEST CONTROL',
@@ -71,48 +70,24 @@ const PHRASE = {
   wdo: 'WDO (termite) inspection report',
 };
 
-afterEach(() => {
-  delete process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK;
-});
-
 describe('estimate PDF Before you book page', () => {
-  test('gate off: no page, same page count and text as the gate-unset document', async () => {
-    const est = fixture('byb-off', [pest, lawn]);
-    const unset = await render(est);
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'false';
-    const off = await render(est);
-    expect(pageCount(off)).toBe(pageCount(unset));
-    expect(extractPdfText(off)).toBe(extractPdfText(unset));
-    expect(extractPdfText(off).toUpperCase()).not.toContain(HEAD);
-  });
-
-  test('only exactly "true" turns the gate on', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = '1';
-    expect(extractPdfText(await render(fixture('byb-1', [pest]))).toUpperCase()).not.toContain('SCHEDULING AND PAYING');
-  });
-
-  test('gate on adds exactly one page and leaves the rest of the document as it was', async () => {
+  test('an open estimate gets exactly one more page than the same estimate once decided', async () => {
     const est = fixture('byb-on', [pest, lawn]);
-    const off = await render(est);
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    const decided = await render({ ...est, status: 'declined' });
     const on = await render(est);
-    expect(pageCount(on)).toBe(pageCount(off) + 1);
-    const offText = extractPdfText(off);
+    expect(pageCount(on)).toBe(pageCount(decided) + 1);
     const onText = extractPdfText(on);
-    expect(onText.startsWith(offText)).toBe(true);
     expect(onText).toContain(PHRASE.scheduling);
     expect(onText).toContain('Before you book');
   });
 
   test('the no-contract line needs a residential pest or lawn plan', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     expect(extractPdfText(await render(fixture('byb-c1', [pest])))).toContain(PHRASE.contract);
     expect(extractPdfText(await render(fixture('byb-c2', [termiteBond])))).not.toContain(PHRASE.contract);
     expect(extractPdfText(await render(fixture('byb-c3', [], [{ name: 'Rodent Trapping' }])))).not.toContain(PHRASE.contract);
   });
 
   test('a commercial or unknown-category estimate never prints the no-contract line, only the neutral agreement line', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const NEUTRAL = 'follow the agreement you sign';
     // Single building, recurring pest, but category COMMERCIAL: the case a building count would miss.
     const commercial = { ...fixture('byb-com1', [pest]), category: 'COMMERCIAL' };
@@ -136,7 +111,6 @@ describe('estimate PDF Before you book page', () => {
   });
 
   test('the page is only for an estimate still being decided', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const open = await render(fixture('byb-open', [pest]));
     const offPages = pageCount(open);
     for (const status of ['accepted', 'declined', 'expired']) {
@@ -151,7 +125,6 @@ describe('estimate PDF Before you book page', () => {
   });
 
   test('the prepay refund line is conditional ("if your estimate offers a prepaid year") and prints on any open estimate (Codex #6504 r4)', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const recurring = fixture('byb-p1', [pest]);
     expect(extractPdfText(await render(recurring))).toContain(PHRASE.prepay);
     // worded conditionally, so it needs no prepay verdict: the same line on any open estimate
@@ -159,11 +132,8 @@ describe('estimate PDF Before you book page', () => {
   });
 
   test('an estimate with every service type still adds exactly one page, scheduling first', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const est = fixture('byb-all', [pest, lawn, termiteBond, rodentTrap], [{ name: 'WDO Inspection' }, { name: 'German Roach Cleanout' }]);
-    const gateOffBuf = (() => { delete process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK; return render(est); })();
-    const off = await gateOffBuf;
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    const off = await render({ ...est, status: 'declined' });
     const on = await render(est);
     expect(pageCount(on)).toBe(pageCount(off) + 1);
     const text = extractPdfText(on);
@@ -175,12 +145,9 @@ describe('estimate PDF Before you book page', () => {
 
   test('every-service page stays above the footer: the last drawn line ends before CONTENT_BOTTOM', async () => {
     const PDFDocument = require('pdfkit');
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const CONTENT_BOTTOM = 742 - 18;
     const est = fixture('byb-fit', [pest, lawn, termiteBond, rodentTrap], [{ name: 'WDO Inspection' }, { name: 'German Roach Cleanout' }]);
-    const off = (() => { delete process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK; return render(est); })();
-    const offBuf = await off;
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    const offBuf = await render({ ...est, status: 'declined' });
     // Record every text call with the page it landed on and the height it takes.
     const calls = [];
     const original = PDFDocument.prototype.text;
@@ -200,7 +167,6 @@ describe('estimate PDF Before you book page', () => {
   });
 
   test('page text has no dollar sign, "safe", EPA or banned wording', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const est = fixture('byb-copy', [pest, lawn, termiteBond, rodentTrap], [{ name: 'WDO Inspection' }, { name: 'German Roach Cleanout' }]);
     const text = extractPdfText(await render(est));
     const bybText = text.slice(text.indexOf('Before you book'));
@@ -256,13 +222,12 @@ describe('Before you book copy', () => {
 
 });
 
-describe('Before you book: terms scope, prepay verdict, structured service keys, partial gate mocks', () => {
+describe('Before you book: terms scope, prepay verdict, structured service keys', () => {
   const { beforeYouBookBlock } = require('../services/estimate-before-you-book');
   const NEUTRAL = 'follow the agreement you sign';
   const withProposal = (est, proposal) => ({ ...est, estimate_data: { ...est.estimate_data, proposal } });
 
   test('a residential pest + lawn estimate mixed with termite or rodent keeps the plan terms off: neutral line only', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     for (const extra of [termiteBond, rodentTrap]) {
       const text = extractPdfText(await render(fixture(`byb-mix-${extra.service}`, [pest, lawn, extra])));
       expect(text).not.toContain(PHRASE.contract);
@@ -275,18 +240,9 @@ describe('Before you book: terms scope, prepay verdict, structured service keys,
   });
 
   test('the payload block carries the same conditional refund line', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const recurring = fixture('byb-pp1', [pest]);
     const lines = () => (beforeYouBookBlock(recurring, { open: true }).beforeYouBook?.sections || []).flatMap((x) => x.lines).join(' ');
     expect(lines()).toContain(PHRASE.prepay);
-  });
-
-  test('a feature-gates mock without the reader never breaks the page or the document (CI regression)', () => {
-    jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
-      const isolated = require('../services/estimate-before-you-book');
-      expect(isolated.beforeYouBookBlock(fixture('byb-mock', [pest]))).toEqual({});
-    });
   });
 });
 
@@ -320,10 +276,9 @@ describe('Before you book trim and payload block', () => {
     expect(tighter.sections.map((s) => s.lines.map((l) => l.text))).toEqual([['a1']]);
   });
 
-  test('the payload block is empty with the gate off and fits the estimate with it on', () => {
+  test('the payload block is empty on a decided estimate and fits an open one', () => {
     const est = fixture('byb-block', [pest, lawn]);
-    expect(beforeYouBookBlock(est)).toEqual({});
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    expect(beforeYouBookBlock({ ...est, status: 'accepted' })).toEqual({});
     const block = beforeYouBookBlock(est).beforeYouBook;
     expect(block.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
     expect(block.sections.every((s) => s.lines.every((l) => typeof l === 'string'))).toBe(true);

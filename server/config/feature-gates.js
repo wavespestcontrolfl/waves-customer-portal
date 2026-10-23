@@ -5443,12 +5443,6 @@ function estimateLawnLimitsLive() {
 function mosquitoMistingLive() {
   return gateEnvValue('GATE_MOSQUITO_MISTING');
 }
-// GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK read at CALL time, strict `=== 'true'`, dark by default (owner
-// answer book 2026-10-22). services/pdf/estimate-pdf.js appends one plain "Before you book" page.
-// Copy only, no prices, sends nothing. Off = the estimate PDF is byte-identical to before.
-function estimateBeforeYouBookLive() {
-  return process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK === 'true';
-}
 
 // GATE_BID_KIT read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader for the
 // Bid kit: routes/admin-bid-kit.js, services/bid-kit-expiry.js (the daily job) and the `bid_kit` flag on
@@ -7489,7 +7483,5 @@ module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
 module.exports.lawnReclaimedHalfNLive = lawnReclaimedHalfNLive;
 // GATE_MOSQUITO_MISTING reader, on its own line so gate PRs never conflict.
 module.exports.mosquitoMistingLive = mosquitoMistingLive;
-// GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK reader, on its own line so gate PRs never conflict.
-module.exports.estimateBeforeYouBookLive = estimateBeforeYouBookLive;
 // GATE_BID_KIT reader, on its own line so gate PRs never conflict.
 module.exports.bidKitLive = bidKitLive;

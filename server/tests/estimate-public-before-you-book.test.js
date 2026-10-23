@@ -1,8 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
-// GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK: GET /:token/data carries `beforeYouBook` (the sections of the
-// "Before you book" page that apply to this estimate, already trimmed) only with the gate on. With
-// the gate off the response has no such key.
+// GET /:token/data carries `beforeYouBook` (the sections of the "Before you book" page that apply to
+// this estimate, already trimmed) on an open estimate, and no such key on a decided one.
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
@@ -106,28 +105,13 @@ async function withServer(fn) {
 const getData = (baseUrl) => fetch(`${baseUrl}/estimates/lawnlimitstoken/data`).then((r) => r.json());
 
 
-afterEach(() => { delete process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK; });
 
 const keysOf = (body) => body.beforeYouBook.sections.map((s) => s.key);
 
-describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)', () => {
+describe('GET /:token/data - before you book', () => {
   beforeEach(() => { dbRows = { estimates: estimateRow({ services: ['pest_control', 'lawn_care'] }), customers: { lawn_type: null }, customer_properties: [] }; });
 
-  test('gate off: no beforeYouBook key, and the rest of the payload is the same as with the gate unset', async () => {
-    await withServer(async (baseUrl) => {
-      const unset = await getData(baseUrl);
-      process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'false';
-      const off = await getData(baseUrl);
-      expect(off.estimate).toBeDefined();
-      expect(off).not.toHaveProperty('beforeYouBook');
-      // meta, cacheHit and the ask token (it carries a timestamp) change from one call to the next; everything else is the same.
-      const stable = (body) => JSON.stringify(body, (key, value) => (key === 'meta' || key === 'cacheHit' || key === 'askToken' ? undefined : value));
-      expect(stable(off)).toBe(stable(unset));
-    });
-  });
-
-  test('gate on: every section, as plain strings with no prices', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+  test('every section, as plain strings with no prices', async () => {
     await withServer(async (baseUrl) => {
       const body = await getData(baseUrl);
       expect(body.beforeYouBook.title).toBe('Before you book');
@@ -143,8 +127,7 @@ describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)
     });
   });
 
-  test('gate on, accepted or declined estimate: no key; a commercial single-building one has no no-contract line', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+  test('accepted or declined estimate: no key; a commercial single-building one has no no-contract line', async () => {
     for (const status of ['accepted', 'declined']) {
       dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'], overrides: { status } }) };
       await withServer(async (baseUrl) => {
@@ -167,14 +150,12 @@ describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)
   });
 
   test('the conditional prepay refund line prints on any open estimate, not on a payload verdict (Codex #6504 r4)', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const refundLine = (body) => body.beforeYouBook.sections.flatMap((x) => x.lines).some((l) => l.includes('If your estimate offers a prepaid year'));
     dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'] }) };
     await withServer(async (baseUrl) => { expect(refundLine(await getData(baseUrl))).toBe(true); });
   });
 
-  test('gate on, pest-only estimate: the same sections (service sections are worded "if your estimate includes")', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+  test('pest-only estimate: the same sections (service sections are worded "if your estimate includes")', async () => {
     dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'] }) };
     await withServer(async (baseUrl) => {
       const body = await getData(baseUrl);
