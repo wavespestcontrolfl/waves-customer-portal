@@ -73,7 +73,7 @@ const PAYLOADS = {
       renewal_due: 'June 2027',
       applicator_name: 'Adam Benetti',
       applicator_fdacs_id: 'JE362022',
-      applicator_attestation: 'I attest that the soil treatment described above was applied in accordance with the product label and Florida Building Code 1816.1.7.',
+      applicator_attestation: 'I attest that the soil treatment described above was applied in accordance with the product label and Florida Building Code 1816.1 / R318.1.',
     },
   }),
   'certificate-sticker': () => {
