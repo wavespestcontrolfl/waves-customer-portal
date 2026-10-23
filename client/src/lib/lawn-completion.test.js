@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { lawnPlanActionOptions, lawnPlanSelections, reconcileLawnPlanSelections, withdrawLawnPlanSuggestions, LAWN_FIELD_ACTIONS, LAWN_PLAN_UNAVAILABLE_REASON } from './lawn-completion';
 
 it('uses the engine mix instead of catalog defaults and skips unselected optional rows', () => {
