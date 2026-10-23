@@ -109,7 +109,7 @@ function InboxRow({ row, categories, busy, error, onAct }) {
       </div>
       )}
       <div style={s.row}>
-        {["personal", "transfer", "income", "later"].map((d) => (
+        {["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), "later"].map((d) => (
           <button
             key={d}
             type="button"

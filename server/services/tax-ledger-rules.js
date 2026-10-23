@@ -104,10 +104,48 @@ function httpError(status, message) {
   const e = new Error(message); e.status = status; return e;
 }
 
-function compilePattern(pattern) {
+// Patterns run synchronously on every staged row during imports and the
+// hourly sync, so a pattern that can backtrack catastrophically is refused:
+// no backreference, no lookaround, and no quantifier on a group that itself
+// holds a quantifier (the (a+)+ shape). Alternations, classes, \W*, \b,
+// .?, bounded repeats all pass; every seed does.
+const UNSAFE_PATTERN = [
+  { re: /\\[1-9]/, why: 'a backreference' },
+  { re: /\(\?<?[=!]/, why: 'a lookaround' },
+];
+function unboundedGroupRepeat(p) {
+  // walk the pattern once: an unbounded quantifier (* + {) right after a ')'
+  // whose group holds a quantifier, a nested repeated group, or an
+  // alternation ((a+)+, ((ab)+)+, (x|xy)+) is the dangerous shape; (…)? is
+  // bounded and stays allowed
+  const stack = [];
+  let seen = false;
+  let alt = false;
+  for (let i = 0; i < p.length; i += 1) {
+    const c = p[i];
+    if (c === '\\') { i += 1; continue; }
+    if (c === '[') { while (i < p.length && p[i] !== ']') { if (p[i] === '\\') i += 1; i += 1; } continue; }
+    if (c === '(') { stack.push([seen, alt]); seen = false; alt = false; continue; }
+    if (c === '|') { alt = true; continue; }
+    if (c === ')') {
+      const inner = seen || alt;
+      const outer = stack.pop() || [false, false];
+      if (inner && /[*+{]/.test(p[i + 1] || '')) return true;
+      seen = outer[0] || seen; alt = outer[1];
+      continue;
+    }
+    if (c === '*' || c === '+' || c === '{') seen = true;
+  }
+  return false;
+}
+// maxLength caps what the owner types; a stored rule (seeds are long
+// alternations of literals) is checked for safety only.
+function compilePattern(pattern, { maxLength = MAX_PATTERN } = {}) {
   const p = String(pattern || '').trim();
   if (!p) throw httpError(400, 'pattern is required');
-  if (p.length > MAX_PATTERN) throw httpError(400, `pattern is longer than ${MAX_PATTERN} characters`);
+  if (p.length > maxLength) throw httpError(400, `pattern is longer than ${maxLength} characters`);
+  for (const { re, why } of UNSAFE_PATTERN) if (re.test(p)) throw httpError(400, `pattern uses ${why}, which is not allowed`);
+  if (unboundedGroupRepeat(p)) throw httpError(400, 'pattern repeats a group that repeats or alternates inside (for example (a+)+ or (x|xy)+), which is not allowed');
   try { return new RegExp(p, 'i'); } catch (e) { throw httpError(400, `pattern is not a valid regular expression: ${e.message}`); }
 }
 
@@ -115,7 +153,7 @@ function compileRules(rules) {
   const out = [];
   for (const r of rules || []) {
     if (r.enabled === false) continue;
-    try { out.push({ ...r, re: new RegExp(r.pattern, 'i') }); } catch (e) {
+    try { out.push({ ...r, re: compilePattern(r.pattern, { maxLength: Infinity }) }); } catch (e) {
       logger.warn(`[tax-ledger] rule ${r.id} skipped, invalid pattern: ${e.message}`);
     }
   }
@@ -125,9 +163,14 @@ function compileRules(rules) {
   return out;
 }
 
-function matchRule(description, compiled) {
+// An income rule (a customer receipt) only fits money in; for a debit the
+// next rule that fits wins, so a payee that is both is still placed.
+function matchRule(description, compiled, direction = null) {
   const d = String(description || '');
-  for (const r of compiled) if (r.re.test(d)) return r;
+  for (const r of compiled) {
+    if (r.kind === 'income' && direction && direction !== 'credit') continue;
+    if (r.re.test(d)) return r;
+  }
   return null;
 }
 
@@ -250,7 +293,7 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
       .whereRaw(MATCHER_EXAMINED_SQL)
       .orderBy('txn_date', 'asc').orderBy('id', 'asc')
       .limit(pageSize)
-      .select('id', 'txn_date', 'description', 'suggestion');
+      .select('id', 'txn_date', 'description', 'direction', 'suggestion');
     if (!force) q = q.whereRaw("(suggestion -> 'rulesAt') is null");
     if (after) q = q.whereRaw('(txn_date, id) > (?::date, ?::uuid)', [after.txn_date, after.id]);
     const rows = await q;
@@ -258,7 +301,7 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
       counts.examined += 1;
       const sug = row.suggestion || {};
       if (sug.decision || !matcherExamined(row)) continue;
-      const rule = matchRule(row.description, compiled);
+      const rule = matchRule(row.description, compiled, row.direction);
       const matcherTransfer = !!(sug.ignore && !sug.rule);
       const writes = !!rule && !matcherTransfer && (!pattern || rule.pattern === pattern);
       if (pattern && !writes) continue;
@@ -356,6 +399,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
   const block = inboxBlock(row);
   if (block) throw httpError(409, block);
   if (decision === 'expense' && !categoryId) throw httpError(400, 'an expense needs a categoryId');
+  if (decision === 'income' && row.direction !== 'credit') throw httpError(400, 'only money in can be income; this row is a payment out');
   if (decision === 'expense') return { success: true, action: 'create-expense', createExpense: true, ruleCreated: false };
 
   const now = new Date();

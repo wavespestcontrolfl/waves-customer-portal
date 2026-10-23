@@ -99,6 +99,36 @@ describe('compileRules / matchRule', () => {
     expect(() => svc.compilePattern('(')).toThrow(expect.objectContaining({ status: 400 }));
     expect(svc.compilePattern('costco\\W*gas').test('COSTCO GAS')).toBe(true);
   });
+
+  test('compilePattern refuses the shapes that can backtrack catastrophically; every seed and every Inbox pattern passes', () => {
+    for (const bad of ['(a+)+$', '(a*)*b', '(x|xy)+z', '((ab)+)+', '(\\w+\\s?)+$', '(a)\\1', '(?=a)b', '(?<!a)b']) {
+      expect([bad, () => svc.compilePattern(bad)]).toEqual([bad, expect.any(Function)]);
+      expect(() => svc.compilePattern(bad)).toThrow(expect.objectContaining({ status: 400 }));
+    }
+    for (const ok of ['costco\\W*gas', '\\bwawa\\b', 'google\\W*ads|facebk|meta ads', 'o.?reilly auto', 'wu\\b.*\\bco\\b', 'a{2,4}b', '(ab|cd)e', '(mobile )?ach', 'usps po\\b']) {
+      expect([ok, svc.compilePattern(ok)]).toEqual([ok, expect.any(RegExp)]);
+    }
+    for (const r of seeds.SEED_RULES) expect([r.pattern, svc.compilePattern(r.pattern, { maxLength: Infinity })]).toEqual([r.pattern, expect.any(RegExp)]);
+    // a seed may be a long alternation of literals; the owner's typed pattern keeps the cap
+    expect(svc.compileRules(seeds.SEED_RULES.map((r, i) => ({ ...r, id: `s${i}` })))).toHaveLength(seeds.SEED_RULES.length);
+    for (const d of ['DEBIT CARD PURCHASE - SITEONE LANDSCAPE SUPPLY 1234', "O'REILLY AUTO PARTS 0042", 'AMAZON.COM*AB12CD']) {
+      expect(svc.compilePattern(svc.patternFromDescription(d))).toEqual(expect.any(RegExp));
+    }
+    // stored rules take the same check: an unsafe one is skipped, not run
+    const compiled = svc.compileRules([{ id: 'evil', pattern: '(a+)+$', priority: 1 }, { id: 'ok', pattern: 'wawa', priority: 2 }]);
+    expect(compiled.map((r) => r.id)).toEqual(['ok']);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('rule evil skipped'));
+  });
+
+  test('matchRule skips an income rule for money out and takes the next rule that fits', () => {
+    const compiled = svc.compileRules([
+      { id: 'inc', pattern: 'acme', kind: 'income', priority: 10 },
+      { id: 'exp', pattern: 'acme', kind: 'expense', priority: 100 },
+    ]);
+    expect(svc.matchRule('ACME SUPPLY', compiled, 'credit').id).toBe('inc');
+    expect(svc.matchRule('ACME SUPPLY', compiled, 'debit').id).toBe('exp');
+    expect(svc.matchRule('ACME SUPPLY', compiled).id).toBe('inc');
+  });
 });
 
 describe('suggestionFor', () => {
@@ -214,7 +244,9 @@ describe('applyRules (suggestion-only)', () => {
     // every row the matcher examined carries its marker (noMatch here)
     state.bankRows = [
       { id: 'b1', txn_date: '2026-01-02', description: 'COSTCO GAS #1', suggestion: { noMatch: true, categoryId: 'cat-old', categorySource: 'ai' } },
-      { id: 'b2', txn_date: '2026-01-03', description: 'ZELLE MONEY RECEIVED FROM ACME', suggestion: { noMatch: true } },
+      { id: 'b2', txn_date: '2026-01-03', description: 'ZELLE MONEY RECEIVED FROM ACME', direction: 'credit', suggestion: { noMatch: true } },
+      // money OUT to the same payee: the income rule does not fit, no other rule does either
+      { id: 'b8', txn_date: '2026-01-03', description: 'ZELLE MONEY SENT TO ACME', direction: 'debit', suggestion: { noMatch: true } },
       { id: 'b3', txn_date: '2026-01-04', description: 'COSTCO GAS #2', suggestion: { noMatch: true } },
       { id: 'b4', txn_date: '2026-01-05', description: 'UNKNOWN PAYEE', suggestion: { noMatch: true } },
       { id: 'b5', txn_date: '2026-01-06', description: 'COSTCO GAS #3', suggestion: { ignore: true, reason: 'internal transfer?' } },
@@ -227,10 +259,10 @@ describe('applyRules (suggestion-only)', () => {
 
   test('merges a suggestion on each matching open row after clearing the old classification, stamps every examined row, never touches status, skips a matcher-flagged transfer, counts hits', async () => {
     const out = await svc.applyRules({ limit: 500 });
-    expect(out).toEqual({ examined: 7, suggested: 3, cleared: 0, byKind: { expense: 2, income: 1 }, more: false, cursor: null });
+    expect(out).toEqual({ examined: 8, suggested: 3, cleared: 0, byKind: { expense: 2, income: 1 }, more: false, cursor: null });
     expect(selects()[0].whereRaw).toHaveBeenCalledWith("(suggestion -> 'decision') is null");
     expect(selects()[0].whereRaw).toHaveBeenCalledWith(svc.MATCHER_EXAMINED_SQL);
-    expect(state.updates).toHaveLength(5);
+    expect(state.updates).toHaveLength(6);
     expect(state.updates.map((u) => u.wheres[0].id)).toEqual(expect.not.arrayContaining(['b6', 'b0']));
     const stamps = new Set();
     for (const u of state.updates) {
@@ -248,6 +280,7 @@ describe('applyRules (suggestion-only)', () => {
     expect(byId.b2.merged.ignore).toBeUndefined();
     expect(byId.b4.merged).toEqual({ rulesAt: expect.any(String) });
     expect(byId.b4.removed).toEqual([]);
+    expect(byId.b8.merged).toEqual({ rulesAt: expect.any(String) });
     expect(byId.b5.merged).toEqual({ rulesAt: expect.any(String) });
     const hits = Object.fromEntries(state.ruleUpdates.map((u) => [u.wheres[0].id, u.patch.hits.bindings[0]]));
     expect(hits).toEqual({ 'r-gas': 2, 'r-acme': 1 });
@@ -259,7 +292,7 @@ describe('applyRules (suggestion-only)', () => {
     state.updates = []; state.ruleUpdates = []; mockDb.mockClear();
     const out = await svc.applyRules({ force: true, pattern: 'acme' });
     expect(selects()[0].whereRaw).not.toHaveBeenCalledWith(expect.stringContaining("(suggestion -> 'rulesAt') is null"));
-    expect(out).toEqual({ examined: 7, suggested: 1, cleared: 0, byKind: { income: 1 }, more: false, cursor: null });
+    expect(out).toEqual({ examined: 8, suggested: 1, cleared: 0, byKind: { income: 1 }, more: false, cursor: null });
     expect(state.updates).toHaveLength(1);
     expect(state.updates[0].wheres[0]).toEqual({ id: 'b2', status: 'unmatched' });
     expect(state.updates[0].patch.suggestion.removed).toEqual(svc.CLASSIFICATION_KEYS);
@@ -336,6 +369,7 @@ describe('applyAfterImport', () => {
 describe('decide', () => {
   // a row the matcher examined and found nothing for (its noMatch marker)
   const open = () => ({ id: 'b1', status: 'unmatched', description: 'DEBIT CARD PURCHASE - WAWA 5519', direction: 'debit', suggestion: { noMatch: true } });
+  const moneyIn = () => ({ ...open(), description: 'ZELLE MONEY RECEIVED FROM SOMEONE', direction: 'credit' });
 
   test('rejects an unknown decision, a missing row, a settled row and a bank-changed row', async () => {
     await expect(svc.decide({ id: 'b1', decision: 'maybe' })).rejects.toMatchObject({ status: 400 });
@@ -376,8 +410,11 @@ describe('decide', () => {
     expect(state.updates[0].wheres).toEqual([{ id: 'b1', status: 'unmatched' }, svc.DECIDABLE_SQL]);
   });
 
-  test('income moves the row to the Income shelf: still unmatched, nothing counts it as revenue', async () => {
+  test('income moves the row to the Income shelf: still unmatched, nothing counts it as revenue; money out can never be income', async () => {
     state.bankRow = open();
+    await expect(svc.decide({ id: 'b1', decision: 'income' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/money in/) });
+    expect(state.updates).toHaveLength(0);
+    state.bankRow = moneyIn();
     expect(await svc.decide({ id: 'b1', decision: 'income' })).toEqual({ success: true, action: 'income', ruleCreated: false, propagated: true });
     const u = state.updates[0];
     expect(u.wheres).toEqual([{ id: 'b1', status: 'unmatched' }, svc.DECIDABLE_SQL]);
@@ -385,19 +422,19 @@ describe('decide', () => {
     expect(u.patch.suggestion.merged).toEqual({ income: true, reason: svc.INCOME_REASON, decision: 'income', decidedAt: expect.any(String) });
     expect(u.patch.suggestion.merged.ignore).toBeUndefined();
     expect(u.patch.suggestion.removed).toEqual(['ignore', 'personal', 'review', 'note', 'later']);
-    state.casResult = 0;
+    state.casResult = 0; state.bankRow = moneyIn();
     await expect(svc.decide({ id: 'b1', decision: 'income' })).rejects.toMatchObject({ status: 409 });
   });
 
   test('income on a row whose only examination marker is the matcher ignore flag keeps the evidence (examined:true)', async () => {
-    state.bankRow = { ...open(), suggestion: { ignore: true, reason: 'internal transfer?' } };
+    state.bankRow = { ...moneyIn(), suggestion: { ignore: true, reason: 'internal transfer?' } };
     await svc.decide({ id: 'b1', decision: 'income' });
     expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ income: true, examined: true }));
     expect(state.updates[0].patch.suggestion.removed).toContain('ignore');
     expect(svc.matcherExamined({ suggestion: { income: true, examined: true } })).toBe(true);
     expect(svc.MATCHER_EXAMINED_SQL).toContain("'examined'");
     // with another marker present nothing extra is written
-    state.updates = []; state.bankRow = { ...open(), suggestion: { ignore: true, noMatch: true } };
+    state.updates = []; state.bankRow = { ...moneyIn(), suggestion: { ignore: true, noMatch: true } };
     await svc.decide({ id: 'b1', decision: 'income' });
     expect(state.updates[0].patch.suggestion.merged.examined).toBeUndefined();
   });
@@ -422,7 +459,7 @@ describe('decide', () => {
 
   test('every decision UPDATE repeats the eligibility predicates, so a match parked mid-decision wins', async () => {
     for (const decision of ['later', 'income', 'personal', 'transfer']) {
-      state.bankRow = open(); state.updates = [];
+      state.bankRow = decision === 'income' ? moneyIn() : open(); state.updates = [];
       await svc.decide({ id: 'b1', decision });
       expect(state.updates[0].wheres).toEqual([{ id: 'b1', status: 'unmatched' }, svc.DECIDABLE_SQL]);
     }

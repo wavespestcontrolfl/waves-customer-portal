@@ -153,6 +153,13 @@ it('Apply rules now follows the continuation cursor until the server has no more
   expect(applies[1].body).toEqual({ after: { txn_date: '2026-03-01', id: '11111111-1111-4111-8111-111111111111' } });
 });
 
+it('a money-out row offers no Income button', async () => {
+  render(<LedgerInboxTab />);
+  const card = await screen.findByTestId('ledger-row-row-1');
+  expect(within(card).queryByRole('button', { name: 'Income' })).not.toBeInTheDocument();
+  expect(within(card).getByRole('button', { name: 'Business' })).toBeInTheDocument();
+});
+
 it('a money-in row offers no Business button', async () => {
   const base = fetch;
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
