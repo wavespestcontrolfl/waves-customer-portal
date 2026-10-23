@@ -1,5 +1,7 @@
 const express = require('express');
-const { supersedeOpenNewConstructionWarranty, templateIssueValues } = require('../services/new-construction-warranty');
+const {
+  NEW_CONSTRUCTION_WARRANTY_KEY, assertConfirmedRender, renderHash, supersedeOpenNewConstructionWarranty, templateIssueValues,
+} = require('../services/new-construction-warranty');
 
 const router = express.Router();
 const db = require('../models/db');
@@ -382,6 +384,32 @@ router.post('/:key/bulk-send', async (req, res, next) => {
   }
 });
 
+// The full text a warranty issue would create, for staff to read and
+// confirm (the issue route checks the returned hash). Warranty only.
+router.post('/:key/issue-preview', async (req, res, next) => {
+  try {
+    const loaded = await loadTemplateByKey(req.params.key);
+    if (!loaded?.activeVersion || loaded.template.template_key !== NEW_CONSTRUCTION_WARRANTY_KEY) {
+      return res.status(404).json({ error: 'No issue preview for this template' });
+    }
+    const customer = await db('customers').where({ id: req.body?.customerId }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const values = await templateIssueValues(loaded.template.template_key, req.body, customer);
+    const rendered = renderDocumentTemplate({
+      template: loaded.template,
+      version: loaded.activeVersion,
+      context: buildCustomerDocumentContext(customer, values),
+    });
+    if (rendered.unresolvedVariables.length) {
+      return res.status(400).json({ error: 'Document has unresolved merge fields.', unresolvedVariables: rendered.unresolvedVariables });
+    }
+    res.json({ body: rendered.body, renderHash: renderHash(rendered.body) });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
 router.post('/:key/contracts', async (req, res, next) => {
   try {
     const loaded = await loadTemplateByKey(req.params.key);
@@ -461,6 +489,7 @@ router.post('/:key/contracts', async (req, res, next) => {
         unresolvedErr.status = 409;
         throw unresolvedErr;
       }
+      assertConfirmedRender(loaded.template.template_key, req.body, liveRendered.body);
       const recipientNameLive = cleanRecipientName(req.body?.recipientName) || signerName(freshDocCustomer);
       const recipientEmailLive = recipientEmailExplicit ? recipientEmail : (freshDocCustomer.email || null);
       const recipientPhoneLive = cleanRecipientName(req.body?.recipientPhone) || freshDocCustomer.phone || null;

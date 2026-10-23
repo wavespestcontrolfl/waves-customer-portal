@@ -325,3 +325,15 @@ describe('templateIssueValues (server-built warranty)', () => {
     await expect(issue({ projectId: project.id, values: badNotice }, customer, project)).rejects.toMatchObject({ status: 400 });
   });
 });
+
+describe('assertConfirmedRender (staff read the exact text)', () => {
+  const { assertConfirmedRender, renderHash, NEW_CONSTRUCTION_WARRANTY_KEY } = require('../services/new-construction-warranty');
+  test('the warranty issues only with the hash of the text being created', () => {
+    const text = 'WARRANTY BODY';
+    expect(() => assertConfirmedRender(NEW_CONSTRUCTION_WARRANTY_KEY, { confirmedRenderHash: renderHash(text) }, text)).not.toThrow();
+    expect(() => assertConfirmedRender(NEW_CONSTRUCTION_WARRANTY_KEY, {}, text)).toThrow(expect.objectContaining({ status: 409 }));
+    expect(() => assertConfirmedRender(NEW_CONSTRUCTION_WARRANTY_KEY, { confirmedRenderHash: renderHash(text) }, `${text} changed`))
+      .toThrow(expect.objectContaining({ status: 409 }));
+    expect(() => assertConfirmedRender('service_agreement.termite_bond_retreatment', {}, text)).not.toThrow();
+  });
+});

@@ -26,6 +26,48 @@ const fieldStyle = {
 const labelStyle = { display: "block", fontSize: 14, fontWeight: 500, color: "#18181B", marginBottom: 4 };
 const mutedStyle = { fontSize: 14, color: "#71717A" };
 
+// The server's error, naming any certificate field it found empty.
+function issueError(data, fallback) {
+  const missing = data.unresolvedVariables || [];
+  return missing.length
+    ? `The certificate is missing: ${missing.join(", ")}. Fill it on the certificate first.`
+    : data.error || fallback;
+}
+
+// The full warranty text, read before it is created. Create stays off until
+// the box is ticked; the server refuses text that differs from this preview.
+function WarrantyPreview({ text, reviewed, onReviewed }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 14, color: "#18181B" }}>Read the full warranty. This is the exact text the customer signs.</div>
+      <pre aria-label="Warranty text" style={{ ...fieldStyle, maxHeight: 360, overflowY: "auto", whiteSpace: "pre-wrap", fontFamily: "inherit", margin: 0 }}>{text}</pre>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, color: "#18181B" }}>
+        <input type="checkbox" checked={reviewed} onChange={(e) => onReviewed(e.target.checked)} />
+        I read the full warranty text and it is correct.
+      </label>
+    </div>
+  );
+}
+
+// Edit → Preview warranty → (read, tick) → Create warranty → done.
+function IssueFooter({ stage, canPreview, canCreate, busy, onClose, onBack, onPreview, onCreate }) {
+  if (stage === "done") return <DialogFooter><Button variant="secondary" onClick={onClose}>Done</Button></DialogFooter>;
+  if (stage === "edit") {
+    return (
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button onClick={onPreview} disabled={!canPreview}>{busy ? "Building…" : "Preview warranty"}</Button>
+      </DialogFooter>
+    );
+  }
+  return (
+    <DialogFooter>
+      <Button variant="secondary" onClick={onBack}>Back to edit</Button>
+      <Button onClick={onCreate} disabled={!canCreate}>{busy ? "Creating…" : "Create warranty"}</Button>
+    </DialogFooter>
+  );
+}
+
 function Field({ id, label, children }) {
   return (
     <div>
@@ -51,19 +93,18 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [reviewed, setReviewed] = useState(false);
 
   const { basisProblem, noticeProblem, ready } = warrantyIssueReadiness(base, {
     basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures, noticeLocation, payer,
   });
   const lateDays = daysSinceTreatment(base.treatment.initial_date, base.warranty.issue_date);
 
-  const issue = async () => {
-    setBusy(true);
-    setError("");
-    try {
-      // The server builds every job field from the saved certificate and
-      // stamps the issue date; only the office's own fields go up.
-      const values = {
+  // The server builds every job field from the saved certificate and
+  // stamps the issue date; only the office's own fields go up.
+  const requestBody = (extra) => {
+    const values = {
         warranty: {
           structures: structures.trim(),
           notice_location: noticeLocation.trim(),
@@ -75,31 +116,43 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         },
         basis: { kind: basisKind, date: basisDate.trim() },
         issuer: { name: issuerName.trim(), title: issuerTitle.trim() },
-      };
-      const response = await adminFetch(
-        `/admin/document-templates/${encodeURIComponent(NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY)}/contracts`,
-        {
-          method: "POST",
-          // No propertyAddress override: section 1 keeps the owner's or
-          // builder's own mailing address; the job address is project.address.
-          body: { customerId: project.customer_id, projectId: project.id, values },
-        },
-      );
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const missing = data.unresolvedVariables || [];
-        setError(missing.length
-          ? `The certificate is missing: ${missing.join(", ")}. Fill it on the certificate first.`
-          : data.error || "Could not create the warranty.");
-        return;
-      }
-      setSigningUrl(data.signingUrl || data.contract?.signingUrl || "");
+    };
+    // No propertyAddress or recipientName override: the server refuses them.
+    return { customerId: project.customer_id, projectId: project.id, values, ...extra };
+  };
+
+  const run = async (step) => {
+    setBusy(true);
+    setError("");
+    try {
+      await step();
     } catch (err) {
       setError(err.message || "Could not create the warranty.");
     } finally {
       setBusy(false);
     }
   };
+
+  const showPreview = () => run(async () => {
+    const response = await adminFetch(
+      `/admin/document-templates/${encodeURIComponent(NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY)}/issue-preview`,
+      { method: "POST", body: requestBody() },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return setError(issueError(data, "Could not build the warranty text."));
+    setReviewed(false);
+    setPreview({ text: data.body, hash: data.renderHash });
+  });
+
+  const issue = () => run(async () => {
+    const response = await adminFetch(
+      `/admin/document-templates/${encodeURIComponent(NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY)}/contracts`,
+      { method: "POST", body: requestBody({ confirmedRenderHash: preview.hash }) },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return setError(issueError(data, "Could not create the warranty."));
+    setSigningUrl(data.signingUrl || data.contract?.signingUrl || "");
+  });
 
   if (!open) return null;
   return (
@@ -124,6 +177,11 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
               </div>
               <input id="warranty-signing-url" readOnly value={signingUrl} style={fieldStyle} onFocus={(e) => e.target.select()} />
             </div>
+          ) : preview ? (
+            <>
+              <WarrantyPreview text={preview.text} reviewed={reviewed} onReviewed={setReviewed} />
+              {error && <div role="alert" style={{ fontSize: 14, color: "#B91C1C" }}>{error}</div>}
+            </>
           ) : (
             <>
               <Field id="warranty-basis" label="Contract signed before treatment (Rule 5E-14.105(2))">
@@ -169,12 +227,16 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
           )}
         </div>
       </DialogBody>
-      <DialogFooter>
-        <Button variant="secondary" onClick={onClose}>{signingUrl ? "Done" : "Cancel"}</Button>
-        {!signingUrl && (
-          <Button onClick={issue} disabled={!ready || busy}>{busy ? "Creating…" : "Create warranty"}</Button>
-        )}
-      </DialogFooter>
+      <IssueFooter
+        stage={signingUrl ? "done" : preview ? "review" : "edit"}
+        canPreview={ready && !busy}
+        canCreate={reviewed && !busy}
+        busy={busy}
+        onClose={onClose}
+        onBack={() => setPreview(null)}
+        onPreview={showPreview}
+        onCreate={issue}
+      />
     </Dialog>
   );
 }

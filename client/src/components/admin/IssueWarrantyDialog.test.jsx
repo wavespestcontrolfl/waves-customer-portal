@@ -39,19 +39,29 @@ function fillOfficeFields() {
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe('IssueWarrantyDialog', () => {
-  it('creates the warranty from the certificate plus the office fields, and sends nothing', async () => {
-    adminFetch.mockResolvedValue({ ok: true, json: async () => ({ signingUrl: 'https://portal.example/sign/tok' }) });
+  it('shows the full text, needs the review tick, then creates with the previewed hash and sends nothing', async () => {
+    adminFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ body: 'WARRANTY TEXT FOR REVIEW', renderHash: 'h1' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ signingUrl: 'https://portal.example/sign/tok' }) });
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
+    const previewButton = screen.getByRole('button', { name: 'Preview warranty' });
+    expect(previewButton).toBeDisabled();
+    fillOfficeFields();
+    expect(previewButton).toBeEnabled();
+    fireEvent.click(previewButton);
+    await screen.findByText('WARRANTY TEXT FOR REVIEW');
     const create = screen.getByRole('button', { name: 'Create warranty' });
     expect(create).toBeDisabled();
-    fillOfficeFields();
-    expect(create).toBeEnabled();
+    fireEvent.click(screen.getByRole('checkbox'));
     fireEvent.click(create);
     await screen.findByDisplayValue('https://portal.example/sign/tok');
 
-    expect(adminFetch).toHaveBeenCalledTimes(1);
-    const [path, init] = adminFetch.mock.calls[0];
+    expect(adminFetch).toHaveBeenCalledTimes(2);
+    expect(adminFetch.mock.calls[0][0]).toBe('/admin/document-templates/service_agreement.termite_new_construction_warranty/issue-preview');
+    const [path, init] = adminFetch.mock.calls[1];
     expect(path).toBe('/admin/document-templates/service_agreement.termite_new_construction_warranty/contracts');
+    expect(init.body.confirmedRenderHash).toBe('h1');
+    expect(adminFetch.mock.calls[0][1].body.values).toEqual(init.body.values);
     expect(init.body.customerId).toBe('cust-1');
     expect(init.body.projectId).toBe('abcd1234-0000');
     expect(init.body.propertyAddress).toBeUndefined();
@@ -68,19 +78,19 @@ describe('IssueWarrantyDialog', () => {
     expect(init.body.values.issuer).toEqual({ name: 'Pat Office', title: 'Office Manager' });
   });
 
-  it('keeps Create disabled while the contract basis date is after treatment', () => {
+  it('keeps Preview disabled while the contract basis date is after treatment', () => {
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
     fillOfficeFields();
     fireEvent.change(document.getElementById('warranty-basis-date'), { target: { value: '10/05/2026' } });
     expect(screen.getByText('This date must be on or before the treatment date.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Create warranty' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
   });
 
   it('names the certificate fields the issue route found empty', async () => {
     adminFetch.mockResolvedValue({ ok: false, json: async () => ({ error: 'Document has unresolved merge fields.', unresolvedVariables: ['treatment.product'] }) });
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
     fillOfficeFields();
-    fireEvent.click(screen.getByRole('button', { name: 'Create warranty' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Preview warranty' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The certificate is missing: treatment.product'));
   });
 });

@@ -1,6 +1,7 @@
 // New Construction Termite Warranty (Rule 5E-14.105(3)): one live warranty
 // per pre-treat job. The warranty number (NCW-…, from the project id) names
 // the job in every issued snapshot.
+const crypto = require('crypto');
 const db = require('../models/db');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
@@ -448,8 +449,24 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   });
 }
 
+// Staff read the full warranty text before it is created: the preview
+// returns this hash of the rendered body, and the issue route renders again
+// under its locks and refuses unless the hash matches. Every value in the
+// contract is then text a person saw, not only text that passed a screen.
+function renderHash(text) {
+  return crypto.createHash('sha256').update(String(text || '')).digest('hex');
+}
+function assertConfirmedRender(templateKey, body, renderedBody) {
+  if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return;
+  if (body?.confirmedRenderHash !== renderHash(renderedBody)) {
+    throw bad('The warranty text changed since it was reviewed, or was not reviewed. Preview it again and confirm.', 409);
+  }
+}
+
 module.exports = {
   NEW_CONSTRUCTION_WARRANTY_KEY,
+  assertConfirmedRender,
+  renderHash,
   supersedeOpenNewConstructionWarranty,
   snapshotWarrantyNumber,
   templateIssueValues,
