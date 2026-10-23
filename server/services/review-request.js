@@ -1994,7 +1994,7 @@ const ReviewService = {
   // enrollment; a failed read never holds (the ask keeps today's behavior).
   async _heldReportQueuedRetryAt(seq) {
     if (!seq.service_record_id || seq.started_by !== "post_service" || Number(seq.current_step || 0) !== 0 || Number(seq.touches_sent || 0) !== 0) return null;
-    if (parseDecision(seq.decision)?.reason !== "smart_window" || Date.now() - new Date(seq.started_at || 0).getTime() > 24 * 3600000) return null;
+    if (seq.customer_requested || parseDecision(seq.decision)?.reason !== "smart_window" || Date.now() - new Date(seq.started_at || 0).getTime() > 24 * 3600000) return null;
     try {
       if (!reviewAskAfterReportOn()) return null;
       const row = await db("service_records").where({ id: seq.service_record_id }).first("structured_notes");
@@ -2019,7 +2019,7 @@ const ReviewService = {
     return /^(SM|MM)[0-9a-f]{32}$/i.test(String(providerMessageId || "")) ? "sms" : undefined;
   },
 
-  async pullAskAfterHeldReport(serviceRecordId, { channel = null } = {}) {
+  async pullAskAfterHeldReport(serviceRecordId, { channel = null, deliveredAt = Date.now() } = {}) {
     if (!serviceRecordId || !["sms", "mms"].includes(channel)) return { pulled: 0 };
     try {
       if (!reviewAskAfterReportOn() || !require("../config/feature-gates").isEnabled("reviewSequences")) return { pulled: 0 };
@@ -2034,7 +2034,9 @@ const ReviewService = {
         // The customer's send lock, the one _runSequenceStep holds while it
         // sends: the re-plan and a send never interleave. A held lock means
         // that ask is being sent right now; it is left alone.
-        const dueAt = new Date(Date.now() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000);
+        // 10 minutes after the delivery (a recovered finalize passes the stored
+        // acceptance time), never in the past.
+        const dueAt = new Date(Math.max(Date.now(), new Date(deliveredAt).getTime() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000));
         const result = await runExclusive(`review-send:${row.customer_id}`, () => pending().where({ id: row.id })
           .update({ next_run_at: dueAt, decision: sequenceDecision({ reason: "after_report", plannedAt: dueAt, nextEvalAt: dueAt }), updated_at: new Date() }), { recordHealth: false });
         if (!wasLockSkipped(result)) pulled += Number(result) || 0;
@@ -6923,7 +6925,7 @@ const ReviewService = {
     // pullAskAfterHeldReport still finds it.
     const reportQueuedUntil = await this._heldReportQueuedRetryAt(seq);
     if (reportQueuedUntil) {
-      await db("review_sequences").where({ id: seq.id, status: "active" })
+      await db("review_sequences").where({ id: seq.id, status: "active" }).whereNull("customer_requested")
         .update({ next_run_at: reportQueuedUntil, decision: sequenceDecision({ reason: "smart_window", plannedAt: reportQueuedUntil, nextEvalAt: reportQueuedUntil }), updated_at: new Date() });
       return { ran: false, deferred: true, reason: "report_queued", retryAt: reportQueuedUntil };
     }

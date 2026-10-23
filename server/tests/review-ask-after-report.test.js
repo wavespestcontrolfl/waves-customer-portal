@@ -260,10 +260,25 @@ describe('a report held for the morning pulls its review ask when it goes out as
   test('the completion replay finalize stamps the channel and pulls with it (a finalize-only retry too)', async () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/messaging/deferred-replay-registry.js'), 'utf8');
     expect(src).toContain("const channel = ReviewService.heldReportReplayChannel({ channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });");
-    expect(src).toContain("await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true, channel });");
-    expect(src).toContain("await ReviewService.pullAskAfterHeldReport(meta.service_record_id, { channel });");
+    expect(src).toContain("await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true, channel, deliveredAt });");
+    expect(src).toContain("await ReviewService.pullAskAfterHeldReport(meta.service_record_id, { channel, deliveredAt });");
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(scheduler).toContain('{ providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channel: smsResult.channel || null });');
+  });
+
+  test('a recovered finalize plans from the stored delivery time, never in the past (codex #6471 r6 P2)', async () => {
+    process.env.GATE_REVIEW_ASK_AFTER_REPORT = 'true';
+    process.env.GATE_REVIEW_SEQUENCES = 'true';
+    const recent = chain();
+    db.mockImplementation(() => recent.q);
+    await ReviewService.pullAskAfterHeldReport('sr-1', { channel: 'sms', deliveredAt: new Date('2026-10-21T11:58:00Z') });
+    expect(recent.calls.update.next_run_at.toISOString()).toBe('2026-10-21T12:08:00.000Z');
+    const old = chain();
+    db.mockImplementation(() => old.q);
+    await ReviewService.pullAskAfterHeldReport('sr-1', { channel: 'sms', deliveredAt: new Date('2026-10-21T11:00:00Z') });
+    expect(old.calls.update.next_run_at.toISOString()).toBe('2026-10-21T12:03:00.000Z');
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(src).toContain('deliveredAt: msg.created_at || null })');
   });
 
   test('a held send lock (that ask is being sent right now) is left alone', async () => {

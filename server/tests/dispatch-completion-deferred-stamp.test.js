@@ -167,6 +167,12 @@ test('the replay channel rides in the once-only stamp; unknown = no key (codex #
   expect(JSON.parse(updates.find((u) => u.structured_notes).structured_notes.bindings[1])).toMatchObject({ sentSmsChannel: 'push' });
 });
 
+test('a finalize-only retry stamps the stored delivery time, not the retry time (codex #6471 r6 P2)', async () => {
+  updates.length = 0;
+  await finalizeDeferredCompletionSend({ service_record_id: 'rec-dt' }, { retry: true, deliveredAt: new Date('2026-10-21T12:00:00Z') });
+  expect(JSON.parse(updates.find((u) => u.structured_notes).structured_notes.bindings[1]).completionSmsDeferredDeliveredAt).toBe('2026-10-21T12:00:00.000Z');
+});
+
 test('wrapper invoice completion forwards the original App witness on finalize-only retry', async () => {
   const Invoice = require('../services/invoice');
   const meta = { invoice_id: 'inv-1', mark_invoice_delivery: true, app_event_already_visible_at: '2026-09-08T15:00:00Z' };

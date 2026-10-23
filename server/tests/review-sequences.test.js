@@ -8147,6 +8147,7 @@ describe('GATE_REVIEW_ASK_AFTER_REPORT — Day-0 ask 10 minutes after the report
       ['the gate is off', { completionSmsStatus: 'deferred' }, {}, false],
       ['enrolled over 24 hours ago', { completionSmsStatus: 'deferred' }, { started_at: new Date(Date.now() - 25 * 3600000) }],
       ['an operator timing', { completionSmsStatus: 'deferred' }, { decision: JSON.stringify({ reason: 'operator_timing' }) }],
+      ['a captured customer request on the cadence (codex #6471 r6 P2)', { completionSmsStatus: 'deferred' }, { customer_requested: JSON.stringify({ by: 'office', at: new Date().toISOString(), source: 'completion' }) }],
     ])('%s: the ask sends as before', async (_label, notes, over, gate = true) => {
       mockGates.reviewAskAfterReport = gate;
       const mock = bookQ(notes, over);

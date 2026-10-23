@@ -143,9 +143,10 @@ function stripPayLinkLineFromBody(body, payUrl) {
   return stripped || null;
 }
 
-async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false, channel } = {}) {
+async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false, channel, deliveredAt = Date.now() } = {}) {
   const recordId = claimMeta.service_record_id || null;
-  const sentAtIso = new Date().toISOString();
+  // The provider's acceptance time (a finalize-only retry passes the stored one).
+  const sentAtIso = new Date(deliveredAt).toISOString();
   // ok covers the STATE steps (invoice flip, review mark, receipt claim).
   // All three are idempotent, so the executor can re-run this whole
   // function from a finalize_only retry row when any of them failed —
