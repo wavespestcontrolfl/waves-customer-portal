@@ -774,3 +774,48 @@ describe('Codex round 9: whole-number refills, misting plan ownership', () => {
   });
 });
 
+describe('Codex round 10: manual-quote stamp, reminder recheck, client no-booking codes, commercial ownership', () => {
+  const { priceMosquitoMisting } = require('../services/pricing-engine/service-pricing');
+  const { MOSQUITO_MISTING } = require('../services/pricing-engine/constants');
+  const { mistingKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+  const fs = require('fs');
+  const path = require('path');
+
+  test('a sent manual quote keeps its stamp on the mapped row and stays a manual quote when the live maximum grows', () => {
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    const est = generateEstimate({ ...PROPERTY, services: { mosquitoMisting: { tier: 'smart', nozzles: 81 } } });
+    const mapped = mapper.mapV1ToLegacyShape(est);
+    const row = mapped.recurring.services.find((s) => s.service === 'mosquito_misting');
+    expect(row.quoteRequired).toBe(true);
+    expect(row.pricingKnobs).toMatchObject({ maxNozzles: 80 });
+    const stamp = mistingKnobSignalForReplay({ result: mapped });
+    expect(stamp).toMatchObject({ maxNozzles: 80 });
+    const live = MOSQUITO_MISTING.maxNozzles;
+    try {
+      MOSQUITO_MISTING.maxNozzles = 100;
+      expect(priceMosquitoMisting({}, { tier: 'smart', nozzles: 81 }).quoteRequired).toBe(false);
+      expect(priceMosquitoMisting({}, { tier: 'smart', nozzles: 81, knobs: stamp }).quoteRequired).toBe(true);
+    } finally { MOSQUITO_MISTING.maxNozzles = live; delete process.env.GATE_MOSQUITO_MISTING; }
+  });
+
+  test('the payment-step reminder recheck consults the shared gated refusal before building the pricing bundle', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-follow-up.js'), 'utf8');
+    const at = src.indexOf('gatedAddOnCustomerRefusal(estData, { pricingAuthority: est.pricing_authority })) return false;');
+    expect(at).toBeGreaterThan(0);
+    expect(src.indexOf('const pricingBundle = await buildPricingBundle(est);', at)).toBeGreaterThan(at);
+  });
+
+  test('the customer page treats both misting refusals as permanent no-booking states', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'pages', 'EstimateViewPage.jsx'), 'utf8');
+    const fn = src.slice(src.indexOf('export function isAreaAddOnNoBookingCode'));
+    expect(fn.slice(0, 600)).toContain("'MOSQUITO_MISTING_GATED'");
+    expect(fn.slice(0, 600)).toContain("'MOSQUITO_MISTING_ACCEPT_PENDING'");
+  });
+
+  test('a combined commercial tree & shrub + mosquito row owns both families; a commercial misting row owns only misting', () => {
+    const svc = require('../services/waveguard-existing-services');
+    expect(svc.ownershipKeysForRow({ service_type: 'Commercial Tree & Shrub + Mosquito' })).toEqual(expect.arrayContaining(['tree_shrub', 'mosquito']));
+    expect(svc.ownershipKeysForRow({ service_type: 'Commercial Mosquito Misting System' })).toEqual(['mosquito_misting']);
+  });
+});
+

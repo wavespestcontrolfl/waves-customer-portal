@@ -10558,6 +10558,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 // The area add-on refusals that mean "this estimate books nothing online right now" (the add-on gate is off, an add-on's
 // yearly limit is reached or its history cannot be read, or the estimate cannot be accepted in this mode). They are NOT a
 // taken slot: the page reloads and the server's own contact-the-office copy speaks, as for the Bermuda gate.
+// The mosquito misting system's two refusals (gate off; acceptance pending until misting PR 2) are the same kind of
+// permanent no-booking state, never a taken slot.
 export function isAreaAddOnNoBookingCode(code) {
-  return ['AREA_ADDONS_GATED', 'AREA_ADDON_YEARLY_LIMIT_REACHED', 'AREA_ADDON_HISTORY_UNAVAILABLE', 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY'].includes(code);
+  return ['AREA_ADDONS_GATED', 'AREA_ADDON_YEARLY_LIMIT_REACHED', 'AREA_ADDON_HISTORY_UNAVAILABLE', 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+    'MOSQUITO_MISTING_GATED', 'MOSQUITO_MISTING_ACCEPT_PENDING'].includes(code);
 }

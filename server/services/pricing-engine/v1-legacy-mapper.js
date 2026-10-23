@@ -1288,6 +1288,9 @@ function mapV1ToLegacyShape(v1Result) {
       annual: null,
       detail: `${mmAnyLI.nozzles} nozzles · ${mmAnyLI.risers} risers · manual quote (above the standard layout)`,
       quoteRequired: true,
+      // The stamp rides the manual-quote row too (Codex #6503 r10): a sent manual quote replays against the layout limits it
+      // was judged under and cannot silently become purchasable when a live limit grows.
+      pricingKnobs: mmAnyLI.pricingKnobs || null,
       requiresManualReview: !!mmAnyLI.requiresManualReview,
       manualReviewReasons: mmAnyLI.manualReviewReasons || [],
       discountable: false,

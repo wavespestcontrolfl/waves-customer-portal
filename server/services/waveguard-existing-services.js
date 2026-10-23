@@ -580,6 +580,16 @@ async function filterRowsToStreet(database, rows, streetScope) {
 //  - termite counts ONLY for bait/station/monitoring products — a recurring
 //    termite BOND (termite_bond_1yr) is a distinct warranty product and must
 //    not block a bait-monitoring quote (codex #3253 r3).
+// The commercial auto-priced families a row OWNS (never qualifies): each check is independent, so a combined
+// "Commercial Tree & Shrub + Mosquito" row owns both (Codex #6503 r10); a misting-system row is owned under its own key
+// by the caller and never claims barrier mosquito here.
+function addCommercialOwnedFamilies(s, raw, add) {
+  if (s.includes('pest') && !isRodentLedText(s)) add('pest_control');
+  if (s.includes('lawn') || s.includes('turf')) add('lawn_care');
+  if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
+  if (s.includes('mosquito') && !isMistingSystemIdentity(raw)) add('mosquito');
+}
+
 function ownershipFamiliesFromText(raw) {
   // Key-shaped text ('rodent_bait', 'pest_rodent_quarterly' in an unlinked
   // row's service_type) must match the token regexes — underscores are word
@@ -599,13 +609,7 @@ function ownershipFamiliesFromText(raw) {
   // duplicate-coverage checks see the live plan), but never claims barrier-mosquito ownership and never qualifies for a
   // WaveGuard tier: toQualifyingKeys above leaves it out (Codex #6503 r9).
   if (isMistingSystemIdentity(raw)) add('mosquito_misting');
-  if (s.includes('commercial')) {
-    const rodentLed = isRodentLedText(s);
-    if (s.includes('pest') && !rodentLed) add('pest_control');
-    if (s.includes('lawn') || s.includes('turf')) add('lawn_care');
-    if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
-    else if (s.includes('mosquito') && !isMistingSystemIdentity(raw)) add('mosquito');
-  }
+  if (s.includes('commercial')) addCommercialOwnedFamilies(s, raw, add);
   // Rodent ownership means the BAIT-MONITORING product (codex #3253 r4):
   // trapping / exclusion / rodent_general_one_time are distinct specialties
   // (estimate-converter maps only bait|station|monitor identities to
