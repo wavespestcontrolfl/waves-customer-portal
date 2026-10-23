@@ -313,6 +313,23 @@ describe('buildLawnFastContext', () => {
     expect(spray).not.toHaveProperty('gateNotes');
   });
 
+  test('GATE_LAWN_RECLAIMED_HALF_N: the half-nitrogen note and the pre-emergent bag note ride the planned line onto the sheet, as the only notes carried', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const HALF = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
+    const KEPT = 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.';
+    const lineWith = (note) => ({
+      product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast',
+      mix: { amount: 15.625, amountUnit: 'lb', ratePer1000: 1.5625, rateUnit: 'lb', treatedSqft: 10000 },
+      gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, note],
+    });
+    for (const text of [HALF, KEPT]) {
+      buildPlanForService.mockResolvedValue({ completionDefaults: { items: [lineWith({ key: 'reclaimedNitrogen', severity: 'note', text })] } });
+      const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+      expect(ctx.plannedProducts.items[0]).toMatchObject({ productId: P_GRAN, gateNotes: [text] });
+    }
+  });
+
   describe('a visit that OFFERS the bermuda removal mix takes the full form, whatever the completion defaults or the visit type say', () => {
     const removal = require('../services/lawn-bermuda-removal');
     let offered;

@@ -378,18 +378,23 @@ const NO_LAWN_GUIDANCE = Object.freeze({
   held_products: [],
 });
 
-// GATE_LAWN_NOV_LARGE_PATCH_N: the brief states a nitrogen bag's stored target (gates.targetN, "0.75 lb N/1000"); for a visit where the
-// plan cuts it (waveguard-plan-engine fungusNitrogenCut, the plan's own decision) the brief states the cut and why, so the pocket
-// reference agrees with the plan and the Fast Complete sheet. Gate off, not v13 or no cut: the entries are left as they are (no read).
-// STRICT like the brief's other reads: the sweep stores the brief, so a failed area read aborts the generation (the prior brief
+// GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N: the brief states a nitrogen bag's stored target (gates.targetN, "0.75 lb N/1000");
+// for a visit where the plan cuts it (waveguard-plan-engine nitrogenDecision, the plan's own decision) the brief states the cut and why, so
+// the pocket reference agrees with the plan and the Fast Complete sheet. Gate off, not v13 or no cut: the entries are left as they are (no read).
+// STRICT like the brief's other reads: the sweep stores the brief, so a failed read aborts the generation (the prior brief
 // survives) instead of storing the normal target the live plan would not use once the database is back.
-async function projectFungusNitrogenCut(dbh, svc, entries, summary) {
-  const { fungusNitrogenCut } = require('./waveguard-plan-engine');
+async function projectNitrogenCut(dbh, svc, entries, summary) {
+  const { nitrogenDecision } = require('./waveguard-plan-engine');
   const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
   for (const entry of entries) {
     const stated = String(entry.gates.targetN || '').match(/^\s*(\d+(?:\.\d+)?)\s*lb N\/1000/i);
-    const cut = stated ? await fungusNitrogenCut(dbh, svc, { targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, strict: true }) : null;
-    if (cut != null) entry.gates = { ...entry.gates, targetN: `${cut} lb N/1000 (active fungus mapped; normal ${stated[1]} lb N/1000)` };
+    const decision = stated ? await nitrogenDecision(dbh, svc, {
+      targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, preEmergentBag: /\bPre-?Emergent Plus Fertilizer\b/i.test(entry.shapedEntry?.name || ''), strict: true,
+    }) : null;
+    if (decision?.cut != null) {
+      const why = decision.why === 'reclaimed' ? 'reclaimed water, half' : 'active fungus mapped';
+      entry.gates = { ...entry.gates, targetN: `${decision.cut} lb N/1000 (${why}; normal ${stated[1]} lb N/1000)` };
+    }
   }
 }
 
@@ -507,7 +512,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
         gates: (p.gates && typeof p.gates === 'object') ? p.gates : {},
       }))
       .filter((p) => p.shapedEntry.name);
-    await projectFungusNitrogenCut(dbh, svc, shaped, summary);
+    await projectNitrogenCut(dbh, svc, shaped, summary);
 
     // Customer-specific application limits (annual max apps, cumulative
     // rate, minimum interval, MOA rotation — application-limits.js, the
