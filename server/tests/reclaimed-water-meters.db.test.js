@@ -68,8 +68,12 @@ describeDb('reclaimed water through PostgreSQL', () => {
     const summary = await meters.runDailyTick({ knex, fetchImpl, now: T0 });
     expect(summary).toMatchObject({ refreshed: meters.MIN_PLAUSIBLE_METERS + 1 });
     expect(await atMeter.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
-    expect(await farInside.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
-    expect(await outside.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+    // A property at no meter keeps no answer and no source; it carries only the check time, so the daily tick does not re-match it.
+    for (const missed of [farInside, outside]) {
+      const row = await missed.read();
+      expect(row).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
+      expect(new Date(row.reclaimed_water_checked_at).toISOString()).toBe(T0.toISOString());
+    }
     expect(await noCoords.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
     expect(new Date((await atMeter.read()).reclaimed_water_checked_at).toISOString()).toBe(T0.toISOString());
   });
@@ -133,7 +137,8 @@ describeDb('reclaimed water through PostgreSQL', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(retry).toMatchObject({ refreshed: null, reclaimed: 2, cleared: 1 });
     expect(await kept.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
-    expect(await dropped.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+    expect(await dropped.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
+    expect((await dropped.read()).reclaimed_water_checked_at).toBeTruthy();
     expect(await added.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
   });
 
@@ -245,9 +250,25 @@ describeDb('reclaimed water through PostgreSQL', () => {
     const summary = await meters.runDailyTick({ knex, fetchImpl: async () => layerOf(filler), now: later });
     expect(summary).toMatchObject({ refreshed: meters.MIN_PLAUSIBLE_METERS });
     expect(Number((await knex('reclaimed_water_meters').count('* as n').first()).n)).toBe(meters.MIN_PLAUSIBLE_METERS);
-    // The dropped meter no longer holds the property: back to unknown (no county value), never "not reclaimed". A property that never had a meter stays untouched.
-    expect(await p.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
-    expect(await q.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+    // The dropped meter no longer holds the property: back to no county value, never "not reclaimed" (only the check time is stamped).
+    // A property that never had a meter keeps no value either.
+    for (const row of [await p.read(), await q.read()]) {
+      expect(row).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
+      expect(new Date(row.reclaimed_water_checked_at).toISOString()).toBe(later.toISOString());
+    }
+  });
+
+  test('a property at no meter is matched once per layer, not every day: the next daily tick visits only new rows', async () => {
+    const missed = await property(offset(1000, 1000));
+    const first = await meters.runDailyTick({ knex, fetchImpl: async () => layer(offset(0, 0)), now: T0 });
+    expect(first.missed).toBeGreaterThanOrEqual(1);
+    expect(new Date((await missed.read()).reclaimed_water_checked_at).toISOString()).toBe(T0.toISOString());
+    const fresh = await property(offset(0, 5));
+    const nextDay = await meters.runDailyTick({ knex, fetchImpl: jest.fn(), now: new Date(T0.getTime() + 86400000) });
+    // Only the new property is visited (the missed one was checked against this layer already); it is at a meter.
+    expect(nextDay).toMatchObject({ refreshed: null, checked: 1, reclaimed: 1, missed: 0 });
+    expect(await fresh.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
+    expect(new Date((await missed.read()).reclaimed_water_checked_at).toISOString()).toBe(T0.toISOString());
   });
 
   test('a failed download (403, or a short answer) keeps the stored layer and the stored values; with nothing stored it throws', async () => {

@@ -190,8 +190,8 @@ async function loadIndex(knex) {
 
 /**
  * Settle the county value of the properties that have coordinates and no office or customer value. A property at a meter becomes
- * true / 'county_meter'; a property the county marked earlier whose meter is gone (a new layer dropped it) goes back to unknown (all three
- * columns NULL); every other property is left exactly as it is. `all: false` visits the properties with no county value, and those
+ * true / 'county_meter'; a property the county marked earlier whose meter is gone (a new layer dropped it) goes back to no value; a property
+ * at no meter keeps no value. Both of those carry the check time only (reclaimed_water and its source NULL). `all: false` visits the properties with no county value, and those
  * marked before the stored layer was fetched (so a refresh whose match pass failed is finished by the next tick). Writes only the
  * county-owned columns, never updated_at, and never a row whose source is 'office' or 'customer' or whose coordinates changed since they
  * were read. Safe to run twice.
@@ -205,13 +205,18 @@ async function matchProperties({ knex = defaultDb, now = new Date(), all = true 
     .whereNotNull('latitude').whereNotNull('longitude')
     .where((q) => q.whereNull('reclaimed_water_source').orWhere('reclaimed_water_source', 'county_meter'))
     .modify((q) => {
-      if (!all) q.where((w) => w.whereNull('reclaimed_water_source').orWhereNull('reclaimed_water_checked_at').orWhere('reclaimed_water_checked_at', '<', layerAt));
+      // Incremental: only rows never checked (a new or moved property, or one the office handed back to Automatic) or checked against an
+      // older layer. A miss is stamped too (below), so an unmatched property is not re-matched every day.
+      if (!all) q.where((w) => w.whereNull('reclaimed_water_checked_at').orWhere('reclaimed_water_checked_at', '<', layerAt));
     })
     .select('id', 'latitude', 'longitude', 'reclaimed_water_source');
   const found = rows.filter((row) => atMeter(index, Number(row.latitude), Number(row.longitude)));
   const gone = rows.filter((row) => row.reclaimed_water_source === 'county_meter' && !found.includes(row));
+  const missed = rows.filter((row) => row.reclaimed_water_source == null && !found.includes(row));
+  // A property at no meter keeps no value (source and answer NULL) but carries the time it was checked: "no county meter here".
+  const at = now.toISOString();
   let written = 0;
-  for (const [group, patch] of [[found, { water: true, source: 'county_meter', at: now.toISOString() }], [gone, { water: null, source: null, at: null }]]) {
+  for (const [group, patch] of [[found, { water: true, source: 'county_meter', at }], [gone, { water: null, source: null, at }], [missed, { water: null, source: null, at }]]) {
     for (let i = 0; i < group.length; i += CHUNK) {
       const chunk = group.slice(i, i + CHUNK);
       // The write is guarded by what the verdict was judged on: the same coordinates (a move changes them and the trigger of migration
@@ -228,7 +233,7 @@ async function matchProperties({ knex = defaultDb, now = new Date(), all = true 
       written += result?.rowCount ?? 0;
     }
   }
-  return { checked: rows.length, written, reclaimed: found.length, cleared: gone.length };
+  return { checked: rows.length, written, reclaimed: found.length, cleared: gone.length, missed: missed.length };
 }
 
 /**

@@ -55,7 +55,7 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(select).toHaveValue('');
     expect(screen.getByText('County meter found at this address. Half nitrogen on eligible v13 lawn visits.')).toBeInTheDocument();
     fireEvent.change(select, { target: { value: 'no' } });
-    await waitFor(() => expect(screen.getByText('Office said not reclaimed. Lawn visits use the full nitrogen.')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Office said not reclaimed. No reclaimed-water nitrogen cut.')).toBeInTheDocument());
     const put = fetchMock.mock.calls.find(([, o]) => o?.method === 'PUT');
     expect(put[0]).toBe('/api/admin/customers/c1/properties/p1/reclaimed-water');
     expect(JSON.parse(put[1].body)).toEqual({ reclaimed: false });
@@ -65,6 +65,14 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(JSON.parse(fetchMock.mock.calls.filter(([, o]) => o?.method === 'PUT')[1][1].body)).toEqual({ reclaimed: null });
     // The hint never promises half nitrogen on "lawn visits" in general: only on eligible v13 visits.
     expect(document.body.textContent).not.toMatch(/Lawn visits use half the nitrogen/);
+    // Nor full nitrogen: a mapped fungus area can still lower a dose.
+    expect(document.body.textContent).not.toMatch(/full nitrogen/);
+  });
+
+  it('a property the county job checked and found at no meter says so', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: '2026-10-23T08:00:00Z' }], reclaimedWater: true })));
+    render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    expect(await screen.findByText('No county reclaimed meter at this address. No reclaimed-water nitrogen cut.')).toBeInTheDocument();
   });
 
   it('an answer inherited from a merged record shows as the choice, says where it came from, and Automatic clears it', async () => {
@@ -79,7 +87,7 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(select).toHaveValue('yes');
     expect(screen.getByText('From a merged customer record: office said reclaimed. Half nitrogen on eligible v13 lawn visits.')).toBeInTheDocument();
     fireEvent.change(select, { target: { value: '' } });
-    await waitFor(() => expect(screen.getByText('Not checked against the county meters. Lawn visits use the full nitrogen.')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Not checked against the county meters. No reclaimed-water nitrogen cut.')).toBeInTheDocument());
     expect(JSON.parse(fetchMock.mock.calls.find(([, o]) => o?.method === 'PUT')[1].body)).toEqual({ reclaimed: null });
   });
 
@@ -92,7 +100,7 @@ describe('CustomerPropertiesPanelV2', () => {
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: null }], reclaimedWater: true })));
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit={false} />);
     expect(await screen.findByLabelText('Reclaimed water for 10 Palm Ave')).toBeDisabled();
-    expect(screen.getByText('Not checked against the county meters. Lawn visits use the full nitrogen.')).toBeInTheDocument();
+    expect(screen.getByText('Not checked against the county meters. No reclaimed-water nitrogen cut.')).toBeInTheDocument();
   });
 
   it('drops a late primary preview after switching customers', async () => {

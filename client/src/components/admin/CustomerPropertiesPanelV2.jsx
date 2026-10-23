@@ -45,7 +45,8 @@ function reclaimedChoice(p) {
 // What a reclaimed answer does: half nitrogen, only on lawn visits the plan actually halves (a v13 program visit; a bag that carries the
 // pre-emergent or the winter potassium keeps its full rate), so the line says "eligible v13 lawn visits", never "lawn visits".
 const HALF_N = "Half nitrogen on eligible v13 lawn visits.";
-const FULL_N = "Lawn visits use the full nitrogen.";
+// Not "full nitrogen": other plan rules (a mapped fungus area) can still lower a dose, so the line says only what reclaimed water does not do.
+const FULL_N = "No reclaimed-water nitrogen cut.";
 function reclaimedHint(p) {
   const said = p.reclaimed_water ? "reclaimed" : "not reclaimed";
   const effect = p.reclaimed_water ? HALF_N : FULL_N;
@@ -54,7 +55,8 @@ function reclaimedHint(p) {
   if (p.reclaimed_water_source === "customer") return `Customer said ${said}. ${effect}`;
   if (p.reclaimed_water_source === "office") return `Office said ${said}. ${effect}`;
   if (p.reclaimed_water === true) return `County meter found at this address. ${HALF_N}`;
-  if (p.reclaimed_water === false) return `No county reclaimed meter at this address. ${FULL_N}`;
+  // The county job stamps its check time on a property at no meter (answer and source stay empty).
+  if (p.reclaimed_water === false || (p.reclaimed_water == null && p.reclaimed_water_checked_at)) return `No county reclaimed meter at this address. ${FULL_N}`;
   return `Not checked against the county meters. ${FULL_N}`;
 }
 
