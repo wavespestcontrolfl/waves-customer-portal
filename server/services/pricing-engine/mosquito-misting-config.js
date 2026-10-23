@@ -39,7 +39,8 @@ const BOUNDS = Object.freeze({
   extraRiserCost: COST,
   techs: [1, 4],
   hours: [0, 80],
-  monthly: PRICE,
+  // A $0 plan would drop the line (and its install) out of the engine's recurring totals: must be positive.
+  monthly: [1, PRICE[1]],
   visitsPerYear: [1, 24],
   laborMinutesPerVisit: [0, 240],
   partsReservePerMonth: COST,

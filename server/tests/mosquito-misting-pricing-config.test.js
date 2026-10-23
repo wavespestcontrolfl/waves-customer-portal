@@ -227,3 +227,27 @@ describe('the sync: the row drives the price, a bad or missing row leaves the co
     expect(src).toContain("require('./mosquito-misting-config').syncMosquitoMistingPricingConfig(config.mosquito_misting_pricing, constants.MOSQUITO_MISTING)");
   });
 });
+
+describe('pre-push audit P1s (cadence and zero plan)', () => {
+  const { applyMosquitoMistingPricingConfig } = require('../services/pricing-engine/mosquito-misting-config');
+  const { MOSQUITO_MISTING, mosquitoMistingPricingDefaults } = require('../services/pricing-engine/constants');
+  const { priceMosquitoMisting } = require('../services/pricing-engine/service-pricing');
+  afterEach(() => applyMosquitoMistingPricingConfig(null, MOSQUITO_MISTING));
+
+  test('an edited visitsPerYear moves annual with it (annual = per application × cadence)', () => {
+    const row = JSON.parse(JSON.stringify(mosquitoMistingPricingDefaults()));
+    row.plan.visitsPerYear = 6;
+    expect(applyMosquitoMistingPricingConfig(row, MOSQUITO_MISTING).applied).toBe(true);
+    const r = priceMosquitoMisting({}, {});
+    expect(r.perApp).toBe(59);
+    expect(r.visitsPerYear).toBe(6);
+    expect(r.annual).toBe(354);
+  });
+
+  test('a $0 plan price is refused and the defaults stand', () => {
+    const row = JSON.parse(JSON.stringify(mosquitoMistingPricingDefaults()));
+    row.plan.monthly = 0;
+    expect(applyMosquitoMistingPricingConfig(row, MOSQUITO_MISTING).applied).toBe(false);
+    expect(priceMosquitoMisting({}, {}).annual).toBe(708);
+  });
+});

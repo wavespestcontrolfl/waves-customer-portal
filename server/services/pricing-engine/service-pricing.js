@@ -5107,7 +5107,8 @@ function priceMosquitoMisting(property, options = {}) {
   const materialCost = Math.round((tierCfg.hardwareCost + extraNozzles * M.extraNozzleCost + extraRisers * M.extraRiserCost) * 100) / 100;
   const laborCost = Math.round(M.install.techs * M.install.hours * GLOBAL.LABOR_RATE * 100) / 100;
   const totalCost = Math.round((materialCost + laborCost) * 100) / 100;
-  const annual = Math.round(M.plan.monthly * 12 * 100) / 100;
+  // annual = per-application price × the configured cadence (pre-push audit P1: an edited visitsPerYear must move annual).
+  const annual = Math.round(M.plan.monthly * M.plan.visitsPerYear * 100) / 100;
   const planCostAnnual = Math.round(
     ((M.plan.laborMinutesPerVisit / 60) * GLOBAL.LABOR_RATE * M.plan.visitsPerYear + M.plan.partsReservePerMonth * 12) * 100,
   ) / 100;
