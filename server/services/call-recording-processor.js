@@ -516,6 +516,18 @@ const CALL_EXTRACTION_ROUTE = Object.freeze({
 // 2026-07-09: the old gemini-2.5-flash default 404'd (model retired by
 // Google) and six calls died unprocessed — keep this on a live model.
 const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-3.5-flash';
+// GATE_CALL_EXTRACTION_V1_FALLBACK backup route for the V1 extractor: when its
+// Gemini leg fails for a PROVIDER reason (2026-10-21: Gemini 402 "prepayment
+// credits are depleted" failed 19 of 19 recorded calls three times each), the
+// same prompt goes through the house dispatcher — Claude first (the house
+// automatic-fallback-to-Claude rule), then OpenAI. Models are the SAME pinned
+// per-provider values V2 uses (CALL_EXTRACTION_MODEL_FOR), never a tier alias.
+// Gemini is not in this route: it is the leg that just failed.
+const CALL_EXTRACTION_V1_BACKUP_ROUTE = Object.freeze({
+  name: 'callExtractionV1Backup',
+  primary: Object.freeze({ provider: 'anthropic', model: CALL_EXTRACTION_MODEL_FOR.anthropic }),
+  fallback: Object.freeze({ provider: 'openai', model: CALL_EXTRACTION_MODEL_FOR.openai }),
+});
 
 // Transcription-hallucination guard (2026-07-10). The Gemini fallback
 // transcriber can invent a full conversation from a near-empty voicemail —
@@ -9724,10 +9736,85 @@ function buildCallDirectionBlock(callDirection) {
   return '';
 }
 
-async function extractCallData(transcription, callerPhone, opts = {}) {
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY not configured');
+// GATE_CALL_EXTRACTION_V1_FALLBACK: the same V1 prompt on Claude, then OpenAI,
+// through the house dispatcher (CALL_EXTRACTION_V1_BACKUP_ROUTE, attributed to
+// the existing call_extraction_v1 switchboard lane). Returns the normalized
+// extraction, or null when every backup leg failed so the caller keeps today's
+// outcome. `why` is a reason code only: provider response bodies and model
+// output carry caller detail and are never logged.
+async function v1BackupExtraction({ prompt, callerPhone, why, providerMeta }) {
+  const accept = (result) => {
+    const json = result && result.json;
+    if (!json || typeof json !== 'object' || Array.isArray(json)) return 'extraction_json_invalid';
+    let normalized;
+    try {
+      normalized = normalizeCallExtraction(json, { callerPhone });
+    } catch {
+      return 'extraction_normalize_failed';
+    }
+    // normalizeCallExtraction fills gaps instead of failing, so a leg must also
+    // return the decisions routing reads, or the next leg runs: `{}` or a partial
+    // object would end the call with no lead, spam or voicemail decision. The
+    // three V1 booleans the normalizer passes through unchanged are read as
+    // truthy downstream (a "false" string would confirm an appointment or drop
+    // the call as spam), so only real booleans count.
+    if (!normalized.call_type || normalized.is_lead === null || !normalized.call_summary
+      || !['appointment_confirmed', 'is_spam', 'is_voicemail'].every((k) => typeof json[k] === 'boolean')) {
+      return 'extraction_incomplete';
+    }
+    return null;
+  };
+  let res;
+  try {
+    res = await dispatchWithFallback(CALL_EXTRACTION_V1_BACKUP_ROUTE, {
+      laneId: 'call_extraction_v1',
+      text: prompt,
+      jsonMode: true,
+      maxTokens: 16384,
+    }, { validate: accept });
+  } catch (e) {
+    logger.error(`[call-proc] V1 extraction backup threw (${why}): ${e.message}`);
+    return null;
   }
+  if (!res || !res.ok || !res.json) {
+    const legs = (res?.failures || []).map((f) => `${f.provider}:${f.reason}`).join(', ');
+    logger.error(`[call-proc] V1 extraction backup failed after Gemini ${why} (${res?.reason || 'no_result'}${legs ? `: ${legs}` : ''})`);
+    return null;
+  }
+  const servedProvider = res.provider || CALL_EXTRACTION_V1_BACKUP_ROUTE.primary.provider;
+  logger.warn(`[call-proc] V1 extraction served by ${servedProvider} (${res.model || 'unknown model'}) after Gemini ${why}`);
+  if (providerMeta && typeof providerMeta === 'object') {
+    providerMeta.extraction_v1_provider = servedProvider;
+    providerMeta.extraction_v1_model = res.model || null;
+    providerMeta.extraction_v1_fallback_reason = why;
+  }
+  return normalizeCallExtraction(res.json, { callerPhone });
+}
+
+// GATE_CALL_EXTRACTION_V1_FALLBACK: the two paths that finalize a call before
+// the common write (spam / non-workable voicemail, V2 hard veto) keep the
+// backup provider record in metadata.processing_timings, in the common write's
+// shape. Null when no backup served the call, so those writes stay unchanged
+// with the gate off.
+function v1BackupTimingsJson(stageTimings, { processingStartedAt, procGeneration }) {
+  if (!stageTimings.extraction_v1_provider) return null;
+  return JSON.stringify({
+    ...stageTimings,
+    total_ms: Date.now() - processingStartedAt.getTime(),
+    generation: procGeneration,
+    started_at: processingStartedAt.toISOString(),
+    finished_at: new Date().toISOString(),
+  });
+}
+
+// Reason code for a thrown Gemini failure: the HTTP status, else a network
+// error or timeout. Never the message (it carries the provider's body).
+function geminiFailureReason(err) {
+  const m = /Gemini HTTP (\d+)/.exec(String(err && err.message));
+  return m ? `http_${m[1]}` : 'network_or_timeout';
+}
+
+async function extractCallData(transcription, callerPhone, opts = {}) {
   const callDateET = etDateString(opts.callStartedAt || new Date());
 
   // Known-caller context: when the inbound number maps to a single existing
@@ -9928,33 +10015,53 @@ Return ONLY valid JSON.`;
   // silently no-oped a booked call's entire downstream — the stub is a last
   // resort, not the first response to a bad sample).
   const V1_PARSE_ATTEMPTS = 2;
-  for (let attempt = 1; attempt <= V1_PARSE_ATTEMPTS; attempt += 1) {
-    const cleaned = await generateOnce();
-    try {
-      return normalizeCallExtraction(JSON.parse(cleaned), { callerPhone });
-    } catch (e) {
-      // Fixed message + length ONLY — the raw model output is a call
-      // extraction carrying the caller's name/phone/address, and JSON.parse
-      // error messages themselves echo a fragment of the rejected input
-      // (`Unexpected token 'J', "John Smith"…`), so e.message can't be
-      // logged either (AGENTS.md PII-in-logs).
-      if (attempt < V1_PARSE_ATTEMPTS) {
-        logger.warn(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) — retrying (${attempt + 1}/${V1_PARSE_ATTEMPTS})`);
-        continue;
+
+  // The Gemini leg, classified once: { extracted } on success, otherwise
+  // { why, error } where `error` is the thrown provider failure to rethrow,
+  // or null for invalid JSON (which falls to the stub instead).
+  const runGemini = async () => {
+    if (!process.env.GEMINI_API_KEY) return { why: 'key_missing', error: new Error('GEMINI_API_KEY not configured') };
+    for (let attempt = 1; attempt <= V1_PARSE_ATTEMPTS; attempt += 1) {
+      let cleaned;
+      try {
+        cleaned = await generateOnce();
+      } catch (err) {
+        return { why: geminiFailureReason(err), error: err };
       }
-      logger.error(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) after ${V1_PARSE_ATTEMPTS} attempts`);
-      return normalizeCallExtraction({
-        first_name: null,
-        is_spam: false,
-        is_voicemail: false,
-        call_summary: EXTRACTION_INVALID_JSON_SUMMARY,
-        lead_quality: 'cold',
-      }, { callerPhone });
+      try {
+        return { extracted: normalizeCallExtraction(JSON.parse(cleaned), { callerPhone }) };
+      } catch (e) {
+        // Fixed message + length ONLY — the raw model output is a call
+        // extraction carrying the caller's name/phone/address, and JSON.parse
+        // error messages themselves echo a fragment of the rejected input
+        // (`Unexpected token 'J', "John Smith"…`), so e.message can't be
+        // logged either (AGENTS.md PII-in-logs).
+        if (attempt < V1_PARSE_ATTEMPTS) {
+          logger.warn(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) — retrying (${attempt + 1}/${V1_PARSE_ATTEMPTS})`);
+        } else {
+          logger.error(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars) after ${V1_PARSE_ATTEMPTS} attempts`);
+        }
+      }
     }
+    return { why: 'invalid_json', error: null };
+  };
+
+  const gemini = await runGemini();
+  if (gemini.extracted) return gemini.extracted;
+  // The one place that decides backup-or-rethrow. GATE_CALL_EXTRACTION_V1_FALLBACK
+  // off (read here, once per call) = Gemini only, exactly as before.
+  if (require('../config/feature-gates').callExtractionV1FallbackLive()) {
+    const backedUp = await v1BackupExtraction({ prompt, callerPhone, why: gemini.why, providerMeta: opts.providerMeta });
+    if (backedUp) return backedUp;
   }
-  // Unreachable — the loop always returns — but keeps the function's
-  // contract explicit for static analysis.
-  throw new Error('extractCallData: attempt loop exited without a verdict');
+  if (gemini.error) throw gemini.error;
+  return normalizeCallExtraction({
+    first_name: null,
+    is_spam: false,
+    is_voicemail: false,
+    call_summary: EXTRACTION_INVALID_JSON_SUMMARY,
+    lead_quality: 'cold',
+  }, { callerPhone });
 }
 
 // ── V2 Extraction (shadow pipeline — stores alongside, never replaces v1) ──
@@ -11882,8 +11989,11 @@ const CallRecordingProcessor = {
     let extracted;
     try {
       const extractStartedAt = Date.now();
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: callStartedAt(call) || call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
+      const v1ProviderMeta = {};
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: callStartedAt(call) || call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound', providerMeta: v1ProviderMeta });
       stageTimings.extraction_v1_ms = Date.now() - extractStartedAt;
+      // Only set when GATE_CALL_EXTRACTION_V1_FALLBACK served the call from a backup provider.
+      if (v1ProviderMeta.extraction_v1_provider) Object.assign(stageTimings, v1ProviderMeta);
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       // Increment in SQL, not from the in-memory row: the stale-reclaim path
@@ -12371,6 +12481,10 @@ const CallRecordingProcessor = {
       if (extracted.is_voicemail) {
         terminalUpdate.answered_by = 'voicemail';
         terminalUpdate.call_outcome = 'voicemail';
+      }
+      const v1Timings = v1BackupTimingsJson(stageTimings, { processingStartedAt, procGeneration });
+      if (v1Timings) {
+        terminalUpdate.metadata = db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)", [v1Timings]);
       }
       // Fenced like the finalization write, and BEFORE the shadow/triage
       // side effects (pre-push P1 r2): the settle above is not an
@@ -14106,9 +14220,15 @@ const CallRecordingProcessor = {
             // (codex P1, PR #3303 r4): a force-reprocess that corrected a
             // prior definitive rejection into out_of_service_area/DNC
             // must not leave the call terminally rejected forever.
-            metadata: v2VetoDefinitiveRejection
-              ? db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)")
-              : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution'"),
+            metadata: (() => {
+              const marker = v2VetoDefinitiveRejection
+                ? "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)"
+                : "COALESCE(metadata, '{}'::jsonb) - 'no_attribution'";
+              const v1Timings = v1BackupTimingsJson(stageTimings, { processingStartedAt, procGeneration });
+              return v1Timings
+                ? db.raw(`jsonb_set(${marker}, '{processing_timings}', ?::jsonb, true)`, [v1Timings])
+                : db.raw(marker);
+            })(),
             updated_at: new Date(),
           });
         if (!vetoWrote) {
@@ -25584,9 +25704,13 @@ CallRecordingProcessor._test = {
   deriveEmailHoldTarget,
   emailPassEvidence,
   transcribeRecording,
+  extractCallData,
   extractCallDataV2,
+  CALL_EXTRACTION_V1_BACKUP_ROUTE,
   callTimeETString,
   CALL_EXTRACTION_ROUTE,
+  CALL_EXTRACTION_MODEL_FOR,
+  v1BackupTimingsJson,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
