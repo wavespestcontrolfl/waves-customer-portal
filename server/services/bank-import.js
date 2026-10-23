@@ -1595,8 +1595,10 @@ async function runDeterministicMatching({ limit } = {}) {
           const changed = await db('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
             // re-checked at the claim: the row may have been linked, got a
-            // bank change parked, and been unlinked since this pass read it
+            // bank change parked, and been unlinked since this pass read it,
+            // or decided as Income in the ledger Inbox (that decision holds)
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            .whereRaw(NO_INCOME_DECISION_SQL)
             .update({
               status: 'matched_payout',
               matched_payout_id: exact[0].id,
@@ -1809,8 +1811,10 @@ async function runDeterministicMatching({ limit } = {}) {
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
             // re-checked at the claim: the row may have been linked, got a
-            // bank change parked, and been unlinked since this pass read it
+            // bank change parked, and been unlinked since this pass read it,
+            // or decided as Income in the ledger Inbox (that decision holds)
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            .whereRaw(NO_INCOME_DECISION_SQL)
             .update({
               status: 'matched_expense',
               matched_expense_id: strong[0].id,

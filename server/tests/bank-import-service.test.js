@@ -809,14 +809,25 @@ describe('runDeterministicMatching', () => {
   });
 
   test('an Income decision is never read by the matcher and never claimed: the selects and both claim writes guard on it', async () => {
-    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'ZELLE FROM CUSTOMER', amount: 120, direction: 'credit', account_type: 'bank', account_label: 'capone-checking-3098', suggestion: { noMatch: true, income: true, decision: 'income' } }];
-    state.payouts = [{ id: 'po-1', amount: '120.00', arrival_date: '2026-08-11', status: 'paid', destination_last4: '3098' }];
+    // the selects leave decided Income rows out
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'ZELLE FROM CUSTOMER', amount: 120, direction: 'credit', account_type: 'bank', suggestion: { noMatch: true, income: true, decision: 'income' } }];
     await runDeterministicMatching({ limit: 5 });
     const selects = state.builders.filter(x => x.table === 'bank_transactions').flatMap(x => x.b.whereRaw.mock.calls.map(c => String(c[0])));
     expect(selects.filter(r => /decision.*income/.test(r)).length).toBeGreaterThanOrEqual(1);
-    for (const u of state.updates.filter(u => u.patch.status === 'matched_payout' || u.patch.status === 'matched_expense')) {
-      expect(u.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
-    }
+    // a decision that lands between the read and the claim: the payout claim CAS repeats the check
+    state.updates = [];
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
+    expect((await runDeterministicMatching()).payoutsLinked).toBe(1);
+    const payoutClaim = state.updates.find(u => u.patch.status === 'matched_payout');
+    expect(payoutClaim.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
+    // and the expense claim CAS
+    state.updates = []; state.payouts = [];
+    state.bankRows = [{ id: 'bt-3', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'bank', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'check' }];
+    expect((await runDeterministicMatching()).expensesLinked).toBe(1);
+    const expenseClaim = state.updates.find(u => u.patch.status === 'matched_expense');
+    expect(expenseClaim.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
     // and every per-row write of a pass in flight repeats it: a parked candidate list or a transfer
     // flag must not land on a row the owner decided as Income meanwhile
     state.updates = [];
