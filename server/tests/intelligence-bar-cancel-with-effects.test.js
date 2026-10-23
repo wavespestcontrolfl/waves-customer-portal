@@ -225,6 +225,16 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(normal.recovery_owns_outcome).toBeUndefined();
   });
 
+  test('a not-sent report whose bookkeeping failed, with the text still open for the system: the retry advice wins, never "send it by hand"', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationError: 'connection terminated', textRetryScheduled: true } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.warning).toMatch(/system retries it within about 15 minutes/);
+    expect(result.warning).not.toMatch(/send it by hand\.|will not be retried automatically/);
+    // A delivery-uncertain report keeps its own advice (the system never resends it).
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationUncertain: true, textRetryScheduled: true } });
+    expect((await executeTool('cancel_appointment', input(), ADMIN)).warning).toMatch(/may have gone out/);
+  });
+
   test('a step that failed after the commit leaves the bundle pending, so its receipt is provisional (the sweep\'s final receipt replaces it)', async () => {
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, postCommitFailure: 'connection terminated' } });
     const result = await executeTool('cancel_appointment', input(), ADMIN);
