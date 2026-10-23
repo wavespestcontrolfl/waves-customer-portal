@@ -7,7 +7,7 @@
  * customer message, and the visit-scoped payment. Children keep their own
  * records, reports, and invoices.
  *
- * Concurrency: every create/join/split/dissolve runs inside a transaction
+ * Concurrency: every split/dissolve/move runs inside a transaction
  * holding `pg_advisory_xact_lock(hashtext('visit.stop'), hashtext(baseKey))`
  * where baseKey = `<property_id|customer_id>:<date>`. `stop_seq` is
  * allocated as max(seq)+1 over ALL historical rows for the base key, and
@@ -15,23 +15,22 @@
  * closed visit's identity is never re-minted. `visit_id` is the durable
  * identity — reschedules recompute the base key under both stop locks.
  *
- * DARK: gate `GATE_VISIT_GROUPS` (feature-gates `visitGroups`). Nothing
- * calls createOrJoinVisit while the gate is off; guards (isRowVisitBlocked)
- * are inert because no row carries a visit_id yet. Kill switch: unset the
- * gate — no new groups; existing visits keep behaving as created
- * (behavior_version is frozen at creation and never rewritten by gates).
+ * Creation retired (owner ruling 2026-10-22: appointments are no longer
+ * grouped): nothing creates or joins a visit. Visits created before that
+ * keep behaving as created (behavior_version is frozen at creation and never
+ * rewritten by gates); this module keeps what they need — separate,
+ * dissolve, live fan-out, unit moves, notifications and closeout.
  */
 
 const db = require('../models/db');
 const { assertAssignableTechnician } = require('./technician-eligibility');
 
-const OPEN_STATUSES = ['open'];
 // Row-status vocabularies live in the canonical visit-context module.
 const { TERMINAL_ROW_STATUSES, JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const ACTIVE_PACKET_STATUSES = ['accepted', 'processing'];
 // service_completion_attempts statuses that mean a legacy /complete owns the
 // row: pending (claimed), side effects queued/running, or already succeeded.
-// Stamping and the unit mover both refuse members carrying one.
+// The unit mover refuses members carrying one.
 const LIVE_COMPLETION_CLAIM_STATUSES = ['pending', 'side_effects_pending', 'side_effects_running', 'succeeded'];
 
 /**
@@ -86,41 +85,6 @@ function windowsOverlap(aStart, aEnd, bStart, bEnd) {
 function familiesCompatible(a, b) {
   if (!a || !b) return false;
   return a === b; // policy table: same family only, until the owner widens it
-}
-
-/**
- * Join eligibility for a row against an open visit (doc §2). Pure.
- * `row`/`visit` carry: customer_id, property_id, scheduled_date,
- * window_start, window_end, technician_id, group_family, groupable.
- */
-function canJoin(row, visit) {
-  if (!row || !visit) return { ok: false, reason: 'missing' };
-  if (String(visit.status) !== 'open') return { ok: false, reason: 'visit_not_open' };
-  if (String(row.customer_id) !== String(visit.customer_id)) return { ok: false, reason: 'customer' };
-  if (String(row.property_id || '') !== String(visit.property_id || '')) return { ok: false, reason: 'property' };
-  if (dateOnly(row.scheduled_date) !== dateOnly(visit.scheduled_date)) {
-    return { ok: false, reason: 'date' };
-  }
-  if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) {
-    return { ok: false, reason: 'row_terminal' };
-  }
-  // An unconfirmed office-review booking is not yet a real stop (it needs
-  // the tech's field-confirm tap or the office's activation first); it
-  // groups once confirmed — the shared status writer regroups it on
-  // pending → confirmed (codex #3603 r2).
-  if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) {
-    return { ok: false, reason: 'office_review' };
-  }
-  if (!row.groupable) return { ok: false, reason: 'not_groupable' };
-  if (!familiesCompatible(row.group_family, visit.group_family)) return { ok: false, reason: 'family' };
-  if (row.technician_id && visit.technician_id
-      && String(row.technician_id) !== String(visit.technician_id)) {
-    return { ok: false, reason: 'technician' };
-  }
-  if (!windowsOverlap(row.window_start, row.window_end, visit.window_start, visit.window_end)) {
-    return { ok: false, reason: 'window' };
-  }
-  return { ok: true };
 }
 
 /**
@@ -206,8 +170,8 @@ async function lockStopForRow(trx, serviceId) {
   await lockStop(trx, baseKey);
   // Revalidate under the lock (codex #3590 r13): a reschedule committing
   // between the peek and the lock leaves us holding the OLD stop's lock
-  // while stamping serializes on the new one. Same peek → lock → verify →
-  // retry contract as createOrJoinVisit; callers retry on VISIT_STOP_MOVED.
+  // while a writer serializes on the new one. Peek → lock → verify → retry;
+  // callers retry on VISIT_STOP_MOVED.
   const locked = await trx('scheduled_services').where({ id: serviceId })
     .first('property_id', 'customer_id', 'scheduled_date');
   if (!locked) return null;
@@ -471,352 +435,6 @@ async function nextStopSeq(trx, baseKey) {
 }
 
 /**
- * Create a visit for `rows` (>= 2 scheduled_services already loaded with
- * catalog flags) or join them onto an eligible open visit for the stop.
- * Caller checks the gate; this only enforces invariants. Returns the visit.
- */
-const baseKeyFor = (r) => stopBaseKey({
-  propertyId: r.property_id,
-  customerId: r.customer_id,
-  scheduledDate: r.scheduled_date,
-});
-
-async function createOrJoinVisit({ rows, createdBy, trx = null, lockedGuard = null }) {
-  if (!Array.isArray(rows) || rows.length < 2) throw new Error('createOrJoinVisit needs >= 2 rows');
-  const ids = rows.map((r) => (r && r.id) || r).filter(Boolean);
-  if (ids.length !== rows.length) throw new Error('createOrJoinVisit rows need ids');
-
-  // Authoritative reload with catalog flags — caller snapshots are never
-  // trusted for eligibility (codex r3 P1: a reschedule/reassignment can
-  // commit between the caller's read and our lock).
-  const loadRows = (t, { lock }) => {
-    let q = t('scheduled_services as ss')
-      .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-      .whereIn('ss.id', ids)
-      .select(
-        'ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
-        'ss.source_action', 'ss.customer_confirmed',
-        'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.status',
-        'ss.visit_id',
-        'svc.groupable as groupable', 'svc.group_family as group_family',
-      );
-    if (lock) q = q.forUpdate('ss');
-    return q;
-  };
-
-  const run = async (t) => {
-    // Derive the stop key from an unlocked peek, take the stop advisory
-    // lock (always BEFORE row locks — same order as splitChild/dissolve),
-    // then lock + reload and confirm the key still matches. A concurrent
-    // reschedule between peek and lock surfaces as a mismatch.
-    const peek = await loadRows(t, { lock: false });
-    if (peek.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
-    const stopCustomerId = peek[0].customer_id;
-    // A STABLE mixed-customer selection is an invalid request, not a race
-    // (GH codex r2 P2): refuse it as not-groupable (the route's 409)
-    // instead of letting the post-lock check spin it through the
-    // VISIT_STOP_MOVED retries into a 500.
-    if (peek.some((r) => String(r.customer_id) !== String(stopCustomerId))) {
-      throw new Error('rows not mutually groupable: rows span two customers');
-    }
-    // Autopay exclusion UNDER the customer row lock (pre-push codex P0 —
-    // TOCTOU): the callers' unlocked pre-checks are fast paths only; the
-    // authoritative check runs here, in the same transaction that creates
-    // or joins the visit. Customer lock taken BEFORE the stop advisory
-    // lock, matching the booking paths' customer → stop-advisory order
-    // (booking.js locks the customer first, then stamps). A concurrent
-    // enrollment either committed first (seen and refused here) or waits
-    // on this row lock until the grouping commits. Enrollment AFTER a
-    // group exists is NOT a double-charge path in Phase 1 (every row
-    // still bills once, per row — see customerExcludedByAutopay); it is
-    // the documented Phase-2 gate-flip precondition, owned by that lane.
-    // FOR NO KEY UPDATE, not FOR UPDATE (pre-push codex r9 P1): the callers'
-    // just-inserted scheduled_services row already holds the customer's
-    // FK KEY SHARE lock, and FOR UPDATE conflicts with KEY SHARE — two
-    // concurrent same-customer bookings would each hold KEY SHARE and
-    // deadlock on the upgrade (one grouping silently skipped). NO KEY
-    // UPDATE does not conflict with KEY SHARE, yet still conflicts with the
-    // enrollment UPDATE's own NO KEY UPDATE lock — the serialization the
-    // TOCTOU fix needs is intact.
-    await t('customers').where({ id: stopCustomerId }).forNoKeyUpdate().first('id');
-    const behaviorVersion = combinedCloseoutBehaviorVersion();
-    if (await groupingRefusedByAutopay(stopCustomerId, t)) {
-      throw new Error('rows not mutually groupable: autopay_enrolled');
-    }
-    await lockStop(t, baseKeyFor(peek[0]));
-    const baseKey = baseKeyFor(peek[0]);
-
-    const fresh = await loadRows(t, { lock: true });
-    if (fresh.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
-    const [first] = fresh;
-    const lockedKey = baseKeyFor(first);
-    if (lockedKey !== baseKey
-      // The stop key anchors on property when present, so a customer swap
-      // (merge repoint) could survive the key check — the autopay verdict
-      // above was rendered for stopCustomerId and must not carry over.
-      || fresh.some((r) => String(r.customer_id) !== String(stopCustomerId))) {
-      const err = new Error('visit stop moved concurrently — retry');
-      err.code = 'VISIT_STOP_MOVED';
-      throw err;
-    }
-
-    const attachedVisitIds = [...new Set(fresh.map((r) => r.visit_id).filter(Boolean).map(String))];
-    if (attachedVisitIds.length > 1) {
-      throw new Error('visit membership conflict: rows span two visits');
-    }
-    for (const r of fresh) {
-      if (JOIN_INELIGIBLE_STATUSES.includes(String(r.status || ''))) {
-        throw new Error('visit membership conflict: a row is already terminal');
-      }
-      if (!r.groupable || !r.group_family) {
-        throw new Error('rows not mutually groupable: not_groupable');
-      }
-      if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(r)) {
-        throw new Error('rows not mutually groupable: office_review');
-      }
-    }
-    // A row that already carries a completion artifact (service record or
-    // invoice — prepaid, pre-minted, or an earlier completion) never forms
-    // or joins a visit (codex #3590 r13): canSplit would freeze the new
-    // group on that artifact immediately, making it impossible to separate.
-    const unattachedIds0 = fresh.filter((r) => !r.visit_id).map((r) => r.id);
-    if (unattachedIds0.length) {
-      const [rec, inv] = await Promise.all([
-        t('service_records').whereIn('scheduled_service_id', unattachedIds0).first('id').catch(() => null),
-        t('invoices').whereIn('scheduled_service_id', unattachedIds0).first('id').catch(() => null),
-      ]);
-      if (rec || inv) throw new Error('rows not mutually groupable: child_artifact');
-    }
-    // One technician owns the visit (doc §2 rev 5): all non-null
-    // assignments across the input rows must agree.
-    const rowTechs = [...new Set(fresh.map((r) => r.technician_id).filter(Boolean).map(String))];
-    if (rowTechs.length > 1) throw new Error('rows not mutually groupable: technician');
-    // Non-window compatibility against the first row (customer, property,
-    // date, family, tech, status) — the anchor is WINDOWLESS here so the
-    // window rule is judged over the whole set below, not against whichever
-    // row the unordered query returned first (codex #3590 r12 P2: a valid
-    // 09-10 · 10-11 · 11-12 chain was rejected whenever an endpoint
-    // happened to be the anchor).
-    const anchor = { ...first, status: 'open', window_start: null, window_end: null };
-    for (const r of fresh.slice(1)) {
-      const probe = canJoin(r, anchor);
-      if (!probe.ok) throw new Error(`rows not mutually groupable: ${probe.reason}`);
-    }
-    if (!windowedMembersConnected(fresh)) {
-      throw new Error('rows not mutually groupable: window');
-    }
-
-    let visit = null;
-    if (attachedVisitIds.length === 1) {
-      // Join-to-existing: some rows already belong to one visit — the rest
-      // may only join THAT visit, and only while it is open and eligible.
-      const target = await t('service_visits').where({ id: attachedVisitIds[0] }).first();
-      if (!target || String(target.status) !== 'open' || target.stop_base_key !== baseKey) {
-        throw new Error('visit membership conflict: attached visit not open for joining');
-      }
-      if (Number(target.behavior_version) !== behaviorVersion) {
-        throw new Error('visit membership conflict: closeout behavior differs');
-      }
-      // Membership freeze applies to JOINS too (codex #3590 r4): once the
-      // visit has a packet, child artifact, issued link, or payment
-      // attempt, its member set is frozen — a late join would desync
-      // packet items and the customer surface.
-      const targetActivity = await visitActivity(target.id, t);
-      const joinGate = canSplit(targetActivity);
-      if (!joinGate.ok) {
-        throw new Error(`visit membership conflict: target frozen (${joinGate.reason})`);
-      }
-      // Non-window rules against the target; the window rule runs over
-      // the COMBINED member set (codex #3590 r13 P2): a 09-10 visit plus a
-      // 10-11 · 11-12 continuation is one chain even though 11-12 never
-      // touches the parent's current union.
-      const targetAnchor = { ...target, window_start: null, window_end: null };
-      for (const r of fresh) {
-        if (r.visit_id) continue; // already a member
-        const probe = canJoin(r, targetAnchor);
-        if (!probe.ok) throw new Error(`rows not mutually groupable: ${probe.reason}`);
-      }
-      const targetMembers = await openMembers(t, target.id);
-      if (!windowedMembersConnected([...targetMembers, ...fresh.filter((r) => !r.visit_id)])) {
-        throw new Error('rows not mutually groupable: window');
-      }
-      if (rowTechs.length && target.technician_id && String(target.technician_id) !== rowTechs[0]) {
-        throw new Error('rows not mutually groupable: technician');
-      }
-      visit = target;
-    } else {
-      const openVisits = await t('service_visits')
-        .where({ stop_base_key: baseKey })
-        .whereIn('status', OPEN_STATUSES)
-        .orderBy('stop_seq', 'asc');
-      for (const v of openVisits) {
-        if (Number(v.behavior_version) !== behaviorVersion) continue;
-        if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
-        const vAnchor = { ...v, window_start: null, window_end: null };
-        if (!fresh.every((r) => canJoin(r, vAnchor).ok)) continue;
-        // Combined-chain window rule (codex r13 P2), as in join-to-existing.
-        if (!windowedMembersConnected([...(await openMembers(t, v.id)), ...fresh])) continue;
-        // Membership freeze applies here too (codex r5): a visit whose
-        // packet/artifact/link/payment froze its member set never absorbs
-        // new rows, even fully unattached ones — skip to a fresh seq.
-        const vActivity = await visitActivity(v.id, t);  
-        if (!canSplit(vActivity).ok) continue;
-        visit = v; break;
-      }
-    }
-
-    // Caller-specific fences, under the row locks and in the membership-write
-    // transaction, once the destination is known (regroup sweep: rows
-    // untouched, reminder tiers equal, never an existing visit). A throw
-    // refuses the whole grouping.
-    if (lockedGuard) await lockedGuard(fresh, t, { existingVisit: visit || null });
-
-    if (!visit) {
-      const seq = await nextStopSeq(t, baseKey);
-      [visit] = await t('service_visits')
-        .insert({
-          customer_id: first.customer_id,
-          property_id: first.property_id || null,
-          scheduled_date: dateOnly(first.scheduled_date),
-          window_start: first.window_start || null,
-          window_end: first.window_end || null,
-          stop_base_key: baseKey,
-          stop_seq: seq,
-          technician_id: rowTechs[0] || null,
-          group_family: first.group_family || null,
-          behavior_version: behaviorVersion,
-          status: 'open',
-          created_by: createdBy || 'admin:unknown',
-        })
-        .returning('*');
-    }
-
-    // Widen the visit window to the union of member windows (doc rev 5f).
-    const starts = [visit.window_start, ...fresh.map((r) => r.window_start)].filter(Boolean);
-    const ends = [visit.window_end, ...fresh.map((r) => r.window_end)].filter(Boolean);
-    const patch = {};
-    if (starts.length) patch.window_start = starts.sort()[0];
-    if (ends.length) patch.window_end = ends.sort().slice(-1)[0];
-    // The visit owns the assignment: adopt the rows' single technician when
-    // the visit has none, and align children below.
-    if (!visit.technician_id && rowTechs[0]) patch.technician_id = rowTechs[0];
-    if (Object.keys(patch).length) {
-      await t('service_visits').where({ id: visit.id }).update(patch);
-      Object.assign(visit, patch);
-    }
-
-    // Serialize with legacy completion (codex r2 P0): rows are locked
-    // above; refuse any row with a live or succeeded completion attempt.
-    // The legacy handler claims its attempt (committed) BEFORE re-reading
-    // membership under the same row lock, so every interleaving resolves:
-    // either we see the claim here and refuse, or the handler sees our
-    // committed stamp and 409s.
-    // The check spans EVERY current member of a reused/joined visit, not
-    // just the input rows (codex #3590 r11): a claim on an existing member
-    // may already have committed and released the post-claim stop lock —
-    // attaching new rows now would only have them dissolved by that
-    // completion's dissolveForLegacyCompletion moments later.
-    const liveAttempt = await t('service_completion_attempts')
-      .where((qb) => {
-        qb.whereIn('service_id', ids);
-        if (visit.id) {
-          qb.orWhereIn('service_id', t('scheduled_services').select('id').where({ visit_id: visit.id }));
-        }
-      })
-      .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES)
-      .first('id')
-      .catch(() => null);
-    if (liveAttempt) {
-      throw new Error('visit membership conflict: a completion attempt is in flight');
-    }
-
-    // The visit owns assignment (rev-5 item 6): when the parent has (or
-    // adopts) a technician, EVERY member aligns — including previously
-    // attached children, or tech-scoped dispatch views would split the
-    // physical stop (codex #3590 r4).
-    // Alignment goes through the canonical assignment writer (codex r13
-    // P1) — never a bare technician_id write.
-    if (visit.technician_id) {
-      const unassignedMembers = (await openMembers(t, visit.id)).filter((m) => !m.technician_id);
-      for (const m of unassignedMembers) await alignMemberTechnician(t, m.id, visit.technician_id);
-    }
-    const unattachedIds = fresh.filter((r) => !r.visit_id).map((r) => r.id);
-    const stamped = unattachedIds.length
-      ? await t('scheduled_services')
-        .whereIn('id', unattachedIds)
-        .whereNull('visit_id')
-        .update({ visit_id: visit.id })
-      : 0;
-    if (Number(stamped) !== unattachedIds.length) {
-      throw new Error('visit membership conflict: a row is attached to another visit');
-    }
-    // A joiner INHERITS an active unit-move hold (codex #3609 r34 P1):
-    // when this join lands between a running move's phases (the mover's
-    // lease is claimed in its own trx, not under this stop lock for the
-    // whole move), an existing member's live move_hold_until must cover
-    // the new member too — otherwise a partial move leaves every planned
-    // member suppressed while the late joiner texts freely. Same inherit
-    // shape the registration self-heal uses; best-effort (the mover's
-    // per-member re-stamp and the senders' checks stay authoritative).
-    if (unattachedIds.length) {
-      try {
-        const heldSibling = await t('appointment_reminders as ar')
-          .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-          .where('ss.visit_id', visit.id)
-          .where('ar.move_hold_until', '>', new Date())
-          .orderBy('ar.move_hold_until', 'desc')
-          .first('ar.move_hold_until', 'ar.move_hold_token');
-        if (heldSibling) {
-          // A joiner with NO reminder row gets one CREATED held (codex r35):
-          // booking/seeding can group rows before registerAppointment runs,
-          // and that later registration would arrive unheld mid-move.
-          const existing = (await t('appointment_reminders')
-            .whereIn('scheduled_service_id', unattachedIds)
-            .select('scheduled_service_id')).map((r) => String(r.scheduled_service_id));
-          for (const missingId of unattachedIds.map(String).filter((id) => !existing.includes(id))) {
-            await ensureMemberReminderRowInTx(t, missingId);
-          }
-          await t('appointment_reminders')
-            .whereIn('scheduled_service_id', unattachedIds)
-            .where((q) => { q.whereNull('move_hold_until').orWhere('move_hold_until', '<', heldSibling.move_hold_until); })
-            .update({ move_hold_until: heldSibling.move_hold_until, move_hold_token: heldSibling.move_hold_token || null });
-        }
-      } catch (holdErr) {
-        // FAIL CLOSED (uncapped r36 P1): this inherit is the ONLY thing
-        // keeping a mid-move joiner quiet — a swallowed failure commits an
-        // unheld member that can text stale details while the move runs.
-        // Aborting rolls the join back; createOrJoinVisit's retry loop (or
-        // the caller's) re-attempts.
-        throw Object.assign(new Error(`visit join aborted — the member hold could not be inherited: ${holdErr.message}`), { code: holdErr.code || 'VISIT_JOIN_HOLD_FAILED' });
-      }
-    }
-    if (visit.technician_id) {
-      for (const r of fresh) {
-        if (!r.visit_id && !r.technician_id) await alignMemberTechnician(t, r.id, visit.technician_id);
-      }
-    }
-    return visit;
-  };
-
-  if (trx) return run(trx);
-  // Advisory locks are transaction-scoped; a stop that moved concurrently
-  // needs a fresh transaction, so retry the whole unit a couple of times.
-  let lastErr = null;
-  for (let i = 0; i < 3; i += 1) {
-    try {
-      return await db.transaction(run);  
-    } catch (err) {
-      // 40P01 = PG deadlock: the tech-day fence taken by assignDispatchJob
-      // can be held by a scheduling writer that is waiting on our stop
-      // lock; PG aborts one side — retrying resolves it.
-      if (err && (err.code === 'VISIT_STOP_MOVED' || err.code === '40P01')) { lastErr = err; continue; }
-      throw err;
-    }
-  }
-  throw lastErr;
-}
-
-/**
  * Explicit split / "Separate these services" (doc §2): DETACH one child to
  * a plain ungrouped row, subject to the membership freeze. Until Phase-2
  * grouped completion exists, a one-row visit is pointless (the doc says it
@@ -915,8 +533,8 @@ async function handleChildTerminal(scheduledServiceId) {
       if (!visit || !['open'].includes(String(visit.status))) return false;
       await lockStop(t, visit.stop_base_key);
       // Re-read under the stop lock (codex #3590 r3 P1): this hook runs
-      // post-commit and async — a cancellation reversal or regroup may
-      // have landed first. Only a row still terminal AND still attached
+      // post-commit and async — a cancellation reversal may have landed
+      // first. Only a row still terminal AND still attached
       // to THIS visit detaches; the update is predicated on both.
       const fresh = await t('scheduled_services').where({ id: row.id })
         .forUpdate().first('id', 'visit_id', 'status');
@@ -1148,209 +766,6 @@ async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx 
     logger.warn(`[visit-groups] dissolveForLegacyCompletion(${visitId}) skipped: ${err.message}`);
     return false;
   }
-}
-
-/**
- * Stamping entry point for scheduling paths (converter same-trip rows,
- * recurring seeder, future admin actions). Gate-checked, best-effort:
- * grouping is an enhancement, so failures LOG and return null rather than
- * breaking scheduling. Finds same-stop partner rows (same customer +
- * property + date, non-terminal, groupable catalog type, unattached or in
- * one open visit) and groups them with `rowId`.
- */
-/**
- * TRUE when grouping must be refused for this customer because they are on
- * autopay (or their autopay state cannot be read — fail closed). Shared by
- * the automatic stamping path and the office group route.
- *
- * WHAT THIS PROTECTS (and what it does not): Phase 1 has NO visit-level
- * billing — service_visits.payment_intent_id / billing_strategy /
- * billing_hold have no writers, no money code reads visit_id, and a
- * grouped member completing through any existing path first dissolves
- * its open visit (dissolveForLegacyCompletion) and then completes and
- * bills PER ROW, once each — byte-identical to two ungrouped same-day
- * services today. So a customer who enrolls in autopay AFTER a group
- * forms is charged exactly as with no group: once per completed row,
- * never twice. The exclusion protects the Phase-2 contract (one
- * visit-level PaymentIntent, per-invoice receipt suppression): groups
- * must not pre-exist for enrolled customers when that lane ships, and
- * the enrollment-time refuse/dissolve seam belongs to that lane
- * (spec §6/§7, GATE_VISIT_GROUP_AUTOPAY) — not to a money flow here.
- */
-// Version 2 (combined closeout live with its encryption key) bills a grouped
-// visit through one packet, so Auto Pay customers may be grouped; version 1
-// keeps the Phase-1 exclusion. One decision for automatic stamping and the
-// staff grouping route alike.
-function combinedCloseoutBehaviorVersion() {
-  return require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY ? 2 : 1;
-}
-
-async function groupingRefusedByAutopay(customerId, database = db) {
-  if (combinedCloseoutBehaviorVersion() === 2) return false;
-  return customerExcludedByAutopay(customerId, database);
-}
-
-async function customerExcludedByAutopay(customerId, database = db) {
-  try {
-    const customer = await database('customers').where({ id: customerId })
-      .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
-    if (!customer) return true;
-    // ENROLLMENT excludes, not current chargeability (pre-push codex P0):
-    // customerOnAutopay returns false during an autopay PAUSE, but a
-    // paused customer is still enrolled — a group formed during the pause
-    // would persist into resumed autopay and the per-row charger would
-    // charge each sibling separately. An explicit enrollment flag refuses
-    // outright; the chargeability predicate then catches legacy rows
-    // (autopay_enabled NULL with a live default autopay method).
-    if (customer.autopay_enabled === true) return true;
-    // Explicitly disabled = unenrolled, regardless of any stale pause stamp.
-    if (customer.autopay_enabled === false) return false;
-    // Legacy NULL-flag rows: ENROLLMENT signals only — never the
-    // chargeability predicate (customerOnAutopay), which returns false for
-    // a pause, an expired card, or a pending ACH even though all three
-    // still represent enrollment (GH codex r3+r4 P1s: the flag survives a
-    // card replacement, and the group would persist into resumed
-    // chargeability). Enrolled = a live pause (only enrolled accounts
-    // pause) OR ANY autopay-enabled method on file, chargeable or not.
-    const { isPaused } = require('./autopay-eligibility');
-    if (isPaused(customer)) return true;
-    const method = await database('payment_methods')
-      .where({ customer_id: customerId, autopay_enabled: true })
-      .first('id');
-    return Boolean(method);
-  } catch (err) {
-    require('./logger').warn(`[visit-groups] autopay-exclusion check failed for customer ${customerId} — refusing to group: ${err.message}`);
-    return true;
-  }
-}
-
-async function maybeGroupRow(rowId, { createdBy, database = db, preview = false, lockedGuard = null } = {}) {
-  const { gates } = require('../config/feature-gates');
-  if (!gates.visitGroups) return null;
-  try {
-    if (database && database.isTransaction) {
-      // Inside a caller transaction (booking/converter/seeder) the work
-      // must run on that trx (its uncommitted rows are invisible
-      // elsewhere), but a grouping failure must not abort the caller's
-      // transaction (25P02 poisons every later statement) — so the WHOLE
-      // attempt, reads included, runs inside a SAVEPOINT (knex nested
-      // transaction) and the catch below swallows the rolled-back
-      // savepoint (codex #3590 r4; widened from createOrJoinVisit alone
-      // to the pre-reads + autopay check by the r5 pre-push audit: a
-      // failed SELECT there aborted the caller just the same).
-      return await database.transaction((sp) => groupRowOn(sp, rowId, createdBy, { preview, lockedGuard }));
-    }
-    return await groupRowOn(database, rowId, createdBy, { preview, lockedGuard });
-  } catch (err) {
-    const logger = require('./logger');
-    logger.warn(`[visit-groups] maybeGroupRow(${rowId}) skipped: ${err.message}`);
-    return null;
-  }
-}
-
-// maybeGroupRow's body on one connection: `database` is either the plain
-// pool (createOrJoinVisit opens its own transaction) or the caller's
-// savepoint (everything, createOrJoinVisit included, runs on it).
-// `preview` (regroup dry run, visit-regroup.js): run every read-only
-// eligibility check above createOrJoinVisit — subject gates, autopay fast
-// path, partner query, canJoin/windowsOverlap subset, technician partition —
-// and return `{ preview: true, rowIds }` (the exact set createOrJoinVisit
-// would be handed) instead of writing. The locked re-checks inside
-// createOrJoinVisit (child artifacts, freeze, chain, live attempts) cannot be
-// previewed, so a preview may name a set the apply then refuses.
-async function groupRowOn(database, rowId, createdBy, { preview = false, lockedGuard = null } = {}) {
-  const row = await database('scheduled_services as ss')
-    .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-    .where('ss.id', rowId)
-    .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
-      'ss.source_action', 'ss.customer_confirmed',
-      'ss.window_start', 'ss.window_end', 'ss.technician_id',
-      'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
-  if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
-  // Property identity is REQUIRED for automatic grouping (codex #3590
-  // r14): a null-property row (legacy / multi-home parent carrying only
-  // a stamped service address) would match any other null-property row
-  // for the customer that day, folding two addresses into one stop.
-  // Such rows group once property linkage stamps them (the linkage
-  // regroup pass) or by explicit office action.
-  if (!row.property_id) return null;
-  // A placed window is REQUIRED for automatic grouping (codex #3590
-  // r15): windowless overlaps anything, and a windowless row is by
-  // policy an unplaced placeholder (booking-wizard demotion clears the
-  // window + tech for the office). Office placement/explicit grouping
-  // is the path for those rows — as subject AND as partner.
-  if (!row.window_start) return null;
-  if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
-  if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
-  // Autopay exclusion (spec rev-2 item: "autopay customers are not
-  // grouped until grouped autopay ships"; owner ruling 2026-08-31) —
-  // see customerExcludedByAutopay for what it protects (the Phase-2
-  // visit-level PI contract; per-row billing today is once per row,
-  // group or not). FAST PATH ONLY — the authoritative check runs inside
-  // createOrJoinVisit under the customer row lock (pre-push codex P0
-  // TOCTOU); this unlocked read just avoids partner queries for a
-  // customer that will be refused anyway. Unit moves of existing visits
-  // never pass through createOrJoinVisit, so later enrollment cannot
-  // break them.
-  const closeoutEnabled = require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY;
-  if (!closeoutEnabled && await customerExcludedByAutopay(row.customer_id, database)) return null;
-  const partnersQ = database('scheduled_services as ss')
-    .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-    .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
-    .where('ss.customer_id', row.customer_id)
-    .where('ss.scheduled_date', dateOnly(row.scheduled_date))
-    .whereNot('ss.id', row.id)
-    .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
-    .where('svc.groupable', true)
-    .where('svc.group_family', row.group_family)
-    .whereNotNull('ss.window_start')
-    .where((q) => q.whereNull('ss.visit_id').orWhere((attached) => attached
-      .where('sv.status', 'open').where('sv.behavior_version', closeoutEnabled ? 2 : 1)))
-    .select('ss.id', 'ss.visit_id');
-  if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
-  else partnersQ.whereNull('ss.property_id');
-  partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
-    'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
-    'ss.source_action', 'ss.customer_confirmed',
-    'svc.groupable', 'svc.group_family');
-  // Every same-stop candidate, deterministically ordered — a cap made
-  // grouping depend on heap order once a customer had more rows than
-  // the cap (codex #3590 r12 P2). The set is bounded by one customer's
-  // one-day, one-property, one-family rows.
-  const partners = await partnersQ.orderBy('ss.window_start', 'asc').orderBy('ss.id', 'asc');
-  if (!partners.length) return null;
-  // Mutually compatible subset (codex r1 P1): one incompatible same-day
-  // row must not poison the whole grouping. Treat the new row as a
-  // pseudo-visit and keep only partners that would join it, then keep at
-  // most ONE attached visit's members (createOrJoinVisit refuses rows
-  // spanning two visits).
-  const pseudoVisit = { ...row, status: 'open' };
-  const compatible = partners.filter((p) => canJoin(p, pseudoVisit).ok
-    && windowsOverlap(row.window_start, row.window_end, p.window_start, p.window_end));
-  if (!compatible.length) return null;
-  const attachedVisit = compatible.find((p) => p.visit_id);
-  let subset = attachedVisit
-    ? compatible.filter((p) => !p.visit_id || String(p.visit_id) === String(attachedVisit.visit_id))
-    : compatible;
-  // Technician partition (codex r7 P2): when the new row is unassigned
-  // and partners span two technicians, keep ONE tech's partition
-  // (the attached visit's tech when present, else the first assigned
-  // partner's) plus unassigned partners — otherwise createOrJoinVisit
-  // rejects the whole mixed set and nothing groups.
-  if (!row.technician_id) {
-    const partTechs = [...new Set(subset.map((p) => p.technician_id).filter(Boolean).map(String))];
-    if (partTechs.length > 1) {
-      const keep = (attachedVisit && attachedVisit.technician_id && String(attachedVisit.technician_id))
-        || partTechs[0];
-      subset = subset.filter((p) => !p.technician_id || String(p.technician_id) === keep);
-    }
-  }
-  const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
-  if (preview) return { preview: true, rowIds: rows.map((r) => r.id) };
-  if (database && database.isTransaction) {
-    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database, lockedGuard });
-  }
-  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', lockedGuard });
 }
 
 // ---- Live transitions: one tap moves the whole stop (doc §3) ---------------
@@ -2120,8 +1535,8 @@ async function liveStopStartHHMM(conn, visitId) {
   return starts[0] || null;
 }
 
-// Ensure a member has a reminder row a hold can live on (shared by the
-// unit-move claim and createOrJoinVisit's join-inherit — codex r35): a
+// Ensure a member has a reminder row a hold can live on (the unit-move
+// claim — codex r35): a
 // WINDOWED member gets an ARMED registration (normal 72h/24h once any hold
 // clears), a windowless one the pre-closed 08:00 placeholder. Returns the
 // row (or null when the member has no usable schedule).
@@ -2530,9 +1945,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // /complete handler claims service_completion_attempts under the
         // row's stop lock and then lets an open, packet-less grouped row
         // complete where it sits (dissolving the visit at commit) — state
-        // canSplit cannot see. Mirror createOrJoinVisit's guard under the
-        // same stop lock + member row locks: a member with a live or
-        // succeeded claim freezes the move before anything is written. The
+        // canSplit cannot see. Under the same stop lock + member row locks,
+        // a member with a live or succeeded claim freezes the move before
+        // anything is written. The
         // rebooker repeats this under each member's own row locks
         // (VISIT_COMPLETION_IN_FLIGHT) for a claim that lands after the plan.
         // No catch: an unreadable ledger fails the move, never opens it.
@@ -3535,11 +2950,6 @@ module.exports = {
   liveStopStartHHMM,
   incompleteMoveMessage,
   appointmentSendHeld,
-  createOrJoinVisit,
-  maybeGroupRow,
-  customerExcludedByAutopay,
-  combinedCloseoutBehaviorVersion,
-  groupingRefusedByAutopay,
   splitChild,
   handleChildTerminal,
   handleChildStopChanged,
@@ -3585,7 +2995,6 @@ module.exports = {
     stopBaseKey,
     windowsOverlap,
     familiesCompatible,
-    canJoin,
     canDissolve,
     canSplit,
     isRowVisitBlocked,

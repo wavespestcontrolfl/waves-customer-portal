@@ -254,3 +254,105 @@ describe('codex #5389 r3', () => {
       .toMatchObject({ mode: 'hold' });
   });
 });
+
+// GATE_LAWN_WATERING_EVERY_VISIT (owner 2026-10-22): target rules, label minimums and the label's second step.
+describe('target rules, label minimums and second steps', () => {
+  const { rulesForTargets } = require('../services/service-report/lawn-watering-rule');
+  const ACELEPRYN = {
+    by_target: [
+      { match: ['caterpillar', 'webworm'], mode: 'hold', hold_hours: 24, label_minimum: { hold_until: 'dry' } },
+      { match: ['grub'], mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, label_note: 'grubs' },
+    ],
+    source: 'owner',
+    label_note: 'parent',
+  };
+  const HEADWAY = {
+    mode: 'hold',
+    hold_until: 'dry',
+    by_target: [{ match: ['spring dead spot'], mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true }],
+    source: 'owner',
+  };
+  const valid = (rule) => validateRule(rule).rule;
+
+  test('a target-only rule validates and has no product-wide mode', () => {
+    const checked = validateRule(ACELEPRYN);
+    expect(checked.valid).toBe(true);
+    expect(checked.rule.mode).toBeUndefined();
+    expect(checked.rule.by_target[0]).toMatchObject({ match: ['caterpillar', 'webworm'], label_minimum: { hold_until: 'dry' } });
+  });
+
+  test.each([
+    ['no mode and no targets', { source: 'owner' }, /mode must be one of/],
+    ['an empty target list', { mode: 'hold', by_target: [], source: 'owner' }, /by_target must be a list/],
+    ['an entry with no words', { by_target: [{ match: [], mode: 'none' }], source: 'owner' }, /match must be a list/],
+    ['an unknown entry key', { by_target: [{ match: ['grub'], mode: 'none', source: 'label' }], source: 'owner' }, /unknown key: by_target\[0\]\.source/],
+    ['a minimum on a water-in', { mode: 'water_in', label_minimum: { hold_until: 'dry' }, source: 'owner' }, /label_minimum is for a hold only/],
+    ['a minimum longer than the hold', { mode: 'hold', hold_hours: 4, label_minimum: { hold_hours: 6 }, source: 'owner' }, /cannot be longer than hold_hours/],
+    ['a second step on a none', { mode: 'none', then_water_in: { water_in_inches: 0.5, water_in_by_hours: 168 }, source: 'owner' }, /then_water_in is for a hold only/],
+    ['a second step inside the hold', { mode: 'hold', hold_hours: 24, then_water_in: { water_in_inches: 0.5, water_in_by_hours: 24 }, source: 'owner' }, /must be longer than hold_hours/],
+    ['rain counting on a same-day water-in', { mode: 'water_in', water_in_same_day: true, rain_counts: true, source: 'owner' }, /rain_counts cannot be true with water_in_same_day/],
+  ])('refuses %s', (_, rule, error) => {
+    const checked = validateRule(rule);
+    expect(checked.valid).toBe(false);
+    expect(checked.errors.join('; ')).toMatch(error);
+  });
+
+  test('logged targets that point one way pick that target rule; each picked rule is a valid rule of its own', () => {
+    const rule = valid(ACELEPRYN);
+    expect(rulesForTargets(rule, ['White grubs']).map((r) => r.mode)).toEqual(['water_in']);
+    expect(rulesForTargets(rule, ['Tropical sod webworms']).map((r) => r.mode)).toEqual(['hold']);
+    for (const picked of [...rulesForTargets(rule, ['White grubs']), ...rulesForTargets(rule, ['Tropical sod webworms'])]) expect(validateRule(picked).valid).toBe(true);
+    expect(rulesForTargets(rule, ['White grubs'])[0]).toMatchObject({ source: 'owner', label_note: 'grubs' });
+  });
+
+  test('the untouched label prefill reads the product\'s main use; an edited mixed list reads every named target', () => {
+    const ACELEPRYN_LABEL = ['Tropical sod webworms', 'Fall armyworms', 'White grubs', 'Billbugs'];
+    const XTRA_LABEL = ['Southern chinch bugs', 'Tropical sod webworms', 'White grubs', 'Fall armyworms'];
+    const HEADWAY_LABEL = ['Large patch', 'Gray leaf spot', 'Take-all root rot', 'Fairy ring'];
+    // The prefill (any order, any case): the caterpillar hold, never hold-then-water-in.
+    expect(rulesForTargets(valid(ACELEPRYN), ['White grubs', 'tropical sod webworms', 'Fall armyworms'], { labelTargets: ACELEPRYN_LABEL }))
+      .toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    // A prefill with a target no entry names: still the main use, not no rule.
+    expect(rulesForTargets(valid(ACELEPRYN), XTRA_LABEL.slice(0, 3), { labelTargets: XTRA_LABEL }))
+      .toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    // A list the technician chose: every named direction (the builder combines them).
+    expect(rulesForTargets(valid(ACELEPRYN), ['Tropical sod webworms', 'White grubs'], { labelTargets: ACELEPRYN_LABEL }).map((r) => r.mode)).toEqual(['hold', 'water_in']);
+    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'], { labelTargets: HEADWAY_LABEL }).map((r) => r.mode)).toEqual(['water_in', 'hold']);
+    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'], { labelTargets: HEADWAY_LABEL })[1].by_target).toBeUndefined();
+    // ...but a chosen target the label gives no line for, on a target-only rule: no rule.
+    expect(rulesForTargets(valid(ACELEPRYN), ['Billbugs', 'White grubs'], { labelTargets: ACELEPRYN_LABEL })).toEqual([]);
+  });
+
+  test('catalog label targets unknown: a list that is not one way is ambiguous, no rule', () => {
+    expect(rulesForTargets(valid(ACELEPRYN), ['Tropical sod webworms', 'Fall armyworms', 'White grubs'])).toEqual([]);
+    expect(rulesForTargets(valid(HEADWAY), ['Large patch', 'Spring dead spot'])).toEqual([]);
+    // One-way lists and lists no entry names do not need them.
+    expect(rulesForTargets(valid(ACELEPRYN), ['White grubs']).map((r) => r.mode)).toEqual(['water_in']);
+    expect(rulesForTargets(valid(HEADWAY), ['Gray leaf spot']).map((r) => r.mode)).toEqual(['hold']);
+  });
+
+  test('no target logged: the product-wide rule, or for a target-only rule its first entry (the main use)', () => {
+    expect(rulesForTargets(valid(ACELEPRYN), [])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    expect(rulesForTargets(valid(ACELEPRYN), ['  '])).toEqual([expect.objectContaining({ mode: 'hold', hold_hours: 24 })]);
+    expect(rulesForTargets(valid(HEADWAY), null)).toEqual([expect.objectContaining({ mode: 'hold', hold_until: 'dry' })]);
+  });
+
+  test('a hold with a second step carries its own rain-counting water-in', () => {
+    const blindside = valid({ mode: 'hold', hold_hours: 24, then_water_in: { water_in_inches: 0.5, water_in_by_hours: 168 }, source: 'label' });
+    const [hold, later] = rulesForTargets(blindside, []);
+    expect(hold.then_water_in).toBeUndefined();
+    expect(later).toMatchObject({ mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 168, rain_counts: true, source: 'label' });
+    expect(validateRule(later).valid).toBe(true);
+  });
+
+  test('no rule is no rule', () => {
+    expect(rulesForTargets(null, ['White grubs'])).toEqual([]);
+  });
+
+  test('only targets the label gives no line for: no rule on a target-only product, never another target\'s direction', () => {
+    expect(rulesForTargets(valid(ACELEPRYN), ['Southern chinch bugs'])).toEqual([]);
+    expect(rulesForTargets(valid(ACELEPRYN), ['Southern chinch bugs', 'Billbugs'])).toEqual([]);
+    // A product-wide rule covers a target no entry names.
+    expect(rulesForTargets(valid(HEADWAY), ['Gray leaf spot']).map((r) => r.mode)).toEqual(['hold']);
+  });
+});

@@ -93,6 +93,8 @@ const UNRECORDED_DECLINE_CODES = new Set([
   'reprice_page_limit',
   // A move refused for a wait (a visit being finalized or completed): retry in a moment (Codex #6371 r19).
   'visit_busy_move',
+  // A cancel refused because the customer's record is locked (an edit or merge): retry in a moment (#6377).
+  'customer_busy_cancel',
 ]);
 // A tool's own refusal that sends the operator to another screen. Only used to
 // classify; the text itself is never stored (it can hold customer data).

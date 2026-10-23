@@ -421,9 +421,11 @@ describe('the confirmed run', () => {
   });
 
   test('the tool reaches no message sender, and the only Stripe calls are two reads', () => {
-    const source = require('fs').readFileSync(require.resolve('../services/intelligence-bar/void-invoice-tools.js'), 'utf8');
+    // The tool plus the shared invoice classifier it calls (its refusal rules moved there unchanged).
+    const readSource = (rel) => require('fs').readFileSync(require.resolve(rel), 'utf8');
+    const source = readSource('../services/intelligence-bar/void-invoice-tools.js') + readSource('../services/invoice-void-classifier.js');
     expect(source).not.toMatch(/twilio|sendgrid|sendSms|sendEmail|notifyAdmin|messaging|refund\(|cancelPaymentIntent|createPaymentIntent|charge\(/i);
-    const stripeCalls = [...source.matchAll(/require\('\.\.\/stripe'\)\.(\w+)/g)].map((m) => m[1]).sort();
+    const stripeCalls = [...source.matchAll(/require\('\.{1,2}\/stripe'\)\.(\w+)/g)].map((m) => m[1]).sort();
     expect(stripeCalls).toEqual(['assertNoInvoiceChargeReconciliationPending', 'retrievePaymentIntent']);
   });
 });

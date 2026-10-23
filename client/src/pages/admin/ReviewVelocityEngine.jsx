@@ -394,7 +394,8 @@ export function decisionLine(seq, sequencesEnabled) {
   const label =
     DECISION_LABELS[d.reason] ||
     (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
-  // nextRunAt is when the row becomes ELIGIBLE; the worker runs at :14/:44,
+  // nextRunAt is when the row becomes ELIGIBLE; the worker runs at :14/:44
+  // (every 5 minutes with GATE_REVIEW_SENDER_EVERY_5_MIN),
   // so the planned send is the next tick the server computes
   // (nextSendTickAt) — a 4:30 PM row cannot text before 4:44 (codex #4140 r4).
   const when =

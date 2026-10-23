@@ -148,6 +148,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('propose_admin_edit');
 CURATED_PREVIEW_TOOL_NAMES.add('convert_lead');
 // void_invoice: its card lines come from its own preview (void-invoice-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('void_invoice');
+// The invoice edit cards: card lines come from their own previews (invoice-edit-tools.js cardLines). None sends anything.
+for (const name of ['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // The invoice reminder and payment-plan cards: their card lines come from their own previews (invoice-reminder-tools.js and
 // payment-plan-tools.js cardLines), never the generic dump.
 for (const name of ['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan']) CURATED_PREVIEW_TOOL_NAMES.add(name);
@@ -226,6 +228,10 @@ const ACTION_LABELS = {
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
   void_invoice: 'Void an invoice (sends nothing)',
+  edit_invoice: 'Edit an invoice’s title, notes or due date (sends nothing)',
+  archive_invoice: 'Archive a voided invoice (sends nothing)',
+  unarchive_invoice: 'Unarchive an invoice (sends nothing)',
+  unvoid_invoice: 'Restore a voided invoice to a draft (sends nothing)',
   pause_invoice_reminders: 'Pause an invoice’s reminders (sends nothing)',
   resume_invoice_reminders: 'Resume an invoice’s reminders',
   stop_invoice_reminders: 'Stop an invoice’s reminders (sends nothing)',
@@ -771,10 +777,26 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
         Number(inv.deposit_credit) > 0 ? `$${Number(inv.deposit_credit).toFixed(2)} deposit credit` : null,
       ].filter(Boolean);
       const restoredText = restored.length ? `; ${restored.join(' and ')} restored` : '';
-      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''})${restoredText} — skipped for office review if a payment is in flight, it sits on a finalized statement, or its amounts change first`);
+      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''})${restoredText} — skipped for office review if a payment is in flight, it sits on a finalized statement, or its amounts change first${c.with_effects && inv.payment_intent ? '; its open card payment attempt is cancelled first (no charge, no refund)' : ''}`);
     }
-    if ((c.invoices || []).length) {
+    if ((c.invoices || []).length && !c.with_effects) {
       push('billing', 'Only the invoices listed above are voided — anything created after this card is left for office review');
+    }
+    // GATE_IB_CANCEL_WITH_EFFECTS: Confirm replays the Dispatch cancel for this one visit, so every effect of that
+    // handler is stated here: the open invoices it voids (above), the invoices it leaves alone, and the linked visits.
+    if (c.with_effects) {
+      push('operational', 'Runs the Dispatch cancel for this one visit only (not the series)');
+      const voidedIds = new Set((c.invoices || []).map((inv) => String(inv.id)));
+      for (const inv of c.linked_invoices || []) {
+        if (voidedIds.has(String(inv.id))) continue;
+        push('billing', `Invoice ${inv.invoice_number || inv.id} (${inv.status}) stays as it is — nothing to void`);
+      }
+      for (const visit of c.linked_visits || []) {
+        push('operational', `Also cancels the linked follow-up visit${visit.service_type ? ` (${visit.service_type})` : ''}${visit.scheduled_date ? ` on ${visit.scheduled_date}` : ''}, with no text for it`);
+        if (visit.technician_notice === 'may_notify') {
+          push('comms', `Tech ${visit.technician_name || 'assigned to it'} may be notified of the cancellation for ${visit.scheduled_date || 'that day'} ${visit.service_type || 'visit'} (tech home card + push)`);
+        }
+      }
     }
     // Inspection-credit reversal (appointment-cancel-impact.js's read-only
     // mirror of inspection-credit.reverseInspectionCreditForBooking): most
@@ -871,6 +893,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // void_invoice: the invoice, what the void does and that nothing is sent.
   if (toolName === 'void_invoice' && preview?.preview === true) {
     for (const line of require('./void-invoice-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // The invoice edit cards: the invoice, each change before -> after, what it does and that nothing is sent.
+  if (['edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./invoice-edit-tools').cardLines(toolName, preview)) push(line.kind, line.text, line.before !== undefined ? { before: line.before, after: line.after } : {});
   }
   // The invoice reminder cards: what each does, and for send-now and schedule the channel, the masked recipient and the message.
   if (['pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send'].includes(toolName) && preview?.preview === true) {
@@ -1120,6 +1146,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // job-status.js#previewCancellationNoticeVerdict for the exact rule.
   const cancelCustomerNotice = toolName === 'cancel_appointment'
     ? (preview?.cancellation?.customer_notice || 'none') : 'none';
+  // GATE_IB_CANCEL_WITH_EFFECTS: the Dispatch handler composes the cancellation text itself; the card shows the exact
+  // text (customer_text.body) and Confirm sends notifyCustomer as the card shows it.
+  const cancelEffects = toolName === 'cancel_appointment' && preview?.cancellation?.with_effects === true
+    ? preview.cancellation : null;
+  const cancelTextGoesOut = cancelEffects !== null && cancelEffects.notify_customer === true && cancelEffects.customer_text?.would_send === true;
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
     : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText
@@ -1133,7 +1164,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // when the preview found they will go out; each rides its own comms line.
       || (toolName === 'accept_estimate' && preview?.notifies_customer === true)
       || tierUpgradeEmail
-      || cancelCustomerNotice !== 'none');
+      || cancelCustomerNotice !== 'none' || cancelTextGoesOut);
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
@@ -1189,7 +1220,21 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (bookingConfirmationLines) bookingConfirmationLines.forEach((line) => push('comms', line));
     // The tier-upgrade email has its own line above; an email change on the
     // same card has its own double-opt-in line too.
-    else if (!tierUpgradeEmail) push('comms', contactLabel);
+    else if (cancelTextGoesOut) {
+      // One line per approved recipient with the exact text: Confirm sends these bodies and no others.
+      for (const r of cancelEffects.customer_text.recipients || []) {
+        push('comms', `Text to the ${r.role || 'primary'} contact ending ${r.phone_last4 || '????'}, if they can receive texts: "${String(r.body)}"`);
+      }
+    } else if (!tierUpgradeEmail) push('comms', contactLabel);
+  }
+
+  if (cancelEffects && !cancelTextGoesOut) {
+    const why = cancelEffects.notify_customer !== true ? 'cancelled without a text, as asked'
+      : cancelEffects.customer_text?.reason === 'no_reminder_record' ? 'this visit has no reminder record, so no text is composed'
+        : 'no cancellation text can be composed for this visit';
+    push('comms', `No cancellation text goes to the customer (${why})`);
+  } else if (cancelTextGoesOut) {
+    push('comms', 'To cancel without a text, ask for "cancel without a text" and a new card is shown');
   }
 
   // cancel_appointment's assigned-technician cancel notice
@@ -1251,7 +1296,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // tool (it never deletes a variable or writes anything but true/false).
       || (toolName === 'set_railway_gate' && preview?.prior_kind !== 'boolean'),
     notifies_customer: notifiesCustomer,
-    notifies_technician: cancelTechnicianNotice !== 'none',
+    notifies_technician: cancelTechnicianNotice !== 'none' || (preview?.cancellation?.linked_visits || []).some((v) => v.technician_notice === 'may_notify'),
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)

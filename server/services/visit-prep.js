@@ -418,7 +418,7 @@ async function preserveResubmittedFields(trx, current, duplicate, { topic, locat
 // shared directly: that route requires this service, so importing its
 // helper back would form a require cycle — this is a deliberately minimal
 // local copy of just the retry loop, not the route's other logic.
-// Customer row BEFORE the stop lock: createOrJoinVisit takes the customer
+// Customer row BEFORE the stop lock: the visit writers take the customer
 // (FOR NO KEY UPDATE) and then the stop advisory lock, so taking them the
 // other way round here could deadlock a booking against an upload (Codex
 // #5306 r2 P2). FOR SHARE keeps a deactivation or delete waiting until the

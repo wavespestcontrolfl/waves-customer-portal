@@ -155,7 +155,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 20, color: TEXT, margin: 0 }}>{status.label}</h2>
       </div>
       {statusSummary ? (
-        <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
+        <p className="sr-v2-body" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
       ) : null}
       {/* The score pill hides when the reading is still insufficient (score
           null) — the metric may then exist solely to carry the rating picker. */}
@@ -181,7 +181,8 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
           text={aiSummary.body}
           sections={reportSections}
           nextVisitLabel={nextVisitLabel}
-          style={{ fontSize: 16, color: TEXT, lineHeight: 1.55, margin: '12px 0 0' }}
+          className="sr-v2-body"
+          style={{ fontSize: 16, color: TEXT, lineHeight: 1.5, margin: '12px 0 0' }}
           titleStyle={{ color: TEXT, fontSize: 18 }}
         />
       ) : null}

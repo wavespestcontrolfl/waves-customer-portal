@@ -13,7 +13,6 @@ jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn
 jest.mock('../services/visit-groups', () => ({
   handleChildStopChanged: jest.fn().mockResolvedValue(undefined),
   handleChildTerminal: jest.fn().mockResolvedValue(undefined),
-  maybeGroupRow: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock('../services/appointment-reminders', () => ({
   releaseMoveHoldIfRepaired: jest.fn().mockResolvedValue(undefined),
@@ -426,9 +425,10 @@ describe('Codex r9 writers (source order)', () => {
 
   test('the call follow-up cancel cascade carries the acting staff row from both callers (child card + history)', () => {
     const track = read('../services/track-transitions.js');
-    expect(track).toContain('async function cascadeCallFollowUpCancel(serviceId, actorId = null) {');
-    expect(track).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: serviceId, actorId });");
-    expect(track.match(/cascadeCallFollowUpCancel\(serviceId, actorId\)/g)).toHaveLength(3);
+    expect(track).toContain('async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null) {');
+    // approval is the opt-in Intelligence Bar cancel card (approved linked visits); null for every other caller.
+    expect(track).toContain('conn: db, parentServiceId: serviceId, actorId,');
+    expect(track.match(/cascadeCallFollowUpCancel\(serviceId, actorId, approval\)/g)).toHaveLength(3);
     expect(track).not.toContain('cascadeCallFollowUpCancel(serviceId);');
     const offboarding = read('../services/customer-offboarding.js');
     expect(offboarding).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id, actorId: actorId || null });");
@@ -470,15 +470,6 @@ describe('Codex r7 writers (source order)', () => {
   test('offboarding skips the cancel card on a same-status repair (row already cancelled when re-read)', () => {
     const src = read('../services/customer-offboarding.js');
     expect(src).toContain("if (String(fresh.status) !== 'cancelled') {\n    void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null, previousStatus: fresh.status });");
-  });
-
-  test('Office Combine suppresses every tentative move (forward and rollback) and tells the holders after tryGroup() stands', () => {
-    const src = read('../services/visit-combine.js');
-    expect(src).toContain('    suppressTechNotice: true,\n    expect,');
-    const group = src.indexOf('const visit = await tryGroup();');
-    const notice = src.indexOf('void techNotices.notifyVisitRescheduled({');
-    expect(notice).toBeGreaterThan(group);
-    expect(src.indexOf('} catch (err) {', group)).toBeGreaterThan(notice);
   });
 });
 

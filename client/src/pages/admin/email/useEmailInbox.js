@@ -453,6 +453,10 @@ export default function useEmailInbox(active, clearDraftResult) {
     selectedEmail,
     thread,
     openEmail,
+    // Opens a message by id through the URL, the way a linked email opens.
+    // Inbox is set explicitly: the id may already be selected, and then the
+    // selection effect returns before it would switch the tab.
+    showEmailById: (id) => { setTab("inbox"); selectMessageId(id); },
     closeEmail,
     handleStar,
     removeEmail,

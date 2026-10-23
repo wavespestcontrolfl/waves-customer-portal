@@ -33,7 +33,6 @@ jest.mock('../services/booking/create-scheduled-service', () => ({
   completeScheduledServiceInsert: jest.fn(async (data, { source }) => ({ ...data, source_action: source.sourceAction })),
 }));
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn() }));
-jest.mock('../services/visit-groups', () => ({ maybeGroupRow: jest.fn() }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn() }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn() }));
 

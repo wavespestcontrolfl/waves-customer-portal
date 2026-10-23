@@ -1088,6 +1088,20 @@ function initScheduledJobs() {
   cron.scheduleTimeout(pmGuardFirstsTick, 120 * 1000);
   cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
 
+  // EVERY MINUTE — Gmail-style scheduled emails (GATE_EMAIL_SEND_LATER; the
+  // sender returns at once with the gate off). A minute keeps "9:00 AM" at
+  // 9:00-9:01. No cron lease: the row claim (FOR UPDATE SKIP LOCKED) makes
+  // each email go out at most once across the fleet, and a lease could wait
+  // or skip and send late. runScheduledSweep records job_health so that a
+  // concurrent empty sweep never hides a failed one.
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./email/scheduled-email-sender').runScheduledSweep();
+    } catch (err) {
+      logger.error(`[scheduled-email] sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
   cron.schedule('*/5 * * * *', async () => {
     try {
@@ -1392,31 +1406,6 @@ function initScheduledJobs() {
   };
   cron.schedule('55 3 * * *', () => runPropertyEnrichBackfill(), { timezone: 'America/New_York' });
   registerDeployKillRetry('property-enrich-backfill', () => runPropertyEnrichBackfill({ afterKill: true }));
-
-  // =========================================================================
-  // DAILY 2:25AM ET — same-stop regroup sweep. Future same-day services at
-  // one stop that qualify for a visit group but were never grouped (written
-  // before the gates, while autopay customers were excluded, or by a writer
-  // that never calls maybeGroupRow: moves, series extension) are folded into
-  // one visit through the canonical maybeGroupRow / createOrJoinVisit path.
-  // Only loose pairs more than 76h out (no reminder due or in flight), so a
-  // tech's near days never change under them.
-  // Inert unless GATE_VISIT_GROUPS is on (checked inside the sweep). Grouping
-  // writes no customer message. runExclusive: read-then-act; a deploy overlap
-  // must not run two sweeps over the same rows.
-  // =========================================================================
-  cron.schedule('25 2 * * *', async () => {
-    if (!isEnabled('visitGroups')) return;
-    try {
-      const res = await runExclusive('visit-regroup-same-stop', () =>
-        require('./visit-regroup').regroupUngroupedSameStopRows({ dryRun: false }));
-      if (res && !res.skipped && (res.groups.length || res.left.length)) {
-        logger.info(`[visit-regroup] grouped ${res.groups.length} stop(s); left ${res.left.length} row(s) alone (${res.candidates} candidates)`);
-      }
-    } catch (err) {
-      logger.error(`[visit-regroup] nightly same-stop regroup failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
 
   // =========================================================================
   // WEEKLY MON 7:41AM ET — Manatee permit sync (public ACA CSV reports →
@@ -8043,13 +8032,22 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY 30 MIN (:14/:44 — own minutes) — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
+  // GATE_REVIEW_SENDER_EVERY_5_MIN: every 5 minutes on the same offset
+  // (:04 ... :59). The cron fires on all of those minutes; the body runs only
+  // on the minutes reviewCadenceTickMinutes() names, so the Reviews page and
+  // the completion panel show the ticks it really runs on. A late callback
+  // (a busy loop can push it past the minute) still counts as its minute.
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  cron.schedule('14,44 * * * *', async () => {
+  // An explicit list: node-cron 3 reads `4-59/5` as minutes divisible by 5.
+  cron.schedule('4,9,14,19,24,29,34,39,44,49,54,59 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
+    const minute = new Date().getUTCMinutes();
+    const ticks = require('./review-request').__private.reviewCadenceTickMinutes();
+    if (!ticks.includes(minute) && !ticks.includes((minute + 59) % 60)) return;
     try {
       await runExclusive('review-sequences', async () => {
         const ReviewService = require('./review-request');

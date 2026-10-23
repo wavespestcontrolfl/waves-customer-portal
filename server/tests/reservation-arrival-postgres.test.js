@@ -65,7 +65,6 @@ async function registerRows({ rows, customerId }) {
 
 postgres('reservation arrival through existing reminder mechanisms', () => {
   beforeAll(async () => {
-    expect(require('../config/feature-gates').isEnabled('visitGroups')).toBe(false);
     const url = new URL(connection);
     const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && url.pathname === '/waves_test';
     if (!local && !/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname)) throw new Error('Use a verified private dev database');

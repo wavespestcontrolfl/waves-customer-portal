@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const { dictatedAmountsNote } = require('../utils/spoken-money');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
@@ -954,6 +954,19 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // The invoice edit cards (GATE_IB_INVOICE_EDITS): the invoice, the customer and the headline; the lines ride the contract.
+  edit_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'edit_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, total: `${preview.amount} (unchanged)`, changes: (preview.changes || []).map((c) => `${c.field}: ${c.before} -> ${c.after}`), sends_to_customer: 'nothing' }
+    : null),
+  archive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'archive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unarchive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unarchive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unvoid_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unvoid_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, amount: preview.amount, becomes: preview.becomes, reminders_restart: 'only when it is sent again', sends_to_customer: 'nothing' }
+    : null),
   // The invoice reminder and payment-plan cards: each names the invoice and the customer; the lines ride the contract.
   pause_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'pause_invoice_reminders'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> paused`, sends_to_customer: 'nothing' }
@@ -1029,6 +1042,11 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // The invoice edit cards bind the invoice version (and, per card, the body, credit balance or visit) they showed.
+  edit_invoice: '_verified_invoice_edit_version',
+  archive_invoice: '_verified_invoice_archive_version',
+  unarchive_invoice: '_verified_invoice_unarchive_version',
+  unvoid_invoice: '_verified_invoice_unvoid_version',
   // The reminder cards bind the invoice, its reminder row, the recipients and the message the card showed; the payment-plan
   // cards bind the invoice, the plan terms (every installment) and the reminder row.
   pause_invoice_reminders: '_verified_invoice_reminder_version',
@@ -1921,10 +1939,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // the SAME id the commit-time recheck passes as its own confirming
       // actor in the common case (propose then immediately confirm), so
       // technician_notice reads the same at both points.
-      const { computeCancelAppointmentImpact } = require('../services/appointment-cancel-impact');
+      // The no-text option is carried only by the replay (GATE_IB_CANCEL_WITH_EFFECTS). The bare-visit path cannot
+      // suppress the shared notice hook, so an explicit "no text" is refused rather than silently ignored.
+      if (!ibCancelWithEffectsLive() && params.notify_customer === false) {
+        return { failed: true, modelResult: { error: "Cancelling without a customer text is not enabled (GATE_IB_CANCEL_WITH_EFFECTS), so the bar can't cancel this visit without a text from here yet. Nothing was changed.", code: 'gate_off' } };
+      }
+      const { computeCancelAppointmentImpact, cancelWithEffectsRefusal } = require('../services/appointment-cancel-impact');
+      // GATE_IB_CANCEL_WITH_EFFECTS: the card also carries the invoice, credit and linked-visit effects and the
+      // customer text, and Confirm replays the Dispatch cancel. notify_customer (default true) is the card's choice.
+      const withEffects = ibCancelWithEffectsLive();
       let impact;
       try {
-        impact = await computeCancelAppointmentImpact(params.appointment_id, { actorId: getAdminActorId(req) });
+        impact = await computeCancelAppointmentImpact(params.appointment_id, {
+          actorId: getAdminActorId(req),
+          ...(withEffects ? { withEffects: true, notifyCustomer: params.notify_customer !== false } : {}),
+        });
       } catch (err) {
         logger.warn(`[intelligence-bar] cancel proposal impact unavailable for ${params.appointment_id}: ${err.message}`);
         return { failed: true, modelResult: { error: 'The cancellation effects could not be verified right now — nothing was proposed.' } };
@@ -1950,8 +1979,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with the
       // commit-side refusal (tools.js) rather than a second copy.
       if ((impact.card_cancel_refusals || []).length) {
+        if (withEffects) return { failed: true, modelResult: cancelWithEffectsRefusal(impact) };
         return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' } };
       }
+      if (withEffects) params.notify_customer = params.notify_customer !== false;
       params._frozen_cancellation_impact = impact;
       preview = { ...preview, cancellation: impact };
     }
@@ -2203,7 +2234,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // send_invoice: the stored approval names the invoice the preview resolved,
   // never the number the model sent.
-  if (['send_invoice', 'record_payment', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
+  if (['send_invoice', 'record_payment', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
@@ -3461,7 +3492,8 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
-- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, apply account credit, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoice edits (each only when it is in your tools, each its own confirmation card; none sends a message, charges a card or refunds): edit_invoice changes an unpaid invoice's title, notes or due date only (never a line item, the tax rate or the total: those stay on the Invoices page; it does not resend the invoice); archive_invoice / unarchive_invoice hide or restore a voided invoice in the list; unvoid_invoice turns a voided invoice back into a draft. Anything else on an invoice stays on the Invoices page.
 - Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for FUTURE billing on a customer who pays for themselves today and has no open unpaid invoice or checkout; no existing invoice moves. A customer with open invoices, moving existing invoices to a payer, changing or removing an existing payer, or adding a new payer stays on the customer page. There is no per-invoice Bill-To: the payer is set on the account.
 - Invoice reminders and payment plans (when they are in your tools): pause_invoice_reminders, resume_invoice_reminders and stop_invoice_reminders change one invoice's automatic reminders and send nothing; send_invoice_reminder_now texts and emails the customer the next reminder, and schedule_invoice_send sends the invoice later at a set Eastern time (give send_at_et as YYYY-MM-DDTHH:MM); create_payment_plan records a plan of equal installments and emails the customer the plan confirmation but never charges a card; cancel_payment_plan cancels the active plan. Each shows a confirmation card first. Never promise a plan collects money on its own.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
@@ -4791,8 +4823,10 @@ async function commitPendingAction(req, { id, contractHash }) {
     // A gate-on row that DOES carry the pin falls through to the normal
     // claim/dispatch path below; tools.js cancelAppointment re-verifies the
     // pin against a fresh impact read and refuses on drift.
+    // A card proposed with effects (GATE_IB_CANCEL_WITH_EFFECTS) also needs that gate still on.
     if (action.tool_name === 'cancel_appointment'
-      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
+      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact
+        || (action.params._frozen_cancellation_impact.with_effects === true && !ibCancelWithEffectsLive()))) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: ibCancelAppointmentLive() ? 'cancel_with_effects_unsupported' : 'cancel_gate_off' };
       await PendingActions.recordResult(action.id, result);
       await recordConfirmedGaps(action.tool_name, result);

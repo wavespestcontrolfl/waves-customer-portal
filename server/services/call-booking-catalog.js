@@ -892,6 +892,27 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 // parent-linked flow untouched. Best-effort per child, and callers invoke
 // this after their own parent-cancel commits — a cascade failure must
 // never fail the parent cancel.
+// The re-check an approved linked visit passes under its own row lock before the parent's cancel takes it along.
+async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want) {
+  const changed = (reason) => Object.assign(new Error(`linked follow-up ${childId} changed since the card: ${reason}`), { code: 'LINKED_CHILD_CHANGED', reason });
+  const locked = await applyCallFollowUpCancelFilter(trx('scheduled_services'), parentServiceId)
+    .where('id', childId).forUpdate().first('id', 'status', 'scheduled_date', 'service_type', 'technician_id', 'visit_id');
+  if (!locked) throw changed('no_longer_linked');
+  if (String(locked.status) !== String(want.status)) throw changed('status_changed');
+  // The card refuses a grouped linked visit; one grouped since (package follow-ups group automatically) would run the
+  // group hook (detach, window change, dissolve) on cancel, effects the card never showed.
+  if (locked.visit_id) throw changed('grouped_changed');
+  if (callBookingDateOnly(locked.scheduled_date) !== callBookingDateOnly(want.scheduled_date)) throw changed('date_changed');
+  if ((locked.service_type || null) !== (want.service_type || null)) throw changed('service_changed');
+  // The child's own tech cancel notice goes to whoever is assigned NOW: a reassigned child is not the one the card showed.
+  if (Object.prototype.hasOwnProperty.call(want, 'technician_id') && (locked.technician_id || null) !== (want.technician_id || null)) throw changed('technician_changed');
+  // The same money-rail checks the card ran on every linked visit (prepaid or coverage, estimate deposit or annual
+  // prepay, card request or hold, inspection-credit offer, any invoice), repeated on this child's own transaction and
+  // lock. A child that has money now is not cancelled by the bar's replay and never reaches the shared money seam.
+  const money = await require('./appointment-cancel-impact').linkedChildMoneyReason(trx, [{ id: childId }]);
+  if (money) throw changed(`money_added_${money}`);
+}
+
 // actorId: the staff row cancelling the parent (a technicians.id, or null)
 // — rides into each child's history + the child's tech cancel card, so a
 // technician cancelling their own booking hears nothing about its follow-up
@@ -900,17 +921,33 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 // packageOnly: the skipped / no-show cascade (job-status.js) — a package
 // visit 2 is treatment 2 of a visit 1 that never happened, so it goes; a
 // call-booked child keeps its office-owned lifecycle there, as before.
-async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null, packageOnly = false }) {
+// approvedChildren (opt-in, the Intelligence Bar cancel card): [{ id, status, scheduled_date, service_type, technician_id }], the
+// linked visits the operator approved. Only those are cancelled, each one only after it is re-read under its OWN row
+// lock and still matches the card (still a live linked follow-up, same status, date and service, no invoice of its
+// own); any other child, and any approved child that changed, is NOT cancelled and is listed in report.skipped
+// ({ id, reason }). Without approvedChildren every caller behaves exactly as before.
+async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null, packageOnly = false, approvedChildren = null, report = null }) {
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
   const childQuery = applyCallFollowUpCancelFilter(conn('scheduled_services'), parentServiceId);
   if (packageOnly) childQuery.where({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
-  const children = await childQuery.select('id', 'status', 'source_action');
+  const children = await childQuery.select('id', 'status', 'source_action', 'scheduled_date', 'service_type');
+  const approved = Array.isArray(approvedChildren) ? new Map(approvedChildren.map((c) => [String(c.id), c])) : null;
+  const skip = (id, reason) => {
+    logger.warn(`[call-booking] linked follow-up ${id} of ${parentServiceId} NOT cancelled with the parent: ${reason}`);
+    if (report && Array.isArray(report.skipped)) report.skipped.push({ id, reason });
+  };
+  if (approved) {
+    const present = new Set(children.map((c) => String(c.id)));
+    for (const id of approved.keys()) if (!present.has(id)) skip(id, 'no_longer_linked');
+  }
   let cancelled = 0;
   for (const child of children) {
+    if (approved && !approved.has(String(child.id))) { skip(child.id, 'not_on_card'); continue; }
     try {
       await conn.transaction(async (trx) => {
+        if (approved) await assertApprovedChildUnchanged(trx, parentServiceId, child.id, approved.get(String(child.id)));
         await transitionJobStatus({
           jobId: child.id,
           fromStatus: child.status,
@@ -920,7 +957,18 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
           // A package visit 2 arms reminders, so its own cancel could text the
           // customer; the parent's cancellation owns that choice (an operator
           // may have chosen no text), so the child never sends its own.
-          ...(child.source_action === PACKAGE_FOLLOWUP_SOURCE_ACTION ? { notifyCustomer: false } : {}),
+          // An approved cascade (the Intelligence Bar cancel card, which promises no text for a linked visit) texts
+          // no child either, call-booked or package.
+          ...(child.source_action === PACKAGE_FOLLOWUP_SOURCE_ACTION || approved ? { notifyCustomer: false } : {}),
+          // An approved child was checked money-free under its own lock, and the card promised nothing about its money.
+          // An invoice or inspection credit that lands between that check and the post-commit hook must not reach the
+          // ordinary unpinned void/reversal seam (it never appeared on the card or in moneyReport); it is left for office review.
+          ...(approved ? { moneySeam: 'caller' } : {}),
+          // The card promised no text for a linked visit. notifyCustomer false makes the writer write a terminal
+          // 'suppressed' marker, but only behind GATE_CANCEL_NOTICE_HOOK; cancelNoticeApproved writes it in this
+          // transaction whatever the gate says, so no pod can late-claim the child's reminder row and text it.
+          // (A claim an older notice already holds aborts this child's cancel: it stays active and is reported.)
+          ...(approved ? { cancelNoticeApproved: true } : {}),
           trx,
         });
         await trx('scheduled_services')
@@ -935,7 +983,10 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
       cancelled += 1;
       logger.info(`[call-booking] cancelled linked follow-up ${child.id} with parent ${parentServiceId}`);
     } catch (childErr) {
+      if (childErr && childErr.code === 'LINKED_CHILD_CHANGED') { skip(child.id, childErr.reason); continue; }
       logger.error(`[call-booking] call follow-up cancel cascade failed for child ${child.id} of ${parentServiceId}: ${childErr.message}`);
+      // Opt-in report: an approved linked visit that failed to cancel stays active, and the receipt must say so.
+      if (approved && report && Array.isArray(report.skipped)) report.skipped.push({ id: child.id, reason: 'cancel_failed' });
     }
   }
   return cancelled;

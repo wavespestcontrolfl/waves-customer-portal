@@ -500,7 +500,43 @@ async function resolveProposalBillingContext(estimate) {
   };
 }
 
+// Whether the offer was SENT in the per-application lane. buildPricingBundle
+// keeps (and backfills) the billedPerApplication flags for a customer billed
+// per application and strips every one, to the same depth, for a customer
+// billed monthly, so the frozen send bundle records the lane the customer was
+// quoted in. No bundle, or one frozen before the flags existed, answers false
+// (today's display).
+function sentBundleBillsPerApplication(estimate) {
+  const bundle = parseEstimateDataLoose(estimate?.estimate_data)?.sendSnapshot?.pricingBundle;
+  return carriesBilledPerApplicationFlag(bundle, 0);
+}
+// Mirrors estimate-public's stripBilledPerApplicationDeep walk (depth 6).
+function carriesBilledPerApplicationFlag(value, depth) {
+  if (depth > 6 || !value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some((entry) => carriesBilledPerApplicationFlag(entry, depth + 1));
+  return value.billedPerApplication === true
+    || Object.values(value).some((nested) => carriesBilledPerApplicationFlag(nested, depth + 1));
+}
+
+/**
+ * The billing context for a document that must describe the offer AS SENT, not
+ * today's price list or today's billing lane: livePricing is never resolved,
+ * so the proposal reads the frozen send snapshot (the way accepted / declined /
+ * price-locked rows already render), and the lane is the one the offer was
+ * sent in (sentBundleBillsPerApplication). Used by the staff PDF for a
+ * delivered quote the public page no longer serves; the caller checks that the
+ * send bundle exists, since without it the document has no recurring price to
+ * show. An annual prepay sale still renders the legacy document.
+ */
+async function resolveFrozenBillingContext(estimate) {
+  const prepaid = await estimateSoldAsAnnualPrepay(estimate);
+  return { billsPerApplication: sentBundleBillsPerApplication(estimate) && prepaid === false, livePricing: null };
+}
+
 module.exports = {
+  resolveFrozenBillingContext,
+  sentBundleBillsPerApplication,
+  perApplicationBillingColumnsExist,
   estimateBillsPerApplication,
   estimateIsPriceLocked,
   estimateSoldAsAnnualPrepay,
