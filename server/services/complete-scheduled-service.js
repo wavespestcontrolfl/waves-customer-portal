@@ -2122,6 +2122,7 @@ const FINDING_WHY = {
   [tsOrnamental.HISTORY_LIMIT_TYPE]: (name, f) => `${name}: ${f.reason}`,
   [tsOrnamental.UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
+  [tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
@@ -2137,6 +2138,7 @@ const tsUncheckedDetail = (fullName, f, svc) => (f.reason === 'history_unavailab
   : `${fullName} was ${tsOrnamental.uncheckedClause(f.reason)} on a ${svc.service_type || 'tree & shrub'} visit. The county limit is ${f.max} lb per 1,000 sq ft (0.75 lb per 100 sq ft), so the rate could not be held to it. Check the amount and treated area on the application record and report it if needed.`);
 FINDING_DETAIL[tsOrnamental.UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
 FINDING_DETAIL[tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
+FINDING_DETAIL[tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was submitted on a ${svc.service_type || 'tree & shrub'} visit, but its ${tsOrnamental.uncheckedClause(f.reason)}: the record's products could not be read back. Check the 13-0-13 amount, treated area and history on the application record and report it if needed.`;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -2160,7 +2162,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: unchecked ? `review ${name} ${finding.limitType === tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE ? 'history' : 'limit'} not checked` : over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : over ? `review ${name} over its limit` : 'review product limits not checked',
         why,
         severity: 'needs-you',
         who: 'person',
@@ -2967,6 +2969,9 @@ async function settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome) {
   });
 }
 
+// The names the completion payload itself carries for its products (an id-only row has none).
+const payloadProductNames = (products) => (Array.isArray(products) ? products : []).map((p) => p?.name || p?.product_name).filter(Boolean);
+
 async function completeScheduledService(completionInput, packetContext = null) {
   // Internal packet context is supplied separately from the HTTP body. All
   // member writes share its OUTER transaction; no member starts post-commit
@@ -3394,6 +3399,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // crossed: an advisory in the response and one dispatch alert. The work is done;
     // the completion is never blocked.
     let applicationLimitAdvisory = null;
+    // The names of the products this completion submitted (the payload's own, then the catalog's once it is read inside the record
+    // transaction): the only evidence of a 13-0-13 if the post-save read of the record's rows fails (tsOrnamental.flagOrnamentalFertilizer).
+    let submittedProductNames = payloadProductNames(products);
     let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
@@ -7145,6 +7153,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : []
             ).map((row) => [canonicalProductId(row.id), row]),
           );
+          submittedProductNames = [...completionCatalogRowsById.values()].map((row) => row.name).filter(Boolean);
           // Lawn Fast Complete: the target a spot fungicide / insecticide row is stored with (lawn-spot-target.js; the row's own tags for any other
           // completion). Resolved BEFORE the report facts freeze, so the stored application and every frozen report fact use the same targets.
           const spotTargets = await require('../services/lawn-spot-target').resolveForCompletion({
@@ -9594,7 +9603,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // rows and returns at once when none is a 13-0-13, so a Tree & Shrub companion on a lawn or pest visit is judged too, as is a
     // hand-added row as well as the suggestion.
     if (!issuedInvoiceCloseout) {
-      applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings });
+      applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames });
     }
 
     // The add-on's OWN yearly limit (maxPerYear / minDaysApart, the place-based history the booking used; the add-ons carry no

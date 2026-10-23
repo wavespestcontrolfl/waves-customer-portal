@@ -43,6 +43,7 @@ const CATALOG = [
   { id: 'oil', name: 'SuffOil-X', category: 'insecticide', tsFlags: { insectFamily: true, needsIracFrac: true } },
   // The bed fertilizer: held to the county cap, so its row carries the treated square feet.
   { id: 'orn', name: 'LESCO 13-0-13 60% PolyPlus Landscape', category: 'fertilizer', formulation: 'granular', rate_unit: 'lb', tsFlags: {} },
+  { id: 'palm812', name: 'LESCO 8-0-12 Palm & Tropical', category: 'fertilizer', formulation: 'granular', rate_unit: 'lb', tsFlags: {} },
   { id: 'drench', name: 'Imidacloprid Drench', category: 'insecticide', inventory_unit: 'fl_oz', inventory_on_hand: '0.0000', tsFlags: {} },
 ];
 
@@ -951,6 +952,17 @@ describe('13-0-13 treated square feet (the county cap needs an area)', () => {
     fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '13-0-13' } });
     fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 13-0-13/ }));
     expect(within(editorFor(orn)).queryByText(/^Held:/)).toBeNull();
+  });
+
+  test('another held product (the palm feed) shows the reason alone, with no office promise', async () => {
+    const palm = 'LESCO 8-0-12 Palm & Tropical';
+    const context = { ...CONTEXT, monthProductHolds: [{ name: palm, reason: 'The last palm feeding was less than three months ago.' }] };
+    await openSheet(makeRequest({ context }));
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '8-0-12' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 8-0-12/ }));
+    const line = within(editorFor(palm)).getByText(/^Held:/);
+    expect(line.textContent).toBe('Held: The last palm feeding was less than three months ago.');
+    expect(line.textContent).not.toMatch(/office/);
   });
 
   test('a held 13-0-13 still completes: the hold line never blocks the send', async () => {

@@ -464,6 +464,23 @@ describe('the office notification for a finding (raised through the admin alert 
     expect(historyCall.detail).toContain('Check this property\'s 13-0-13 history');
   });
 
+  test('a 13-0-13 whose post-save read failed rings a needs-you alert (limits_checked) with its own dedupe key', async () => {
+    const notify = notifyFor();
+    const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const message = '13-0-13 limits could not be checked for this visit; the office will review.';
+    const audit = { code: 'application_limit_exceeded', productName: name, limitType: 'ornamental_fertilizer_audit_unavailable', reason: 'audit_unavailable', current: null, max: 7.5, message };
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Lawn Care' }, record, findings: [audit, { ...audit, productId: 'p-orn', limitType: 'ornamental_fertilizer_rate_unchecked', reason: 'area_missing' }] });
+    expect(notify).toHaveBeenCalledTimes(2);
+    const [, headline, why, opts] = notify.mock.calls[0];
+    expect(headline).toBe('Schedule — review LESCO 13-0-13 60%… limits not checked');
+    expect(why).toBe('LESCO 13-0-13 60%… limits could not be checked for this visit.');
+    expect(opts.metadata.doneWhen).toBe('limits_checked');
+    expect(opts.detail).toContain('could not be read back');
+    expect(opts.metadata.dedupeKey).toBe('application-limit-finding:record-1:application_limit_exceeded:all:ornamental_fertilizer_audit_unavailable');
+    expect(notify.mock.calls[1][3].metadata.dedupeKey).not.toBe(opts.metadata.dedupeKey);
+    for (const call of notify.mock.calls) { expect(call[1].length).toBeLessThanOrEqual(60); expect(call[2].length).toBeLessThanOrEqual(110); }
+  });
+
   test('the 13-0-13 rate and history findings obey the notification rule and name the county limit and the reason', async () => {
     const notify = notifyFor();
     const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
@@ -488,7 +505,7 @@ describe('the office notification for a finding (raised through the admin alert 
     expect(at).toBeGreaterThan(0);
     // No service-line gate on the line before the call.
     expect(src.slice(at - 120, at)).not.toMatch(/detectServiceLine|tree_shrub/);
-    expect(src).toContain('tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings })');
+    expect(src).toContain('tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames })');
   });
 
   test('a bell that is not recorded (null) is logged, a failure never throws', async () => {

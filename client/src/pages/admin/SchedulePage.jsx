@@ -10216,8 +10216,36 @@ function requiresAreaSqft(method, serviceType = "") {
 // The LESCO 13-0-13 bed fertilizer on a Tree & Shrub visit is held to the county cap (0.75 lb per 100 sq ft), which the
 // closeout can only judge from the treated area: its row always needs the treated square feet, whatever the method.
 const BED_FEED_NAME = /\b13-0-13\b/;
-export function isBedFeedRow(product, serviceType = "") {
-  return serviceLineFromType(serviceType) === "tree_shrub" && BED_FEED_NAME.test(String(product?.name || ""));
+// The row is classified by the product's identity (its 13-0-13 name) whenever the visit has ANY Tree & Shrub work: the row's own
+// line, or `treeShrubWork` (a Tree & Shrub primary or companion, see visitHasTreeShrubWork). A lawn-primary visit with a Tree &
+// Shrub companion records the same product against the same county cap.
+export function isBedFeedRow(product, serviceType = "", treeShrubWork = false) {
+  return BED_FEED_NAME.test(String(product?.name || "")) && (treeShrubWork || serviceLineFromType(serviceType) === "tree_shrub");
+}
+
+// True when the visit has Tree & Shrub work: its own line or a Tree & Shrub companion (the
+// same companions the server judges for photos and regulatory compliance: service.companionSchemas, and the profile's companions).
+export function visitHasTreeShrubWork(service) {
+  const companions = [...(service?.companionSchemas || []), ...(service?.completionProfile?.companions || [])];
+  return serviceLineFromType(service?.serviceType || service?.service_type || "") === "tree_shrub"
+    || companions.some((item) => item?.type === "tree_shrub");
+}
+
+// The 13-0-13 row's starting treated area: the REVIEWED bed area, never the turf area. On a Tree & Shrub primary that is the visit's
+// bed coverage; on a lawn (or other) primary with a Tree & Shrub companion it is the property's reviewed beds figure. No areas loaded: blank.
+export function bedFeedStartArea({ currentPropertyAreas, propertyAreaLine, propertyTreatedArea }) {
+  if (propertyAreaLine === "tree_shrub") return propertyTreatedArea;
+  const beds = currentPropertyAreas?.areas?.beds;
+  return beds?.reviewedAt ? beds.sqft : "";
+}
+
+// The pre-submit lines for a Tree & Shrub visit's rows over their rate ceiling (a quiet advisory, never a block). Other rows use
+// their label ceiling only on a Tree & Shrub primary; a 13-0-13 row is judged on its effective rate (entered rate, else total
+// over treated area, like the server's cap check) on any visit with Tree & Shrub work.
+export function treeShrubRateAdvisories({ selectedProducts, highRateSelectedProducts, primaryIsTreeShrub, treeShrubWork }) {
+  const labelRows = primaryIsTreeShrub ? highRateSelectedProducts.filter((product) => !isBedFeedRow(product, "", treeShrubWork)) : [];
+  const bedRows = treeShrubWork ? selectedProducts.filter((product) => isBedFeedRow(product, "", true)) : [];
+  return [...labelRows, ...bedRows].map((product) => treeShrubHighRateAdvisory(product, "Tree & Shrub Care")).filter(Boolean);
 }
 
 // The pre-submit line for a Tree & Shrub row entered above its rate ceiling. The 13-0-13 ceiling is the COUNTY limit (0.75 lb per
@@ -10236,8 +10264,8 @@ export function treeShrubHighRateAdvisory(product, serviceType = "") {
   return `${name} rate ${product.rate} ${product.rateUnit || ""}${suffix} exceeds label max ${product.maxLabelRatePer1000} ${product.catalogRateUnit || ""}${suffix}.`;
 }
 
-function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false, includeServiceArea = false, product = null) {
-  if (isBedFeedRow(product, serviceType)) {
+function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false, includeServiceArea = false, product = null, treeShrubWork = false) {
+  if (isBedFeedRow(product, serviceType, treeShrubWork)) {
     return { unit: "sqft", label: "Treated sq ft", alertLabel: "the treated square feet" };
   }
   if (requiresLinearFt(method)) {
@@ -10285,7 +10313,8 @@ export function completionGroupMates(group, selectedProducts, protocolActions) {
 }
 
 export function completionProductRowProblem(service, rows, typeFor) {
-  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p), false, false, p);
+  const treeShrubWork = visitHasTreeShrubWork(service);
+  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p), false, false, p, treeShrubWork);
   const missingArea = rows.find((p) => {
     const requirement = areaOf(p);
     if (!requirement) return false;
@@ -10305,9 +10334,9 @@ function productApplicationMethod(product = {}, serviceType = "") {
     defaultApplicationMethod(product, serviceType);
 }
 
-function normalizeProductArea(product = {}, serviceType = "") {
+function normalizeProductArea(product = {}, serviceType = "", treeShrubWork = false) {
   const applicationMethod = productApplicationMethod(product, serviceType);
-  const areaRequirement = requiredApplicationArea(applicationMethod, serviceType, false, false, product);
+  const areaRequirement = requiredApplicationArea(applicationMethod, serviceType, false, false, product, treeShrubWork);
   return {
     ...product,
     applicationMethod,
@@ -13430,6 +13459,8 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = visitServiceLine(service, serviceTypeForArea);
+  // Any Tree & Shrub work on this visit (the line, or a Tree & Shrub companion): a 13-0-13 row follows the bed-area rule.
+  const hasTreeShrubWork = visitHasTreeShrubWork(service);
   // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
   // flag): the visit's photos and their descriptions sit inside the notes
   // box and the separate photo section goes away. Never on lawn or tree,
@@ -13457,6 +13488,7 @@ export function CompletionPanel({
     && propertyVisitArea?.kind === propertyAreaKey ? propertyVisitArea.area : undefined;
   const propertyTreatedArea = propertyAreaLine === "lawn" ? lawnVisitArea
     : propertyVisitOverride ?? (reviewedPropertyArea?.reviewedAt ? reviewedPropertyArea.sqft : "");
+  const bedFeedPrefillArea = bedFeedStartArea({ currentPropertyAreas, propertyAreaLine, propertyTreatedArea });
   // The bed coverage this effect last accounted for (wrote or promoted), so
   // its own earlier value is never mistaken for one the tech entered.
   const bedCoverageSeenRef = useRef(null);
@@ -14432,14 +14464,8 @@ export function CompletionPanel({
       : []),
     // Tree & Shrub has no WaveGuard approval step (managerApprovalRequired is lawn only), so a row over its ceiling
     // would otherwise reach Complete unseen. A quiet line, never a block.
-    ...(!managerApprovalRequired && !isIncompleteVisit && serviceLineForCloseout === "tree_shrub"
-      ? [
-          ...highRateSelectedProducts.filter((product) => !isBedFeedRow(product, "Tree & Shrub Care")),
-          // 13-0-13 is judged on its effective rate (entered rate, else total over treated area), like the server cap check.
-          ...selectedProducts.filter((product) => isBedFeedRow(product, "Tree & Shrub Care")),
-        ]
-          .map((product) => treeShrubHighRateAdvisory(product, "Tree & Shrub Care"))
-          .filter(Boolean)
+    ...(!managerApprovalRequired && !isIncompleteVisit
+      ? treeShrubRateAdvisories({ selectedProducts, highRateSelectedProducts, primaryIsTreeShrub: serviceLineForCloseout === "tree_shrub", treeShrubWork: hasTreeShrubWork })
       : []),
     ...(calibrationRequired && !isIncompleteVisit
       ? treatmentPlanCalibrationBlocks
@@ -15481,7 +15507,7 @@ export function CompletionPanel({
     setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
-            const normalized = normalizeProductArea(product, typeFor(product));
+            const normalized = normalizeProductArea(product, typeFor(product), hasTreeShrubWork);
             // Bed bug: a pre-migration draft carries the old inferred
             // perimeter default — reclassify it to the interior default so
             // a restored draft can't demand perimeter footage or record
@@ -16946,6 +16972,9 @@ export function CompletionPanel({
   function productUsesPropertyArea(product, applicationMethod) {
     // An add-on's product is entered with the area the add-on was sold for, never the host line's property area.
     if (product.areaAddOnKey) return false;
+    // A 13-0-13 on a visit whose shared coverage is not the bed area (a lawn primary with a Tree & Shrub companion) keeps its own
+    // treated area, started from the reviewed bed area; it never follows the lawn coverage.
+    if (propertyAreaKey !== "beds" && isBedFeedRow(product, "", hasTreeShrubWork)) return false;
     if (propertyAreaKey === "lawn" && !["granular_broadcast", "broadcast_spray"].includes(applicationMethod)) return false;
     return !!propertyAreaKey
       && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
@@ -16967,7 +16996,7 @@ export function CompletionPanel({
     const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
-      rowType, false, !!currentPropertyAreas && productUsesServiceArea, product,
+      rowType, false, !!currentPropertyAreas && productUsesServiceArea, product, hasTreeShrubWork,
     );
     // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
     // resolver ServiceRecapModal uses, so both completion paths prefill
@@ -16991,8 +17020,8 @@ export function CompletionPanel({
     // (Treatment Zone Mapper) so the tech doesn't retype what the trace
     // already measured. Editable as before.
     // The 13-0-13 bed row never borrows the turf area: with no property areas loaded it starts blank and is required.
-    const sharedArea = currentPropertyAreas ? (productUsesServiceArea ? propertyTreatedArea : "")
-      : isBedFeedRow(product, rowType) ? ""
+    const sharedArea = isBedFeedRow(product, rowType, hasTreeShrubWork) ? bedFeedPrefillArea
+      : currentPropertyAreas ? (productUsesServiceArea ? propertyTreatedArea : "")
         : lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill;
     const prefillArea =
       areaRequirement?.unit === "sqft" && sharedArea !== "" && sharedArea != null && Number(sharedArea) >= 0
@@ -17250,7 +17279,7 @@ export function CompletionPanel({
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
-            typeFor(next), false, next.propertyServiceAreaField, next,
+            typeFor(next), false, next.propertyServiceAreaField, next, hasTreeShrubWork,
           );
           if (areaRequirement) {
             if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
@@ -17277,7 +17306,7 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, typeFor(next)),
             typeFor(next),
-            governed || !!next.group, next.propertyServiceAreaField, next,
+            governed || !!next.group, next.propertyServiceAreaField, next, hasTreeShrubWork,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -21150,7 +21179,7 @@ export function CompletionPanel({
                         const areaRequirement = requiredApplicationArea(
                           productApplicationMethod(sp, typeFor(sp)),
                           typeFor(sp),
-                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField, sp,
+                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField, sp, hasTreeShrubWork,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -23625,7 +23654,7 @@ export function CompletionPanel({
                     const areaRequirement = requiredApplicationArea(
                       productApplicationMethod(sp, typeFor(sp)),
                       typeFor(sp),
-                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField, sp,
+                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField, sp, hasTreeShrubWork,
                     );
                     if (!areaRequirement) return null;
                     return (

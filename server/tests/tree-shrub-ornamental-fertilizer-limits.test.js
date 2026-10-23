@@ -183,6 +183,32 @@ describe('scope and merging', () => {
   });
 });
 
+describe('the post-save read of the record\'s rows fails (Codex #6516 r7)', () => {
+  const failing = () => { const db = fakeDb({ rows: [] }); const broken = () => { throw new Error('rows down'); }; broken.raw = db.raw; return broken; };
+  const run = (names) => {
+    const notify = jest.fn(async () => {});
+    return limits.flagOrnamentalFertilizer({ svc, record, database: failing(), advisory: null, notify, submittedProductNames: names }).then((out) => ({ out, notify }));
+  };
+  test('a 13-0-13 among the submitted products rings the office and tells the tech', async () => {
+    const { out, notify } = await run(['Celsius WG', ORN]);
+    expect(out.blocks).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', message: '13-0-13 limits could not be checked for this visit; the office will review.' })]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0].findings).toEqual([expect.objectContaining({ limitType: limits.AUDIT_UNAVAILABLE_LIMIT_TYPE, reason: 'audit_unavailable', productName: ORN })]);
+    expect(notify.mock.calls[0][0].findings[0].advisoryOnly).toBeUndefined();
+  });
+  test('a visit that submitted no 13-0-13 (or no products at all) rings nothing', async () => {
+    for (const names of [['Celsius WG', 'Snapshot 2.5TG'], [], undefined]) {
+      const { out, notify } = await run(names);
+      expect(out).toBeNull();
+      expect(notify).not.toHaveBeenCalled();
+    }
+  });
+  test('it has its own limit type, apart from the rate-unchecked and history-unchecked findings', () => {
+    expect(new Set(limits.UNCHECKED_LIMIT_TYPES).size).toBe(3);
+    expect(limits.UNCHECKED_LIMIT_TYPES).toContain(limits.AUDIT_UNAVAILABLE_LIMIT_TYPE);
+  });
+});
+
 describe('a 13-0-13 on a lawn-primary visit with a Tree & Shrub companion is judged the same (the row is the trigger)', () => {
   const lawnSvc = { ...svc, service_type: 'Lawn Care', city: 'Sarasota' };
   const run = (opts, extra = {}) => {

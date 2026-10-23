@@ -249,10 +249,13 @@ function productRow(product, { method, last = null, added = false, bedSqft = nul
 const hasBedArea = (row) => !row.needsArea || Number(row.areaValue) > 0;
 
 // A product the server held back as this month's suggestion can still be added by hand. The sheet never refuses it; it says why it
-// was held, and the office reviews the record (the 13-0-13 history check at closeout).
+// was held. Only a held 13-0-13 is promised an office review (its history check at closeout rings the office); any other held
+// product, such as the palm feed, gets the reason alone.
 const heldLine = (row, holds) => {
   const hold = holds.find((item) => item.name === row.name);
-  return hold ? `Held: ${String(hold.reason).replace(/\.\s*$/, '')}. It will be recorded and the office will review it.` : null;
+  if (!hold) return null;
+  const reason = String(hold.reason).replace(/\.\s*$/, '');
+  return row.needsArea ? `Held: ${reason}. It will be recorded and the office will review it.` : `Held: ${reason}.`;
 };
 
 // The non-blocking county-limit line for an applied 13-0-13 row: the higher of the entered rate (none on this sheet) and the

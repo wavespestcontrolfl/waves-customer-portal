@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { CompletionPanel, completionProductRowProblem, isBedFeedRow } from './SchedulePage';
+import { CompletionPanel, completionProductRowProblem, isBedFeedRow, visitHasTreeShrubWork, treeShrubRateAdvisories } from './SchedulePage';
 import { refetchFlags } from '../../hooks/useFeatureFlag';
 const products = [
   { id: 'snapshot', name: 'Snapshot 2.5TG', category: 'herbicide', application_method: 'granular_broadcast', default_rate_per_1000: 2.3, rate_unit: 'lb' },
@@ -423,4 +423,60 @@ it('a 13-0-13 row never borrows the turf area and starts blank, and is required,
   fireEvent.click(screen.getByText(ORN));
   expect(screen.getByPlaceholderText('Treated sq ft')).toHaveValue(null);
   expect(screen.getByPlaceholderText('Treated sq ft').value).toBe('');
+});
+
+// ── A lawn-primary visit with a Tree & Shrub companion: the 13-0-13 row follows the bed-area rule (classified by product identity) ──
+const COMPANION = { type: 'tree_shrub', fields: [], nextStepChips: [] };
+const lawnWithCompanion = (extra = {}) => ({ id: 'visit-1', customerId: 'customer-1', serviceType: 'Lawn Care', scheduledDate: '2026-09-27',
+  completionProfile: { findingsType: 'lawn', requiresProducts: false, companions: [{ type: 'tree_shrub' }] }, companionSchemas: [COMPANION], ...extra });
+
+it('Tree & Shrub work is the visit\'s own line or a Tree & Shrub companion, from either companion signal', () => {
+  expect(visitHasTreeShrubWork({ serviceType: 'Tree & Shrub Care' })).toBe(true);
+  expect(visitHasTreeShrubWork({ serviceType: 'Lawn Care', companionSchemas: [COMPANION] })).toBe(true);
+  expect(visitHasTreeShrubWork({ serviceType: 'Lawn Care', completionProfile: { companions: [{ type: 'tree_shrub' }] } })).toBe(true);
+  expect(visitHasTreeShrubWork({ serviceType: 'Lawn Care', companionSchemas: [{ type: 'pest' }] })).toBe(false);
+  expect(visitHasTreeShrubWork({ serviceType: 'Lawn Care' })).toBe(false);
+  expect(visitHasTreeShrubWork(null)).toBe(false);
+});
+
+it('on a lawn visit with a Tree & Shrub companion the 13-0-13 row needs the treated square feet; on a plain lawn visit it does not', () => {
+  expect(isBedFeedRow({ name: ORN }, 'Lawn Care', true)).toBe(true);
+  expect(isBedFeedRow({ name: ORN }, 'Lawn Care')).toBe(false);
+  expect(isBedFeedRow({ name: 'LESCO 8-0-12 Palm' }, 'Lawn Care', true)).toBe(false);
+  const row = ornRow({ applicationMethod: 'granular_broadcast', areaUnit: 'sqft' });
+  expect(completionProductRowProblem(lawnWithCompanion(), [row], () => 'Lawn Care')).toBe(`Enter the treated square feet for ${ORN}.`);
+  expect(completionProductRowProblem({ serviceType: 'Lawn Care' }, [{ ...row, areaValue: '' }], () => 'Lawn Care')).not.toBe(`Enter the treated square feet for ${ORN}.`);
+  expect(completionProductRowProblem(lawnWithCompanion(), [{ ...row, areaValue: 900 }], () => 'Lawn Care')).toBeFalsy();
+});
+
+it('the pre-submit county-limit line shows for a 13-0-13 on a lawn visit with a companion, and a lawn product keeps lawn behavior', () => {
+  const orn = { name: ORN, rate: '', rateUnit: 'lb', totalAmount: '12', amountUnit: 'lb', areaValue: 1200, areaUnit: 'sqft', catalogRateUnit: 'lb' };
+  const lawnProduct = { name: 'Celsius WG', rate: '9', rateUnit: 'oz', catalogRateUnit: 'oz', maxLabelRatePer1000: 4 };
+  const lines = treeShrubRateAdvisories({ selectedProducts: [orn, lawnProduct], highRateSelectedProducts: [lawnProduct], primaryIsTreeShrub: false, treeShrubWork: true });
+  expect(lines).toEqual([`${ORN} rate 10 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`]);
+  expect(treeShrubRateAdvisories({ selectedProducts: [orn], highRateSelectedProducts: [], primaryIsTreeShrub: false, treeShrubWork: false })).toEqual([]);
+  expect(treeShrubRateAdvisories({ selectedProducts: [orn, lawnProduct], highRateSelectedProducts: [lawnProduct], primaryIsTreeShrub: true, treeShrubWork: true })).toHaveLength(2);
+});
+
+it('a 13-0-13 added on a lawn visit with a Tree & Shrub companion starts from the reviewed BED area, never the turf area', async () => {
+  measurements = { ...measurements, areas: { ...measurements.areas, lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' } } };
+  render(<CompletionPanel service={lawnWithCompanion()} products={products} onClose={() => {}} onSubmit={vi.fn()} />);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('property-areas'))).toBe(true));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: ORN } });
+  fireEvent.click(screen.getByText(ORN));
+  const area = screen.getByPlaceholderText('Treated sq ft');
+  expect(area).toHaveValue(1200);
+  expect(screen.queryByDisplayValue('4200')).not.toBeInTheDocument();
+});
+
+it('with no reviewed bed area on a lawn visit with a companion the 13-0-13 row starts blank (never the turf area) and is required', async () => {
+  measurements = { ...measurements, areas: { beds: { sqft: 900, source: 'recorded', reviewedAt: null }, lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }, mosquito: null } };
+  render(<CompletionPanel service={lawnWithCompanion()} products={products} onClose={() => {}} onSubmit={vi.fn()} />);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('property-areas'))).toBe(true));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: ORN } });
+  fireEvent.click(screen.getByText(ORN));
+  expect(screen.getByPlaceholderText('Treated sq ft').value).toBe('');
+  expect(screen.queryByDisplayValue('4200')).not.toBeInTheDocument();
 });

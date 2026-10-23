@@ -29,7 +29,11 @@ const HISTORY_LIMIT_TYPE = 'ornamental_fertilizer_history';
 const UNCHECKED_LIMIT_TYPE = 'ornamental_fertilizer_rate_unchecked';
 // Its own type, so the unreadable-history finding and the rate-unchecked finding of one record never share a dedupe key.
 const HISTORY_UNCHECKED_LIMIT_TYPE = 'ornamental_fertilizer_history_unchecked';
-const UNCHECKED_LIMIT_TYPES = [UNCHECKED_LIMIT_TYPE, HISTORY_UNCHECKED_LIMIT_TYPE];
+// The post-save read of the record's rows failed, so it is not known whether the visit's 13-0-13 was over the cap or held.
+const AUDIT_UNAVAILABLE_LIMIT_TYPE = 'ornamental_fertilizer_audit_unavailable';
+const UNCHECKED_LIMIT_TYPES = [UNCHECKED_LIMIT_TYPE, HISTORY_UNCHECKED_LIMIT_TYPE, AUDIT_UNAVAILABLE_LIMIT_TYPE];
+// The word each unchecked finding puts in its office headline: "review <name> <word> not checked".
+const UNCHECKED_HEADLINE_WORD = { [UNCHECKED_LIMIT_TYPE]: 'limit', [HISTORY_UNCHECKED_LIMIT_TYPE]: 'history', [AUDIT_UNAVAILABLE_LIMIT_TYPE]: 'limits' };
 
 const PER_1000_SUFFIXES = new Set(['', '/1000sf', '/1000sqft', '/1000ft2']);
 // The sheet's weight units for a dry product are g, oz and lb; the total is judged in pounds.
@@ -68,6 +72,7 @@ const round2 = (value) => Math.round(value * 100) / 100;
 const uncheckedReason = (row) => (totalLb(row) !== null ? 'area_missing' : 'rate_missing');
 /** The one sentence the tech and the office read for a 13-0-13 row whose county cap could not be checked (no leading name). */
 const uncheckedClause = (reason) => {
+  if (reason === 'audit_unavailable') return 'limits could not be checked for this visit';
   if (reason === 'history_unavailable') return 'recorded but its history could not be read; 2-a-year and 5-month rules not checked';
   return reason === 'area_missing'
     ? 'recorded with no treated sq ft; county cap not checked'
@@ -116,16 +121,38 @@ async function recordedOrnamentalRows(database, recordId) {
   return rows.filter(isOrnamental);
 }
 
+// The finding for a post-save read that failed, only when a submitted product was a 13-0-13 (the visit could have had one); a visit that
+// submitted none gets nothing. The record's rows are unreadable here, so the submitted names are the only evidence there is.
+function auditUnavailableFinding(submittedProductNames) {
+  const name = (submittedProductNames || []).find((item) => ORNAMENTAL_13_0_13.test(String(item || '')));
+  if (!name) return null;
+  return { code: 'application_limit_exceeded', limitType: AUDIT_UNAVAILABLE_LIMIT_TYPE, productName: name, reason: 'audit_unavailable', current: null, max: CAP_LB_PER_1000,
+    message: '13-0-13 limits could not be checked for this visit; the office will review.' };
+}
+
+/** The rows of the record, or null when the read failed (logged). */
+async function readRecordedRows(database, recordId) {
+  try {
+    return await recordedOrnamentalRows(database, recordId);
+  } catch (err) {
+    logger.warn(`[ts-ornamental-fertilizer] rows read failed for record ${recordId}: ${err?.message}`);
+    return null;
+  }
+}
+
 /**
  * The completion check: reads the 13-0-13 rows this record saved and flags a rate over the county cap and a breach of the
  * 2-in-12-months, 5-months-apart or June-September history rules. `advisory` is the completion's applicationLimitAdvisory; the
  * merged advisory comes back (the same object when nothing is flagged). `notify` sends the findings to the office
- * (notifyOfficeOfLimitFindings). Never throws, never blocks.
+ * (notifyOfficeOfLimitFindings). `submittedProductNames` are the names the completion submitted: when the post-save read of the record's
+ * rows fails, a 13-0-13 among them gets an 'audit unavailable' finding (the office is rung); a visit that submitted none gets nothing.
+ * Never throws, never blocks.
  */
-async function flagOrnamentalFertilizer({ svc, record, database, advisory, notify }) {
+async function flagOrnamentalFertilizer({ svc, record, database, advisory, notify, submittedProductNames = [] }) {
   try {
     if (!record?.id) return advisory;
-    const rows = await recordedOrnamentalRows(database, record.id);
+    const rows = await readRecordedRows(database, record.id);
+    if (rows === null) return await reportFindings({ svc, record, advisory, notify, findings: [auditUnavailableFinding(submittedProductNames)].filter(Boolean) });
     if (!rows.length) return advisory;
     const findings = rateFindings(rows);
     const serviceDate = record.service_date || svc.scheduled_date;
@@ -140,16 +167,21 @@ async function flagOrnamentalFertilizer({ svc, record, database, advisory, notif
         productName: rows[0].product_name, reason: 'history_unavailable', current: null, max: CAP_LB_PER_1000,
         message: `Recorded. The office will review: ${rows[0].product_name || '13-0-13'} ${uncheckedClause('history_unavailable')}.` });
     }
-    if (!findings.length) return advisory;
-    const toOffice = findings.filter((finding) => !finding.advisoryOnly);
-    if (toOffice.length) await notify({ svc, record, findings: toOffice });
-    return { advisory: true, blocks: [...(advisory?.blocks || []), ...findings.map((f) => ({ code: f.code, message: f.message, productId: f.productId }))] };
+    return await reportFindings({ svc, record, advisory, notify, findings });
   } catch (err) {
     logger.warn(`[ts-ornamental-fertilizer] check failed for record ${record?.id}: ${err?.message}`);
     return advisory;
   }
 }
 
+// Sends the findings to the office and merges them into the completion's advisory (the same object when none).
+async function reportFindings({ svc, record, advisory, notify, findings }) {
+  if (!findings.length) return advisory;
+  const toOffice = findings.filter((finding) => !finding.advisoryOnly);
+  if (toOffice.length) await notify({ svc, record, findings: toOffice });
+  return { advisory: true, blocks: [...(advisory?.blocks || []), ...findings.map((f) => ({ code: f.code, message: f.message, productId: f.productId }))] };
+}
+
 module.exports = {
-  CAP_LB_PER_1000, RATE_LIMIT_TYPE, HISTORY_LIMIT_TYPE, UNCHECKED_LIMIT_TYPE, HISTORY_UNCHECKED_LIMIT_TYPE, UNCHECKED_LIMIT_TYPES, uncheckedClause, ratePer1000, rateFindings, historyFinding, recordedOrnamentalRows, flagOrnamentalFertilizer,
+  CAP_LB_PER_1000, RATE_LIMIT_TYPE, HISTORY_LIMIT_TYPE, UNCHECKED_LIMIT_TYPE, HISTORY_UNCHECKED_LIMIT_TYPE, AUDIT_UNAVAILABLE_LIMIT_TYPE, UNCHECKED_LIMIT_TYPES, UNCHECKED_HEADLINE_WORD, uncheckedClause, ratePer1000, rateFindings, historyFinding, recordedOrnamentalRows, flagOrnamentalFertilizer,
 };
