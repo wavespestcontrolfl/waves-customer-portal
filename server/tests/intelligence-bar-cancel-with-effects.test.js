@@ -225,6 +225,15 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(normal.recovery_owns_outcome).toBeUndefined();
   });
 
+  test('a step that failed after the commit leaves the bundle pending, so its receipt is provisional (the sweep\'s final receipt replaces it)', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, postCommitFailure: 'connection terminated' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.recovery_owns_outcome).toBe(true);
+    expect(result.text_retry_pending).toBeUndefined();
+    expect(result.warning).toMatch(/a step after the cancel did not finish/);
+  });
+
   test('an approved text the system is still sending says so, and never advises sending it by hand', async () => {
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, textRetryScheduled: true } });
     const result = await executeTool('cancel_appointment', input(), ADMIN);

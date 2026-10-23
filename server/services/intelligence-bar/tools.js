@@ -4719,8 +4719,13 @@ function cancelReplayWarnings(json, sendText) {
 // recovery_owns_outcome, so /confirm-action saves it only if the action has none and the sweep's final receipt (sent, partial,
 // abandoned...) replaces it. A real final receipt is never replaced.
 function recoveryOwnedFields(json, warnings) {
-  if (!json.recoveryOwnsOutcome && json.textRetryScheduled === true) {
-    return { recovery_owns_outcome: true, text_retry_pending: true, warning: warnings.join(' ') };
+  // A post-commit failure also leaves the bundle pending (liveFinish never ran), so its receipt is provisional too.
+  if (!json.recoveryOwnsOutcome && (json.textRetryScheduled === true || json.postCommitFailure)) {
+    return {
+      recovery_owns_outcome: true,
+      ...(json.textRetryScheduled === true ? { text_retry_pending: true } : {}),
+      warning: warnings.join(' '),
+    };
   }
   if (!json.recoveryOwnsOutcome) return warnings.length ? { warning: warnings.join(' ') } : {};
   return {
