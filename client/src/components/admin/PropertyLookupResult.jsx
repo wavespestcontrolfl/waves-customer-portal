@@ -109,7 +109,7 @@ function AddressStatusLine({ meta }) {
 // "Could not confirm" belongs to an address that needs confirmation (or to a
 // lookup with no status, as before). When the address itself is confirmed or
 // validation did not answer, the open question is the county roll's.
-function addressIssueCopy(status) {
+function addressIssueCopy(status, campus) {
   if (!status || !ADDRESS_STATUS_LABELS[status.state] || status.state === "needs_confirmation" || status.state === "outside_service_area") {
     return "We could not confirm this address. Check the house number, street suffix, direction, and ZIP before using property measurements.";
   }
@@ -122,10 +122,40 @@ function addressIssueCopy(status) {
   if (status.countyRoll !== "not_found") {
     return "The property record found may be for a different house number. Check the house number, street suffix, direction, and ZIP before using property measurements.";
   }
+  if (campus?.situsAddress) {
+    return `This address has no county record of its own. The map point is inside the county parcel at ${campus.situsAddress}, one record for several buildings. Its size is the whole property, not this business's space.`;
+  }
   if (status.state === "unit_missing") {
     return "The building is confirmed, but no unit was given and the county roll has no record for this entry. Add the unit or suite, then check the measurements.";
   }
   return "The county roll has no record for this house number. Check the house number, street suffix, direction, and ZIP before using property measurements.";
+}
+
+function titleCase(text) {
+  return String(text || "").toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+// The parent parcel's buildings (the county building table), grouped by
+// type and size: which building of a campus the business may be in. Shown
+// as context; nothing here fills a field or a price.
+function CampusParcelBuildings({ campus }) {
+  const groups = campus?.buildings?.groups;
+  if (!Array.isArray(groups) || !groups.length) return null;
+  const more = Number(campus.buildings.moreGroups) || 0;
+  return (
+    <div className="mt-3 text-sm text-ink-secondary">
+      <p className="text-zinc-900">Buildings on the county parcel at {campus.situsAddress} (county roll, not priced):</p>
+      <ul className="mt-1 space-y-1">
+        {groups.map((group, index) => (
+          <li key={index}>
+            {group.count > 1 ? `${group.count} × ` : ""}{titleCase(group.classification)} · {Number(group.sqft).toLocaleString("en-US")} sq ft
+            {group.stories ? ` · ${group.stories} ${group.stories === 1 ? "story" : "stories"}` : ""}
+          </li>
+        ))}
+        {more > 0 && <li>{more} more building {more === 1 ? "type" : "types"}</li>}
+      </ul>
+    </div>
+  );
 }
 
 function platMedianSourceLine(median) {
@@ -154,10 +184,11 @@ export default function PropertyLookupResult({ profile, form, meta, refreshing, 
       <AddressStatusLine meta={meta} />
       {addressIssue && (
         <div className="mt-3 text-sm text-alert-fg">
-          <p>{addressIssueCopy(statusOf(meta))}</p>
+          <p>{addressIssueCopy(statusOf(meta), meta?.campusParcel)}</p>
           <button type="button" className="mt-2 min-h-11 border-0 bg-transparent p-0 text-left underline" onClick={onEditAddress}>Check address</button>
         </div>
       )}
+      <CampusParcelBuildings campus={meta?.campusParcel} />
       <dl className="mt-2 grid grid-cols-1 divide-y divide-zinc-200 sm:grid-cols-2 sm:gap-x-6">
         {fields.map((field) => (
           <PropertyMeasurement key={field.key} field={field} profile={profile} form={form}

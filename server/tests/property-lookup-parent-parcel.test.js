@@ -214,6 +214,29 @@ describe('the whole lookup when every fact provider fails', () => {
     expect(hasCountyEvidence(record)).toBe(false);
   });
 
+  test('a Manatee parent parcel carries its county building list; the record stays facts-free', async () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    lookupCountyParcelByPoint.mockResolvedValue(plazaParcel({ parcelId: '1000000000', paoParcelId: '1000000000', county: 'Manatee' }));
+    global.fetch = jest.fn(async (url) => {
+      if (!String(url).includes('pao-model-buildings.php?parid=1000000000')) throw new Error('provider down');
+      return {
+        ok: true,
+        json: async () => ({
+          cols: [{ title: 'Classification' }, { title: 'Stories' }, { title: 'LivBus' }],
+          rows: [['OFFICE BUILDING', 1, '5000'], ['OFFICE BUILDING', 1, '5000']],
+        }),
+      };
+    });
+    const record = await lookupPropertyFromAITrio(TYPED, { ...geo, county: 'Manatee' }, null, { commercialSuiteSizing: true, retainParentParcel: true });
+    expect(record._parentParcel.buildings).toEqual({
+      total: 2,
+      groups: [{ classification: 'OFFICE BUILDING', stories: 1, sqft: 5000, count: 2 }],
+      moreGroups: 0,
+    });
+    expect(record.squareFootage || 0).toBe(0);
+    expect(hasCountyEvidence(record)).toBe(false);
+  });
+
   test('the lookup reports whether the point lookup gave a definitive answer', async () => {
     process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
     // A parcel was examined.

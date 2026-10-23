@@ -227,3 +227,42 @@ describe("PropertyLookupResult — address status line", () => {
     expect(screen.getByText(/We could not confirm this address/)).toBeInTheDocument();
   });
 });
+
+describe("PropertyLookupResult — campus parcel context", () => {
+  const flagged = { ...VACANT_PROFILE, fieldVerifyFlags: [{ field: "address", priority: "HIGH", reason: "No record of its own" }] };
+  const campusParcel = {
+    parcelId: "1000000000",
+    county: "Manatee",
+    situsAddress: "900 EXAMPLE PARK BLVD",
+    landUseDescription: "Mixed Use Commercial (1555)",
+    buildings: {
+      total: 8,
+      groups: [
+        { classification: "OFFICE BUILDING", stories: 1, sqft: 5070, count: 6 },
+        { classification: "HOTEL/MOTEL", stories: 4, sqft: 63576, count: 1 },
+      ],
+      moreGroups: 1,
+    },
+  };
+  const meta = (extra) => ({ addressStatus: { state: "confirmed", use: { business: true }, countyRoll: "not_found" }, ...extra });
+
+  it("says the address is one building of a larger parcel instead of asking to fix the house number", () => {
+    renderPanel({ profile: flagged, form: { address: "950 Example Park Blvd, Suite 101" }, meta: meta({ campusParcel }) });
+    expect(screen.getByText(/no county record of its own.*900 EXAMPLE PARK BLVD/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check the house number, street suffix/)).not.toBeInTheDocument();
+  });
+
+  it("lists the parcel's buildings by type and size, marked as not priced", () => {
+    renderPanel({ profile: flagged, form: { address: "950 Example Park Blvd, Suite 101" }, meta: meta({ campusParcel }) });
+    expect(screen.getByText(/Buildings on the county parcel at 900 EXAMPLE PARK BLVD \(county roll, not priced\)/)).toBeInTheDocument();
+    expect(screen.getByText(/6 × Office Building · 5,070 sq ft · 1 story/)).toBeInTheDocument();
+    expect(screen.getByText(/Hotel\/Motel · 63,576 sq ft · 4 stories/)).toBeInTheDocument();
+    expect(screen.getByText("1 more building type")).toBeInTheDocument();
+  });
+
+  it("without a campus parcel the copy and the panel are unchanged", () => {
+    renderPanel({ profile: flagged, form: { address: "950 Example Park Blvd" }, meta: meta({}) });
+    expect(screen.getByText(/The county roll has no record for this house number/)).toBeInTheDocument();
+    expect(screen.queryByText(/Buildings on the county parcel/)).not.toBeInTheDocument();
+  });
+});
