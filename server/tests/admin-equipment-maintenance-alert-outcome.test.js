@@ -125,6 +125,13 @@ test('a stale Lost on an alert the truck check already closed is refused and mar
   expect((await put('a-due', { status: 'resolved' })).statusCode).toBe(200);
 });
 
+test('a closed tool alert never reopens', async () => {
+  db.__state.alerts['a-missing'].status = 'resolved';
+  expect((await put('a-missing', { status: 'acknowledged' })).statusCode).toBe(409);
+  expect((await put('a-missing', { status: 'new' })).statusCode).toBe(409);
+  expect(db.__state.alerts['a-missing'].status).toBe('resolved');
+});
+
 test('a tool alert accepts only new, acknowledged or resolved', async () => {
   const res = await put('a-missing', { status: 'dismissed' });
   expect(res.statusCode).toBe(400);

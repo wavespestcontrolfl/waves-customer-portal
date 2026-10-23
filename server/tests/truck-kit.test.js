@@ -392,6 +392,9 @@ describe('tool gaps by kit key', () => {
     // Catalog category "inspection" is NOT an exemption: the WDO letter needs the meter and probe.
     expect(truckKit.serviceLinesFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' })).toEqual(['termite']);
     expect(truckKit.serviceLinesFor('Lawn Health Inspection', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
+    // The lawn_inspection row was renamed "Lawn Assessment": the key wins over the consultation-looking name.
+    expect(truckKit.serviceLinesFor('Lawn Assessment', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
+    expect(truckKit.serviceLinesFor('Lawn Assessment')).toEqual([]);
   });
 
   test('a bait station or foam job promotes its optional kit to required', async () => {
@@ -435,6 +438,10 @@ describe('tool gaps by kit key', () => {
   test('booked add-ons bring their own line, on readiness and on Today', async () => {
     expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Tree & Shrub Care' }, { name: 'Termite Spot Treatment' }] })).toEqual(['pest', 'tree_shrub', 'termite']);
     expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Waves Assessment' }] })).toEqual(['pest']);
+    // Catalog identity picks the add-on's line: the fire ant yard add-on is lawn_care, a spreader job.
+    expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Fire Ant Yard Treatment', serviceKey: 'area_addon_fire_ant_yard', category: 'lawn_care' }] })).toEqual(['pest', 'lawn']);
+    expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceKey: 'area_addon_fire_ant_yard', serviceCategory: 'lawn_care' })).toEqual(['lawn']);
+    expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceCategory: 'inspection' })).toEqual(['pest']);
     db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
     db.__state.equipment.push({ id: '66666666-2222-4333-8444-555555555555', name: 'Flashlight', category: 'tool', status: 'active', assigned_vehicle_id: TRUCK, kit_key: 'flashlight' });
     expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'Quarterly Pest Control', addons: [{ name: 'Termite Spot Treatment' }] }))

@@ -81,10 +81,19 @@ const lockTechnician = (conn, technicianId) => conn.raw('SELECT pg_advisory_xact
 // treatment. The misting design visit uses the repository's shared predicate.
 const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link', 'consultation', 'new_customer_inspection', 'pest_inspection']);
 const CONSULTATION_NAME = /\b(assessment|consultation|walk-?through|new customer property inspection|pest inspection service)\b/i;
-const isConsultation = (serviceType, serviceKey) =>
-  (serviceKey ? CONSULTATION_KEYS.has(String(serviceKey).toLowerCase()) : false)
-  || CONSULTATION_NAME.test(String(serviceType || ''))
-  || isMistingDesignConsultation({ serviceKey, name: serviceType });
+// A known diagnostic identity (the lawn assessment is the lawn_inspection
+// row, renamed) needs its instruments whatever its name says.
+const DIAGNOSTIC_KEYS = new Set(['lawn_inspection', 'wdo_inspection', 'termite_inspection']);
+const isConsultation = (serviceType, serviceKey) => {
+  const key = serviceKey ? String(serviceKey).toLowerCase() : null;
+  if (key && DIAGNOSTIC_KEYS.has(key)) return false;
+  return (key ? CONSULTATION_KEYS.has(key) : false)
+    || CONSULTATION_NAME.test(String(serviceType || ''))
+    || isMistingDesignConsultation({ serviceKey, name: serviceType });
+};
+// Catalog identity picks the line before the name does: a fire ant yard
+// add-on is lawn_care (a spreader job) whatever its name reads as.
+const CATEGORY_LINE = { lawn_care: 'lawn', pest_control: 'pest', tree_shrub: 'tree_shrub', termite: 'termite', mosquito: 'mosquito', rodent: 'rodent' };
 // Mechanical lawn work (job-card.js ADDON_PROGRAMS lawn_care.nonChemical)
 // and the web sweep use their own machines, not the spray checklist: no
 // treatment-tool hold. Legacy rows without a key match by name.
@@ -95,10 +104,10 @@ const isMechanical = (serviceType, serviceKey) =>
 
 // The checklist lines ONE service's tools come from: its line plus every
 // companion line its name mentions, in that order, once each.
-function linesForService(serviceType, serviceKey) {
+function linesForService(serviceType, serviceKey, serviceCategory = null) {
   const lines = [];
   if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey) || isMechanical(serviceType, serviceKey)) return lines;
-  const primary = detectServiceLine(serviceType);
+  const primary = CATEGORY_LINE[String(serviceCategory || '').toLowerCase()] || detectServiceLine(serviceType);
   if (primary) lines.push(primary);
   const text = String(serviceType || '').toLowerCase();
   for (const [line, re] of COMPANION_LINES) if (re.test(text) && !lines.includes(line)) lines.push(line);
@@ -123,11 +132,11 @@ function promotedKeysFor(serviceType, serviceKey) {
 // What a visit requires: the primary service's lines, then each booked
 // add-on's (a Tree & Shrub add-on on a pest visit needs the tree and shrub
 // tools too), plus the keys its identity promotes. `addons` is [{ name, serviceKey }].
-function requirementsFor(serviceType, { serviceKey = null, addons = [] } = {}) {
-  const lines = linesForService(serviceType, serviceKey);
+function requirementsFor(serviceType, { serviceKey = null, serviceCategory = null, addons = [] } = {}) {
+  const lines = linesForService(serviceType, serviceKey, serviceCategory);
   const promote = new Set(lines.length ? promotedKeysFor(serviceType, serviceKey) : []);
   for (const addon of Array.isArray(addons) ? addons : []) {
-    const addonLines = linesForService(addon?.name, addon?.serviceKey);
+    const addonLines = linesForService(addon?.name, addon?.serviceKey, addon?.category);
     for (const line of addonLines) if (!lines.includes(line)) lines.push(line);
     if (addonLines.length) for (const key of promotedKeysFor(addon?.name, addon?.serviceKey)) promote.add(key);
   }
@@ -298,7 +307,7 @@ async function readinessToolIssue(facts, conn = db) {
   try {
     return await module.exports.toolGapIssue({
       technicianId: facts.technicianId, serviceLine: facts.serviceLine, serviceType: facts.serviceType,
-      serviceKey: facts.serviceKey || null, addons: facts.addons || [],
+      serviceKey: facts.serviceKey || null, serviceCategory: facts.serviceCategory || null, addons: facts.addons || [],
     }, conn);
   } catch (err) {
     logger.warn(`[truck-kit] readiness read failed for ${facts.serviceId}: ${err?.message || err}`);
@@ -324,9 +333,9 @@ function toolGapLabel(gaps) {
 // dispatchReadiness), or null: a required tool the assigned truck lacks is a
 // hold like company stock or weather.
 // serviceType, when given, adds the companion lines of a combined job.
-async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey = null, addons = [] }, conn = db) {
+async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey = null, serviceCategory = null, addons = [] }, conn = db) {
   if (!truckKitLive() || !technicianId) return null;
-  const { lines, promote } = serviceType ? requirementsFor(serviceType, { serviceKey, addons }) : { lines: [serviceLine].filter(Boolean), promote: new Set() };
+  const { lines, promote } = serviceType ? requirementsFor(serviceType, { serviceKey, serviceCategory, addons }) : { lines: [serviceLine].filter(Boolean), promote: new Set() };
   if (!lines.length) return null;
   let truck;
   try { truck = await truckForTechnician(technicianId, conn); } catch (err) {
@@ -345,23 +354,23 @@ async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = 
   const visits = await conn('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: etDateString(now) })
     .whereIn('status', LIVE_VISIT_STATUSES)
-    .select('id', 'service_type', 'service_key_snapshot');
+    .select('id', 'service_type', 'service_key_snapshot', 'service_category_snapshot');
   if (!visits.length) return [];
   if (!(await truckHasKeys(truck.id, conn))) return [];
   const onTruck = keysOnTruck(await kitForTruck(truck.id, conn));
   // Booked add-ons bring their own line's tools.
   const addonRows = await conn('scheduled_service_addons')
     .whereIn('scheduled_service_id', visits.map((v) => v.id))
-    .select('scheduled_service_id', 'service_name', 'service_key_snapshot');
+    .select('scheduled_service_id', 'service_name', 'service_key_snapshot', 'service_category_snapshot');
   const addonsByVisit = new Map();
   for (const row of addonRows) {
     if (!addonsByVisit.has(row.scheduled_service_id)) addonsByVisit.set(row.scheduled_service_id, []);
-    addonsByVisit.get(row.scheduled_service_id).push({ name: row.service_name, serviceKey: row.service_key_snapshot || null });
+    addonsByVisit.get(row.scheduled_service_id).push({ name: row.service_name, serviceKey: row.service_key_snapshot || null, category: row.service_category_snapshot || null });
   }
   const requiredByLines = new Map();
   const out = [];
   for (const visit of visits) {
-    const { lines, promote } = requirementsFor(visit.service_type, { serviceKey: visit.service_key_snapshot, addons: addonsByVisit.get(visit.id) || [] });
+    const { lines, promote } = requirementsFor(visit.service_type, { serviceKey: visit.service_key_snapshot, serviceCategory: visit.service_category_snapshot, addons: addonsByVisit.get(visit.id) || [] });
     if (!lines.length) continue;
     const key = `${lines.join('+')}|${[...promote].sort().join('+')}`;
     if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn, promote));
