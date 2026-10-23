@@ -381,6 +381,11 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   // A sent certificate passed the full send gate (attestation, application
   // record); a draft has not, so it cannot back a signed warranty yet.
   if (!(project.sent_at || project.status === 'sent')) throw bad('Send the pre-treat certificate first, then issue its warranty.', 409);
+  // An edit after the send can still clear a field, so the certificate as it
+  // stands now must pass the same staff send gate (lazy: the route module).
+  const { evaluateProjectSendReadiness } = require('../routes/admin-projects')._private;
+  const { missing } = evaluateProjectSendReadiness({ project, customer, staffSend: true });
+  if (missing.length) throw bad(`Complete the certificate first: ${missing.map((item) => item.label).join('; ')}.`, 409);
   const findings = parseFindings(project.findings);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
   const { initial, values } = certificateValues(project, findings);

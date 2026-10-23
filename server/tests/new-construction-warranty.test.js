@@ -55,6 +55,11 @@ describe('supersedeOpenNewConstructionWarranty', () => {
   });
 });
 
+// The certificate send gate lives in the projects route; its own suite
+// covers it. Here it reads ready unless a test says otherwise.
+const mockReadiness = jest.fn(() => ({ missing: [] }));
+jest.mock('../routes/admin-projects', () => ({ _private: { evaluateProjectSendReadiness: (...args) => mockReadiness(...args) } }));
+
 describe('templateIssueValues (server-built warranty)', () => {
   const { templateIssueValues } = require('../services/new-construction-warranty');
   const KEY = 'service_agreement.termite_new_construction_warranty';
@@ -180,6 +185,13 @@ describe('templateIssueValues (server-built warranty)', () => {
     await expect(issue({ projectId: project.id, values: office }, customer, project, { ...customer, address_line1: '9 New Rd' }))
       .rejects.toMatchObject({ status: 409 });
     await expect(issue({ projectId: project.id, values: office }, customer, project, null)).rejects.toMatchObject({ status: 409 });
+  });
+
+  test('the certificate as it stands must pass the staff send gate', async () => {
+    mockReadiness.mockReturnValueOnce({ missing: [{ key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)' }] });
+    await expect(issue({ projectId: project.id, values: office }, customer, project))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining('Applicator attestation') });
+    expect(mockReadiness).toHaveBeenLastCalledWith(expect.objectContaining({ staffSend: true, project: expect.objectContaining({ id: project.id }) }));
   });
 
   test('issues only from a sent certificate, and prints the catalog product', async () => {
