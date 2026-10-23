@@ -351,10 +351,12 @@ const NOT_DECIDED_SQL = "(suggestion -> 'decision') is null";
 // a seed-rule write is conditional on it, so a flag the matcher adds between
 // the SELECT and the UPDATE still wins over the seed.
 const NO_MATCHER_FLAG_SQL = `not (jsonb_exists(${SUG}, 'ignore') and not jsonb_exists(${SUG}, 'rule'))`;
-// "the rule on the row is still the one this pass read": a newer owner rule
-// an Always decision propagated between the SELECT and the UPDATE wins over
-// the pass's older result.
-const RULE_SNAPSHOT_SQL = `coalesce(${SUG} -> 'rule' ->> 'id', '') = ?`;
+// "the row's classification is still the one this pass read": every rule
+// write stamps rulesAt with its pass's start time, so a newer pass (an
+// Always decision's propagation, even one that re-pointed the SAME rule id
+// through the upsert) that landed between the SELECT and this UPDATE wins
+// over the older pass's result.
+const RULE_SNAPSHOT_SQL = `coalesce(${SUG} ->> 'rulesAt', '') = ?`;
 function ymd(v) {
   if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
   return String(v || '').slice(0, 10);
@@ -401,8 +403,8 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
   // matcher-flagged row: with the rule gone the row returns to the
   // matcher's reading (its next rescan flags it again), not to "unexplained"
   const removeKeys = stale ? [...CLASSIFICATION_KEYS, 'examined'] : (writes ? CLASSIFICATION_KEYS : []);
-  const ruleRead = sug.rule && sug.rule.id ? String(sug.rule.id) : '';
-  return { skip: false, writes, stale, rule, patch, removeKeys, guardMatcherFlag: !matcherFlag, ruleRead };
+  const versionRead = sug.rulesAt ? String(sug.rulesAt) : '';
+  return { skip: false, writes, stale, rule, patch, removeKeys, guardMatcherFlag: !matcherFlag, versionRead };
 }
 
 // Writes one row's outcome and books it in the counts and the hit map —
@@ -411,7 +413,7 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
 // nothing, so the pass result and the rule hits report what is stored.
 async function applyClassification(row, c, counts, hits) {
   let w = db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL)
-    .whereRaw(RULE_SNAPSHOT_SQL, [c.ruleRead]);
+    .whereRaw(RULE_SNAPSHOT_SQL, [c.versionRead]);
   if (c.guardMatcherFlag) w = w.whereRaw(NO_MATCHER_FLAG_SQL);
   const landed = await w.update({ suggestion: bankImport.suggestionMerge(c.patch, c.removeKeys), updated_at: new Date() });
   if (!landed) return;

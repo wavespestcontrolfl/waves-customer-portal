@@ -817,6 +817,16 @@ describe('runDeterministicMatching', () => {
     for (const u of state.updates.filter(u => u.patch.status === 'matched_payout' || u.patch.status === 'matched_expense')) {
       expect(u.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
     }
+    // and every per-row write of a pass in flight repeats it: a parked candidate list or a transfer
+    // flag must not land on a row the owner decided as Income meanwhile
+    state.updates = [];
+    state.payouts = [];
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '500.00', description: 'card payment', vendor_name: 'Capital One', expense_date: '2026-08-08', payment_method: 'ach' }];
+    await runDeterministicMatching();
+    const parks = state.updates.filter(u => sugOf(u) && (sugOf(u).candidates || sugOf(u).ignore));
+    expect(parks.length).toBeGreaterThan(0);
+    for (const u of parks) expect(u.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
   });
 
   test('a bounded pass serves an examined (owner-overridden) row from the examined pool, not as a fresh row', async () => {

@@ -357,7 +357,8 @@ describe('applyRules (suggestion-only)', () => {
       expect(u.wheres).toContain(svc.MATCHER_EXAMINED_SQL);
       // a seed write is conditional on the matcher not having flagged the row since it was read
       if (u.wheres[0].id !== 'b5') expect(u.wheres).toContain(svc.NO_MATCHER_FLAG_SQL);
-      // and on the rule on the row still being the one this pass read (a newer owner rule wins)
+      // and on the row's classification version (rulesAt) still being the one this pass read: a
+      // newer pass, even one that re-pointed the same rule id, wins
       expect(u.wheres).toContain(svc.RULE_SNAPSHOT_SQL);
       stamps.add(u.patch.suggestion.merged.rulesAt);
     }

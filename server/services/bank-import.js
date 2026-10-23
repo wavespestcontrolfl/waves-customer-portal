@@ -1365,10 +1365,13 @@ function hasUnresolvedBankChange(row) {
 // ruling made after the read wins too.
 function transferFlagWanted(sug, ledgerOn) { return !sug || (!sug.ignore && !sug.decision && !(ledgerOn && sug.examined)); }
 const NO_DECISION_SQL = "(suggestion is null or (suggestion -> 'decision') is null)";
-// An Income decision from the ledger Inbox holds against the automatic
-// claims too: the row stays open on its shelf, never read by the matcher and
-// never claimed for a payout or an expense (the claim CAS repeats the check).
-// A Later row stays matchable: a link would explain it.
+// An Income decision from the ledger Inbox holds against the matcher: the
+// row stays open on its shelf, is never read by a pass, and every per-row
+// write of a pass already in flight (claims, parked candidates, flags,
+// rotation bumps) repeats the check, so a decision that lands mid-pass is
+// never followed by a candidate list that would pull the receipt off the
+// Income shelf and then never refresh. A Later row stays matchable: a link
+// would explain it.
 const NO_INCOME_DECISION_SQL = "coalesce(suggestion ->> 'decision', '') <> 'income'";
 const NO_OWNER_RULING_SQL = "(suggestion is null or ((suggestion -> 'decision') is null and not jsonb_exists(suggestion, 'examined')))";
 function ledgerRulesOn() { return !!(gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_LEDGER')); }
@@ -1408,7 +1411,7 @@ async function runDeterministicMatching({ limit } = {}) {
       // leftover budget forever while newer examined rows never get a turn.
       if (bounded) {
         await db('bank_transactions')
-          .where({ id: row.id, status: 'unmatched' })
+          .where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL)
           .update({ updated_at: new Date() });
       }
       return;
@@ -1418,7 +1421,7 @@ async function runDeterministicMatching({ limit } = {}) {
     // (deleted, claimed elsewhere, or out of window) — leaving them would
     // keep the UI offering targets that can only 404/409.
     await db('bank_transactions')
-      .where({ id: row.id, status: 'unmatched' })
+      .where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL)
       .update({
         suggestion: suggestionMerge({ noMatch: true }, ['candidates', 'candidatesTotal', 'payoutCandidates', 'payoutCandidatesTotal', 'refundCandidates', 'refundCandidatesTotal']),
         updated_at: new Date(),
@@ -1529,7 +1532,7 @@ async function runDeterministicMatching({ limit } = {}) {
       if (transferFlagWanted(row.suggestion, ledgerOn)) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(rulingGuardSql).update({
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).whereRaw(rulingGuardSql).update({
           suggestion: suggestionMerge({ ...transfer, ...actionPatch }, hasActions ? ['noMatch'] : []),
           updated_at: new Date(),
         });
@@ -1540,13 +1543,13 @@ async function runDeterministicMatching({ limit } = {}) {
         // already flagged — REFRESH the action list on every rescan
         // (targets appear and disappear; a stale list can only 404/409)
         // and rotate via updated_at like every other examined row
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
           suggestion: suggestionMerge(actionPatch, hasActions ? ['noMatch'] : staleActionKeys),
           updated_at: new Date(),
         });
       } else if (bounded) {
         // nothing to park and nothing stale to clear — plain rotation bump
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ updated_at: new Date() });
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({ updated_at: new Date() });
       }
       continue; // transfer-looking rows never auto-match anything
     }
@@ -1566,7 +1569,7 @@ async function runDeterministicMatching({ limit } = {}) {
         const refunds = await refundCandidateList();
         if (refunds.length) {
           summary.ambiguous++;
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
             suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal', 'noMatch']),
             updated_at: new Date(),
           });
@@ -1594,7 +1597,6 @@ async function runDeterministicMatching({ limit } = {}) {
             // re-checked at the claim: the row may have been linked, got a
             // bank change parked, and been unlinked since this pass read it
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
-            .whereRaw(NO_INCOME_DECISION_SQL)
             .update({
               status: 'matched_payout',
               matched_payout_id: exact[0].id,
@@ -1724,7 +1726,7 @@ async function runDeterministicMatching({ limit } = {}) {
         const refunds = await refundCandidateList();
         const arrivalDistance = (c) => Math.abs(new Date(`${toDateStr(c.arrival_date)}T00:00:00Z`) - new Date(`${txnDate}T00:00:00Z`));
         const parkedPayouts = [...candidates].sort((a, b) => (arrivalDistance(a) - arrivalDistance(b)) || String(a.id).localeCompare(String(b.id)));
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
           suggestion: suggestionMerge({
             payoutCandidates: parkedPayouts.slice(0, 20).map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
@@ -1740,7 +1742,7 @@ async function runDeterministicMatching({ limit } = {}) {
         const refunds = await refundCandidateList();
         if (refunds.length) {
           summary.ambiguous++;
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
             suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal', 'noMatch']),
             updated_at: new Date(),
           });
@@ -1809,7 +1811,6 @@ async function runDeterministicMatching({ limit } = {}) {
             // re-checked at the claim: the row may have been linked, got a
             // bank change parked, and been unlinked since this pass read it
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
-            .whereRaw(NO_INCOME_DECISION_SQL)
             .update({
               status: 'matched_expense',
               matched_expense_id: strong[0].id,
@@ -1830,7 +1831,7 @@ async function runDeterministicMatching({ limit } = {}) {
           // now, so the operator gets a picker immediately instead of an
           // unmatched row a bounded pass just reported as done
           summary.ambiguous++;
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
             suggestion: suggestionMerge(expenseCandidatePatch(recheckPlural), ['noMatch']),
             updated_at: new Date(),
           });
@@ -1887,7 +1888,7 @@ async function runDeterministicMatching({ limit } = {}) {
       // slice made the visible subset arbitrary run-to-run
       const parkedCandidates = [...candidates].sort((a, b) => String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
         || String(a.id).localeCompare(String(b.id)));
-      await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+      await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
         suggestion: suggestionMerge({
           // amount included (the GROSS reading for refund-reduced
           // candidates — that is the figure the statement debit carries):
