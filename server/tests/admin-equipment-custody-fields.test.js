@@ -445,6 +445,14 @@ describe('kit key', () => {
     expect(db.__state.inserted).toBeNull();
   });
 
+  test('kit_key writes need the gate: refused in the dark', async () => {
+    require('../services/truck-kit').truckKitEnabled.mockReturnValueOnce(false);
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { kit_key: 'moisture_meter' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/GATE_TRUCK_KIT/);
+    expect(db.__state.updated).toBeNull();
+  });
+
   test('GET /kit-keys answers the vocabulary with the gate on, 404 enabled:false with it off', async () => {
     const res = await run('get', '/kit-keys');
     expect(res.body).toEqual({ enabled: true, keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });

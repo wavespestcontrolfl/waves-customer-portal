@@ -3,6 +3,7 @@ import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '';
 export const TRUCK_KIT_OFF = { enabled: false };
+export const TRUCK_KIT_ERROR = { enabled: true, truck: null, kit: [], lastCheck: null, due: false, intervalDays: 7, gaps: [] };
 
 // GET /api/tech/truck-check (GATE_TRUCK_KIT): the signed-in technician's truck,
 // its kit, the last check and whether one is due. The gate off answers 404
@@ -15,7 +16,7 @@ export async function fetchTruckKit(signal) {
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 404 && data?.enabled === false) return TRUCK_KIT_OFF;
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data?.error || `HTTP ${res.status}`), { code: data?.code || null, status: res.status });
   return data;
 }
 
@@ -51,7 +52,10 @@ export default function useTruckKit() {
       if (mine === seq.current && !controller.signal.aborted) setState({ loading: false, data, error: '' });
     } catch (err) {
       if (err?.name === 'AbortError' || mine !== seq.current) return;
-      setState({ loading: false, data: null, error: err?.message || 'Could not load your truck' });
+      // The kit answered (the gate is on) but with an error the technician
+      // must see and act on (two trucks assigned, a server fault): keep the
+      // Tools tile reachable so the check page can show it with its retry.
+      setState({ loading: false, data: { ...TRUCK_KIT_ERROR, errorCode: err?.code || null }, error: err?.message || 'Could not load your truck' });
     }
   }, []);
   useEffect(() => {

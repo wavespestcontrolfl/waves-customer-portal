@@ -49,8 +49,11 @@ function conditionValue(raw) {
 }
 
 // kit_key (PR 2): what the tool is, lowercase snake_case; blank clears it.
+// Only while GATE_TRUCK_KIT is on: the kill switch covers the writer too, so
+// nothing can preconfigure holds in the dark.
 function kitKeyValue(raw) {
   if (raw === undefined) return { skip: true };
+  if (!require('../services/truck-kit').truckKitEnabled()) return { error: 'kit_key needs GATE_TRUCK_KIT' };
   const key = normalizeKitKey(raw);
   if (key && !isValidKitKey(key)) return { error: 'kit_key must be letters, digits and underscores, 2 to 60 characters' };
   return { value: key };
