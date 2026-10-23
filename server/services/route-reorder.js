@@ -1541,7 +1541,7 @@ async function runRouteReorder(opts = {}, conn = db) {
         for (const [techId, techStops] of byTech) {
           summary.measurements.push({ date: dateStr, technician_id: techId, as_of: now.toISOString(), snapshot_phase: 'loaded_schedule',
             drive_model: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
-            ...measureDayQuality(RouteOptimizer, techStops) });
+            ...measureDayQuality(RouteOptimizer, techStops, { home: homeFromMap(techHomes, techId) }) });
         }
       }
 
@@ -1854,7 +1854,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             summary.measurements.push({ date: dateStr, technician_id: techId, as_of: (opts.now || new Date()).toISOString(),
               snapshot_phase: 'applied_reorder', drive_model: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
               ...require('./scheduling/day-quality').measureDayQuality(RouteOptimizer,
-                techStops.map(stop => ({ ...stop, route_order: finalIds.indexOf(stop.id) + 1 }))) });
+                techStops.map(stop => ({ ...stop, route_order: finalIds.indexOf(stop.id) + 1 })), { home }) });
           }
           logger.info(`[route-reorder] ${dateStr} tech ${techId}: reordered ${withCoords.length} stops, saved ~${Math.round(appliedMetrics.saved_meters)} m (${appliedMetrics.source})`);
         } catch (techErr) {

@@ -47,6 +47,8 @@ async function loadGapCandidate(serviceId, conn) {
 
 function analyzeGapCandidate(candidate, rows, {
   date, technicianId, now, today, departureMinutes, targetReturnMinutes, breakMinutes, closed,
+  // The tech's start point (GATE_TECH_START_POINTS); absent = the office.
+  home,
 }) {
   const response = { candidateId: candidate.service?.id || null, routeFits: [], feasibleInsertionWindows: null,
     automaticMoveAuthorized: false, reviewRequirements: ['customer_commitments_and_access', 'locked_save_recheck'] };
@@ -98,7 +100,7 @@ function analyzeGapCandidate(candidate, rows, {
   const duration = workDuration({ ...service, planning_exempt: true });
   const sameRoute = toDateStr(service.scheduled_date) === date && service.technician_id === technicianId;
   const target = { ...service, technician_id: technicianId, scheduled_date: date, route_order: sameRoute ? service.route_order : null };
-  const context = { target, rows: others, date, now, grouped: false, activeTarget: false };
+  const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home };
   const result = enumerateArrivalPlacements(context, { durationMinutes: duration, earliestStartMin: departure,
     latestServiceEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES),
     dayEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES), departureMin: departure, returnByMin: returnBy });
