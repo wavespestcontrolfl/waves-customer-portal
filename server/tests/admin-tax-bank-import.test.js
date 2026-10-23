@@ -1221,3 +1221,26 @@ describe('unlink (gate on)', () => {
     expect((await post('/admin/tax/bank-import/bt-1/unlink', {})).status).toBe(409);
   });
 });
+
+describe('AI suggest eligibility follows the ledger kill switch', () => {
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; state.listRows = []; });
+  afterAll(() => { delete process.env.GATE_TAX_LEDGER; });
+  const scopeRaws = () => {
+    const b = mockDb.mock.results.map((r) => r.value).find((v) => v && v.whereRaw && v.whereRaw.mock.calls.some((c) => /categoryId/.test(c[0])));
+    return b.whereRaw.mock.calls.map((c) => c[0]);
+  };
+  test('gate off: a category or transfer flag a ledger rule wrote does not take the row out of the AI pass', async () => {
+    delete process.env.GATE_TAX_LEDGER; mockDb.mockClear();
+    expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
+    const raws = scopeRaws();
+    expect(raws).toContainEqual(expect.stringContaining("(suggestion->>'categorySource') = 'rule'"));
+    expect(raws).toContainEqual(expect.stringContaining("(suggestion->'rule'->>'kind') = 'transfer'"));
+  });
+  test('gate on: the stored category and flag count as they are', async () => {
+    process.env.GATE_TAX_LEDGER = 'true'; mockDb.mockClear();
+    expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
+    const raws = scopeRaws();
+    expect(raws).toContainEqual("(suggestion is null or (suggestion->>'categoryId') is null)");
+    expect(raws).toContainEqual("coalesce(suggestion->>'ignore','') <> 'true'");
+  });
+});

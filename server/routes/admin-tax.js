@@ -2306,10 +2306,21 @@ router.post('/bank-import/suggest', async (req, res, next) => {
     const ids = Array.isArray(req.body?.ids)
       ? req.body.ids.filter(x => typeof x === 'string').slice(0, 50)
       : null;
+    // Eligibility reads the suggestion the way the tab sees it: with
+    // GATE_TAX_LEDGER off, a category a ledger rule wrote and a transfer
+    // flag a ledger rule wrote do not count (visibleSuggestion hides them);
+    // the matcher's own flag and an owner decision still do.
+    const ledgerOn = taxLedgerRules.isOn();
+    const noCategory = ledgerOn
+      ? "(suggestion is null or (suggestion->>'categoryId') is null)"
+      : "(suggestion is null or (suggestion->>'categoryId') is null or (suggestion->>'categorySource') = 'rule')";
+    const notIgnored = ledgerOn
+      ? "coalesce(suggestion->>'ignore','') <> 'true'"
+      : "(coalesce(suggestion->>'ignore','') <> 'true' or ((suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null))";
     let q = db('bank_transactions')
       .where({ status: 'unmatched', direction: 'debit' })
-      .whereRaw("(suggestion is null or (suggestion->>'categoryId') is null)")
-      .whereRaw("coalesce(suggestion->>'ignore','') <> 'true'")
+      .whereRaw(noCategory)
+      .whereRaw(notIgnored)
       .orderBy('txn_date', 'asc')
       .limit(limit)
       .select('id', 'description', 'amount', 'suggestion');
