@@ -10,8 +10,9 @@
  * frozen as first pushed (a preview may already have recorded it in
  * knex_migrations, so an edit there would never run); this migration
  * corrects the row after the fact:
- *   - if the 20261021010000 audit row exists, the live value moved and the
- *     changelog is already true — nothing to do;
+ *   - if the 20261021010000 UP audit row is the LATEST activity on the key,
+ *     the live value moved in this application and the changelog is already
+ *     true — nothing to do;
  *   - otherwise rewrite that changelog row to say the admin-tuned value
  *     (read live — even when it already reads 0.40) was preserved and still
  *     governs pricing; without the audit row no cut happened here.
@@ -40,10 +41,18 @@ async function liveValue(knex) {
 exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('pricing_changelog'))) return;
   if (await knex.schema.hasTable('pricing_config_audit')) {
-    const moved = await knex('pricing_config_audit')
-      .where({ config_key: CONFIG_KEY, changed_by: PREV_TAG, reason: PREV_UP_REASON })
-      .first('id');
-    if (moved) return; // the row moved; the changelog is already true
+    // The audit row proves a move only while it is the LATEST activity on
+    // the key. After a rollback and re-apply with an admin-tuned value in
+    // place, 20261021010000 preserves the row (both ways) yet re-inserts the
+    // "0.45 -> 0.40" changelog, and its historical UP audit still exists —
+    // so a mere existence check would leave that fresh row lying (Codex
+    // #6398 r21). Same ownership rule as that migration's down().
+    const latest = await knex('pricing_config_audit')
+      .where({ config_key: CONFIG_KEY })
+      .orderBy('id', 'desc')
+      .first('id', 'changed_by', 'reason');
+    const moved = !!latest && latest.changed_by === PREV_TAG && latest.reason === PREV_UP_REASON;
+    if (moved) return; // the row moved in this application; the changelog is already true
   }
   // No audit row means 20261021010000 did NOT move the row — including an
   // admin-tuned row that already read 0.40 (Codex #6398 r3): the changelog

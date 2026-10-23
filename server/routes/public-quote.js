@@ -3089,8 +3089,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 palmCount: item.palmCount,
                 palmCountSource: item.palmCountSource ?? null,
                 palmReserveActive: item.palmReserveActive ?? null,
-                pricingKnobs: item.pricingKnobs ?? null,
               }
+              : {}),
+            // The T&S knob stamp (margin target, bed basis, density table)
+            // rides on BOTH programs — the commercial line prices the same
+            // lot-based bed and replays its own lotBedBasis — and does not
+            // depend on a palm count being present (Codex #6398 r21).
+            ...((item.service === 'tree_shrub' || item.service === 'commercial_tree_shrub') && item.pricingKnobs
+              ? { pricingKnobs: item.pricingKnobs }
               : {}),
             // Mosquito rows name their program via selectedProgram/tier and
             // carry station/dunk addOns — both feed the audit's COGS

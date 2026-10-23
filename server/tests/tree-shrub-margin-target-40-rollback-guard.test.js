@@ -8,6 +8,7 @@
  * pricing_changelog).
  */
 const migration = require('../models/migrations/20261021010000_tree_shrub_margin_target_40');
+const truth = require('../models/migrations/20261022000000_tree_shrub_margin_changelog_truth');
 
 const KEY = 'global_margin_target_ts';
 const TAG = 'migration:20261021010000_tree_shrub_margin_target_40';
@@ -29,9 +30,10 @@ function fakeKnex(db) {
         else preds.push((r) => Object.entries(a).every(([k, v]) => r[k] === v));
         return q;
       },
-      whereRaw(sql) {
+      whereRaw(sql, bindings = []) {
         const m = sql.match(/summary LIKE '(.+)%'/);
-        preds.push((r) => String(r.summary || '').startsWith(m[1]));
+        const prefix = m ? m[1] : String(bindings[0] || '').replace(/%$/, '');
+        preds.push((r) => String(r.summary || '').startsWith(prefix));
         return q;
       },
       orderBy(col, dir) { order = { col, dir }; return q; },
@@ -87,6 +89,31 @@ describe('20261021010000 Tree & Shrub margin target rollback', () => {
     await migration.down(knex);
     expect(value(db)).toBe(0.40);
     expect(db.pricing_config_audit.filter((r) => r.changed_by === TAG)).toHaveLength(1);
+  });
+
+  test('the changelog-truth migration trusts the UP audit only while it is the latest activity (Codex #6398 r21)', async () => {
+    // Straight deploy: moved, audit is latest → changelog untouched.
+    const clean = freshDb();
+    const k1 = fakeKnex(clean);
+    await migration.up(k1);
+    await truth.up(k1);
+    expect(clean.pricing_changelog[0].summary).toMatch(/^Tree & Shrub margin target 0\.45 -> 0\.40 \(admin-inclusive\)/);
+    // Moved, admin tuned afterwards, stack rolled back (value preserved) and
+    // re-applied: 20261021010000 preserves 0.42 but re-inserts the "cut"
+    // changelog while its historical UP audit still exists — the truth
+    // migration must rewrite that fresh row to the preserved wording.
+    const replayed = freshDb();
+    const k2 = fakeKnex(replayed);
+    await migration.up(k2);
+    await adminSets(k2, replayed, 0.42);
+    await truth.down(k2);
+    await migration.down(k2);
+    expect(value(replayed)).toBe(0.42);
+    await migration.up(k2);
+    await truth.up(k2);
+    expect(value(replayed)).toBe(0.42);
+    expect(replayed.pricing_changelog).toHaveLength(1);
+    expect(replayed.pricing_changelog[0].summary).toContain('(0.42) was preserved and still governs live pricing');
   });
 
   test('an admin value other than 0.40 is never touched; up skips a row an admin already tuned', async () => {
