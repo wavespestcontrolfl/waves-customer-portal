@@ -2052,6 +2052,55 @@ function parentParcelContext(parcel, { address, gisPrecision, point }) {
   };
 }
 
+// The buildings on a parent parcel, grouped by type and size, so staff can
+// see which building of a campus the business may be in (an office park
+// whose six buildings share one county address). Manatee only: its PAO
+// building table is public per parcel. Context for the panel, never a size
+// or price input: a building is not the business's space (owner ruling
+// 2026-09-25, price a suite by the suite).
+const PARENT_PARCEL_BUILDINGS_TIMEOUT_MS = 4000;
+const PARENT_PARCEL_BUILDING_GROUPS_MAX = 8;
+
+function groupParentParcelBuildings(table) {
+  const rows = parsePaoRows(table);
+  const groups = new Map();
+  let total = 0;
+  for (const row of rows) {
+    const sqft = positiveInt(String(row.LivBus || '').replace(/,/g, ''), 0);
+    if (!sqft) continue;
+    const classification = String(row.Classification || '').trim() || 'BUILDING';
+    const stories = positiveInt(row.Stories, 0) || null;
+    const key = `${classification}|${stories || ''}|${sqft}`;
+    const group = groups.get(key) || { classification, stories, sqft, count: 0 };
+    group.count += 1;
+    groups.set(key, group);
+    total += 1;
+  }
+  if (!total) return null;
+  const sorted = [...groups.values()].sort((a, b) => (b.count - a.count) || (a.sqft - b.sqft));
+  return {
+    total,
+    groups: sorted.slice(0, PARENT_PARCEL_BUILDING_GROUPS_MAX),
+    moreGroups: Math.max(0, sorted.length - PARENT_PARCEL_BUILDING_GROUPS_MAX),
+  };
+}
+
+// Fail-open: an error or a non-Manatee parcel is simply no building list.
+async function parentParcelBuildings(parentParcel) {
+  if (!parentParcel?.parcelId || String(parentParcel.county || '').toLowerCase() !== 'manatee') return null;
+  if (!/^\d+$/.test(String(parentParcel.parcelId))) return null;
+  try {
+    const table = await fetchManateePaoJson(
+      `${MANATEE_PAO_BUILDINGS_URL}?parid=${encodeURIComponent(parentParcel.parcelId)}`,
+      PARENT_PARCEL_BUILDINGS_TIMEOUT_MS,
+    );
+    return groupParentParcelBuildings(table);
+  } catch (err) {
+    logger.warn('[county-property] parent parcel building list unavailable', { error: summarizeProviderError(err) });
+    return null;
+  }
+}
+
 const TYPED_DWELLING_UNIT_RE = /(?:\b(?:APT|APARTMENT|UNIT)\b\.?\s*#?\s*|#\s*)([A-Z0-9-]+)/i;
 const TYPED_BUILDING_RE = /\b(?:BLDG|BUILDING)\b\.?\s*#?\s*([A-Z0-9-]+)/i;
 // Designators that are not a dwelling unit: a suite is commercial, and a
@@ -2583,6 +2632,12 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
     return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
   }
 
+  // The parent parcel's building list runs beside the AI legs (they take
+  // far longer), so it adds no wait. Only for a caller keeping the context.
+  const parentBuildingsPending = parentParcel && options.retainParentParcel === true
+    ? parentParcelBuildings(parentParcel)
+    : null;
+
   // Same diag wrapper as the county legs above: a leg resolving null after
   // ~its full configured timeout is a suspected provider timeout.
   const aiLegTimeoutMs = {
@@ -2616,6 +2671,10 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
     cadastralRecord,
     ...aiRecords,
   ].filter(Boolean);
+  if (parentBuildingsPending) {
+    const buildings = await parentBuildingsPending;
+    if (buildings) parentParcel = { ...parentParcel, buildings };
+  }
 
   if (!records.length) {
     // Opted-in callers only: for everyone else a lookup with no record stays
@@ -5961,6 +6020,7 @@ module.exports = {
     situsHouseNumberMismatch,
     aggregateSitusVerdict,
     applyGisParcelGuards,
+    groupParentParcelBuildings,
     livePointQueryBudgetMs,
     addressHasSubpremise,
     FL_FLOOR_RE,
