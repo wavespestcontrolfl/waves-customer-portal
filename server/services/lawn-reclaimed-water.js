@@ -6,11 +6,34 @@
  *   'office' or 'customer'  a person said so. Always wins; the county job never overwrites it.
  *   'county_meter'          services/reclaimed-water-meters.js matched the property to a Manatee County reclaimed meter.
  *   NULL / NULL             nobody knows (the plan treats it as not reclaimed).
- * A visit pointing at a property a customer merge deactivated is judged by the winning customer's active property at the same address.
+ * A visit pointing at a property a customer merge deactivated is judged by the winning customer's active property at the same address, and a
+ * person's answer left on a merged-away copy of that address counts when the active copy has no person answer.
  * The plan engine reads this through isReclaimedService (waveguard-plan-engine.js nitrogenDecision) and halves the N.
  */
 const logger = require('./logger');
 const { savepointRead } = require('../utils/savepoint-read');
+
+const PERSON_SOURCES = ['office', 'customer'];
+
+// The visit still points at a property a customer merge deactivated (repointCustomerProperties keeps the loser's row as history and the visits
+// keep its id). The county job and the office settle ACTIVE rows, so the verdict lives on the winning customer's active property at the same
+// address. None (or no address key or customer to match): undefined, and the normal target stands unless a person answered (below).
+async function liveCopy(k, row, customerId) {
+  if (!row.address_key || !customerId) return undefined;
+  return k('customer_properties').where({ customer_id: customerId, active: true, address_key: row.address_key })
+    .first('reclaimed_water', 'reclaimed_water_source');
+}
+
+// A person's answer (office or customer) on a deactivated copy of the same address of the same customer: a merge deactivates the loser's copy
+// without moving its columns, and a person's answer must not be lost to that. Used only when the active copy has no person answer; the newest
+// answer wins. A county verdict on a deactivated copy is never used (the county job re-matches the active copy).
+async function mergedPersonAnswer(k, addressKey, customerId) {
+  if (!addressKey || !customerId) return undefined;
+  return k('customer_properties').where({ customer_id: customerId, active: false, address_key: addressKey })
+    .whereIn('reclaimed_water_source', PERSON_SOURCES)
+    .orderBy('reclaimed_water_checked_at', 'desc', 'last')
+    .first('reclaimed_water');
+}
 
 // The property a visit is for: the visit's own link, else the resolver the whole lawn program uses (null = unresolvable).
 async function propertyIdOf(knex, svc) {
@@ -30,13 +53,14 @@ async function isReclaimedService(knex, svc, { strict = false } = {}) {
     return await savepointRead(knex, async (k) => {
       const propertyId = await propertyIdOf(k, svc);
       if (!propertyId) return false;
-      const row = await k('customer_properties').where({ id: propertyId }).first('reclaimed_water', 'active', 'address_key');
-      if (row?.active !== false) return row?.reclaimed_water === true;
-      // The visit still points at a property a customer merge deactivated (repointCustomerProperties keeps the loser's row as history and the
-      // visits keep its id). The county job and the office only ever settle ACTIVE rows, so the verdict lives on the winning customer's active
-      // property at the same address. None (or no address key to match): fail closed, the normal target stands.
-      if (!row.address_key || !svc.customer_id) return false;
-      const live = await k('customer_properties').where({ customer_id: svc.customer_id, active: true, address_key: row.address_key }).first('reclaimed_water');
+      const row = await k('customer_properties').where({ id: propertyId })
+        .first('reclaimed_water', 'reclaimed_water_source', 'active', 'address_key', 'customer_id');
+      if (!row) return false;
+      const customerId = row.active === false ? svc.customer_id : row.customer_id;
+      const live = row.active === false ? await liveCopy(k, row, customerId) : row;
+      if (PERSON_SOURCES.includes(live?.reclaimed_water_source)) return live.reclaimed_water === true;
+      const merged = await mergedPersonAnswer(k, row.address_key, customerId);
+      if (merged) return merged.reclaimed_water === true;
       return live?.reclaimed_water === true;
     });
   } catch (err) {

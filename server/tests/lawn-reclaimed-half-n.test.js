@@ -30,7 +30,7 @@ function fakeKnex(rows) {
       if (row instanceof Error) throw row;
       return row;
     };
-    const query = { where: () => query, first: answer };
+    const query = { where: () => query, whereIn: () => query, orderBy: () => query, first: answer };
     return query;
   };
   knex.calls = calls;
@@ -287,15 +287,26 @@ describe('the property read (isReclaimedService)', () => {
     const inactive = { reclaimed_water: null, active: false, address_key: 'k-12-sample-lane' };
 
     test('the verdict is the winning customer\'s active property at the same address', async () => {
-      const knex = fakeKnex([inactive, { reclaimed_water: true }]);
+      const knex = fakeKnex([inactive, { reclaimed_water: true }, undefined]);
       expect(await reclaimed.isReclaimedService(knex, MERGED)).toBe(true);
-      expect(knex.calls).toEqual(['customer_properties', 'customer_properties']);
+      // The visit's row, the active copy, then the look for a person answer on a merged-away copy (none here).
+      expect(knex.calls).toEqual(['customer_properties', 'customer_properties', 'customer_properties']);
       expect(await reclaimed.isReclaimedService(fakeKnex([inactive, { reclaimed_water: false }]), MERGED)).toBe(false);
       expect(await reclaimed.isReclaimedService(fakeKnex([inactive, { reclaimed_water: null }]), MERGED)).toBe(false);
     });
 
-    test('the inactive row\'s own old verdict is never trusted: the loser\'s answer does not carry over', async () => {
-      expect(await reclaimed.isReclaimedService(fakeKnex([{ ...inactive, reclaimed_water: true }, { reclaimed_water: false }]), MERGED)).toBe(false);
+    test('the winner\'s active copy answered by a person wins over the loser\'s copy', async () => {
+      expect(await reclaimed.isReclaimedService(fakeKnex([{ ...inactive, reclaimed_water: true, reclaimed_water_source: 'office' }, { reclaimed_water: false, reclaimed_water_source: 'customer' }]), MERGED)).toBe(false);
+    });
+
+    test('a person answer on a merged-away copy counts when the active copy has none (a merge does not move the columns)', async () => {
+      // The active copy is unknown or county-judged; the merged-away copies hold an office "yes".
+      expect(await reclaimed.isReclaimedService(fakeKnex([inactive, { reclaimed_water: null, reclaimed_water_source: null }, { reclaimed_water: true }]), MERGED)).toBe(true);
+      expect(await reclaimed.isReclaimedService(fakeKnex([inactive, { reclaimed_water: true, reclaimed_water_source: 'county_meter' }, { reclaimed_water: false }]), MERGED)).toBe(false);
+    });
+
+    test('a county verdict on the deactivated copy is never trusted', async () => {
+      expect(await reclaimed.isReclaimedService(fakeKnex([{ ...inactive, reclaimed_water: true, reclaimed_water_source: 'county_meter' }, { reclaimed_water: false }, undefined]), MERGED)).toBe(false);
     });
 
     test.each([
@@ -309,10 +320,18 @@ describe('the property read (isReclaimedService)', () => {
       expect(await reclaimed.isReclaimedService(fakeKnex([inactive, { reclaimed_water: true }]), { id: 'svc-x', property_id: PROPERTY })).toBe(false);
     });
 
-    test('an active property is read as before, in one read', async () => {
-      const knex = fakeKnex([{ reclaimed_water: true, active: true, address_key: 'k' }]);
+    test('an active property a person answered is read in one read', async () => {
+      const knex = fakeKnex([{ reclaimed_water: true, reclaimed_water_source: 'office', active: true, address_key: 'k', customer_id: 'winner-1' }]);
       expect(await reclaimed.isReclaimedService(knex, MERGED)).toBe(true);
       expect(knex.calls).toEqual(['customer_properties']);
+    });
+
+    test('an active property with no person answer: a person answer on a merged-away copy of the address wins, else its own verdict', async () => {
+      const active = { reclaimed_water: null, reclaimed_water_source: null, active: true, address_key: 'k', customer_id: 'winner-1' };
+      expect(await reclaimed.isReclaimedService(fakeKnex([active, { reclaimed_water: true }]), MERGED)).toBe(true);
+      expect(await reclaimed.isReclaimedService(fakeKnex([{ ...active, reclaimed_water: true, reclaimed_water_source: 'county_meter' }, { reclaimed_water: false }]), MERGED)).toBe(false);
+      expect(await reclaimed.isReclaimedService(fakeKnex([{ ...active, reclaimed_water: true, reclaimed_water_source: 'county_meter' }, undefined]), MERGED)).toBe(true);
+      expect(await reclaimed.isReclaimedService(fakeKnex([active, undefined]), MERGED)).toBe(false);
     });
 
     test('the plan decision halves through the winner\'s property', async () => {
