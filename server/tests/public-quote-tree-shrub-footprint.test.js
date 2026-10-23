@@ -65,6 +65,28 @@ describe('trustedTreeShrubFootprintSqFt', () => {
     expect(trustedTreeShrubFootprintSqFt({ storiesSource: 'guess', footprint: 2000 })).toBeNull();
   });
 
+  test("an 'ai' story count is trusted only when its fallback evidence is direct, attributable and not low-confidence (Codex security r24)", () => {
+    const ai = { storiesSource: 'ai', stories: 1, footprint: 15000, homeSqFt: 15000 };
+    // A public-record search hit carries no fallback evidence: trusted as before.
+    expect(trustedTreeShrubFootprintSqFt(ai, {})).toBe(15000);
+    expect(trustedTreeShrubFootprintSqFt(ai, null)).toBe(15000);
+    // The Claude stories fallback graded 'estimated' (inferred / low confidence /
+    // unattributable) yields NO trusted footprint — the three-story home would
+    // otherwise pass its whole living area off as a one-story footprint.
+    for (const evidence of [
+      { value: 1, basis: 'inferred', confidence: 'medium', sourceUrl: 'https://www.example-county.gov/parcel/1', sourceType: 'county' },
+      { value: 1, basis: 'direct', confidence: 'low', sourceUrl: 'https://www.example-county.gov/parcel/1', sourceType: 'county' },
+      { value: 1, basis: 'direct', confidence: 'high', sourceUrl: 'the county site', sourceType: 'county' },
+      { value: 1, basis: 'direct', confidence: 'high', sourceUrl: 'https://example.com/x', sourceType: 'unknown' },
+    ]) {
+      expect(trustedTreeShrubFootprintSqFt(ai, { _storiesEvidence: evidence })).toBeNull();
+    }
+    // A direct, attributable, confident answer is trusted.
+    const direct = { value: 3, basis: 'direct', confidence: 'high', sourceUrl: 'https://www.example-county.gov/parcel/1', sourceType: 'county' };
+    expect(trustedTreeShrubFootprintSqFt({ ...ai, stories: 3 }, { _storiesEvidence: direct })).toBe(15000);
+    expect(trustedTreeShrubFootprintSqFt({ storiesSource: 'ai', stories: 3, homeSqFt: 15000 }, { _storiesEvidence: direct })).toBe(5000);
+  });
+
   test('no server-measured building → null (the pricer parks the lot-based line)', () => {
     expect(trustedTreeShrubFootprintSqFt({ ...V })).toBeNull();
     expect(trustedTreeShrubFootprintSqFt(null)).toBeNull();

@@ -163,11 +163,23 @@ function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {})
 // itself be trusted: 'default' means nobody knew and the lookup fell back to
 // 1, which would pass a whole multi-story home off as its footprint (Codex
 // security r13). The body's story count is never consulted.
+// 'ai' covers both a public-record search hit and the Claude stories
+// fallback; the latter stamps `_storiesEvidence` on the property record and
+// only a direct, attributable, non-low-confidence answer counts
+// (draft-builder#storiesSourceForPricing, the same grader the estimator and
+// customer pricing apply) — an inferred one-story answer on a three-story
+// home would otherwise pass the whole living area off as its footprint
+// (Codex #6398 security r24).
 const TRUSTED_STORIES_SOURCES = new Set(['ai', 'permit', 'verified', 'manual']);
-function trustedTreeShrubFootprintSqFt(trustedTurf = {}) {
+function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) {
   const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
   if (t.footprintUnknown === true) return null;
   if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource)) return null;
+  if (t.storiesSource === 'ai') {
+    const { storiesSourceForPricing } = require('../services/estimator-engine/draft-builder');
+    const graded = storiesSourceForPricing({ stories: t.stories, storiesEvidence: propertyRecord?._storiesEvidence || null });
+    if (graded !== 'lookup') return null;
+  }
   const stories = Math.max(1, Math.min(3, Number(t.stories) || 1));
   const perStory = (v) => Math.max(1, Math.round(Number(v) / stories));
   if (Number(t.footprint) > 0) return Number(t.footprint);
@@ -1261,6 +1273,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       })
       : (normalizedAddress.fullAddress || String(address || '').trim());
     let trustedTurf = {};
+    let trustedRecord = null;
     let trustedProfileFound = false;
     // When the cached profile was saved (property_lookup_cache): a cache-only
     // re-read obtains no NEW evidence, so its county audit is only as fresh
@@ -1274,6 +1287,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const serverLookup = await performPropertyLookup(parcelLookupAddress, lookupOptionsFor('public_quote', { cacheOnly: true, persist: false }));
         if (serverLookup?.enriched) {
           trustedTurf = serverLookup.enriched;
+          trustedRecord = serverLookup.propertyRecord || null;
           trustedProfileFound = true;
           trustedProfileCachedAt = auditEvidenceAt(serverLookup);
         }
@@ -1599,7 +1613,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
-    const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf);
+    const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf, trustedRecord);
     let engineInput = {
       homeSqFt: sqft,
       // Tree & Shrub open-parcel basis: the server-measured footprint, never
