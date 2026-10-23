@@ -127,13 +127,18 @@ const SIGN_OFF_REFUSAL = {
 };
 
 // Tax IDs are never stored. Refused in any typed text: a hyphenated EIN (12-3456789), a hyphenated SSN (123-45-6789), and a
-// nine-digit run that follows a label (EIN, FEIN, TIN, SSN, "tax id", "taxpayer") by at most 12 characters. A bare nine-digit
+// nine-digit run that follows a label (EIN, FEIN, TIN, SSN, W-9 or W9, "tax id", "taxpayer") by at most 12 characters. A bare nine-digit
 // number with no such label (an insurance policy number) is fine. The message never repeats the text.
-const TAX_ID_PATTERN = /(?<!\d)(?:\d{2}-\d{7}|\d{3}-\d{2}-\d{4})(?!\d)|(?:\b(?:EIN|FEIN|TIN|SSN)\b|tax\s*id|taxpayer)[\s\S]{0,12}?(?<!\d)\d{9}(?!\d)/i;
+const TAX_ID_PATTERN = /(?<!\d)(?:\d{2}-\d{7}|\d{3}-\d{2}-\d{4})(?!\d)|(?:\b(?:EIN|FEIN|TIN|SSN)\b|\bW[-\s]?9\b|tax\s*id|taxpayer)[\s\S]{0,12}?(?<!\d)\d{9}(?!\d)/i;
+// A file name is held to a stricter rule: any standalone run of exactly nine digits (not part of a longer run) is refused with
+// or without a label, as are the hyphenated forms. A name has no sentence around it, and "W9 123456789.pdf" is the common case.
+const FILE_NAME_TAX_ID = /(?<!\d)(?:\d{2}-\d{7}|\d{3}-\d{2}-\d{4}|\d{9})(?!\d)/;
 // The one plain refusal every tax-ID check gives. It never repeats the text.
 const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID.';
 // An underscore counts as a space, so a file name like EIN_123456789.pdf is read the same as "EIN 123456789".
 const looksLikeTaxId = (text) => typeof text === 'string' && TAX_ID_PATTERN.test(text.replace(/_/g, ' '));
+// An uploaded file's name (the strict rule above). Underscores count as spaces, as in typed text.
+const fileNameHasTaxId = (name) => typeof name === 'string' && (FILE_NAME_TAX_ID.test(name.replace(/_/g, ' ')) || looksLikeTaxId(name));
 function containsTaxId(value) {
   if (value == null) return false;
   if (typeof value === 'string') return looksLikeTaxId(value);
@@ -258,5 +263,5 @@ module.exports = {
   LIMIT_KEYS, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, MAX_LIMIT_DOLLARS, REFERENCE_DETAIL_KEYS, PUBLIC_OR_PRIVATE,
   SUBSTANTIVE_FIELDS, EXPIRING_DAYS, STATUS, STATUS_ORDER, STATUS_LABEL, SIGN_OFF_REFUSAL,
   catalogItem, catalogSections, itemStatus, buildChecklist, summarize, changesSubstance,
-  TAX_ID_REFUSED, looksLikeTaxId, containsTaxId, etToday, dayText, daysBetween,
+  TAX_ID_REFUSED, looksLikeTaxId, fileNameHasTaxId, containsTaxId, etToday, dayText, daysBetween,
 };

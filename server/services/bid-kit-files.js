@@ -71,25 +71,30 @@ function validateFile(file) {
   if (detected !== declared) throw new FileError('The file content does not match its type. ' + SUPPORTED_MESSAGE);
   // A file name is typed text too: one that carries a tax ID or SSN (W9-123-45-6789.pdf) is refused, never stored or cleaned,
   // so the number cannot reach file_name, a list response or a signed link. The refusal never repeats the name.
-  if (catalog.containsTaxId([file.originalname, safeFileName(file.originalname)])) throw new FileError(catalog.TAX_ID_REFUSED);
+  if (catalog.fileNameHasTaxId(file.originalname) || catalog.fileNameHasTaxId(safeFileName(file.originalname))) throw new FileError(catalog.TAX_ID_REFUSED);
   return detected;
 }
 
 // The name kept with the file: no path, no quotes, no control characters.
+const MAX_NAME_CHARS = 80;
 function safeFileName(name = 'file') {
   const cleaned = String(name || 'file')
     .replace(/[^A-Za-z0-9._ -]+/g, '_')
     .replace(/\s+/g, ' ')
     .replace(/^[. ]+/, '')
-    .trim()
-    .slice(0, 80);
-  return cleaned || 'file';
+    .trim();
+  // A long name is shortened in the middle of the base, never at the end: the extension stays, so the stored name still says
+  // what kind of file it is.
+  const match = cleaned.match(/^(.*?)(\.[A-Za-z0-9]{1,5})$/);
+  const [base, ext] = match ? [match[1], match[2]] : [cleaned, ''];
+  const shortened = `${base.slice(0, Math.max(1, MAX_NAME_CHARS - ext.length)).trimEnd()}${ext}`;
+  return shortened === '' ? 'file' : shortened;
 }
 
 // The name a signed link offers. A stored name that somehow holds a tax ID is replaced by a plain one.
 function downloadName(fileName, contentType) {
   const name = safeFileName(fileName);
-  return catalog.containsTaxId(name) ? `file.${(TYPES[contentType] || ['bin'])[0]}` : name;
+  return catalog.fileNameHasTaxId(name) ? `file.${(TYPES[contentType] || ['bin'])[0]}` : name;
 }
 
 const keyFingerprint = (key) => crypto.createHash('sha256').update(String(key || '')).digest('hex').slice(0, 12);

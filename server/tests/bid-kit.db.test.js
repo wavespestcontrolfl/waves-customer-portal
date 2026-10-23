@@ -239,7 +239,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
 
     test('a file name with a tax ID is refused: nothing is stored, no row or key holds it', async () => {
       const created = await create({ item_key: 'business_license_copy' });
-      for (const name of ['W9-123-45-6789.pdf', 'W9 12-3456789.pdf', 'EIN 123456789.pdf']) {
+      for (const name of ['W9-123-45-6789.pdf', 'W9 12-3456789.pdf', 'EIN 123456789.pdf', 'W9 123456789.pdf', 'w-9_123456789.pdf']) {
         expect((await upload(created.id, name)).status).toBe(400);
       }
       expect(mockSent).toHaveLength(0);

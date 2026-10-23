@@ -225,6 +225,24 @@ describe('gate off', () => {
     expect((await call('GET', '/api/admin/feature-flags')).body.flags.bid_kit).toBeUndefined(); // even a stray per-user row cannot show it
   });
 
+  test('every answer carries no-store, the dark-gate 404 and the sign-in refusals included', async () => {
+    delete process.env.GATE_BID_KIT;
+    const id = '11111111-2222-4333-8444-555555555555';
+    for (const [method, url] of [['GET', '/api/admin/bid-kit'], ['GET', '/api/admin/bid-kit/facts-sheet'], ['PATCH', `/api/admin/bid-kit/${id}`], ['GET', `/api/admin/bid-kit/${id}/file`]]) {
+      const off = await call(method, url, method === 'PATCH' ? {} : undefined);
+      expect(off.status).toBe(404);
+      expect(off.headers.get('cache-control')).toBe('no-store');
+      const anonymous = await call(method, url, method === 'PATCH' ? {} : undefined, { 'Content-Type': 'application/json' });
+      expect(anonymous.status).toBe(401);
+      expect(anonymous.headers.get('cache-control')).toBe('no-store');
+      const tech = await call(method, url, method === 'PATCH' ? {} : undefined, { Authorization: 'Bearer tech', 'Content-Type': 'application/json' });
+      expect(tech.status).toBe(403);
+      expect(tech.headers.get('cache-control')).toBe('no-store');
+    }
+    process.env.GATE_BID_KIT = 'true';
+    expect((await call('GET', '/api/admin/bid-kit')).headers.get('cache-control')).toBe('no-store');
+  });
+
   test('the daily job does nothing', async () => {
     delete process.env.GATE_BID_KIT;
     expect(await require('../services/bid-kit-expiry').runBidKitExpiryCheck()).toEqual({ skipped: 'gate_off' });
@@ -534,6 +552,9 @@ describe('files', () => {
     ['a hyphenated EIN', 'W9 12-3456789.pdf'],
     ['a labelled nine-digit EIN', 'EIN 123456789.pdf'],
     ['a labelled TIN with a separator', 'W9_TIN_123456789.pdf'],
+    ['an unhyphenated number after W9', 'W9 123456789.pdf'],
+    ['an unhyphenated number after w-9 and an underscore', 'w-9_123456789.pdf'],
+    ['a bare nine-digit run, no label at all', 'scan_123456789.pdf'],
   ])('a file name with %s is refused with the tax-ID message, and never reaches storage, the row or any response', async (_name, fileName) => {
     const item = await create();
     const res = await upload(item.id, { name: fileName });
@@ -561,6 +582,27 @@ describe('files', () => {
     await call('GET', `/api/admin/bid-kit/${item.id}/file`);
     expect(getSignedUrl.mock.calls[0][1].input.ResponseContentDisposition).toBe('inline; filename="Policy 2026 renewal _final_.pdf"');
     expect(getSignedUrl.mock.calls[0][1].input.Key).toBe(key);
+  });
+
+  test('a name that is not a nine-digit run is fine: eight digits, ten digits, a date', async () => {
+    const cases = [['scan 12345678.pdf', 'ipm_plan'], ['scan 1234567890.pdf', 'capability_sheet'], ['Policy 2026-10-23.pdf', 'service_center_proof']];
+    for (const [name, itemKey] of cases) {
+      const item = await create({ item_key: itemKey });
+      expect((await upload(item.id, { name })).status).toBe(200);
+    }
+  });
+
+  test('a long name is shortened without losing its extension', async () => {
+    const item = await create();
+    const long = `${'Certified operator renewal '.repeat(8)}final.pdf`;
+    expect(long.length).toBeGreaterThan(120);
+    const res = await upload(item.id, { name: long });
+    expect(res.status).toBe(200);
+    expect(res.body.item.file.name.length).toBeLessThanOrEqual(80);
+    expect(res.body.item.file.name).toMatch(/\.pdf$/);
+    expect(res.body.item.file.name.startsWith('Certified operator renewal')).toBe(true);
+    await call('GET', `/api/admin/bid-kit/${item.id}/file`);
+    expect(getSignedUrl.mock.calls[0][1].input.ResponseContentDisposition).toMatch(/\.pdf"$/);
   });
 
   test('every accepted type gets a whitelisted extension in its key', async () => {

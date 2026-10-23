@@ -13,7 +13,7 @@ Each row keeps: its private file, limits (insurance, whole dollars), source docu
 - Nothing here is on the website or in `/api/public/credentials`. Every route needs an admin login and answers 404 while the gate is off.
 - A file is stored privately in S3 and opens only through a signed link that lasts 5 minutes. No route returns a stored key.
 - Nothing is sent to an agency, a customer or anyone else. The only notice is one admin bell per paper that expired or expires within 30 days, at most once a week per paper.
-- A FEIN, EIN or SSN is never stored, parsed or shown. A hyphenated EIN or SSN, or nine digits right after a label such as EIN, FEIN, TIN, SSN, tax id or taxpayer, is refused in any text field. A bare nine-digit number (a policy number) is fine. The same check covers uploaded file names: a name like `W9-123-45-6789.pdf` is refused, and a stored file's key is a random token and a whitelisted extension, never the original name. The W-9 file is the only place one lives.
+- A FEIN, EIN or SSN is never stored, parsed or shown. A hyphenated EIN or SSN, or nine digits right after a label such as EIN, FEIN, TIN, SSN, tax id or taxpayer, is refused in any text field. A bare nine-digit number (a policy number) is fine. W-9 and W9 count as tax labels in typed text. Uploaded file names are held to a stricter rule: any standalone run of exactly nine digits (`W9 123456789.pdf`, `scan_123456789.pdf`) or a hyphenated EIN or SSN is refused, label or not, and a stored file's key is a random token and a whitelisted extension, never the original name. The W-9 file is the only place one lives.
 
 ## The sign-off rule
 

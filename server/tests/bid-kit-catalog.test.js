@@ -235,7 +235,7 @@ describe('what clears a sign-off', () => {
 describe('tax IDs are never stored', () => {
   test.each([
     '12-3456789', '123-45-6789', 'EIN 12-3456789 on file', 'note: 987-65-4321.',
-    'EIN 123456789', 'EIN: 123456789', 'ein 123456789', 'FEIN 123456789', 'TIN: 123456789', 'SSN 123456789', 'tax id 123456789', 'Tax ID: 123456789', 'taxpayer ID: 123456789', 'Taxpayer 123456789', 'EIN_123456789.pdf', 'W9_TIN_123456789', 'W9-SSN-123456789.pdf',
+    'EIN 123456789', 'EIN: 123456789', 'ein 123456789', 'FEIN 123456789', 'TIN: 123456789', 'SSN 123456789', 'tax id 123456789', 'Tax ID: 123456789', 'taxpayer ID: 123456789', 'Taxpayer 123456789', 'W9 123456789', 'W-9 123456789', 'W 9: 123456789', 'w-9_123456789', 'W-9 TIN 123456789', 'EIN_123456789.pdf', 'W9_TIN_123456789', 'W9-SSN-123456789.pdf',
   ])('%s is refused', (text) => {
     expect(looksLikeTaxId(text)).toBe(true);
     expect(containsTaxId({ nested: [text] })).toBe(true);
@@ -244,10 +244,27 @@ describe('tax IDs are never stored', () => {
   test.each([
     '941-555-0100', '9415550100', '34202-1234', '561710, 561730', 'JB000000', '2026-10-23', 'NIGP 968-45', '1234567890123', 'Example Pest Services LLC',
     'Policy 123456789', 'POL 987654321', '123456789', 'Certificate 123456789 dated Sep 1', 'W-9 on file with the office manager, policy 123456789',
-    'EIN is on file with the W-9; policy 123456789', // the label is more than 12 characters before the digits
+    'EIN is on file with the W-9 and the insurance certificate, policy 123456789', // the label is more than 12 characters before the digits
     'EIN on the W-9 only', 'the tin roof', 'tax identification is on the W-9',
   ])('%s is fine', (text) => {
     expect(looksLikeTaxId(text)).toBe(false);
+  });
+
+  test('W-9 and W9 are tax labels in typed text too, with the same 12-character reach', () => {
+    expect(looksLikeTaxId('W9 123456789')).toBe(true);
+    expect(looksLikeTaxId('See the w-9: 123456789')).toBe(true);
+    expect(looksLikeTaxId('W-9 on file with the office, policy 123456789')).toBe(false); // too far from the label
+    expect(looksLikeTaxId('W-9 on file; Policy 98765432')).toBe(false); // eight digits
+  });
+
+  test('a file name is held to a stricter rule: any standalone nine-digit run, with or without a label', () => {
+    for (const name of ['W9 123456789.pdf', 'w-9_123456789.pdf', 'scan_123456789.pdf', '123456789.pdf', 'insurance-123456789-final.png', 'W9-123-45-6789.pdf', 'W9 12-3456789.pdf', 'EIN 123456789.pdf', 'W9_TIN_123456789.pdf']) {
+      expect(catalog.fileNameHasTaxId(name)).toBe(true);
+    }
+    for (const name of ['12345678.pdf', '1234567890.pdf', '1234567890123.pdf', 'FDACS license 2026.pdf', 'Policy 2026-10-23.pdf', 'W-9 signed.pdf', 'COI 2026 renewal (final).docx']) {
+      expect(catalog.fileNameHasTaxId(name)).toBe(false);
+    }
+    expect(catalog.fileNameHasTaxId(undefined)).toBe(false);
   });
 
   test('the label reaches at most 12 characters ahead, and a longer run of digits is not a tax ID', () => {
