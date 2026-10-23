@@ -155,9 +155,12 @@ describe('bells close when the paper no longer needs renewing', () => {
     expect(episodes.closeAdminAlertKeys.mock.calls.map(([, keys]) => keys)).toEqual([[keyFor({ id: ID(2) })], [keyFor({ id: ID(3) })], [keyFor({ id: ID(4) })]]);
   });
 
-  test('a failure while closing never fails the job or hides what rang', async () => {
+  test('when the open bells cannot be read the run stops before raising anything; the next run tries again', async () => {
     mockRows.push(item(ID(1), { expires_on: '2026-11-04' }));
     episodes.openAdminAlertKeys.mockRejectedValueOnce(new Error('db down'));
+    expect(await runBidKitExpiryCheck({ now: NOW })).toEqual({ scanned: 1, rang: 0, closed: 0, overflow: 0, failed: 'open_bells' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(await runBidKitExpiryCheck({ now: NOW })).toEqual({ scanned: 1, rang: 1, closed: 0, overflow: 0 });
   });
 

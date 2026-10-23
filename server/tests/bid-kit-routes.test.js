@@ -481,9 +481,9 @@ describe('patch', () => {
       expect(res.body.item).toMatchObject({ attested_at: null, attested_by: null, status: 'unattested' });
     });
 
-    test('a label, a note or the same values again do not clear it', async () => {
+    test('a note or the same values again do not clear it (a catalog item cannot be relabeled at all)', async () => {
       const item = await signed({ item_key: 'insurance_certificate' });
-      const renamed = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { label: 'COI (renewal Mar 1)', notes: 'Agent: call in February', expected_updated_at: item.updated_at });
+      const renamed = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { notes: 'Agent: call in February', expected_updated_at: item.updated_at });
       expect(renamed.body.item.attested_at).not.toBeNull();
       const same = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { value: 'JB000000', limits: null, expected_updated_at: renamed.body.item.updated_at });
       expect(same.body.item.attested_at).not.toBeNull();
@@ -534,6 +534,20 @@ describe('a custom item\'s label is part of what a sign-off covers', () => {
     const renamed = await call('PATCH', `/api/admin/bid-kit/${custom.id}`, { label: 'County vendor letter (2027)', expected_updated_at: same.body.item.updated_at });
     expect(renamed.status).toBe(200);
     expect(renamed.body.item).toMatchObject({ attested_at: null, attested_by: null, status: 'unattested' });
+  });
+
+  test('a catalog item keeps its catalog name: a relabel is refused and the signed row is left alone', async () => {
+    const legal = await signed({ kind: 'fact', item_key: 'legal_name', value: 'Example Pest Services LLC' });
+    expect(legal.attested_at).not.toBeNull();
+    const relabel = await call('PATCH', `/api/admin/bid-kit/${legal.id}`, { label: 'Doing business as', expected_updated_at: legal.updated_at });
+    expect(relabel).toMatchObject({ status: 400, body: { error: 'A catalog item keeps its catalog name' } });
+    const stored = store.rows.get(legal.id);
+    expect(stored.label).toBe(legal.label);
+    expect(stored.attested_at).not.toBeNull();
+    // Sending the catalog name itself is not a change.
+    const same = await call('PATCH', `/api/admin/bid-kit/${legal.id}`, { label: legal.label, expected_updated_at: legal.updated_at });
+    expect(same.status).toBe(200);
+    expect(same.body.item.attested_at).not.toBeNull();
   });
 });
 

@@ -167,6 +167,11 @@ const phraseText = (t) => t.toLowerCase().replace(/#/g, ' no ').replace(/([a-z])
   .replace(/[^a-z0-9]+/g, ' ').trim();
 const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID. A nine-digit number with no letters cannot be stored: save it with its letters, or keep it in the file.';
 
+// The digits are read with the W-9 token blanked ("W-9 12345678" holds eight digits, not nine); a phrase still sees it.
+const W9_TOKEN = /\bw[^\p{L}\p{N}]*9(?!\d)/giu;
+const digitText = (t) => t.replace(W9_TOKEN, ' ');
+const sum = (groups) => groups.reduce((total, n) => total + n, 0);
+
 // True when some consecutive digit groups of a separator-joined chain add up to exactly nine digits.
 function hasNineDigitGrouping(text) {
   for (const chain of text.matchAll(DIGIT_CHAIN)) {
@@ -187,15 +192,18 @@ function hasNineDigitGrouping(text) {
 function detectTaxId(text, { fileName = false } = {}) {
   if (typeof text !== 'string') return false;
   const t = screenText(text);
-  if (SSN_SHAPE.test(t) || EIN_SHAPE.test(t) || NINE_CONTIGUOUS.test(t)) return true;
-  if (!hasNineDigitGrouping(t)) return false;
+  const d = digitText(t);
+  if (SSN_SHAPE.test(d) || EIN_SHAPE.test(d) || NINE_CONTIGUOUS.test(d)) return true;
+  if (!hasNineDigitGrouping(d)) return false;
   return fileName || TAX_PHRASE.test(phraseText(t));
 }
 
-// A whole item as it will be stored (stored values with an edit applied). Each text field is screened alone, and every
-// ordered pair of text fields is screened as one string, so a tax label in one field and the digits in another (the label
-// "EIN" with the value 1234 56789, or the same built across two edits) cannot get past the phrase rule. A reference's details
-// are fields too (a number counts as its digits).
+// A whole item as it will be stored (stored values with an edit applied). Each text field is screened alone; then the row is
+// screened as a whole, in ANY field order, because a person can split a number across fields: digits can run from the end of
+// one field, through fields that hold only digits, into the start of another. Across fields these are refused: an SSN shape
+// (3-2-4) or EIN shape (2-7) whose groups meet at field boundaries, label or not; and, when a tax phrase appears anywhere in
+// the row (a field, a reference detail or the catalog label), nine digits in any grouping, inside one field or across several.
+// A reference's details are fields too (a number counts as its digits).
 function rowHasTaxId(row) {
   const r = row || {};
   const details = r.details && typeof r.details === 'object' ? Object.values(r.details) : [];
@@ -203,7 +211,70 @@ function rowHasTaxId(row) {
     .map((part) => (typeof part === 'number' ? String(part) : part))
     .filter((part) => typeof part === 'string' && part.trim() !== '');
   if (parts.some((part) => detectTaxId(part))) return true;
-  return parts.some((a, i) => parts.some((b, j) => i !== j && detectTaxId(`${a} ${b}`)));
+  const texts = parts.map(screenText);
+  const fields = texts.map(fieldDigits);
+  if (shapeAcrossFields(fields)) return true;
+  if (!texts.some((t) => TAX_PHRASE.test(phraseText(t)))) return false;
+  if (texts.some((t) => hasNineDigitGrouping(digitText(t)))) return true;
+  return nineAcrossFields(fields);
+}
+
+// A field's digit groups at its edges: `head` when it starts with digits, `tail` when it ends with them, `whole` when it holds
+// no letter at all (then all its digits are one chain and it can sit between two other fields).
+function fieldDigits(text) {
+  const d = digitText(text);
+  const chains = [...d.matchAll(DIGIT_CHAIN)].map((m) => [...m[0].matchAll(/\d+/g)].map((g) => g[0].length));
+  if (!chains.length) return {};
+  return {
+    head: /^[^\p{L}\p{N}]*\d/u.test(d) ? chains[0] : null,
+    tail: /\d[^\p{L}\p{N}]*$/u.test(d) ? chains[chains.length - 1] : null,
+    whole: /\p{L}/u.test(d) ? null : chains[0],
+  };
+}
+
+const endsWith = (groups, shape) => Boolean(groups) && groups.length >= shape.length && shape.every((n, k) => groups[groups.length - shape.length + k] === n);
+const startsWith = (groups, shape) => Boolean(groups) && groups.length >= shape.length && shape.every((n, k) => groups[k] === n);
+
+// An SSN or EIN whose groups meet at field boundaries: [2]|[7], [3]|[2,4], [3,2]|[4], or [3]|[2]|[4] through a field that
+// holds exactly two digits.
+function shapeAcrossFields(fields) {
+  return fields.some((a, i) => fields.some((b, j) => {
+    if (i === j || !a.tail || !b.head) return false;
+    if (endsWith(a.tail, [2]) && startsWith(b.head, [7])) return true;
+    if (endsWith(a.tail, [3]) && startsWith(b.head, [2, 4])) return true;
+    if (endsWith(a.tail, [3, 2]) && startsWith(b.head, [4])) return true;
+    return endsWith(a.tail, [3]) && startsWith(b.head, [4])
+      && fields.some((m, k) => k !== i && k !== j && m.whole && m.whole.length === 1 && m.whole[0] === 2);
+  }));
+}
+
+// Nine digits across two or more fields, in any order: the end of one field's tail, any digit-only fields whole, and the start
+// of another field's head.
+function nineAcrossFields(fields) {
+  const suffixes = (groups) => (groups ? groups.map((_, k) => sum(groups.slice(k))) : []);
+  const prefixes = (groups) => (groups ? groups.map((_, k) => sum(groups.slice(0, k + 1))) : []);
+  const starts = [{ at: -1, sums: [0] }, ...fields.map((f, at) => ({ at, sums: suffixes(f.tail) }))];
+  const ends = [{ at: -1, sums: [0] }, ...fields.map((f, at) => ({ at, sums: prefixes(f.head) }))];
+  for (const start of starts) {
+    for (const end of ends) {
+      if (start.at !== -1 && start.at === end.at) continue;
+      // Most digit-only fields that reach each total up to nine (more fields only makes "two or more" easier).
+      const most = new Map([[0, 0]]);
+      fields.forEach((f, at) => {
+        if (!f.whole || at === start.at || at === end.at) return;
+        const n = sum(f.whole);
+        for (const [total, count] of [...most]) if (total + n <= 9 && (most.get(total + n) ?? -1) < count + 1) most.set(total + n, count + 1);
+      });
+      const edges = (start.at === -1 ? 0 : 1) + (end.at === -1 ? 0 : 1);
+      for (const a of start.sums) {
+        for (const b of end.sums) {
+          const middle = most.get(9 - a - b);
+          if (middle !== undefined && edges + middle >= 2) return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 // ---- dates (America/New_York) ----

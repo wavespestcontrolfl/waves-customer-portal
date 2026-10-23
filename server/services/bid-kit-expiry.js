@@ -244,7 +244,9 @@ async function runBidKitExpiryCheck({ now = new Date() } = {}) {
     holders = new Set(open.filter((key) => key.startsWith(KEY_PREFIX)));
     standing = open.some(isOverflowKey);
   } catch (err) {
+    // Without the open bells the run cannot tell a paper with a bell from one without: it stops, and the next run tries again.
     logger.warn(`[bid-kit] reading open expiry bells failed: ${errorTag(err)}`);
+    return { scanned: due.length, rang: 0, closed: 0, overflow: 0, failed: 'open_bells' };
   }
   let rang = 0;
   const overflow = [];

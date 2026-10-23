@@ -353,6 +353,24 @@ describe('tax IDs are never stored: one detector', () => {
     }
   });
 
+  // A whole row, in any field order: a number split across fields.
+  const ROWS = [
+    [{ label: 'EIN', value: '1234', source_document: '56789' }, true, 'phrase, then the digits split across two more fields'],
+    [{ label: '1234', value: 'EIN', source_document: '56789' }, true, 'the phrase in the middle field'],
+    [{ label: 'Tax ID 12', value: '345', source_document: '6789' }, true, 'a field ending in digits, then two digit-only fields'],
+    [{ value: '123', source_document: '45', notes: '6789' }, true, 'an SSN across three fields, no label'],
+    [{ value: '12', source_document: '3456789' }, true, 'an EIN across two fields, no label'],
+    [{ label: 'Custom', value: '123-45', notes: '6789' }, true, 'SSN 3-2 then 4'],
+    [{ label: 'EIN', value: '1234 56789' }, true, 'the phrase in one field, the grouping in another'],
+    [{ label: 'W-9', source_document: 'IRS W-9 Rev. 3-2024', notes: 'signed 10/01/2026' }, false, 'the W-9 row with dates'],
+    [{ label: 'W-9', notes: 'scan 12345678 copy' }, false, 'the W-9 token is no digit of a number'],
+    [{ label: 'Customer reference', details: { entity: 'Sample HOA', phone: '941-555-0100', annualValue: 12000, contractPeriod: '2025-2026' } }, false, 'a reference with no tax phrase'],
+    [{ label: 'Policy', value: '1234', source_document: '56789' }, false, 'two numbers and no tax phrase'],
+  ];
+  test.each(ROWS)('row %j: refused = %s (%s)', (row, refused) => {
+    expect(rowHasTaxId(row)).toBe(refused);
+  });
+
   // File names: any standalone nine-digit run is refused, label or not; so are the SSN and EIN shapes.
   const FILE_NAMES = [
     ['W9 123456789.pdf', true], ['w-9_123456789.pdf', true], ['scan_123456789.pdf', true], ['123456789.pdf', true], ['insurance-123456789-final.png', true],

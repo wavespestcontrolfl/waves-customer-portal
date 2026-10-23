@@ -221,6 +221,8 @@ router.patch('/:id', async (req, res, next) => {
     if (!Object.keys(rest).length) return res.status(400).json({ error: 'Nothing to change' });
     const outcome = await store.updateItem(req.params.id, (row) => {
       if (!sameInstant(row.updated_at, expected)) return { error: { status: 409, message: CHANGED } };
+      // A catalog item's name is the catalog's: it never changes, so a sign-off can never sit on a relabeled row.
+      if (rest.label !== undefined && row.item_key !== 'custom' && rest.label !== row.label) return { error: { status: 400, message: 'A catalog item keeps its catalog name' } };
       const built = toColumns(rest, row.kind, row);
       if (built.refused) return { error: { status: 400, message: built.refused } };
       const columns = built.columns;
