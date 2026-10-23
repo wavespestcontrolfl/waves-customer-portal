@@ -228,6 +228,10 @@ describe('admin project route guards', () => {
     expect(hardKeys(evaluate({
       ...complete, ...exterior, final_exterior_product: false, final_exterior_active_ingredient: false, final_exterior_applicator_name: 7,
     }, true))).toEqual(['cert_final_exterior_product', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator']);
+    // Judged as the customer sees it: an impossible date or a value the public page blanks fails.
+    expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_date: '2026-02-30' }, true))).toEqual(['cert_final_exterior_date']);
+    expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_date: '2026-05-01' }, true))).toEqual(['cert_final_exterior_date']);
+    expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_product: 'pet-safe Termidor' }, true))).toEqual(['cert_final_exterior_product']);
 
     // A certificate held before these checks existed still releases once paid.
     const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '', final_exterior_date: '2026-06-01' }, false);

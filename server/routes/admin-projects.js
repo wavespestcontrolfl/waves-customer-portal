@@ -123,7 +123,7 @@ const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_c
 // screen runs here at write time: a claim ("pet-safe", "EPA-approved") or an
 // access code is refused, not stored. reports-public blanks the same keys at
 // egress, and the detail payload names them for the staff preview.
-const { failingFinalExteriorKeys, isClockTime } = require('../services/final-exterior-screen');
+const { failingFinalExteriorKeys, isClockTime, screenFinalExteriorFindings } = require('../services/final-exterior-screen');
 // The final exterior date is a completed treatment on a legal document:
 // blank, or a real YYYY-MM-DD no later than today (ET), like project_date,
 // and never before the initial treatment (same day allowed).
@@ -172,9 +172,10 @@ function publishedCertificateEditRejection(project, updates, current) {
   if (project.project_type !== 'pre_treatment_termite_certificate' || updates.findings === undefined) return null;
   if (!(current.report_token || current.sent_at || project.report_token || project.sent_at)) return null;
   const typeCfg = getProjectType(project.project_type);
-  const failing = (findings) => pretreatStaffSendChecks(normalizeFindings(findings), typeCfg).filter((c) => !c.ok);
-  const before = new Set(failing(current.findings).map((c) => c.key));
-  const added = failing(updates.findings).filter((c) => !before.has(c.key));
+  const failing = (findings, projectDate) => pretreatStaffSendChecks(normalizeFindings(findings), typeCfg, projectDate).filter((c) => !c.ok);
+  const before = new Set(failing(current.findings, current.project_date).map((c) => c.key));
+  const added = failing(updates.findings, updates.project_date !== undefined ? updates.project_date : current.project_date)
+    .filter((c) => !before.has(c.key));
   if (!added.length) return null;
   return {
     error: `This certificate is already published — complete ${added.map((c) => c.label).join('; ')} before saving.`,
@@ -188,8 +189,8 @@ function publishedCertificateEditRejection(project, updates, current) {
 // fenced once the row is 'sending').
 async function pretreatClaimedSendMissing(projectId, projectType) {
   if (projectType !== 'pre_treatment_termite_certificate') return [];
-  const row = await db('projects').select('findings').where({ id: projectId }).first();
-  return pretreatStaffSendChecks(normalizeFindings(row?.findings), getProjectType(projectType))
+  const row = await db('projects').select('findings', 'project_date').where({ id: projectId }).first();
+  return pretreatStaffSendChecks(normalizeFindings(row?.findings), getProjectType(projectType), row?.project_date)
     .filter((c) => !c.ok)
     .map(({ key, label }) => ({ key, label }));
 }
@@ -807,7 +808,11 @@ const FINAL_EXTERIOR_RECORD_KEYS = ['final_exterior_date', 'final_exterior_produ
 // never on the automatic release of a paid held report: a certificate held
 // before these checks existed must still deliver once paid (see the note in
 // certApplicationChecks).
-function pretreatStaffSendChecks(findings, typeCfg) {
+function pretreatStaffSendChecks(findings, typeCfg, projectDate) {
+  // The final exterior record is judged as the customer will see it: the
+  // public page blanks a screened value, and a legacy or imported row may
+  // carry a date the write guard would refuse today.
+  const exterior = screenFinalExteriorFindings(findings) || {};
   const checks = [
     { key: 'cert_warranty', label: 'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)', ok: pretreatWarrantyOk(findings.warranty_type, typeCfg), hard: true },
     // FBC 105.10 lists the time and date of each treatment.
@@ -815,12 +820,12 @@ function pretreatStaffSendChecks(findings, typeCfg) {
   ];
   if (FINAL_EXTERIOR_RECORD_KEYS.some((key) => hasMeaningfulValue(findings[key]))) {
     checks.push(
-      { key: 'cert_final_exterior_date', label: 'Date of final exterior treatment', ok: hasMeaningfulValue(findings.final_exterior_date), hard: true },
-      { key: 'cert_final_exterior_time', label: 'Time of final exterior treatment', ok: isClockTime(findings.final_exterior_time), hard: true },
+      { key: 'cert_final_exterior_date', label: 'Date of final exterior treatment', ok: hasMeaningfulValue(exterior.final_exterior_date) && !finalExteriorDateProblem(exterior.final_exterior_date, findings.treatment_date || projectDate), hard: true },
+      { key: 'cert_final_exterior_time', label: 'Time of final exterior treatment', ok: isClockTime(exterior.final_exterior_time), hard: true },
       // The later treatment is its own record (FBC 105.10): product, chemical and applicator too.
-      { key: 'cert_final_exterior_product', label: 'Final exterior product', ok: isFilledText(findings.final_exterior_product), hard: true },
-      { key: 'cert_final_exterior_active_ingredient', label: 'Final exterior active ingredient', ok: isFilledText(findings.final_exterior_active_ingredient), hard: true },
-      { key: 'cert_final_exterior_applicator', label: 'Final exterior applicator', ok: isFilledText(findings.final_exterior_applicator_name), hard: true },
+      { key: 'cert_final_exterior_product', label: 'Final exterior product', ok: isFilledText(exterior.final_exterior_product), hard: true },
+      { key: 'cert_final_exterior_active_ingredient', label: 'Final exterior active ingredient', ok: isFilledText(exterior.final_exterior_active_ingredient), hard: true },
+      { key: 'cert_final_exterior_applicator', label: 'Final exterior applicator', ok: isFilledText(exterior.final_exterior_applicator_name), hard: true },
     );
   }
   return checks;
@@ -875,7 +880,7 @@ function evaluateProjectSendReadiness({ project, customer, staffSend = false }) 
       // requirement when paired with the typed name + FDACS ID + date.
       { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
-    if (staffSend) required.push(...pretreatStaffSendChecks(findings, typeCfg));
+    if (staffSend) required.push(...pretreatStaffSendChecks(findings, typeCfg, project?.project_date));
   }
 
   // Termite Phase-3 compliance content (Codex P1 r2 on #2703): the termite
