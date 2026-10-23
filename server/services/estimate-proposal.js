@@ -158,7 +158,9 @@ function normalizeCorrectiveWorkItem(raw = {}) {
     amount: Math.max(0, roundMoney(num(raw.amount ?? raw.price, 0))),
     taxable: raw.taxable === true,
     includes: cleanStringList(raw.includes, { maxItems: 12, maxLen: 200 }),
-    service: cleanString(raw.service, 80) || null,
+    // A misting-system row keeps a canonical identity even when the editor sends no service (inferred from its text the way
+    // normalizeLineItem / normalizeProgram do), so a later rename cannot shed it (pre-push audit P1).
+    service: cleanString(raw.service, 80) || require('../utils/mosquito-misting-system').mistingProposalIdentity(raw) || null,
     ...(raw.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}),
     visits: visits > 0 ? Math.min(Math.round(visits), 52) : null,
   };

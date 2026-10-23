@@ -534,6 +534,17 @@ describe('the proposal editor cannot launder the misting identity away', () => {
     expect(mapper.gatedAddOnCustomerRefusal(lost)).toBeNull();
   });
 
+  test('a corrective-work row with no service persists the inferred misting identity, so a later rename keeps it', () => {
+    const { normalizeCorrectiveWork } = require('../services/estimate-proposal');
+    const first = { enabled: true, buildings: [], correctiveWork: normalizeCorrectiveWork([{ id: 'cw-9', label: 'Smart system (tankless + app) Installation', amount: 4595 }]) };
+    expect(first.correctiveWork[0].service).toBe('mosquito_misting_installation');
+    const renamed = normalizeCorrectiveWork(carryMistingIdentity({ correctiveWork: [{ id: 'cw-9', label: 'Install the system', amount: 4595 }] }, first).correctiveWork);
+    expect(renamed[0].service).toBe('mosquito_misting_installation');
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    expect(mapper.gatedAddOnCustomerRefusal({ result: { recurring: { services: [] } }, proposal: { enabled: true, buildings: [], correctiveWork: renamed } })).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+    expect(normalizeCorrectiveWork([{ label: 'Gutter guard', amount: 50 }])[0].service).toBeNull();
+  });
+
   test('text fallback: the install labels the mapper emits are recognized without any service field', () => {
     for (const label of ['Essential system (drum) Installation', 'Smart system (tankless + app) Installation']) {
       expect(mistingProposalIdentity({ description: label })).toBe('mosquito_misting_installation');
