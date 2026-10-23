@@ -81,7 +81,7 @@ beforeEach(() => {
 });
 
 describe('compileRules / matchRule', () => {
-  test('lowest priority first, then created_at; disabled and invalid rules are skipped', () => {
+  test('lowest priority first, then the newest rule; disabled and invalid rules are skipped', () => {
     const compiled = svc.compileRules([
       { id: 'seed', pattern: 'costco', priority: 100, created_at: '2026-01-01' },
       { id: 'owner', pattern: 'costco gas', priority: 10, created_at: '2026-02-01' },
@@ -89,13 +89,21 @@ describe('compileRules / matchRule', () => {
       { id: 'bad', pattern: '(', priority: 1 },
       { id: 'older', pattern: 'wawa', priority: 10, created_at: '2026-01-15' },
     ]);
-    expect(compiled.map((r) => r.id)).toEqual(['older', 'owner', 'seed']);
+    expect(compiled.map((r) => r.id)).toEqual(['owner', 'older', 'seed']);
     // created_at arrives as a Date from Postgres: compare in time, not as text
     const dated = svc.compileRules([
-      { id: 'later', pattern: 'a', priority: 10, created_at: new Date('2026-10-23T10:00:00Z') },
       { id: 'first', pattern: 'b', priority: 10, created_at: new Date('2026-09-05T10:00:00Z') },
+      { id: 'later', pattern: 'a', priority: 10, created_at: new Date('2026-10-23T10:00:00Z') },
     ]);
-    expect(dated.map((r) => r.id)).toEqual(['first', 'later']);
+    expect(dated.map((r) => r.id)).toEqual(['later', 'first']);
+    // an Always decision is an owner rule at the same priority as every other: the latest
+    // reading of an overlapping payee wins, the older rule keeps the rows only it matches
+    const owners = svc.compileRules([
+      { id: 'acme-personal', pattern: 'acme', kind: 'personal', priority: 10, source: 'owner', created_at: new Date('2026-09-01T10:00:00Z') },
+      { id: 'acme-hardware', pattern: '\\bacme\\W*hardware\\b', kind: 'expense', category_id: 'cat-s', priority: 10, source: 'owner', created_at: new Date('2026-10-01T10:00:00Z') },
+    ]);
+    expect(svc.matchRule('ACME HARDWARE 1234', owners, 'debit').id).toBe('acme-hardware');
+    expect(svc.matchRule('ACME 1234', owners, 'debit').id).toBe('acme-personal');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('rule bad skipped'));
     expect(svc.matchRule('DEBIT CARD PURCHASE - COSTCO GAS #123', compiled).id).toBe('owner');
     expect(svc.matchRule('COSTCO WHOLESALE', compiled).id).toBe('seed');

@@ -169,9 +169,14 @@ function compileRules(rules) {
       logger.warn(`[tax-ledger] rule ${r.id} skipped, invalid pattern: ${e.message}`);
     }
   }
+  // Lowest priority first; at the same priority the NEWEST rule wins: every
+  // Always decision is an owner rule at the same priority, and the latest
+  // one is the owner's current reading of an overlapping payee (an older
+  // "acme → personal" must not defeat a new Always Business on "ACME
+  // HARDWARE"). Postgres returns created_at as a Date: compared in time.
   const t = (v) => { const n = new Date(v || 0).getTime(); return Number.isFinite(n) ? n : 0; };
   out.sort((a, b) => (Number(a.priority) - Number(b.priority))
-    || (t(a.created_at) - t(b.created_at))
+    || (t(b.created_at) - t(a.created_at))
     || String(a.pattern).localeCompare(String(b.pattern)));
   return out;
 }
