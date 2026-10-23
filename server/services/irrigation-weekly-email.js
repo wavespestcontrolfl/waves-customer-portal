@@ -665,7 +665,8 @@ function decideWeeklyEmail({
         summary_line: neutralLead,
         // The gallons sentence rides the schedule note (the ask to confirm or update the schedule): a weekly total on
         // file gives no per-run depth, so the owner default applies unless a portal schedule is on file (codex r6 P2).
-        schedule_note: [buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor: rainSensor === true || rainSensor === 't', rateTable: table }), waterSavedSetupSentence(askWaterSaved())].filter(Boolean).join(' '),
+        // A tech-recorded 'manual' / 'none' system is hand watering: no sprinkler-run sentence (codex r7 P2).
+        schedule_note: [buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor: rainSensor === true || rainSensor === 't', rateTable: table }), turfType === 'manual' || turfType === 'none' ? null : waterSavedSetupSentence(askWaterSaved())].filter(Boolean).join(' '),
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,

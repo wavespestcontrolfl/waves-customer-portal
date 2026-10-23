@@ -59,10 +59,14 @@ function roundGallons(gallons) {
  * @param {Array|string|null}  input.systemType          the customer's head types, or null
  * @param {number|null}        input.explicitInchesPerWeek  a POSITIVE typed weekly figure, or null
  * @param {object}             input.rates               the head rate table the decision is built on (ratesForTable)
- * @returns {{ v: 1, basis: 'schedule'|'default', lawnSqft: number, depthInches: number, runsPerWeek: number,
+ * @param {number|null}        input.planDepthInches     a RUN / conditional plan's prescribed depth per event: the run
+ *                                                        the email tells them to skip, which may differ from their normal
+ *                                                        schedule (a restriction-limited plan prescribes fewer, longer runs)
+ * @param {number|null}        input.planEvents          that plan's event count
+ * @returns {{ v: 1, basis: 'plan'|'schedule'|'default', lawnSqft: number, depthInches: number, runsPerWeek: number,
  *             gallonsPerRun: number, gallonsPerWeek: number } | null}
  */
-function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = null, systemType = null, explicitInchesPerWeek = null, rates } = {}) {
+function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = null, systemType = null, explicitInchesPerWeek = null, rates, planDepthInches = null, planEvents = null } = {}) {
   const sqft = positiveLawnSqft(lawnSqft);
   if (!sqft) return null;
 
@@ -71,8 +75,16 @@ function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = nul
   let basis = 'default';
   const explicit = Number(explicitInchesPerWeek);
   const days = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType }).wateringDays;
-  const derived = deriveIrrigationInchesPerWeek({ runMinutes, wateringDays, systemType }, { rates });
-  if (Number.isFinite(explicit) && explicit > 0 && days.length > 0) {
+  // Drip waters beds, not turf: one turf head beside drip zones is still one head, as the plan engine reads it
+  // (codex #6498 r7).
+  const derived = deriveIrrigationInchesPerWeek({ runMinutes, wateringDays, systemType }, { rates, ignoreDrip: true });
+  const planDepth = Number(planDepthInches);
+  if (Number.isFinite(planDepth) && planDepth > 0) {
+    // The run the plan prescribes IS the run the sentence sits beside (codex #6498 r7).
+    depth = planDepth;
+    runs = Number.isFinite(Number(planEvents)) && Number(planEvents) > 0 ? Number(planEvents) : 1;
+    basis = 'plan';
+  } else if (Number.isFinite(explicit) && explicit > 0 && days.length > 0) {
     // A typed weekly figure outranks any table (the engine's own precedence), spread over the customer's days.
     depth = explicit / days.length;
     runs = days.length;
@@ -117,6 +129,9 @@ function waterSavedSentence(block, plan) {
   const weekClause = plan.action === 'hold' && !cadenceHold && block.runsPerWeek >= 2
     ? `, so skipping ${block.runsPerWeek === 2 ? 'both' : `all ${block.runsPerWeek}`} of this week's runs saves about ${fmtGallons(block.gallonsPerWeek)} gallons`
     : '';
+  if (block.basis === 'plan') {
+    return `Each run you skip is about ${perRun} gallons on your lawn, from this week's plan and your lawn's size on file${weekClause}.`;
+  }
   if (block.basis === 'schedule') {
     return `Each run you skip is about ${perRun} gallons on your lawn, from the sprinkler schedule in your portal and your lawn's size on file${weekClause}.`;
   }

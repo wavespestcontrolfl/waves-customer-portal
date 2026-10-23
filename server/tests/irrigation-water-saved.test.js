@@ -56,8 +56,22 @@ describe('waterSavedForDecision — the gallons block', () => {
     expect(block).toMatchObject({ basis: 'schedule', depthInches: 0.5, runsPerWeek: 4, gallonsPerRun: 1550, gallonsPerWeek: 6200 });
   });
 
-  test('a schedule that derives nothing (mixed heads, drip, no days) falls back to the owner default', () => {
+  test('drip beside one turf head is still one head (codex #6498 r7): rotor + drip, 40 min on the owner table → 0.25" per run', () => {
+    const block = waterSavedForDecision({ lawnSqft: 5000, runMinutes: 40, wateringDays: ['Mon', 'Thu'], systemType: ['rotor', 'drip'], rates: OWNER_HEAD_RATE_IN_PER_HR });
+    expect(block).toMatchObject({ basis: 'schedule', depthInches: 0.25, gallonsPerRun: 800, gallonsPerWeek: 1600 });
+  });
+
+  test('a run plan\'s prescribed depth outranks the schedule (codex #6498 r7): the sentence sits beside that run', () => {
+    const block = waterSavedForDecision({ lawnSqft: 5000, runMinutes: 40, wateringDays: ['Mon', 'Thu'], systemType: ['rotor'], rates: OWNER_HEAD_RATE_IN_PER_HR, planDepthInches: 0.75, planEvents: 1 });
+    expect(block).toMatchObject({ basis: 'plan', depthInches: 0.75, runsPerWeek: 1, gallonsPerRun: 2350, gallonsPerWeek: 2350 });
+    expect(waterSavedSentence(block, { action: 'run', reasons: [] })).toBe("Each run you skip is about 2,350 gallons on your lawn, from this week's plan and your lawn's size on file.");
+    // null / 0 plan depth (a hold) leaves the schedule or default basis alone.
+    expect(waterSavedForDecision({ lawnSqft: 5000, rates: OWNER_HEAD_RATE_IN_PER_HR, planDepthInches: null }).basis).toBe('default');
+  });
+
+  test('a schedule that derives nothing (mixed turf heads, drip only, no days) falls back to the owner default', () => {
     expect(waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: ['Mon'], systemType: ['spray', 'rotor'], rates: HEAD_PRECIP_RATE_IN_PER_HR })).toMatchObject({ basis: 'default', gallonsPerRun: 1550 });
+    expect(waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: ['Mon'], systemType: ['drip'], rates: HEAD_PRECIP_RATE_IN_PER_HR })).toMatchObject({ basis: 'default' });
     expect(waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: [], systemType: ['spray'], explicitInchesPerWeek: 2, rates: HEAD_PRECIP_RATE_IN_PER_HR })).toMatchObject({ basis: 'default' });
   });
 
@@ -143,7 +157,10 @@ describe('freeze rule — a NEW decision reads the gate once; stored plans never
     expect(JSON.stringify(off.decisionInputs)).not.toMatch(/waterSaved|gallons/);
     gateOn();
     const on = decide();
-    expect(on.decisionInputs.waterSaved).toEqual({ v: 1, basis: 'schedule', lawnSqft: 5000, depthInches: 0.5, runsPerWeek: 2, gallonsPerRun: 1550, gallonsPerWeek: 3100 });
+    // A one-day policy makes this a RUN plan of one 0.75" event: the frozen block follows the prescribed run (r7),
+    // not the customer's two 20-minute spray runs (0.5" each).
+    expect(on.plan).toMatchObject({ action: 'run', events: 1, depthInches: 0.75 });
+    expect(on.decisionInputs.waterSaved).toEqual({ v: 1, basis: 'plan', lawnSqft: 5000, depthInches: 0.75, runsPerWeek: 1, gallonsPerRun: 2350, gallonsPerWeek: 2350 });
     expect(Object.keys(on.decisionInputs).filter((k) => k !== 'waterSaved')).toEqual(Object.keys(off.decisionInputs));
     expect(on.plan).toEqual(off.plan); // the block never shapes the decision
   });
@@ -255,6 +272,10 @@ describe('end to end — sweep inputs, the email note, replay and the app card',
     expect(JSON.stringify(decideFor({ ...tech, irrigation_home_changed_at: '2026-09-01T00:00:00Z', irrigation_confirmed_fields: '[]' }).payload)).not.toMatch(/gallons/);
     // A replay passes its block verbatim; null means none.
     expect(decideFor(tech, { waterSaved: null }).payload.schedule_note).toBe(off.payload.schedule_note);
+    // Hand watering on record (tech irrigation_type manual / none): no sprinkler-run sentence (codex r7 P2).
+    for (const type of ['manual', 'none']) {
+      expect(JSON.stringify(decideFor({ ...tech, turf_irrigation_type: type }).payload)).not.toMatch(/gallons/);
+    }
   });
 
   test('replay and the app card read the frozen block: a gate flip or a lawn-size edit after publication changes nothing and withholds nothing', async () => {

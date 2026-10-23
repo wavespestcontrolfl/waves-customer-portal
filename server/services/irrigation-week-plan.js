@@ -195,7 +195,12 @@ function decideWeekPlan({
   const waterSavedBlock = waterSaved !== undefined
     ? (waterSaved || null)
     : (irrigationWaterSavedLive()
-      ? waterSavedForDecision({ lawnSqft, runMinutes, wateringDays, systemType, explicitInchesPerWeek, rates: ratesForTable(table) })
+      ? waterSavedForDecision({
+        lawnSqft, runMinutes, wateringDays, systemType, explicitInchesPerWeek, rates: ratesForTable(table),
+        // A run / conditional plan: the prescribed run is what gets skipped; a hold skips the customer's normal run.
+        planDepthInches: plan.action !== 'hold' ? (plan.depthInches ?? null) : null,
+        planEvents: plan.action !== 'hold' ? (plan.events ?? null) : null,
+      })
       : null);
   // Everything the decision was made from, for the snapshot (the report
   // renders comparisons from these, never from today's prefs).
