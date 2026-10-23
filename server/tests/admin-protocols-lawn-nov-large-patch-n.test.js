@@ -38,7 +38,7 @@ const V13_SUMMARY = { version: LAWN_V13_VERSION, products: [{ productId: 'f24', 
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
 
@@ -94,7 +94,7 @@ describe('active large patch mapped, gate on', () => {
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
     expect(bag(body).jobMix.amount).toBeCloseTo(20.833, 2);
     expect(bag(body).gateNotes).toContainEqual({ key: 'activeFungusNitrogen', severity: 'note', text: NOTE });
-    expect(mockLoadActive).toHaveBeenCalledWith(db, PROPERTY);
+    expect(mockLoadActive).toHaveBeenCalledWith(db, PROPERTY, { asOf: '2026-11-10' }); // the evidence is dated to the visit
   });
 
   test('the yearly-limit read judges the same reduced rate the sheet quotes', async () => {

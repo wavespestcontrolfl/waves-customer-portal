@@ -65,6 +65,16 @@ describe('loadActiveLargePatch', () => {
     expect(await areas.loadActiveLargePatch(knex, PROPERTY)).toEqual([]);
   });
 
+  test('asOf dates the evidence: only applications on or before that day are read; without asOf every application counts', async () => {
+    jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', place: 'front', type: 'fungus' }]);
+    const dated = ledgerKnex([{ treated_place: 'front', target_pest: 'Large patch' }]);
+    expect((await areas.loadActiveLargePatch(dated.knex, PROPERTY, { asOf: '2026-12-10' })).map((area) => area.id)).toEqual(['a']);
+    expect(dated.calls).toEqual(expect.arrayContaining([['where', 'application_date', '<=', '2026-12-10']]));
+    const undated = ledgerKnex([{ treated_place: 'front', target_pest: 'Large patch' }]);
+    await areas.loadActiveLargePatch(undated.knex, PROPERTY);
+    expect(undated.calls.some((call) => call[0] === 'where' && call[1] === 'application_date')).toBe(false);
+  });
+
   test('an area with no ledger row is not a large patch (the disease is unknown), and a failed read throws', async () => {
     jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', place: 'front', type: 'fungus' }]);
     expect(await areas.loadActiveLargePatch(ledgerKnex([]).knex, PROPERTY)).toEqual([]);

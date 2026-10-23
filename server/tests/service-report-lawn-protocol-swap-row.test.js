@@ -11,7 +11,7 @@ jest.mock('../services/lawn-protocol-operating-layer', () => ({
 const { buildLawnProtocolReportContext } = require('../services/service-report/dynamic-context');
 const { swapOnlyRule, DEC_K_PRODUCT, DEC_FROM } = require('../config/lawn-v13-trouble-product-swaps');
 
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 

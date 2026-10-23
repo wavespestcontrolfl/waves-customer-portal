@@ -11,7 +11,7 @@ const router = require('../routes/admin-protocols');
 const v13 = require('../config/lawn-protocol-v13.json');
 
 const handler = router.stack.find((layer) => layer.route?.path === '/programs' && layer.route.methods.get).route.stack[0].handle;
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 

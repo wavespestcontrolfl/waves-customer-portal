@@ -64,7 +64,7 @@ async function getFacts() {
   } finally { await new Promise((r) => server.close(r)); }
 }
 
-const SWAP_GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+const SWAP_GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
 afterEach(() => { for (const name of SWAP_GATES) delete process.env[name]; });
 beforeEach(() => { jest.clearAllMocks(); wireCatalog(); });
 

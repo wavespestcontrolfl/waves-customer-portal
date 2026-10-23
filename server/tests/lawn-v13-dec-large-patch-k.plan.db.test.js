@@ -14,8 +14,8 @@ jest.setTimeout(60000);
 const KEY = 'fixture_v13_lawn_dec';
 const WINDOW = 'dec_v13_spreader_feeding';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
-  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
-const NOTE = 'Active large patch mapped: potassium-only bag, no nitrogen (4.1 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22.';
+  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+const NOTE = 'Active large patch mapped: potassium-only bag, no nitrogen (4.125 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22.';
 const TEN_LINE = `${TEN} — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`;
 const day = etDateString(addETDays(new Date(), -1));
 const LARGE = 'Large patch';
@@ -66,7 +66,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
 
   // A December visit at a fresh lawn, optionally with mapped areas ({ type, status, target }). `target` is the disease the newest fungicide
   // spot application at the area's place recorded (property_application_history.target_pest, from the sheet's target); a fungus area
-  // with no `target` has no disease on record. `ledger` adds more application rows ({ place, target, daysAgo, category, retracted }).
+  // with no `target` has no disease on record. `ledger` adds more application rows ({ place, target, daysAgo, date, category, retracted }).
   async function decemberVisit(areas = [], { city, ledger = [] } = {}) {
     const f = await fixture(knex);
     await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: city || f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
@@ -80,7 +80,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
     }
     for (const row of ledger) {
       await knex('property_application_history').insert({
-        customer_id: f.customerId, property_id: f.property.id, application_date: etDateString(addETDays(new Date(), -(row.daysAgo ?? 1))), category: row.category || 'fungicide',
+        customer_id: f.customerId, property_id: f.property.id, application_date: row.date || etDateString(addETDays(new Date(), -(row.daysAgo ?? 1))), category: row.category || 'fungicide',
         treated_place: row.place, target_pest: row.target, retracted_at: row.retracted ? new Date() : null,
       });
     }
@@ -99,9 +99,11 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       expect(item.mix).toMatchObject({ rateSource: 'target_k_analysis', targetKPer1000: 0.99, amountUnit: 'lb' });
       expect(item.mix.ratePer1000).toBeCloseTo(4.125, 3);
       expect(item.mix.amount).toBeCloseTo(41.25, 2);
+      // The prefilled rate IS the rate the line states (one figure everywhere).
+      expect(item.mix.ratePer1000).toBeCloseTo(Number(item.raw.match(/(\d+(?:\.\d+)?) lb per 1,000/)[1]), 3);
       expect(item.gateNotes).toContainEqual({ key: 'activeLargePatchPotassium', severity: 'note', text: NOTE });
       expect(item.productSwapIn).toBe(true);
-      expect(item.raw).toBe(`${BO} — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`);
+      expect(item.raw).toBe(`${BO} — 4.125 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`);
       // The 10-0-22 is gone from the plan; no text still states its rate.
       expect(itemOf(result.mixCalculator.items, TEN)).toBeUndefined();
       expect(JSON.stringify(result.protocol)).not.toContain('4.5 lb per 1,000');
@@ -273,6 +275,17 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       await normal(await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: '  ', daysAgo: 0 }] }));
       // An older blank row does not hide a newer large patch one.
       expect(await swapped(await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, daysAgo: 5 }] }))).toBe(true);
+    });
+
+    test('the evidence is dated to the visit: a LATER large patch application does not swap an earlier visit; a LATER other-disease one does not hide the evidence that stood', async () => {
+      // The visit is 2026-12-10. A large patch row on 2026-12-20 is after it: this visit's disease is still unknown.
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: '2026-12-20' }] }));
+      // Applied on the visit day itself counts.
+      expect(await swapped(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: '2026-12-10' }] }))).toBe(true);
+      // Large patch on file before the visit, a gray leaf spot row after it: the visit still swaps.
+      expect(await swapped(await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Gray leaf spot', date: '2026-12-20' }] }))).toBe(true);
+      // A later blank-target row does not hide it either.
+      expect(await swapped(await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, date: '2026-12-20' }] }))).toBe(true);
     });
 
     test('a take-all area with a large patch application at its place is still take-all: no swap', async () => {

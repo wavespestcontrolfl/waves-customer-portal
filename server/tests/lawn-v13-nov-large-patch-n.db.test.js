@@ -11,7 +11,7 @@ jest.setTimeout(60000);
 const KEY = 'fixture_v13_lawn_nov';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
-  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
 const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
 const day = etDateString(addETDays(new Date(), -1));
 const LARGE = 'Large patch';
@@ -59,7 +59,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
 
   // A November visit at a fresh lawn, optionally with mapped areas ({ type, status, target }). `target` is the disease the newest fungicide
   // spot application at the area's place recorded (property_application_history.target_pest); a fungus area with no `target` has no
-  // disease on record. `ledger` adds more application rows ({ place, target, daysAgo, category, retracted }).
+  // disease on record. `ledger` adds more application rows ({ place, target, daysAgo, date, category, retracted }).
   async function novemberVisit(areas = [], { ledger = [] } = {}) {
     const f = await fixture(knex);
     await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
@@ -73,7 +73,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     }
     for (const row of ledger) {
       await knex('property_application_history').insert({
-        customer_id: f.customerId, property_id: f.property.id, application_date: etDateString(addETDays(new Date(), -(row.daysAgo ?? 1))), category: row.category || 'fungicide',
+        customer_id: f.customerId, property_id: f.property.id, application_date: row.date || etDateString(addETDays(new Date(), -(row.daysAgo ?? 1))), category: row.category || 'fungicide',
         treated_place: row.place, target_pest: row.target, retracted_at: row.retracted ? new Date() : null,
       });
     }
@@ -147,6 +147,13 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     test('a newer fungicide application with NO target outranks an older large patch one: no cut (the disease is unknown again)', async () => {
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, daysAgo: 0 }] }))).toBeCloseTo(3.125, 3);
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: '', daysAgo: 5 }] }))).toBeCloseTo(2.0833, 3);
+    });
+
+    test('the evidence is dated to the visit: a LATER large patch application does not cut an earlier visit; a LATER other-disease one does not hide the evidence that stood', async () => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: '2026-11-20' }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: '2026-11-10' }] }))).toBeCloseTo(2.0833, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Gray leaf spot', date: '2026-11-20' }] }))).toBeCloseTo(2.0833, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, date: '2026-11-20' }] }))).toBeCloseTo(2.0833, 3);
     });
 
     test('the newest named target at the place decides; a retracted or non-fungicide row is not evidence', async () => {

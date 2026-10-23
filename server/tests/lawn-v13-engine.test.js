@@ -87,14 +87,14 @@ describe('gate and loader', () => {
   });
 
   test('the December swaps block reaches the shared reader only while GATE_LAWN_DEC_LARGE_PATCH_K (and the trouble-area gates it needs) is on; both blocks on gives v13 itself', () => {
-    const names = ['GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS'];
+    const names = ['GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
     const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     try {
       for (const name of names) process.env[name] = 'true';
       expect(withGate('true', () => lawnProtocols())).toBe(v13);
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('largePatchPotassium');
       // The swap gate off, or one gate it needs off: no swaps, and the bermuda add-ons are unaffected.
-      for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_TROUBLE_AREAS']) {
+      for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET']) {
         process.env[name] = 'true';
         delete process.env[name];
         const view = JSON.stringify(withGate('true', () => lawnProtocols()));

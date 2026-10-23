@@ -8,8 +8,8 @@
  * loadActiveLargePatch asks for the target Large patch on record and fails closed when the disease is not known).
  *
  * The December visit puts down LESCO 10-0-22 at 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O). While a large patch is mapped as
- * active the bag is LESCO Black Out 0-0-24 AM Spar-TECH (SiteOne 511512, 50 lb; 0 N, 0 P, 24% K2O) at 4.1 lb per 1,000 sq ft: the same
- * 0.99 lb K2O (4.1 x 0.24 = 0.984; the plan derives 0.99 / 0.24 = 4.125 lb) and no nitrogen. Another lane's owner-approved alternative
+ * active the bag is LESCO Black Out 0-0-24 AM Spar-TECH (SiteOne 511512, 50 lb; 0 N, 0 P, 24% K2O) at 4.125 lb per 1,000 sq ft: the same
+ * 0.99 lb K2O (4.125 x 0.24 = 0.99; the plan derives 0.99 / 0.24 = 4.125 lb, so the recipe, the notes and the prefilled amount all state the figure the plan applies) and no nitrogen. Another lane's owner-approved alternative
  * is no December nitrogen on EVERY lawn; that is a change to this rule (drop the `evidence` and the area read, and the swap applies
  * to every v13 December visit).
  *

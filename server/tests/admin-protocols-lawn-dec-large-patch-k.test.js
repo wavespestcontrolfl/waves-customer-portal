@@ -46,8 +46,8 @@ const V13_SUMMARY = {
 };
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
-const NOTE = 'Active large patch mapped: potassium-only bag, no nitrogen (4.1 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22.';
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+const NOTE = 'Active large patch mapped: potassium-only bag, no nitrogen (4.125 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22.';
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
 const NORMAL_LINE = `${DEC_FROM} \u2014 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`;
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
@@ -102,10 +102,12 @@ describe('active large patch mapped, gate on', () => {
   test.each(['bermuda', 'st_augustine', 'zoysia'])('%s: the December bag is the 0-0-24 at 4.125 lb per 1,000, 41.25 lb on 10,000 sq ft, 0 lb N, with the technician note', async (track) => {
     const body = await sheet({}, track);
     const bag = itemOf(body, DEC_K_PRODUCT);
-    expect(bag).toMatchObject({ selected: true, raw: expect.stringMatching(/^LESCO Black Out 0-0-24 AM Spar-TECH \u2014 4\.1 lb per 1,000 sq ft \(0 lb N, 0\.99 lb K2O\), spreader, active patch mapped$/) });
+    expect(bag).toMatchObject({ selected: true, raw: expect.stringMatching(/^LESCO Black Out 0-0-24 AM Spar-TECH \u2014 4\.125 lb per 1,000 sq ft \(0 lb N, 0\.99 lb K2O\), spreader, active patch mapped$/) });
     expect(bag.jobMix).toMatchObject({ rateSource: 'target_k_analysis', targetKPer1000: 0.99, amountUnit: 'lb', targetNPer1000: null });
     expect(bag.jobMix.ratePer1000).toBeCloseTo(4.125, 3);
     expect(bag.jobMix.amount).toBeCloseTo(41.25, 2);
+    // The prefilled rate IS the rate the line states (one figure everywhere).
+    expect(bag.jobMix.ratePer1000).toBeCloseTo(Number(bag.raw.match(/(\d+(?:\.\d+)?) lb per 1,000/)[1]), 3);
     expect(bag.gateNotes).toContainEqual({ key: 'activeLargePatchPotassium', severity: 'note', text: NOTE });
     // The 10-0-22 is not on the sheet as a selected line, and no line still states its rate.
     expect(selectedNames(body)).toEqual([DEC_K_PRODUCT]);
@@ -113,7 +115,7 @@ describe('active large patch mapped, gate on', () => {
     expect(JSON.stringify([body.items, body.selectedItems, body.visit])).not.toContain('4.5 lb per 1,000');
     expect(body.visit.primary).toBe(bag.raw);
     expect(body.visit.objective).toMatch(/^N rate: 0 lb N \(active large patch mapped; normal 0\.45 lb N\)\. K rate: 0\.99 lb K\. Spreader visit\./);
-    expect(mockLoadActive).toHaveBeenCalledWith(db, PROPERTY);
+    expect(mockLoadActive).toHaveBeenCalledWith(db, PROPERTY, { asOf: '2026-12-10' }); // the evidence is dated to the visit
   });
 
   test('no nitrogen ordinance warning or block comes from the swapped bag; the cost line is priced from the stored SiteOne figure', async () => {

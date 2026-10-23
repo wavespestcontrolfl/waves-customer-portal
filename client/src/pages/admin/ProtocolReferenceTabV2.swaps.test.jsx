@@ -30,7 +30,7 @@ async function openCalendar() {
 const SWAP = {
   largePatchPotassium: {
     gate: "GATE_LAWN_DEC_LARGE_PATCH_K",
-    primary: "Synthetic Potash 0-0-24 — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped",
+    primary: "Synthetic Potash 0-0-24 — 4.125 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped",
     summary: "Active large patch mapped (GATE_LAWN_DEC_LARGE_PATCH_K): Synthetic Potash 0-0-24 in place of the Synthetic 10-0-22.",
   },
 };

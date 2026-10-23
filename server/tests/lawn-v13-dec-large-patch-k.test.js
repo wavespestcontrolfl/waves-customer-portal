@@ -1,6 +1,6 @@
 // GATE_LAWN_DEC_LARGE_PATCH_K (owner 2026-10-23): the gate reader, the swap rule, and visitNutrientTargets, the one place the plan
 // and the tank sheet read a visit's nutrient targets and bag from. A lawn with an ACTIVE mapped large patch gets LESCO Black Out
-// 0-0-24 (4.1 lb per 1,000 = 0.99 lb K2O, 0 N) in December instead of the LESCO 10-0-22 (4.5 lb = 0.45 lb N, 0.99 lb K2O). Synthetic
+// 0-0-24 (4.125 lb per 1,000 = 0.99 lb K2O, 0 N) in December instead of the LESCO 10-0-22 (4.5 lb = 0.45 lb N, 0.99 lb K2O). Synthetic
 // knex and trouble-area store; no database.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockLoadActive = jest.fn();
@@ -20,7 +20,7 @@ const { validateRule } = require('../services/service-report/lawn-watering-rule'
 const { approvedReportProductFacts } = require('../services/service-report/report-data');
 const migration = require('../models/migrations/20261023121000_lawn_v13_dec_large_patch_potassium_v2');
 
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 const allOn = () => { for (const name of GATES) process.env[name] = 'true'; };
 beforeEach(() => { jest.clearAllMocks(); allOn(); mockLoadActive.mockResolvedValue([{ id: 'a', type: 'fungus' }]); });
@@ -47,7 +47,7 @@ describe('lawnDecLargePatchKLive', () => {
     expect(featureGates.lawnDecLargePatchKLive()).toBe(expected);
   });
 
-  test.each(GATES.slice(0, 4))('is off when %s is off (fail closed: the rule reads the mapped areas)', (name) => {
+  test.each(GATES.slice(0, -1))('is off when %s is off (fail closed: the rule reads the mapped areas)', (name) => {
     delete process.env[name];
     expect(featureGates.lawnDecLargePatchKLive()).toBe(false);
   });
@@ -82,9 +82,9 @@ describe('the rule and the recipe', () => {
     const block = decOf('zoysia').swaps[SWAP_KEY];
     expect(block).toMatchObject({
       gate: 'GATE_LAWN_DEC_LARGE_PATCH_K', replaces: DEC_FROM, targetN: 0, trigger: { troubleType: 'fungus', evidence: 'large_patch' },
-      primary: `${DEC_K_PRODUCT} \u2014 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`,
+      primary: `${DEC_K_PRODUCT} \u2014 4.125 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`,
     });
-    expect(block.summary).toContain(`${DEC_K_PRODUCT} \u2014 4.1 lb per 1,000 sq ft (0 N, 0.99 lb K2O) in place of the LESCO 10-0-22`);
+    expect(block.summary).toContain(`${DEC_K_PRODUCT} \u2014 4.125 lb per 1,000 sq ft (0 N, 0.99 lb K2O) in place of the LESCO 10-0-22`);
     // The three tracks carry the same block.
     expect(decOf('bermuda').swaps).toEqual(decOf('st_augustine').swaps);
     expect(decOf('zoysia').swaps).toEqual(decOf('st_augustine').swaps);
@@ -130,12 +130,19 @@ describe('the rule and the recipe', () => {
     expect(engine.classifyProtocolLine(rule.line, 'base')).toMatchObject({ scope: 'BROADCAST_FULL', conditionFlag: 'none' });
   });
 
-  test('the figures: 4.1 lb of a 24% bag is 0.984 lb K2O (the 10-0-22 gives 0.99); the plan derives 4.125 lb; no nitrogen', () => {
-    expect(4.5 * 0.22).toBeCloseTo(0.99, 2);
-    expect(4.1 * 0.24).toBeCloseTo(0.99, 1);
-    expect(0.99 / 0.24).toBeCloseTo(4.125, 3);
-    expect(V13_TROUBLE_PRODUCT_SWAPS[0].line).toBe(`${DEC_K_PRODUCT} — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`);
-    expect(migration.CATALOG).toMatchObject({ analysis_n: 0, analysis_p: 0, analysis_k: 24, default_rate_per_1000: 4.1 });
+  test('ONE figure: the recipe, the rule line, the note and the planner all say 4.125 lb per 1,000 (0.99 / 0.24), which is exactly 0.99 lb K2O', () => {
+    expect(4.125 * 0.24).toBeCloseTo(0.99, 10);
+    expect(0.99 / 0.24).toBeCloseTo(4.125, 10);
+    const rule = V13_TROUBLE_PRODUCT_SWAPS[0];
+    expect(rule.line).toBe(`${DEC_K_PRODUCT} \u2014 4.125 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`);
+    expect(rule.note).toContain('4.125 lb per 1,000 sq ft = 0.99 lb K2O');
+    for (const track of TRACKS) expect(JSON.stringify(decOf(track).swaps)).not.toMatch(/\b4\.1 lb/);
+    // The planner applies the figure the text states (the stored row's analysis and the 0.99 lb K2O target).
+    const mix = engine.calculateProductAmount({ product: BLACK_OUT, lawnSqft: 10000, areaFactor: 1, targetNPer1000: 0, targetKPer1000: 0.99, ...engine.v13RateOptions(BO_ROW) });
+    const stated = Number(rule.line.match(/(\d+(?:\.\d+)?) lb per 1,000/)[1]);
+    expect(mix.ratePer1000).toBeCloseTo(stated, 3);
+    expect(mix.amount).toBeCloseTo(stated * 10, 2);
+    expect(migration.CATALOG).toMatchObject({ analysis_n: 0, analysis_p: 0, analysis_k: 24 });
   });
 });
 
@@ -149,7 +156,13 @@ describe('visitNutrientTargets in December', () => {
     // The notes state the new target, keep the normal one in view, and keep every other sentence (fertilizer safety).
     expect(found.visit.notes).toMatch(/^N rate: 0 lb N \(active large patch mapped; normal 0\.45 lb N\)\. K rate: 0\.99 lb K\. Spreader visit\. Fertilizer safety: deflector on/);
     expect(found.visit.secondary).toBe(decOf(track).secondary);
-    expect(mockLoadActive).toHaveBeenCalledWith({}, service.property_id);
+    expect(mockLoadActive).toHaveBeenCalledWith({}, service.property_id, { asOf: null }); // a visit with no scheduled day reads undated
+  });
+
+  test('the evidence is read as of the visit\'s scheduled day (ET), so a later application never decides an earlier visit', async () => {
+    await engine.visitNutrientTargets({}, { ...service, scheduled_date: '2026-12-10' }, { visit: DEC, month: 'Dec', v13Active: true });
+    await engine.visitNutrientTargets({}, { ...service, scheduled_date: new Date('2026-12-11T05:00:00Z') }, { visit: DEC, month: 'Dec', v13Active: true });
+    expect(mockLoadActive.mock.calls.map((call) => call[2])).toEqual([{ asOf: '2026-12-10' }, { asOf: '2026-12-11' }]);
   });
 
   test('the swap changes a copy: the recipe visit itself is untouched', async () => {
@@ -298,7 +311,7 @@ describe('the swapped line: the amount, the cost, the ordinance checks and the n
   test('productSwapNotes: the note rides the swapped product only, and nothing for a lawn that was not swapped', async () => {
     const { productSwap } = await swapped();
     expect(engine.productSwapNotes(BLACK_OUT, productSwap)).toEqual([{ key: PRODUCT_SWAP_NOTE_KEY, severity: 'note', text: productSwap.note }]);
-    expect(productSwap.note).toBe('Active large patch mapped: potassium-only bag, no nitrogen (4.1 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22.');
+    expect(productSwap.note).toBe('Active large patch mapped: potassium-only bag, no nitrogen (4.125 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22.');
     expect(engine.productSwapNotes(TEN_22, productSwap)).toEqual([]);
     expect(engine.productSwapNotes(BLACK_OUT, undefined)).toEqual([]);
     expect(engine.productSwapNotes(null, productSwap)).toEqual([]);

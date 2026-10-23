@@ -140,19 +140,24 @@ const isLargePatchTarget = (value) => LARGE_PATCH_TARGET.test(String(value || ''
  * The property's ACTIVE fungus areas that are known to be a LARGE PATCH, as loadActive shows them. The evidence is the newest
  * fungicide application at the area's place (the ledger, retractions left out), whatever it recorded: the area is a large patch only
  * when THAT application's target names large patch. An area with no application, whose newest application names no target (it
- * outranks an older large patch one: the disease is unknown again), or whose newest target is another disease (gray leaf spot, Pythium, dollar spot, fairy ring, rust) is NOT returned: the answer fails closed when the
- * disease is unknown. A read failure throws, like loadActive.
+ * outranks an older large patch one: the disease is unknown again), or whose newest target is another disease (gray leaf spot, Pythium,
+ * dollar spot, fairy ring, rust) is NOT returned: the answer fails closed when the disease is unknown.
+ *
+ * `asOf` (a YYYY-MM-DD day, the visit's scheduled day) dates the evidence: only applications on or before that day are read, so an
+ * application recorded AFTER a visit never decides that visit (a later large patch row does not swap an older visit; a later
+ * other-disease row does not hide the evidence that stood on the day). Without `asOf` every application counts (an undated read).
+ * A read failure throws, like loadActive.
  */
-async function loadActiveLargePatch(knex, propertyId) {
+async function loadActiveLargePatch(knex, propertyId, { asOf = null } = {}) {
   const areas = (await module.exports.loadActive(knex, propertyId)).filter((area) => area.type === 'fungus');
   if (!areas.length) return [];
-  const rows = await knex('property_application_history')
+  const query = knex('property_application_history')
     .where({ property_id: propertyId })
     .whereNull('retracted_at')
     .whereIn('treated_place', [...new Set(areas.map((area) => area.place))])
-    .whereRaw("lower(category) = 'fungicide'")
-    .orderByRaw('application_date DESC, created_at DESC')
-    .select('treated_place', 'target_pest');
+    .whereRaw("lower(category) = 'fungicide'");
+  if (asOf) query.where('application_date', '<=', asOf);
+  const rows = await query.orderByRaw('application_date DESC, created_at DESC').select('treated_place', 'target_pest');
   const newest = new Map();
   for (const row of rows) if (!newest.has(row.treated_place)) newest.set(row.treated_place, row.target_pest);
   return areas.filter((area) => isLargePatchTarget(newest.get(area.place)));

@@ -788,13 +788,22 @@ function parseVisitNutrientTargets(notes) {
 // fails is "no" too, with its code logged, UNLESS `strict` (a persisted or fail-closed reader: the previsit brief, the strict plan): then
 // it THROWS, so nothing stores the normal target as if it were the answer. The property resolution and the read share ONE savepoint
 // either way, so a query that fails inside either cannot leave a transaction (packet closeout) aborted for the queries after it.
+// The day (YYYY-MM-DD, ET) a booked visit is scheduled for, the date large patch evidence is read as of; null when the visit has none
+// (the reference tank sheet): then no application is excluded.
+function visitDay(service) {
+  const value = service?.scheduled_date;
+  if (!value) return null;
+  return etDateString(toServiceDate(value));
+}
+
 async function hasActiveTroubleArea(knex, service, type, { strict = false, evidence = null } = {}) {
   const areas = require('./lawn-trouble-areas');
   try {
     const found = await savepointRead(knex, async (k) => {
       const propertyId = await areas.propertyOf(k, service, { strict });
       if (!propertyId) return [];
-      return evidence === 'large_patch' ? areas.loadActiveLargePatch(k, propertyId) : areas.loadActive(k, propertyId);
+      // The evidence is dated: the visit's scheduled day (ET), so a later application never decides an earlier visit.
+      return evidence === 'large_patch' ? areas.loadActiveLargePatch(k, propertyId, { asOf: visitDay(service) }) : areas.loadActive(k, propertyId);
     });
     return found.some((area) => area.type === type);
   } catch (err) {

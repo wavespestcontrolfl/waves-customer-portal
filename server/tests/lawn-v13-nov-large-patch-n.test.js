@@ -16,7 +16,7 @@ const engine = require('../services/waveguard-plan-engine');
 const v13 = require('../config/lawn-protocol-v13.json');
 const { TYPES } = jest.requireActual('../services/lawn-trouble-areas');
 
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 const allOn = () => { for (const name of GATES) process.env[name] = 'true'; };
 beforeEach(() => { jest.clearAllMocks(); allOn(); mockLoadActive.mockResolvedValue([{ id: 'a', type: 'fungus' }]); });
@@ -39,7 +39,7 @@ describe('lawnNovLargePatchNLive', () => {
     expect(featureGates.lawnNovLargePatchNLive()).toBe(expected);
   });
 
-  test.each(GATES.slice(0, 4))('is off when %s is off (fail closed: the rule reads the mapped areas)', (name) => {
+  test.each(GATES.slice(0, -1))('is off when %s is off (fail closed: the rule reads the mapped areas)', (name) => {
     delete process.env[name];
     expect(featureGates.lawnNovLargePatchNLive()).toBe(false);
   });
@@ -60,7 +60,7 @@ describe('the rule', () => {
 describe('visitNutrientTargets', () => {
   test('active fungus in November lowers only the nitrogen target', async () => {
     expect(await targetsFor()).toEqual({ targets: { targetNPer1000: 0.5, targetKPer1000: null }, nitrogenCut: 0.5 });
-    expect(mockLoadActive).toHaveBeenCalledWith({}, service.property_id);
+    expect(mockLoadActive).toHaveBeenCalledWith({}, service.property_id, { asOf: null });
   });
 
   test('potassium is untouched when the visit states one', async () => {

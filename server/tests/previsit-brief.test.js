@@ -1282,7 +1282,7 @@ describe('sweep', () => {
 describe('the November nitrogen target on the lawn brief', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');
   const areas = require('../services/lawn-trouble-areas');
-  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
   const BAG = 'LESCO 24-0-11 with PolyPlus OPTI';
   const november = (version = LAWN_V13_VERSION) => mockSummarize.mockReturnValue({
     version,
@@ -1431,7 +1431,7 @@ describe('the May Tetrino rate on the lawn brief', () => {
 describe('the December large patch bag on the lawn brief', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');
   const areas = require('../services/lawn-trouble-areas');
-  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
   const TEN = 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer';
   const BLACK_OUT = 'LESCO Black Out 0-0-24 AM Spar-TECH';
   const december = (version = LAWN_V13_VERSION, month = 12) => mockSummarize.mockReturnValue({
