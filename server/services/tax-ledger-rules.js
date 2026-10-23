@@ -286,7 +286,8 @@ async function loadRules(conn = db) {
 // - pattern limits the pass to one rule's matches (an Always decision):
 //   unrelated rows are neither written nor stamped.
 // - A row the matcher already flagged as an internal transfer (ignore
-//   without a rule) is left as it is.
+//   without a rule) is left as it is by a seed; an owner rule outranks the
+//   heuristic and writes over it.
 // - after = {txn_date, id} continues a pass past its row budget: the result
 //   carries more:true and the cursor to send back.
 const NOT_DECIDED_SQL = "(suggestion -> 'decision') is null";
@@ -324,7 +325,10 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
       const sug = row.suggestion || {};
       if (sug.decision || !matcherExamined(row)) continue;
       const rule = matchRule(row.description, compiled, row.direction);
-      const matcherTransfer = !!(sug.ignore && !sug.rule);
+      // the matcher's own "internal transfer?" flag (ignore without a rule)
+      // holds against a seed; a rule the owner wrote outranks the heuristic
+      // (a vendor whose descriptor says AUTOPAY is the usual case)
+      const matcherTransfer = !!(sug.ignore && !sug.rule) && !(rule && rule.source === 'owner');
       const writes = !!rule && !matcherTransfer && (!pattern || rule.pattern === pattern);
       if (pattern && !writes) continue;
       const stale = !writes && !pattern && force && !!sug.rule && !matcherTransfer;

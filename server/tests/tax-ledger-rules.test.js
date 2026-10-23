@@ -332,6 +332,19 @@ describe('applyRules (suggestion-only)', () => {
     for (const u of state.ruleUpdates) expect(u.patch.updated_at).toBeUndefined();
   });
 
+  test('the matcher transfer flag holds against a seed but an owner rule writes over it', async () => {
+    state.rules = [{ id: 'r-owner', pattern: 'costco gas #3', kind: 'expense', category_id: 'cat-v', category_name: 'Vehicle Expenses', irs_line: '9', priority: 10, enabled: true, source: 'owner' }];
+    state.bankRows = [{ id: 'b5', txn_date: '2026-01-06', description: 'COSTCO GAS #3', direction: 'debit', suggestion: { ignore: true, reason: 'internal transfer?' } }];
+    const out = await svc.applyRules({ force: true });
+    expect(out.suggested).toBe(1);
+    expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ categoryId: 'cat-v', categorySource: 'rule' }));
+    expect(state.updates[0].patch.suggestion.removed).toContain('ignore');
+    // the same rule as a seed does not
+    state.rules[0].source = 'seed'; state.updates = [];
+    expect((await svc.applyRules({ force: true })).suggested).toBe(0);
+    expect(state.updates[0].patch.suggestion.merged).toEqual({ rulesAt: expect.any(String) });
+  });
+
   test('without force only unstamped rows are read; a payee pass (force + pattern) writes that rule only and stamps nothing else', async () => {
     await svc.applyRules({});
     expect(selects()[0].whereRaw).toHaveBeenCalledWith(expect.stringContaining("(suggestion -> 'rulesAt') is null"));
