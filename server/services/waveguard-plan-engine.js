@@ -763,6 +763,8 @@ async function hasActiveTroubleArea(knex, service, type, { strict = false } = {}
 const NITROGEN_LINE = /(\d+(?:\.\d+)?) lb per 1,000 sq ft \((\d+(?:\.\d+)?) lb N\)/;
 const NITROGEN_NOTE = /\bN\s+rate:?\s*(\d+(?:\.\d+)?)\s*lb\s*N/i;
 const CUT_WHY = Object.freeze({ fungus: 'active fungus mapped', reclaimed: 'reclaimed water, half' });
+// The reason a cut states in the visit text: the rule that set the smaller target, and the other one too when both applied.
+const nitrogenCutWhy = (decision) => (decision.why === 'reclaimed' && decision.fungusApplied ? `${CUT_WHY.reclaimed}; ${CUT_WHY.fungus}` : CUT_WHY[decision.why]);
 function nitrogenAdjustedVisit(visit, cut, why) {
   const primary = typeof visit.primary !== 'string' ? visit.primary : visit.primary.split('\n').map((line) => {
     const found = line.match(NITROGEN_LINE);
@@ -823,6 +825,8 @@ async function nitrogenDecision(knex, service, { targetN, monthNumber, v13Active
     why: byWater ? 'reclaimed' : 'fungus',
     reclaimed: byWater ? 'half' : (water?.kept ? 'kept' : null),
     ...(water?.kept ? { keptFor: water.kept } : {}),
+    // The fungus rule applied too (its target was the larger one, so the smaller reclaimed target won): its spreader instruction still stands.
+    ...(fungus != null ? { fungusApplied: true } : {}),
   };
 }
 
@@ -838,19 +842,22 @@ async function visitNutrientTargets(knex, service, { visit, month, v13Active, st
     keep: keptBagReason({ primary: visit.primary, targetK: targets.targetKPer1000 }), strict,
   }) : null;
   if (!decision) return { visit, targets, nitrogenCut: null };
-  const water = decision.reclaimed ? { reclaimedWater: decision.reclaimed, ...(decision.keptFor ? { keptFor: decision.keptFor } : {}) } : {};
+  const water = decision.reclaimed ? {
+    reclaimedWater: decision.reclaimed, ...(decision.keptFor ? { keptFor: decision.keptFor } : {}), ...(decision.fungusApplied ? { fungusAlso: true } : {}),
+  } : {};
   if (decision.cut == null) return { visit, targets, nitrogenCut: null, ...water };
-  return { visit: nitrogenAdjustedVisit(visit, decision.cut, CUT_WHY[decision.why]), targets: { ...targets, targetNPer1000: decision.cut }, nitrogenCut: decision.cut, ...water };
+  return { visit: nitrogenAdjustedVisit(visit, decision.cut, nitrogenCutWhy(decision)), targets: { ...targets, targetNPer1000: decision.cut }, nitrogenCut: decision.cut, ...water };
 }
 
 // The line note for a nitrogen bag sized for the reduced target (in the line's gateNotes, the way the Fast Complete sheet and the
 // plan panel already show a line's notes). [] for any line the cut did not size.
+const FUNGUS_EXCLUSION = 'Close the spreader over the patch and 6 ft around it.';
 function fungusNitrogenNotes(mix, nitrogenCut) {
   if (nitrogenCut == null || mix?.rateSource !== 'target_n_analysis' || mix.targetNPer1000 !== nitrogenCut) return [];
   return [{
     key: FUNGUS_NITROGEN_NOTE_KEY,
     severity: 'note',
-    text: `Active fungus mapped: nitrogen reduced to ${nitrogenCut} lb N (${Number(mix.ratePer1000).toFixed(1)} lb per 1,000). Close the spreader over the patch and 6 ft around it.`,
+    text: `Active fungus mapped: nitrogen reduced to ${nitrogenCut} lb N (${Number(mix.ratePer1000).toFixed(1)} lb per 1,000). ${FUNGUS_EXCLUSION}`,
   }];
 }
 
@@ -871,10 +878,13 @@ function reclaimedNitrogenNotes(mix, product, found) {
   return [];
 }
 
-// Every nitrogen line note of one visit's decision, for one planned line: the fungus note and the reclaimed-water note.
+// Every nitrogen line note of one visit's decision, for one planned line: the reclaimed-water note and the fungus note. When the smaller
+// reclaimed target set the amount and the fungus rule applied as well, the fungus note keeps only its spreader instruction (its own
+// "reduced to" figures would contradict the amount the line now states).
 function nitrogenCutNotes(mix, product, found) {
-  return found?.reclaimedWater === 'half' ? reclaimedNitrogenNotes(mix, product, found)
-    : [...reclaimedNitrogenNotes(mix, product, found), ...fungusNitrogenNotes(mix, found?.nitrogenCut ?? null)];
+  const reclaimed = reclaimedNitrogenNotes(mix, product, found);
+  if (found?.reclaimedWater !== 'half') return [...reclaimed, ...fungusNitrogenNotes(mix, found?.nitrogenCut ?? null)];
+  return found.fungusAlso && reclaimed.length ? [...reclaimed, { key: FUNGUS_NITROGEN_NOTE_KEY, severity: 'note', text: `Active fungus mapped. ${FUNGUS_EXCLUSION}` }] : reclaimed;
 }
 
 function derivedNutrientRate(product, nutrient, targetPer1000) {
@@ -2602,6 +2612,7 @@ module.exports = {
   visitOnV13Protocol,
   fungusNitrogenNotes,
   nitrogenCutNotes,
+  nitrogenCutWhy,
   nitrogenDecision,
   summarizeMaterialCost,
   effectiveAreaFactor,

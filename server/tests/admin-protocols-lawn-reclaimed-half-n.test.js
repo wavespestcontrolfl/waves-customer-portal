@@ -119,8 +119,13 @@ describe('each nitrogen gate alone activates its own adjustment on the tank shee
     only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N');
     const body = await sheet();
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(1.5625, 4);
-    expect(bag(body).gateNotes.map((note) => note.key)).toEqual(expect.arrayContaining(['reclaimedNitrogen']));
-    expect(bag(body).gateNotes.map((note) => note.key)).not.toContain('activeFungusNitrogen');
+    // Both notes: the half-nitrogen note and the fungus spreader instruction (without the fungus rule's own, larger, figures).
+    expect(bag(body).gateNotes).toEqual(expect.arrayContaining([
+      { key: 'reclaimedNitrogen', severity: 'note', text: HALF_NOTE },
+      { key: 'activeFungusNitrogen', severity: 'note', text: 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.' },
+    ]));
+    expect(JSON.stringify(bag(body).gateNotes)).not.toContain('reduced to 0.5');
+    expect(bag(body).raw).toContain('reclaimed water, half; active fungus mapped');
   });
 
   test('both on but the lawn is not reclaimed: the fungus cut alone; large patch without trouble areas + reclaimed on: the half alone', async () => {

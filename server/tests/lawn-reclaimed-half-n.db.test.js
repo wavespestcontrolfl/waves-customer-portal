@@ -143,12 +143,16 @@ describeDb('reclaimed water half nitrogen through PostgreSQL', () => {
     expect(JSON.stringify(result)).not.toContain('reclaimedNitrogen');
   });
 
-  test('reclaimed with active fungus in November: the smaller target (0.375), the reclaimed note only', async () => {
+  test('reclaimed with active fungus in November: the smaller target (0.375), BOTH notes (half nitrogen and the fungus spreader instruction), in the plan and the completion defaults', async () => {
     const result = await plan(await visitOn('2026-11-10', { water: COUNTY, areas: [{ type: 'fungus' }] }));
     const item = bagOf(result.mixCalculator.items);
     expect(item.mix.targetNPer1000).toBe(0.375);
-    expect(item.gateNotes.map((note) => note.key)).toContain('reclaimedNitrogen');
-    expect(item.gateNotes.map((note) => note.key)).not.toContain('activeFungusNitrogen');
+    expect(item.gateNotes).toEqual(expect.arrayContaining([
+      { key: 'reclaimedNitrogen', severity: 'note', text: HALF_NOTE },
+      { key: 'activeFungusNitrogen', severity: 'note', text: 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.' },
+    ]));
+    const defaulted = bagOf(result.completionDefaults.items);
+    expect(defaulted.gateNotes.map((note) => note.key)).toEqual(expect.arrayContaining(['reclaimedNitrogen', 'activeFungusNitrogen']));
   });
 
   test('October Dimension 18-0-10 (a pre-emergent plus fertilizer bag) keeps its 4.04 lb and says why', async () => {

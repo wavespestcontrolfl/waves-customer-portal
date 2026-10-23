@@ -394,8 +394,7 @@ async function projectNitrogenCut(dbh, svc, entries, summary) {
         : (Number(String(entry.gates.targetK2O || '').match(/^\s*(\d+(?:\.\d+)?)/)?.[1]) > 0 ? 'potash' : null),
     }) : null;
     if (decision?.cut != null) {
-      const why = decision.why === 'reclaimed' ? 'reclaimed water, half' : 'active fungus mapped';
-      entry.gates = { ...entry.gates, targetN: `${decision.cut} lb N/1000 (${why}; normal ${stated[1]} lb N/1000)` };
+      entry.gates = { ...entry.gates, targetN: `${decision.cut} lb N/1000 (${require('./waveguard-plan-engine').nitrogenCutWhy(decision)}; normal ${stated[1]} lb N/1000)` };
     }
   }
 }

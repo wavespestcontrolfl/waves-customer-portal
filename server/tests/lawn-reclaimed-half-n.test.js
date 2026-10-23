@@ -215,8 +215,33 @@ describe('with the November large patch cut too: the smaller target wins, not bo
     const found = await run(REC(), 'Nov');
     expect(found.nitrogenCut).toBe(0.375);
     expect(found.reclaimedWater).toBe('half');
-    expect(found.visit.notes).toContain('reclaimed water, half');
-    expect(found.visit.notes).not.toContain('fungus');
+    expect(found.fungusAlso).toBe(true);
+    // The visit text names both reasons; the target is the smaller one.
+    expect(found.visit.notes).toContain('N rate: 0.375 lb N (reclaimed water, half; active fungus mapped; normal 0.75 lb N)');
+    // Both notes reach the bag the halved target sized: the half-nitrogen note, and the fungus spreader instruction without its own (larger) figures.
+    const f24 = { id: 'f24', analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
+    const mix = engine.calculateProductAmount({ product: f24, lawnSqft: 10000, areaFactor: 1, ...found.targets, ...engine.v13RateOptions({ ratePer1000: null, rateUnit: 'lb_n' }) });
+    expect(engine.nitrogenCutNotes(mix, f24, found)).toEqual([
+      { key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).' },
+      { key: FUNGUS_NITROGEN_NOTE_KEY, severity: 'note', text: 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.' },
+    ]);
+    // A line the halved target did not size gets neither.
+    expect(engine.nitrogenCutNotes({ rateSource: 'protocol_rate', targetNPer1000: 0.375 }, f24, found)).toEqual([]);
+  });
+
+  test('the fungus rule applied but the reclaimed gate is off or the lawn is not reclaimed: the fungus note alone, with its own figures', async () => {
+    const found = await run(NOT_REC(), 'Nov');
+    expect(found.fungusAlso).toBeUndefined();
+    const f24 = { id: 'f24', analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
+    const mix = engine.calculateProductAmount({ product: f24, lawnSqft: 10000, areaFactor: 1, ...found.targets, ...engine.v13RateOptions({ ratePer1000: null, rateUnit: 'lb_n' }) });
+    expect(engine.nitrogenCutNotes(mix, f24, found).map((note) => note.text)).toEqual([
+      'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.',
+    ]);
+  });
+
+  test('a bag that keeps its rate on a reclaimed lawn with fungus mapped carries both notes too (the reclaimed "kept" note and the fungus cut figures)', async () => {
+    const found = await engine.nitrogenDecision(REC(), service, { targetN: 0.75, monthNumber: 11, v13Active: true, keep: 'potash' });
+    expect(found).toMatchObject({ cut: 0.5, reclaimed: 'kept', keptFor: 'potash', fungusApplied: true });
   });
 
   test('fungus alone still cuts to 0.5 with the fungus wording and no reclaimed key', async () => {

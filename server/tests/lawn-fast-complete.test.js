@@ -330,6 +330,24 @@ describe('buildLawnFastContext', () => {
     }
   });
 
+  test('the reclaimed lawn with active fungus: BOTH the half-nitrogen note and the fungus spreader instruction ride the planned line onto the sheet', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const HALF = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
+    const FUNGUS = 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.';
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [{
+          product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast',
+          mix: { amount: 15.625, amountUnit: 'lb', ratePer1000: 1.5625, rateUnit: 'lb', treatedSqft: 10000 },
+          gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, { key: 'reclaimedNitrogen', severity: 'note', text: HALF }, { key: 'activeFungusNitrogen', severity: 'note', text: FUNGUS }],
+        }],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    expect(ctx.plannedProducts.items[0].gateNotes).toEqual([HALF, FUNGUS]);
+  });
+
   describe('a visit that OFFERS the bermuda removal mix takes the full form, whatever the completion defaults or the visit type say', () => {
     const removal = require('../services/lawn-bermuda-removal');
     let offered;
