@@ -379,7 +379,8 @@ export default function LedgerInboxTab() {
         setNotice(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}${after ? "…" : "."}`);
       } while (after && rounds < 40);
       await loadStatus();
-      await loadRows(view, 0);
+      // the view the user is on now, not the one the pass started from
+      await loadRows(viewRef.current, 0);
     } catch (e) {
       setNotice(e.message);
     } finally {
