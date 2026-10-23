@@ -399,10 +399,15 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
   const stale = !writes && !pattern && force && hasKey(sug, 'rule') && !matcherFlag;
   const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
   if (writes && matcherFlag) patch.examined = true;
-  // a stale clear also drops the override marker an owner rule left on a
-  // matcher-flagged row: with the rule gone the row returns to the
-  // matcher's reading (its next rescan flags it again), not to "unexplained"
-  const removeKeys = stale ? [...CLASSIFICATION_KEYS, 'examined'] : (writes ? CLASSIFICATION_KEYS : []);
+  // The override marker an owner rule left on a matcher-flagged row lives
+  // only while an owner rule holds the row: a stale clear drops it, and so
+  // does a write that falls from an owner rule to a seed (the owner rule
+  // was disabled or re-pointed and a seed still matches). Either way the
+  // row returns to the matcher's reading (its next rescan flags it again),
+  // not to a seed classification the matcher can never warn about.
+  const ownerHeld = hasKey(sug, 'rule') && sug.rule.source === 'owner';
+  const fellToSeed = writes && ownerHeld && rule.source !== 'owner';
+  const removeKeys = (stale || fellToSeed) ? [...CLASSIFICATION_KEYS, 'examined'] : (writes ? CLASSIFICATION_KEYS : []);
   const versionRead = sug.rulesAt ? String(sug.rulesAt) : '';
   return { skip: false, writes, stale, rule, patch, removeKeys, guardMatcherFlag: !matcherFlag, versionRead };
 }

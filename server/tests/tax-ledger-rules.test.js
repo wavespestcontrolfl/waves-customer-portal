@@ -408,6 +408,24 @@ describe('applyRules (suggestion-only)', () => {
     expect(state.updates[0].patch.suggestion.removed).toEqual(svc.CLASSIFICATION_KEYS);
   });
 
+  test('a write that falls from an owner rule to a seed drops the override marker; owner to owner keeps it', async () => {
+    // the owner rule that overrode the matcher's transfer flag is gone; the Costco seed still matches
+    state.rules = state.rules.filter((r) => r.id === 'r-gas');
+    state.bankRows = [
+      { id: 'b1', txn_date: '2026-01-02', description: 'AUTOPAY COSTCO GAS #1', direction: 'debit', suggestion: { examined: true, rule: { id: 'r-old-owner', kind: 'personal', source: 'owner' }, personal: true, rulesAt: 'old' } },
+    ];
+    let out = await svc.applyRules({ force: true });
+    expect(out).toEqual(expect.objectContaining({ examined: 1, suggested: 1, cleared: 0 }));
+    expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ categoryId: 'cat-v', categorySource: 'rule' }));
+    expect(state.updates[0].patch.suggestion.removed).toEqual([...svc.CLASSIFICATION_KEYS, 'examined']);
+    // a newer owner rule taking over keeps the marker: an owner rule still holds the row
+    state.rules = [{ id: 'r-new-owner', pattern: 'costco gas', kind: 'expense', category_id: 'cat-v', category_name: 'Vehicle Expenses', irs_line: '9', priority: 10, enabled: true, source: 'owner' }];
+    state.updates = [];
+    out = await svc.applyRules({ force: true });
+    expect(out).toEqual(expect.objectContaining({ suggested: 1 }));
+    expect(state.updates[0].patch.suggestion.removed).toEqual(svc.CLASSIFICATION_KEYS);
+  });
+
   test('a full forced pass clears a classification an earlier rule wrote when no rule matches any more', async () => {
     state.rules = state.rules.filter((r) => r.id !== 'r-gas');
     state.bankRows = [
