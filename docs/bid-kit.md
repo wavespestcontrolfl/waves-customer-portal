@@ -17,12 +17,12 @@ Each row keeps: its private file, limits (insurance, whole dollars), source docu
 
 ## The sign-off rule
 
-A document counts only with a file (a typed number alone leaves it **missing**); a fact or a reference counts on its text. A paper counts as **ready** only after the owner presses Sign off. The sign-off covers the item as the owner saw it:
+A document counts only with a file (a typed number alone leaves it **missing**); a fact or a reference counts on its text (a reference needs a value or the name of its entity; a file alone never makes a fact or a reference count). A paper counts as **ready** only after the owner presses Sign off. The sign-off covers the item as the owner saw it:
 
 - Every write, a file replacement and an archive included, carries the version of the item the page loaded. A stale page gets a 409 and the open editors close, so old fields never go out with a new version.
 - The expiry bell closes by itself when the item is renewed or archived. Raising and closing a bell run under one lock per item and read the item again inside it, so a renewal or archive that lands while the daily run is working is never undone.
 - Logs never carry a database error's message (it can quote a reference's name, email or address): a log line is a fixed sentence plus the error code.
-- A document counts only with a file: a typed number alone leaves it missing (facts and references are there on text).
+- A document counts only with a file: a typed number alone leaves it missing (facts and references are there on text; a file alone never counts for either).
 - A check date and a permission date cannot be after today (Eastern); an expiry date may be ahead. The sign-off time is shown in Eastern time with the zone named.
 - A custom item's label is part of what a sign-off covers; a catalog item's label is not.
 - Any change to the value, file, limits, details, source document, checked-on date, expiry, or permission date clears the sign-off in the same update. A stale sign-off cannot survive an edit.

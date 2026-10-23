@@ -221,7 +221,8 @@ const present = (value) => typeof value === 'string' ? value.trim() !== '' : val
 // The status of one row. Pure: pass `today` (an Eastern YYYY-MM-DD) or `now`.
 // First match wins, in this order: missing, expired, needs_expiry, needs_permission, unattested, expiring, ready.
 // A document is "there" only when it has a FILE: the paper is the evidence, and a typed number alone is not (this holds for a
-// custom document too). A fact is there only with a typed value (it takes no file), and a reference with a value or when it names its entity. A catalog item
+// custom document too). A fact is there only with a typed value (it takes no file), and a reference only with a value or when it names its
+// entity (a file alone never makes a reference present: it carries no usable identity). A catalog item
 // that expires (expires: true) and has no expiry date is needs_expiry; custom rows are not held to that.
 function itemStatus(row, { today, now } = {}) {
   const day = today || etToday(now);
@@ -229,7 +230,7 @@ function itemStatus(row, { today, now } = {}) {
   const hasFile = present(r.file_s3_key) || r.has_file === true;
   const hasValue = present(r.value);
   const hasEntity = r.kind === 'reference' && present(r.details && r.details.entity);
-  const there = { document: hasFile, fact: hasValue }[r.kind] ?? (hasFile || hasValue || hasEntity);
+  const there = { document: hasFile, fact: hasValue, reference: hasValue || hasEntity }[r.kind] ?? false;
   if (!there) return STATUS.MISSING;
   const expires = dayText(r.expires_on);
   const left = expires ? daysBetween(day, expires) : null;

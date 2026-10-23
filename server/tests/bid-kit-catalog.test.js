@@ -90,6 +90,12 @@ describe('status', () => {
     // Facts and references are ready on text.
     expect(itemStatus({ kind: 'fact', item_key: 'phone', value: '941-555-0100' }, { today: TODAY })).toBe(STATUS.UNATTESTED);
     expect(itemStatus({ kind: 'reference', item_key: 'reference', value: 'Sample District', permission_on: '2026-09-30' }, { today: TODAY })).toBe(STATUS.UNATTESTED);
+    // A reference needs text that names it: a file and a permission date, signed off, are still missing.
+    expect(itemStatus({ kind: 'reference', item_key: 'reference', has_file: true, permission_on: '2026-09-30', attested_at: SIGNED }, { today: TODAY })).toBe(STATUS.MISSING);
+    expect(itemStatus({ kind: 'reference', item_key: 'reference', file_s3_key: 'bid-kit/x/y.pdf', value: ' ', details: { entity: ' ' }, permission_on: '2026-09-30', attested_at: SIGNED }, { today: TODAY })).toBe(STATUS.MISSING);
+    expect(itemStatus({ kind: 'reference', item_key: 'reference', has_file: true, details: { entity: 'Sample District' }, permission_on: '2026-09-30', attested_at: SIGNED }, { today: TODAY })).toBe(STATUS.READY);
+    // A kind outside the three is never present.
+    expect(itemStatus({ kind: 'other', value: 'x', has_file: true, attested_at: SIGNED }, { today: TODAY })).toBe(STATUS.MISSING);
     // A fact's value is the one the owner typed. Nothing is read from any other table, so a stray number on the row is ignored.
     expect(itemStatus({ kind: 'fact', item_key: 'fdacs_license_number', value: null, credential_number: 'JB000000' }, { today: TODAY })).toBe(STATUS.MISSING);
     expect(itemStatus({ kind: 'fact', item_key: 'fdacs_license_number', value: 'JB000000', attested_at: SIGNED }, { today: TODAY })).toBe(STATUS.READY);
