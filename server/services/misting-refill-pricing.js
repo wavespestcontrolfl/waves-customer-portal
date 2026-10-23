@@ -43,8 +43,13 @@ function mistingRefillSolutionFromEstimateData(estimateData) {
   return asSolution(chosen && chosen.solution) || DEFAULT_SOLUTION;
 }
 
-// 'standard' | 'natural' | 'premium' for a visit (or a booking in progress): the visit's source estimate, else the customer's newest
-// estimate that carries a misting plan. Unreadable or unknown: 'standard'.
+// The solution of the misting plan a visit belongs to, or null when no accepted plan can be established.
+//   1. the visit's own source_estimate_id (unchanged: an unknown solution inside that estimate reads Standard);
+//   2. else the customer's newest ACCEPTED estimate that carries a misting plan, scoped to the visit's property when the visit names
+//      one (estimates.property_id must match). Drafts, sent-but-unaccepted, declined or expired quotes and another property's
+//      quote never decide the price.
+// Null (nothing established, or an unreadable lookup) leaves the price to the catalog / staff: resolveAddonUnitPrice returns the
+// price it was given.
 async function mistingRefillSolutionForVisit(visitRow, database = db) {
   try {
     const estimateId = visitRow && (visitRow.source_estimate_id || visitRow.sourceEstimateId);
@@ -54,24 +59,33 @@ async function mistingRefillSolutionForVisit(visitRow, database = db) {
     }
     const customerId = visitRow && (visitRow.customer_id || visitRow.customerId);
     if (customerId) {
-      const rows = await database('estimates').where({ customer_id: customerId }).orderBy('id', 'desc').limit(10).select('estimate_data');
+      const propertyId = visitRow.property_id || visitRow.propertyId || null;
+      const rows = await database('estimates')
+        .where({ customer_id: customerId, status: 'accepted' })
+        .orderBy('accepted_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(20)
+        .select('id', 'property_id', 'estimate_data');
       for (const row of Array.isArray(rows) ? rows : []) {
+        if (propertyId && String(row.property_id || '') !== String(propertyId)) continue;
         const data = parseData(row.estimate_data);
         if (data && storedMistingRows(data).length) return mistingRefillSolutionFromEstimateData(data);
       }
     }
   } catch (err) {
-    logger.warn(`[misting-refill-pricing] solution lookup failed (Standard used): ${err.message}`);
+    logger.warn(`[misting-refill-pricing] solution lookup failed (price left to the catalog): ${err.message}`);
+    return null;
   }
-  return DEFAULT_SOLUTION;
+  return null;
 }
 
 /**
  * The unit price of an add-on line.
  * @param {object} addon  { serviceKey, price (the price on the line now, may be null), catalogBasePrice }
- * @param {object} parentVisit  the visit the add-on rides on, or the booking in progress: { source_estimate_id, customer_id }
- * A refill line with no price, or still at the unedited catalog price, takes the plan's solution price; a price staff typed in is
- * kept. Every other add-on returns its price untouched.
+ * @param {object} parentVisit  the visit the add-on rides on, or the booking in progress: { source_estimate_id, customer_id, property_id }
+ * A refill line with no price, or still at the unedited catalog price, takes the accepted plan's solution price; a price staff typed
+ * in is kept. When no accepted plan can be established the price is left exactly as given (one debug line). Every other add-on
+ * returns its price untouched.
  */
 async function resolveAddonUnitPrice(addon, parentVisit, database = db) {
   const price = addon ? addon.price : null;
@@ -80,7 +94,12 @@ async function resolveAddonUnitPrice(addon, parentVisit, database = db) {
   const catalog = addon.catalogBasePrice != null ? Number(addon.catalogBasePrice) : null;
   const isDefault = price == null || (catalog != null && Math.abs(Number(price) - catalog) < 0.005);
   if (!isDefault) return price;
-  return mistingRefillPriceFor(await mistingRefillSolutionForVisit(parentVisit, database));
+  const solution = await mistingRefillSolutionForVisit(parentVisit, database);
+  if (!solution) {
+    logger.debug(`[misting-refill-pricing] no accepted misting plan found for customer ${(parentVisit && (parentVisit.customer_id || parentVisit.customerId)) || 'unknown'}: refill price left for staff to select`);
+    return price;
+  }
+  return mistingRefillPriceFor(solution);
 }
 
 module.exports = {

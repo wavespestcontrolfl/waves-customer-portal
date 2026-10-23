@@ -8753,7 +8753,7 @@ async function scheduleCreateHandler(req, res, next) {
       discountAmount,
       customer,
       recurringMembershipBooking,
-      parentVisit: { source_estimate_id: linkedEstimateId, customer_id: customer?.id },
+      parentVisit: { source_estimate_id: linkedEstimateId, customer_id: customer?.id, property_id: bookingProperty?.property_id || null },
     });
 
     // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
@@ -12397,7 +12397,7 @@ async function normalizeUpdateDetailsAddons({
         // default. A line the visit already has, and a price staff typed that differs from the catalog price, keep exactly what was
         // posted (misting PR 2a, services/misting-refill-pricing.js). Every other add-on goes through unchanged.
         if (catalogService?.service_key === 'mosquito_misting_refill' && !(a.id && existingAddonDiscountById.has(a.id))) {
-          if (!visitPricingLink) visitPricingLink = await db('scheduled_services').where({ id }).first('source_estimate_id', 'customer_id');
+          if (!visitPricingLink) visitPricingLink = await db('scheduled_services').where({ id }).first(...['source_estimate_id', 'customer_id', 'property_id'].filter((column) => cols[column]));
           gross = await resolveAddonUnitPrice({ serviceKey: catalogService.service_key, price: gross, catalogBasePrice: catalogService.base_price }, visitPricingLink || {}, db);
         }
         const lineType = a.discountType || null;

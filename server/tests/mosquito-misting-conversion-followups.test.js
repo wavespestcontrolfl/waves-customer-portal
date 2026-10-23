@@ -141,35 +141,82 @@ describe('P1: a refill add-on takes the plan solution price through one helper',
   });
 
   const dbReturning = (estimates) => {
-    const database = jest.fn((table) => {
+    const database = jest.fn(() => {
       const q = {
-        where: (cond) => { q.cond = cond; return q; },
-        orderBy: () => q,
-        limit: () => q,
+        cond: {},
+        where(cond) { q.cond = { ...q.cond, ...cond }; return q; },
+        orderBy() { return q; },
+        limit() { return q; },
         first: async () => estimates.find((e) => String(e.id) === String(q.cond.id)),
-        select: async () => estimates.filter((e) => String(e.customer_id) === String(q.cond.customer_id)),
+        select: async () => estimates
+          .filter((e) => Object.entries(q.cond).every(([k, v]) => e[k] === undefined || String(e[k]) === String(v)))
+          // newest accepted first, as the real query orders (accepted_at desc, id desc)
+          .sort((x, y) => String(y.accepted_at || '').localeCompare(String(x.accepted_at || '')) || Number(y.id) - Number(x.id)),
       };
-      return table === 'estimates' ? q : q;
+      return q;
     });
     return database;
   };
 
-  test('mistingRefillSolutionForVisit: source_estimate_id first, else the customer newest misting estimate, else standard', async () => {
+  test('mistingRefillSolutionForVisit: source_estimate_id first (unchanged); an unreadable lookup leaves the price to staff (null)', async () => {
     const natural = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' });
     const premium = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'premium' });
     const database = dbReturning([
-      { id: 11, customer_id: 'c1', estimate_data: JSON.stringify(natural) },
-      { id: 12, customer_id: 'c2', estimate_data: premium },
-      { id: 13, customer_id: 'c3', estimate_data: { result: {} } },
+      { id: 11, customer_id: 'c1', status: 'draft', estimate_data: JSON.stringify(natural) },
+      { id: 12, customer_id: 'c2', status: 'declined', estimate_data: premium },
     ]);
+    // the explicit link is trusted whatever the estimate status is
     expect(await refillPricing.mistingRefillSolutionForVisit({ source_estimate_id: 11 }, database)).toBe('natural');
     expect(await refillPricing.mistingRefillSolutionForVisit({ source_estimate_id: 12 }, database)).toBe('premium');
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c2' }, database)).toBe('premium');
-    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c3' }, database)).toBe('standard');
-    expect(await refillPricing.mistingRefillSolutionForVisit({}, database)).toBe('standard');
-    expect(await refillPricing.mistingRefillSolutionForVisit(null, database)).toBe('standard');
+    expect(await refillPricing.mistingRefillSolutionForVisit({}, database)).toBeNull();
+    expect(await refillPricing.mistingRefillSolutionForVisit(null, database)).toBeNull();
     const broken = jest.fn(() => { throw new Error('db down'); });
-    expect(await refillPricing.mistingRefillSolutionForVisit({ source_estimate_id: 11 }, broken)).toBe('standard');
+    expect(await refillPricing.mistingRefillSolutionForVisit({ source_estimate_id: 11 }, broken)).toBeNull();
+    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, broken)).toBeNull();
+  });
+
+  test('no source link: the ACCEPTED plan decides, not the newest quote (accepted Natural + a newer draft Standard -> Natural / 219)', async () => {
+    const natural = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' });
+    const standard = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'standard' });
+    const database = dbReturning([
+      { id: 20, customer_id: 'c1', status: 'accepted', accepted_at: '2027-01-05', property_id: 'p1', estimate_data: natural },
+      { id: 21, customer_id: 'c1', status: 'draft', accepted_at: null, property_id: 'p1', estimate_data: standard },
+      { id: 22, customer_id: 'c1', status: 'sent', accepted_at: null, property_id: 'p1', estimate_data: standard },
+    ]);
+    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, database)).toBe('natural');
+    expect(await refillPricing.resolveAddonUnitPrice({ serviceKey: 'mosquito_misting_refill', price: 129, catalogBasePrice: 129 }, { customer_id: 'c1' }, database)).toBe(219);
+  });
+
+  test('declined / unaccepted quotes only: nothing is established (null) and the price is left untouched', async () => {
+    const standard = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'premium' });
+    const database = dbReturning([
+      { id: 30, customer_id: 'c1', status: 'declined', estimate_data: standard },
+      { id: 31, customer_id: 'c1', status: 'expired', estimate_data: standard },
+      { id: 32, customer_id: 'c1', status: 'draft', estimate_data: standard },
+    ]);
+    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, database)).toBeNull();
+    const refill = (price) => ({ serviceKey: 'mosquito_misting_refill', price, catalogBasePrice: 129 });
+    expect(await refillPricing.resolveAddonUnitPrice(refill(129), { customer_id: 'c1' }, database)).toBe(129);
+    expect(await refillPricing.resolveAddonUnitPrice(refill(null), { customer_id: 'c1' }, database)).toBeNull();
+    // an accepted estimate with no misting plan establishes nothing either
+    const pest = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })) };
+    const noMisting = dbReturning([{ id: 33, customer_id: 'c1', status: 'accepted', estimate_data: pest }]);
+    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, noMisting)).toBeNull();
+  });
+
+  test('two properties: the visit property decides (an accepted quote for another property never prices this visit)', async () => {
+    const natural = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' });
+    const premium = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'premium' });
+    const database = dbReturning([
+      { id: 40, customer_id: 'c1', status: 'accepted', accepted_at: '2027-01-05', property_id: 'home', estimate_data: natural },
+      { id: 41, customer_id: 'c1', status: 'accepted', accepted_at: '2027-02-05', property_id: 'rental', estimate_data: premium },
+    ]);
+    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1', property_id: 'home' }, database)).toBe('natural');
+    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1', property_id: 'rental' }, database)).toBe('premium');
+    // a property with no accepted misting plan establishes nothing
+    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1', property_id: 'cabin' }, database)).toBeNull();
+    // no property on the visit: the newest accepted plan
+    expect(await refillPricing.mistingRefillSolutionForVisit({ customer_id: 'c1' }, database)).toBe('premium');
   });
 
   test('resolveAddonUnitPrice: natural 219 / premium 319 / standard 129 for a refill at the catalog price or no price; typed prices stay', async () => {
@@ -203,7 +250,9 @@ describe('P1: a refill add-on takes the plan solution price through one helper',
     expect(src).toContain("const { resolveAddonUnitPrice } = require('../services/misting-refill-pricing');");
     expect(src).toContain("if (addonService?.service_key === 'mosquito_misting_refill') {");
     expect(src).toContain('base = await resolveAddonUnitPrice({ serviceKey: addonService.service_key, price: base, catalogBasePrice: addonService.base_price }');
-    expect(src).toContain('parentVisit: { source_estimate_id: linkedEstimateId, customer_id: customer?.id },');
+    expect(src).toContain('parentVisit: { source_estimate_id: linkedEstimateId, customer_id: customer?.id, property_id: bookingProperty?.property_id || null },');
+    // the visit edit passes the visit's own link and property (only the columns that exist)
+    expect(src).toContain("first(...['source_estimate_id', 'customer_id', 'property_id'].filter((column) => cols[column]))");
     // the add-on reads of stored rows (restack, rebase, copy to child visits) keep the price the booking resolved
     expect((src.match(/resolveAddonUnitPrice\(/g) || [])).toHaveLength(2);
   });
