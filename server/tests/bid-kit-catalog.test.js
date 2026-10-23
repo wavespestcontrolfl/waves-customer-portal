@@ -366,6 +366,12 @@ describe('tax IDs are never stored: one detector', () => {
     [{ label: 'W-9', notes: 'scan 12345678 copy' }, false, 'the W-9 token is no digit of a number'],
     [{ label: 'Customer reference', details: { entity: 'Sample HOA', phone: '941-555-0100', annualValue: 12000, contractPeriod: '2025-2026' } }, false, 'a reference with no tax phrase'],
     [{ label: 'Policy', value: '1234', source_document: '56789' }, false, 'two numbers and no tax phrase'],
+    // Insurance dollar limits: alone, and with the row when a tax phrase is in it.
+    [{ label: 'Certificate of insurance', limits: { glEachOccurrence: 123456789 } }, true, 'a nine-digit limit'],
+    [{ label: 'Certificate of insurance', limits: { umbrella: '123456789' } }, true, 'a nine-digit limit as text'],
+    [{ label: 'Certificate of insurance', notes: 'EIN is on the W-9', limits: { glEachOccurrence: 1234, umbrella: 56789 } }, true, 'a tax phrase and limits that add up to nine digits'],
+    [{ label: 'Certificate of insurance', notes: 'renews 10/25', limits: { glEachOccurrence: 1000000, glAggregate: 2000000 } }, false, 'a date in the notes and real limits'],
+    [{ label: 'Certificate of insurance', limits: { glEachOccurrence: 1000000000, workersComp: 'statutory' } }, false, 'the largest limit (ten digits) and a word'],
   ];
   test.each(ROWS)('row %j: refused = %s (%s)', (row, refused) => {
     expect(rowHasTaxId(row)).toBe(refused);

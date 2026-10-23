@@ -203,7 +203,7 @@ function detectTaxId(text, { fileName = false } = {}) {
 // one field, through fields that hold only digits, into the start of another. Across fields these are refused: an SSN shape
 // (3-2-4) or EIN shape (2-7) whose groups meet at field boundaries, label or not; and, when a tax phrase appears anywhere in
 // the row (a field, a reference detail or the catalog label), nine digits in any grouping, inside one field or across several.
-// A reference's details are fields too (a number counts as its digits).
+// A reference's details are fields too (a number counts as its digits), and so are the insurance dollar limits (below).
 function rowHasTaxId(row) {
   const r = row || {};
   const details = r.details && typeof r.details === 'object' ? Object.values(r.details) : [];
@@ -211,12 +211,18 @@ function rowHasTaxId(row) {
     .map((part) => (typeof part === 'number' ? String(part) : part))
     .filter((part) => typeof part === 'string' && part.trim() !== '');
   if (parts.some((part) => detectTaxId(part))) return true;
+  // Dollar limits are whole numbers: each is screened alone (nine digits is a tax ID, never a limit here) and, when a tax
+  // phrase is in the row, with the row. They never join the label-free shapes across fields: a date in the notes followed by a
+  // $1,000,000 limit would read as an EIN.
+  const amounts = (r.limits && typeof r.limits === 'object' ? LIMIT_DOLLAR_KEYS.map((key) => r.limits[key]) : [])
+    .filter((amount) => typeof amount === 'number' || (typeof amount === 'string' && amount.trim() !== '')).map(String);
+  if (amounts.some((amount) => detectTaxId(amount))) return true;
   const texts = parts.map(screenText);
   const fields = texts.map(fieldDigits);
   if (shapeAcrossFields(fields)) return true;
   if (!texts.some((t) => TAX_PHRASE.test(phraseText(t)))) return false;
   if (texts.some((t) => hasNineDigitGrouping(digitText(t)))) return true;
-  return nineAcrossFields(fields);
+  return nineAcrossFields([...fields, ...amounts.map(fieldDigits)]);
 }
 
 // A field's digit groups at its edges: `head` when it starts with digits, `tail` when it ends with them, `whole` when it holds

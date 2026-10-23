@@ -344,6 +344,7 @@ describe('create and list', () => {
     ['a labelled nine-digit tax ID', { source_document: 'Tax ID: 123456789' }],
     ['a label', { label: 'W-9 for 12-3456789' }],
     ['reference details', { details: { entity: '123-45-6789' } }],
+    ['an insurance limit', { limits: { glEachOccurrence: 123456789 } }],
   ])('%s is refused without repeating it', async (_name, over) => {
     const kind = over.details ? 'reference' : 'document';
     // A catalog reference takes its catalog name (no label is sent); a custom document takes a label.

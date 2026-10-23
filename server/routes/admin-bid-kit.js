@@ -99,7 +99,7 @@ function toColumns(body, kind, stored = {}) {
   }
   // Screened as the row will be stored: the stored values with this edit applied, so a label saved in one edit and a number
   // saved in another are read together.
-  const merged = Object.fromEntries(['label', 'value', 'source_document', 'notes', 'details'].map((key) => [key, key in out ? out[key] : stored[key]]));
+  const merged = Object.fromEntries(['label', 'value', 'source_document', 'notes', 'details', 'limits'].map((key) => [key, key in out ? out[key] : stored[key]]));
   if (catalog.rowHasTaxId(merged)) return { refused: TAX_ID_REFUSED };
   return { columns: out };
 }
