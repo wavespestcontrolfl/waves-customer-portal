@@ -109,7 +109,7 @@ describe('assets custody', () => {
     expect(puts[0]).toEqual(expect.objectContaining({
       asset_tag: 'T-001', location: 'storage', assigned_vehicle_id: null, assigned_to: 't1', condition_rating: 6,
       // The status the form loaded rides along, so a stale form cannot resurrect a lost item.
-      expected_status: 'active',
+      expected_status: 'active', expected_assigned_vehicle_id: 'v1',
     }));
   });
 

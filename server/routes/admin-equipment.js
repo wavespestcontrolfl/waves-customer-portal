@@ -252,7 +252,7 @@ function trucksTouched(id, row, updates) {
     row.category === 'vehicle' && ['status', 'category', 'assigned_to'].some((key) => updates[key] !== undefined) ? id : null,
   ].filter(Boolean))].sort();
 }
-async function applyAssetUpdate(trx, id, updates, expectedStatus = undefined) {
+async function applyAssetUpdate(trx, id, updates, expected = {}) {
   const truckKit = require('../services/truck-kit');
   // The item row itself is serialized first (one advisory lock per row), so
   // two saves of the same item never derive their truck locks from the same
@@ -268,9 +268,11 @@ async function applyAssetUpdate(trx, id, updates, expectedStatus = undefined) {
   // Truck, category OR status: an alert outcome (Lost / Retired) that landed
   // while this save waited must not be undone by the dialog's full payload.
   if (!before || ['assigned_vehicle_id', 'category', 'status'].some((key) => before[key] !== first[key])) return 'moved';
-  // ...nor by a form opened before it landed: the dialog sends the status it
-  // loaded (expected_status) and a different stored status refuses the save.
-  if (expectedStatus !== undefined && expectedStatus !== null && String(expectedStatus) !== String(before.status)) return 'stale-status';
+  // ...nor by a form opened before it landed: the dialog sends the status
+  // and the truck it loaded (expected_*) and a stored value that differs
+  // refuses the save (a stale form would otherwise move the tool back).
+  if (expected.status !== undefined && expected.status !== null && String(expected.status) !== String(before.status)) return 'stale-status';
+  if (expected.assigned_vehicle_id !== undefined && (expected.assigned_vehicle_id || null) !== (before.assigned_vehicle_id || null)) return 'stale-status';
   const refusal = await writeRefusal(trx, id, updates, before);
   if (refusal) return refusal;
   const moved = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id;
@@ -346,11 +348,11 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     // A tool that leaves a truck (moved or unassigned) takes its open tool
     // alerts with it, so the old truck's bell must be re-judged: under both
     // trucks' locks, in the same transaction as the move (truck-kit.js).
-    const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates, req.body.expected_status));
+    const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates, { status: req.body.expected_status, assigned_vehicle_id: req.body.expected_assigned_vehicle_id }));
     if (record === 'moved') return res.status(409).json({ error: 'Another save changed this item (its truck, category or status). Reload and try again.' });
     if (record === 'vehicle-cargo') return res.status(409).json({ error: 'This item is now a vehicle; a vehicle cannot ride on a truck. Reload and try again.' });
     if (record === 'riders') return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
-    if (record === 'stale-status') return res.status(409).json({ error: 'This item\'s status changed since you opened it. Reload and try again.' });
+    if (record === 'stale-status') return res.status(409).json({ error: 'This item changed since you opened it (its status or truck). Reload and try again.' });
     if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
     if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });

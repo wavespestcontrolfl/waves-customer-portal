@@ -69,6 +69,19 @@ describe('truck-check alert outcomes', () => {
     expect(puts[1][1]).toEqual({ status: 'resolved', resolved_by: 'admin' });
   });
 
+  it('a refused outcome shows the server\'s reason, not an HTTP code', async () => {
+    const stub = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => {
+      if (String(url).includes('/equipment-maintenance/alerts/') && options.method === 'PUT') return { ok: false, status: 409, json: async () => ({ error: 'That alert is already closed (the truck check found the tool). Reload the list.' }) };
+      return stub(url, options);
+    });
+    render(<MemoryRouter><EquipmentMaintenancePage /></MemoryRouter>);
+    await screen.findByText(/3 Active Alerts/);
+    fireEvent.click(rowOf(ALERTS[0].title).getByRole('button', { name: 'Found' }));
+    expect(await screen.findByText(/already closed \(the truck check found the tool\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/HTTP 409/)).not.toBeInTheDocument();
+  });
+
   it('a technician sees the truck-check alerts without any outcome button', async () => {
     render(<MemoryRouter><EquipmentMaintenancePage readOnly /></MemoryRouter>);
     await screen.findByText(/3 Active Alerts/);

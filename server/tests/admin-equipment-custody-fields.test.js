@@ -308,10 +308,16 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE, status: 'lost' };
     const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status: 'active', expected_status: 'active' } });
     expect(res.statusCode).toBe(409);
-    expect(res.body.error).toMatch(/status changed since you opened it/);
+    expect(res.body.error).toMatch(/changed since you opened it/);
     expect(db.__state.updated).toBeNull();
     // The same form with the status it really loaded saves.
     expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status: 'active', expected_status: 'lost' } })).statusCode).toBe(200);
+    // A form that loaded the tool on VEHICLE while it has since moved to OTHER cannot move it back.
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: OTHER, status: 'active' };
+    db.__state.vehicles[OTHER] = { id: OTHER };
+    const back = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Edited', assigned_vehicle_id: VEHICLE, expected_assigned_vehicle_id: VEHICLE } });
+    expect(back.statusCode).toBe(409);
+    expect(back.body.error).toMatch(/changed since you opened it/);
     db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE };
   });
 

@@ -21,8 +21,12 @@ function af(path, opts = {}) {
       "Content-Type": "application/json"
     },
     ...opts
-  }).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async r => {
+    if (!r.ok) {
+      // A refusal says what happened (the alert already closed, reload): show it.
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body?.error || `HTTP ${r.status}`);
+    }
     return r.json();
   });
 }
