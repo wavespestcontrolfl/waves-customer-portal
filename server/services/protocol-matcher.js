@@ -262,6 +262,11 @@ const MATCH_RULES = [
   { programKey: 'area_addon', visit: 3, reason: 'area_addon_fire_ant_yard', serviceKeys: ['area_addon_fire_ant_yard'], terms: [] },
   { programKey: 'area_addon', visit: 4, reason: 'area_addon_lawn_insect_preventive', serviceKeys: ['area_addon_lawn_insect_preventive'], terms: [] },
   { programKey: 'area_addon', visit: 5, reason: 'area_addon_hardscape_weed', serviceKeys: ['area_addon_hardscape_weed'], terms: [] },
+  // The converted mosquito misting system (misting PR 2a): routed by catalog service key, and by the system's own plan phrase
+  // for a keyless row. Bare "misting" (the barrier program's 21-day cycle wording) never reaches these.
+  { programKey: 'mosquito_misting', visit: 1, reason: 'misting_system_service', serviceKeys: ['mosquito_misting_service'], terms: ['misting service plan'] },
+  { programKey: 'mosquito_misting', visit: 2, reason: 'misting_system_install', serviceKeys: ['mosquito_misting_install'], terms: [] },
+  { programKey: 'mosquito_misting', visit: 3, reason: 'misting_system_refill', serviceKeys: ['mosquito_misting_refill'], terms: [] },
 ];
 
 // The automatic mosquito misting SYSTEM's DESIGN-VISIT identity
@@ -309,6 +314,8 @@ function isPestPrimaryCompanion(normalized) {
 
 function programKeyForService(serviceType) {
   const normalized = normalize(serviceType);
+  // The misting SYSTEM's plan phrase is its own program (a keyless row); bare "misting" below stays the barrier program.
+  if (normalized.includes('misting service plan')) return 'mosquito_misting';
   // 'turf' is the commercial turf-treatment synonym for the lawn program
   // ("Commercial Turf Treatment Program") — must route to the lawn protocol,
   // not fall through to pest.

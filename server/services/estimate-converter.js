@@ -10,6 +10,7 @@
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
+const { createScheduledService } = require('./booking/create-scheduled-service');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
@@ -2225,6 +2226,95 @@ function normalizeEstimateData(value) {
   return value;
 }
 
+// The one-time install of an accepted mosquito misting system (GATE_MOSQUITO_MISTING, misting PR 2a): the mapped
+// `mosquito_misting_installation` row, read from the STORED estimate so the invoice bills exactly the figure the quote was sent at
+// (never a live constant: frozen-disclosure rule, same as frozenSetupFeeAmount / frozenRodentBaitSetupAmount). Null when the
+// estimate carries no priced install (an oversize layout is an unpriced quote-required row and bills nothing).
+function frozenMistingInstall(estimateData = {}) {
+  const rows = estimateOneTimeItemsFromData(estimateData, { collapseMirrored: true })
+    .filter((item) => item && String(item.service || '').toLowerCase() === 'mosquito_misting_installation' && item.quoteRequired !== true);
+  for (const row of rows) {
+    const amount = firstPositiveNumber(row.price, row.amount, row.total, row.priceAfterDiscount, row.totalAfterDiscount);
+    if (amount != null) {
+      return { amount: roundMoney(amount), description: String(row.name || row.label || 'Mosquito Misting System Installation') };
+    }
+  }
+  return null;
+}
+
+// Mosquito misting install visit (misting PR 2a). The accepted install is a one-time job under the catalog row
+// mosquito_misting_install, scheduled on the same day as the first service-plan visit (the plan visit is seeded at the normal lead
+// time and the office confirms the real install day with the customer after the design visit; the install physically comes first).
+// The visit is NOT billed again: the install amount is already on the acceptance invoice (frozenMistingInstall), so the row is
+// stamped with that amount as covered (estimated_price + prepaid_amount, method 'acceptance_invoice'), which is the existing
+// "covered visit" posture the completion mint honors. Idempotent per estimate (a retried accept never doubles it). Returns the
+// inserted row id, or null (no priced install, or the row is already there). A failure throws to the caller, which logs it and
+// never blocks the acceptance.
+async function scheduleMistingInstallVisit(database, { estimateId, customerId, estimateData, fallbackDate = null } = {}) {
+  const install = frozenMistingInstall(estimateData);
+  if (!install) return null;
+  const catalog = await database('services')
+    .where({ service_key: 'mosquito_misting_install' })
+    .first('id', 'name', 'default_duration_minutes');
+  const serviceType = catalog?.name || 'Mosquito Misting System Installation';
+  const existing = await database('scheduled_services')
+    .where({ source_estimate_id: estimateId, customer_id: customerId, service_type: serviceType })
+    .first('id');
+  if (existing) return existing.id;
+  // The first plan visit's date: the earliest row this accept created under the misting service plan.
+  const plan = await database('services').where({ service_key: 'mosquito_misting_service' }).first('id', 'name');
+  let firstPlanDate = null;
+  try {
+    const planRows = await database('scheduled_services')
+      .where({ source_estimate_id: estimateId, customer_id: customerId })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .select('scheduled_date', 'service_id', 'service_type');
+    const dates = planRows
+      .filter((row) => (plan && row.service_id === plan.id) || (plan && row.service_type === plan.name) || row.service_type === 'Mosquito Misting Service Plan')
+      .map((row) => row.scheduled_date)
+      .filter(Boolean)
+      .sort();
+    firstPlanDate = dates[0] || null;
+  } catch (dateErr) {
+    logger.warn(`[estimate-converter] misting install: first plan visit date lookup failed for estimate ${estimateId}: ${dateErr.message}`);
+  }
+  const cols = await database('scheduled_services').columnInfo();
+  const columns = Object.keys(cols);
+  const row = {
+    customer_id: customerId,
+    scheduled_date: firstPlanDate || fallbackDate || etDateString(),
+    service_type: serviceType,
+    status: 'pending',
+    notes: `Auto-created from accepted estimate #${estimateId}. Misting system installation: the office confirms the install day with the customer after the design visit. The install amount ($${install.amount.toFixed(2)}) is already on the acceptance invoice — do not invoice it again.`,
+    source_estimate_id: estimateId,
+    estimated_price: install.amount,
+    estimated_duration_minutes: Number(catalog?.default_duration_minutes) > 0 ? Number(catalog.default_duration_minutes) : 480,
+    prepaid_amount: install.amount,
+    prepaid_method: 'acceptance_invoice',
+    ...(catalog?.id ? { service_id: catalog.id } : {}),
+  };
+  const insertable = Object.fromEntries(Object.entries(row).filter(([key]) => columns.includes(key)));
+  // The booking stamping contract owns the field stamping and the source attribution for every new visit row.
+  const created = await createScheduledService({
+    trx: database,
+    insertData: insertable,
+    cols,
+    source: { sourceAction: 'estimate_accept_misting_install' },
+  });
+  const insertedId = created && typeof created === 'object' ? created.id : created;
+  try {
+    await database('activity_log').insert({
+      customer_id: customerId,
+      action: 'misting_install_visit_created',
+      description: `Estimate #${estimateId}: misting installation visit created (${serviceType}, ${insertable.scheduled_date}). The office confirms the install day with the customer; the $${install.amount.toFixed(2)} install is on the acceptance invoice.`,
+      metadata: JSON.stringify({ estimateId, scheduledServiceId: insertedId, amount: install.amount }),
+    });
+  } catch (noteErr) {
+    logger.warn(`[estimate-converter] misting install activity note failed: ${noteErr.message}`);
+  }
+  return insertedId || null;
+}
+
 function estimateLineItemsFromData(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data.lineItems
@@ -3778,6 +3868,9 @@ function remainingUnitCatalogKey(svc = {}, acceptedPlanFrequency = null) {
   // name, so legacy name-only lines link too. Absent row (env not yet
   // migrated) degrades to the existing name-only warn path.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  // Mosquito misting service plan (misting PR 2a): the catalog row ships in migration 20261023100000. An absent row (env not yet
+  // migrated) degrades to the existing name-only warn path; the plan's name equals the catalog name exactly.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito_misting') return 'mosquito_misting_service';
   // Recurring palm (owner ruling 2026-08-11): the semiannual program row
   // ships in the same PR (20260811000010). Estimator palm lines carry the
   // label 'Palm Injection', which the completion resolver's short-name
@@ -4129,6 +4222,14 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     if (pattern === 'semiannual') return (visits == null && !visitCountFieldsInvalid(svc)) || visits === 2;
     return false;
   }
+  // Mosquito misting service plan (misting PR 2a): 12 monthly applications a year. The only supported cadence is monthly with
+  // 12 (or an unstated count, like the barrier monthly program); any other cadence or count keeps office scheduling.
+  if (key === 'mosquito_misting') {
+    if (isCommercialRecurringLine(svc, parentRow)) return false;
+    if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)) return false;
+    const visits = visitsPerYearForRecurringService(svc);
+    return pattern === 'monthly' && (visits == null || visits === 12);
+  }
   // Mosquito (owner 2026-07-27). Neither program seeded before this, so a sold
   // plan booked its FIRST visit and never created the rest — the customer was
   // billed monthly for a series they did not get. Same failure the T&S audit
@@ -4406,6 +4507,16 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
   }
+  // Mosquito misting service plan (misting PR 2a): 12 applications a year has exactly ONE cadence, monthly. Resolve it before
+  // generic inference, which would otherwise take the accepted PLAN's fallback cadence (a misting line beside a quarterly pest plan
+  // inherits quarterly) and the monthly gate would decline it, silently leaving the plan with no series. Same shape as the
+  // forced seasonal mosquito rule above; any other count falls through to the gate and keeps office scheduling.
+  if (seedingFamilyKey(svc, parentRow) === 'mosquito_misting'
+    && !isCommercialRecurringLine(svc, parentRow)
+    && !visitCountFieldsConflict(svc) && !visitCountFieldsInvalid(svc)
+    && visitsPerYearForRecurringService(svc) === 12) {
+    return 'monthly';
+  }
   // Palm Injection (owner ruling 2026-08-11): the estimate builder's palm
   // supplement carries visitsPerYear 2 but NO frequency field
   // (estimate-public upsertSupplement 'palm_injection'), so generic
@@ -4480,6 +4591,14 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFr
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
+  // Mirror of the forced monthly misting rule in converterFollowUpSeedingPattern (the prepay term must record the cadence the
+  // series actually seeds).
+  if (seedingFamilyKey(svc) === 'mosquito_misting'
+    && !isCommercialRecurringLine(svc)
+    && !visitCountFieldsConflict(svc) && !visitCountFieldsInvalid(svc)
+    && visitsPerYearForRecurringService(svc) === 12) {
+    return 'monthly';
   }
   // Same forced-palm rule as converterFollowUpSeedingPattern above (owner
   // ruling 2026-08-11): a builder palm line has no frequency field, so raw
@@ -7731,6 +7850,18 @@ const EstimateConverter = {
       if (earliestScheduledUnitDate) termStartDate = earliestScheduledUnitDate;
     }
 
+    // Mosquito misting install visit (misting PR 2a, GATE_MOSQUITO_MISTING): one one-time job beside the plan series. Skipped when
+    // the caller scheduled nothing itself (manual Mark Won) or recurring conversion is suppressed; a failure never blocks the accept.
+    if (!skipAutoSchedule && !suppressRecurringConversion && frozenMistingInstall(estimateData)) {
+      try {
+        await scheduleMistingInstallVisit(database, {
+          estimateId, customerId, estimateData, fallbackDate: earliestScheduledUnitDate || termStartDate || null,
+        });
+      } catch (installErr) {
+        logger.error(`[estimate-converter] Failed to create the misting install visit for estimate ${estimateId}: ${installErr.message}`);
+      }
+    }
+
     // B06/B17 office alert: a multi-program accept whose auto-scheduled series
     // could not be priced per unit. The single-unit park bell above needs
     // recurringUnitCount === 1 and the route's completeness alert only reads
@@ -7868,9 +7999,12 @@ const EstimateConverter = {
       // acceptance (frozenSetupFeeAmount below), so every charging path
       // bills exactly what the quote disclosed.
       const setupFeeAmount = frozenSetupFeeAmount(estimateData);
+      // Mosquito misting system install (misting PR 2a): billed on the acceptance invoice, standard and annual prepay alike,
+      // from the frozen one-time row. Null for every estimate without a priced misting install.
+      const mistingInstall = frozenMistingInstall(estimateData);
       const hasDraftAmount = billingTerm === 'prepay_annual'
-        ? annualPrepayAmount > 0
-        : setupFeeApplies || standardFirstApplicationAmount > 0;
+        ? annualPrepayAmount > 0 || !!mistingInstall
+        : setupFeeApplies || standardFirstApplicationAmount > 0 || !!mistingInstall;
       // Sign-before-pay (slice 3a restructure, owner ruling 2026-09-24, dark
       // behind GATE_TERMITE_ANNUAL_PLAN): an accepted Subterranean Termite
       // Protection annual plan never reaches this point at accept time at
@@ -8077,6 +8211,11 @@ const EstimateConverter = {
                 description: annualPlanSetupDescription,
                 quantity: 1,
                 unit_price: annualPlanSetupFeeAmount,
+              }] : []),
+              ...(mistingInstall ? [{
+                description: mistingInstall.description,
+                quantity: 1,
+                unit_price: mistingInstall.amount,
               }] : [])],
               notes: prepayNotes,
               dueDate: etDateString(),
@@ -8380,6 +8519,13 @@ const EstimateConverter = {
               unit_price: setupFeeAmount,
             });
           }
+          if (mistingInstall) {
+            lineItems.push({
+              description: mistingInstall.description,
+              quantity: 1,
+              unit_price: mistingInstall.amount,
+            });
+          }
           if (firstApplicationAmount > 0) {
             lineItems.push({
               description: 'First service application',
@@ -8400,11 +8546,15 @@ const EstimateConverter = {
           // fresh, possibly shrunken balance. Never a discounted invoice
           // beside an unconsumed deposit row.
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
-          const invoiceSubtotal = (setupFeeApplies ? setupFeeAmount : 0) + firstApplicationAmount;
-          const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
+          const invoiceSubtotal = (setupFeeApplies ? setupFeeAmount : 0) + (mistingInstall ? mistingInstall.amount : 0) + firstApplicationAmount;
+          const invoiceTitle = mistingInstall
+            ? (includesFirstApplicationLine ? 'Mosquito Misting System Installation + First Application' : 'Mosquito Misting System Installation')
+            : setupFeeApplies && includesFirstApplicationLine
             ? 'WaveGuard Membership Setup + First Application'
             : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
-          const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
+          const invoiceNotes = mistingInstall
+            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${mistingInstall.amount.toFixed(2)} system installation${includesFirstApplicationLine ? ' plus first application' : ''}${setupFeeApplies ? ` plus $${setupFeeAmount.toFixed(2)} setup fee` : ''}.`
+            : setupFeeApplies && includesFirstApplicationLine
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${setupFeeAmount.toFixed(2)} setup fee plus first application.`
             : (setupFeeApplies
                 ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${setupFeeAmount.toFixed(2)} setup fee only.`
@@ -9100,3 +9250,5 @@ module.exports.funnelKeyForEstimateId = funnelKeyForEstimateId;
 // One-time row classifiers (area add-on rows classify by key), exported for server/tests/area-addon-flow.test.js.
 module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
+module.exports.frozenMistingInstall = frozenMistingInstall;
+module.exports.scheduleMistingInstallVisit = scheduleMistingInstallVisit;

@@ -277,13 +277,14 @@ describe('mosquito misting SYSTEM is a consultation, not the barrier protocol', 
     // A DIFFERENT, not-yet-built catalog key must not be silently suppressed
     // by the name phrase — key-first means this predicate does not apply to
     // it at all, so it falls through to the matcher's ordinary name-based
-    // resolution (today: the barrier program, since no dedicated
-    // install/maintenance protocols.json program exists yet — building one
-    // is a future, separate change, not invented here).
+    // resolution. Misting PR 2a built the dedicated program (protocols.json
+    // `mosquito_misting`), so the built catalog key now resolves to it by its
+    // own key, never to the barrier program and never to the consultation.
     const futureKeyed = matchServiceProtocol(protocols, 'Mosquito Misting System Install', { serviceKey: 'mosquito_misting_install' });
     expect(futureKeyed.reason).not.toBe('misting_system_consultation');
     expect(futureKeyed.reason).not.toBe('misting_system_service_unconfigured');
-    expect(futureKeyed.programKey).toBe('mosquito');
+    expect(futureKeyed.programKey).toBe('mosquito_misting');
+    expect(futureKeyed.reason).toBe('misting_system_install');
   });
 
   test('bare "misting" (the barrier program\'s own cycle-length wording) still routes to the barrier protocol', () => {

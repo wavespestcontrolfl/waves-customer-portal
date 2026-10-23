@@ -479,7 +479,9 @@ const ADDON_PROGRAMS = Object.freeze({
   // suppressed by the shared isMistingDesignConsultation predicate in
   // addonProgramKey below — key-first, name only for a keyless row — so it
   // no longer needs its own nonChemical entry here.
-  mosquito: { any: ['mosquito'], fallback: 'mosquito' },
+  // The converted misting system (misting PR 2a): matchServiceProtocol routes its catalog keys (and the keyless plan phrase) to the
+  // mosquito_misting program, which must be allowed here or the barrier fallback would hand the visit the barrier spray steps.
+  mosquito: { any: ['mosquito', 'mosquito_misting'], fallback: 'mosquito' },
   termite: { any: ['termite'], fallback: 'termite' },
   rodent: {
     any: ['rodent'],

@@ -115,6 +115,9 @@ const BILLING_RIDER_KEYS = [
   // plus a reference in the home visit's cockroach report, no report of its
   // own; its profile ships internal_only/disabled.
   'vehicle_roach_addon',
+  // Mosquito misting refill (misting PR 2a, migration 20261023100000): billed per refill application on its parent
+  // service-plan visit; an invoice line with no report of its own, so it ships internal_only/disabled.
+  'mosquito_misting_refill',
 ];
 
 // Recurring programs whose GENERIC Service Report V1 is the decided lane —
@@ -136,6 +139,9 @@ const RECURRING_GENERIC_BY_DESIGN = [
   // archives the catalog row everywhere) — removed from this list.
   'pest_termite_bait_quarterly',
   'waveguard_membership',
+  // Mosquito misting service plan (misting PR 2a, migration 20261023100000): 12 monthly applications, the standard recurring
+  // Service Report is the product.
+  'mosquito_misting_service',
 ];
 
 // One-time services whose GENERIC Service Report V1 is the decided lane
@@ -188,6 +194,9 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   'area_addon_lawn_insect_preventive',
   'area_addon_hardscape_weed',
   'area_addon_web_sweep',
+  // Mosquito misting system install (misting PR 2a, migration 20261023100000): a one-time job reported on the generic Service
+  // Report (the install record, calibration and walkthrough are the report).
+  'mosquito_misting_install',
   // german_roach / german_roach_initial LEFT this list 2026-08-29 (owner
   // ruling, cockroach report V2): migration 20260830000030 points both at
   // the typed `cockroach` form so every one-time roach job feeds the

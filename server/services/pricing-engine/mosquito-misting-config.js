@@ -149,6 +149,17 @@ function syncMosquitoMistingPricingConfig(row, target = MOSQUITO_MISTING) {
   return applied;
 }
 
+// The per-refill-application price of a solution tier (misting PR 2a): Standard / Natural / Premium. Reads the LIVE table, so it is
+// DB-authoritative through the pricing_config sync like the quote itself. An unknown or missing solution reads the Standard price (the
+// catalog refill row's base_price), never NaN. The scheduled_service_addons picker sends the catalog base_price (Standard), so a
+// Natural or Premium refill is priced by this helper where the solution is known (Fast Complete / invoice follow-up).
+function mistingRefillPriceFor(solution, target = MOSQUITO_MISTING) {
+  const key = String(solution == null ? '' : solution).trim().toLowerCase();
+  const refills = target.refills || {};
+  const entry = Object.prototype.hasOwnProperty.call(refills, key) ? refills[key] : refills[target.defaultSolution];
+  return entry && Number.isFinite(entry.price) ? entry.price : null;
+}
+
 // The row's data at the in-code defaults: what the migration seeds and the route's table-creating fallback inserts.
 function defaultMosquitoMistingPricingData() {
   return JSON.parse(JSON.stringify(DEFAULTS));
@@ -161,4 +172,5 @@ module.exports = {
   applyMosquitoMistingPricingConfig,
   syncMosquitoMistingPricingConfig,
   rebaseMosquitoMisting,
+  mistingRefillPriceFor,
 };

@@ -159,6 +159,12 @@ const SERVICE_KEY_RULES = {
   // overlay as lawn (owner 2026-08-11; see the mosquito_event rule above)
   mosquito_monthly: { eligible: true, variant: 'outline', captionKey: 'yardCoverage' },
   mosquito_seasonal: { eligible: true, variant: 'outline', captionKey: 'yardCoverage' },
+  // Misting system (PR 2a): a fixed nozzle line on a timer. The tech services,
+  // installs or refills hardware; nobody sprays a path a trace could draw, so
+  // a trace would claim coverage the visit did not make.
+  mosquito_misting_service: { eligible: false, reason: 'misting_system_lane' },
+  mosquito_misting_install: { eligible: false, reason: 'misting_system_lane' },
+  mosquito_misting_refill: { eligible: false, reason: 'misting_system_lane' },
   // Billing construct, not a visit (zero duration, booking disabled) —
   // WaveGuard's actual stops book as the mosquito programs above (codex
   // P2 r4).

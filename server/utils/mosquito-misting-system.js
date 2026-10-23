@@ -60,6 +60,12 @@
  */
 
 const MISTING_SYSTEM_SERVICE_KEY = 'mosquito_misting_system';
+// The catalog rows the converted misting system lives under (migration 20261023100000, misting PR 2a): the one-time install, the
+// monthly service plan (12 applications a year) and the per-fill refill add-on. All three are `mosquito_misting_*` keys, so
+// isMistingSystemService counts them; none is the free design visit, so isMistingDesignConsultation (exact key) refuses them.
+const MISTING_INSTALL_CATALOG_KEY = 'mosquito_misting_install';
+const MISTING_SERVICE_CATALOG_KEY = 'mosquito_misting_service';
+const MISTING_REFILL_CATALOG_KEY = 'mosquito_misting_refill';
 // The pricing engine's recurring plan line (GATE_MOSQUITO_MISTING). It is the
 // misting SYSTEM's install + plan + refills, so isMistingSystemService counts
 // it, but isMistingDesignConsultation does NOT: it is not the free design visit.
@@ -185,6 +191,9 @@ function isMistingSystemServiceUnconfigured({ serviceKey, name } = {}) {
 module.exports = {
   MISTING_SYSTEM_SERVICE_KEY,
   MISTING_ENGINE_SERVICE_KEY,
+  MISTING_INSTALL_CATALOG_KEY,
+  MISTING_SERVICE_CATALOG_KEY,
+  MISTING_REFILL_CATALOG_KEY,
   isMistingSystemIdentity,
   isMistingSelection,
   mistingProposalIdentity,

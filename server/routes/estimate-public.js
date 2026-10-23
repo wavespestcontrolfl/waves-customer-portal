@@ -13936,6 +13936,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // not mint (codex #3591 r59 P1); the recurring conversion path is
           // the only one that owes it.
           const acceptedRodentSetupAmount = treatAsOneTime ? 0 : EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
+          // Mosquito misting system install (misting PR 2a, GATE_MOSQUITO_MISTING): the stored one-time install row bills on this
+          // same acceptance invoice (frozen-disclosure rule; the converter's own invoice path bills it the same way). A one-time
+          // selection schedules no misting plan, so the recurring conversion path is the only one that owes it.
+          const acceptedMistingInstall = treatAsOneTime ? null : EstimateConverter.frozenMistingInstall(conversionEstData);
+          const acceptedMistingInstallAmount = acceptedMistingInstall ? acceptedMistingInstall.amount : 0;
           // Pay after the first visit — monthly-tier (setup-only) shape. On the
           // card rail with GATE_PAF_SETUP_FEE live, a pure WaveGuard setup fee
           // (no first-application line, no rodent bait-station setup) is not
@@ -13952,6 +13957,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           let deferSetupFeeStamp = null;
           const deferShapeEligible = !!(shouldCreateStandardDraftInvoice && setupFeeApplies && !includesFirstApplicationLine
             && !(acceptedRodentSetupAmount > 0)
+            && !(acceptedMistingInstallAmount > 0)
             && require('../config/feature-gates').pafSetupFeeLive()
             && RecurringCards.payAfterFirstVisitSetupFeeRail(recurringCardPolicy)
             // The SAME eligibility predicate the preview (/data flag, legacy
@@ -14090,7 +14096,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           if (deferSetupFeeStamp) {
             setupFeeDeferredToFirstVisit = true;
             logger.info(`[estimate-accept] setup fee $${deferSetupFeeStamp.amount.toFixed(2)} for estimate ${estimate.id} stamped on series ${deferSetupFeeStamp.parentId} — billed with the first performed visit, no accept-time invoice`);
-          } else if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
+          } else if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0 || acceptedMistingInstallAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];
             // Frozen-disclosure resolver — bill (and narrate) exactly what
@@ -14116,6 +14122,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 description: 'Bait Station Setup — one-time setup fee',
                 quantity: 1,
                 unit_price: acceptedRodentSetupAmount,
+              });
+            }
+            if (acceptedMistingInstallAmount > 0) {
+              lineItems.push({
+                description: acceptedMistingInstall.description,
+                quantity: 1,
+                unit_price: acceptedMistingInstallAmount,
               });
             }
             if (includesFirstApplicationLine) {
@@ -14153,14 +14166,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 });
               }
             }
-            const anySetupLine = setupFeeApplies || acceptedRodentSetupAmount > 0;
-            const setupTitleWord = setupFeeApplies ? 'WaveGuard Membership Setup' : 'Bait Station Setup';
+            const anySetupLine = setupFeeApplies || acceptedRodentSetupAmount > 0 || acceptedMistingInstallAmount > 0;
+            const setupTitleWord = acceptedMistingInstallAmount > 0 && !setupFeeApplies && !(acceptedRodentSetupAmount > 0)
+              ? 'Mosquito Misting System Installation'
+              : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'Bait Station Setup');
             const invoiceTitle = anySetupLine && includesFirstApplicationLine
               ? `${setupTitleWord} + First Application`
               : (anySetupLine ? setupTitleWord : 'First Service Application');
             const setupNotesParts = [
               setupFeeApplies ? `$${acceptSetupFeeAmount.toFixed(2)} setup fee` : null,
               acceptedRodentSetupAmount > 0 ? `$${acceptedRodentSetupAmount.toFixed(2)} bait-station setup` : null,
+              acceptedMistingInstallAmount > 0 ? `$${acceptedMistingInstallAmount.toFixed(2)} system installation` : null,
             ].filter(Boolean);
             const invoiceNotes = anySetupLine && includesFirstApplicationLine
               ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — ${setupNotesParts.join(' plus ')} plus first application.`
