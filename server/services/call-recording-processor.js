@@ -20170,6 +20170,27 @@ const CallRecordingProcessor = {
                         followUpFence = { acquired: false, keys: [], reason: 'error' };
                         logger.warn(`[call-proc] follow-up fence failed for ${maskSid(callSid)} (seeding unfenced): ${fenceErr.message}`);
                       }
+                      // A copied hour (the call set none) that another stop
+                      // holds on visit 2's date moves to the nearest free whole
+                      // hour that day (GATE_CALL_FOLLOWUP_FREE_HOUR, owner
+                      // 2026-10-22; scheduling/plan-taken-hour.js), read under
+                      // the fence above so a concurrent fenced call booking
+                      // cannot pick the same hour. A time set on the call and
+                      // a package visit 2 keep theirs; the idempotency key
+                      // below stays on the planned hour. A moved visit 2
+                      // keeps its job length (Codex #6495 r1 P1).
+                      const fuDurationMin = callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES;
+                      const fuWindow = await require('./scheduling/plan-taken-hour').callFollowUpWindow(sp, {
+                        visit1: primaryRow,
+                        customerId,
+                        technicianId: followUpTechId,
+                        date: fuPlan.scheduledDate,
+                        durationMinutes: fuDurationMin,
+                      }, {
+                        window_start: fuStart,
+                        window_end: fuWindowEnd,
+                        window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
+                      }, { hourStated: fuPlan.hourStated, packageVisit: packageFollowUp });
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
@@ -20194,9 +20215,7 @@ const CallRecordingProcessor = {
                           service_address_state: primaryRow.service_address_state || null,
                           service_address_zip: primaryRow.service_address_zip || null,
                           scheduled_date: fuPlan.scheduledDate,
-                          window_start: fuStart,
-                          window_end: fuWindowEnd,
-                          window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
+                          ...fuWindow,
                           service_type: serviceType,
                           service_id: callBookingCatalogRow?.id || null,
                           parent_service_id: primaryRow.id,
@@ -20222,7 +20241,7 @@ const CallRecordingProcessor = {
                           // from owing a third visit.
                           ...callFollowUpBillingShape(packageFollowUp ? 0 : priceInfo.price),
                           followup_source_service_id: primaryRow.id,
-                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                          estimated_duration_minutes: fuDurationMin,
                           // Customer-safe only: once dispatch confirms this row
                           // the portal filter no longer hides it and
                           // GET /api/schedule returns notes verbatim. The

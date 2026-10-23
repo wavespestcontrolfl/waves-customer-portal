@@ -1028,7 +1028,20 @@ describe('resolveCallFollowUpPlan', () => {
       parentDate: '2026-07-02',
       parentWindowStart: '08:00',
     });
-    expect(plan).toEqual({ scheduledDate: '2026-07-20', windowStart: '13:00' });
+    // The call set the hour: it is kept as is (plan-taken-hour.js callFollowUpWindow).
+    expect(plan).toEqual({ scheduledDate: '2026-07-20', windowStart: '13:00', hourStated: true });
+  });
+
+  test('an hour the call did not set is a copy: no hourStated flag (it may move to a free hour)', () => {
+    // A mention with no date or time: visit 1's hour.
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true }, catalogRow: roach, parentDate: '2026-07-02', parentWindowStart: '10:00',
+    })).toEqual({ scheduledDate: '2026-07-16', windowStart: '10:00' });
+    // A stated date with a malformed time: the time is visit 1's.
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2026-07-20T13:75' },
+      catalogRow: roach, parentDate: '2026-07-02', parentWindowStart: '10:00',
+    })).toEqual({ scheduledDate: '2026-07-20', windowStart: '10:00' });
   });
 
   test('a follow_up_date_time alone (no boolean) still counts as mentioned', () => {

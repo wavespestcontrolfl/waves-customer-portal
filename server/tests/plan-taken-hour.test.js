@@ -188,3 +188,146 @@ describe('plan-taken-hour', () => {
       .toEqual({ window_start: null, recurring_dispatch_due_date: '2026-11-03' });
   });
 });
+
+// CALL FOLLOW-UP FREE HOUR (GATE_CALL_FOLLOWUP_FREE_HOUR; owner 2026-10-22,
+// "fix", after a call follow-up landed on another customer's 10 AM): visit 2
+// of a call keeps a copied hour only while that hour is free on its date.
+describe('callFollowUpWindow', () => {
+  const conn = { transaction: async (fn) => fn('sp') };
+  const args = { visit1: { property_id: 'prop-a' }, customerId: 'c1', technicianId: 't1', date: day(7) };
+  const planned = { window_start: '10:00', window_end: '11:00', window_display: '10:00 AM' };
+  const startOf = async (...rest) => (await planTakenHour.callFollowUpWindow(...rest)).window_start;
+  // Another customer's stop holds the hours in `taken` on visit 2's date.
+  const holdHours = (taken) => findConflictingVisits.mockImplementation(async ({ windowStart }) => (
+    taken.includes(windowStart) ? [{ id: `other-${windowStart}`, customer_id: 'c2' }] : []));
+  beforeEach(() => { process.env.GATE_CALL_FOLLOWUP_FREE_HOUR = 'true'; });
+  afterEach(() => {
+    delete process.env.GATE_CALL_FOLLOWUP_FREE_HOUR;
+    findConflictingVisits.mockReset().mockImplementation(async () => []);
+  });
+
+  test('a free planned window stays as planned', async () => {
+    expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
+    expect(findConflictingVisits).toHaveBeenCalledTimes(1);
+    // The probe reads visit 2's planned window, with the night tool's statuses and interviews.
+    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ date: day(7), windowStart: '10:00', windowEnd: '11:00', includeInterviews: true });
+  });
+
+  test('a taken planned hour moves to a one-hour window at the nearest free whole hour, the later of two equally near', async () => {
+    holdHours(['10:00']);
+    expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toEqual({ window_start: '11:00', window_end: '12:00', window_display: '11:00 AM' });
+    holdHours(['10:00', '11:00']);
+    expect(await startOf(conn, args, planned)).toBe('09:00');
+    holdHours(['10:00', '11:00', '09:00', '12:00', '08:00']);
+    expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toEqual({ window_start: '13:00', window_end: '14:00', window_display: '1:00 PM' });
+  });
+
+  test('only whole hours inside the shift (8 AM to the 6 PM close); none free keeps the planned window', async () => {
+    holdHours(['17:00']);
+    expect(await startOf(conn, args, { window_start: '17:00', window_end: '18:00', window_display: '5:00 PM' })).toBe('16:00');
+    const all = ['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+    holdHours(all);
+    expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
+    const probed = findConflictingVisits.mock.calls.slice(-all.length).map(([a]) => a.windowStart);
+    expect(probed.sort()).toEqual(all);
+  });
+
+  test('a moved visit 2 keeps its job length: the whole job must fit the shift and be free, and is written that long', async () => {
+    // Other customers' stops as spans; a probe conflicts with any it overlaps.
+    const holdSpans = (spans) => findConflictingVisits.mockImplementation(async ({ windowStart, windowEnd }) => spans
+      .filter(([s, e]) => windowStart < e && s < windowEnd)
+      .map(([s]) => ({ id: `other-${s}`, customer_id: 'c2' })));
+    const threeHours = { ...args, durationMinutes: 180 };
+    // 3 PM is taken. A three-hour job cannot start at 4 PM (it would run past the 6 PM close),
+    // and the stop holds part of 2 PM's and 1 PM's span: noon is the nearest whole job that fits.
+    holdSpans([['15:00', '16:00']]);
+    expect(await planTakenHour.callFollowUpWindow(conn, threeHours, { window_start: '15:00', window_end: '16:00', window_display: '3:00 PM' }))
+      .toEqual({ window_start: '12:00', window_end: '15:00', window_display: '12:00 PM' });
+    expect(findConflictingVisits.mock.calls.map(([a]) => a.windowStart)).not.toContain('16:00');
+    // A stop at noon holds the job's third hour, not its first: the planned 10 AM is taken, and so is 11 AM.
+    holdSpans([['12:00', '13:00']]);
+    expect(await planTakenHour.callFollowUpWindow(conn, threeHours, planned))
+      .toEqual({ window_start: '09:00', window_end: '12:00', window_display: '9:00 AM' });
+    expect(findConflictingVisits.mock.calls[findConflictingVisits.mock.calls.length - 3][0]).toMatchObject({ windowStart: '10:00', windowEnd: '13:00' });
+    // A job shorter than its planned window keeps the window's span.
+    holdSpans([['10:00', '11:00']]);
+    expect(await planTakenHour.callFollowUpWindow(conn, { ...args, durationMinutes: 30 }, planned))
+      .toEqual({ window_start: '11:00', window_end: '12:00', window_display: '11:00 AM' });
+  });
+
+  test('the same customer at the same place is one stop, not a reason to move', async () => {
+    findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
+    const q = { leftJoin: () => q, whereIn: () => q, select: async () => [{ id: 'own', property_id: 'prop-a' }] };
+    const placeConn = Object.assign(jest.fn((table) => (table === 'customers' ? { where: () => ({ first: async () => null }) } : q)), {
+      transaction: async (fn) => fn(placeConn),
+    });
+    expect(await planTakenHour.callFollowUpWindow(placeConn, args, planned)).toBe(planned);
+  });
+
+  test('a time the call set, a package visit 2, and the gate off keep the planned window, unread', async () => {
+    holdHours(['10:00']);
+    expect(await planTakenHour.callFollowUpWindow(conn, args, planned, { hourStated: true })).toBe(planned);
+    expect(await planTakenHour.callFollowUpWindow(conn, args, planned, { packageVisit: true })).toBe(planned);
+    delete process.env.GATE_CALL_FOLLOWUP_FREE_HOUR;
+    expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('a failed read keeps the planned window and never throws', async () => {
+    findConflictingVisits.mockRejectedValue(new Error('db down'));
+    expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
+    const failing = { transaction: async () => { throw new Error('savepoint failed'); } };
+    expect(await planTakenHour.callFollowUpWindow(failing, args, planned)).toBe(planned);
+  });
+
+  test('the probe carries the technician the writer resolved; unassigned, every stop counts', async () => {
+    const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+    techScopedConfirmActive.mockReturnValue(true);
+    try {
+      // Technician t2's stop holds 10:00: not visit 2's technician (t1), so the hour is free.
+      findConflictingVisits.mockImplementation(async ({ windowStart }) => (windowStart === '10:00' ? [{ id: 'x', customer_id: 'c2', technician_id: 't2' }] : []));
+      expect(await planTakenHour.callFollowUpWindow(conn, args, planned)).toBe(planned);
+      // Visit 2 goes to t2: the hour is taken.
+      expect(await startOf(conn, { ...args, technicianId: 't2' }, planned)).toBe('11:00');
+      // Visit 2 goes unassigned (its technician is not assignable): t2's stop still holds the hour.
+      expect(await startOf(conn, { ...args, technicianId: null }, planned)).toBe('11:00');
+    } finally {
+      techScopedConfirmActive.mockReturnValue(false);
+    }
+  });
+});
+
+// The call pipeline's visit 2 (call-recording-processor.js
+// ensureCallFollowUpVisit) is too large to drive here; its wiring is pinned
+// by source, as call-lead-form-address-street-level.test.js pins the same
+// function.
+describe('callFollowUpWindow wiring in the call pipeline', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  const fu = src.indexOf('const ensureCallFollowUpVisit = async (primaryRow, { fresh = false } = {}) => {');
+  const fence = src.indexOf('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })', fu);
+  const insert = src.indexOf('source_action: packageFollowUp', fu);
+
+  test("visit 2's window comes from callFollowUpWindow under the fence, with the resolved technician and the call's own flags", () => {
+    const call = src.indexOf("const fuWindow = await require('./scheduling/plan-taken-hour').callFollowUpWindow(sp, {", fu);
+    expect(fu).toBeGreaterThan(-1);
+    expect(fence).toBeGreaterThan(fu);
+    // Read after the fence (Codex pre-push P1: two calls must not pick the same free hour) and before the insert.
+    expect(call).toBeGreaterThan(fence);
+    expect(call).toBeLessThan(insert);
+    const block = src.slice(call, src.indexOf('packageVisit: packageFollowUp });', call));
+    expect(block).toContain('technicianId: followUpTechId,');
+    // The job length the probe uses is the one the insert stores.
+    expect(block).toContain('durationMinutes: fuDurationMin,');
+    expect(block).toContain('window_start: fuStart,');
+    expect(block).toContain('{ hourStated: fuPlan.hourStated,');
+    // The insert writes that window and no other.
+    const insertBlock = src.slice(src.indexOf("const [fuRow] = await sp('scheduled_services')", call), insert);
+    expect(insertBlock).toContain('...fuWindow,');
+    expect(src.slice(call, insert + 4000)).toContain('estimated_duration_minutes: fuDurationMin,');
+    expect(insertBlock).not.toMatch(/window_(start|end|display):/);
+  });
+
+  test('the idempotency key stays on the planned hour, so a retry finds the same visit 2', () => {
+    expect(src.slice(fu, insert + 2000)).toContain('confirmedStartAt: `${fuPlan.scheduledDate}T${fuStart}`,');
+  });
+});
