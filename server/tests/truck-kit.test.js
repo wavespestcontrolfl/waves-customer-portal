@@ -293,7 +293,9 @@ describe('recordTruckCheck', () => {
     expect(opts.bell).toBeUndefined();
     expect(require('../services/notification-bell-policy').OVERRIDABLE_CATEGORIES).toContain('truck_kit');
     expect(reportEquipmentIssue.mock.calls.every(([args]) => args.conn)).toBe(true);
-    expect(opts.detail).toBe('Missing: Moisture meter (T-002)\nDamaged: B&G 1 gal. sprayer (T-001) · Pump leaks');
+    // Names and tags only: the technician's note never rides in the bell detail.
+    expect(opts.detail).toBe('Missing: Moisture meter (T-002)\nDamaged: B&G 1 gal. sprayer (T-001)');
+    expect(opts.detail).not.toContain('Pump leaks');
     expect(closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 

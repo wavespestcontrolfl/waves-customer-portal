@@ -294,6 +294,9 @@ async function writeRefusal(trx, id, updates, before) {
   // (that is how a second truck is unassigned).
   const pick = (key) => (Object.prototype.hasOwnProperty.call(updates, key) ? updates[key] : before[key]);
   const live = { category: pick('category'), assigned_to: pick('assigned_to'), status: pick('status') };
+  // The invariant itself, on the FINAL row under the locks: a vehicle is
+  // never cargo (a save that raced a recategorization is refused).
+  if (live.category === 'vehicle' && pick('assigned_vehicle_id')) return 'vehicle-cargo';
   if (live.category === 'vehicle' && live.assigned_to && !DEAD_ITEM_STATUSES.includes(live.status)) {
     await truckKit.lockTechnician(trx, live.assigned_to);
     if (await secondLiveTruck(live, id, trx)) return 'second-truck';
@@ -335,6 +338,7 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     // trucks' locks, in the same transaction as the move (truck-kit.js).
     const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates));
     if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload and try again.' });
+    if (record === 'vehicle-cargo') return res.status(409).json({ error: 'This item is now a vehicle; a vehicle cannot ride on a truck. Reload and try again.' });
     if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
     if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });

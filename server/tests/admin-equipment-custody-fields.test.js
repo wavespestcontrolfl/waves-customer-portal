@@ -274,6 +274,17 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     expect(db.__state.inserted).toBeNull();
   });
 
+  test('a row that became a vehicle while the save waited cannot end up as cargo', async () => {
+    // vehicleTarget saw a tool; under the locks the stored row is a vehicle (both snapshots agree).
+    let reads = 0;
+    db.__state.rows[TOOL] = { id: TOOL, assigned_vehicle_id: null, status: 'active', get category() { return reads++ === 0 ? 'tool' : 'vehicle'; } };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: VEHICLE } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/cannot ride on a truck/);
+    expect(db.__state.updated).toBeNull();
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE };
+  });
+
   test('every save of an item takes the item\'s own lock first', async () => {
     await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed' } });
     expect(truckKit.lockTruck.mock.calls[0]).toEqual([db, TOOL]);
