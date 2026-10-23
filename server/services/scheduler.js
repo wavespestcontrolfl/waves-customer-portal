@@ -2115,6 +2115,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 07:20 — new construction warranty renewal reminder (GATE_WARRANTY_RENEWAL_REMINDER, dark): one admin
+  // notification 45 days before each signed warranty renews, closed when staff mark the notice sent. It sends
+  // nothing to a customer. Gate read per run, so a flip needs no restart. runExclusive records the job health.
+  cron.schedule('20 7 * * *', async () => {
+    try {
+      await runExclusive('warranty-renewal-reminder', async () => {
+        const result = await require('./warranty-renewal-reminder').runWarrantyRenewalReminder();
+        if (result.raised > 0) logger.info(`[warranty-renewal-reminder] ${result.raised} new renewal reminder(s)`);
+      });
+    } catch (err) {
+      logger.error(`[warranty-renewal-reminder] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 15 MIN — Bid Desk intake (GATE_BID_DESK, dark): files bid invites found in new `emails` rows as
   // bid opportunities and sends the 7-day and 2-day reminders for due dates the operator confirmed. No AI call; it
   // posts admin notifications only and sends nothing to a buyer, contractor or customer. The gate is read per tick,
