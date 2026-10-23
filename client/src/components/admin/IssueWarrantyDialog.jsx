@@ -190,7 +190,9 @@ export function IssueWarrantyAction({ project, findings, allowed, blocked, unsav
     && Boolean(project?.customer_id)
     && warrantyEligible(findings || {});
   if (!eligible) return null;
-  const disabled = blocked || unsaved;
+  // The server issues only from a sent certificate (it passed the send gate).
+  const unsent = !(project.sent_at || project.status === "sent");
+  const disabled = blocked || unsaved || unsent;
   return (
     <>
       <button
@@ -198,7 +200,7 @@ export function IssueWarrantyAction({ project, findings, allowed, blocked, unsav
         onClick={() => setOpen(true)}
         disabled={disabled}
         style={{ ...buttonStyle, opacity: disabled ? 0.4 : 1 }}
-        title={unsaved ? "Save changes first" : "Create the new construction warranty for signature"}
+        title={unsaved ? "Save changes first" : unsent ? "Send the certificate first" : "Create the new construction warranty for signature"}
       >
         Issue warranty
       </button>

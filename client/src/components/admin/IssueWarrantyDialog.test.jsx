@@ -87,7 +87,7 @@ describe('IssueWarrantyDialog', () => {
 
 
 describe('IssueWarrantyAction', () => {
-  const certificate = { ...project, project_type: 'pre_treatment_termite_certificate' };
+  const certificate = { ...project, project_type: 'pre_treatment_termite_certificate', sent_at: '2026-10-02T12:00:00Z' };
   it('shows for a certificate with a warranty plan, not for an addition or without a customer', () => {
     const { rerender } = render(<IssueWarrantyAction project={certificate} findings={findings} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
     expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeEnabled();
@@ -98,6 +98,8 @@ describe('IssueWarrantyAction', () => {
     rerender(<IssueWarrantyAction project={certificate} findings={{ ...findings, treatment_method: 'Wood treatment (borate)' }} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
     expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
     rerender(<IssueWarrantyAction project={certificate} findings={findings} allowed blocked={false} unsaved buttonStyle={{}} />);
+    expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeDisabled();
+    rerender(<IssueWarrantyAction project={{ ...certificate, sent_at: null, status: 'draft' }} findings={findings} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
     expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeDisabled();
   });
 });

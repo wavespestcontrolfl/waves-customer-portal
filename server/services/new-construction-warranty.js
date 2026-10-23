@@ -347,6 +347,15 @@ function assertCustomerPrintable(customer) {
   }
 }
 
+// The product prints as its catalog entry, never as typed text: a typed
+// name could carry a clause ("Termidor SC WE REPAIR ALL DAMAGE"). The
+// catalog's active ingredient wins when it has one.
+async function catalogProduct(conn, treatment) {
+  const row = await conn('products_catalog').whereRaw('lower(name) = ?', [treatment.product.toLowerCase()]).first('name', 'active_ingredient');
+  if (!row) throw bad(`Pick the product from the product catalog on the certificate (found "${treatment.product}").`, 409);
+  return { product: oneLine(row.name), active_ingredient: oneLine(row.active_ingredient) || treatment.active_ingredient };
+}
+
 // Values for one issue of the warranty, built server-side from the project
 // named in the request. The issue route calls it again inside its
 // transaction with `trx`, which locks the certificate row, so the snapshot is
@@ -369,9 +378,13 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
     throw bad('Pre-treat certificate not found for this customer.', 404);
   }
   assertCustomerPrintable(customer);
+  // A sent certificate passed the full send gate (attestation, application
+  // record); a draft has not, so it cannot back a signed warranty yet.
+  if (!(project.sent_at || project.status === 'sent')) throw bad('Send the pre-treat certificate first, then issue its warranty.', 409);
   const findings = parseFindings(project.findings);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
   const { initial, values } = certificateValues(project, findings);
+  Object.assign(values.treatment, await catalogProduct(conn, values.treatment));
   const issuer = body?.values?.issuer || {};
   return screenValues({
     ...values,

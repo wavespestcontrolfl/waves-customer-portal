@@ -65,9 +65,10 @@ describe('templateIssueValues (server-built warranty)', () => {
     concentration_pct: '0.06', gallons_applied: '180', square_footage: '1800', applicator_name: 'Sam Tester', applicator_fdacs_id: 'JF000000',
     warranty_type: 'Builder 1-year, renewable yearly to year 5', wdo_target: ['Subterranean termites'],
   };
-  const project = { id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_date: '2026-10-01', project_type: 'pre_treatment_termite_certificate', findings: JSON.stringify(findings) };
+  const project = { id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_date: '2026-10-01', sent_at: '2026-10-02T12:00:00Z', project_type: 'pre_treatment_termite_certificate', findings: JSON.stringify(findings) };
   const locks = [];
   let lockedCustomer;
+  const CATALOG = { 'termidor sc': { name: 'Termidor SC', active_ingredient: 'Fipronil 9.1%' }, 'taurus sc': { name: 'Taurus SC', active_ingredient: '' } };
   // The row the lock returns is the row the caller passed, unless a test
   // sets lockedCustomer to model an edit that committed in between.
   const issue = (body, cust, row, lockedRow = cust) => {
@@ -76,8 +77,13 @@ describe('templateIssueValues (server-built warranty)', () => {
   };
   const conn = (row) => (table) => ({
     where() { return this; },
+    whereRaw(sql, [name]) { this._product = name; return this; },
     forUpdate() { locks.push(table === 'customers' ? 'customer' : row && row.id); return this; },
-    first: async () => (table === 'customers' ? lockedCustomer : row),
+    async first() {
+      if (table === 'customers') return lockedCustomer;
+      if (table === 'products_catalog') return CATALOG[this._product] || null;
+      return row;
+    },
   });
   const office = {
     warranty: {
@@ -145,9 +151,9 @@ describe('templateIssueValues (server-built warranty)', () => {
     const coded = { ...office, warranty: { ...office.warranty, notice_location: 'garage panel, gate code 1234' } };
     await expect(issue({ projectId: project.id, values: coded }, customer, project))
       .rejects.toMatchObject({ status: 400, message: expect.stringContaining('warranty.notice_location') });
-    const claim = { ...project, findings: { ...findings, product_name: 'Termidor SC, pet-safe' } };
+    const claim = { ...project, findings: { ...findings, builder_contractor: 'Pet-safe Homes LLC' } };
     await expect(issue({ projectId: project.id, values: office }, customer, claim))
-      .rejects.toMatchObject({ status: 400, message: expect.stringContaining('treatment.product') });
+      .rejects.toMatchObject({ status: 400, message: expect.stringContaining('project.builder') });
   });
 
   test('refuses a non-subterranean target and an out-of-order final exterior date; strips units the template prints', async () => {
@@ -174,6 +180,19 @@ describe('templateIssueValues (server-built warranty)', () => {
     await expect(issue({ projectId: project.id, values: office }, customer, project, { ...customer, address_line1: '9 New Rd' }))
       .rejects.toMatchObject({ status: 409 });
     await expect(issue({ projectId: project.id, values: office }, customer, project, null)).rejects.toMatchObject({ status: 409 });
+  });
+
+  test('issues only from a sent certificate, and prints the catalog product', async () => {
+    const draft = { ...project, sent_at: null, status: 'draft' };
+    await expect(issue({ projectId: project.id, values: office }, customer, draft)).rejects.toMatchObject({ status: 409 });
+    const typed = { ...project, findings: { ...findings, product_name: 'Termidor SC WE REPAIR ALL DAMAGE' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, typed)).rejects.toMatchObject({ status: 409 });
+    const lower = { ...project, findings: { ...findings, product_name: 'termidor sc' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, lower))
+      .resolves.toMatchObject({ treatment: { product: 'Termidor SC', active_ingredient: 'Fipronil 9.1%' } });
+    const noAi = { ...project, findings: { ...findings, product_name: 'Other', product_name_other: 'Taurus SC' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, noAi))
+      .resolves.toMatchObject({ treatment: { product: 'Taurus SC', active_ingredient: 'fipronil' } });
   });
 
   test('certificate fields are short values, never clauses', async () => {
