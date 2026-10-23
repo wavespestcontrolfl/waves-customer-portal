@@ -140,24 +140,26 @@ function promotedKeysFor(serviceType, serviceKey) {
 // What a visit requires: the primary service's lines, then each booked
 // add-on's (a Tree & Shrub add-on on a pest visit needs the tree and shrub
 // tools too), plus the keys its identity promotes. `addons` is [{ name, serviceKey }].
+// One service's contribution: its lines, the keys it promotes, and the
+// focused keys it is restricted to (null = the whole kit of its lines).
+function serviceRequirement(svc) {
+  const focused = focusedKitFor(svc?.name, svc?.serviceKey);
+  const lines = focused ? [focused.line] : linesForService(svc?.name, svc?.serviceKey, svc?.category);
+  if (!lines.length) return null;
+  return { lines, promote: promotedKeysFor(svc?.name, svc?.serviceKey), restrict: focused ? focused.keys : null };
+}
+
 // `restrict` (a Set of keys, or null) narrows the requirement to focused
 // tools when EVERY service on the visit is a focused job; one full-kit
 // service on the visit lifts the restriction.
 function requirementsFor(serviceType, { serviceKey = null, serviceCategory = null, addons = [] } = {}) {
   const services = [{ name: serviceType, serviceKey, category: serviceCategory }, ...(Array.isArray(addons) ? addons : [])];
-  const lines = [];
-  const promote = new Set();
-  let restrict = new Set();
-  for (const svc of services) {
-    const focused = focusedKitFor(svc?.name, svc?.serviceKey);
-    const svcLines = focused ? [focused.line] : linesForService(svc?.name, svc?.serviceKey, svc?.category);
-    if (!svcLines.length) continue;
-    for (const line of svcLines) if (!lines.includes(line)) lines.push(line);
-    for (const key of promotedKeysFor(svc?.name, svc?.serviceKey)) promote.add(key);
-    if (focused && restrict) for (const key of focused.keys) restrict.add(key);
-    else restrict = null;
-  }
-  return { lines, promote, restrict: restrict && restrict.size ? restrict : null };
+  const parts = services.map(serviceRequirement).filter(Boolean);
+  const lines = [...new Set(parts.flatMap((part) => part.lines))];
+  const promote = new Set(parts.flatMap((part) => part.promote));
+  const allFocused = parts.length > 0 && parts.every((part) => part.restrict);
+  const restrict = allFocused ? new Set(parts.flatMap((part) => part.restrict)) : null;
+  return { lines, promote, restrict };
 }
 const serviceLinesFor = (serviceType, opts) => requirementsFor(serviceType, opts).lines;
 
