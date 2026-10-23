@@ -4869,7 +4869,7 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
 });
 
 // POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview
-// body: { productIds: [catalog product ids] }
+// body: { productIds: [catalog product ids], targets?: { [productId]: [target] } }
 // Each chosen product's watering rule and the one watering instruction the
 // customer report would print for them, built by the report's own functions so
 // the sheet's sentence can never differ from the report's. Read-only; sends
@@ -4881,6 +4881,7 @@ router.post('/:lawnFastServiceId/lawn-fast/watering-preview', async (req, res, n
     const result = await require('../services/lawn-fast-complete').buildLawnFastWateringPreview({
       serviceId,
       productIds: req.body?.productIds,
+      targets: req.body?.targets,
     });
     if (!result.ok) {
       const status = result.reason === 'not_found' ? 404 : 400;

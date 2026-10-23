@@ -132,6 +132,41 @@ describe('item 1: a visit with a water-in product never says "No special waterin
       .toEqual({ inches: 0.5, hours: 24, sameDay: false });
   });
 
+  test('GATE_LAWN_WATERING_EVERY_VISIT: logged targets pick a target rule; a target the label gives no line for gives no advice', () => {
+    gateOn();
+    const prior = { every: process.env.GATE_LAWN_WATERING_EVERY_VISIT, sms: process.env.GATE_LAWN_WATERING_SMS, rule: process.env.GATE_LAWN_WATERING_RULE };
+    const restore = (key, value) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; };
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    process.env.GATE_LAWN_WATERING_SMS = 'true';
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+    try {
+      const TARGET_ONLY = { source: 'label', by_target: [
+        { match: ['caterpillar'], mode: 'hold', hold_until: 'dry' },
+        { match: ['grub'], mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24 },
+      ] };
+      const use = (targets) => ({ ...product('Test Target Insecticide', TARGET_ONLY), targets });
+      expect(cleanup.waterInRuleOf([use(['White grubs'])])).toEqual({ inches: 0.25, hours: 24, sameDay: false });
+      expect(cleanup.waterInRuleOf([use(['Tropical sod webworm caterpillars'])])).toEqual({ hold: true });
+      expect(cleanup.waterInRuleOf([use(['Southern chinch bugs']), product('Granular Fertilizer', WATER_IN_ROW)])).toEqual({ hold: true, unresolved: true });
+      // A known hold beside a use with no direction still reads as a hold, never "No special watering".
+      expect(cleanup.waterInRuleOf([use(['Southern chinch bugs']), product('Test Herbicide', { mode: 'hold', hold_hours: 24, source: 'owner' })])).toEqual({ hold: true });
+      // A mixed list: without the catalog label targets the use is ambiguous, so no water-in advice.
+      expect(cleanup.waterInRuleOf([use(['White grubs', 'Tropical sod webworm caterpillars']), product('Granular Fertilizer', WATER_IN_ROW)])).toEqual({ hold: true, unresolved: true });
+      // ...so the neutral line is blank, never "No special watering is needed".
+      expect(cleanup.neutralWatering(cleanup.waterInRuleOf([use(['White grubs', 'Tropical sod webworm caterpillars'])]), 'No special watering is needed.')).toBe('');
+      // The SMS gate off changes nothing in the report (the route contract names only the rule gate).
+      delete process.env.GATE_LAWN_WATERING_SMS;
+      expect(cleanup.waterInRuleOf([use(['White grubs'])])).toEqual({ inches: 0.25, hours: 24, sameDay: false });
+      // The watering-rule gate off (a kill switch): target rules are not read, as before the gate.
+      delete process.env.GATE_LAWN_WATERING_RULE;
+      expect(cleanup.waterInRuleOf([use(['White grubs'])])).toBeNull();
+    } finally {
+      restore('GATE_LAWN_WATERING_EVERY_VISIT', prior.every);
+      restore('GATE_LAWN_WATERING_SMS', prior.sms);
+      restore('GATE_LAWN_WATERING_RULE', prior.rule);
+    }
+  });
+
   test('water-in beside a product with no rule (no hold) gives the water-in line', () => {
     gateOn();
     const rule = cleanup.waterInRuleOf([product('Granular Fertilizer', WATER_IN_ROW), product('Test Fungicide', null)]);

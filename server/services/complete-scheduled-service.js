@@ -14198,6 +14198,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // closeouts skip it: the gate would freeze TODAY's sprinkler settings as
     // though captured at the historical visit (render-time reconciliation
     // still applies, as it did before the hoist).
+    let wateringNoClaim = null;
     if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion) {
       try {
         const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
@@ -14211,6 +14212,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
         // Same for the watering-instruction freeze (its own key, first writer wins).
         if (gate.wateringFreeze) recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze;
+        // GATE_LAWN_WATERING_EVERY_VISIT: why no instruction froze, for the watering text's office alert.
+        if (gate.wateringNoClaim) wateringNoClaim = gate.wateringNoClaim;
         // And the "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH), keyed by assessment.
         if (gate.techParagraphFreeze) recordStructuredNotes.lawnTechParagraph = { ...(recordStructuredNotes.lawnTechParagraph || {}), ...gate.techParagraphFreeze };
         // And the Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY), keyed by assessment.
@@ -14265,6 +14268,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // not a grouped stop's packet effects); its own failure or withholding
       // still sends the watering text.
       completionTextRequested: effectiveSendCompletionSms === true,
+      noClaim: wateringNoClaim,
     }, {
       db,
       sendCustomerMessage,
