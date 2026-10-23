@@ -38,7 +38,20 @@ const fixture = (id, services, oneTime = []) => ({
   customer_name: 'Sample Customer',
   address: '1 Example Way, Sarasota, FL 34200',
   created_at: '2026-10-22T15:00:00Z',
-  estimate_data: { result: { recurring: { services }, oneTime: { items: oneTime } } },
+  // The proposal rows a real estimate prints (the terms-scope check reads them), beside the engine result.
+  estimate_data: {
+    result: { recurring: { services }, oneTime: { items: oneTime } },
+    proposal: {
+      enabled: false,
+      buildings: [{
+        name: 'Service location',
+        lineItems: [
+          ...services.map((svc) => ({ description: svc.name, unitPrice: 50, frequency: 'quarterly' })),
+          ...oneTime.map((item) => ({ description: item.name, unitPrice: 150, frequency: 'one_time' })),
+        ],
+      }],
+    },
+  },
 });
 const pest = { service: 'pest_control', name: 'Pest Control', visitsPerYear: 4 };
 const lawn = { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 };
@@ -283,6 +296,63 @@ describe('Before you book copy', () => {
 
   test('a lawn line that mentions pest in passing does not turn on the pest section', () => {
     expect(detectServices({ rows: [], items: ['Lawn Pest and Weed Control'] }).pest).toBe(false);
+  });
+});
+
+describe('Before you book: terms scope, prepay verdict, structured service keys, partial gate mocks', () => {
+  const { beforeYouBookBlock } = require('../services/estimate-before-you-book');
+  const NEUTRAL = 'follow the agreement you sign';
+  const withProposal = (est, proposal) => ({ ...est, estimate_data: { ...est.estimate_data, proposal } });
+
+  test('a residential pest + lawn estimate mixed with termite or rodent keeps the plan terms off: neutral line only', async () => {
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    for (const extra of [termiteBond, rodentTrap]) {
+      const text = extractPdfText(await render(fixture(`byb-mix-${extra.service}`, [pest, lawn, extra])));
+      expect(text).not.toContain(PHRASE.contract);
+      expect(text).toContain(NEUTRAL);
+    }
+    // Pest + lawn alone is the plan-terms lane: the claim prints and the neutral line does not.
+    const plain = extractPdfText(await render(fixture('byb-mix-none', [pest, lawn])));
+    expect(plain).toContain(PHRASE.contract);
+    expect(plain).not.toContain(NEUTRAL);
+  });
+
+  test('the prepay refund line follows the offer: not for an existing customer, not when the payload offers none', async () => {
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+    const recurring = fixture('byb-pp1', [pest]);
+    expect(extractPdfText(await render(recurring))).toContain(PHRASE.prepay);
+    // The pricing payload hides annual prepay from an existing customer (membershipSnapshot.isExistingCustomer).
+    const existing = { ...recurring, estimate_data: { ...recurring.estimate_data, membershipSnapshot: { isExistingCustomer: true } } };
+    expect(extractPdfText(await render(existing))).not.toContain(PHRASE.prepay);
+    // /data hands its own verdict (a floor-capped offer is hidden there): the block follows it, whatever the mix says.
+    const lines = (opts) => (beforeYouBookBlock(recurring, { open: true, ...opts }).beforeYouBook?.sections || []).flatMap((x) => x.lines).join(' ');
+    expect(lines({ annualPrepayOffered: true })).toContain(PHRASE.prepay);
+    expect(lines({ annualPrepayOffered: false })).not.toContain(PHRASE.prepay);
+  });
+
+  test('a program or corrective-work row is classified by its structured service, not its label', async () => {
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    const program = { service: 'lawn', label: 'Grounds maintenance', frequencyPerYear: 9, pricePerApplication: 55 };
+    const est = { ...fixture('byb-struct', []), estimate_data: { proposal: { enabled: false, buildings: [], programs: [program] } } };
+    const text = extractPdfText(await render(est));
+    expect(text).toContain(PHRASE.lawn);
+    expect(text).toContain(PHRASE.contract);
+    const corrective = { ...fixture('byb-struct2', []), estimate_data: { proposal: { enabled: false, buildings: [], correctiveWork: [{ service: 'termite', label: 'Wood service', amount: 200, includes: [] }] } } };
+    const correctiveText = extractPdfText(await render(corrective));
+    expect(correctiveText).toContain(PHRASE.termite);
+    expect(correctiveText).not.toContain(PHRASE.lawn);
+    // Corrective work is one-time: a lawn-keyed one never claims the recurring lawn program.
+    const oneTimeLawn = { ...fixture('byb-struct3', []), estimate_data: { proposal: { enabled: false, buildings: [], correctiveWork: [{ service: 'lawn', label: 'Grounds fix', amount: 200, includes: [] }] } } };
+    expect(extractPdfText(await render(oneTimeLawn))).not.toContain(PHRASE.lawn);
+  });
+
+  test('a feature-gates mock without the reader never breaks the page or the document (CI regression)', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      const isolated = require('../services/estimate-before-you-book');
+      expect(isolated.beforeYouBookBlock(fixture('byb-mock', [pest]))).toEqual({});
+    });
   });
 });
 

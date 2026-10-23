@@ -120,8 +120,8 @@ describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)
       const off = await getData(baseUrl);
       expect(off.estimate).toBeDefined();
       expect(off).not.toHaveProperty('beforeYouBook');
-      // meta and cacheHit change from one call to the next; everything else is the same.
-      const stable = (body) => JSON.stringify(body, (key, value) => (key === 'meta' || key === 'cacheHit' ? undefined : value));
+      // meta, cacheHit and the ask token (it carries a timestamp) change from one call to the next; everything else is the same.
+      const stable = (body) => JSON.stringify(body, (key, value) => (key === 'meta' || key === 'cacheHit' || key === 'askToken' ? undefined : value));
       expect(stable(off)).toBe(stable(unset));
     });
   });
@@ -164,6 +164,26 @@ describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)
       const lines = body.beforeYouBook.sections.flatMap((s) => s.lines).join(' ');
       expect(lines).not.toContain('no long-term contract');
       expect(lines).toContain('follow the agreement you sign');
+    });
+  });
+
+  test('the prepay refund line prints only when the payload itself offers annual prepay', async () => {
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+    const refundLine = (body) => body.beforeYouBook.sections.flatMap((x) => x.lines).some((l) => l.includes('If you prepay for the year'));
+    dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'] }) };
+    await withServer(async (baseUrl) => {
+      const body = await getData(baseUrl);
+      expect(body.pricing.annualPrepayEligible).toBe(true);
+      expect(refundLine(body)).toBe(true);
+    });
+    // The pricing payload offers no prepay (a termite bond rider cannot prepay): the page does not mention a prepay refund.
+    // A new id: the pricing bundle is cached per estimate id for a few minutes.
+    dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control', 'termite_bond'], overrides: { id: 'est-byb-bond' } }) };
+    await withServer(async (baseUrl) => {
+      const body = await getData(baseUrl);
+      expect(body.pricing.annualPrepayEligible).toBe(false);
+      expect(refundLine(body)).toBe(false);
     });
   });
 

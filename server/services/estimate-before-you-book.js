@@ -41,7 +41,7 @@ const COMMERCIAL_TEXT = /commercial/i;
 // proposal. `residential` = the estimate is KNOWN to be residential (see isKnownResidential): anything
 // else is treated as maybe-commercial and gets the neutral agreement line, never a no-contract claim. Text matching is per line, so a lawn line that mentions "pest" in
 // passing does not turn on the pest section.
-function detectServices({ rows = [], items = [], commercial = false, residential = false } = {}) {
+function detectServices({ rows = [], items = [], commercial = false, residential = false, planTerms = false } = {}) {
   const keys = new Set(rows.map((r) => String(r.key || '')));
   const hasKey = (test) => [...keys].some(test);
   const anyItem = (test) => items.some((t) => test.test(String(t || '')));
@@ -55,6 +55,8 @@ function detectServices({ rows = [], items = [], commercial = false, residential
   return {
     commercial: isCommercial,
     residential: residential === true && !isCommercial,
+    // The estimate-wide plan terms (no long-term contract) apply: known residential AND the proposal's own terms-scope verdict.
+    planTerms: planTerms === true && residential === true && !isCommercial,
     recurring: rows.length > 0,
     recurringPest,
     recurringLawn,
@@ -83,9 +85,9 @@ const SECTIONS = [
       { rank: 1, text: 'There is no deposit.' },
       { rank: 2, when: (s) => s.recurring, text: 'If you are a new recurring customer paying by card, you save your card when you book and we charge it after your first visit.' },
       { rank: 2, text: 'At the visit, your technician can take a card, a check or cash. You can also pay with the card or bank account we have on file, or send a check or cash through our office.' },
-      { rank: 2, when: (s) => s.residential && (s.recurringPest || s.recurringLawn), text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
-      // The neutral line: printed whenever the estimate is not KNOWN residential, so an unknown or commercial estimate never reads as month-to-month.
-      { rank: 3, when: (s) => s.termiteRecurring || !s.residential, text: 'Termite plans and commercial accounts follow the agreement you sign.' },
+      { rank: 2, when: (s) => s.planTerms && (s.recurringPest || s.recurringLawn), text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
+      // The neutral line: printed whenever the plan terms do not apply (not known residential, or a mix the proposal's own terms-scope check keeps terms-neutral), so such an estimate never reads as month-to-month.
+      { rank: 3, when: (s) => s.termiteRecurring || !s.planTerms, text: 'Termite plans and commercial accounts follow the agreement you sign.' },
       { rank: 2, when: (s, o) => o.prepayRefundOffered === true && (s.recurringPest || s.recurringLawn), text: 'If you prepay for the year and cancel within 90 days, we refund the visits we have not done yet. After 90 days there is no refund, and your paid visits stay on your schedule through the end of the prepaid term.' },
       { rank: 4, text: 'Mail checks to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.' },
     ],
@@ -180,49 +182,65 @@ function estimateIsOpen(estimate) {
   return !(expiry && !Number.isNaN(expiry.getTime()) && expiry < new Date());
 }
 
+// Every printed proposal row (building lines, programs, corrective work) as { recurring, text }: the
+// structured `service` first, because a program labelled "Grounds maintenance" is still a lawn program.
+// Programs are recurring, corrective work is one-time, building lines follow their own frequency.
+function proposalLines(proposal) {
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const line = (row, recurring) => ({ recurring, service: row.service || '', text: `${row.service || ''} ${row.description || row.label || ''}`.trim() });
+  return [
+    ...list(proposal.buildings).flatMap((b) => list(b.lineItems)).map((row) => line(row, row.frequency !== 'one_time')),
+    ...list(proposal.programs).map((row) => line(row, true)),
+    ...list(proposal.correctiveWork).map((row) => line(row, false)),
+  ];
+}
+
+// The estimate-wide plan terms apply (no long-term contract): KNOWN residential and the proposal's OWN
+// terms-scope verdict (estimate-proposal-billing proposalCarriesPlanTerms, the one the PDF, page and
+// accept read), which keeps termite, rodent and mixed-with-neutral documents terms-neutral.
+function planTermsApply(estimate, proposal) {
+  try {
+    return isKnownResidential(estimate, proposal)
+      && require('./estimate-proposal-billing').proposalCarriesPlanTerms(proposal, estimate?.id) === true;
+  } catch {
+    return false;
+  }
+}
+
 // What THIS estimate quotes, read the way the lawn limits block reads it (estimate-public's
-// recurring reader), plus the quoted line descriptions of the normalized proposal. A read that
-// fails returns no signals, so only the always-section prints: never a guess.
-function estimateSignals(estimate, proposal) {
-  const rows = [];
-  const items = [];
-  let prepayOffered = false;
+// recurring reader), plus the proposal's own rows. A read that fails returns no signals, so only the
+// neutral always-section prints: never a guess. `annualPrepayOffered`: the /data payload's own verdict
+// when the caller has it; otherwise the same two checks that verdict is made from.
+function estimateSignals(estimate, proposal, { annualPrepayOffered } = {}) {
+  const base = { planTerms: planTermsApply(estimate, proposal), residential: isKnownResidential(estimate, proposal), commercial: (proposal.buildings || []).length > 1 };
   try {
     const pub = require('../routes/estimate-public');
     const estData = pub.parseEstimateDataSafe(estimate);
     const estResult = estData?.result || estData?.engineResult || estData || {};
     const services = pub.recurringServicesWithSupplements(estResult);
-    const oneTime = [
-      ...(estResult.oneTime?.items || []),
-      ...(estResult.oneTime?.specItems || []),
-      ...(estResult.specItems || []),
-    ].filter((item) => item && typeof item === 'object');
-    const seen = new Set();
-    const addRow = (key) => { if (!seen.has(key)) { seen.add(key); rows.push({ key }); } };
-    for (const svc of services) { addRow(pub.recurringServiceKey(svc)); items.push(svc.name || svc.service || ''); }
-    for (const item of oneTime) items.push(item.name || item.service || item.label || '');
-    // Synthesized proposals carry their lines only in the proposal: read the recurring ones the same way.
-    for (const line of (proposal.buildings || []).flatMap((b) => b.lineItems || [])) {
-      items.push(line.description || '');
-      if (line.frequency !== 'one_time') addRow(pub.recurringServiceKey({ name: line.description }));
-    }
-    for (const program of proposal.programs || []) items.push(program.label || '');
-    // Corrective work can be a proposal's whole itemization (one-time lines: never a recurring row).
-    for (const work of proposal.correctiveWork || []) items.push(work.label || '');
-    // The refund rule is stated only when the estimate offers an annual prepay AND the 90-day rule is live.
-    prepayOffered = featureGates.prepayRefund90DayLive() === true && pub.isAnnualPrepayEligibleServiceMix(services, oneTime) === true;
+    const oneTime = [...(estResult.oneTime?.items || []), ...(estResult.oneTime?.specItems || []), ...(estResult.specItems || [])]
+      .filter((item) => item && typeof item === 'object');
+    const lines = proposalLines(proposal);
+    const keys = [...services, ...lines.filter((l) => l.recurring).map((l) => ({ service: l.service !== 'other' ? l.service : '', name: l.text }))]
+      .map((svc) => pub.recurringServiceKey(svc));
+    const prepayOffered = annualPrepayOffered ?? (pub.annualPrepayEligibleForEstimateData(estData) && pub.annualPrepayHasSellableIncentive(estimate, estData, {}));
+    return {
+      signals: detectServices({
+        ...base,
+        rows: [...new Set(keys)].map((key) => ({ key })),
+        items: [...services.map((svc) => svc.name || svc.service || ''), ...oneTime.map((item) => item.name || item.service || item.label || ''), ...lines.map((l) => l.text)],
+      }),
+      prepayOffered: featureGates.prepayRefund90DayLive?.() === true && prepayOffered === true,
+    };
   } catch (err) {
     logger.warn?.(`[estimate-before-you-book] service read failed: ${err.message}`);
-    rows.length = 0;
-    items.length = 0;
-    prepayOffered = false;
+    return { signals: detectServices({ ...base, planTerms: false }), prepayOffered: false };
   }
-  return { signals: detectServices({ rows, items, commercial: (proposal.buildings || []).length > 1, residential: isKnownResidential(estimate, proposal) }), prepayOffered };
 }
 
 // The page for one estimate, untrimmed. `proposal` = normalizeProposal(estimate).
-function beforeYouBookForEstimate(estimate, proposal) {
-  const { signals, prepayOffered } = estimateSignals(estimate, proposal || {});
+function beforeYouBookForEstimate(estimate, proposal, opts = {}) {
+  const { signals, prepayOffered } = estimateSignals(estimate, proposal || {}, opts);
   return buildBeforeYouBook(signals, { prepayRefundOffered: prepayOffered, phone: WAVES_SUPPORT_PHONE_DISPLAY });
 }
 
@@ -262,11 +280,11 @@ const DOC_PAGE_PX = 820;
 // The `/data` payload fragment: `{ beforeYouBook: { title, sections: [{ key, heading, lines: [text] }],
 // closing } }`, already chosen and trimmed for this estimate, or nothing (gate off, or the estimate is
 // accepted, declined or expired), so a gate-off response is byte-identical to before. Copy only: no prices. Never throws: a failure is "no page".
-function beforeYouBookBlock(estimate, { open = estimateIsOpen(estimate) } = {}) {
-  if (!featureGates.estimateBeforeYouBookLive() || open !== true) return {};
+function beforeYouBookBlock(estimate, { open = estimateIsOpen(estimate), annualPrepayOffered } = {}) {
+  if (featureGates.estimateBeforeYouBookLive?.() !== true || open !== true) return {};
   try {
     const { normalizeProposal } = require('./estimate-proposal');
-    const page = trimByRank(beforeYouBookForEstimate(estimate, normalizeProposal(estimate)), {
+    const page = trimByRank(beforeYouBookForEstimate(estimate, normalizeProposal(estimate), { annualPrepayOffered }), {
       lineHeight: (text) => Math.ceil(text.length / DOC_CHARS_PER_LINE) * DOC_LINE_PX + DOC_BULLET_GAP_PX,
       headingH: DOC_HEADING_PX,
       closingGap: DOC_BULLET_GAP_PX,

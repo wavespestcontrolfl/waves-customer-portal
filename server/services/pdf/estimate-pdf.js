@@ -506,7 +506,10 @@ function trimBeforeYouBook(doc, page, available) {
   });
 }
 
-function beforeYouBookPage(ctx, page) {
+function beforeYouBookPage(ctx, estimate, proposal) {
+  // Gate off (or an estimate already decided): nothing is drawn and the document is exactly as before.
+  if (featureGates.estimateBeforeYouBookLive?.() !== true || !estimateIsOpen(estimate)) return;
+  const page = beforeYouBookForEstimate(estimate, proposal);
   const { doc } = ctx;
   footerBar(doc, ctx.tagline);
   doc.addPage();
@@ -697,7 +700,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   acceptanceBlock(ctx, billing?.acceptance || null, y + 8);
 
   // GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK: one more page after the last one. Gate off prints nothing here.
-  if (featureGates.estimateBeforeYouBookLive() && estimateIsOpen(estimate)) beforeYouBookPage(ctx, beforeYouBookForEstimate(estimate, proposal));
+  beforeYouBookPage(ctx, estimate, proposal);
 
   footerBar(doc, ctx.tagline);
   doc.end();
