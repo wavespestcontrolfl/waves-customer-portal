@@ -425,10 +425,13 @@ describe('Codex r9 writers (source order)', () => {
 
   test('the call follow-up cancel cascade carries the acting staff row from both callers (child card + history)', () => {
     const track = read('../services/track-transitions.js');
-    expect(track).toContain('async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null) {');
+    expect(track).toContain('async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null, cancelFence = null) {');
     // approval is the opt-in Intelligence Bar cancel card (approved linked visits); null for every other caller.
     expect(track).toContain('conn: db, parentServiceId: serviceId, actorId,');
-    expect(track.match(/cascadeCallFollowUpCancel\(serviceId, actorId, approval\)/g)).toHaveLength(3);
+    // The three cancel paths (already cancelled, a lost tracker race, the normal flip) all finish through
+    // finishTrackCancellation, which runs the one cascade call (#6493 split; cancelFence is the recovery's).
+    expect(track.match(/cascadeCallFollowUpCancel\(serviceId, actorId, approval, cancelFence\)/g)).toHaveLength(1);
+    expect(track.match(/await finishTrackCancellation\(svc, /g)).toHaveLength(3);
     expect(track).not.toContain('cascadeCallFollowUpCancel(serviceId);');
     const offboarding = read('../services/customer-offboarding.js');
     expect(offboarding).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id, actorId: actorId || null });");
