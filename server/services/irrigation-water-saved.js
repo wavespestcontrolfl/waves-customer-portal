@@ -124,13 +124,18 @@ function waterSavedSentence(block, plan) {
 }
 
 /**
- * The sentence for the SETUP-SCHEDULE email (a sprinkler system on file, no usable schedule): there is no plan to skip
- * yet, so it gives the typical-run figure as the reason to enter the schedule. Default basis by definition. Appended to
- * the schedule ask; null when there is no block.
+ * The sentence for the ASK emails (setup: a sprinkler system on file but no usable schedule; confirm: a tech-recorded
+ * weekly total): there is no plan to skip yet, so it gives the per-run figure as the reason to enter or confirm the
+ * schedule. Default basis in practice (a weekly total gives no per-run depth); a portal schedule on file is named.
+ * Appended to the ask; null when there is no block.
  */
 function waterSavedSetupSentence(block) {
   if (!block) return null;
-  return `For a lawn your size, a typical ${DEFAULT_RUN_MINUTES}-minute run is about ${fmtGallons(block.gallonsPerRun)} gallons, so every run you skip after a good rain is real water saved. Once your schedule is on file we'll use your own minutes and days for that figure.`;
+  const perRun = fmtGallons(block.gallonsPerRun);
+  if (block.basis === 'schedule') {
+    return `From the sprinkler schedule in your portal and your lawn's size on file, each run is about ${perRun} gallons, so every run you skip after a good rain is real water saved.`;
+  }
+  return `For a lawn your size, a typical ${DEFAULT_RUN_MINUTES}-minute run is about ${perRun} gallons, so every run you skip after a good rain is real water saved. Once your schedule is on file we'll use your own minutes and days for that figure.`;
 }
 
 module.exports = {

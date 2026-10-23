@@ -495,6 +495,25 @@ function decideWeeklyEmail({
   // ask is what changes. Rain must be KNOWN for the same reason the advice
   // path requires it: the email quotes the week's rainfall, and we never
   // print a number we don't trust.
+  // "Water you saved" (GATE_IRRIGATION_WATER_SAVINGS) for the two ask variants that never reach decideWeekPlan: the
+  // setup ask (no usable schedule) and the confirm ask (a tech-recorded weekly total, which gives no per-run depth).
+  // Without this the owner default (20 minutes, half an inch) reached nobody it was meant for (codex #6498 r1 P1,
+  // r6 P2). Neither variant stores a plan, so the gate is read at send time; a replay passes its frozen block. The
+  // customer's own schedule inputs ride when they are on file and current (a legacy derived schedule); lawnSqft is
+  // already withheld after a move until re-established.
+  const askWaterSaved = () => {
+    if (waterSaved !== undefined) return waterSaved || null;
+    if (!irrigationWaterSavedLive()) return null;
+    return waterSavedForDecision({
+      lawnSqft,
+      runMinutes: scheduleUnconfirmed ? null : irrigationRunMinutes,
+      wateringDays: scheduleUnconfirmed ? null : wateringDays,
+      systemType: scheduleUnconfirmed ? null : irrigationSystemType,
+      explicitInchesPerWeek: scheduleUnconfirmed ? null : prefsInches,
+      rates: ratesForTable(table),
+    });
+  };
+
   if (advice.profileMissing) {
     if (!advice.rainKnown) {
       return { shouldSend: false, reason: 'rain_unknown', advice };
@@ -520,14 +539,7 @@ function decideWeeklyEmail({
       ? (turfType === 'in_ground' || turfType === 'mixed')
       : irrigationSystem === true;
     const grassLabelSetup = customerGrassLabel(grassType);
-    // "Water you saved" (GATE_IRRIGATION_WATER_SAVINGS) on the setup ask too: a schedule-less customer never reaches
-    // decideWeekPlan, so the owner default (20 minutes, half an inch) is applied HERE, or the line would print for
-    // nobody it was meant for (codex #6498 r1 P1). No plan is stored for this variant, so the gate is read at send
-    // time; a replay passes its frozen block. lawnSqft is already withheld after a move until re-established.
-    const setupBlock = waterSaved !== undefined
-      ? (waterSaved || null)
-      : (irrigationWaterSavedLive() ? waterSavedForDecision({ lawnSqft, rates: ratesForTable(table) }) : null);
-    const setupWaterSaved = hasSystem ? waterSavedSetupSentence(setupBlock) : null;
+    const setupWaterSaved = hasSystem ? waterSavedSetupSentence(askWaterSaved()) : null;
     const rainSetup = formatInches(rainfallInches7d);
     const targetSetup = formatInches(advice.recommendedInchesPerWeek);
     return {
@@ -651,7 +663,9 @@ function decideWeeklyEmail({
         total_inches: totalFmt,
         target_inches: targetFmt,
         summary_line: neutralLead,
-        schedule_note: buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor: rainSensor === true || rainSensor === 't', rateTable: table }),
+        // The gallons sentence rides the schedule note (the ask to confirm or update the schedule): a weekly total on
+        // file gives no per-run depth, so the owner default applies unless a portal schedule is on file (codex r6 P2).
+        schedule_note: [buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor: rainSensor === true || rainSensor === 't', rateTable: table }), waterSavedSetupSentence(askWaterSaved())].filter(Boolean).join(' '),
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,

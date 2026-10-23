@@ -238,6 +238,25 @@ describe('end to end — sweep inputs, the email note, replay and the app card',
     expect(decideFor(noSchedule, { waterSaved: { v: 1, basis: 'default', lawnSqft: 3000, depthInches: 0.5, runsPerWeek: 2, gallonsPerRun: 950, gallonsPerWeek: 1900 } }).payload.schedule_ask).toContain('about 950 gallons');
   });
 
+  test('confirm-schedule email (tech-recorded weekly total, no portal schedule): the owner default rides the schedule note (codex #6498 r6)', () => {
+    const { TEMPLATE_CONFIRM_SCHEDULE } = require('../services/irrigation-weekly-email');
+    const tech = { ...customer, irrigation_inches_per_week: null, turf_irrigation_inches_per_week: 1 };
+    const off = decideFor(tech);
+    expect(off.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
+    expect(off.payload.schedule_note).not.toMatch(/gallons/);
+    gateOn();
+    const on = decideFor(tech);
+    expect(on.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
+    expect(on.payload.schedule_note.startsWith(off.payload.schedule_note)).toBe(true);
+    expect(on.payload.schedule_note).toContain('For a lawn your size, a typical 20-minute run is about 1,550 gallons');
+    // No area (or withheld after a move): the note is exactly as before.
+    expect(decideFor({ ...tech, turf_lawn_sqft: null }).payload.schedule_note).toBe(off.payload.schedule_note);
+    // (A moved home in plan mode routes to the plan branch instead; whichever variant, no gallons anywhere in the payload.)
+    expect(JSON.stringify(decideFor({ ...tech, irrigation_home_changed_at: '2026-09-01T00:00:00Z', irrigation_confirmed_fields: '[]' }).payload)).not.toMatch(/gallons/);
+    // A replay passes its block verbatim; null means none.
+    expect(decideFor(tech, { waterSaved: null }).payload.schedule_note).toBe(off.payload.schedule_note);
+  });
+
   test('replay and the app card read the frozen block: a gate flip or a lawn-size edit after publication changes nothing and withholds nothing', async () => {
     gateOn();
     const decision = decideFor(customer);
