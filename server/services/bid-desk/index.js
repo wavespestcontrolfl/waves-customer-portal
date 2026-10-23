@@ -232,9 +232,11 @@ async function deliverOwedBidAlert(bidId) {
   return db.transaction(async (trx) => {
     const bid = await trx('bid_opportunities').where({ id: bidId }).forUpdate().first();
     if (!bid || !bid.owed_alert_kind) return false;
+    // A closed SAM.gov notice's bell asks for a decision, so a confirmed date does not make it moot.
+    const closedNotice = bid.source === 'sam_gov' && bid.source_active === false;
     const moot = bid.historical || !OPEN_STATUSES.includes(bid.status)
       || (bid.owed_alert_kind === 'new' && bid.status !== 'new')
-      || (bid.owed_alert_kind === 'addendum' && !bid.needs_date_confirmation);
+      || (bid.owed_alert_kind === 'addendum' && !bid.needs_date_confirmation && !closedNotice);
     if (!moot && bid.owed_alert_kind === 'new') {
       await alerts.raise(alerts.newBidSpec(bid, null), bid.owed_alert_key, trx);
       await trx('bid_opportunities').where({ id: bid.id }).update({ notified_at: trx.fn.now() });

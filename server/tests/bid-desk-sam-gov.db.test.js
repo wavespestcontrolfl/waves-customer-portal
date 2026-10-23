@@ -330,6 +330,20 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect((await cursorState()).refresh_after).toBe(brokenIds[0]);
   });
 
+  test('an owed closure bell survives a date confirmed before it rings; an owed deadline bell does not', async () => {
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-41'), notice('n-42')]), apiKey: 'test-key' });
+    const ids = Object.fromEntries((await samBids()).map((b) => [b.external_id, b.id]));
+    await mockPg('bid_opportunities').whereIn('id', Object.values(ids)).update({ due_confirmed: true, status: 'bid' });
+    raiseAdminAlertWithReopen.mockRejectedValueOnce(new Error('bell down')).mockRejectedValueOnce(new Error('bell down'));
+    const changed = [notice('n-41', { active: 'No' }), notice('n-42', { responseDeadLine: '2026-11-12T14:00:00-05:00' })];
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch(changed), apiKey: 'test-key' })).toMatchObject({ refreshed: 2, rung: 0 });
+    // The operator confirms both dates before the next sweep.
+    await mockPg('bid_opportunities').whereIn('id', Object.values(ids)).update({ needs_date_confirmation: false });
+    raiseAdminAlertWithReopen.mockClear();
+    expect(await service.deliverOwedAlerts()).toBe(1);
+    expect(raiseAdminAlertWithReopen.mock.calls.map(([, , , o]) => o.dedupeKey)).toEqual([`bid-desk:addendum:${ids['n-41']}:sam:inactive`]);
+  });
+
   test('a deadline removed before anyone confirmed it clears the date, so no reminder runs for it', async () => {
     await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-31')]), apiKey: 'test-key' });
     const [filed] = await samBids();
