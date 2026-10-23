@@ -93,6 +93,7 @@
 const { matchServiceProtocol, MATCH_RULES } = require('./protocol-matcher');
 const { gateEnvValue } = require('../config/feature-gates');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
+const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
 
 // -- name parsing / dedupe (pure) --------------------------------------
 
@@ -401,7 +402,13 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     } else if (resolved.programKey === 'tree_shrub') {
       // Legacy service defaults are not reviewed T&S treatment choices.
       if (resolved.source !== 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
-      const applicable = await filterTreeShrubDefaults({ db, scheduled, entries: resolved.entries });
+      // The property's ordinance zone, read as the closeout reads it; a property that cannot be read keeps the conservative
+      // Sarasota/Manatee rule (an unknown zone).
+      const place = scheduled.property_id
+        ? await db('customer_properties').where({ id: scheduled.property_id }).first('city', 'address_line1').catch(() => null)
+        : null;
+      const zone = inferTreeShrubOrdinanceZone({ city: place?.city, address: place?.address_line1 });
+      const applicable = await filterTreeShrubDefaults({ db, scheduled, entries: resolved.entries, zone });
       resolved.entries = applicable.entries;
       holds = applicable.holds;
     }

@@ -113,6 +113,15 @@ describe('13-0-13 bed fertilizer due rule (label read 2026-10-22)', () => {
     expect(due([], '2028-05-31')).toBeNull();
     expect(due([], '2028-10-01')).toBeNull();
   });
+  test('the June to September hold follows the property\'s ordinance zone: North Port is outside it; Sarasota, Manatee and an unknown zone are inside', () => {
+    const inJuly = zone => treeShrubDueReason('f13013', [], '2028-07-15', 'property-a', zone);
+    expect(inJuly('north_port')).toBeNull();
+    for (const zone of ['sarasota_venice', 'manatee_parrish', 'other_unknown']) expect(inJuly(zone)).toMatch(/June 1 to September 30/);
+    // No zone given keeps the conservative Sarasota/Manatee rule.
+    expect(treeShrubDueReason('f13013', [], '2028-07-15', 'property-a')).toMatch(/June 1 to September 30/);
+    // The other rules still apply in North Port.
+    expect(treeShrubDueReason('f13013', [application(orn, '2028-05-20')], '2028-07-15', 'property-a', 'north_port')).toMatch(/less than five months/);
+  });
   test('at least five calendar months after the last one', () => {
     // An October feeding clears on 2029-03-15; the next spring window opens after that.
     const history = [application(orn, '2028-10-15')];

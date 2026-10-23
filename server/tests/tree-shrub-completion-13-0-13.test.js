@@ -14,7 +14,7 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const WITH_ORN = ['Feb', 'Mar', 'Apr', 'May', 'Oct', 'Nov', 'Dec'];
 
 // A fake knex for exactly the chains the resolver and filterTreeShrubDefaults call; synthetic rows only.
-function fakeDb({ scheduled, history = [], failHistory = false }) {
+function fakeDb({ scheduled, history = [], failHistory = false, property }) {
   const catalog = [
     { id: 'snap', name: 'Snapshot 2.5TG', category: 'herbicide', active: true },
     { id: 'palm', name: PALM, category: 'fertilizer', active: true },
@@ -31,7 +31,7 @@ function fakeDb({ scheduled, history = [], failHistory = false }) {
       whereNull() { return q; },
       whereIn() { return q; },
       leftJoin() { return q; },
-      first() { return Promise.resolve(table === 'scheduled_services' ? scheduled : undefined); },
+      first() { return Promise.resolve(table === 'scheduled_services' ? scheduled : table === 'customer_properties' ? property : undefined); },
       select() {
         if (table === 'property_application_history as history') return failHistory ? Promise.reject(new Error('down')) : Promise.resolve(history);
         if (table === 'products_catalog') return Promise.resolve(catalog);
@@ -104,6 +104,49 @@ describe('resolveCompletionProductDefaults for a Tree & Shrub visit', () => {
     const result = await resolveOn('2028-04-10', [], { failHistory: true });
     expect(result.products).toEqual([]);
     expect(result.error).toBeTruthy();
+  });
+});
+
+describe('the property\'s ordinance zone decides the June to September hold on the full form', () => {
+  const july = '2028-07-10';
+  const offered = (result) => result.products.map((row) => row.treeShrubKey).includes('f13013');
+  // The July card carries no 13-0-13 line, so the zone is judged through the resolver with a card month that does
+  // (the due rule is the same whatever the card): filterTreeShrubDefaults with a keyed entry.
+  const filter = (property) => filterTreeShrubDefaults({
+    db: fakeDb({ scheduled: null }), scheduled: { ...visitOn(july), ...property }, entries: [{ name: ORN, treeShrubKey: 'f13013' }],
+  });
+  test('North Port: not held (landscape plants are outside the blackout)', async () => {
+    const out = await filter({ city: 'North Port' });
+    expect(out.holds).toEqual([]);
+    expect(out.entries).toHaveLength(1);
+  });
+  test('Sarasota and an unknown zone are held', async () => {
+    for (const property of [{ city: 'Sarasota' }, { city: 'Venice' }, { city: 'Parrish' }, {}, { city: 'Somewhere Else' }]) {
+      expect((await filter(property)).holds).toEqual([{ name: ORN, reason: '13-0-13 holds nitrogen, so it is not allowed June 1 to September 30.' }]);
+    }
+  });
+  test('an explicit zone wins over the visit row', async () => {
+    const out = await filterTreeShrubDefaults({ db: fakeDb({ scheduled: null }), scheduled: visitOn(july), entries: [{ name: ORN, treeShrubKey: 'f13013' }], zone: 'north_port' });
+    expect(out.holds).toEqual([]);
+  });
+  test('the resolver reads the property city for the zone and falls back to the conservative rule when it cannot', async () => {
+    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
+    const run = (property) => resolveCompletionProductDefaults({ db: fakeDb({ scheduled: visitOn('2028-10-10'), property }), serviceId: 'svc-1' });
+    // October is outside the blackout in every zone: the line is offered whatever the property says.
+    expect(offered(await run({ city: 'North Port', address_line1: '1 Synthetic Rd' }))).toBe(true);
+    expect(offered(await run(undefined))).toBe(true);
+  });
+});
+
+describe('an unidentified application only holds the list while it is inside the 12-month window', () => {
+  const unidentified = (date) => ({ product_name: null, catalog_name: null, application_date: date, property_id: 'prop-1', ledger_property_id: 'prop-1' });
+  test('older than 12 months: ignored; recent or undated: everything is held for review', async () => {
+    expect((await resolveOn('2028-10-10', [unidentified('2026-05-01')])).holds).toEqual([]);
+    for (const date of ['2028-03-01', null]) {
+      const result = await resolveOn('2028-10-10', [unidentified(date)]);
+      expect(result.products).toEqual([]);
+      expect(result.holds.every((hold) => hold.reason === 'Review an application with an unidentified product.')).toBe(true);
+    }
   });
 });
 

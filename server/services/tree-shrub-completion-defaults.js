@@ -1,4 +1,5 @@
 const { etCalendarDayOf } = require('../utils/datetime-et');
+const { inferTreeShrubOrdinanceZone, isSummerBlackoutForZone } = require('./tree-shrub-closeout');
 
 const PALM = /(?:8[-–]0[-–]12|8[-–]2[-–]12|palm.*fertili|fertili.*palm|\b510513\b)/i;
 const PALM_ZERO_N_LEGACY = /^LESCO\s+0[-–]0[-–]16$/i;
@@ -59,17 +60,14 @@ function snapshotRatePer1000(row) {
   return SNAPSHOT_LABEL_MAX_LB_PER_1000;
 }
 
-// June 1 through September 30 (Sarasota and Manatee landscape N/P blackout; an unknown zone gets the same rule).
-function inLandscapeNpBlackout(scheduledDate) {
-  const month = Number(String(etCalendarDayOf(scheduledDate)).slice(5, 7));
-  return month >= 6 && month <= 9;
-}
-
-function treeShrubDueReason(key, history, scheduledDate, propertyId) {
+// `zone` is the property's ordinance zone, as tree-shrub-closeout.js reads it (inferTreeShrubOrdinanceZone). The 13-0-13
+// June 1 to Sept. 30 hold applies where the closeout's N/P blackout does: Sarasota, Manatee and an unknown zone (the
+// conservative default). North Port landscape plants are route-gated separately and are not in this blackout.
+function treeShrubDueReason(key, history, scheduledDate, propertyId, zone = 'other_unknown') {
   const today = dayNumber(scheduledDate);
   if (!Number.isFinite(today) || !propertyId) return 'Confirm the service property and visit date.';
   const ornamental = key === 'f13013';
-  if (ornamental && inLandscapeNpBlackout(scheduledDate)) return '13-0-13 holds nitrogen, so it is not allowed June 1 to September 30.';
+  if (ornamental && isSummerBlackoutForZone(etCalendarDayOf(scheduledDate), zone)) return '13-0-13 holds nitrogen, so it is not allowed June 1 to September 30.';
   const matches = name => key === 'snapshot' ? SNAPSHOT.test(name)
     : ornamental ? ORNAMENTAL_13_0_13.test(name)
       : !ORNAMENTAL_13_0_13.test(name) && (PALM.test(name) || PALM_ZERO_N_LEGACY.test(name.trim()));
@@ -134,9 +132,15 @@ async function loadTreeShrubApplicationHistory({ db, scheduled, excludeRecordId 
 }
 
 const UNIDENTIFIED_PRODUCT_REASON = 'Review an application with an unidentified product.';
-const hasUnidentifiedApplication = (normalized, scheduled) => normalized.some(row => !row.product_name && (!row.property_id || row.property_id === scheduled.property_id));
+// Only the past 12 months can affect a due decision (treeShrubDueReason's own window): an old unidentified row never holds a
+// suggestion or flags a new feeding; an undated one still does.
+function hasUnidentifiedApplication(normalized, scheduled, visitDate = scheduled.scheduled_date) {
+  const today = dayNumber(visitDate);
+  return normalized.some(row => !row.product_name && (!row.property_id || row.property_id === scheduled.property_id) &&
+    !(Number.isFinite(today) && Number.isFinite(dayNumber(row.application_date)) && today >= monthsAfter(row.application_date, 12)));
+}
 
-async function filterTreeShrubDefaults({ db, scheduled, entries }) {
+async function filterTreeShrubDefaults({ db, scheduled, entries, zone = inferTreeShrubOrdinanceZone(scheduled) }) {
   const normalized = await loadTreeShrubApplicationHistory({ db, scheduled });
   if (hasUnidentifiedApplication(normalized, scheduled)) {
     return { entries: [], holds: entries.map(entry => ({ name: entry.name, reason: UNIDENTIFIED_PRODUCT_REASON })) };
@@ -144,7 +148,7 @@ async function filterTreeShrubDefaults({ db, scheduled, entries }) {
   const allowed = [], holds = [];
   for (const entry of entries) {
     if (!['snapshot', 'f8012', 'f0016', 'f13013'].includes(entry.treeShrubKey)) continue;
-    const reason = treeShrubDueReason(entry.treeShrubKey, normalized, scheduled.scheduled_date, scheduled.property_id);
+    const reason = treeShrubDueReason(entry.treeShrubKey, normalized, scheduled.scheduled_date, scheduled.property_id, zone);
     if (reason) holds.push({ name: entry.name, reason });
     else allowed.push(entry);
   }

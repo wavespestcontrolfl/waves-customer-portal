@@ -392,7 +392,7 @@ function dueKeyFor(row) {
   return null;
 }
 
-async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
+async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId, zone) {
   const byId = new Map((catalog || []).map((row) => [String(row.id), row]));
   const keyed = [];
   const passThrough = [];
@@ -404,7 +404,7 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
   }
   if (!keyed.length) return { entries, holds: [] };
   try {
-    const { entries: allowed, holds } = await filterTreeShrubDefaults({ db: knex, scheduled: svc, entries: keyed });
+    const { entries: allowed, holds } = await filterTreeShrubDefaults({ db: knex, scheduled: svc, entries: keyed, zone });
     const allowedIds = new Set(allowed.map((item) => String(item.entry.productId)));
     return {
       entries: entries.filter((entry) => passThrough.includes(entry) || allowedIds.has(String(entry.productId))),
@@ -416,6 +416,23 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
       entries: passThrough,
       holds: keyed.map((item) => ({ name: item.name, reason: 'Application history is unavailable; check before applying.' })),
     };
+  }
+}
+
+// The property's recorded bed square feet (customer_properties.bed_sqft; a primary property or a visit with no property falls
+// back to the customer's legacy figure), or null. It prefills the treated area of the 13-0-13 row, which the county cap
+// (0.75 lb per 100 sq ft) is judged against at closeout; the tech can edit it. A failed read is a blank, never a throw.
+async function loadBedSqft(svc, knex) {
+  try {
+    const positive = (value) => (Number(value) > 0 ? Number(value) : null);
+    const property = svc.property_id ? await knex('customer_properties').where({ id: svc.property_id }).first('bed_sqft', 'is_primary') : null;
+    const own = positive(property?.bed_sqft);
+    if (own || (property && property.is_primary !== true)) return own;
+    const customer = await knex('customers').where({ id: svc.customer_id }).first('bed_sqft');
+    return positive(customer?.bed_sqft);
+  } catch (err) {
+    logger.warn(`[ts-fast-context] bed square feet unavailable: ${err?.code || err?.name || 'Error'}`);
+    return null;
   }
 }
 
@@ -499,7 +516,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   }
   const lastAmounts = lastAmountsByProduct(history);
   const { entries: dueMonthEntries, holds: monthProductHolds } = await filterDueMonthProducts(
-    resolveMonthProducts(svc.scheduled_date, catalog), catalog, svc, knex, serviceId,
+    resolveMonthProducts(svc.scheduled_date, catalog), catalog, svc, knex, serviceId, zone,
   );
   const monthProducts = dueMonthEntries.map((entry) => ({
     ...entry,
@@ -526,6 +543,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     service,
     products,
     monthProducts,
+    bedSqft: await loadBedSqft(svc, knex),
     ...(monthProductHolds.length && { monthProductHolds }),
     lastVisit: buildLastVisit(history),
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),

@@ -822,7 +822,8 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
     const ctx = await buildTreeShrubFastContext('visit-1', knex);
     expect(ctx.eligible).toBe(true);
     expect('neonicCap' in ctx).toBe(false);
-    expect(knex.calls.some(([table]) => table === 'customer_properties')).toBe(false);
+    // The one customer_properties read is the sheet's own bed square feet prefill; the cap would add a second.
+    expect(knex.calls.filter(([table]) => table === 'customer_properties')).toHaveLength(1);
   });
 
   test('gate on: what is left of Zylam at this property, a lawn visit\'s imidacloprid left out', async () => {
@@ -860,5 +861,28 @@ describe('GATE_TS_NEONIC_CAP: the fast-context neonicCap', () => {
     const ctx = await build();
     expect(ctx.eligible).toBe(false);
     expect('neonicCap' in ctx).toBe(false);
+  });
+});
+
+
+describe('buildTreeShrubFastContext bedSqft (the 13-0-13 row\'s treated-area prefill)', () => {
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = (tables) => buildTreeShrubFastContext('visit-1', fakeKnex({ scheduled_services: visit(), products_catalog: catalog, ...tables }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+  test('the property\'s recorded bed square feet ride the context as a number', async () => {
+    expect((await build({ customer_properties: { bed_sqft: '1200', is_primary: false } })).bedSqft).toBe(1200);
+  });
+  test('a primary property with no figure falls back to the customer\'s legacy figure; a secondary one does not', async () => {
+    expect((await build({ customer_properties: { bed_sqft: null, is_primary: true }, customers: { bed_sqft: 900 } })).bedSqft).toBe(900);
+    expect((await build({ customer_properties: { bed_sqft: null, is_primary: false }, customers: { bed_sqft: 900 } })).bedSqft).toBeNull();
+  });
+  test('no figure anywhere, or a failed read, is null and the sheet still loads', async () => {
+    expect((await build({ customer_properties: { bed_sqft: 0, is_primary: false } })).bedSqft).toBeNull();
+    const failed = await build({ customer_properties: new Error('down') });
+    expect(failed.eligible).toBe(true);
+    expect(failed.bedSqft).toBeNull();
   });
 });

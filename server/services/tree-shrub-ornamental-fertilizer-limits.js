@@ -18,6 +18,7 @@
  * blocks; a failed read is logged and flags nothing, except an unreadable history, which is flagged as unchecked.
  */
 const logger = require('./logger');
+const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
 const {
   ORNAMENTAL_13_0_13, treeShrubDueReason, loadTreeShrubApplicationHistory, hasUnidentifiedApplication, UNIDENTIFIED_PRODUCT_REASON,
 } = require('./tree-shrub-completion-defaults');
@@ -27,6 +28,12 @@ const RATE_LIMIT_TYPE = 'ornamental_fertilizer_rate';
 const HISTORY_LIMIT_TYPE = 'ornamental_fertilizer_history';
 
 const LB_PER_1000_UNITS = new Set(['lb', 'lbs', 'lb/1000sf', 'lb/1000sqft', 'lb/1000ft2']);
+// The sheet's weight units for a dry product are g, oz and lb; the total is judged in pounds.
+const LB_PER_UNIT = { lb: 1, lbs: 1, oz: 1 / 16, g: 1 / 453.592 };
+function totalLb(row) {
+  const factor = LB_PER_UNIT[squash(row.amount_unit)];
+  return positive(row.total_amount) && factor ? Number(row.total_amount) * factor : null;
+}
 const SQFT_UNITS = new Set(['sqft', 'sf', 'ft2']);
 const squash = (value) => String(value || '').toLowerCase().replace(/[\s,.]/g, '');
 const positive = (value) => Number.isFinite(Number(value)) && Number(value) > 0 && value !== '' && value !== null;
@@ -39,9 +46,8 @@ const positive = (value) => Number.isFinite(Number(value)) && Number(value) > 0 
 function ratePer1000(row) {
   const readings = [];
   if (positive(row.application_rate) && LB_PER_1000_UNITS.has(squash(row.rate_unit))) readings.push(Number(row.application_rate));
-  if (positive(row.total_amount) && ['lb', 'lbs'].includes(squash(row.amount_unit)) && positive(row.area_value) && SQFT_UNITS.has(squash(row.area_unit))) {
-    readings.push((Number(row.total_amount) / Number(row.area_value)) * 1000);
-  }
+  const lb = totalLb(row);
+  if (lb !== null && positive(row.area_value) && SQFT_UNITS.has(squash(row.area_unit))) readings.push((lb / Number(row.area_value)) * 1000);
   return readings.length ? Math.max(...readings) : null;
 }
 
@@ -65,10 +71,10 @@ function rateFindings(rows) {
 }
 
 /** The history finding for one 13-0-13 row, or null: the f13013 due rule over the other records of this customer. Pure. */
-function historyFinding({ row, history, scheduled, serviceDate }) {
-  const reason = hasUnidentifiedApplication(history, scheduled)
+function historyFinding({ row, history, scheduled, serviceDate, zone }) {
+  const reason = hasUnidentifiedApplication(history, scheduled, serviceDate)
     ? UNIDENTIFIED_PRODUCT_REASON
-    : treeShrubDueReason('f13013', history, serviceDate, scheduled.property_id);
+    : treeShrubDueReason('f13013', history, serviceDate, scheduled.property_id, zone);
   if (!reason) return null;
   return { code: 'application_limit_exceeded', limitType: HISTORY_LIMIT_TYPE, productId: row.product_id, productName: row.product_name, current: null, max: null,
     reason, message: `Recorded. The office will review: ${row.product_name || '13-0-13'}: ${reason}` };
@@ -100,7 +106,7 @@ async function flagOrnamentalFertilizer({ svc, record, database, advisory, notif
     const serviceDate = record.service_date || svc.scheduled_date;
     try {
       const history = await loadTreeShrubApplicationHistory({ db: database, scheduled: svc, excludeRecordId: record.id });
-      const found = historyFinding({ row: rows[0], history, scheduled: svc, serviceDate });
+      const found = historyFinding({ row: rows[0], history, scheduled: svc, serviceDate, zone: inferTreeShrubOrdinanceZone(svc) });
       if (found) findings.push(found);
     } catch (err) {
       logger.warn(`[ts-ornamental-fertilizer] history read failed for record ${record.id}: ${err?.message}`);

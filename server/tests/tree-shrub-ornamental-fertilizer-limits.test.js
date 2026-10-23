@@ -59,6 +59,14 @@ describe('the rate cap (7.5 lb per 1,000 sq ft = 0.75 lb per 100 sq ft = 0.98 lb
     expect(limits.ratePer1000(row({ application_rate: 9, rate_unit: 'lb', total_amount: 6, amount_unit: 'lb', area_value: 1200, area_unit: 'sqft' }))).toBe(9);
   });
 
+  test('the sheet\'s weight units (oz, g, lb) are all judged in pounds', () => {
+    const area = { area_value: 1200, area_unit: 'sqft' };
+    expect(limits.ratePer1000(row({ total_amount: 144, amount_unit: 'oz', ...area }))).toBe(7.5);
+    expect(limits.ratePer1000(row({ total_amount: 4082.328, amount_unit: 'g', ...area }))).toBeCloseTo(7.5, 3);
+    expect(limits.rateFindings([row({ total_amount: 192, amount_unit: 'oz', ...area })])).toEqual([expect.objectContaining({ current: 10 })]);
+    expect(limits.ratePer1000(row({ total_amount: 9, amount_unit: 'fl_oz', ...area }))).toBeNull();
+  });
+
   test('the bag label rate of 1 lb per 100 sq ft (10 per 1,000, 1.3 lb N) is over the cap', () => {
     expect(limits.rateFindings([row({ application_rate: 10, rate_unit: 'lb' })])).toEqual([expect.objectContaining({ limitType: 'ornamental_fertilizer_rate', current: 10 })]);
     expect(limits.rateFindings([row({ application_rate: 7.5, rate_unit: 'lb' })])).toEqual([]);
@@ -96,6 +104,23 @@ describe('the history rules judge the hand-added row as the suggestion is judged
     expect(await limits.flagOrnamentalFertilizer({ svc, record, database: db, advisory: null, notify })).toBeNull();
     expect(notify).not.toHaveBeenCalled();
     expect(db.seen.excluded).toBe('rec-1');
+  });
+
+  test('the zone comes from the visit\'s city as the closeout reads it: North Port is not flagged in July, Sarasota is', async () => {
+    const run = (city) => limits.flagOrnamentalFertilizer({ svc: { ...svc, city, scheduled_date: '2028-07-10' }, record: { id: 'rec-1', service_date: '2028-07-10' }, database: fakeDb({ rows: [row({ application_rate: 7.5, rate_unit: 'lb' })] }), advisory: null, notify: jest.fn() });
+    expect(await run('North Port')).toBeNull();
+    expect((await run('Sarasota')).blocks[0].message).toMatch(/not allowed June 1 to September 30/);
+    expect((await run(undefined)).blocks[0].message).toMatch(/not allowed June 1 to September 30/);
+  });
+
+  test('an unidentified history row older than 12 months does not flag a new feeding; a recent or undated one does', async () => {
+    const unidentified = (date) => ({ product_name: null, catalog_name: null, application_date: date, property_id: 'prop-1', ledger_property_id: 'prop-1' });
+    const run = (history) => limits.flagOrnamentalFertilizer({ svc, record, database: fakeDb({ rows: [row({ application_rate: 7.5, rate_unit: 'lb' })], history }), advisory: null, notify: jest.fn() });
+    // Visit 2028-10-10: 2027-10-10 is exactly 12 months back, so it is out of the window.
+    expect(await run([unidentified('2026-03-01'), unidentified('2027-10-10')])).toBeNull();
+    for (const date of ['2027-10-11', '2028-06-01', null]) {
+      expect((await run([unidentified(date)])).blocks[0].message).toMatch(/unidentified product/);
+    }
   });
 
   test('an unreadable history is flagged to the tech as unchecked and never throws', async () => {

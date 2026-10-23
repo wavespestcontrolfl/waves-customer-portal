@@ -206,7 +206,12 @@ function decisionAction(action) {
 // A product on the sheet. `last` is the amount the server says was recorded
 // last time: the only thing an amount ever starts from, in the unit it was
 // recorded in. Anything else leaves it blank for the tech.
-function productRow(product, { method, last = null, added = false }) {
+// The 13-0-13 bed fertilizer is held to the county cap of 0.75 lb per 100 sq ft (7.5 lb per 1,000), which the server can only
+// judge from the treated area. Its row carries the bed square feet, prefilled from the property's recorded bed area and
+// editable, and cannot be sent without one.
+const needsBedArea = (product) => /\b13-0-13\b/.test(String(product?.name || ''));
+
+function productRow(product, { method, last = null, added = false, bedSqft = null }) {
   const flags = flagsOf(product);
   const own = productUnits(product, { method });
   const lastAmount = Number(last?.totalAmount);
@@ -234,8 +239,11 @@ function productRow(product, { method, last = null, added = false }) {
     totalAmount: seeded.amount,
     amountUnit: seeded.unit,
     fromLast: seeded.amount !== '',
+    ...(needsBedArea(product) ? { needsArea: true, areaValue: Number(bedSqft) > 0 ? String(Number(bedSqft)) : '' } : {}),
   };
 }
+
+const hasBedArea = (row) => !row.needsArea || Number(row.areaValue) > 0;
 
 // A catalog product's method on this line: foliar spray unless it is a
 // granule or a drench.
@@ -297,7 +305,7 @@ function monthRows(data, products, lastVisit) {
     const product = byId.get(id);
     if (!product || seen.has(id)) continue;
     seen.add(id);
-    rows.push(productRow(product, { method: monthMethod(month.method, product), last: month.lastAmount || lastAmounts[id] || null }));
+    rows.push(productRow(product, { method: monthMethod(month.method, product), last: month.lastAmount || lastAmounts[id] || null, bedSqft: data?.bedSqft }));
   }
   return rows;
 }
@@ -320,6 +328,7 @@ function contextFrom(data, service) {
     loadError: '',
     blockedReason: blockedReasonFor(data, service),
     visit: data?.service || {},
+    bedSqft: Number(data?.bedSqft) > 0 ? Number(data.bedSqft) : null,
     products,
     rows: monthRows(data, products, lastVisit),
     lastVisit,
@@ -344,7 +353,7 @@ function contextFrom(data, service) {
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null, neonicCap: null, wrapUp: false, stockAdvisory: false,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, bedSqft: null, watchList: null, pestCheck: null, neonicCap: null, wrapUp: false, stockAdvisory: false,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -388,9 +397,9 @@ function useProductRows(ctx) {
   const addProduct = useCallback((product) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      { ...productRow(product, { method: catalogMethod(product), last: lastAmounts[String(product.id)] || null, added: true }), active: !flagsOf(product).npBlackout },
+      { ...productRow(product, { method: catalogMethod(product), last: lastAmounts[String(product.id)] || null, added: true, bedSqft: ctx.bedSqft }), active: !flagsOf(product).npBlackout },
     ]));
-  }, [lastAmounts]);
+  }, [lastAmounts, ctx.bedSqft]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
@@ -433,6 +442,7 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
   const active = rows.filter((row) => row.active);
   const outOfStock = stockState(rows, ctx).hold;
   const missingAmount = active.find((row) => !hasAmount(row));
+  const missingArea = active.find((row) => !hasBedArea(row));
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
   const manualIrac = needsManualIrac(rows, ctx);
   const [, reason = ''] = [
@@ -443,6 +453,7 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
     [!slots.back_landscape, 'Add a back or side landscape photo.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
+    [missingArea, missingArea && `Enter the treated square feet for ${missingArea.name}.`],
     [insect && !form.pollinator, 'Select the flowering / bee status.'],
     [insect && form.pollinator === BEES_ACTIVE, BEES_ACTIVE_MESSAGE],
     [manualIrac && form.irac !== 'Yes', 'Confirm the IRAC / FRAC rotation was checked and logged.'],
@@ -466,7 +477,8 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
     ...(ctx.visitIdentity ? { expectedVisit: ctx.visitIdentity } : {}),
     products: active.map((row) => {
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
-      return { productId: row.productId, applicationMethod: row.method, totalAmount, amountUnit, applicationArea, targets: [] };
+      // The treated square feet (numeric, in sq ft) let the server hold a 13-0-13 row to the county cap.
+      return { productId: row.productId, applicationMethod: row.method, totalAmount, amountUnit, applicationArea, targets: [], ...(row.needsArea ? { areaValue: Number(row.areaValue), areaUnit: 'sqft' } : {}) };
     }),
     structuredFindings: {
       type: 'tree_shrub',
@@ -1144,6 +1156,7 @@ function ProductTile({ row, locked, onClick }) {
 function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }) {
   const nameId = useId();
   const amountId = useId();
+  const areaId = useId();
   const methodId = useId();
   const choices = METHOD_CHOICES.some((choice) => choice.value === row.method)
     ? METHOD_CHOICES
@@ -1155,6 +1168,24 @@ function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'this month'].filter(Boolean).join(' · ')}</span>
       </div>
       <AmountEntry id={amountId} row={row} locked={locked} onChange={onChange} />
+      {row.needsArea && (
+        <div>
+          <label className="tech-product-editor-label" htmlFor={areaId}>Treated square feet</label>
+          <input
+            id={areaId}
+            className="ui-control tech-visit-control"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="1"
+            value={row.areaValue}
+            disabled={locked}
+            placeholder="Enter bed square feet"
+            onChange={(e) => onChange({ areaValue: e.target.value })}
+          />
+          <p className="tech-visit-muted">County limit: 0.75 lb per 100 sq ft of bed.</p>
+        </div>
+      )}
       {neonicLine && <p className="tech-visit-muted" role="status">{neonicLine}</p>}
       {row.fromLast && <p className="tech-visit-muted">last time</p>}
       {row.added ? (

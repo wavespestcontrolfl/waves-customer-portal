@@ -41,6 +41,8 @@ const CATALOG = [
   // Something the tech adds from the picker: a rotation-logged oil with no
   // resistance group, which the app cannot rotation-check.
   { id: 'oil', name: 'SuffOil-X', category: 'insecticide', tsFlags: { insectFamily: true, needsIracFrac: true } },
+  // The bed fertilizer: held to the county cap, so its row carries the treated square feet.
+  { id: 'orn', name: 'LESCO 13-0-13 60% PolyPlus Landscape', category: 'fertilizer', formulation: 'granular', rate_unit: 'lb', tsFlags: {} },
   { id: 'drench', name: 'Imidacloprid Drench', category: 'insecticide', inventory_unit: 'fl_oz', inventory_on_hand: '0.0000', tsFlags: {} },
 ];
 
@@ -844,5 +846,65 @@ describe('suspended behind the appointment details sheet', () => {
     expect(document.querySelector('.tech-visit-overlay').style.display).toBe('');
     expect(screen.getByPlaceholderText('What you treated, where, and what you saw').value).toBe(NOTE);
     expect(tile('Merit 2F').getAttribute('aria-pressed')).toBe(pressedBefore);
+  });
+});
+
+
+describe('13-0-13 treated square feet (the county cap needs an area)', () => {
+  const withOrn = (bedSqft) => ({ ...CONTEXT, ...(bedSqft === undefined ? {} : { bedSqft }), monthProducts: [...CONTEXT.monthProducts, { productId: 'orn', method: 'granular_broadcast' }] });
+  const areaField = () => within(editorFor('LESCO 13-0-13 60% PolyPlus Landscape')).getByLabelText('Treated square feet');
+  const ready = async (context) => {
+    const request = makeRequest({ context });
+    await readyVisit(request);
+    fireEvent.click(tile('LESCO 13-0-13'));
+    return request;
+  };
+
+  test('the property\'s bed square feet prefill the row, and the tech can edit it', async () => {
+    await ready(withOrn(1200));
+    expect(areaField().value).toBe('1200');
+    fireEvent.change(areaField(), { target: { value: '1500' } });
+    expect(areaField().value).toBe('1500');
+  });
+
+  test('numeric areaValue and areaUnit sqft ride the 13-0-13 row, and only that row', async () => {
+    const request = await ready(withOrn(1200));
+    enterAmount('LESCO 13-0-13 60% PolyPlus Landscape', 9);
+    fireEvent.click(tile('Chelated Iron Plus'));
+    enterAmount('Chelated Iron Plus', 1);
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ totalAmount: 9, amountUnit: 'lb', areaValue: 1200, areaUnit: 'sqft' });
+    expect(typeof body.products.find((p) => p.productId === 'orn').areaValue).toBe('number');
+    expect(body.products.find((p) => p.productId === 'iron')).not.toHaveProperty('areaValue');
+  });
+
+  test('an edited area is what is sent', async () => {
+    const request = await ready(withOrn(1200));
+    enterAmount('LESCO 13-0-13 60% PolyPlus Landscape', 9);
+    fireEvent.change(areaField(), { target: { value: '800' } });
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ areaValue: 800, areaUnit: 'sqft' });
+  });
+
+  test('no recorded bed area: the field is blank and Complete is held until the tech enters one', async () => {
+    const request = await ready(withOrn(null));
+    enterAmount('LESCO 13-0-13 60% PolyPlus Landscape', 9);
+    expect(areaField().value).toBe('');
+    expect(screen.getByText('Enter the treated square feet for LESCO 13-0-13 60% PolyPlus Landscape.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(areaField(), { target: { value: '0' } });
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(areaField(), { target: { value: '1000' } });
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ areaValue: 1000, areaUnit: 'sqft' });
+  });
+
+  test('a 13-0-13 the tech adds by hand gets the same area field, prefilled', async () => {
+    const request = makeRequest({ context: { ...CONTEXT, bedSqft: 900 } });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '13-0-13' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 13-0-13/ }));
+    expect(areaField().value).toBe('900');
   });
 });

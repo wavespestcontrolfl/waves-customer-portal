@@ -1,8 +1,8 @@
 /**
- * 20261023120000 clears the wrong 1.5 oz per 1,000 sq ft prefill on the Sequestar catalog row. It acts only on one active row
- * that still reads as seeded, records the before/after in audit_log in the same transaction, is idempotent, and has no rollback.
+ * 20261023140000 clears the wrong 1.5 oz per 1,000 sq ft prefill on the Sequestar catalog row. It acts only on one active row
+ * that still reads as seeded, records the before/after in audit_log in the same transaction, is idempotent, and has no rollback. The row is read FOR UPDATE and the update is conditional on what was read (exactly one row).
  */
-const migration = require('../models/migrations/20261023120000_sequestar_per_1000_default_correction');
+const migration = require('../models/migrations/20261023140000_sequestar_per_1000_default_correction_v2');
 
 const COLUMNS = { id: {}, name: {}, active: {}, default_rate_per_1000: {}, rate_unit: {}, label_source_note: {}, updated_at: {} };
 
@@ -13,15 +13,24 @@ function fakeKnex(rows, { columns = COLUMNS, tables = ['products_catalog', 'audi
     const preds = [];
     const q = {
       columnInfo: async () => columns,
+      forUpdate() { knex.locked.push(table); return q; },
       where(cond) { preds.push((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+      whereNull(col) { preds.push((r) => r[col] == null); return q; },
+      whereRaw(_sql, [value]) { preds.push((r) => Number(r.default_rate_per_1000) === value); return q; },
       select() { return Promise.resolve(rows.filter((r) => preds.every((p) => p(r))).map((r) => ({ ...r }))); },
-      async update(patch) { for (const r of rows.filter((x) => preds.every((p) => p(x)))) Object.assign(r, patch); },
+      async update(patch) {
+        if (knex.beforeUpdate) knex.beforeUpdate();
+        const hit = rows.filter((x) => preds.every((p) => p(x)));
+        for (const r of hit) Object.assign(r, patch);
+        return hit.length;
+      },
     };
     return q;
   };
   knex.schema = { hasTable: async (t) => tables.includes(t) };
   knex.fn = { now: () => 'now' };
   knex.audit = audit;
+  knex.locked = [];
   return knex;
 }
 
@@ -52,6 +61,21 @@ describe('up', () => {
 
   test('a failed audit write fails the migration (same transaction, nothing half-done)', async () => {
     await expect(migration.up(fakeKnex([seeded()], { failAudit: true }))).rejects.toThrow('audit down');
+  });
+
+  test('the row is read FOR UPDATE before it is checked', async () => {
+    const knex = fakeKnex([seeded()]);
+    await migration.up(knex);
+    expect(knex.locked).toEqual(['products_catalog']);
+  });
+
+  test('an edit that lands between the read and the update changes nothing and audits nothing', async () => {
+    const rows = [seeded()];
+    const knex = fakeKnex(rows);
+    knex.beforeUpdate = () => { rows[0].label_source_note = 'Staff wrote this first.'; };
+    await migration.up(knex);
+    expect(rows[0]).toMatchObject({ default_rate_per_1000: '1.5', label_source_note: 'Staff wrote this first.' });
+    expect(knex.audit).toEqual([]);
   });
 
   test.each([
