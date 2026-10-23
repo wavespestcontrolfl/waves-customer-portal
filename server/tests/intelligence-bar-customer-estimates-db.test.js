@@ -855,7 +855,8 @@ suite('existing-customer estimates from another workspace', () => {
     const fixture = await customerFixture(), proposal = await propose(fixture);
     const pending = require('../services/intelligence-bar/pending-actions'), original = pending.recordResult;
     jest.spyOn(pending, 'recordResult').mockImplementation((id, result, options) => {
-      if (!options) throw new Error('Synthetic runner stopped after commit');
+      // The route's ordinary receipt save (it now passes keepRecoveryFinal, #6493); the recovery write is onlyIfEmpty.
+      if (!options || options.keepRecoveryFinal) throw new Error('Synthetic runner stopped after commit');
       return original(id, result, options);
     });
     jest.spyOn(pending, 'getActionReceipt').mockRejectedValueOnce(new Error('Synthetic recovery read unavailable'));
