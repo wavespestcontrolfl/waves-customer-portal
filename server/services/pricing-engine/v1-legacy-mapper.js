@@ -1746,12 +1746,19 @@ function estimateDataCarriesPricedMisting(estimateDataRaw, { pricingAuthority = 
     ];
     const { mistingProposalIdentity } = require('../../utils/mosquito-misting-system');
     const numberOf = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-    // Priced = carries an amount (a line's unitPrice / amount, a program's pricePerApplication); a quote-required line does not count.
-    return lines.some((line) => !!mistingProposalIdentity(line) && line.quoteRequired !== true
+    // Priced = carries a billable amount (a line's unitPrice / amount, a program's pricePerApplication), WHATEVER the
+    // quoteRequired flag says: the editors keep that flag after staff enters a price, and computeProposalTotals bills the
+    // amount regardless (pre-push audit P0), so the amount alone decides.
+    return lines.some((line) => !!mistingProposalIdentity(line)
       && (numberOf(line.unitPrice) > 0 || numberOf(line.amount) > 0 || numberOf(line.pricePerApplication) > 0));
   }
   const rows = storedMistingRows(d, { pricingAuthority });
-  if (rows.length) return rows.some((row) => row.quoteRequired !== true);
+  // A stored row is priced when it is not a manual quote OR it carries an amount anyway (same amount-first rule).
+  const numberOf = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const rowPriced = (row) => row.quoteRequired !== true
+    || numberOf(row.price) > 0 || numberOf(row.monthly ?? row.mo) > 0 || numberOf(row.annual) > 0
+    || numberOf(row.installation && row.installation.price) > 0;
+  if (rows.length) return rows.some(rowPriced);
   return mistingInputSelected(d);
 }
 // ACCEPTANCE of a priced misting estimate is blocked, fail closed, even with the gate ON, until misting PR 2 ships the

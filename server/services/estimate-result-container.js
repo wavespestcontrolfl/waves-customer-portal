@@ -77,7 +77,10 @@ function storedAreaAddOnRows(estimateData, options = {}) {
 
 // The stored rows of the mosquito misting system (GATE_MOSQUITO_MISTING): the mapped recurring plan row, its one-time
 // install item, the quote-required copy and the raw engine line, from the same authoritative container.
-const isMistingRow = (row) => isRecord(row) && (row.service === 'mosquito_misting' || row.service === 'mosquito_misting_installation');
+// A commercial misting request is a manual-quote row of the commercial family that keeps the misting identity only in
+// originalRequestedService (pre-push audit P1): it counts as a stored misting row (unpriced, quoteRequired).
+const isMistingRow = (row) => isRecord(row) && (row.service === 'mosquito_misting' || row.service === 'mosquito_misting_installation'
+  || row.originalRequestedService === 'mosquito_misting');
 function mistingRowsIn(container) {
   const nested = container.results && container.results.oneTime;
   const recurring = [container.recurring && container.recurring.services, container.results && container.results.recurring && container.results.recurring.services];

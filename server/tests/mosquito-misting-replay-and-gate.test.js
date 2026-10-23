@@ -581,3 +581,31 @@ describe('the other resolvers never read the misting plan as the barrier program
     expect(converter.tierQualifyingRecurringServiceKeys(mapped.recurring.services)).toEqual([]);
   });
 });
+
+describe('pre-push audit: priced proposal lines and commercial rows', () => {
+  const { normalizeBuilding } = require('../services/estimate-proposal');
+  const authored = (lines) => ({
+    result: { recurring: { services: [{ service: 'pest_control', mo: 40 }] } },
+    proposal: { enabled: true, buildings: [normalizeBuilding({ name: 'Home', lineItems: lines })] },
+  });
+  afterEach(() => { delete process.env.GATE_MOSQUITO_MISTING; });
+
+  test('a misting proposal line that keeps quoteRequired:true but carries a price is priced evidence (accept blocked)', () => {
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    const data = authored([{ service: 'mosquito_misting_installation', description: 'Essential system (drum) Installation', unitPrice: 9000, frequency: 'one_time', quoteRequired: true }]);
+    expect(data.proposal.buildings[0].lineItems[0]).toMatchObject({ quoteRequired: true, unitPrice: 9000 });
+    expect(mapper.estimateMistingAcceptBlocked(data)).toBe(true);
+    expect(mapper.gatedAddOnStaffRefusal(data, 'accepting')).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+  });
+
+  test('a stored commercial misting manual-quote row is a misting row: gated when the gate is off, not accept-blocked when on', () => {
+    const row = { service: 'commercial_pest', originalRequestedService: 'mosquito_misting', quoteRequired: true, name: 'Mosquito Misting System (commercial)' };
+    const data = { result: { quoteRequiredItems: [row], recurring: { services: [] } }, engineInputs: { ...PROPERTY, services: { mosquitoMisting: OPTS } } };
+    delete process.env.GATE_MOSQUITO_MISTING;
+    expect(mapper.estimateMistingGated(data)).toBe(true);
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    expect(mapper.estimateMistingGated(data)).toBe(false);
+    // Unpriced manual quote: the stored row decides, the selection fallback is not consulted.
+    expect(mapper.estimateMistingAcceptBlocked(data)).toBe(false);
+  });
+});
