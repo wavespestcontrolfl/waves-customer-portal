@@ -426,6 +426,20 @@ describe('run', () => {
     expect(report).toMatch(/24a/);
   });
 
+  test('a rerun holds a row an earlier run loaded whose expense was deleted since, instead of skipping it as a duplicate', async () => {
+    const db = makeFakeDb();
+    await run({ file, db });
+    const loaded = db.tables().bank_transactions.find(r => r.description === 'ACME SUPPLY 4471');
+    expect(loaded.status).toBe('created_expense');
+    // the owner deleted the expense: the FK goes null (ON DELETE SET NULL)
+    loaded.matched_expense_id = null;
+    db.tables().expenses = db.tables().expenses.filter(e => e.vendor_name !== 'ACME SUPPLY 4471');
+    const { counts, report } = await run({ file, db });
+    expect(counts).toMatchObject({ inserted: 0, held: 1, duplicates: 7 });
+    expect(report).toMatch(/loaded by an earlier run but its expense was deleted since; the ledger says expense \(Supplies\)/);
+    expect(db.tables().expenses.find(e => e.vendor_name === 'ACME SUPPLY 4471')).toBeUndefined(); // nothing re-booked by guesswork
+  });
+
   test('second run inserts nothing and creates no duplicate expense', async () => {
     const db = makeFakeDb();
     await run({ file, db });
@@ -761,7 +775,7 @@ describe('--skip-existing and expenses', () => {
     db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'ignored' });
     const { counts, report } = await run({ file, db, skipExisting: true });
     expect(counts).toMatchObject({ overlaps: 0, held: 1, inserted: 0 });
-    expect(report).toMatch(/the portal ignored this row but the ledger books it as an expense/);
+    expect(report).toMatch(/the portal ignored this row but the ledger says it is business/);
     // a refund credit the portal ignored WITHOUT applying it leaves the expense at its gross
     // amount: held; a released refund (releasedRefundOf) is accounted for: an overlap
     fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY REFUND', amount: '12.50', direction: 'in', class: 'refund', sched_c_line: '', category: 'Refund' })));
@@ -803,6 +817,16 @@ describe('--skip-existing and expenses', () => {
       const out = await run({ file, db: dbp, skipExisting: true });
       expect([cls, out.counts.held, out.counts.overlaps]).toEqual([cls, expected.held, expected.overlaps]);
       if (expected.held) expect(out.report).toMatch(/linked this credit to a payout but the ledger says it is a refund credit/);
+    }
+    // a business row the ledger PARKED (a line with no category here, 16b) is business all the same:
+    // ignored in the portal = conflict; booked in the portal = the category needs a check
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'interest', sched_c_line: '16b', category: 'Card interest' })));
+    for (const [status, link, re] of [['ignored', null, /ledger says it is business/], ['created_expense', 'exp-x', /line 16b has no category here/]]) {
+      const dbq = makeFakeDb();
+      dbq.tables().bank_transactions.push({ id: 'up-q', row_hash: 'hq', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status, matched_expense_id: link });
+      const out = await run({ file, db: dbq, skipExisting: true });
+      expect([status, out.counts.held, out.counts.overlaps]).toEqual([status, 1, 0]);
+      expect(out.report).toMatch(re);
     }
     // the ledger says personal too: the portal's ignore is the same answer
     fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'personal', sched_c_line: '', category: 'Personal' })));

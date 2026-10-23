@@ -321,6 +321,7 @@ function mapRow(row, ordinal, basename) {
       bank.status = 'unmatched';
       bank.suggestion = reviewSuggestion(row, {});
       out.unmatchedLine = row.sched_c_line || '(none)';
+      out.businessParked = true; // business by the ledger, no category to book it under here
       return out;
     }
     const period = row.period || taxPeriodFor(row.date);
@@ -373,6 +374,7 @@ function parkForReview(mapped, row) {
   mapped.bank.suggestion = reviewSuggestion(row, {});
   mapped.expense = null;
   mapped.unmatchedLine = row.sched_c_line || '(none)';
+  mapped.businessParked = true;
   return mapped;
 }
 
@@ -457,10 +459,12 @@ class DuplicateRace extends Error {}
 // before (by row_hash), the bank rows from a feed or an upload in the file's
 // date range, the hand-entered expenses in it, and the Plaid account masks.
 async function loadPortalState(db, mapped, rows, skipExisting) {
-  const existing = new Set();
+  // the rows an earlier run loaded, with their state: a row whose expense was
+  // deleted since (the FK is null, or the matcher reopened it) is not done
+  const existing = new Map();
   for (const part of chunk(mapped.map(m => m.bank.row_hash), HASH_LOOKUP_CHUNK)) {
-    const found = await db('bank_transactions').whereIn('row_hash', part).select('row_hash');
-    found.forEach(f => existing.add(f.row_hash));
+    const found = await db('bank_transactions').whereIn('row_hash', part).select('row_hash', 'status', 'matched_expense_id');
+    found.forEach(f => existing.set(f.row_hash, f));
   }
   const dates = rows.map(r => r.date).sort();
   const range = [dates[0], dates[dates.length - 1]];
@@ -602,37 +606,52 @@ function describeGap(days) {
 // or payout was deleted since (the FK is null; bank-import's
 // resetDanglingLinks reopens such rows on its next pass).
 const LINKED_TO_EXPENSE = new Set(['matched_expense', 'created_expense']);
-function openReason(row, m, portal) {
+function expenseGone(row) {
+  return (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) || row.status === 'unmatched';
+}
+function openOrDangling(row) {
   if (row.status === 'unmatched') return 'the same row is open in the portal, not booked';
-  // the portal said ignore, the ledger books an expense: a conflict for the owner, not an answer
-  if (row.status === 'ignored' && m.expense) return 'the portal ignored this row but the ledger books it as an expense (unignore and decide it)';
-  // a refund credit ignored without being applied leaves its expense at the
-  // gross amount; a RELEASED refund (releasedRefundOf) is accounted for
-  if (row.status === 'ignored' && m.unmatchedLine === 'refund' && !(row.suggestion && row.suggestion.releasedRefundOf)) {
-    return 'the portal ignored this refund credit without applying it (unignore it and apply it to the original expense in Bank Import)';
-  }
-  // the portal linked this credit to a Stripe payout, the ledger says it is
-  // a merchant refund: one of them is wrong, and the expense it would reduce
-  // stays at its gross amount until the owner decides
-  if (row.status === 'matched_payout' && row.matched_payout_id && m.unmatchedLine === 'refund') {
-    return 'the portal linked this credit to a payout but the ledger says it is a refund credit (check which is right)';
-  }
-  // the mirror conflict: the portal booked an expense, the ledger says the
-  // money was personal, a transfer, a reward or an asset
-  if (LINKED_TO_EXPENSE.has(row.status) && row.matched_expense_id && m.bank.status === 'ignored') {
-    return 'the portal booked this row as an expense but the ledger does not (check which is right; the expense may need deleting)';
-  }
-  // both say expense, under different categories: the owner picks
-  if (LINKED_TO_EXPENSE.has(row.status) && row.matched_expense_id && m.expense && portal) {
-    const booked = portal.bookedExpenses.get(row.matched_expense_id);
-    const ledgerCategoryId = portal.categoryIds.get(m.categoryName);
-    if (booked && ledgerCategoryId && booked.category_id && booked.category_id !== ledgerCategoryId) {
-      return `the portal booked this row under ${portal.categoryNames.get(booked.category_id) || 'another category'}, the ledger says ${m.categoryName} (check which is right)`;
-    }
-  }
   if (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) return 'the same row is in the portal but its expense was deleted (the next matching pass reopens it)';
   if (row.status === 'matched_payout' && !row.matched_payout_id) return 'the same row is in the portal but its payout link is gone (the next matching pass reopens it)';
   return null;
+}
+// The portal ignored the row; the ledger says business (booked or parked
+// for a line with no category here), or says refund credit (unless the
+// refund was RELEASED: releasedRefundOf means it is accounted for).
+function ignoredConflict(row, m) {
+  if (row.status !== 'ignored') return null;
+  if (m.expense || m.businessParked) return 'the portal ignored this row but the ledger says it is business (unignore and decide it)';
+  if (m.unmatchedLine === 'refund' && !(row.suggestion && row.suggestion.releasedRefundOf)) {
+    return 'the portal ignored this refund credit without applying it (unignore it and apply it to the original expense in Bank Import)';
+  }
+  return null;
+}
+// The portal linked the credit to a Stripe payout; the ledger says merchant
+// refund: one of them is wrong, and the expense it would reduce stays at its
+// gross amount until the owner decides.
+function payoutConflict(row, m) {
+  if (row.status === 'matched_payout' && row.matched_payout_id && m.unmatchedLine === 'refund') {
+    return 'the portal linked this credit to a payout but the ledger says it is a refund credit (check which is right)';
+  }
+  return null;
+}
+// The portal booked an expense; the ledger says non-business, or business
+// under another category, or business on a line with no category here.
+function bookedConflict(row, m, portal) {
+  if (!LINKED_TO_EXPENSE.has(row.status) || !row.matched_expense_id) return null;
+  if (m.bank.status === 'ignored') return 'the portal booked this row as an expense but the ledger does not (check which is right; the expense may need deleting)';
+  if (m.businessParked) return `the portal booked this row as an expense; the ledger's line ${m.unmatchedLine} has no category here (check the category)`;
+  if (!m.expense || !portal) return null;
+  const booked = portal.bookedExpenses.get(row.matched_expense_id);
+  const ledgerCategoryId = portal.categoryIds.get(m.categoryName);
+  if (booked && ledgerCategoryId && booked.category_id && booked.category_id !== ledgerCategoryId) {
+    return `the portal booked this row under ${portal.categoryNames.get(booked.category_id) || 'another category'}, the ledger says ${m.categoryName} (check which is right)`;
+  }
+  return null;
+}
+// Why an exact overlap is held rather than counted as answered (null = answered).
+function openReason(row, m, portal) {
+  return openOrDangling(row) || ignoredConflict(row, m) || payoutConflict(row, m) || bookedConflict(row, m, portal);
 }
 
 // Which ledger rows load, and which the portal already answers for.
@@ -656,7 +675,14 @@ function reconcileRows(mapped, rows, portal) {
   const note = (i, other, account, why) => ({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other, account, why });
   const reading = (m, i) => `the ledger says ${rows[i].class}${m.categoryName ? ` (${m.categoryName})` : ''}`;
   mapped.forEach((m, i) => {
-    if (existing.has(m.bank.row_hash)) { duplicates += 1; settled.add(i); return; }
+    const prior = existing.get(m.bank.row_hash);
+    if (prior) {
+      settled.add(i);
+      // loaded before: done, unless the expense that run made is gone since
+      if (m.expense && expenseGone(prior)) held.push(note(i, prior.description || rows[i].description, 'this ledger (loaded before)', `loaded by an earlier run but its expense was deleted since; ${reading(m, i)} (decide it in Bank Import)`));
+      else duplicates += 1;
+      return;
+    }
     const pool = pools.bankLeft.get(tupleKey(m.bank)) || [];
     const same = pool.findIndex(f => sameAccountRow(rows[i].source, f, ids));
     if (same === -1) return;
