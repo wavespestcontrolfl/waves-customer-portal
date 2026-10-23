@@ -118,4 +118,19 @@ describe('new construction termite warranty template', () => {
     await v7.up(knex);
     expect(calls).toEqual(['lock:document_templates', 'active:v-existing']);
   });
+
+  test('the metadata migration makes a reused row an active, customer-facing, signed service agreement', async () => {
+    const meta = require('../models/migrations/20261023260000_new_construction_termite_warranty_metadata');
+    const updates = [];
+    const row = { id: 't1', status: 'inactive', audience: 'staff', requires_signature: false, document_type: 'notice', category: 'other' };
+    const knex = () => ({ where() { return this; }, first: async () => row, update: async (patch) => { updates.push(patch); return 1; } });
+    knex.fn = { now: () => 'now()' };
+    await meta.up(knex);
+    expect(updates).toEqual([{ ...meta.REQUIRED, updated_at: 'now()' }]);
+    expect(meta.REQUIRED).toMatchObject({ status: 'active', audience: 'customer', requires_signature: true });
+    updates.length = 0;
+    Object.assign(row, meta.REQUIRED);
+    await meta.up(knex);
+    expect(updates).toEqual([]);
+  });
 });

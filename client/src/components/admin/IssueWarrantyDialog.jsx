@@ -114,7 +114,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
           </div>
           {lateDays != null && lateDays > 30 && (
             <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
-              Treated {lateDays} days ago: past the 30-day limit. The warranty states its real issue date.
+              Treated {lateDays} days ago: past the 30-day limit in Rule 5E-14.105(3)(a). Send it today.
             </div>
           )}
           {signingUrl ? (

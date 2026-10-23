@@ -180,10 +180,11 @@ function propertyAddress(findings, lot) {
 }
 
 function contractBasis(basis, builder, initial) {
+  if (!['master', 'signed'].includes(basis?.kind)) throw bad('Choose the contract basis: master agreement or signed before treatment.');
   const date = parseUs(basis?.date);
   if (!date) throw bad('Enter the contract basis date as MM/DD/YYYY.');
   if (key(date) > key(initial)) throw bad('The contract basis date must be on or before the treatment date.');
-  return basis?.kind === 'signed'
+  return basis.kind === 'signed'
     ? `Signed by the owner or authorized agent before treatment, on ${us(date)}.`
     : `Issued under the master agreement with ${builder || 'the builder'} dated ${us(date)}.`;
 }
@@ -212,8 +213,8 @@ function officeFields(body, initial) {
 
 // The template prints its own unit after each amount; a certificate value
 // that already carries one ("0.060%", "180 gallons") would print it twice.
-// A value that names its unit anywhere ("180 gal applied") prints as its
-// leading number; one with no number stays as written.
+// A value that names its unit anywhere ("180 gal applied", "about 220 LF")
+// prints as its first number; one with no number stays as written.
 const UNIT_WORD = {
   concentration: /%/,
   gallons: /\b(gal|gals|gallons?)\b/i,
@@ -222,8 +223,9 @@ const UNIT_WORD = {
 };
 function withoutUnit(value, unit) {
   const raw = oneLine(value);
-  const number = /^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?/.exec(raw)[0];
-  return UNIT_WORD[unit].test(raw) && number ? number : raw;
+  if (!UNIT_WORD[unit].test(raw)) return raw;
+  const number = /(\d{1,3}(,\d{3})+|\d+)(\.\d+)?|\.\d+/.exec(raw);
+  return number ? number[0] : raw;
 }
 
 function certificateValues(project, findings) {
@@ -301,13 +303,15 @@ function issueRequestProjectId(body) {
   return body.projectId;
 }
 
+const PRINTED_CUSTOMER_FIELDS = ['first_name', 'last_name', 'company_name', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
+
 // Section 1 prints the owner's or agent's name and complete address (Rule
 // 5E-14.105(2)(a)), so the customer record must have one and pass the screen.
 function assertCustomerPrintable(customer) {
   if (![customer.address_line1, customer.city, customer.zip].every((part) => oneLine(part))) {
     throw bad("Add the owner's or agent's full mailing address (street, city, ZIP) to the customer first.", 409);
   }
-  const failing = ['first_name', 'last_name', 'company_name', 'address_line1', 'address_line2', 'city', 'zip']
+  const failing = PRINTED_CUSTOMER_FIELDS
     .filter((field) => customerCopyViolations(oneLine(customer[field])).length > 0);
   if (failing.length) {
     throw bad(`Remove the access code or banned wording from the customer record: ${failing.join(', ')}.`, 409);
@@ -324,7 +328,13 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   const projectId = issueRequestProjectId(body);
   // Customer row before the certificate row: the order the issue route and
   // a customer merge both take, so the two cannot deadlock.
-  await conn('customers').where({ id: customer.id }).forUpdate().first('id');
+  // The row under the lock must be the row being printed: an edit that
+  // committed after the caller read it would leave a stale owner name or
+  // address on the contract.
+  const locked = await conn('customers').where({ id: customer.id }).forUpdate().first();
+  if (!locked || PRINTED_CUSTOMER_FIELDS.some((field) => oneLine(locked[field]) !== oneLine(customer[field]))) {
+    throw bad('This customer changed while the warranty was being issued. Reload and try again.', 409);
+  }
   const project = await conn('projects').where({ id: projectId }).forUpdate().first();
   if (!project || project.project_type !== 'pre_treatment_termite_certificate' || project.customer_id !== customer.id) {
     throw bad('Pre-treat certificate not found for this customer.', 404);
