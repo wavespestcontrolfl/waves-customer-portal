@@ -32,15 +32,17 @@ const squash = (value) => String(value || '').toLowerCase().replace(/[\s,.]/g, '
 const positive = (value) => Number.isFinite(Number(value)) && Number(value) > 0 && value !== '' && value !== null;
 
 /**
- * lb per 1,000 sq ft of one recorded row: its rate when that is a lb-per-1,000 rate, else the total over the treated area.
- * null when neither can be read (no rate, or a total with no area), so the cap cannot be judged.
+ * lb per 1,000 sq ft of one recorded row. The form lets a tech override the total without touching the rate, so BOTH readings
+ * are taken and the higher one is judged: the total over the treated area (what was actually spread) and the entered rate when
+ * it is a lb-per-1,000 rate. null when neither can be read (no rate, or a total with no area), so the cap cannot be judged.
  */
 function ratePer1000(row) {
-  if (positive(row.application_rate) && LB_PER_1000_UNITS.has(squash(row.rate_unit))) return Number(row.application_rate);
+  const readings = [];
+  if (positive(row.application_rate) && LB_PER_1000_UNITS.has(squash(row.rate_unit))) readings.push(Number(row.application_rate));
   if (positive(row.total_amount) && ['lb', 'lbs'].includes(squash(row.amount_unit)) && positive(row.area_value) && SQFT_UNITS.has(squash(row.area_unit))) {
-    return (Number(row.total_amount) / Number(row.area_value)) * 1000;
+    readings.push((Number(row.total_amount) / Number(row.area_value)) * 1000);
   }
-  return null;
+  return readings.length ? Math.max(...readings) : null;
 }
 
 const round2 = (value) => Math.round(value * 100) / 100;
