@@ -318,7 +318,7 @@ describe('the bundle is written in the cancel transaction', () => {
 
 describe('the request marks its bundle complete', () => {
   test('liveFinish completes a pending bundle with the follow-through reports and frees the lease', async () => {
-    const row = seedBundle({ created_at: new Date(mockNow.getTime() - 1 * MIN) });
+    const row = seedBundle({ created_at: new Date(mockNow.getTime() - 1 * MIN), notice_outcome: { state: 'sent', by: 'request' } });
     await svc.liveFinish({ ibCancelBundleId: row.id, ibMoneyReport: { skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'x' }] }, ibLinkedChildReport: { skipped: [] } });
     expect(row).toMatchObject({ status: 'complete', finish_note: 'request', lease_owner: null, lease_until: null });
     expect(row.followthrough_outcome).toEqual({ money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'x' }], linked_skipped: [] });
@@ -331,6 +331,7 @@ describe('the request marks its bundle complete', () => {
     expect(row).toMatchObject({ status: 'pending', lease_owner: 'sweep-token', notice_outcome: null });
     // Once that lease has run out the request may record again.
     row.lease_until = new Date(mockNow.getTime() - 1 * MIN);
+    row.notice_outcome = { state: 'sent', by: 'request' };
     await svc.liveFinish({ ibCancelBundleId: row.id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } });
     expect(row.status).toBe('complete');
   });
@@ -406,6 +407,57 @@ describe('the request marks its bundle complete', () => {
     });
   });
 
+  describe('an approved text with no terminal outcome never completes the bundle', () => {
+    const ft = { ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } };
+
+    test('liveFinish records the follow-through, keeps the bundle pending with a free lease, and flags the request', async () => {
+      const row = seedBundle({ created_at: new Date(mockNow.getTime() - 1 * MIN) });
+      const req = { ibCancelBundleId: row.id, ...ft };
+      await svc.liveFinish(req);
+      expect(row).toMatchObject({ status: 'pending', lease_owner: null, lease_until: null });
+      expect(row.finish_note).toBeUndefined();
+      expect(row.followthrough_done_at).toBeTruthy();
+      expect(row.followthrough_outcome).toEqual({ money_skipped: [], linked_skipped: [] });
+      expect(req.ibCancelTextPending).toBe(true);
+    });
+
+    test('the card that chose no text still completes', async () => {
+      const row = seedBundle({ notify_customer: false, approved_notice: null });
+      const req = { ibCancelBundleId: row.id, ...ft };
+      await svc.liveFinish(req);
+      expect(row.status).toBe('complete');
+      expect(req.ibCancelTextPending).toBeUndefined();
+    });
+
+    test('a not-sent report while the approved marker is untouched is not terminal: nothing recorded, outcome cleared, flagged', async () => {
+      const row = seedBundle();
+      mockNoticeStatus.mockResolvedValueOnce('ready');
+      const outcome = { notificationSent: false, notificationError: 'connection terminated' };
+      const req = { ibCancelBundleId: row.id, ibCancelNoticeOutcome: outcome };
+      await svc.liveNotice(req, outcome);
+      expect(row.notice_outcome).toBeNull();
+      expect(outcome.notificationSent).toBeUndefined();
+      expect(req.ibCancelTextPending).toBe(true);
+    });
+
+    test('the sweep then runs ONLY the text step on the still-untouched marker and finishes the bundle', async () => {
+      const row = seedBundle({ created_at: new Date(mockNow.getTime() - 30 * MIN) });
+      await svc.liveFinish({ ibCancelBundleId: row.id, ...ft });
+      expect(row.status).toBe('pending');
+      const summary = await svc.sweepIbCancelBundles();
+      expect(summary.recovered).toBe(1);
+      expect(mockFollowThrough).not.toHaveBeenCalled();
+      expect(mockHandleCancellation).toHaveBeenCalledTimes(1);
+      expect(row.notice_outcome).toMatchObject({ state: 'sent', by: 'sweep' });
+    });
+
+    test('a request that already recorded a terminal outcome completes as before', async () => {
+      const row = seedBundle({ notice_outcome: { state: 'not_sent', error: 'blocked', by: 'request' } });
+      await svc.liveFinish({ ibCancelBundleId: row.id, ...ft });
+      expect(row.status).toBe('complete');
+    });
+  });
+
   test('a dispatch cancel with no bundle (no id on the request) touches nothing', async () => {
     seedBundle();
     await svc.liveStart({});
@@ -426,6 +478,7 @@ describe('the request marks its bundle complete', () => {
 
   test('liveNotice records the text outcome the request reported', async () => {
     const row = seedBundle();
+    mockNoticeStatus.mockResolvedValueOnce('suppressed'); // the approved send was blocked: a definite, terminal not-sent
     await svc.liveNotice({ ibCancelBundleId: row.id }, { notificationSent: false, notificationError: 'blocked for +19415550100' });
     expect(row.notice_outcome).toEqual({ state: 'not_sent', error: 'blocked for [number]', by: 'request' });
   });

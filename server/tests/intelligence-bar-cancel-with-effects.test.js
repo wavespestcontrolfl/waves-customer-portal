@@ -225,6 +225,15 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(normal.recovery_owns_outcome).toBeUndefined();
   });
 
+  test('an approved text the system is still sending says so, and never advises sending it by hand', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, textRetryScheduled: true } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.customer_text_sent).toBe(false);
+    expect(result.warning).toMatch(/has not gone out yet\. The system retries it within about 15 minutes/);
+    expect(result.warning).not.toMatch(/will not be retried automatically/);
+  });
+
   test('a text that the handler could not send is reported as a warning, not hidden', async () => {
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationError: 'customer opted out' } });
     const result = await executeTool('cancel_appointment', input(), ADMIN);

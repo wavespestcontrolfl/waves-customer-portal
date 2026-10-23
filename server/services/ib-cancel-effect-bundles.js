@@ -189,6 +189,9 @@ async function settleRequestNotice(row, outcome, classified) {
   });
   // "Sent" from an unclaimed send rests on ANY accepted audit row, so it is verified per approved recipient too: a recipient
   // the other sender never reached downgrades it to partial (or uncertain), and the receipt says so.
+  // The approved marker is still untouched: nothing was claimed or handed to the provider, so the failure was operational (an
+  // exception before the claim) or an early return, not a delivery verdict. Not terminal: the sweep claims the marker and sends.
+  if (status === 'ready' && classified.state === 'not_sent') return { state: 'open' };
   if (status === 'delivered') {
     if (classified.state === 'sent') return classified;
     Object.assign(outcome, { notificationSent: true, notificationError: null });
@@ -216,6 +219,12 @@ function liveNotice(req, outcome) {
       ? await db(TABLE).where({ id }).first('scheduled_service_id', 'approved_notice')
       : null;
     const settled = await settleRequestNotice(row, outcome, classified);
+    if (settled.state === 'open') {
+      // No terminal outcome: record nothing, and tell the request's reply the system retries the text (see liveFinish).
+      if (outcome && typeof outcome === 'object') { delete outcome.notificationSent; delete outcome.notificationError; }
+      req.ibCancelTextPending = true;
+      return null;
+    }
     return db(TABLE)
       .where({ id, status: 'pending' })
       .where(notHeldBySweep)
@@ -223,7 +232,12 @@ function liveNotice(req, outcome) {
   }));
 }
 
-// The follow-through returned: the request finished its work.
+// The follow-through returned: the request finished its work. The bundle is marked complete ONLY when the text step also has a
+// terminal outcome on the row (sent, partial, uncertain or a definite not-sent), or the card chose no text. When the card
+// approved a text and no outcome was recorded (the reminder step threw before reporting, or its outcome could not be saved),
+// the follow-through is recorded as done and the bundle stays PENDING with the lease freed: the sweep then runs only the text
+// step, claiming the still-untouched approved marker as usual (or classifying a marker that a handoff already touched). The
+// request flags req.ibCancelTextPending so its own reply says the system is retrying, never "send it by hand".
 function liveFinish(req) {
   const id = req && req.ibCancelBundleId;
   if (!id) return Promise.resolve(null);
@@ -231,21 +245,31 @@ function liveFinish(req) {
     money_skipped: (req.ibMoneyReport && req.ibMoneyReport.skipped) || [],
     linked_skipped: (req.ibLinkedChildReport && req.ibLinkedChildReport.skipped) || [],
   };
-  return trackOwnership(req, guarded('complete', () => db(TABLE)
-    .where({ id, status: 'pending' })
-    // Not completed under a live sweep lease (see notHeldBySweep): the sweep then finishes the row itself, idempotently,
-    // and records its own result; a normal recovery that the request beat to it still ends in the sweep's LeaseLost.
-    .where(notHeldBySweep)
-    .update({
-      status: 'complete',
-      followthrough_done_at: db.fn.now(),
-      followthrough_outcome: JSON.stringify(followthrough),
-      finished_at: db.fn.now(),
-      finish_note: FINISH_REQUEST,
-      lease_owner: null,
-      lease_until: null,
-      updated_at: db.fn.now(),
-    })));
+  return trackOwnership(req, guarded('complete', async () => {
+    const row = await db(TABLE).where({ id }).first('status', 'notify_customer', 'approved_notice', 'notice_outcome');
+    const textOpen = Boolean(row) && row.status === 'pending' && row.notify_customer === true
+      && Array.isArray(row.approved_notice) && row.approved_notice.length > 0 && !row.notice_outcome;
+    const patch = textOpen
+      ? { followthrough_done_at: db.fn.now(), followthrough_outcome: JSON.stringify(followthrough), lease_owner: null, lease_until: null, updated_at: db.fn.now() }
+      : {
+        status: 'complete',
+        followthrough_done_at: db.fn.now(),
+        followthrough_outcome: JSON.stringify(followthrough),
+        finished_at: db.fn.now(),
+        finish_note: FINISH_REQUEST,
+        lease_owner: null,
+        lease_until: null,
+        updated_at: db.fn.now(),
+      };
+    const changed = await db(TABLE)
+      .where({ id, status: 'pending' })
+      // Not completed under a live sweep lease (see notHeldBySweep): the sweep then finishes the row itself, idempotently,
+      // and records its own result; a normal recovery that the request beat to it still ends in the sweep's LeaseLost.
+      .where(notHeldBySweep)
+      .update(patch);
+    if (textOpen && changed) req.ibCancelTextPending = true;
+    return changed;
+  }));
 }
 
 // ── The sweep's side ──────────────────────────────────────────────────────────────────────────────────────────

@@ -2559,6 +2559,15 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
 });
 
 router.put('/:serviceId/status', serviceStatusHandler);
+// What the recovery record tells the Intelligence Bar's reply: the sweep took the bundle over while the request ran (its lease
+// ran out, so the sweep owns the outcome), and/or the approved text has no terminal outcome yet (the sweep sends it).
+function ibRecoveryReplyFlags(req) {
+  return {
+    ...(req.ibCancelBundleLost ? { recoveryOwnsOutcome: true } : {}),
+    ...(req.ibCancelTextPending ? { textRetryScheduled: true } : {}),
+  };
+}
+
 async function serviceStatusHandler(req, res, next) {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
@@ -3504,8 +3513,7 @@ async function serviceStatusHandler(req, res, next) {
         : {}),
       ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
       ...(req.ibMoneyReport ? { moneySkipped: req.ibMoneyReport.skipped } : {}),
-      // The recovery sweep took this bundle over while the request ran (its lease ran out): the sweep owns the outcome.
-      ...(req.ibCancelBundleLost ? { recoveryOwnsOutcome: true } : {}),
+      ...ibRecoveryReplyFlags(req),
     });
   } catch (err) { next(err); }
 }
@@ -3583,7 +3591,7 @@ function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeC
             : {}),
           ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
           ...(req.ibMoneyReport ? { moneySkipped: req.ibMoneyReport.skipped } : {}),
-          ...(req.ibCancelBundleLost ? { recoveryOwnsOutcome: true } : {}),
+          ...ibRecoveryReplyFlags(req),
         },
       });
     };

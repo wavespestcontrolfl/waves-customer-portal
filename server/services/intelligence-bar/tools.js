@@ -4671,14 +4671,12 @@ async function cancelReceiptName(appt, frozen, appointment_id) {
   return frozen?.appointment?.customer_name || 'Unknown';
 }
 
-// What the Dispatch handler did NOT finish, in the operator's words (the receipt shows result.warning only).
-function cancelReplayWarnings(json, sendText) {
+// The approved text has no terminal outcome yet (the reminder step failed before reporting): the system retries it.
+const TEXT_RETRY_WARNING = 'The visit is cancelled, but the customer text has not gone out yet. The system retries it within about 15 minutes (only if it was never started) and posts a note to the office alerts. Do not send it by hand unless that note says it did not go out.';
+
+// The customer text's warnings, in the operator's words.
+function cancelTextWarnings(json, sendText) {
   const warnings = [];
-  // A step after the cancel committed failed (activity log, settlement bookkeeping...): the visit IS cancelled and the
-  // text / money steps before it may have run, so this is a success with a warning, never a failed action.
-  if (json.postCommitFailure) {
-    warnings.push(`The visit is cancelled, but a step after the cancel did not finish (${json.postCommitFailure}). Nothing was undone: check the visit's invoices and credit and the customer's message history${sendText && json.notificationSent === undefined ? ' (the customer text may or may not have gone out)' : ''} before doing anything again. The approved steps are saved: within about 15 minutes the system finishes any invoice, credit or linked-visit step that is left (and the approved text, only if it was never started) and posts a note to the office alerts.`);
-  }
   // Delivery unproven (the provider may have accepted it): never advise a resend, whatever else is true.
   if (sendText && json.notificationUncertain === true) {
     warnings.push(`The visit is cancelled, but the customer text may have gone out (${json.notificationError || 'delivery could not be confirmed'}). Check the customer's message history before sending it again.`);
@@ -4689,6 +4687,19 @@ function cancelReplayWarnings(json, sendText) {
   if (sendText && json.notificationUncertain !== true && json.notificationSent === true && json.notificationPartial === true) {
     warnings.push(`The visit is cancelled and the customer text went to some recipients, but not all (${json.notificationError || 'no reason given'}). Do not send it again to those already reached.`);
   }
+  if (sendText && json.textRetryScheduled === true && json.notificationSent === undefined) warnings.push(TEXT_RETRY_WARNING);
+  return warnings;
+}
+
+// What the Dispatch handler did NOT finish, in the operator's words (the receipt shows result.warning only).
+function cancelReplayWarnings(json, sendText) {
+  const warnings = [];
+  // A step after the cancel committed failed (activity log, settlement bookkeeping...): the visit IS cancelled and the
+  // text / money steps before it may have run, so this is a success with a warning, never a failed action.
+  if (json.postCommitFailure) {
+    warnings.push(`The visit is cancelled, but a step after the cancel did not finish (${json.postCommitFailure}). Nothing was undone: check the visit's invoices and credit and the customer's message history${sendText && json.notificationSent === undefined ? ' (the customer text may or may not have gone out)' : ''} before doing anything again. The approved steps are saved: within about 15 minutes the system finishes any invoice, credit or linked-visit step that is left (and the approved text, only if it was never started) and posts a note to the office alerts.`);
+  }
+  warnings.push(...cancelTextWarnings(json, sendText));
   // A money effect that changed since the card (an invoice, a payment attempt, a credit) was NOT acted on.
   const moneySkipped = json.moneySkipped || [];
   if (moneySkipped.length) {

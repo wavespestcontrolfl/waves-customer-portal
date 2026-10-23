@@ -262,6 +262,20 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     expect(row.followthrough_outcome.linked_already_cancelled).toBeUndefined();
   });
 
+  test('a request that finishes with the approved text still open leaves the bundle pending; the sweep sends only the text and completes it', async () => {
+    const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+    const req = { ibCancelBundleId: id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } };
+    await svc.liveFinish(req);
+    expect(req.ibCancelTextPending).toBe(true);
+    expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'pending', lease_owner: null });
+    expect((await app(TABLE).where({ id }).first()).followthrough_done_at).toBeTruthy();
+    await ageBundle(id, 30);
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ recovered: 1 });
+    expect(mockFollowThrough).not.toHaveBeenCalled();
+    expect(mockHandleCancellation).toHaveBeenCalledTimes(1);
+    expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'recovered' });
+  });
+
   test('a visit restored after the cancel is abandoned: nothing runs', async () => {
     const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
     await ageBundle(id, 30);
@@ -562,7 +576,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       await app(TABLE).where({ id }).update({ lease_owner: 'report:abc', lease_until: app.raw("now() + interval '5 minutes'") });
       await svc.liveFinish(report);
       expect((await app(TABLE).where({ id }).first()).status).toBe('pending');
-      await app(TABLE).where({ id }).update({ lease_owner: 'report:abc', lease_until: app.raw("now() - interval '1 minute'") });
+      await app(TABLE).where({ id }).update({ lease_owner: 'report:abc', lease_until: app.raw("now() - interval '1 minute'"), notice_outcome: JSON.stringify({ state: 'sent', by: 'request' }) });
       await svc.liveFinish(report);
       expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'complete', finish_note: 'request', lease_owner: null });
       const other = await app.transaction((trx) => svc.insertBundle(trx, pins()));

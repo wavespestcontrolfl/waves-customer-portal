@@ -328,6 +328,16 @@ describe('the recovery bundle rides the cancel transaction', () => {
     expect(json.recoveryOwnsOutcome).toBe(true);
   });
 
+  test('an approved text with no terminal outcome: the reply carries textRetryScheduled (the sweep sends it)', async () => {
+    const bundles = require('../services/ib-cancel-effect-bundles');
+    const spy = jest.spyOn(bundles, 'liveFinish').mockImplementationOnce(async (req) => { req.ibCancelTextPending = true; });
+    const { json } = await run();
+    spy.mockRestore();
+    expect(json.success).toBe(true);
+    expect(json.textRetryScheduled).toBe(true);
+    expect((await run()).json.textRetryScheduled).toBeUndefined();
+  });
+
   test('the normal path (the request still owns its bundle) carries no such flag', async () => {
     const { json } = await run();
     expect(json.recoveryOwnsOutcome).toBeUndefined();
