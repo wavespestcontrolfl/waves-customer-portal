@@ -93,6 +93,12 @@ describe('write provenance (pre-push audit on 75ecf0d2f9)', () => {
     const unstamped = { ...lead, extracted_data: JSON.stringify({ homeSqFt: 2614 }) };
     expect(classify({ ...r, leads: [unstamped] }).class).toBe('legacy_ambiguous_review');
   });
+
+  test('a draft the retry refreshed proves by its updated_at (codex #6520 r4): the first calculation minted it, the retry attached the customer', () => {
+    const stale = { ...est(2614, '2026-10-08T19:50:00Z'), updated_at: '2026-10-08T20:33:12Z' };
+    expect(classify({ ...row('2026-10-08T20:33:05Z', 2614, '2026-10-08T19:50:00Z'), estimates: [stale] }).class).toBe('house_in_lawn_mirror');
+    expect(classify({ ...row('2026-10-08T20:33:05Z', 2614, '2026-10-08T19:50:00Z'), estimates: [{ ...stale, updated_at: '2026-10-08T19:50:00Z' }] }).class).toBe('legacy_ambiguous_review');
+  });
 });
 
 describe('parseArgs', () => {
@@ -102,5 +108,9 @@ describe('parseArgs', () => {
     expect(parseArgs(['--out', 'x.csv', '--only', 'c1'])).toEqual({ apply: false, sure: false, out: 'x.csv', only: 'c1' });
     expect(parseArgs(['--apply', '--i-am-sure-this-is-the-intended-database', '--out', 'y.csv']).apply).toBe(true);
     expect(() => parseArgs(['--out', 'x.csv', '--bogus'])).toThrow(/unknown argument/);
+    // A flag that needs a value must not swallow the next flag or run unbounded (r4 P1).
+    expect(() => parseArgs(['--apply', '--i-am-sure-this-is-the-intended-database', '--out', 'y.csv', '--only'])).toThrow(/--only needs a value/);
+    expect(() => parseArgs(['--only', '--out', 'y.csv'])).toThrow(/--only needs a value/);
+    expect(() => parseArgs(['--out'])).toThrow(/--out needs a value/);
   });
 });

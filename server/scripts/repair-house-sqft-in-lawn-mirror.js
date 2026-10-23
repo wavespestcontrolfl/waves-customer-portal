@@ -49,14 +49,6 @@ const QUOTE_WRITE_WINDOW_MS = 15 * 60 * 1000;
 
 function ms(v) { const t = v instanceof Date ? v.getTime() : Date.parse(v); return Number.isFinite(t) ? t : null; }
 
-/** The customer row was created by the same quote request as the evidence row (write provenance). */
-function createdByQuote(customer, evidenceCreatedAt) {
-  const c = ms(customer?.created_at);
-  const e = ms(evidenceCreatedAt);
-  if (c == null || e == null) return false;
-  return Math.abs(c - e) <= QUOTE_WRITE_WINDOW_MS;
-}
-
 const HOME_SQFT_CARRIERS = [
   ['engineRequest.profile', (d) => d.engineRequest?.profile],
   ['engineRequest', (d) => d.engineRequest],
@@ -92,42 +84,67 @@ function homeSqFtFromEstimate(estimateData) {
   return out;
 }
 
+/** The customer row was created by the same quote request as one of the evidence row's write times (provenance). */
+function createdByQuote(customer, writeTimes) {
+  const c = ms(customer?.created_at);
+  if (c == null) return false;
+  return (writeTimes || []).some((t) => { const e = ms(t); return e != null && Math.abs(c - e) <= QUOTE_WRITE_WINDOW_MS; });
+}
+
+/** A lawn writer already set a size for this customer: the turf row, or a reviewed lawn on the primary property. */
+function lawnAlreadyOnFile(turf, primary) {
+  if (Number(turf?.lawn_sqft) > 0) return 'has_turf_lawn';
+  const reviewed = primary?.service_area_measurements;
+  const reviewedLawn = (typeof reviewed === 'string' ? parseData(reviewed) : reviewed)?.areas?.lawn?.sqft;
+  return Number(reviewedLawn) > 0 ? 'has_reviewed_lawn' : null;
+}
+
+/**
+ * The quote's own writes that record `propertySqft` as the home size, each with the times that write (or its
+ * refresh) happened: a quote-wizard estimate for the customer's primary property (created_at, and updated_at for a
+ * draft the retry refreshed — codex #6520 r4), or a quote-wizard lead linked to the customer (its server-stamped
+ * wizard_submitted_at; created_at is only the lookup mint — r3).
+ */
+function quoteEvidence({ customer, primary, estimates, leads }, propertySqft) {
+  const fromEstimates = (estimates || [])
+    .filter((e) => e.source === QUOTE_ESTIMATE_SOURCE && estimateTargetsPrimary(e, customer, primary).match)
+    .map((e) => ({ hit: homeSqFtFromEstimate(e.estimate_data).find((h) => h.value === propertySqft), e }))
+    .filter(({ hit }) => hit)
+    .map(({ hit, e }) => ({ houseField: hit.field, estimateId: e.id, writeTimes: [e.created_at, e.updated_at] }));
+  const fromLeads = (leads || [])
+    .filter((l) => l.lead_type === QUOTE_LEAD_TYPE)
+    .map((l) => ({ l, data: parseData(l.extracted_data) }))
+    .filter(({ data }) => Math.round(Number(data.homeSqFt)) === propertySqft)
+    .map(({ l, data }) => ({ houseField: 'lead.extracted_data.homeSqFt', leadId: l.id, writeTimes: [data.wizard_submitted_at, l.created_at] }));
+  return [...fromEstimates, ...fromLeads];
+}
+
 /**
  * Classify one customer. Pure. `estimates` = every estimate row of the customer (any status: the quote writes the
  * lead's estimate before it is accepted, and the house value lands with it); `leads` = the customer's quote-wizard
- * lead rows. Only a quote-wizard estimate for the customer's primary property, or a quote-wizard lead linked to the
- * customer, can prove a house value.
- * @returns {{ class: string, houseField?: string, propertySqft?: number, primaryMatches?: boolean }}
+ * lead rows.
+ * @returns {{ class: string, houseField?: string, estimateId?: string, leadId?: string, propertySqft?: number, primaryMatches?: boolean }}
  */
-function classify({ customer, turf, primary, estimates, leads }) {
+function classify(entry) {
+  const { customer, turf, primary } = entry;
   const propertySqft = Number(customer.property_sqft);
   if (!(propertySqft > 0)) return { class: 'no_property_sqft' };
-  if (Number(turf?.lawn_sqft) > 0) return { class: 'has_turf_lawn', propertySqft };
-  const reviewed = primary?.service_area_measurements;
-  const reviewedLawn = (typeof reviewed === 'string' ? parseData(reviewed) : reviewed)?.areas?.lawn?.sqft;
-  if (Number(reviewedLawn) > 0) return { class: 'has_reviewed_lawn', propertySqft };
-  // The quote's own writes that record this exact number as the home size.
-  const evidence = [];
-  for (const e of estimates || []) {
-    if (e.source !== QUOTE_ESTIMATE_SOURCE) continue;
-    if (!estimateTargetsPrimary(e, customer, primary).match) continue;
-    const hit = homeSqFtFromEstimate(e.estimate_data).find((h) => h.value === propertySqft);
-    if (hit) evidence.push({ houseField: hit.field, estimateId: e.id, createdAt: e.created_at });
-  }
-  for (const l of leads || []) {
-    if (l.lead_type !== QUOTE_LEAD_TYPE) continue;
-    const data = parseData(l.extracted_data);
-    const n = Number(data.homeSqFt);
-    // A lead row is minted by the property lookup and re-typed in place on each calculation, so its created_at is
-    // the mint; the quote request's own time is extracted_data.wizard_submitted_at (codex #6520 r3 P2).
-    if (Number.isFinite(n) && Math.round(n) === propertySqft) evidence.push({ houseField: 'lead.extracted_data.homeSqFt', leadId: l.id, createdAt: data.wizard_submitted_at || l.created_at });
-  }
+  const lawn = lawnAlreadyOnFile(turf, primary);
+  if (lawn) return { class: lawn, propertySqft };
+  const evidence = quoteEvidence(entry, propertySqft);
   if (!evidence.length) return { class: 'unproven', propertySqft };
-  const primaryMatches = !!primary && Number(primary.property_sqft) === propertySqft;
-  // Provenance: only a customer row the quote created can have had the house written unconditionally.
-  const own = evidence.find((ev) => createdByQuote(customer, ev.createdAt));
-  if (!own) return { class: 'legacy_ambiguous_review', houseField: evidence[0].houseField, estimateId: evidence[0].estimateId, leadId: evidence[0].leadId, propertySqft, primaryMatches };
-  return { class: 'house_in_lawn_mirror', houseField: own.houseField, estimateId: own.estimateId, leadId: own.leadId, propertySqft, primaryMatches };
+  // Provenance: only a customer row the quote created can have had the house written unconditionally; an older
+  // customer whose legacy lawn a later quote happens to match (the 2,000 default above all) is review only.
+  const own = evidence.find((ev) => createdByQuote(customer, ev.writeTimes));
+  const { houseField, estimateId, leadId } = own || evidence[0];
+  return {
+    class: own ? 'house_in_lawn_mirror' : 'legacy_ambiguous_review',
+    houseField,
+    estimateId,
+    leadId,
+    propertySqft,
+    primaryMatches: !!primary && Number(primary.property_sqft) === propertySqft,
+  };
 }
 
 function parseArgs(argv) {
@@ -137,8 +154,13 @@ function parseArgs(argv) {
     if (a === '--apply') out.apply = true;
     else if (a === '--dry-run') out.apply = false;
     else if (a === '--i-am-sure-this-is-the-intended-database') out.sure = true;
-    else if (a === '--out') out.out = argv[++i];
-    else if (a === '--only') out.only = argv[++i];
+    else if (a === '--out' || a === '--only') {
+      const v = argv[i + 1];
+      // A missing value must not silently widen the run: `--only` with no id would process every customer (r4 P1).
+      if (v === undefined || v.startsWith('--')) throw new Error(`${a} needs a value`);
+      out[a.slice(2)] = v;
+      i += 1;
+    }
     else throw new Error(`unknown argument ${a}`);
   }
   if (!out.out) throw new Error('--out <file> is required');
@@ -159,7 +181,7 @@ async function loadCustomers(knex, only) {
   if (only) q.where('c.id', only);
   const rows = await q;
   const ids = rows.map((r) => r.id);
-  const estimates = ids.length ? await knex('estimates').whereIn('customer_id', ids).select('id', 'customer_id', 'status', 'source', 'property_id', 'address', 'created_at', 'estimate_data') : [];
+  const estimates = ids.length ? await knex('estimates').whereIn('customer_id', ids).select('id', 'customer_id', 'status', 'source', 'property_id', 'address', 'created_at', 'updated_at', 'estimate_data') : [];
   const byCustomer = new Map();
   for (const e of estimates) byCustomer.set(e.customer_id, [...(byCustomer.get(e.customer_id) || []), e]);
   const leads = ids.length ? await knex('leads').whereIn('customer_id', ids).where({ lead_type: QUOTE_LEAD_TYPE }).select('id', 'customer_id', 'lead_type', 'created_at', 'extracted_data') : [];
