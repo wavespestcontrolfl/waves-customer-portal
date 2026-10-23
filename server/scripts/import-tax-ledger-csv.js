@@ -10,9 +10,19 @@
  *   node server/scripts/import-tax-ledger-csv.js --file /path/ledger-2025.csv --dry-run
  *   node server/scripts/import-tax-ledger-csv.js --file /path/ledger-2025.csv
  *
- * Idempotent: row_hash is unique, so a second run inserts nothing and creates
- * no duplicate expense. Hashes are looked up first; a row whose hash exists is
- * skipped entirely (no expense either).
+ * It fills a date range the portal has nothing for, and never reconciles the
+ * ledger against other rows by guesswork:
+ *  - a bank row from a feed or an upload in the file's date range refuses the
+ *    run (those rows are classified in Bank Import, with the ledger rules);
+ *  - a rerun of the same file loads nothing twice (row_hash is unique): an
+ *    unchanged row is a duplicate; a row the file now reads differently, or
+ *    whose expense was deleted since, is HELD and listed, never rewritten;
+ *  - a loaded row that is no longer in the file (a corrected date, text or
+ *    amount, or a dropped row) refuses the run: a loaded row is corrected in
+ *    Bank Import, not by re-import;
+ *  - an expense already in the portal (entered by hand, or from a feed) of
+ *    the same gross amount within the matcher's window holds the ledger's
+ *    expense row; every such expense is listed to check once.
  *
  * CSV header (exact):
  *   source,date,description,amount,direction,class,category,sched_c_line,flag,processor_match,bank_category
@@ -177,49 +187,14 @@ function parseLedgerCsv(text) {
 }
 
 /**
- * Bank Import's row identity without the account label (bank-import.js
- * withRowHashes). A DATE column comes back from pg as a JS Date at LOCAL
- * midnight, so the calendar day is read from the local components, never
- * through a time-zone conversion (an ET conversion of a UTC-midnight Date
- * would give the day before).
+ * The calendar day of a portal DATE value. A DATE column comes back from pg
+ * as a JS Date at LOCAL midnight, so the day is read from the local
+ * components, never through a time-zone conversion (an ET conversion of a
+ * UTC-midnight Date would give the day before).
  */
 function ymdOf(v) {
   if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
   return String(v || '').slice(0, 10);
-}
-function tupleKey(r) {
-  return `${ymdOf(r.txn_date)}|${String(r.description || '').replace(/\s+/g, ' ').toUpperCase()}|${Number(r.amount).toFixed(2)}|${r.direction}`;
-}
-
-/**
- * The ledger's source is an account's last four digits (or "amex"); a portal
- * row's account is known when its label carries those digits (an upload
- * labelled by the owner) or its Plaid account mask equals them.
- */
-const ACCOUNT_ALIASES = { amex: ['amex', 'american express', 'american-express', 'americanexpress'] };
-function sameAccount(source, accountLabel, masks) {
-  const code = String(source || '').trim().toLowerCase();
-  const label = String(accountLabel || '').toLowerCase();
-  if (!code || !label) return false;
-  if ((ACCOUNT_ALIASES[code] || [code]).some(a => label.includes(a))) return true;
-  const mask = masks.get(String(accountLabel));
-  return !!mask && mask.toLowerCase() === code;
-}
-// A portal row's account: a Plaid row carries the account's stable id, so a
-// renamed Plaid label (plaid_accounts is updated, old rows keep the old
-// label) still resolves to its mask, and that mask is the answer either way
-// (a stale label that happens to contain the digits never overrides it);
-// rows without that identity go by their label.
-function sameAccountRow(source, row, ids) {
-  const code = String(source || '').trim().toLowerCase();
-  const acct = row.plaid_account_id ? ids.accountsById.get(String(row.plaid_account_id)) : null;
-  if (acct) {
-    // a numeric source is the account's mask, nothing else; an alias (amex)
-    // has no mask to compare and is read from the account's CURRENT label
-    if (/^\d+$/.test(code)) return String(acct.mask || '').toLowerCase() === code;
-    return sameAccount(source, acct.label, ids.masks) || sameAccount(source, row.account_label, ids.masks);
-  }
-  return sameAccount(source, row.account_label, ids.masks);
 }
 
 /** sha256 over the ledger identity tuple plus the in-file ordinal. */
@@ -239,12 +214,16 @@ const SOFTWARE_27A = /software|subscription|saas|\bapp\b|hosting|domain|cloud|\b
 // fee on its own (pnl-report) and a manual expense for it would count it
 // twice. Such a row is parked with that note; other line 10 items book.
 const PROCESSOR_FEE_RE = /stripe|processing fee|processor fee|merchant fee|card fee|payment fee|transaction fee/i;
+const PROCESSOR_NOTE = 'processor fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced';
+// The ledger marks a processor fee by its processor_match column (the row
+// matched a processor record) or, on line 10, by its text.
+function processorFee(row, line) {
+  if (/^(y|yes|true|1)$/i.test(String(row.processor_match || '').trim())) return true;
+  return String(line) === '10' && PROCESSOR_FEE_RE.test(String(row.category || ''));
+}
 // The note a parked business row carries: why it is not booked here.
-function parkNote(line, category) {
-  if (String(line) === '10' && PROCESSOR_FEE_RE.test(String(category || ''))) {
-    return { note: 'processor fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced' };
-  }
-  return {};
+function parkNote(row, line) {
+  return processorFee(row, line) ? { note: PROCESSOR_NOTE } : {};
 }
 function categoryNameForLine(line, category) {
   const key = String(line || '').trim().toLowerCase();
@@ -309,7 +288,9 @@ function mapRow(row, ordinal, basename) {
     suggestion: null,
   };
   const out = { bank, expense: null, categoryName: null, unmatchedLine: null, ledgerClass: row.class };
-  const base = { ledgerClass: row.class, ledgerCategory: row.category, flag: row.flag };
+  // the ledger's reading travels with every row (class, category and line
+  // are not in the hash: a rerun compares them to what was loaded)
+  const base = { ledgerClass: row.class, ledgerCategory: row.category, flag: row.flag, schedCLine: row.sched_c_line };
 
   const refundCredit = (row.class === 'refund' || BUSINESS_CLASSES.has(row.class)) && row.direction === 'in';
   // a refund, a processor deposit or a receipt is money IN by definition:
@@ -331,10 +312,10 @@ function mapRow(row, ordinal, basename) {
 
   if (BUSINESS_CLASSES.has(row.class)) {
     const line = row.sched_c_line || CLASS_DEFAULT_LINE[row.class] || '';
-    const categoryName = categoryNameForLine(line, row.category);
+    const categoryName = processorFee(row, line) ? null : categoryNameForLine(line, row.category);
     if (!categoryName) {
       bank.status = 'unmatched';
-      bank.suggestion = reviewSuggestion(row, parkNote(line, row.category));
+      bank.suggestion = reviewSuggestion(row, parkNote(row, line));
       out.unmatchedLine = row.sched_c_line || '(none)';
       out.businessParked = true; // business by the ledger, no category to book it under here
       return out;
@@ -386,7 +367,7 @@ function mapNonBusinessRow(row, out, base) {
 function parkForReview(mapped, row) {
   mapped.bank.status = 'unmatched';
   mapped.bank.match_method = null;
-  mapped.bank.suggestion = reviewSuggestion(row, parkNote(row.sched_c_line, row.category));
+  mapped.bank.suggestion = reviewSuggestion(row, parkNote(row, row.sched_c_line));
   mapped.expense = null;
   mapped.unmatchedLine = row.sched_c_line || '(none)';
   mapped.businessParked = true;
@@ -432,19 +413,20 @@ function formatTable(map, title) {
   return [`${title}:`, ...keys.map(k => `  ${k.padEnd(28)} ${String(map[k].count).padStart(5)}  ${fmtMoney(map[k].cents).padStart(14)}`)];
 }
 
-function formatReport({ dryRun, file, read, inserted, duplicates, overlaps = 0, held = [], unsure = [], handExpenses = [], summary }) {
+function grossNote(e) {
+  return e.gross != null && Number(e.gross) !== Number(e.amount) ? ` (gross ${Number(e.gross).toFixed(2)} before refunds)` : '';
+}
+
+function formatReport({ dryRun, file, read, inserted, duplicates, held = [], portalExpenses = [], summary }) {
   const lines = [
     `${dryRun ? 'DRY RUN - nothing written. ' : ''}Ledger import report for ${path.basename(file)}`,
     `rows read:                 ${read}`,
     `${dryRun ? 'would insert:              ' : 'inserted:                  '}${inserted}`,
-    `skipped as duplicate:      ${duplicates}`,
-    `already in the portal:     ${overlaps} (left out: the same row, same account and text, already booked, linked or ignored there)`,
-    `held, not imported:        ${held.length} (the same row still open in the portal, the same charge under other text, or an expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days; decide each in Bank Import)`,
-    ...held.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]  (portal: "${h.other}" in ${h.account})`),
-    `check these:               ${unsure.length} (imported; a bank row of ANOTHER or an unknown account has the same day, amount and direction)`,
-    ...unsure.map(u => `  line ${u.line}  ${u.date}  ${u.description}  ${u.amount}  (portal account: ${u.other})`),
-    `hand-entered expenses:     ${handExpenses.length} in this range, not matched by guesswork; check each against the ledger once`,
-    ...handExpenses.map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}${e.gross != null && Number(e.gross) !== Number(e.amount) ? ` (gross ${Number(e.gross).toFixed(2)} before refunds)` : ''}`),
+    `skipped as duplicate:      ${duplicates} (loaded by an earlier run, unchanged)`,
+    `held, not imported:        ${held.length} (loaded before under another reading or without its expense, or an expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days is already in the portal; decide each in Bank Import)`,
+    ...held.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
+    `expenses in the portal:    ${portalExpenses.length} entered by hand or from a feed within ${EXPENSE_DATE_WINDOW_DAYS} days of this file's dates (never matched by guesswork: a ledger expense row of the same amount nearby is held above; check each once)`,
+    ...portalExpenses.map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}${grossNote(e)}`),
     `${dryRun ? 'expenses to create:' : 'expenses created:'}`.padEnd(27) + summary.expensesCreated,
     ...formatTable(summary.byStatus, 'by status'),
     ...formatTable(summary.expensesByCategory, `expenses ${dryRun ? 'to create' : 'created'} by category`),
@@ -465,154 +447,6 @@ function chunk(arr, size) {
 
 class DuplicateRace extends Error {}
 
-/**
- * Load a ledger CSV. `db` is a knex instance (or a stub with the same calls).
- * With dryRun it reads (existing hashes, categories) but writes nothing.
- * Returns { report, counts, summary }.
- */
-// What the portal already holds for this file: the ledger rows loaded
-// before (by row_hash), the bank rows from a feed or an upload in the file's
-// date range, the hand-entered expenses in it, and the Plaid account masks.
-async function loadPortalState(db, mapped, rows, skipExisting) {
-  // the rows an earlier run loaded, with their state: a row whose expense was
-  // deleted since (the FK is null, or the matcher reopened it) is not done
-  const existing = new Map();
-  for (const part of chunk(mapped.map(m => m.bank.row_hash), HASH_LOOKUP_CHUNK)) {
-    const found = await db('bank_transactions').whereIn('row_hash', part).select('id', 'row_hash', 'status', 'matched_expense_id', 'matched_payout_id', 'suggestion', 'description');
-    found.forEach(f => existing.set(f.row_hash, f));
-  }
-  const dates = rows.map(r => r.date).sort();
-  const range = [dates[0], dates[dates.length - 1]];
-  const existingBank = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).whereNot('source', SOURCE_TAG)
-    .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction', 'suggestion') : [];
-  // the rows earlier ledger runs loaded in this range: a row whose text was
-  // corrected since has a new hash, and must still find its old self (same
-  // account, day, amount and direction) instead of loading twice. They sit
-  // in the overlap pools only; the refusal above counts other sources.
-  const priorLedgerRows = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).where({ source: SOURCE_TAG })
-    .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction', 'suggestion') : [];
-  // expenses this importer made on an earlier run are the ledger's own, not
-  // "already there from elsewhere": they are linked from a ledger bank row
-  // the file's range widened by the matcher window: a receipt dated days
-  // before the first posting (or after the last) can still be a ledger row,
-  // and an expense an earlier ledger run made just outside the range must
-  // still read as the ledger's own
-  const handRange = [shiftDays(range[0], -EXPENSE_DATE_WINDOW_DAYS), shiftDays(range[1], EXPENSE_DATE_WINDOW_DAYS)];
-  const ledgerMade = new Set(rows.length ? (await db('bank_transactions').where({ source: SOURCE_TAG }).whereBetween('txn_date', handRange).whereNotNull('matched_expense_id')
-    .select('matched_expense_id')).map(r => r.matched_expense_id) : []);
-  // Expenses linked to a bank row are covered through that row when it
-  // overlaps a ledger row; the bank posting can sit a day or more after the
-  // ledger's charge date, so they stay in the amount pool too (one-for-one
-  // with their row). The rest are hand-entered: never matched by payee
-  // guesswork (text varies); a ledger expense of the same gross amount
-  // within the window is held for the owner, and the report lists them all
-  // to check once.
-  const inRange = rows.length ? (await db('expenses').whereBetween('expense_date', handRange)
-    .select('id', 'expense_date', 'amount', 'vendor_name', 'description', 'payment_method')).filter(e => !ledgerMade.has(e.id)) : [];
-  // the bank rows these expenses are linked to, whatever their posting date:
-  // they carry the expense's account identity
-  const linkedRows = inRange.length ? await db('bank_transactions').whereIn('matched_expense_id', inRange.map(e => e.id)).whereNot('source', SOURCE_TAG)
-    .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'txn_date', 'description', 'amount', 'direction') : [];
-  const linkedExpenseIds = new Set(linkedRows.map(f => f.matched_expense_id));
-  const handExpenses = inRange.filter(e => !linkedExpenseIds.has(e.id));
-  const coveredExpenses = inRange.filter(e => linkedExpenseIds.has(e.id));
-  // compared at the gross amount (one small query per expense: a one-off run
-  // over a handful of rows)
-  for (const e of inRange) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, db)).toFixed(2));
-  if ((existingBank.length || handExpenses.length) && !skipExisting) {
-    throw fail(`the portal already holds ${existingBank.length} bank row(s) from a feed or upload between ${range[0]} and ${range[1]} and ${handExpenses.length} hand-entered expense(s) within ${EXPENSE_DATE_WINDOW_DAYS} days of that range; rerun with --skip-existing to leave out the ledger rows the portal already answers (a row still open there is held and listed; hand-entered expenses are listed for you to check)`);
-  }
-  const plaidAccounts = await db('plaid_accounts').select('account_id', 'account_label', 'mask');
-  const masks = new Map(plaidAccounts.map(a => [String(a.account_label), String(a.mask || '')]));
-  const accountsById = new Map(plaidAccounts.filter(a => a.account_id).map(a => [String(a.account_id), { mask: String(a.mask || ''), label: String(a.account_label || '') }]));
-  const categories = await db('expense_categories').select('id', 'name');
-  // the expenses the overlapping portal rows are booked under: their category
-  // is compared with the ledger's (a different business category is a
-  // conflict for the owner, not an answer)
-  const bookedIds = [...new Set([...existingBank, ...priorLedgerRows, ...existing.values()].map(f => f.matched_expense_id).filter(Boolean))];
-  const bookedExpenses = new Map(bookedIds.length ? (await db('expenses').whereIn('id', bookedIds).select('id', 'category_id')).map(e => [e.id, e]) : []);
-  const categoryNames = new Map(categories.map(c => [c.id, c.name]));
-  return { existing, existingBank, priorLedgerRows, handExpenses, coveredExpenses, linkedRows, masks, accountsById, bookedExpenses, categoryNames, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
-}
-
-// Pools of the portal's rows, consumed one-for-one as ledger rows match them.
-function buildPools({ existingBank, priorLedgerRows = [], handExpenses, coveredExpenses = [], linkedRows = [], masks = new Map(), accountsById = new Map() }) {
-  const ids = { masks, accountsById };
-  const pooled = [...existingBank, ...priorLedgerRows];
-  const bankLeft = new Map();
-  pooled.forEach(f => { const k = tupleKey(f); if (!bankLeft.has(k)) bankLeft.set(k, []); bankLeft.get(k).push(f); });
-  // A feed writes its own text for a transaction ("Wawa" against the
-  // statement's "DEBIT CARD PURCHASE - WAWA 5519 ..."), so a same-account
-  // row of the same day, amount and direction with DIFFERENT text is the
-  // same charge until the owner says otherwise: the ledger row is HELD (not
-  // imported, listed with both texts), never booked on top of it.
-  const looseKey = f => `${ymdOf(f.txn_date)}|${Number(f.amount).toFixed(2)}|${f.direction}`;
-  const looseLeft = new Map();
-  pooled.forEach(f => { const k = looseKey(f); if (!looseLeft.has(k)) looseLeft.set(k, []); looseLeft.get(k).push(f); });
-  const dropLoose = (row) => {
-    const list = looseLeft.get(looseKey(row)) || [];
-    const j = list.indexOf(row);
-    if (j !== -1) list.splice(j, 1);
-  };
-  // A hand-entered expense of the same amount within the matcher's
-  // receipt-vs-posting window may be this very charge entered by hand (a
-  // receipt dated the purchase, the statement dated the posting): the ledger
-  // expense row is HELD (listed with the expense), one-for-one, nearest date
-  // first, never booked on top of it. No payee guessing. The amount compared
-  // is the GROSS one: a refund applied later reduced the expense, the bank
-  // row still shows what was paid.
-  // An expense linked to a bank row and that row are ONE transaction: taking
-  // either removes the other from its pool (one-for-one across both pools).
-  // linkedRows carries every linked row (any posting date, for the account
-  // identity); only the rows in the file's range sit in the pools above.
-  const rowsOfExpense = new Map();
-  linkedRows.forEach(f => { if (!rowsOfExpense.has(f.matched_expense_id)) rowsOfExpense.set(f.matched_expense_id, []); rowsOfExpense.get(f.matched_expense_id).push(f); });
-  const pooledById = new Map(pooled.map(f => [f.id, f]));
-  // a row settled by its hash is accounted for: out of both pools by id
-  const dropById = (id) => { const f = pooledById.get(id); if (f) { dropExact(f); dropLoose(f); } };
-  const handByAmount = new Map();
-  [...handExpenses, ...coveredExpenses].forEach(e => { const k = Number(e.gross != null ? e.gross : e.amount).toFixed(2); if (!handByAmount.has(k)) handByAmount.set(k, []); handByAmount.get(k).push(e); });
-  const dropExact = (row) => {
-    const list = bankLeft.get(tupleKey(row)) || [];
-    const j = list.indexOf(row);
-    if (j !== -1) list.splice(j, 1);
-  };
-  const dropExpense = (id) => {
-    if (!id) return;
-    for (const list of handByAmount.values()) {
-      const j = list.findIndex(e => e.id === id);
-      if (j !== -1) { list.splice(j, 1); return; }
-    }
-  };
-  // A linked expense carries its bank row's account: it is the same
-  // transaction only for a ledger row of that account (a $100 purchase on
-  // one card never holds a distinct $100 purchase on another). A
-  // hand-entered expense has no account identity and is compared on amount
-  // and date alone.
-  const sameAccountAsLinked = (e, source) => {
-    const linked = rowsOfExpense.get(e.id);
-    return !linked || linked.some(f => sameAccountRow(source, f, ids));
-  };
-  // The matcher's own plausibility rule: an expense paid by ach, check or
-  // cash is not a card charge, a cash one is not a bank debit.
-  const takeHand = (date, amount, source, accountType) => {
-    const list = handByAmount.get(Number(amount).toFixed(2)) || [];
-    let best = -1;
-    list.forEach((e, j) => {
-      if (!sameAccountAsLinked(e, source)) return;
-      if (methodIncompatible(accountType, e.payment_method)) return;
-      const gap = Math.abs(dayNumber(ymdOf(e.expense_date)) - dayNumber(date));
-      if (gap > EXPENSE_DATE_WINDOW_DAYS) return;
-      if (best === -1 || gap < Math.abs(dayNumber(ymdOf(list[best].expense_date)) - dayNumber(date))) best = j;
-    });
-    if (best === -1) return null;
-    const [e] = list.splice(best, 1);
-    (rowsOfExpense.get(e.id) || []).forEach(f => { const pooled = pooledById.get(f.id); if (pooled) { dropExact(pooled); dropLoose(pooled); } });
-    return { expense: e, days: dayNumber(ymdOf(e.expense_date)) - dayNumber(date), covered: rowsOfExpense.has(e.id) };
-  };
-  return { bankLeft, looseKey, looseLeft, dropLoose, dropExact, dropById, dropExpense, takeHand };
-}
-
 /** Days since the epoch for a YYYY-MM-DD string (calendar arithmetic only). */
 function dayNumber(ymd) {
   const [y, m, d] = String(ymd).split('-').map(Number);
@@ -625,139 +459,144 @@ function describeGap(days) {
   if (!days) return 'the same day';
   return `${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ${days < 0 ? 'earlier' : 'later'}`;
 }
+// The first few portal rows named in a refusal (the message is one line).
+function sampleRows(rows, whereOf) {
+  return rows.slice(0, 3).map(r => `${ymdOf(r.txn_date)} "${String(r.description || '').slice(0, 30)}" ${Number(r.amount).toFixed(2)} ${r.direction} (${whereOf(r) || 'no label'})`).join('; ');
+}
 
-// A portal row that answers nothing yet: still open, or a link whose expense
-// or payout was deleted since (the FK is null; bank-import's
-// resetDanglingLinks reopens such rows on its next pass).
+/**
+ * What the portal already holds for this file, and the two conditions a run
+ * refuses on. The loader fills a range the portal has nothing for: it never
+ * reconciles the ledger against a feed, an upload or an earlier run's rows
+ * by guesswork (same account, nearby date, similar text).
+ *  - A bank row from a feed or an upload in the file's date range refuses
+ *    the run: the ledger's rows would double it. Those rows are classified
+ *    in Bank Import, with the ledger rules.
+ *  - A row an earlier run loaded that is not in this file (same file name,
+ *    or in the range: a corrected date, text or amount, or a dropped row)
+ *    refuses the run: a loaded row is corrected in Bank Import, never by
+ *    re-import, which would load it twice.
+ *  - The expenses in the range the portal holds from elsewhere (entered by
+ *    hand, or from a feed row outside the range) are read for the hold in
+ *    reconcileRows and listed; the ones ledger runs made are the ledger's own.
+ */
+async function loadPortalState(db, mapped, rows, basename) {
+  const existing = new Map();
+  for (const part of chunk(mapped.map(m => m.bank.row_hash), HASH_LOOKUP_CHUNK)) {
+    const found = await db('bank_transactions').whereIn('row_hash', part).select('id', 'row_hash', 'status', 'matched_expense_id', 'matched_payout_id', 'suggestion');
+    found.forEach(f => existing.set(f.row_hash, f));
+  }
+  const dates = rows.map(r => r.date).sort();
+  const range = [dates[0], dates[dates.length - 1]];
+  const otherRows = await db('bank_transactions').whereBetween('txn_date', range).whereNot('source', SOURCE_TAG)
+    .select('id', 'account_label', 'txn_date', 'description', 'amount', 'direction');
+  if (otherRows.length) {
+    throw fail(`the portal already holds ${otherRows.length} bank row(s) from a feed or an upload between ${range[0]} and ${range[1]}; this loader is for a range the portal has nothing for (the ledger's rows would double them): classify those rows in Bank Import instead. First: ${sampleRows(otherRows, r => r.account_label)}`);
+  }
+  const fileHashes = new Set(mapped.map(m => m.bank.row_hash));
+  const inRange = r => ymdOf(r.txn_date) >= range[0] && ymdOf(r.txn_date) <= range[1];
+  const ledgerRows = await db('bank_transactions').where({ source: SOURCE_TAG })
+    .select('id', 'row_hash', 'source_file', 'txn_date', 'description', 'amount', 'direction', 'matched_expense_id');
+  const notInFile = ledgerRows.filter(r => !fileHashes.has(r.row_hash) && (r.source_file === basename || inRange(r)));
+  if (notInFile.length) {
+    throw fail(`${notInFile.length} row(s) an earlier run loaded from ${basename} or between ${range[0]} and ${range[1]} are not in this file (a corrected date, text or amount, or a dropped row); a loaded row is corrected in Bank Import, not by re-import: put it back in the file as loaded, or decide it there. First: ${sampleRows(notInFile, r => r.source_file)}`);
+  }
+  // every expense a ledger run made is the ledger's own (a ledger row that
+  // could be in question was refused above)
+  const ledgerMade = new Set(ledgerRows.map(r => r.matched_expense_id).filter(Boolean));
+  // the matcher's receipt-vs-posting window on both sides of the range: a
+  // receipt dated days before the first posting can still be a ledger row
+  const handRange = [shiftDays(range[0], -EXPENSE_DATE_WINDOW_DAYS), shiftDays(range[1], EXPENSE_DATE_WINDOW_DAYS)];
+  const portalExpenses = (await db('expenses').whereBetween('expense_date', handRange)
+    .select('id', 'expense_date', 'amount', 'vendor_name', 'description', 'payment_method')).filter(e => !ledgerMade.has(e.id));
+  // compared at the gross amount (one small query per expense: a one-off run over a handful of rows)
+  for (const e of portalExpenses) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, db)).toFixed(2));
+  const categories = await db('expense_categories').select('id', 'name');
+  return { existing, portalExpenses, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+}
+
+// A portal row that no longer has the expense the earlier run made: the FK
+// went null (ON DELETE SET NULL; bank-import's resetDanglingLinks reopens it
+// on its next pass), or the row is open without one (parked, or reopened).
 const LINKED_TO_EXPENSE = new Set(['matched_expense', 'created_expense']);
 function expenseGone(row) {
   return (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) || row.status === 'unmatched';
 }
-function openOrDangling(row) {
-  if (row.status === 'unmatched') return 'the same row is open in the portal, not booked';
-  if (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) return 'the same row is in the portal but its expense was deleted (the next matching pass reopens it)';
-  if (row.status === 'matched_payout' && !row.matched_payout_id) return 'the same row is in the portal but its payout link is gone (the next matching pass reopens it)';
-  return null;
+// The ledger's reading of a row: what the hash leaves out (class, category
+// and line can change in the file without changing the row's identity).
+function readingOf(sug) {
+  const s = sug || {};
+  return [s.ledgerClass, s.ledgerCategory, s.schedCLine].map(v => String(v || '').trim().toLowerCase()).join('|');
 }
-// The portal ignored the row; the ledger says business (booked or parked
-// for a line with no category here), or says refund credit (unless the
-// refund was RELEASED: releasedRefundOf means it is accounted for).
-function ignoredConflict(row, m) {
-  if (row.status !== 'ignored') return null;
-  if (m.expense || m.businessParked) return 'the portal ignored this row but the ledger says it is business (unignore and decide it)';
-  if (m.unmatchedLine === 'refund' && !(row.suggestion && row.suggestion.releasedRefundOf)) {
-    return 'the portal ignored this refund credit without applying it (unignore it and apply it to the original expense in Bank Import)';
+function describeReading(sug) {
+  const s = sug || {};
+  return `${s.ledgerClass || 'unknown'}${s.ledgerCategory ? ` (${s.ledgerCategory}${s.schedCLine ? `, line ${s.schedCLine}` : ''})` : ''}`;
+}
+// A row an earlier run loaded (same hash) is done, unless the file now reads
+// it differently, or the expense that run made is gone. Neither is rewritten
+// by a re-import: the row is held, and the owner decides it in Bank Import,
+// where every later decision on it (an ignore, a link, a refund) already
+// stands and is not second-guessed here.
+function reloadReason(prior, m) {
+  if (readingOf(prior.suggestion) !== readingOf(m.bank.suggestion)) {
+    return `loaded by an earlier run as ${describeReading(prior.suggestion)}; the file now reads it differently (change it in Bank Import, not by re-import)`;
+  }
+  if (m.expense && expenseGone(prior)) {
+    return prior.status === 'unmatched' ? 'loaded by an earlier run and open in the portal without its expense' : 'loaded by an earlier run but its expense was deleted since';
   }
   return null;
-}
-// The portal's reading of a credit against the ledger's: linked to a Stripe
-// payout while the ledger says merchant refund (the expense it would reduce
-// stays at its gross amount), or applied as a refund while the ledger says
-// it was not one (the expense it reduced is understated).
-function creditConflict(row, m) {
-  if (row.status === 'matched_payout' && row.matched_payout_id && m.unmatchedLine === 'refund') {
-    return 'the portal linked this credit to a payout but the ledger says it is a refund credit (check which is right)';
-  }
-  if (row.status === 'refund_applied' && m.unmatchedLine !== 'refund') {
-    return 'the portal applied this credit as a refund to an expense but the ledger does not call it a refund (check which is right)';
-  }
-  return null;
-}
-// The portal booked an expense; the ledger says non-business, or business
-// under another category, or business on a line with no category here.
-function bookedConflict(row, m, portal) {
-  if (!LINKED_TO_EXPENSE.has(row.status) || !row.matched_expense_id) return null;
-  if (m.bank.status === 'ignored') return 'the portal booked this row as an expense but the ledger does not (check which is right; the expense may need deleting)';
-  if (m.businessParked) return `the portal booked this row as an expense; the ledger's line ${m.unmatchedLine} has no category here (check the category)`;
-  if (!m.expense || !portal) return null;
-  const booked = portal.bookedExpenses.get(row.matched_expense_id);
-  const ledgerCategoryId = portal.categoryIds.get(m.categoryName);
-  if (booked && ledgerCategoryId && booked.category_id && booked.category_id !== ledgerCategoryId) {
-    return `the portal booked this row under ${portal.categoryNames.get(booked.category_id) || 'another category'}, the ledger says ${m.categoryName} (check which is right)`;
-  }
-  return null;
-}
-// Why an exact overlap is held rather than counted as answered (null = answered).
-function openReason(row, m, portal) {
-  return openOrDangling(row) || ignoredConflict(row, m) || creditConflict(row, m) || bookedConflict(row, m, portal);
-}
-// A row an earlier run loaded (same hash): done, unless the expense that run
-// made is gone, or the ledger's classification changed since (class,
-// category or line are not in the hash) and the stored state disagrees.
-function reloadReason(prior, m, portal) {
-  if (m.expense && expenseGone(prior)) return 'loaded by an earlier run but its expense was deleted since';
-  return ignoredConflict(prior, m) || creditConflict(prior, m) || bookedConflict(prior, m, portal);
 }
 
-// Which ledger rows load, and which the portal already answers for.
+// Every portal expense of the same gross amount within the matcher's window
+// (a receipt dated the purchase, the statement dated the posting) whose
+// payment method can be this account: any of them may be this very charge,
+// entered before the ledger was loaded. The ledger row is held and they are
+// all listed. There is no one-for-one assignment and no nearest-first pick
+// (two rows of one amount near two receipts are both held): the owner
+// decides each in Bank Import.
+function nearbyExpenses(portalExpenses, row, bank) {
+  const amount = Number(bank.amount).toFixed(2);
+  const day = dayNumber(row.date);
+  return portalExpenses.filter(e => Number(e.gross != null ? e.gross : e.amount).toFixed(2) === amount
+    && Math.abs(dayNumber(ymdOf(e.expense_date)) - day) <= EXPENSE_DATE_WINDOW_DAYS
+    && !methodIncompatible(bank.account_type, e.payment_method));
+}
+function describeNearby(near, date) {
+  const one = e => `"${(e.vendor_name || e.description || '(no text)').slice(0, 40)}" dated ${describeGap(dayNumber(ymdOf(e.expense_date)) - dayNumber(date))}${e.gross != null && Number(e.gross) !== Number(e.amount) ? ` (${Number(e.amount).toFixed(2)} after refunds)` : ''}`;
+  const more = near.length > 3 ? ` and ${near.length - 3} more` : '';
+  return `${near.length === 1 ? 'an expense' : `${near.length} expenses`} of the same amount already in the portal: ${near.slice(0, 3).map(one).join(', ')}${more}`;
+}
+
+// Which ledger rows load: every row but one loaded before (a duplicate, or
+// held when its reading or its expense changed) and an expense row the
+// portal may already hold as an expense (held). A business row whose
+// category is missing from this database is parked for review.
 function reconcileRows(mapped, rows, portal) {
-  const { existing, masks, accountsById, categoryIds } = portal;
-  const ids = { masks, accountsById };
-  const pools = buildPools(portal);
+  const { existing, portalExpenses, categoryIds } = portal;
   const fresh = [];
-  const unsure = [];
   const held = [];
   let duplicates = 0;
-  let overlaps = 0;
-  // Pass 1: exact matches (same text) reserve their portal rows first, so a
-  // looser match (same account, day and amount, other text) earlier in the
-  // file cannot take the row an exact match later in the file is for.
-  // An exact overlap the portal has already answered (booked, linked or
-  // ignored) is left out. One still OPEN in the portal is HELD and listed:
-  // the ledger's reading is not written onto the portal's row (no claims),
-  // and counting it as present would hide that nothing books it yet.
-  const settled = new Set();
-  const note = (i, other, account, why) => ({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other, account, why });
+  const note = (i, why) => ({ line: rows[i].line, description: rows[i].description, amount: Number(rows[i].amount).toFixed(2), date: rows[i].date, why });
   const reading = (m, i) => `the ledger says ${rows[i].class}${m.categoryName ? ` (${m.categoryName})` : ''}`;
   mapped.forEach((m, i) => {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
-      settled.add(i);
-      pools.dropById(prior.id);
-      const why = reloadReason(prior, m, portal);
-      if (why) held.push(note(i, prior.description || rows[i].description, 'this ledger (loaded before)', `${why}; ${reading(m, i)} (decide it in Bank Import)`));
+      const why = reloadReason(prior, m);
+      if (why) held.push(note(i, `${why}; ${reading(m, i)}`));
       else duplicates += 1;
       return;
     }
-    const pool = pools.bankLeft.get(tupleKey(m.bank)) || [];
-    const same = pool.findIndex(f => sameAccountRow(rows[i].source, f, ids));
-    if (same === -1) return;
-    const [used] = pool.splice(same, 1);
-    pools.dropLoose(used);
-    pools.dropExpense(used.matched_expense_id);
-    settled.add(i);
-    const why = openReason(used, m, portal);
-    if (why) held.push(note(i, used.description, used.account_label || '(no label)', `${why}; ${reading(m, i)}`));
-    else overlaps += 1;
-  });
-  // Pass 2: everything else, in file order: a hold wins over an "imported,
-  // check it" note, which is only given for a row that does load.
-  mapped.forEach((m, i) => {
-    if (settled.has(i)) return;
     if (m.expense) {
-      const hand = pools.takeHand(rows[i].date, m.bank.amount, rows[i].source, m.bank.account_type);
-      if (hand) {
-        const gross = hand.expense.gross != null && Number(hand.expense.gross) !== Number(hand.expense.amount) ? ` (${Number(hand.expense.amount).toFixed(2)} after refunds)` : '';
-        const kind = hand.covered ? 'an expense linked to a bank row' : 'a hand-entered expense';
-        held.push(note(i, hand.expense.vendor_name || hand.expense.description || '(no text)', kind, `${kind} of the same amount${gross}, dated ${describeGap(hand.days)}; ${reading(m, i)}`));
+      const near = nearbyExpenses(portalExpenses, rows[i], m.bank);
+      if (near.length) {
+        held.push(note(i, `${describeNearby(near, rows[i].date)}; ${reading(m, i)}`));
         return;
       }
+      if (!categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     }
-    const loose = pools.looseLeft.get(pools.looseKey(m.bank)) || [];
-    const sameLoose = loose.findIndex(f => sameAccountRow(rows[i].source, f, ids));
-    if (sameLoose !== -1) {
-      const [used] = loose.splice(sameLoose, 1);
-      pools.dropExact(used);
-      pools.dropExpense(used.matched_expense_id);
-      held.push(note(i, used.description, used.account_label || '(no label)', `the same charge under other text; ${reading(m, i)}`));
-      return;
-    }
-    const pool = pools.bankLeft.get(tupleKey(m.bank)) || [];
-    if (pool.length) unsure.push({ ...note(i, pool[0].account_label || '(no label)', null), rowHash: m.bank.row_hash });
-    if (m.expense && !categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     fresh.push(m);
   });
-  return { fresh, duplicates, overlaps, held, unsure };
+  return { fresh, duplicates, held };
 }
 
 // Writes the fresh rows: non-expense rows in bulk (row_hash conflicts
@@ -806,7 +645,7 @@ async function writeRows(db, fresh, categoryIds) {
  * With dryRun it reads (what the portal holds, categories) but writes nothing.
  * Returns { report, counts, summary }.
  */
-async function run({ file, dryRun = false, skipExisting = false, db, log = () => {} } = {}) {
+async function run({ file, dryRun = false, db, log = () => {} } = {}) {
   if (!file) throw fail('missing --file');
   if (!db) throw fail('run() needs a db');
   let text;
@@ -819,35 +658,31 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
   const rows = parseLedgerCsv(text);
   const ordinals = withOrdinals(rows);
   const mapped = rows.map((r, i) => mapRow(r, ordinals[i], basename));
-  const portal = await loadPortalState(db, mapped, rows, skipExisting);
+  const portal = await loadPortalState(db, mapped, rows, basename);
   const r = reconcileRows(mapped, rows, portal);
   const written = dryRun ? { inserted: r.fresh.length, duplicates: 0 } : await writeRows(db, r.fresh, portal.categoryIds);
-  // Rows lost to an insert-time conflict are not in the report's tallies,
-  // and an "imported, check it" note is only for a row that did land.
+  // Rows lost to an insert-time conflict are not in the report's tallies.
   const landed = dryRun ? r.fresh : r.fresh.filter(m => !m.skipped);
-  const landedHashes = new Set(landed.map(m => m.bank.row_hash));
-  const unsure = r.unsure.filter(u => landedHashes.has(u.rowHash));
   const summary = summarize(landed);
   const duplicates = r.duplicates + written.duplicates;
-  const counts = { read: rows.length, inserted: written.inserted, duplicates, overlaps: r.overlaps, held: r.held.length, unsure: unsure.length, handExpenses: portal.handExpenses.length };
-  const report = formatReport({ dryRun, file, read: rows.length, inserted: written.inserted, duplicates, overlaps: r.overlaps, held: r.held, unsure, handExpenses: portal.handExpenses, summary });
+  const counts = { read: rows.length, inserted: written.inserted, duplicates, held: r.held.length, portalExpenses: portal.portalExpenses.length };
+  const report = formatReport({ dryRun, file, read: rows.length, inserted: written.inserted, duplicates, held: r.held, portalExpenses: portal.portalExpenses, summary });
   log(report);
   return { report, counts, summary };
 }
 
 function parseArgs(argv) {
-  const args = { file: null, dryRun: false, skipExisting: false };
+  const args = { file: null, dryRun: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--dry-run') args.dryRun = true;
-    else if (a === '--skip-existing') args.skipExisting = true;
     else if (a === '--file') {
       args.file = argv[i + 1];
       i += 1;
     } else if (a.startsWith('--file=')) args.file = a.slice('--file='.length);
     else throw fail(`unknown argument: ${a}`);
   }
-  if (!args.file) throw fail('missing --file (usage: node server/scripts/import-tax-ledger-csv.js --file /path/ledger.csv [--dry-run] [--skip-existing])');
+  if (!args.file) throw fail('missing --file (usage: node server/scripts/import-tax-ledger-csv.js --file /path/ledger.csv [--dry-run])');
   return args;
 }
 
@@ -856,7 +691,7 @@ async function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
     db = require('../models/db'); // lazy: tests import this file without a database
-    const { report } = await run({ file: args.file, dryRun: args.dryRun, skipExisting: args.skipExisting, db });
+    const { report } = await run({ file: args.file, dryRun: args.dryRun, db });
     console.log(report);
   } catch (err) {
     console.error(`error: ${String(err.message || err).split('\n')[0]}`);
@@ -871,8 +706,6 @@ module.exports = {
   parseLedgerCsv,
   mapRow,
   categoryNameForLine,
-  tupleKey,
-  sameAccount,
   rowHash,
   summarize,
   withOrdinals,
