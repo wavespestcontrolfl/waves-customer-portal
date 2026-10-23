@@ -1167,7 +1167,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
-        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...fungusNitrogenNotes(plannedMix, nitrogenCut), ...chinchTetrinoNotes(v13Line?.row, plannedMix, chinchRate), ...productSwapNotes(product, productSwap)]) : {}),
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...fungusNitrogenNotes(plannedMix, nitrogenCut), ...chinchTetrinoNotes(v13Line?.row, plannedMix, chinchRate), ...productSwapNotes(product, productSwap, v13Rows)]) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render

@@ -6,7 +6,6 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
-const { etDateString, addETDays } = require('../utils/datetime-et');
 const { DEC_FROM: TEN, DEC_K_PRODUCT: BO } = require('../config/lawn-v13-trouble-product-swaps');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
@@ -17,7 +16,6 @@ const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROP
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
 const NOTE = 'Active large patch mapped: potassium-only bag, no nitrogen (4.125 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22.';
 const TEN_LINE = `${TEN} — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`;
-const day = etDateString(addETDays(new Date(), -1));
 // Ledger dates are anchored to the fixture visit's day, never to today (the evidence is read as of the visit, so a today-relative date would
 // fall after the visit from 12/10 on).
 const VISIT_DAY = '2026-12-10';
@@ -78,7 +76,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
     for (const [index, area] of areas.entries()) {
       await knex('lawn_trouble_areas').insert({
         customer_id: f.customerId, property_id: f.property.id, place: ['front', 'back', 'left_side', 'right_side'][index], type: area.type, status: area.status || 'active',
-        source: 'tech_tap', first_seen_on: area.firstSeen || day, last_seen_on: area.lastSeen || day, cleared_at: area.clearedAt || null,
+        source: 'tech_tap', first_seen_on: area.firstSeen || daysBeforeVisit(2), last_seen_on: area.lastSeen || daysBeforeVisit(2), cleared_at: area.clearedAt || null,
       });
       if (area.target) ledger = [{ place: ['front', 'back', 'left_side', 'right_side'][index], target: area.target }, ...ledger];
     }
@@ -127,6 +125,23 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       // 4.125 lb x 24% = 0.99 lb K2O per 1,000.
       expect(item.mix.ratePer1000 * 0.24).toBeCloseTo(0.99, 3);
     } finally { spy.mockRestore(); }
+  });
+
+  test('the swapped product is identified by its stored row, not its current catalog name: renamed with the old name kept as an alias, it is still flagged, noted and a completion default', async () => {
+    await knex('products_catalog').where({ id: boProduct.id }).update({ name: 'LESCO Black Out 0-0-24 Potash (renamed)' });
+    await knex('product_aliases').insert({ product_id: boProduct.id, alias_name: BO });
+    try {
+      const result = await plan(await decemberVisit([{ type: 'fungus', target: LARGE }]));
+      const item = result.mixCalculator.items.find((entry) => entry.product?.id === boProduct.id);
+      expect(item).toBeTruthy();
+      expect(item.productSwapIn).toBe(true);
+      expect(item.gateNotes).toContainEqual(expect.objectContaining({ key: 'activeLargePatchPotassium' }));
+      expect(item.mix.ratePer1000).toBeCloseTo(4.125, 3);
+      expect(result.completionDefaults.items.map((entry) => entry.product.id)).toContain(boProduct.id);
+    } finally {
+      await knex('product_aliases').where({ product_id: boProduct.id }).del();
+      await knex('products_catalog').where({ id: boProduct.id }).update({ name: BO });
+    }
   });
 
   test('the cost line: unpriced the bag has no cost; priced from the SiteOne $30.06 / 50 lb it costs $24.80 for the visit', async () => {

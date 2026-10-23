@@ -308,6 +308,19 @@ describe('the swapped line: the amount, the cost, the ordinance checks and the n
     expect(engine.v13RowCalculates({ applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_k' })).toBe(true);
   });
 
+  test('isSwapProduct identifies the bag by the stored row (trigger or old name), so a renamed catalog product keeps the flag; with no rows it falls back to the exact name', () => {
+    const rule = V13_TROUBLE_PRODUCT_SWAPS[0];
+    const renamed = { id: 'bo', name: 'Renamed in the catalog' };
+    const rows = new Map([['bo', { productId: 'bo', productName: 'Renamed in the catalog', protocolProductName: DEC_K_PRODUCT, defaultInPlan: false, gates: { trigger: 'active_large_patch_mapped' } }], ['t22', { productId: 't22', productName: DEC_FROM, defaultInPlan: true, gates: {} }]]);
+    expect(engine.isSwapProduct(renamed, rule, rows)).toBe(true);
+    expect(engine.isSwapProduct({ id: 't22', name: DEC_FROM }, rule, rows)).toBe(false);
+    expect(engine.isSwapProduct({ id: 'x', name: 'Other' }, rule, rows)).toBe(false);
+    expect(engine.isSwapProduct({ id: 'bo', name: DEC_K_PRODUCT }, rule, new Map())).toBe(true);
+    expect(engine.isSwapProduct(renamed, rule, new Map())).toBe(false);
+    expect(engine.isSwapProduct(renamed, null, rows)).toBe(false);
+    expect(engine.productSwapNotes(renamed, rule, rows)).toHaveLength(1);
+  });
+
   test('productSwapNotes: the note rides the swapped product only, and nothing for a lawn that was not swapped', async () => {
     const { productSwap } = await swapped();
     expect(engine.productSwapNotes(BLACK_OUT, productSwap)).toEqual([{ key: PRODUCT_SWAP_NOTE_KEY, severity: 'note', text: productSwap.note }]);

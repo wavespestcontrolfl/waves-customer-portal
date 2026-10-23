@@ -5,7 +5,7 @@ const { lawnProhibitedProductBlock, treatedPropertyType } = require('./lawn-proh
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
 const { V13_TROUBLE_N_TARGETS, FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
-const { V13_TROUBLE_PRODUCT_SWAPS, PRODUCT_SWAP_NOTE_KEY } = require('../config/lawn-v13-trouble-product-swaps');
+const { V13_TROUBLE_PRODUCT_SWAPS, PRODUCT_SWAP_NOTE_KEY, swapOnlyRule } = require('../config/lawn-v13-trouble-product-swaps');
 const { V13_CHINCH_TETRINO, CHINCH_TETRINO_NOTE_KEY, CHINCH_TETRINO_NOTE } = require('../config/lawn-v13-chinch-rate');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -975,9 +975,20 @@ async function visitNutrientTargets(knex, service, { visit, month, v13Active, st
   };
 }
 
+// Is this catalog product the bag the swap puts down? By IDENTITY, not by its current name: the staged protocol row that carries the swap's
+// trigger (or the swap's name) is linked to a catalog product id, and that is the product, so a catalog rename that keeps the old name as an
+// alias (the matcher still resolves the line to it) does not lose the flag or the note. Falls back to the exact name when the rows are not
+// at hand (the reference sheet).
+function isSwapProduct(product, productSwap, v13Rows) {
+  if (!productSwap || !product) return false;
+  const row = v13Rows instanceof Map ? v13Rows.get(String(product.id)) : null;
+  if (row) return swapOnlyRule(row)?.key === productSwap.key;
+  return product.name === productSwap.to;
+}
+
 // The line note for the swapped bag (in the line's gateNotes, like the nitrogen cut's). [] for every other line.
-function productSwapNotes(product, productSwap) {
-  if (!productSwap || !product || product.name !== productSwap.to) return [];
+function productSwapNotes(product, productSwap, v13Rows) {
+  if (!isSwapProduct(product, productSwap, v13Rows)) return [];
   return [{ key: PRODUCT_SWAP_NOTE_KEY, severity: 'note', text: productSwap.note }];
 }
 
@@ -2396,9 +2407,9 @@ async function buildPlanForService(serviceId, options = {}) {
     return {
       ...planLineFields(item),
       // Gate off: no v13 field at all, the payload is the old one.
-      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, [...fungusNitrogenNotes(mix, nitrogenCut), ...chinchTetrinoNotes(line?.row, mix, chinchRate), ...productSwapNotes(plannedProduct, productSwap)]) : {}),
+      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, [...fungusNitrogenNotes(mix, nitrogenCut), ...chinchTetrinoNotes(line?.row, mix, chinchRate), ...productSwapNotes(plannedProduct, productSwap, v13Rows)]) : {}),
       // GATE_LAWN_DEC_LARGE_PATCH_K: the swapped-in bag is the visit's default whole-lawn product though its staged row is not a default.
-      ...(productSwap && plannedProduct?.name === productSwap.to ? { productSwapIn: true } : {}),
+      ...(isSwapProduct(plannedProduct, productSwap, v13Rows) ? { productSwapIn: true } : {}),
       matched: !!plannedProduct,
       product: planProductSnapshot(plannedProduct, mix),
       substitution: planSubstitutionSnapshot(substitution),
@@ -2726,6 +2737,7 @@ module.exports = {
   chinchTetrinoNotes,
   troubleProductSwap,
   productSwapNotes,
+  isSwapProduct,
   summarizeMaterialCost,
   effectiveAreaFactor,
   v13ProtocolRows,

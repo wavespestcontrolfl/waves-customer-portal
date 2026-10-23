@@ -4,7 +4,6 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
-const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 jest.setTimeout(60000);
@@ -13,7 +12,6 @@ const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
 const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
-const day = etDateString(addETDays(new Date(), -1));
 // Ledger dates are anchored to the fixture visit's day, never to today (the evidence is read as of the visit, so a today-relative date would
 // fall after the visit from 11/10 on).
 const VISIT_DAY = '2026-11-10';
@@ -71,7 +69,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     for (const [index, area] of areas.entries()) {
       await knex('lawn_trouble_areas').insert({
         customer_id: f.customerId, property_id: f.property.id, place: ['front', 'back', 'left_side', 'right_side'][index], type: area.type, status: area.status || 'active',
-        source: 'tech_tap', first_seen_on: area.firstSeen || day, last_seen_on: area.lastSeen || day, cleared_at: area.clearedAt || null,
+        source: 'tech_tap', first_seen_on: area.firstSeen || daysBeforeVisit(2), last_seen_on: area.lastSeen || daysBeforeVisit(2), cleared_at: area.clearedAt || null,
       });
       if (area.target) ledger = [{ place: ['front', 'back', 'left_side', 'right_side'][index], target: area.target }, ...ledger];
     }
