@@ -373,6 +373,7 @@ describeDb('mirror-only repair (real PostgreSQL)', () => {
         t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at'); t.jsonb('service_area_measurements');
       });
       await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.boolean('active').defaultTo(true); t.timestamp('updated_at'); });
+      await knex.schema.createTable('property_preferences', t => { t.uuid('customer_id').primary(); t.timestamp('irrigation_home_changed_at'); t.jsonb('irrigation_confirmed_fields'); });
       await knex.schema.createTable('estimates', t => { t.uuid('id').primary(); t.uuid('customer_id'); t.uuid('property_id'); t.string('address'); t.string('status'); t.timestamp('accepted_at'); t.timestamp('created_at'); t.jsonb('estimate_data'); });
       await knex.schema.createTable('audit_log', t => { t.increments('id'); t.string('actor_type'); t.uuid('actor_id'); t.string('action'); t.string('resource_type'); t.uuid('resource_id'); t.jsonb('metadata'); t.string('ip_address'); t.string('user_agent'); });
       const customerId = randomUUID();
