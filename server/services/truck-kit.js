@@ -110,6 +110,7 @@ const FOCUSED_KITS = [
   { line: 'tree_shrub', keys: ['backpack_sprayer'], key: /lawn_insect_spot/i, name: /\blawn\s*insect\s*spot\b/i },
   { line: 'tree_shrub', keys: ['hand_spreader'], key: /bed_pre_emergent/i, name: /\bbed\s*pre-?emergent\b/i },
   { line: 'lawn', keys: ['push_spreader'], key: /lawn_insect_preventive/i, name: /\blawn\s*insect\s*preventive\b/i },
+  { line: 'lawn', keys: ['push_spreader'], key: /fire_ant_yard/i, name: /\bfire\s*ant\s*yard\b/i },
 ];
 function focusedKitFor(serviceType, serviceKey) {
   return FOCUSED_KITS.find((kit) => (serviceKey && kit.key.test(String(serviceKey))) || kit.name.test(String(serviceType || ''))) || null;
@@ -383,26 +384,31 @@ async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey
 // Today's visits of the technician that need a tool their truck lacks (the
 // Today page's Up next line), keyed by scheduled service.
 async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = db } = {}) {
-  const visits = await conn('scheduled_services')
-    .where({ technician_id: technicianId, scheduled_date: etDateString(now) })
-    .whereIn('status', LIVE_VISIT_STATUSES)
-    .select('id', 'service_type', 'service_key_snapshot', 'service_category_snapshot');
+  // Identity as the job card reads it: the booking snapshot, else the live
+  // catalog row (a legacy visit has no snapshot but still links its service).
+  const visits = (await conn('scheduled_services as ss')
+    .leftJoin('services as s', 'ss.service_id', 's.id')
+    .where({ 'ss.technician_id': technicianId, 'ss.scheduled_date': etDateString(now) })
+    .whereIn('ss.status', LIVE_VISIT_STATUSES)
+    .select('ss.id', 'ss.service_type', 'ss.service_key_snapshot', 'ss.service_category_snapshot', 's.service_key as live_service_key', 's.category as live_category'))
+    .map((v) => ({ ...v, serviceKey: v.service_key_snapshot || v.live_service_key || null, serviceCategory: v.service_category_snapshot || v.live_category || null }));
   if (!visits.length) return [];
   if (!(await truckHasKeys(truck.id, conn))) return [];
   const onTruck = keysOnTruck(await kitForTruck(truck.id, conn));
   // Booked add-ons bring their own line's tools.
-  const addonRows = await conn('scheduled_service_addons')
-    .whereIn('scheduled_service_id', visits.map((v) => v.id))
-    .select('scheduled_service_id', 'service_name', 'service_key_snapshot', 'service_category_snapshot');
+  const addonRows = await conn('scheduled_service_addons as a')
+    .leftJoin('services as s', 'a.service_id', 's.id')
+    .whereIn('a.scheduled_service_id', visits.map((v) => v.id))
+    .select('a.scheduled_service_id', 'a.service_name', 'a.service_key_snapshot', 'a.service_category_snapshot', 's.service_key as live_service_key', 's.category as live_category');
   const addonsByVisit = new Map();
   for (const row of addonRows) {
     if (!addonsByVisit.has(row.scheduled_service_id)) addonsByVisit.set(row.scheduled_service_id, []);
-    addonsByVisit.get(row.scheduled_service_id).push({ name: row.service_name, serviceKey: row.service_key_snapshot || null, category: row.service_category_snapshot || null });
+    addonsByVisit.get(row.scheduled_service_id).push({ name: row.service_name, serviceKey: row.service_key_snapshot || row.live_service_key || null, category: row.service_category_snapshot || row.live_category || null });
   }
   const requiredByLines = new Map();
   const out = [];
   for (const visit of visits) {
-    const { lines, promote, restrict } = requirementsFor(visit.service_type, { serviceKey: visit.service_key_snapshot, serviceCategory: visit.service_category_snapshot, addons: addonsByVisit.get(visit.id) || [] });
+    const { lines, promote, restrict } = requirementsFor(visit.service_type, { serviceKey: visit.serviceKey, serviceCategory: visit.serviceCategory, addons: addonsByVisit.get(visit.id) || [] });
     if (!lines.length) continue;
     const key = `${lines.join('+')}|${[...promote].sort().join('+')}|${restrict ? [...restrict].sort().join('+') : '*'}`;
     if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn, promote, restrict));

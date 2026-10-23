@@ -60,6 +60,9 @@ jest.mock('../models/db', () => {
       if (table === 'maintenance_alerts' && c.joins.length) {
         list = list.map((a) => ({ ...a, assigned_vehicle_id: (state.equipment.find((e) => e.id === a.equipment_id) || {}).assigned_vehicle_id }));
       }
+      if ((table === 'scheduled_services' || table === 'scheduled_service_addons') && c.joins.length) {
+        list = list.map((v) => { const svc = (state.services || []).find((s) => s.id === v.service_id) || {}; return { ...v, live_service_key: svc.service_key || null, live_category: svc.category || null }; });
+      }
       if (table === 'equipment_checks' && c.joins.length) {
         list = list.map((k) => ({ ...k, technician_name: (state.technicians.find((t) => t.id === k.technician_id) || {}).name || null }));
       }
@@ -154,6 +157,7 @@ function seed({ truckAssigned = true } = {}) {
   s.equipment_checklists = [];
   s.scheduled_services = [];
   s.scheduled_service_addons = [];
+  s.services = [];
 }
 
 beforeEach(() => {
@@ -430,6 +434,18 @@ describe('tool gaps by kit key', () => {
     expect(await truckKit.truckHasKeys(TRUCK)).toBe(false);
   });
 
+  test('a legacy visit with no snapshot reads its identity from the linked catalog row on Today', async () => {
+    db.__state.equipment_checklists = [CHECKLIST('lawn', [{ item: 'Soil probe (thatch)', required: true, kit_key: 'soil_probe' }])];
+    db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
+    db.__state.services = [{ id: 'svc-lawn-insp', service_key: 'lawn_inspection', category: 'inspection' }];
+    const today = require('../utils/datetime-et').etDateString(NOW);
+    db.__state.scheduled_services = [{ id: 'v1', technician_id: TECH, scheduled_date: today, status: 'confirmed', service_type: 'Lawn Assessment', service_id: 'svc-lawn-insp' }];
+    // By name alone "Lawn Assessment" reads as a consultation; the live key says lawn_inspection.
+    expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Lawn Assessment', missing: ['Soil probe (thatch)'] }]);
+    // The fire ant yard add-on is a spreader job, never the probe.
+    expect(truckKit.requirementsFor('Fire Ant Yard Treatment', { serviceKey: 'area_addon_fire_ant_yard', serviceCategory: 'lawn_care' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: new Set(['push_spreader']) });
+  });
+
   test('mechanical lawn work and the web sweep need no treatment tools', () => {
     expect(truckKit.serviceLinesFor('Lawn Dethatching Service')).toEqual([]);
     expect(truckKit.serviceLinesFor('Core Aeration', { serviceKey: 'lawn_aeration' })).toEqual([]);
@@ -459,7 +475,8 @@ describe('tool gaps by kit key', () => {
     // Catalog identity picks the add-on's line: the fire ant yard add-on is lawn_care, a spreader job.
     expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Fire Ant Yard Treatment', serviceKey: 'area_addon_fire_ant_yard', category: 'lawn_care' }] })).toEqual(['pest', 'lawn']);
     expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceKey: 'area_addon_fire_ant_yard', serviceCategory: 'lawn_care' })).toEqual(['lawn']);
-    expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceCategory: 'inspection' })).toEqual(['pest']);
+    // ...and by name alone it is still the spreader job, whatever category a row carries.
+    expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceCategory: 'inspection' })).toEqual(['lawn']);
     // Specialized lawn add-ons are one-tool jobs, never the whole lawn kit.
     expect(truckKit.requirementsFor('Shell, Rock & Paver Weed Control', { serviceKey: 'area_addon_hardscape_weed', serviceCategory: 'lawn_care' })).toEqual({ lines: ['tree_shrub'], promote: new Set(), restrict: new Set(['backpack_sprayer']) });
     expect(truckKit.requirementsFor('Bed Pre-Emergent Weed Control', { serviceKey: 'area_addon_bed_pre_emergent' }).restrict).toEqual(new Set(['hand_spreader']));

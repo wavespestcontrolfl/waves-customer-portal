@@ -255,8 +255,11 @@ router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => 
     // alert's outcome (Retired / Lost), never around it; the probe and the
     // write hold the item's truck lock so a check in flight finishes first.
     const record = await db.transaction(async (trx) => {
-      const item = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id');
-      if (item?.assigned_vehicle_id) await truckKit.lockTruck(trx, item.assigned_vehicle_id);
+      const item = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category');
+      // A tool locks its truck; a truck locks itself (a check in flight on
+      // it must finish or fail ownership before the truck retires).
+      const truckId = item?.category === 'vehicle' ? req.params.id : item?.assigned_vehicle_id;
+      if (truckId) await truckKit.lockTruck(trx, truckId);
       if (await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
       const [row] = await trx('equipment')
         .where({ id: req.params.id })

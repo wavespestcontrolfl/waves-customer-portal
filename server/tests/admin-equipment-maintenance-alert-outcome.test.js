@@ -73,7 +73,7 @@ beforeEach(() => {
     'a-missing': { id: 'a-missing', equipment_id: TOOL, alert_type: 'tool_missing', status: 'new' },
     'a-due': { id: 'a-due', equipment_id: TOOL, alert_type: 'maintenance_due', status: 'new' },
   };
-  db.__state.equipment = { [TOOL]: { id: TOOL, status: 'active', assigned_vehicle_id: TRUCK } };
+  db.__state.equipment = { [TOOL]: { id: TOOL, status: 'active', assigned_vehicle_id: TRUCK }, [TRUCK]: { id: TRUCK, status: 'active', category: 'vehicle', assigned_vehicle_id: null } };
   db.__state.updates = [];
 });
 
@@ -157,6 +157,11 @@ test('the legacy retire holds the item\'s truck lock around the probe and the wr
   expect(truckKit.lockTruck).toHaveBeenCalledWith(db, TRUCK);
   expect(db.transaction).toHaveBeenCalled();
   expect(db.__state.equipment[TOOL].status).toBe('retired');
+  // Retiring the truck itself locks the truck.
+  jest.clearAllMocks();
+  const res2 = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await handler({ params: { id: TRUCK }, body: {}, techRole: 'admin' }, res2, (err) => { throw err; });
+  expect(truckKit.lockTruck).toHaveBeenCalledWith(db, TRUCK);
 });
 
 test('a tool alert never resolves without an outcome', async () => {
