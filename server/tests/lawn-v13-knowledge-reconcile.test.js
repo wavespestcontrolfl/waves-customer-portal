@@ -121,6 +121,47 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
   });
 
+  test('GATE_LAWN_RECLAIMED_HALF_N flipped alone (v13 on): the reconcile rewrites the entries and both corpora at once, both ways', async () => {
+    const tables = {
+      knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }, { id: 'seed-kb', source: 'kb', source_id: 'y', chunk_index: 0, content_hash: 'h' }],
+    };
+    makeDb(tables);
+    const savedReclaimed = process.env.GATE_LAWN_RECLAIMED_HALF_N;
+    try {
+      delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+      await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
+      for (const track of V13_TRACKS) {
+        expect(tagsOf(kbRow(tables, slugOf(track)))).not.toContain('lawn-reclaimed-half-n');
+        expect(kbRow(tables, slugOf(track)).content).toContain('the app does not adjust it yet');
+      }
+      expect(await KB.lawnCorpusProgram('protocol')).toBe('legacy');
+      // The reclaimed gate on: stale on the very next tick, not at the nightly; the entries now say the app halves.
+      process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
+      expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(true);
+      for (const track of V13_TRACKS) {
+        expect(tagsOf(kbRow(tables, slugOf(track)))).toContain('lawn-reclaimed-half-n');
+        expect(kbRow(tables, slugOf(track)).content).toContain('Reclaimed water: half nitrogen today');
+        expect(kbRow(tables, slugOf(track)).content).not.toContain('the app does not adjust it yet');
+      }
+      expect(await withGate('true', () => KB.lawnCorpusProgram('protocol'))).toBe(`${V13_MARKER}+reclaimed`);
+      expect(await withGate('true', () => KB.lawnCorpusProgram('kb'))).toBe(`${V13_MARKER}+reclaimed`);
+      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
+      // And back off: stale again at once, the original wording returns.
+      delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(true);
+      for (const track of V13_TRACKS) expect(tagsOf(kbRow(tables, slugOf(track)))).not.toContain('lawn-reclaimed-half-n');
+      expect(await withGate('true', () => KB.lawnCorpusProgram('protocol'))).toBe(V13_MARKER);
+      expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
+      // The reclaimed gate means nothing without v13: the old program's marker and tags are unchanged.
+      process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
+      expect(await withGate(undefined, () => KB.lawnCorpusProgram('protocol'))).toBe('legacy');
+    } finally {
+      if (savedReclaimed === undefined) delete process.env.GATE_LAWN_RECLAIMED_HALF_N; else process.env.GATE_LAWN_RECLAIMED_HALF_N = savedReclaimed;
+    }
+  });
+
   test('the index protocol corpus is rebuilt from lawnProtocols() each run: gate off drops the v13 chunks', async () => {
     const tables = { knowledge_embeddings: [] };
     makeDb(tables);

@@ -110,6 +110,7 @@ const autoPrimary = () => ({
   property_type: null, lawn_type: null, property_sqft: null, lot_sqft: null, bed_sqft: null, linear_ft_perimeter: null, palm_count: null, canopy_type: null,
   address_key: require('../services/customer-properties').addressKey(baseStub()), source: 'backfill', active: true,
   neighborhood_id: null, neighborhood_source: null, county_subdivision: null, neighborhood_checked_at: null,
+  reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null,
   created_at: new Date('2026-10-01'), updated_at: new Date('2026-10-01'),
 });
 // The customers columns the mock schema reports (name, default). Real defaults
@@ -320,6 +321,9 @@ describe('refuses any record that is not empty, naming what it found and pointin
     ['an edited backfill primary: a measurement', () => { db.__state.properties = [{ ...autoPrimary(), lot_sqft: 9000 }]; }, 'Saved properties', /edited lot_sqft/],
     ['a primary with operator data in another column', () => { db.__state.properties = [{ ...autoPrimary(), access_notes: 'side gate' }]; }, 'Saved properties', /access_notes/],
     ['a primary with an office neighborhood entry', () => { db.__state.properties = [{ ...autoPrimary(), neighborhood_id: 'n-1', neighborhood_source: 'office' }]; }, 'Saved properties', /office neighborhood/],
+    ['a primary with an office reclaimed-water answer (yes)', () => { db.__state.properties = [{ ...autoPrimary(), reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_checked_at: new Date() }]; }, 'Saved properties', /reclaimed_water/],
+    ['a primary with an office reclaimed-water answer (no)', () => { db.__state.properties = [{ ...autoPrimary(), reclaimed_water: false, reclaimed_water_source: 'office', reclaimed_water_checked_at: new Date() }]; }, 'Saved properties', /reclaimed_water_source/],
+    ['a primary with a customer reclaimed-water answer', () => { db.__state.properties = [{ ...autoPrimary(), reclaimed_water: false, reclaimed_water_source: 'customer', reclaimed_water_checked_at: new Date() }]; }, 'Saved properties', /reclaimed_water_source/],
     ['CRM notes', () => { db.__state.stub.crm_notes = 'Prefers mornings'; }, 'Record fields', /holds crm notes \(crm_notes\)/],
     ['technician notes', () => { db.__state.stub.technician_notes = 'Dog in yard'; }, 'Record fields', /holds technician notes \(technician_notes\)/],
     ['a service contact', () => { db.__state.stub.service_contact_name = 'Sam Example'; }, 'Record fields', /holds service contact name \(service_contact_name\)/],
@@ -682,6 +686,11 @@ describe('D. restore wording and the remaining window', () => {
 });
 
 describe('allowed: the untouched automatic primary', () => {
+  test('a county meter reclaimed-water match (GATE_LAWN_RECLAIMED_HALF_N) is derived, like the neighborhood stamp, not operator history', async () => {
+    db.__state.properties = [{ ...autoPrimary(), reclaimed_water: true, reclaimed_water_source: 'county_meter', reclaimed_water_checked_at: new Date() }];
+    expect((await preview()).preview).toBe(true);
+  });
+
   test('a county neighborhood stamp from the automatic lookup is still the untouched primary', async () => {
     db.__state.properties = [{ ...autoPrimary(), neighborhood_id: 'n-1', neighborhood_source: 'county', county_subdivision: 'Example Glen', neighborhood_checked_at: new Date() }];
     expect((await preview()).preview).toBe(true);
