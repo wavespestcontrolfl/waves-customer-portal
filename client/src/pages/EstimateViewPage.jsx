@@ -5297,6 +5297,23 @@ export function LawnProgramCalendar({ program }) {
   );
 }
 
+// "What we can and can't fix" (GATE_ESTIMATE_LAWN_LIMITS, owner 2026-10-22): the
+// server sends `lawnLimits` = { heading, paragraphs: [{ key, text }] } on a
+// recurring lawn estimate only. The copy is the server's, word for word; the
+// page never writes or edits it. Absent (gate off, no lawn) renders nothing.
+export function LawnLimitsCard({ lawnLimits }) {
+  const paragraphs = Array.isArray(lawnLimits?.paragraphs) ? lawnLimits.paragraphs.filter((p) => p && typeof p.text === 'string' && p.text) : [];
+  if (!lawnLimits?.heading || paragraphs.length === 0) return null;
+  return (
+    <section data-testid="lawn-limits" aria-label={lawnLimits.heading} style={estimateCard()}>
+      <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: ESTIMATE_TEXT, lineHeight: 1.3 }}>{lawnLimits.heading}</h3>
+      {paragraphs.map((p) => (
+        <p key={p.key} data-lawn-limit={p.key} style={{ margin: '10px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.55 }}>{p.text}</p>
+      ))}
+    </section>
+  );
+}
+
 export function ServiceSection({
   section,
   servicesLength = 1,
@@ -7756,6 +7773,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // version, or 409s TERMS_VERSION_STALE if the copy moved under us.
           // Never for annual prepay: the line is not shown for that lane (paid
           // up front), so nothing is attested and nothing is recorded.
+          // GATE_ESTIMATE_LAWN_LIMITS: the hash /data served with the "What we can and can't fix"
+          // block THIS TAB RENDERED (absent when it rendered none). The server recomputes the live
+          // block and 409s LAWN_LIMITS_STALE on any difference, so an accept never lands on words
+          // the customer did not see.
+          lawnLimitsHash: data?.lawnLimits ? (data.lawnLimitsHash || undefined) : undefined,
           termsVersion: (paymentPreference !== 'prepay_annual' && data?.acceptanceTerms?.version) || undefined,
           // …and which SCOPE of that version it rendered — 'plan' (the
           // Services line carried the annual rate review sentence) or
@@ -7947,6 +7969,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             setInlineCardIntent(null);
             await loadEstimate({ preserveSelection: true });
             throw new Error(body.error || 'Your payment terms were updated — please review them and confirm again.');
+          }
+          if (body.code === 'LAWN_LIMITS_STALE') {
+            // The lawn limits copy changed since this tab loaded: nothing was accepted. Refetch so
+            // the card is the one the server will record, keep the reservation and selections,
+            // and ask for one more tap.
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'This estimate was refreshed. Please review it and confirm again.');
           }
           if (body.code === 'TERMS_VERSION_STALE') {
             // The acceptance copy changed since this tab loaded — refetch so
@@ -9282,6 +9311,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             );
           })}
           </div>
+
+          {/* GATE_ESTIMATE_LAWN_LIMITS: what the lawn program can and can't fix (server copy; absent unless a recurring lawn estimate). */}
+          <LawnLimitsCard lawnLimits={data?.lawnLimits || null} />
 
           {/* Services this customer removed, with the way back. Sits directly
               under the remaining service boxes so the reversal is where the

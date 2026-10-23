@@ -775,6 +775,16 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
         ) : null}
 
+        {/* GATE_ESTIMATE_LAWN_LIMITS: what the lawn program can and can't fix (server copy, /data `lawnLimits`; absent unless a recurring lawn estimate). */}
+        {data?.lawnLimits?.heading && Array.isArray(data.lawnLimits.paragraphs) && data.lawnLimits.paragraphs.length > 0 ? (
+          <div className="doc-keep" data-testid="doc-lawn-limits">
+            <SectionHeader>{data.lawnLimits.heading}</SectionHeader>
+            {data.lawnLimits.paragraphs.map((p) => (
+              <p key={p.key} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{p.text}</p>
+            ))}
+          </div>
+        ) : null}
+
         {/* Terms + next steps */}
         <div className="doc-keep">
           <SectionHeader>{termRows.length ? 'Service terms' : 'Terms'}</SectionHeader>

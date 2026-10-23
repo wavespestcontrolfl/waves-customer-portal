@@ -236,7 +236,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, wrapUp: false, spotRules: false, methodCorrection: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null, newSod: null,
+  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, methodCorrection: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null, newSod: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -249,6 +249,8 @@ function blockedReasonFor(data, service) {
 
 const plannedItemsOf = (data) => (Array.isArray(data?.plannedProducts?.items) ? data.plannedProducts.items.filter((item) => item?.productId) : []);
 const addOnsOf = (data) => (Array.isArray(data?.plannedProducts?.addOns) ? data.plannedProducts.addOns.filter((item) => item?.productId) : []);
+// GATE_ESTIMATE_LAWN_LIMITS: the line a Celsius WG row shows when carpetgrass is on the turf profile, or ''.
+const carpetgrassWarningOf = (data) => (typeof data?.carpetgrassCelsiusWarning === 'string' ? data.carpetgrassCelsiusWarning : '');
 // The server's weed-spot decision (GATE_LAWN_SPOT_RULES), or null: an older or dark server sends none.
 const weedMixOf = (data) => {
   const mix = data?.spotRules === true ? data?.plannedProducts?.weedMix : null;
@@ -332,6 +334,8 @@ const optionalContextFields = (data) => ({
   stockAdvisory: typeof data?.stockAdvisory === 'boolean' ? data.stockAdvisory : undefined,
   // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
   wrapUp: data?.wrapUp === true,
+  // GATE_ESTIMATE_LAWN_LIMITS: carpetgrass is on the turf profile; a Celsius WG row shows this line. An older server sends none.
+  carpetgrassCelsiusWarning: carpetgrassWarningOf(data),
   // Spot-area rules: only while the server says so, so an older server renders as before.
   spotRules: data?.spotRules === true,
   // GATE_REPORT_CLEANUP_1020: a granular product starts on Granular broadcast, never a spray method.
@@ -1909,6 +1913,7 @@ function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, area
               surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : takeAllRowNote(gov, row.productId),
               row.sodSwap?.reason,
               sodRowNote(newSod, row.productId),
+              /\bcelsius\b/i.test(String(row.name || '')) ? ctx.carpetgrassCelsiusWarning : '',
             ].filter(Boolean).join(' ') || null}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}

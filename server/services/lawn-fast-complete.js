@@ -905,6 +905,15 @@ function reportFactsContextKeys() {
   return Object.fromEntries(REPORT_FACTS_CONTEXT_KEYS.filter(([, live]) => live()).map(([key]) => [key, true]));
 }
 
+// GATE_ESTIMATE_LAWN_LIMITS: `{ carpetgrassCelsiusWarning }` when the customer's turf profile lists carpetgrass, else `{}`.
+// Advisory text for a product row, never a block and never a required tap; a failed read adds nothing.
+async function carpetgrassCelsiusWarningKey(svc, knex) {
+  if (featureGates.estimateLawnLimitsLive?.() !== true) return {};
+  const lawnLimits = require('./estimate-lawn-limits');
+  const { otherGrasses } = await lawnLimits.loadLawnLimitFlags(svc.customer_id, svc.property_id, knex);
+  return otherGrasses.includes('carpetgrass') ? { carpetgrassCelsiusWarning: lawnLimits.CARPETGRASS_CELSIUS_WARNING } : {};
+}
+
 /**
  * The sheet's context for one scheduled service. `{ ok: false, reason }` for a
  * missing visit; an ineligible visit answers `eligible: false` with the reason
@@ -979,6 +988,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     ...(featureGates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
     // GATE_REPORT_CLEANUP_1020: the sheet's granular method default is on. The key exists only while the gate is live.
     ...require('./service-report/report-cleanup-1020').methodCorrectionKey(),
+    // GATE_ESTIMATE_LAWN_LIMITS: the turf profile lists carpetgrass, so a Celsius WG row on the sheet shows
+    // this line. The key exists only while the gate is live AND the flag is set, so gate off is byte-identical.
+    ...await carpetgrassCelsiusWarningKey(svc, knex),
     // GATE_LAWN_REPORT_FACTS context keys (the standing chinch find, the recorded spot areas), present only while live.
     ...reportFactsContextKeys(),
     // Why the planned list is empty when it is empty because a read failed

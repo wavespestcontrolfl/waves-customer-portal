@@ -5101,8 +5101,11 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
       }
     }
     const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
+    // GATE_ESTIMATE_LAWN_LIMITS: the same "What we can and can't fix" copy the customer's download prints.
+    const lawnLimits = await require('../services/estimate-lawn-limits').lawnLimitsForEstimate(estimate);
     generateEstimateProposalPDF(estimate, res, {
       ...(await (sentOfferView ? billing.resolveFrozenBillingContext : billing.resolveProposalBillingContext)(estimate)),
+      ...(lawnLimits ? { lawnLimits } : {}),
       // Same recorded acceptance the customer's download carries (strict: an
       // accepted document is never produced without its record).
       acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),
