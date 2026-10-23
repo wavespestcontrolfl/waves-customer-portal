@@ -131,8 +131,8 @@ const SIGN_OFF_REFUSAL = {
 // function (typed fields, the merged-row pairs, reference details, uploaded file names, the signed-link name fallback).
 //
 // The text is read in one normal form first (screenText): compatibility forms folded (fullwidth digits and dashes, no-break
-// spaces), every Unicode dash or minus read as a hyphen, every invisible format character, combining mark and stray control
-// character removed, an underscore read as a space. A separator is then any run of characters that are not letters or digits
+// spaces), every Unicode decimal digit read as its ASCII digit, every Unicode dash or minus read as a hyphen, every invisible
+// format character, combining mark and stray control character removed, an underscore read as a space. A separator is then any run of characters that are not letters or digits
 // (space, any dash, dot, slash, comma, colon, parentheses, brackets, plus ...), so no punctuation splits a tax ID apart.
 // In typed text (a number counts as its digits),
 // each field alone and each label/value pair read together, these are refused:
@@ -152,7 +152,17 @@ const DASHES = /[\u2010-\u2015\u2043\u2212\u2E3A\u2E3B\uFE58\uFE63\uFF0D]/g;
 // Every Unicode format character (zero-width spaces and joiners, bidi marks and isolates, soft hyphen, BOM ...), every
 // combining mark, and every control character other than tab and line breaks.
 const INVISIBLE = /[\p{Cf}\p{M}\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu;
-const screenText = (text) => text.normalize('NFKC').replace(INVISIBLE, '').replace(DASHES, '-').replace(/_/g, ' ');
+// Every Unicode decimal digit (Arabic-Indic, Devanagari, Thai ...) read as its ASCII digit. Unicode encodes decimal digits in
+// contiguous runs of ten that start at zero, so a digit's value is its distance from the start of its run, modulo ten.
+const OTHER_DIGIT = /(?![0-9])\p{Nd}/gu;
+const isDecimalDigit = (cp) => /\p{Nd}/u.test(String.fromCodePoint(cp));
+function asciiDigit(ch) {
+  const cp = ch.codePointAt(0);
+  let start = cp;
+  while (start > 0 && isDecimalDigit(start - 1)) start -= 1;
+  return String((cp - start) % 10);
+}
+const screenText = (text) => text.normalize('NFKC').replace(INVISIBLE, '').replace(OTHER_DIGIT, asciiDigit).replace(DASHES, '-').replace(/_/g, ' ');
 const SEPARATOR = '[^\\p{L}\\p{N}]+';
 const SSN_SHAPE = new RegExp(`(?<!\\d)\\d{3}${SEPARATOR}\\d{2}${SEPARATOR}\\d{4}(?!\\d)`, 'u');
 const EIN_SHAPE = new RegExp(`(?<!\\d)\\d{2}${SEPARATOR}\\d{7}(?!\\d)`, 'u');

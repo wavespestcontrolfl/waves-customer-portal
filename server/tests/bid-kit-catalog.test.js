@@ -330,6 +330,11 @@ describe('tax IDs are never stored: one detector', () => {
     ['\u2066123456789\u2069', true, 'bidi isolates around nine digits'], ['1234\u202A56789', true, 'bidi embedding'],
     ['1234\u030156789', true, 'a combining mark inside nine digits'], ['1234\u000156789', true, 'a control character inside nine digits'],
     ['Line 1234\n56789 Example Way', false, 'a line break still separates'],
+    // Digits of any script are read as their ASCII digits.
+    ['EIN \u0661\u0662-\u0663\u0664\u0665\u0666\u0667\u0668\u0669', true, 'EIN in Arabic-Indic digits'],
+    ['SSN \u0661\u0662\u0663-\u0664\u0665-\u0666\u0667\u0668\u0669', true, 'SSN in Arabic-Indic digits'],
+    ['\u0967\u0968\u0969\u096A\u096B\u096C\u096D\u096E\u096F', true, 'nine Devanagari digits'],
+    ['\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8', false, 'eight Extended Arabic-Indic digits'],
     ['SSN 123\u201445\u20146789', true, 'SSN with em dashes'], ['EIN 12\u20143456789', true, 'EIN with an em dash'],
     ['2026\u201410\u201423', false, 'date with em dashes'], ['Policy 1234\u20145678', false, 'eight digits with an em dash'],
     // A tax phrase with punctuation between or inside its words.
@@ -387,7 +392,7 @@ describe('tax IDs are never stored: one detector', () => {
     ['W9-123-45-6789.pdf', true], ['W9 12-3456789.pdf', true], ['EIN 123456789.pdf', true], ['W9_TIN_123456789.pdf', true],
     ['SSN 123 45 6789.pdf', true], ['SSN_123_45_6789.pdf', true], ['EIN 12 3456789.pdf', true], ['W9 1234 56789.pdf', true], ['W9 123.456.789.pdf', true],
     ['scan 123-456-789.pdf', true], ['W9 123–45–6789.pdf', true],
-    ['W9 123\u201445\u20146789.pdf', true], ['scan\uFF0D123456789.pdf', true], ['scan_\uFF11\uFF12\uFF13\uFF14\uFF15\uFF16\uFF17\uFF18\uFF19.pdf', true],
+    ['W9 123\u201445\u20146789.pdf', true], ['scan\uFF0D123456789.pdf', true], ['scan \u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669.pdf', true], ['scan_\uFF11\uFF12\uFF13\uFF14\uFF15\uFF16\uFF17\uFF18\uFF19.pdf', true],
     ['12345678.pdf', false], ['1234567890.pdf', false], ['1234567890123.pdf', false], ['FDACS license 2026.pdf', false], ['Policy 2026-10-23.pdf', false],
     ['W-9 signed.pdf', false], ['COI 2026 renewal (final).docx', false], ['scan 941-555-0100.pdf', false], ['license_2026_10_23.pdf', false],
   ];

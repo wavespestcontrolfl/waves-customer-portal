@@ -716,3 +716,27 @@ it("reads the list again when the Eastern day turns while the page is open", asy
     vi.useRealTimers();
   }
 });
+
+it("the facts sheet reads its data again when the Eastern day turns", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-10-24T03:58:00Z")); // Oct 23, 11:58 PM Eastern
+  let sheets = 0;
+  route({
+    "GET /admin/bid-kit/": () => reply(payload()),
+    "GET /admin/bid-kit/facts-sheet": () => { sheets += 1; return reply({ today: TODAY, facts: [], documents: [] }); },
+  });
+  try {
+    renderPage();
+    await screen.findByText("FDACS business license copy");
+    fireEvent.click(screen.getByRole("button", { name: /facts sheet/i }));
+    await screen.findByText("Company facts");
+    expect(sheets).toBe(1);
+    await vi.advanceTimersByTimeAsync(61 * 1000);
+    expect(sheets).toBe(1);
+    vi.setSystemTime(new Date("2026-10-24T04:01:00Z")); // Oct 24, 12:01 AM Eastern
+    await vi.advanceTimersByTimeAsync(61 * 1000);
+    await waitFor(() => expect(sheets).toBeGreaterThanOrEqual(2));
+  } finally {
+    vi.useRealTimers();
+  }
+});

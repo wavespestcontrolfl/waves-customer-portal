@@ -172,13 +172,16 @@ function DocumentLine({ doc }) {
 
 function FactsSheet() {
   const [state, setState] = useState({ loading: true, error: "", data: null });
+  const live = useRef(true);
+  const load = useCallback(() => api("/facts-sheet")
+    .then((data) => live.current && setState({ loading: false, error: "", data }))
+    .catch((err) => live.current && setState({ loading: false, error: err.message, data: null })), []);
   useEffect(() => {
-    let live = true;
-    api("/facts-sheet")
-      .then((data) => live && setState({ loading: false, error: "", data }))
-      .catch((err) => live && setState({ loading: false, error: err.message, data: null }));
-    return () => { live = false; };
-  }, []);
+    live.current = true;
+    load();
+    return () => { live.current = false; };
+  }, [load]);
+  useDayRollover(state.data && state.data.today, load);
   if (state.loading) return <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading facts…</div>;
   if (state.error) return <ActionFeedback error>{state.error}</ActionFeedback>;
   const { facts, documents } = state.data;
@@ -547,18 +550,20 @@ function useKit() {
     }
   }, []);
   useEffect(() => { load(); }, [load]);
-  // Statuses are the server's for its Eastern day: when the Eastern day turns while the page is open (an expiring paper becomes
-  // expired at midnight), the list is read again.
-  const today = data && data.today;
-  useEffect(() => {
-    if (!today) return undefined;
-    const timer = setInterval(() => { if (etDateString() !== today) load(); }, DAY_CHECK_MS);
-    return () => clearInterval(timer);
-  }, [today, load]);
+  useDayRollover(data && data.today, load);
   return { data, loading, error, load };
 }
 
+// Statuses are the server's for its Eastern day: when the Eastern day turns while a view is open (an expiring paper becomes
+// expired at midnight), it reads its data again. Checked each minute against the day the server answered for.
 const DAY_CHECK_MS = 60 * 1000;
+function useDayRollover(today, reload) {
+  useEffect(() => {
+    if (!today) return undefined;
+    const timer = setInterval(() => { if (etDateString() !== today) reload(); }, DAY_CHECK_MS);
+    return () => clearInterval(timer);
+  }, [today, reload]);
+}
 
 // The page's writes. One mutation at a time (busy), a message that says what happened, and the list read again after it so
 // statuses and the summary always come from the server. A 409 closes every open editor: they hold fields from the old
