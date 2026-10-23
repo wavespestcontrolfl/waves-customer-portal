@@ -272,13 +272,18 @@ function makeFakeDb({ categories } = {}) {
   const log = { transactions: 0, rollbacks: 0, writes: 0 };
 
   function builderFor(store, table) {
-    const state = { filter: null, pending: null, ignoreConflict: false, wantReturn: false };
+    const state = { filter: null, pending: null, ignoreConflict: false, wantReturn: false, raws: [], first: null };
     const b = {
       whereIn(col, vals) { state.filter = { col, vals: new Set(vals) }; return b; },
       whereBetween(col, [lo, hi]) { state.range = { col, lo, hi }; return b; },
       whereNot(col, val) { state.not = { col, val }; return b; },
       whereNotNull(col) { state.notNull = col; return b; },
-      where(obj) { state.eq = obj; return b; },
+      // grouped wheres (bank-import's appliedRefundTotal) run their callback
+      // against this builder; raw predicates are recorded for the refund sum
+      where(arg) { if (typeof arg === 'function') arg.call(b); else state.eq = arg; return b; },
+      orWhere(arg) { if (typeof arg === 'function') arg.call(b); return b; },
+      whereRaw(sql, binds) { state.raws.push({ sql, binds: binds || [] }); return b; },
+      first(expr) { state.first = expr || true; return b; },
       update(patch) { state.patch = patch; return b; },
       select() { return b; },
       insert(rows) { state.pending = Array.isArray(rows) ? rows : [rows]; return b; },
@@ -302,6 +307,17 @@ function makeFakeDb({ categories } = {}) {
             return state.wantReturn ? inserted : undefined;
           }
           const ymd = v => (v instanceof Date ? `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}` : v);
+          // appliedRefundTotal: applied refunds add their refundAmount, released ones their own amount
+          const refundSum = state.raws.find(r => /refundAppliedTo|releasedRefundOf/.test(r.sql));
+          if (state.first && refundSum) {
+            const id = String(refundSum.binds[0]);
+            const total = store[table].reduce((sum, r) => {
+              if (r.status === 'refund_applied' && String(r.suggestion?.refundAppliedTo) === id) return sum + Number(r.suggestion.refundAmount || 0);
+              if (r.status === 'ignored' && String(r.suggestion?.releasedRefundOf) === id) return sum + Number(r.amount || 0);
+              return sum;
+            }, 0);
+            return { total };
+          }
           let out = store[table];
           if (state.filter) out = out.filter(r => state.filter.vals.has(r[state.filter.col]));
           if (state.range) out = out.filter(r => ymd(r[state.range.col]) >= state.range.lo && ymd(r[state.range.col]) <= state.range.hi);
@@ -317,10 +333,12 @@ function makeFakeDb({ categories } = {}) {
   }
 
   const db = table => builderFor(tables, table);
+  db.raw = sql => ({ sql });
   db.transaction = async fn => {
     log.transactions += 1;
     const staged = Object.fromEntries(Object.entries(tables).map(([k, v]) => [k, v.slice()]));
     const trx = table => builderFor(staged, table);
+    trx.raw = db.raw;
     try {
       const out = await fn(trx);
       Object.keys(tables).forEach(k => { tables[k] = staged[k]; });
@@ -620,6 +638,30 @@ describe('--skip-existing and expenses', () => {
     expect(out2.counts).toMatchObject({ held: 2, inserted: 0 });
     expect(out2.report).toMatch(/line 2 .*dated 1 day later.*\(portal: "Near" in a hand-entered expense\)/);
     expect(out2.report).toMatch(/line 3 .*dated 1 day earlier.*\(portal: "Far" in a hand-entered expense\)/);
+  });
+
+  test('a hand-entered expense a refund reduced is compared at its gross amount (applied or released refund), as the matcher does', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
+    const file = path.join(dir, 'ledger-2025.csv');
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '100.00', date: '2025-03-14' })));
+    for (const refund of [
+      { status: 'refund_applied', amount: '20.00', suggestion: { refundAppliedTo: 'exp-r', refundAmount: 20 } },
+      { status: 'ignored', amount: '20.00', suggestion: { releasedRefundOf: 'exp-r' } },
+    ]) {
+      const db = makeFakeDb();
+      // entered by hand at 100, reduced to 80 by the refund the owner applied in Bank Import a month later
+      db.tables().expenses.push({ id: 'exp-r', expense_date: '2025-03-14', amount: '80.00', vendor_name: 'Acme Supply', description: 'supplies' });
+      db.tables().bank_transactions.push({ id: 'rf-1', row_hash: 'rf', source: 'csv', account_label: 'card 3098', txn_date: '2025-04-20', description: 'ACME REFUND', direction: 'credit', ...refund });
+      const { counts, report } = await run({ file, db, skipExisting: true });
+      expect(counts).toMatchObject({ held: 1, inserted: 0, handExpenses: 1 });
+      expect(report).toMatch(/\[a hand-entered expense of the same amount \(80\.00 after refunds\), dated the same day; the ledger says expense \(Supplies\)\]/);
+      expect(report).toMatch(/Acme Supply\s+80\.00 \(gross 100\.00 before refunds\)/);
+      expect(db.tables().expenses).toHaveLength(1);
+    }
+    // without a refund the 80 and the 100 are different charges: the ledger row books
+    const db3 = makeFakeDb();
+    db3.tables().expenses.push({ id: 'exp-r', expense_date: '2025-03-14', amount: '80.00', vendor_name: 'Acme Supply', description: 'supplies' });
+    expect((await run({ file, db: db3, skipExisting: true })).counts).toMatchObject({ held: 0, inserted: 1, handExpenses: 1 });
   });
 
   test('an expense linked to a bank row is covered through that row: not listed, and the refusal does not count it', async () => {
