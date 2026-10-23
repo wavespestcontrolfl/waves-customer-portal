@@ -636,8 +636,14 @@ function classifyRow(row, compiled, { pattern, force, stamp, matched = null }) {
   const sug = row.suggestion || {};
   if (sug.decision || !matcherExamined(row)) return { skip: true };
   const rule = matchRule(row.description, compiled, row.direction, matched);
-  const { matcherFlag, writes, stale } = ruleVerdict(sug, rule, pattern, force);
-  if (pattern && !writes) return { skip: true };
+  // A payee pass also re-evaluates, in full, a row that carries the rule
+  // being propagated: an Always decision can replace that rule's kind or
+  // category under the same pattern (expense to income, say), so a sibling
+  // the new rule no longer fits gets the next rule that does, or its stale
+  // classification cleared, now, not on the next forced pass.
+  const carries = !!pattern && hasKey(sug, 'rule') && sug.rule.pattern === pattern;
+  const { matcherFlag, writes, stale } = ruleVerdict(sug, rule, carries ? null : pattern, carries || force);
+  if (pattern && !writes && !stale) return { skip: true };
   const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
   if (writes && matcherFlag) patch.examined = true;
   // a stale clear drops the override marker with the classification

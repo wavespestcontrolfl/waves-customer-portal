@@ -585,6 +585,28 @@ describe('applyRules (suggestion-only)', () => {
     expect(state.updates[0].patch.suggestion.removed).toEqual(svc.CLASSIFICATION_KEYS);
   });
 
+  test('a payee pass re-evaluates in full a row carrying the propagated pattern: after expense became income under that pattern, a debit sibling gets the next rule that fits or is cleared; others stay untouched', async () => {
+    state.rules = [
+      { id: 'own', pattern: '\\bacme\\b', kind: 'income', priority: 10, enabled: true, source: 'owner' },
+      { id: 'seed', pattern: 'acme supply', kind: 'expense', category_id: 'cat-s', category_name: 'Supplies', irs_line: '22', priority: 100, enabled: true, source: 'seed' },
+    ];
+    const replaced = { id: 'own', kind: 'expense', source: 'owner', pattern: '\\bacme\\b' };
+    state.bankRows = [
+      { id: 'b1', txn_date: '2026-01-02', description: 'ACME SUPPLY 1', direction: 'debit', suggestion: { noMatch: true, rule: replaced, categoryId: 'cat-x', categorySource: 'rule', rulesAt: 'old' } },
+      { id: 'b2', txn_date: '2026-01-03', description: 'ACME 2', direction: 'debit', suggestion: { noMatch: true, rule: replaced, categoryId: 'cat-x', categorySource: 'rule', rulesAt: 'old' } },
+      { id: 'b3', txn_date: '2026-01-04', description: 'ACME 3', direction: 'credit', suggestion: { noMatch: true, rulesAt: 'old' } },
+      { id: 'b4', txn_date: '2026-01-05', description: 'WAWA', direction: 'debit', suggestion: { noMatch: true, rule: { id: 'other', kind: 'expense', source: 'seed', pattern: 'wawa' }, rulesAt: 'old' } },
+    ];
+    const out = await svc.applyRules({ force: true, pattern: '\\bacme\\b', deadline: Number.MAX_SAFE_INTEGER });
+    expect(out).toMatchObject({ examined: 4, suggested: 2, cleared: 1, byKind: { expense: 1, income: 1 } });
+    const byId = Object.fromEntries(state.updates.map((u) => [u.wheres[0].id, u.patch.suggestion]));
+    expect(byId.b1.merged.rule.id).toBe('seed'); // the income rule skips money out; the seed fits
+    expect(byId.b2.merged).toEqual({ rulesAt: expect.any(String) }); // nothing else fits: cleared, not left stale
+    expect(byId.b2.removed).toEqual([...svc.CLASSIFICATION_KEYS, 'examined']);
+    expect(byId.b3.merged.rule.id).toBe('own'); // money in: the propagated rule itself
+    expect(byId.b4).toBeUndefined(); // another rule's row is not a payee pass's business
+  });
+
   test('an owner override whose rule is gone is cleared back to the matcher when only a seed is left; owner to owner keeps the marker', async () => {
     // the owner rule that overrode the matcher's transfer flag is gone; the Costco seed still matches:
     // the seed does NOT take the row (a matcher flag holds against seeds); the row is cleared so the
