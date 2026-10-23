@@ -113,6 +113,31 @@ describeDb('reclaimed water through PostgreSQL', () => {
     expect(await p.read()).toMatchObject({ address_line1: '212 Fixture Street', reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
   });
 
+  test('a unit-only edit keeps a county verdict and its pin while the gate is on; gate off it clears the pin (and so the verdict) as before; a move clears both', async () => {
+    const { syncPrimaryAddress } = require('../services/customer-properties');
+    const saved = process.env.GATE_LAWN_RECLAIMED_HALF_N;
+    try {
+      const county = { reclaimed_water: true, reclaimed_water_source: 'county_meter', reclaimed_water_checked_at: T0 };
+      const p = await property(offset(0, 5), county);
+      const row = await p.read();
+      const customer = (change) => ({ id: p.customerId, address_line1: row.address_line1, address_line2: row.address_line2, city: row.city, state: row.state, zip: row.zip, ...change });
+      process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
+      await syncPrimaryAddress(customer({ address_line2: 'Unit 4' }), knex, { explicitLine2: true });
+      expect(await p.read()).toMatchObject({ address_line2: 'Unit 4', reclaimed_water: true, reclaimed_water_source: 'county_meter' });
+      expect(Number((await p.read()).latitude)).toBeCloseTo(Number(row.latitude), 6);
+      await syncPrimaryAddress(customer({ address_line1: '9 Moved Way', address_line2: 'Unit 4' }), knex, { explicitLine2: true });
+      expect(await p.read()).toMatchObject({ latitude: null, reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+
+      delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+      const q = await property(offset(0, 6), county);
+      const qRow = await q.read();
+      await syncPrimaryAddress({ id: q.customerId, address_line1: qRow.address_line1, address_line2: 'Unit 5', city: qRow.city, state: qRow.state, zip: qRow.zip }, knex, { explicitLine2: true });
+      expect(await q.read()).toMatchObject({ latitude: null, reclaimed_water: null, reclaimed_water_source: null });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_RECLAIMED_HALF_N; else process.env.GATE_LAWN_RECLAIMED_HALF_N = saved;
+    }
+  });
+
   test('a refresh whose match pass failed is finished by the next tick: a stale county verdict is re-judged against the stored layer (kept, cleared, or newly set)', async () => {
     await knex('customer_properties').update({ active: false });
     const kept = await property(offset(0, 5));

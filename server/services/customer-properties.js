@@ -508,6 +508,20 @@ function reclaimedResetOnMove(from, to) {
     : {};
 }
 
+// GATE_LAWN_RECLAIMED_HALF_N: a unit-only or format-only edit (addressMoved false) does not move the building, so a property whose
+// reclaimed answer is the county's keeps its coordinates. Clearing them would fire the coordinate-reset trigger (migration
+// 20261023110000) and drop a still-valid county verdict, putting the lawn back on full nitrogen until the next county tick. Gate off, or
+// no county answer, or a real move: the coordinates clear exactly as before.
+function coordsResetOnSync(from, to, preserveCoords) {
+  return preserveCoords || keepsCountyReclaimedPin(from, to) ? {} : { latitude: null, longitude: null };
+}
+function keepsCountyReclaimedPin(from, to) {
+  const countyAnswer = from.reclaimed_water_source === 'county_meter'
+    || (from.reclaimed_water_source == null && from.reclaimed_water_checked_at != null);
+  return countyAnswer && from.latitude != null && from.longitude != null && !addressMoved(from, to)
+    && require('../config/feature-gates').lawnReclaimedHalfNLive();
+}
+
 /**
  * After an admin edits customers.property_type, write the same value to the
  * primary customer_properties row so the account and its primary property do
@@ -562,10 +576,7 @@ async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = fal
   // preserveCoords (r43): a unit-only edit does not move the building — the
   // caller keeps the still-valid coordinates instead of gambling on the
   // best-effort re-geocode.
-  if (!preserveCoords) {
-    next.latitude = null;
-    next.longitude = null;
-  }
+  Object.assign(next, coordsResetOnSync(primary, next, preserveCoords));
   // A street/locality move takes the property out of its neighborhood (and
   // the shared gate code) — an office pick included — so clear it for a later
   // relink, whatever the caller does with coords.
