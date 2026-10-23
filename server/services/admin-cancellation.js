@@ -189,16 +189,13 @@ async function refusePendingPrepayInvoices(customerId, scope = null) {
     `An unpaid annual-prepay invoice (${inv.invoice_number || inv.id}${p.plan_label ? `, ${p.plan_label}` : ''}) is still payable and would re-activate coverage if paid after this cancellation. Void it from the invoice tools first.`);
 }
 
-async function resolveLiveTerm(customerId, wholeAccount) {
-  if (!wholeAccount) return null;
+// ALL still-paid terms, current AND future: a renewal is a NEW row
+// starting the day after the old term ends, so an as-of-today query would
+// dispose only the current term while the sweep pulls the paid
+// successor's visits and leaves that term live.
+function liveTermRows(customerId) {
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
-  await refusePendingPrepayInvoices(customerId);
-  // ALL still-paid terms, current AND future: a renewal is a NEW row
-  // starting the day after the old term ends, so an as-of-today query would
-  // dispose only the current term while the sweep pulls the paid
-  // successor's visits and leaves that term live. Two live terms refuse
-  // below (multiple_prepay_terms) — dispose the extra one first.
-  const terms = await coveredTermsAsOf(db, null)
+  return coveredTermsAsOf(db, null)
     .where('t.term_end', '>=', etDateString())
     .where('t.customer_id', customerId)
     .orderBy('t.term_end', 'desc')
@@ -207,6 +204,14 @@ async function resolveLiveTerm(customerId, wholeAccount) {
     // provenance), and a partial row drops an anchored installation or
     // widens a successor to the whole account.
     .select('t.*');
+}
+
+async function resolveLiveTerm(customerId, wholeAccount) {
+  if (!wholeAccount) return null;
+  await refusePendingPrepayInvoices(customerId);
+  // Two live terms refuse below (multiple_prepay_terms) — dispose the extra
+  // one first.
+  const terms = await liveTermRows(customerId);
   if (!terms || !terms.length) return null;
   if (terms.length > 1) {
     throw new CancelPlanError(409, 'multiple_prepay_terms',
@@ -244,6 +249,30 @@ function requestCancelPlanMeta(row) {
     return meta && meta.cancel_plan ? meta.cancel_plan : null;
   } catch { return null; }
 }
+// A cancel request records the prepay term it acts on (metadata.cancel_plan
+// .prepayTermId, written at acceptance). It belongs ONLY to that term: a
+// stale open request from an earlier term (the customer reactivated and
+// bought a new one) must not donate its boundary/disposition to, or stand in
+// for, the new term's cancel. A row that records none (written before this
+// shipped) keeps its old reach — it matches any term — and so does a lookup
+// with no term. Identity is the id, never a date: the resolved term can be a
+// FUTURE paid term, and a cancel accepted before it starts still owns it.
+function acceptanceTermId(row) {
+  const cp = requestCancelPlanMeta(row);
+  return cp && cp.prepayTermId != null && cp.prepayTermId !== '' ? String(cp.prepayTermId) : null;
+}
+function acceptanceMatchesTerm(row, termOrId) {
+  const termId = termOrId && typeof termOrId === 'object' ? termOrId.id : termOrId;
+  const recorded = acceptanceTermId(row);
+  return !recorded || termId == null || recorded === String(termId);
+}
+// The id of the one live term a whole-account lookup is for; null when there
+// is none or it is ambiguous (resolveLiveTerm refuses that case itself).
+async function liveTermIdOf(customerId) {
+  const terms = await liveTermRows(customerId);
+  return terms && terms.length === 1 ? terms[0].id : null;
+}
+
 // ADMIN-BUG-R18: an accepted whole-account "end now + refund" run that has
 // not finished — its request is still open ('new'), so the processor may
 // have pulled every visit while the term's disposition was never written
@@ -251,13 +280,16 @@ function requestCancelPlanMeta(row) {
 // annual-prepay end-at-term upkeep neither stamps nor recreates visits for
 // the customer until the run is repaired or resolved. A blank disposition is
 // derived by resolvePrepay's own rule (prepayDispositionForEffectiveDate).
-async function hasOpenEndNowCancellation(customerId, conn = db) {
+// With a termId only a request for THAT term (or a legacy one recording
+// none) skips its upkeep.
+async function hasOpenEndNowCancellation(customerId, conn = db, termId = null) {
   const rows = await conn('service_requests')
     .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'new' })
     .select('id', 'metadata');
   return (rows || []).some((row) => {
     const meta = requestCancelPlanMeta(row);
     if (!meta || (Array.isArray(meta.scope) && meta.scope.length)) return false;
+    if (!acceptanceMatchesTerm(row, termId)) return false;
     const disposition = meta.prepayDisposition || prepayDispositionForEffectiveDate(meta.effectiveDate || 'now');
     return disposition === 'end_now_refund';
   });
@@ -275,11 +307,20 @@ async function findCancelAcceptance(customerId, wholeAccount, scope, status) {
     query = query.where('updated_at', '>=', new Date(Date.now() - 24 * 60 * 60 * 1000));
   }
   const candidates = await query.select('*');
-  for (const row of candidates || []) {
+  const sameScope = (candidates || []).filter((row) => {
     const cp = requestCancelPlanMeta(row);
-    if (cp && JSON.stringify(Array.isArray(cp.scope) ? [...cp.scope].sort() : null) === wanted) return row;
-  }
-  return null;
+    return !!cp && JSON.stringify(Array.isArray(cp.scope) ? [...cp.scope].sort() : null) === wanted;
+  });
+  // A scoped cancel acts on no term. A whole-account one is the live term's
+  // own: a request recording a DIFFERENT term is not its acceptance.
+  const recordsTerm = wholeAccount && sameScope.some((row) => acceptanceTermId(row));
+  if (!recordsTerm) return sameScope[0] || null;
+  const termId = await liveTermIdOf(customerId);
+  if (termId == null) return sameScope[0] || null;
+  // The live term's own request outranks a legacy one that records none.
+  return sameScope.find((row) => acceptanceTermId(row) === String(termId))
+    || sameScope.find((row) => !acceptanceTermId(row))
+    || null;
 }
 
 // coverageRowsForTerm returns [] BOTH for "no covered rows" and for a term
@@ -1946,6 +1987,10 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
             effectiveDate: input.effectiveDate,
             prepayDisposition: input.prepayDisposition,
             previewFingerprint: suppliedFingerprint,
+            // The prepay term this cancel acts on: the request belongs only
+            // to it (acceptanceMatchesTerm), so a later term's cancel never
+            // inherits this boundary or disposition.
+            ...(term ? { prepayTermId: term.id } : {}),
             // The instant the approved fee exposure was judged at — every
             // retry prices the same visits at this clock.
             feeEvaluationAt: feeEvaluationAt ? feeEvaluationAt.toISOString() : null,
@@ -2467,5 +2512,5 @@ module.exports = {
   // refusal this engine applies before its own wind-down.
   findPendingPrepayInvoice,
   // Tests only: the term-decision step with its disposition (ADMIN-BUG-R18).
-  _private: { decideTermCancel },
+  _private: { decideTermCancel, acceptanceMatchesTerm },
 };
