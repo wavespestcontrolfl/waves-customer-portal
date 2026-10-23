@@ -1100,6 +1100,22 @@ describe('what the portal already holds', () => {
     await expect(run({ file, db, dryRun: true })).resolves.toMatchObject({ counts: { read: 2 } });
   });
 
+  test('every held row carries manualLink (a hold is the owner\'s decision): a review row corrected to an ignored class, and an open business row without its expense, are never auto-linked by a matching pass', async () => {
+    const file = fixture(row({ description: 'MYSTERY CHARGE 77', amount: '19.99', class: 'review', category: 'Unknown merchant', sched_c_line: '' }), row({ description: 'ACME SUPPLY 4471', amount: '12.50' }));
+    const db = makeFakeDb({ categories: [{ id: 'cat-x', name: 'Insurance' }] }); // no Supplies: the ACME row loads open, no expense
+    await run({ file, db });
+    const stored = (d) => db.tables().bank_transactions.find(b => b.description.startsWith(d));
+    expect(stored('MYSTERY').suggestion.manualLink).toBeUndefined();
+    fs.writeFileSync(file, csv(row({ description: 'MYSTERY CHARGE 77', amount: '19.99', class: 'personal', category: 'Personal', sched_c_line: '' }), row({ description: 'ACME SUPPLY 4471', amount: '12.50' })));
+    db.tables().expense_categories.push({ id: 'cat-s', name: 'Supplies' });
+    expect((await run({ file, db })).counts).toMatchObject({ held: 2, inserted: 0 });
+    const mystery = JSON.parse(stored('MYSTERY').suggestion.bindings[0]);
+    expect(mystery).toMatchObject({ manualLink: true, review: true, ledgerClass: 'personal', ledgerConflict: expect.objectContaining({ fileSays: 'personal (Personal)' }) });
+    const acme = JSON.parse(stored('ACME').suggestion.bindings[0]);
+    expect(acme).toMatchObject({ manualLink: true, review: true });
+    expect(acme.note).toBeUndefined(); // the row keeps the park note it already carries (no category then)
+  });
+
   test('a rerun that corrects a review row to a business row the loader would park (no category for its line) carries manualLink onto the held row, so no matching pass links it by itself', async () => {
     const mystery = (over) => row({ description: 'MYSTERY CHARGE 77', amount: '19.99', ...over });
     const other = (over) => row({ description: 'OTHER CHARGE 78', amount: '5.00', ...over });
