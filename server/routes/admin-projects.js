@@ -198,6 +198,16 @@ function pretreatSentSnapshot(project, projectCols) {
   };
 }
 
+// Send with invoice: save the copy once the report leg reached the owner,
+// fenced on the send claim (a stale takeover owns the row otherwise). A held
+// report sent only the invoice, so it saves nothing (the release saves it).
+// The row passed in is the post-claim re-read the send delivered.
+async function savePretreatSentCopy(project, projectCols, { reportReached, held, claimToken }) {
+  const copy = reportReached && !held ? pretreatSentSnapshot(project, projectCols) : {};
+  if (!copy.pretreat_sent_snapshot) return;
+  await db('projects').where({ id: project.id, delivery_claim_token: claimToken }).update(copy);
+}
+
 // Re-judges the staff-send checks on the row as it stands after the send
 // claim (an edit can land between the first read and the claim; edits are
 // fenced once the row is 'sending'). Throws an operational 422; both send
@@ -5556,6 +5566,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       await revertHeldReportClaimOnAbort();
     }
 
+    // The sent copy follows the report leg alone: a report that reached the
+    // owner is the copy even when a payer leg failed the send as a whole.
+    await savePretreatSentCopy(refreshed, projectCols, { reportReached: delivered_report, held: holdActive, claimToken: deliveryClaimToken });
+
     // Both delivered-branch finalizes are fenced on the claim token (same
     // contract as /send): zero rows = a stale takeover owns the row now.
     let finalized = !delivered;
@@ -5578,8 +5592,6 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         // (closed_at stays set and closeout artifacts key on status='closed').
         status: project.status === 'closed' ? project.status : 'sent',
         sent_at: project.sent_at || db.fn.now(),
-        // The row re-read after the claim is what this send delivered.
-        ...pretreatSentSnapshot(refreshed, projectCols),
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,
