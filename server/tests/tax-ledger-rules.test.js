@@ -104,6 +104,13 @@ describe('compileRules / matchRule', () => {
     ]);
     expect(svc.matchRule('ACME HARDWARE 1234', owners, 'debit').id).toBe('acme-hardware');
     expect(svc.matchRule('ACME 1234', owners, 'debit').id).toBe('acme-personal');
+    // repeating Always on the older pattern upserts it (updated_at moves, created_at stays): that
+    // decision is the latest reading again and wins the overlap back
+    const redecided = svc.compileRules([
+      { id: 'acme-personal', pattern: 'acme', kind: 'personal', priority: 10, source: 'owner', created_at: new Date('2026-09-01T10:00:00Z'), updated_at: new Date('2026-10-05T10:00:00Z') },
+      { id: 'acme-hardware', pattern: '\\bacme\\W*hardware\\b', kind: 'expense', category_id: 'cat-s', priority: 10, source: 'owner', created_at: new Date('2026-10-01T10:00:00Z'), updated_at: new Date('2026-10-01T10:00:00Z') },
+    ]);
+    expect(svc.matchRule('ACME HARDWARE 1234', redecided, 'debit').id).toBe('acme-personal');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('rule bad skipped'));
     expect(svc.matchRule('DEBIT CARD PURCHASE - COSTCO GAS #123', compiled).id).toBe('owner');
     expect(svc.matchRule('COSTCO WHOLESALE', compiled).id).toBe('seed');

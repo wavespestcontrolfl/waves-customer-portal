@@ -169,14 +169,18 @@ function compileRules(rules) {
       logger.warn(`[tax-ledger] rule ${r.id} skipped, invalid pattern: ${e.message}`);
     }
   }
-  // Lowest priority first; at the same priority the NEWEST rule wins: every
-  // Always decision is an owner rule at the same priority, and the latest
-  // one is the owner's current reading of an overlapping payee (an older
-  // "acme → personal" must not defeat a new Always Business on "ACME
-  // HARDWARE"). Postgres returns created_at as a Date: compared in time.
+  // Lowest priority first; at the same priority the LATEST DECISION wins:
+  // every Always decision is an owner rule at the same priority, and the
+  // latest one is the owner's current reading of an overlapping payee (an
+  // older "acme → personal" must not defeat a new Always Business on "ACME
+  // HARDWARE"; repeating Always on "acme" later must win again). The
+  // decision time is updated_at (the upsert sets it; hits never do), with
+  // created_at for a row that has none. Postgres returns both as Dates:
+  // compared in time.
   const t = (v) => { const n = new Date(v || 0).getTime(); return Number.isFinite(n) ? n : 0; };
+  const decidedAt = (r) => t(r.updated_at || r.created_at);
   out.sort((a, b) => (Number(a.priority) - Number(b.priority))
-    || (t(b.created_at) - t(a.created_at))
+    || (decidedAt(b) - decidedAt(a))
     || String(a.pattern).localeCompare(String(b.pattern)));
   return out;
 }
