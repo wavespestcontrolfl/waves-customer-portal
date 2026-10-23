@@ -738,8 +738,10 @@ router.put('/alerts/:id', async (req, res, next) => {
     // a plain resolve would count the item as back on the truck.
     // A tool alert knows three states; any other value would drop it out of
     // the open queries without the outcome lifecycle (and strand the bell).
-    if (toolAlert && !['new', 'acknowledged', 'resolved'].includes(status)) {
-      return res.status(400).json({ error: 'a truck check alert is new, acknowledged or resolved (with an outcome)' });
+    // (The Fleet tab lists status=new only, so an acknowledged tool alert
+    // would vanish while still holding the tool and the bell.)
+    if (toolAlert && status !== 'resolved') {
+      return res.status(400).json({ error: 'a truck check alert closes only by resolving it with an outcome' });
     }
     if (toolAlert && status === 'resolved' && outcome === undefined) {
       return res.status(400).json({ error: 'resolving a truck check alert needs an outcome: found, repaired, replaced, lost or retired' });

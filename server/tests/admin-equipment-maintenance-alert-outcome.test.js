@@ -127,14 +127,19 @@ test('a stale Lost on an alert the truck check already closed is refused and mar
 
 test('a closed tool alert never reopens', async () => {
   db.__state.alerts['a-missing'].status = 'resolved';
-  expect((await put('a-missing', { status: 'acknowledged' })).statusCode).toBe(409);
-  expect((await put('a-missing', { status: 'new' })).statusCode).toBe(409);
+  // Refused by the transition rule before the row is even read.
+  expect((await put('a-missing', { status: 'acknowledged' })).statusCode).toBe(400);
+  expect((await put('a-missing', { status: 'new' })).statusCode).toBe(400);
+  // And a second resolve of a closed one is the stale-button case (409).
+  expect((await put('a-missing', { status: 'resolved', outcome: 'found' })).statusCode).toBe(409);
   expect(db.__state.alerts['a-missing'].status).toBe('resolved');
 });
 
-test('a tool alert accepts only new, acknowledged or resolved', async () => {
-  const res = await put('a-missing', { status: 'dismissed' });
-  expect(res.statusCode).toBe(400);
+test('a tool alert accepts no transition but resolved with an outcome', async () => {
+  for (const status of ['dismissed', 'acknowledged', 'new']) {
+    const res = await put('a-missing', { status });
+    expect(res.statusCode).toBe(400);
+  }
   expect(db.__state.alerts['a-missing'].status).toBe('new');
   // Other alerts keep the old reach.
   expect((await put('a-due', { status: 'dismissed' })).statusCode).toBe(200);
@@ -157,8 +162,8 @@ test('a tool alert never resolves without an outcome', async () => {
   expect(res.body.error).toMatch(/outcome/);
   expect(db.__state.alerts['a-missing'].status).toBe('new');
   expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
-  // Acknowledging it (not resolving) still needs no outcome.
-  expect((await put('a-missing', { status: 'acknowledged' })).statusCode).toBe(200);
+  // Acknowledging a tool alert is not a state it has (the Fleet tab lists new only).
+  expect((await put('a-missing', { status: 'acknowledged' })).statusCode).toBe(400);
 });
 
 test('Found resolves the alert, leaves the item alone and still checks the bell', async () => {

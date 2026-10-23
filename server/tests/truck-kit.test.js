@@ -403,7 +403,7 @@ describe('tool gaps by kit key', () => {
       { item: 'Bait station keys and replacement cartridges', required: false, kit_key: 'bait_station_key' },
       { item: 'Foam drill kit and patch materials', required: false, kit_key: 'foam_drill_kit' },
     ])];
-    expect(truckKit.requirementsFor('Termite Bait Station System', { serviceKey: 'termite_bait' })).toEqual({ lines: ['termite'], promote: new Set(['bait_station_key']) });
+    expect(truckKit.requirementsFor('Termite Bait Station System', { serviceKey: 'termite_bait' })).toEqual({ lines: ['termite'], promote: new Set(['bait_station_key']), restrict: null });
     expect(truckKit.requirementsFor('Drill and Foam Treatment', { serviceKey: 'foam_drill' }).promote).toEqual(new Set(['foam_drill_kit']));
     expect(truckKit.requirementsFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' }).promote).toEqual(new Set());
     db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
@@ -432,7 +432,21 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Lawn Plugging Service', { serviceKey: 'plugging' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Top Dressing', { serviceKey: 'top_dressing' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Web Sweep', serviceKey: 'area_addon_web_sweep' }] })).toEqual(['pest']);
+    // The web sweep is a focused pest job: the cobweb duster, nothing else.
+    expect(truckKit.requirementsFor('Web Sweep', { serviceKey: 'area_addon_web_sweep' })).toEqual({ lines: ['pest'], promote: new Set(), restrict: new Set(['cobweb_duster']) });
+    expect(truckKit.requirementsFor('Quarterly Pest Control', { addons: [{ name: 'Web Sweep', serviceKey: 'area_addon_web_sweep' }] }).restrict).toBeNull();
     expect(truckKit.serviceLinesFor('Lawn Care — Standard Visit', { serviceKey: 'lawn_standard' })).toEqual(['lawn']);
+  });
+
+  test('a web sweep visit holds for the duster only', async () => {
+    db.__state.equipment_checklists = [CHECKLIST('pest', [
+      { item: 'B&G 1 gal sprayer (interior)', required: true, kit_key: 'bg_sprayer' },
+      { item: 'Webster duster (cobweb sweep)', required: true, kit_key: 'cobweb_duster' },
+    ])];
+    db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'Web Sweep', serviceKey: 'area_addon_web_sweep' }))
+      .toEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Webster duster (cobweb sweep)', tools: ['cobweb_duster'] });
+    expect((await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'Quarterly Pest Control' })).tools).toEqual(['bg_sprayer', 'cobweb_duster']);
   });
 
   test('booked add-ons bring their own line, on readiness and on Today', async () => {

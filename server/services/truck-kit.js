@@ -97,8 +97,16 @@ const CATEGORY_LINE = { lawn_care: 'lawn', pest_control: 'pest', tree_shrub: 'tr
 // Mechanical lawn work (job-card.js ADDON_PROGRAMS lawn_care.nonChemical)
 // and the web sweep use their own machines, not the spray checklist: no
 // treatment-tool hold. Legacy rows without a key match by name.
-const MECHANICAL_KEYS = new Set(['lawn_aeration', 'dethatching', 'plugging', 'top_dressing', 'area_addon_web_sweep']);
-const MECHANICAL_NAME = /\b(dethatch\w*|aerat\w*|plugging|top\s*-?dress\w*|web sweep)\b/i;
+const MECHANICAL_KEYS = new Set(['lawn_aeration', 'dethatching', 'plugging', 'top_dressing']);
+const MECHANICAL_NAME = /\b(dethatch\w*|aerat\w*|plugging|top\s*-?dress\w*)\b/i;
+// A focused job needs ONE tool of its line, not the whole treatment kit: the
+// web sweep is the pest checklist's cobweb duster and nothing else.
+const FOCUSED_KITS = [
+  { line: 'pest', keys: ['cobweb_duster'], key: /web_sweep/i, name: /\bweb\s*sweep\b/i },
+];
+function focusedKitFor(serviceType, serviceKey) {
+  return FOCUSED_KITS.find((kit) => (serviceKey && kit.key.test(String(serviceKey))) || kit.name.test(String(serviceType || ''))) || null;
+}
 const isMechanical = (serviceType, serviceKey) =>
   (serviceKey ? MECHANICAL_KEYS.has(String(serviceKey).toLowerCase()) : false) || MECHANICAL_NAME.test(String(serviceType || ''));
 
@@ -132,15 +140,24 @@ function promotedKeysFor(serviceType, serviceKey) {
 // What a visit requires: the primary service's lines, then each booked
 // add-on's (a Tree & Shrub add-on on a pest visit needs the tree and shrub
 // tools too), plus the keys its identity promotes. `addons` is [{ name, serviceKey }].
+// `restrict` (a Set of keys, or null) narrows the requirement to focused
+// tools when EVERY service on the visit is a focused job; one full-kit
+// service on the visit lifts the restriction.
 function requirementsFor(serviceType, { serviceKey = null, serviceCategory = null, addons = [] } = {}) {
-  const lines = linesForService(serviceType, serviceKey, serviceCategory);
-  const promote = new Set(lines.length ? promotedKeysFor(serviceType, serviceKey) : []);
-  for (const addon of Array.isArray(addons) ? addons : []) {
-    const addonLines = linesForService(addon?.name, addon?.serviceKey, addon?.category);
-    for (const line of addonLines) if (!lines.includes(line)) lines.push(line);
-    if (addonLines.length) for (const key of promotedKeysFor(addon?.name, addon?.serviceKey)) promote.add(key);
+  const services = [{ name: serviceType, serviceKey, category: serviceCategory }, ...(Array.isArray(addons) ? addons : [])];
+  const lines = [];
+  const promote = new Set();
+  let restrict = new Set();
+  for (const svc of services) {
+    const focused = focusedKitFor(svc?.name, svc?.serviceKey);
+    const svcLines = focused ? [focused.line] : linesForService(svc?.name, svc?.serviceKey, svc?.category);
+    if (!svcLines.length) continue;
+    for (const line of svcLines) if (!lines.includes(line)) lines.push(line);
+    for (const key of promotedKeysFor(svc?.name, svc?.serviceKey)) promote.add(key);
+    if (focused && restrict) for (const key of focused.keys) restrict.add(key);
+    else restrict = null;
   }
-  return { lines, promote };
+  return { lines, promote, restrict: restrict && restrict.size ? restrict : null };
 }
 const serviceLinesFor = (serviceType, opts) => requirementsFor(serviceType, opts).lines;
 
@@ -230,7 +247,7 @@ async function requiredToolsForLine(serviceLine, conn = db) {
 
 // The same across several lines (a combined job), once per key. `promote`
 // names optional keyed items this job makes required.
-async function requiredToolsForLines(serviceLines, conn = db, promote = new Set()) {
+async function requiredToolsForLines(serviceLines, conn = db, promote = new Set(), restrict = null) {
   const lines = [...new Set((Array.isArray(serviceLines) ? serviceLines : [serviceLines]).filter(Boolean))];
   if (!lines.length) return [];
   const rows = await conn('equipment_checklists').whereIn('service_line', lines).select('service_line', 'checklist_items');
@@ -241,6 +258,7 @@ async function requiredToolsForLines(serviceLines, conn = db, promote = new Set(
       for (const item of Array.isArray(group?.items) ? group.items : []) {
         const key = normalizeKitKey(item?.kit_key);
         if (!key || (item.required === false && !promote.has(key)) || byKey.has(key)) continue;
+        if (restrict && !restrict.has(key)) continue;
         byKey.set(key, { kit_key: key, label: String(item.item || key) });
       }
     }
@@ -291,9 +309,9 @@ const keysOnTruck = (kit) => new Set(kit.filter((item) => item.kit_key && !item.
 // What a truck lacks for a service line (or several, for a combined job).
 // Empty when the truck has no keyed row at all (keys are not set up for it)
 // or the lines require nothing keyed.
-async function toolGapsForTruck(vehicleId, serviceLines, conn = db, promote = new Set()) {
+async function toolGapsForTruck(vehicleId, serviceLines, conn = db, promote = new Set(), restrict = null) {
   if (!(await truckHasKeys(vehicleId, conn))) return [];
-  const required = await requiredToolsForLines(serviceLines, conn, promote);
+  const required = await requiredToolsForLines(serviceLines, conn, promote, restrict);
   if (!required.length) return [];
   const onTruck = keysOnTruck(await kitForTruck(vehicleId, conn));
   return required.filter((tool) => !onTruck.has(tool.kit_key));
@@ -335,7 +353,7 @@ function toolGapLabel(gaps) {
 // serviceType, when given, adds the companion lines of a combined job.
 async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey = null, serviceCategory = null, addons = [] }, conn = db) {
   if (!truckKitLive() || !technicianId) return null;
-  const { lines, promote } = serviceType ? requirementsFor(serviceType, { serviceKey, serviceCategory, addons }) : { lines: [serviceLine].filter(Boolean), promote: new Set() };
+  const { lines, promote, restrict } = serviceType ? requirementsFor(serviceType, { serviceKey, serviceCategory, addons }) : { lines: [serviceLine].filter(Boolean), promote: new Set(), restrict: null };
   if (!lines.length) return null;
   let truck;
   try { truck = await truckForTechnician(technicianId, conn); } catch (err) {
@@ -343,7 +361,7 @@ async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey
     throw err;
   }
   if (!truck) return null;
-  const gaps = await toolGapsForTruck(truck.id, lines, conn, promote);
+  const gaps = await toolGapsForTruck(truck.id, lines, conn, promote, restrict);
   if (!gaps.length) return null;
   return { kind: 'tools', status: 'hold', label: toolGapLabel(gaps), tools: gaps.map((gap) => gap.kit_key) };
 }
@@ -370,10 +388,10 @@ async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = 
   const requiredByLines = new Map();
   const out = [];
   for (const visit of visits) {
-    const { lines, promote } = requirementsFor(visit.service_type, { serviceKey: visit.service_key_snapshot, serviceCategory: visit.service_category_snapshot, addons: addonsByVisit.get(visit.id) || [] });
+    const { lines, promote, restrict } = requirementsFor(visit.service_type, { serviceKey: visit.service_key_snapshot, serviceCategory: visit.service_category_snapshot, addons: addonsByVisit.get(visit.id) || [] });
     if (!lines.length) continue;
-    const key = `${lines.join('+')}|${[...promote].sort().join('+')}`;
-    if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn, promote));
+    const key = `${lines.join('+')}|${[...promote].sort().join('+')}|${restrict ? [...restrict].sort().join('+') : '*'}`;
+    if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn, promote, restrict));
     const missing = requiredByLines.get(key).filter((tool) => !onTruck.has(tool.kit_key));
     if (missing.length) out.push({ serviceId: visit.id, serviceType: visit.service_type, missing: missing.map((tool) => tool.label) });
   }
