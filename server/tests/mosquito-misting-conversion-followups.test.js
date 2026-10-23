@@ -49,9 +49,8 @@ describe('P0: the install line has a durable identity and prepay coverage exclud
 
   test('every invoice the install enters builds the line through the marker helper, and create() keeps unknown line keys', () => {
     const conv = read('services/estimate-converter.js');
-    expect(conv).toContain("mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount })");
-    expect((conv.match(/mistingInstallLine\(\{ description: mistingInstall\.description/g) || [])).toHaveLength(2); // prepay + standard
-    expect(read('routes/estimate-public.js')).toContain(".mistingInstallLine({ description: acceptedMistingInstall.description, amount: acceptedMistingInstallAmount })");
+    expect((conv.match(/mistingInstallInvoiceLines\(mistingInstall\)/g) || [])).toHaveLength(2); // prepay + standard
+    expect(read('routes/estimate-public.js')).toContain(".mistingInstallInvoiceLines(acceptedMistingInstall)");
     // the invoice writer spreads the whole line (no field whitelist), so kind and service reach line_items
     expect(read('services/invoice.js')).toMatch(/const items = \(lineItems \|\| \[\]\)\.map\(\(item\) => \{[\s\S]{0,200}return \{\s*\.\.\.item,/);
   });
@@ -381,9 +380,9 @@ describe('audit 4: engine-origin install, one prepay total helper, install bell 
 
   test('frozenMistingInstall: mapped item, raw engine line (engineResult.lineItems), and an itemized proposal line all resolve; same shape', () => {
     const mapped = converter.frozenMistingInstall(estimateData());
-    expect(mapped).toEqual({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(mapped).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation' });
     const raw = converter.frozenMistingInstall(engineOnly());
-    expect(raw).toEqual({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(raw).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation' });
     expect(converter.frozenMistingInstall(JSON.stringify(engineOnly()))).toEqual(raw);
     const proposal = converter.frozenMistingInstall({
       proposal: {
@@ -395,7 +394,7 @@ describe('audit 4: engine-origin install, one prepay total helper, install bell 
       },
       result: estimateData().result,
     });
-    expect(proposal).toEqual({ amount: 5200, description: 'Smart system Installation' });
+    expect(proposal).toMatchObject({ amount: 5200, description: 'Smart system Installation', lines: [{ amount: 5200, description: 'Smart system Installation' }] });
   });
 
   test('frozenMistingInstall: an unpriced / oversize raw line, a quote-required item and an unpriced proposal install bill nothing', () => {
@@ -601,5 +600,119 @@ describe('audit 6: a pre-change send snapshot serves the install preview too', (
   test('the snapshot return path attaches the field from the same constant as the fresh path', () => {
     const src = read('routes/estimate-public.js');
     expect(src).toMatch(/\.\.\.snapshotBundle,\s*\/\/ A snapshot frozen before the misting install[\s\S]{0,260}\.\.\.mistingInstallFeeField,\s*source: snapshotBundle\.source/);
+  });
+});
+
+describe('audit 7: several sold installs bill once each; a refill is due once', () => {
+  const twoBuildingProposal = () => ({
+    proposal: {
+      enabled: true,
+      buildings: [
+        { name: 'Main house', lineItems: [
+          { service: 'mosquito_misting', description: 'Mosquito Misting Service Plan', unitPrice: 59, quantity: 1, amount: 59 },
+          { service: 'mosquito_misting_installation', description: 'Main house Installation', unitPrice: 4595, quantity: 1, amount: 4595 },
+        ] },
+        { name: 'Guest house', lineItems: [
+          { service: 'mosquito_misting_installation', description: 'Guest house Installation', unitPrice: 3795, quantity: 1, amount: 3795 },
+        ] },
+      ],
+    },
+  });
+
+  test('a two-building proposal: both installs are billed (one marked line each), and the total, quote and invoice agree', () => {
+    const data = twoBuildingProposal();
+    const install = converter.frozenMistingInstall(data);
+    expect(install.amount).toBe(4595 + 3795);
+    expect(install.lines).toEqual([
+      { amount: 4595, description: 'Main house Installation' },
+      { amount: 3795, description: 'Guest house Installation' },
+    ]);
+    expect(install.description).toBe('Mosquito Misting System Installation (2 systems)');
+    const invoiceLines = misting.mistingInstallInvoiceLines(install);
+    expect(invoiceLines).toHaveLength(2);
+    expect(invoiceLines.every(misting.isMistingInstallLine)).toBe(true);
+    expect(misting.mistingInstallLinesTotal(invoiceLines)).toBe(install.amount);
+    // quote preview == invoice: the prepay/standard helper and the payload field carry the summed total
+    const quote = converter.frozenPrepayOneTimeLines(data);
+    expect(quote.mistingInstall).toBe(install.amount);
+    expect(quote.mistingInstallDescription).toBe(install.description);
+    // invoice-mode draft: one marked line per install, the total includes both
+    const { buildEstimateInvoiceModeDraft } = require('../routes/estimate-public');
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: { id: 99, monthly_total: 59 }, recurringSvcList: [{ name: 'Mosquito Misting Service Plan' }], recurringFirstVisitAmount: 59,
+      effectiveBillingCadence: { frequencyLabel: 'Monthly' }, selectedFrequency: { label: 'Monthly' }, mistingInstall: install,
+    });
+    expect(draft.lineItems.filter(misting.isMistingInstallLine)).toHaveLength(2);
+    expect(draft.amount).toBe(Math.round((59 + install.amount) * 100) / 100);
+  });
+
+  test('a single mapped install is unchanged (one line, same amount and label)', () => {
+    const install = converter.frozenMistingInstall(estimateData());
+    expect(install).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(install.lines).toHaveLength(1);
+    expect(misting.mistingInstallInvoiceLines(install)).toEqual([misting.mistingInstallLine({ description: install.description, amount: INSTALL })]);
+    expect(misting.mistingInstallInvoiceLines(null)).toEqual([]);
+    // a bare { amount, description } (no lines) still renders as one marked line
+    expect(misting.mistingInstallInvoiceLines({ amount: 100, description: 'X Installation' })).toHaveLength(1);
+  });
+
+  test('proposal + a mapped item for the same install: the proposal decides and the install is counted once', () => {
+    const base = estimateData();
+    const data = {
+      ...base,
+      proposal: {
+        enabled: true,
+        buildings: [{ lineItems: [{ service: 'mosquito_misting_installation', description: 'Smart system Installation', unitPrice: 5200, quantity: 1, amount: 5200 }] }],
+      },
+    };
+    const install = converter.frozenMistingInstall(data);
+    expect(install.amount).toBe(5200);
+    expect(install.lines).toHaveLength(1);
+    // the same line object listed under two proposal containers is one install
+    const shared = { service: 'mosquito_misting_installation', description: 'Shared Installation', unitPrice: 4000, quantity: 1, amount: 4000 };
+    const dup = { proposal: { enabled: true, buildings: [{ lineItems: [shared] }], programs: [shared] } };
+    expect(converter.frozenMistingInstall(dup).amount).toBe(4000);
+  });
+
+  test('the invoice builders emit the install through the multi-line helper', () => {
+    const conv = read('services/estimate-converter.js');
+    expect((conv.match(/mistingInstallInvoiceLines\(mistingInstall\)/g) || [])).toHaveLength(2);
+    const route = read('routes/estimate-public.js');
+    expect(route).toContain('.mistingInstallInvoiceLines(mistingInstall)');
+    expect(route).toContain('.mistingInstallInvoiceLines(acceptedMistingInstall)');
+  });
+
+  describe('a misting refill is one refill application', () => {
+    const { lineDueOnRecurringDate, filterAddonLinesForDate, addonRecursAfterAnchor } = require('../routes/admin-schedule')._test;
+    const BASE = '2027-03-10';
+    const dates = ['2027-04-10', '2027-05-10', '2027-06-10'];
+    const storedRefill = { service_key_snapshot: 'mosquito_misting_refill', recurring_pattern: null, estimated_price: 219 };
+    const pricedRefill = { serviceKey: 'mosquito_misting_refill', recurringPattern: null, price: 219 };
+    const storedBait = { service_key_snapshot: 'rodent_bait', recurring_pattern: null, estimated_price: 30 };
+
+    test('due on the visit it was added to, never on a later monthly visit (stored rows and booking lines)', () => {
+      expect(lineDueOnRecurringDate(storedRefill, BASE, BASE)).toBe(true);
+      expect(lineDueOnRecurringDate(pricedRefill, BASE, BASE)).toBe(true);
+      for (const date of dates) {
+        expect(lineDueOnRecurringDate(storedRefill, BASE, date)).toBe(false);
+        expect(lineDueOnRecurringDate(pricedRefill, BASE, date)).toBe(false);
+        expect(lineDueOnRecurringDate({ ...storedRefill, recurring_pattern: 'monthly' }, BASE, date)).toBe(false);
+      }
+      expect(addonRecursAfterAnchor(storedRefill)).toBe(false);
+      expect(addonRecursAfterAnchor(pricedRefill)).toBe(false);
+    });
+
+    test('children and series extensions built from an anchor carrying a refill get none; the anchor keeps it; an ordinary recurring add-on is unchanged', () => {
+      const anchorAddons = [storedRefill, storedBait];
+      expect(filterAddonLinesForDate(anchorAddons, BASE, BASE)).toEqual([storedRefill, storedBait]);
+      for (const date of dates) {
+        // every spawn / top-up / auto-extend path filters the parent add-ons through this one function
+        expect(filterAddonLinesForDate(anchorAddons, BASE, date)).toEqual([storedBait]);
+      }
+      expect(lineDueOnRecurringDate(storedBait, BASE, dates[0])).toBe(true);
+      const src = read('routes/admin-schedule.js');
+      expect((src.match(/filterAddonLinesForDate\(parentAddons/g) || []).length).toBeGreaterThanOrEqual(3);
+      expect(src).toContain("|| serviceKey === 'mosquito_misting_refill';");
+    });
   });
 });

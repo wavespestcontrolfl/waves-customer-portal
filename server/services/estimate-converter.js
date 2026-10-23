@@ -9,7 +9,7 @@
 
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { isMistingSystemIdentity, mistingInstallLine } = require('../utils/mosquito-misting-system');
+const { isMistingSystemIdentity, mistingInstallInvoiceLines } = require('../utils/mosquito-misting-system');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
@@ -2243,7 +2243,17 @@ function frozenMistingInstall(estimateData = {}, { pricingAuthority = null } = {
   const priceOf = (row) => firstPositiveNumber(row.price, row.amount, row.total, row.priceAfterDiscount, row.totalAfterDiscount);
   const named = (row, fallback) => String(row.name || row.label || fallback);
   const fallbackName = 'Mosquito Misting System Installation';
+  // One or more sold installs -> { amount: total, description, lines: [{ amount, description }] }. The invoices emit one marked line
+  // per entry; every total, preview and divider uses the total.
+  const pack = (entries) => {
+    if (!entries.length) return null;
+    const amount = roundMoney(entries.reduce((sum, entry) => sum + entry.amount, 0));
+    const description = entries.length === 1 ? entries[0].description : `${fallbackName} (${entries.length} systems)`;
+    return { amount, description, lines: entries };
+  };
 
+  // An authored itemized proposal is the accepted quote and may sell an install per building: EVERY priced install line counts, once
+  // (a line object listed under two containers is the same line). Mapped / raw rows are never added to it (same install, other shape).
   const proposal = data && data.proposal;
   if (proposal && proposal.enabled === true
     && ['buildings', 'programs', 'correctiveWork'].some((key) => Array.isArray(proposal[key]) && proposal[key].length > 0)) {
@@ -2251,26 +2261,32 @@ function frozenMistingInstall(estimateData = {}, { pricingAuthority = null } = {
       ...(proposal.buildings || []).flatMap((building) => (building && building.lineItems) || []),
       ...(proposal.programs || []), ...(proposal.correctiveWork || []),
     ];
+    const seen = new Set();
+    const entries = [];
     for (const line of lines) {
+      if (!line || typeof line !== 'object' || seen.has(line)) continue;
+      seen.add(line);
       if (mistingProposalIdentity(line) !== 'mosquito_misting_installation') continue;
       const amount = firstPositiveNumber(line.amount, Number(line.unitPrice) * (Number(line.quantity) || 1), line.price);
-      if (amount != null) return { amount: roundMoney(amount), description: String(line.description || line.label || line.name || fallbackName) };
+      if (amount != null) entries.push({ amount: roundMoney(amount), description: String(line.description || line.label || line.name || fallbackName) });
     }
-    return null;
+    return pack(entries);
   }
 
+  // Engine / mapped shapes carry ONE system per estimate (the engine prices a single services.mosquitoMisting selection); the same
+  // install is mirrored across containers as distinct objects, so the first priced one is the install (never summed with its mirrors).
   let stored = [];
   try { stored = resultContainer.storedMistingRows(data, { pricingAuthority }); } catch { stored = []; }
   for (const row of stored) {
     if (String(row.service || '').toLowerCase() !== 'mosquito_misting_installation' || row.quoteRequired === true) continue;
     const amount = priceOf(row);
-    if (amount != null) return { amount: roundMoney(amount), description: named(row, fallbackName) };
+    if (amount != null) return pack([{ amount: roundMoney(amount), description: named(row, fallbackName) }]);
   }
   for (const row of stored) {
     if (String(row.service || '').toLowerCase() !== 'mosquito_misting' || row.quoteRequired === true) continue;
     const amount = firstPositiveNumber(row.installation && row.installation.price);
     if (amount != null) {
-      return { amount: roundMoney(amount), description: row.tierLabel ? `${row.tierLabel} Installation` : fallbackName };
+      return pack([{ amount: roundMoney(amount), description: row.tierLabel ? `${row.tierLabel} Installation` : fallbackName }]);
     }
   }
   if (stored.length) return null;
@@ -2278,7 +2294,7 @@ function frozenMistingInstall(estimateData = {}, { pricingAuthority = null } = {
     .filter((item) => item && String(item.service || '').toLowerCase() === 'mosquito_misting_installation' && item.quoteRequired !== true);
   for (const row of rows) {
     const amount = priceOf(row);
-    if (amount != null) return { amount: roundMoney(amount), description: named(row, fallbackName) };
+    if (amount != null) return pack([{ amount: roundMoney(amount), description: named(row, fallbackName) }]);
   }
   return null;
 }
@@ -8263,7 +8279,7 @@ const EstimateConverter = {
                 quantity: 1,
                 unit_price: annualPlanSetupFeeAmount,
               }] : []),
-              ...(mistingInstall ? [mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount })] : [])],
+              ...mistingInstallInvoiceLines(mistingInstall)],
               notes: prepayNotes,
               dueDate: etDateString(),
               ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
@@ -8566,9 +8582,7 @@ const EstimateConverter = {
               unit_price: setupFeeAmount,
             });
           }
-          if (mistingInstall) {
-            lineItems.push(mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount }));
-          }
+          lineItems.push(...mistingInstallInvoiceLines(mistingInstall));
           if (firstApplicationAmount > 0) {
             lineItems.push({
               description: 'First service application',

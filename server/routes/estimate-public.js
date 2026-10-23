@@ -2637,10 +2637,7 @@ function buildEstimateInvoiceModeDraft({
 
   const installAmount = mistingInstall && Number(mistingInstall.amount) > 0 ? roundInvoiceAmount(mistingInstall.amount) : 0;
   if (installAmount > 0) {
-    recurringLineItems.push(require('../utils/mosquito-misting-system').mistingInstallLine({
-      description: mistingInstall.description,
-      amount: installAmount,
-    }));
+    recurringLineItems.push(...require('../utils/mosquito-misting-system').mistingInstallInvoiceLines(mistingInstall));
   }
 
   return {
@@ -14160,7 +14157,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               });
             }
             if (acceptedMistingInstallAmount > 0) {
-              lineItems.push(require('../utils/mosquito-misting-system').mistingInstallLine({ description: acceptedMistingInstall.description, amount: acceptedMistingInstallAmount }));
+              lineItems.push(...require('../utils/mosquito-misting-system').mistingInstallInvoiceLines(acceptedMistingInstall));
             }
             if (includesFirstApplicationLine) {
               // With a resolvable manual discount, the line grosses up by the

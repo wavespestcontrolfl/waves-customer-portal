@@ -119,8 +119,8 @@ describe('the plan converts to a monthly series under the catalog row', () => {
 describe('the install: a named line on the acceptance invoice and one office bell', () => {
   test('frozenMistingInstall reads the STORED one-time row (the quote figure), named by the tier label', () => {
     const data = estimateData();
-    expect(converter.frozenMistingInstall(data)).toEqual({ amount: INSTALL, description: 'Essential system (drum) Installation' });
-    expect(converter.frozenMistingInstall(JSON.stringify(data))).toEqual({ amount: INSTALL, description: 'Essential system (drum) Installation' });
+    expect(converter.frozenMistingInstall(data)).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation', lines: [{ amount: INSTALL, description: 'Essential system (drum) Installation' }] });
+    expect(converter.frozenMistingInstall(JSON.stringify(data))).toMatchObject({ amount: INSTALL, description: 'Essential system (drum) Installation', lines: [{ amount: INSTALL, description: 'Essential system (drum) Installation' }] });
     // a later price edit never moves a sent quote: the figure is the stored row
     const edited = JSON.parse(JSON.stringify(data));
     edited.result.oneTime.items.find((i) => i.service === 'mosquito_misting_installation').price = 4000;
@@ -137,8 +137,8 @@ describe('the install: a named line on the acceptance invoice and one office bel
   test('the converter bills it on BOTH invoices (standard and annual prepay) and the public accept bills it on its standard invoice', () => {
     const src = read('services/estimate-converter.js');
     expect(src).toContain('const mistingInstall = frozenMistingInstall(estimateData);');
-    expect(src).toContain('...(mistingInstall ? [mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount })] : [])');
-    expect(src).toContain('lineItems.push(mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount }));');
+    expect(src).toContain('...mistingInstallInvoiceLines(mistingInstall)],');
+    expect(src).toContain('lineItems.push(...mistingInstallInvoiceLines(mistingInstall));');
     const route = read('routes/estimate-public.js');
     expect(route).toContain('const acceptedMistingInstall = treatAsOneTime ? null : EstimateConverter.frozenMistingInstall(conversionEstData);');
     expect(route).toContain('acceptedRodentSetupAmount > 0 || acceptedMistingInstallAmount > 0)) {');

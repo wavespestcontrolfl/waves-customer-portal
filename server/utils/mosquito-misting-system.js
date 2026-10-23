@@ -83,6 +83,16 @@ function mistingInstallLine({ description, amount }) {
   };
 }
 
+// The marked invoice lines for a frozen install ({ amount, description, lines? } from the converter's frozenMistingInstall): ONE marked
+// line per sold install (an authored proposal can sell several buildings), else the single { amount, description } as one line.
+function mistingInstallInvoiceLines(install) {
+  if (!install) return [];
+  const entries = Array.isArray(install.lines) && install.lines.length ? install.lines : [install];
+  return entries
+    .filter((entry) => entry && Number(entry.amount) > 0)
+    .map((entry) => mistingInstallLine({ description: entry.description, amount: entry.amount }));
+}
+
 function isMistingInstallLine(line) {
   return !!line && typeof line === 'object' && line.kind === MISTING_INSTALL_LINE_KIND;
 }
@@ -230,6 +240,7 @@ module.exports = {
   MISTING_INSTALL_LINE_KIND,
   MISTING_INSTALL_LINE_SERVICE,
   mistingInstallLine,
+  mistingInstallInvoiceLines,
   isMistingInstallLine,
   mistingInstallLinesTotal,
   isMistingSystemIdentity,
