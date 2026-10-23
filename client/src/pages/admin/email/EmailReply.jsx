@@ -6,6 +6,8 @@ import { ActionFeedback } from "../../../components/ui/ActionFeedback";
 import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
 import { appendStaticLinkClause } from "../../../lib/composerLinks";
 import EmailSendOutcome from "./EmailSendOutcome";
+import ScheduleSendMenu from "./ScheduleSendMenu";
+import ScheduleUnconfirmed from "./ScheduleUnconfirmed";
 
 export default function EmailReply({ active, sender, mailbox, editor }) {
   const { selectedEmail } = mailbox;
@@ -26,17 +28,22 @@ export default function EmailReply({ active, sender, mailbox, editor }) {
     </Field>
     {!sending && <EmailSendOutcome attempt={attempt} onResolve={outcome => editor.reconcileSend(attemptKey, outcome)} />}
     {editor.sendFeedback.reply?.messageId === selectedEmail.id && <ActionFeedback error={editor.sendFeedback.reply.error} className="mt-2">{editor.sendFeedback.reply.message}</ActionFeedback>}
+    <ScheduleUnconfirmed editor={editor} replyId={selectedEmail.id} className="mt-2" />
     {draftResult && <ActionFeedback className="mt-2">AI draft loaded — review and edit before sending</ActionFeedback>}
     <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-      {replyText && <Button variant="ghost" onClick={() => setReplyDraft(selectedEmail.id, "")} disabled={sending} className="mr-auto">Discard reply</Button>}
+      {replyText && <Button variant="ghost" onClick={() => setReplyDraft(selectedEmail.id, "")} disabled={sending || editor.scheduling === "reply"} className="mr-auto">Discard reply</Button>}
       <EmailQuickLinks key={selectedEmail.id} active={active} recipient={effectiveRecipient} disabled={sending}
         onInsert={(link) => setReplyDraft(selectedEmail.id, appendStaticLinkClause(replyText, link))} />
       <Button variant="secondary" onClick={() => editor.handleAiDraft(selectedEmail, mailbox.isSelected)} loading={drafting} disabled={sending} className="gap-2">
         <Sparkles size={16} aria-hidden />AI draft
       </Button>
-      <Button onClick={() => editor.handleReply(selectedEmail, mailbox.loadThread)} loading={sending} disabled={Boolean(attempt) || !replyText.trim()} className="gap-2">
-        <Send size={16} aria-hidden />Send reply
-      </Button>
+      <div className="flex gap-px">
+        <Button onClick={() => editor.handleReply(selectedEmail, mailbox.loadThread)} loading={sending || editor.scheduling === "reply"} disabled={Boolean(attempt) || !replyText.trim() || Boolean(editor.scheduling) || editor.scheduleUnconfirmed(selectedEmail.id)} className="gap-2">
+          <Send size={16} aria-hidden />Send reply
+        </Button>
+        {editor.scheduleEnabled && <ScheduleSendMenu label="Schedule reply options" disabled={sending || Boolean(attempt) || !replyText.trim() || Boolean(editor.scheduling)}
+          onSchedule={(sendAt) => editor.handleReplySchedule(selectedEmail, sendAt, editor.onScheduled)} />}
+      </div>
     </div>
   </section>;
 }

@@ -75,7 +75,7 @@ const mockFilterRecipientsByOptin = jest.fn(async (contacts) => contacts);
 jest.mock('../services/recipient-optin', () => ({
   filterRecipientsByOptin: (...a) => mockFilterRecipientsByOptin(...a),
 }));
-jest.mock('../services/review-request', () => ({
+jest.mock('../services/review-request', () => ({ pullAskAfterHeldReport: jest.fn(async () => ({ pulled: 0 })), heldReportReplayChannel: jest.fn(() => undefined),
   markInlineRetryable: jest.fn(async () => {}),
   markInlineDelivered: jest.fn(async () => {}),
 }));

@@ -121,12 +121,15 @@ const LANE_RUNTIME = {
 
   // ── Calls ──
   call_extraction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M0', ...CALL_PIPELINE },
-  // direct_sdk (Codex r15): V1 extraction and transcript relabeling are raw Gemini / OpenAI fetches in call-recording-processor.js.
-  // offline (Codex r16): each is one provider with no cross-provider answer, retried by the background call pipeline.
-  call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', ...CALL_PIPELINE },
+  // call: the GATE_CALL_EXTRACTION_V1_FALLBACK backup (Claude, then OpenAI) runs through the dispatcher and records a row per
+  // leg under this lane; the Gemini primary is still a raw fetch, unrecorded, so the lane's cost reads low.
+  // offline (Codex r16): the background call pipeline queues and retries it; the backup leg exists only with the gate on.
+  call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', ...CALL_PIPELINE },
   // workflow_id = the cron job (scheduler.js runExclusive name) whose body IS this lane's run — the module names the lane on its calls — so job_health rows read with the lane's long-batch policy, not the 1-min default (Codex r3). Lanes served by two jobs (sms_pathology: classify + propose; sealed_eval: seal + autorun) or one job serving two lanes (sms-draft-canary) stay unmapped until the S5 cron wrap registers the job per run.
   call_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', workflow_id: 'call-research-miner', ...LONG_BATCH },
   transcription: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
+  // direct_sdk (Codex r15): transcript relabeling is a raw Gemini / OpenAI fetch in call-recording-processor.js.
+  // offline (Codex r16): one provider with no cross-provider answer, retried by the background call pipeline.
   transcript_label: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },

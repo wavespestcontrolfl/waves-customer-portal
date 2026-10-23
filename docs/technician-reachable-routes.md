@@ -52,6 +52,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | PUT | `/api/admin/customers/:customerId/turf-profile` | admin-customer-turf-profile |
 | GET | `/api/admin/customers/:id` | admin-customers |
 | GET | `/api/admin/customers/:id/cards` | admin-customers |
+| GET | `/api/admin/customers/:id/contact-notification-prefs` | admin-customers |
 | GET | `/api/admin/customers/:id/estimates-summary` | admin-customers |
 | GET | `/api/admin/customers/:id/latest-scheduled-service` | admin-customers |
 | POST | `/api/admin/customers/at-address` | admin-customers |
@@ -392,6 +393,11 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/email/oauth/callback` | admin-email |
 | GET | `/api/admin/email/oauth/start` | admin-email |
 | GET | `/api/admin/email/oauth/status` | admin-email |
+| POST | `/api/admin/email/schedule` | admin-email |
+| POST | `/api/admin/email/schedule/reconcile` | admin-email |
+| GET | `/api/admin/email/scheduled` | admin-email |
+| POST | `/api/admin/email/scheduled/:id/cancel` | admin-email |
+| POST | `/api/admin/email/scheduled/:id/sent-check` | admin-email |
 | POST | `/api/admin/email/send` | admin-email |
 | GET | `/api/admin/email/stats` | admin-email |
 | POST | `/api/admin/email/sync` | admin-email |
@@ -426,6 +432,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | DELETE | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | PATCH | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | PUT | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/estimates/:id/acceptance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/archive` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/edit-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/extend` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |

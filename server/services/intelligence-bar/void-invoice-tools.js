@@ -36,6 +36,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
+const { refusal, ownerRule, parseLines, disqualifyingPayment, moneyRefusal, pageOnlyRefusal } = require('../invoice-void-classifier');
 
 function voidInvoiceLive() {
   return require('../../config/feature-gates').ibVoidInvoiceLive() === true;
@@ -64,22 +65,9 @@ const money = (value) => `$${(Math.round((Number(value) || 0) * 100) / 100).toFi
 const cents = (value) => Math.round((Number(value) || 0) * 100);
 const msOf = (value) => (value ? new Date(value).getTime() : null);
 const digest = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
-const refusal = (error, code, extra = {}) => ({ error, code, ...extra });
-const ownerRule = (error, reason, invoiceId) => refusal(`${error} Refunds and card charges stay on the Invoices page by the owner's rule.`, 'by_owner_rule', { reason, invoice_id: invoiceId });
-const toPage = (error, reason, invoiceId) => refusal(`${error} The bar can't void this invoice from here yet. Nothing was changed.`, 'needs_invoices_page', { reason, invoice_id: invoiceId });
 
-// Statuses that read as collected or moving money (the screen shows no Void button for them either).
-const MONEY_STATUSES = new Set(['paid', 'processing', 'refunded', 'partially_refunded', 'partial', 'disputed']);
 // The Stripe states of an invoice's own PaymentIntent that mean no payment was attempted: the handler cancels it.
 const UNCONFIRMED_PI = new Set(['requires_payment_method', 'requires_confirmation']);
-const INVOICE_LINK_KEYS = ['invoice_id', 'dispute_invoice_id', 'waves_invoice_id'];
-
-function parseLines(raw) {
-  try {
-    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
-}
 
 async function customerName(customerId) {
   const c = await db('customers').where({ id: customerId }).first('first_name', 'last_name', 'company_name');
@@ -96,98 +84,6 @@ async function resolveInvoice(input) {
     ? await db('invoices').where({ id: rawId.toLowerCase() }).first()
     : await db('invoices').where({ invoice_number: rawNumber.toUpperCase() }).first();
   return invoice ? { invoice } : refusal('Invoice not found', 'invoice_not_found');
-}
-
-// A payments row that moved no money: failed (with its PaymentIntent, so the outcome is known), canceled. A failed row with no
-// PaymentIntent may hide a charge whose outcome is unknown, so it counts as money.
-const PAYMENT_MOVED_NO_MONEY_SQL = "(LOWER(COALESCE(payments.status, '')) IN ('failed', 'canceled', 'cancelled') "
-  + "AND NOT (LOWER(COALESCE(payments.status, '')) = 'failed' AND payments.stripe_payment_intent_id IS NULL))";
-
-// Any payments row tied to this invoice by the portal's own linkage (metadata invoice keys, the invoice's PaymentIntent or
-// charge id, the manual-payment description) that did or may have moved money. A row naming a different invoice is that
-// invoice's. One existence query with the status filter in SQL and no limit: a pile of failed attempts cannot hide a later
-// disputed or refunded payment.
-function disqualifyingPayment(invoice) {
-  const id = String(invoice.id);
-  return db('payments')
-    .where(function linkedToInvoice() {
-      for (const key of INVOICE_LINK_KEYS) this.orWhereRaw(`payments.metadata::jsonb ->> '${key}' = ?`, [id]);
-      if (invoice.stripe_payment_intent_id) this.orWhereRaw('payments.stripe_payment_intent_id = ?', [String(invoice.stripe_payment_intent_id)]);
-      if (invoice.stripe_charge_id) this.orWhereRaw('payments.stripe_charge_id = ?', [String(invoice.stripe_charge_id)]);
-      if (/^[A-Za-z0-9-]+$/.test(String(invoice.invoice_number || ''))) this.orWhereRaw('payments.description LIKE ?', [`Invoice ${invoice.invoice_number} — %`]);
-    })
-    // A row that names ANOTHER invoice explicitly (a combined payment's sibling share) is that invoice's.
-    .whereRaw(`(${INVOICE_LINK_KEYS.map((key) => `NULLIF(payments.metadata::jsonb ->> '${key}', '') IS NULL`).join(' AND ')} OR ${INVOICE_LINK_KEYS.map((key) => `payments.metadata::jsonb ->> '${key}' = ?`).join(' OR ')})`, INVOICE_LINK_KEYS.map(() => id))
-    .whereRaw(`NOT ${PAYMENT_MOVED_NO_MONEY_SQL}`)
-    .first('payments.id', 'payments.status');
-}
-
-// Money received or in flight, from the invoice row and its database links: the by_owner_rule refusals.
-async function moneyRefusal(invoice) {
-  const at = invoice.id;
-  const status = String(invoice.status || '').toLowerCase();
-  if (MONEY_STATUSES.has(status)) {
-    return ownerRule(`Invoice ${invoice.invoice_number} is ${status}, so money has been received or is moving. A void would hide it.`, `status_${status}`, at);
-  }
-  if (status === 'prepaid') {
-    return ownerRule(`Invoice ${invoice.invoice_number} is prepaid (covered by credit or a payment). The Invoices page hides Void for it, so reverse the prepayment there.`, 'status_prepaid', at);
-  }
-  if (invoice.payment_recorded_at) return ownerRule(`A payment is already recorded on invoice ${invoice.invoice_number}.`, 'payment_recorded', at);
-  if (invoice.stripe_charge_id) return ownerRule(`Invoice ${invoice.invoice_number} has a card charge on file.`, 'charge_on_file', at);
-  if (invoice.paid_at && status !== 'prepaid') return ownerRule(`Invoice ${invoice.invoice_number} carries a paid date.`, 'paid_date', at);
-  const moved = await disqualifyingPayment(invoice);
-  if (moved) return ownerRule(`A payment (${moved.status}) is on file for invoice ${invoice.invoice_number}.`, 'payment_on_file', at);
-  const depositLine = parseLines(invoice.line_items).find((li) => li?.category === 'deposit_credit');
-  if (depositLine) return ownerRule(`Invoice ${invoice.invoice_number} applies a deposit the customer already paid.`, 'deposit_collected', at);
-  if (invoice.payer_statement_id) {
-    const stmt = await db('payer_statements').where({ id: invoice.payer_statement_id }).first('status');
-    if (stmt && stmt.status !== 'open') return ownerRule(`Invoice ${invoice.invoice_number} is on a finalized payer statement.`, 'finalized_statement', at);
-  }
-  const plan = await db('payment_plans').where({ invoice_id: invoice.id }).whereNot('status', 'cancelled').first('id', 'status');
-  if (plan) return ownerRule(`Invoice ${invoice.invoice_number} has a payment plan (${plan.status}).`, 'payment_plan', at);
-  try {
-    await require('../stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, db, { readOnly: true });
-  } catch (err) {
-    if (err?.reconciliationRequired || /^STRIPE_/.test(String(err?.code || ''))) {
-      return ownerRule(`Invoice ${invoice.invoice_number} has a saved-card charge in progress or unresolved.`, 'charge_in_progress', at);
-    }
-    return refusal('The bar could not check for a card charge in progress, so nothing was offered. Nothing was changed. Try again in a moment.', 'unverified', { invoice_id: at });
-  }
-  return null;
-}
-
-// Invoices whose void also unwinds a plan, a month of dues, a setup obligation or a queued text: the Invoices page.
-async function pageOnlyRefusal(invoice) {
-  const at = invoice.id;
-  try {
-    if (parseLines(invoice.line_items).some((li) => li && li.membership_dues_month)) {
-      return toPage(`Invoice ${invoice.invoice_number} is a membership-dues invoice: voiding it releases a month of coverage.`, 'membership_dues', at);
-    }
-    if (parseLines(invoice.line_items).some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || '').trim()))) {
-      return toPage(`Invoice ${invoice.invoice_number} bills a bait-station setup fee: voiding it puts that obligation back on the service.`, 'setup_fee', at);
-    }
-    if (await db('setup_fee_claims').where({ invoice_id: invoice.id }).first('id')) {
-      return toPage(`Invoice ${invoice.invoice_number} has a setup-fee claim.`, 'setup_fee', at);
-    }
-    if (invoice.annual_prepay_covered_term_id) {
-      return toPage(`Invoice ${invoice.invoice_number} is covered by an annual plan.`, 'annual_plan_covered', at);
-    }
-    if (await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id')
-      || await require('../invoice-prepay').resolveInvoiceTermId(invoice, db, { strict: true })) {
-      return toPage(`Invoice ${invoice.invoice_number} belongs to an annual plan.`, 'annual_plan', at);
-    }
-    if (invoice.stripe_payment_intent_id) {
-      const shared = await db('invoices').where({ stripe_payment_intent_id: invoice.stripe_payment_intent_id }).whereNot('id', invoice.id).first('id');
-      if (shared) return toPage(`Invoice ${invoice.invoice_number} shares a combined payment session with other invoices.`, 'combined_payment', at);
-    }
-    if (await require('../invoice').queuedPayLinkText(invoice.id, { adoptsQueuedInvoiceSend: false })) {
-      return toPage(`A pay-link text is queued for invoice ${invoice.invoice_number}.`, 'queued_text', at);
-    }
-  } catch (err) {
-    logger.warn(`[intelligence-bar:void-invoice] link check failed (${err.code || err.name || 'error'})`);
-    return refusal('The bar could not check what else this invoice is tied to, so nothing was offered. Nothing was changed. Try again in a moment.', 'unverified', { invoice_id: at });
-  }
-  return null;
 }
 
 // The invoice's own PaymentIntent, read from Stripe: null (none), or { id, status } / a refusal. Unconfirmed or

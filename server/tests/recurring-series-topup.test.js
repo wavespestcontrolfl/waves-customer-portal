@@ -25,6 +25,11 @@ jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
   resolveCompletionProfileForScheduledService: jest.fn(async () => ({ synthesized: true, billingType: null })),
 }));
+// The child's property anchor, passed through unless a test overrides it.
+jest.mock('../services/customer-properties', () => {
+  const actual = jest.requireActual('../services/customer-properties');
+  return { ...actual, anchorSoleProperty: jest.fn(actual.anchorSoleProperty) };
+});
 jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue(undefined),
   resolveCommittedVisitTime: jest.fn(async () => null),
@@ -38,6 +43,7 @@ jest.mock('../services/scheduling/occupancy', () => ({
   // findConflictingVisits' own SQL shape.
   ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn(),
+  techScopedConfirmActive: jest.fn(() => false),
 }));
 // isFamilyOnPlanHold (Codex GitHub r6 P1) reuses cancellation-processor.js's
 // own familyOfServiceRow — mocked here so this suite's tests control which
@@ -228,7 +234,7 @@ function topupScenario({
   parentOverrides = {}, customerOverrides = {}, seriesDates: initialDates = [daysOut(0)],
   colsOverrides = {}, stampedAnnualTermId = false, stampedPrepaidMethod = null,
   customerCoveredTerm = false, customerPendingUnresolvedTerm = false,
-  captureCustomerCalls = null, activeHold = false, addons = [],
+  captureCustomerCalls = null, activeHold = false, addons = [], otherTable = null,
 } = {}) {
   // isCustomerPrepayLive's two customer-wide probes (Codex GitHub r7 P1):
   // (a) coveredTermsAsOf(conn, null) — a still-validly-paid term (active/
@@ -368,6 +374,11 @@ function topupScenario({
     }
     if (table === 'system_settings') return null;
     if (table === 'schedule_blackout_dates') return [];
+    // A table the scenario does not model, answered by the test (undefined = not handled).
+    if (otherTable) {
+      const answer = otherTable({ table, op, calls });
+      if (answer !== undefined) return answer;
+    }
     return null;
   };
   return { conn: makeConn(handler), inserted, parent, customer, seriesDates };
@@ -1015,102 +1026,6 @@ describe('seriesNextOccurrencesUnbillable — the top-up\'s own verdict for a pe
     }
   });
 
-  describe('a rider series seeds on the lawn host date (rideLawnCandidate, the top-up\'s own candidate)', () => {
-    const Preview = require('../services/rider-series-preview');
-    const FG = require('../config/feature-gates');
-    let spies;
-    let visitGroups;
-    beforeEach(() => {
-      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
-      jest.setSystemTime(new Date('2026-07-15T16:00:00Z'));
-      process.env.RECURRING_TOPUP_HORIZON_DAYS = '120';
-      visitGroups = FG.gates.visitGroups;
-      FG.gates.visitGroups = true;
-      spies = [jest.spyOn(FG, 'pestRidesLawnAtAcceptLive').mockReturnValue(true)];
-    });
-    afterEach(() => {
-      jest.useRealTimers();
-      delete process.env.RECURRING_TOPUP_HORIZON_DAYS;
-      FG.gates.visitGroups = visitGroups;
-      spies.forEach((sp) => sp.mockRestore());
-    });
-    // Zero base; a seasonal Feb-Oct add-on carries the whole price. Quarterly from Jul 15:
-    // the cadence date (Oct 21) is priced; the horizon (Nov 12) also holds a host date.
-    const seasonal = { id: 'a5', estimated_price: '60.00', recurring_pattern: 'seasonal_feb_oct', service_key_snapshot: null };
-    const fixture = {
-      parentOverrides: { recurring_pattern: 'quarterly', scheduled_date: '2026-07-15', create_invoice_on_complete: false, estimated_price: '60.00', rides_parent_id: 'lawn-1' },
-      colsOverrides: { rides_parent_id: true },
-      seriesDates: ['2026-07-15'],
-      addons: [seasonal],
-    };
-    const plan = (hostDate) => ({
-      reasons: [], insert: [hostDate], planFloor: '2026-07-23',
-      hostRows: [{ id: 'host-1', scheduled_date: hostDate, window_start: '09:00', technician_id: null }],
-    });
-
-    test('a host date the add-on does not price refuses although the cadence date is priced', async () => {
-      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(plan('2026-11-05')));
-      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
-        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
-      // Without a ride the same series passes: the cadence date alone is priced.
-      spies[1].mockResolvedValue({ ...plan('2026-11-05'), reasons: [[...Preview.RIDE_BLOCKING_REASONS][0]] });
-      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
-    });
-
-    test('a host date the add-on prices (the cadence date itself) passes', async () => {
-      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(plan('2026-10-21')));
-      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
-    });
-
-    test('Codex round 22: every host date the top-up would ride in a run is walked, not only the first', async () => {
-      process.env.RECURRING_TOPUP_HORIZON_DAYS = '400';
-      const twoHosts = {
-        reasons: [], insert: ['2026-10-21', '2027-01-20'], planFloor: '2026-07-23',
-        hostRows: [
-          { id: 'host-1', scheduled_date: '2026-10-21', window_start: '09:00', technician_id: null },
-          { id: 'host-2', scheduled_date: '2027-01-20', window_start: '09:00', technician_id: null },
-        ],
-      };
-      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue(twoHosts));
-      // The first host date is priced by the Feb-Oct add-on; the second (Jan) is not, so the walk refuses.
-      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
-        .toMatchObject({ code: 'RECURRING_WITHOUT_BILLABLE_AMOUNT' });
-      const verdict = await seriesNextOccurrencesPrice(topupScenario(fixture).conn, 10);
-      expect(verdict.hosts.map((h) => [h.date, h.price])).toEqual([['2026-10-21', 60], ['2027-01-20', 0]]);
-      // One planned host only: only that date is a host.
-      spies[1].mockResolvedValue({ ...twoHosts, insert: ['2026-10-21'] });
-      expect((await seriesNextOccurrencesPrice(topupScenario(fixture).conn, 10)).hosts.map((h) => h.date)).toEqual(['2026-10-21']);
-    });
-
-    test('a preview that returns an error reason (not a throw) refuses as unverified; a rule blocker is still no ride', async () => {
-      for (const reason of ['blackout_check_error', 'series_check_error', 'error']) {
-        spies.push(jest.spyOn(Preview, 'previewRiderPair').mockResolvedValue({ ...plan('2026-11-05'), reasons: [reason] }));
-        expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
-          .toMatchObject({ code: 'RECURRING_BILLING_UNVERIFIED' });
-        spies[spies.length - 1].mockRestore();
-      }
-    });
-
-    test('a rider mechanism that cannot answer refuses as unverified; a series that rides nothing is untouched', async () => {
-      spies.push(jest.spyOn(Preview, 'previewRiderPair').mockRejectedValue(new Error('preview down')));
-      expect(await seriesNextOccurrencesUnbillable(topupScenario(fixture).conn, 10, { customerOverride: PER_VISIT }))
-        .toMatchObject({ code: 'RECURRING_BILLING_UNVERIFIED' });
-      const flat = { ...fixture, parentOverrides: { ...fixture.parentOverrides, rides_parent_id: null } };
-      expect(await seriesNextOccurrencesUnbillable(topupScenario(flat).conn, 10, { customerOverride: PER_VISIT })).toBeNull();
-    });
-
-    test('source contract: the verdict asks the top-up\'s own rider candidate, and the top-up\'s ride is built on that same function', () => {
-      const code = require('fs').readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
-      const walk = code.slice(code.indexOf('async function seriesWalkWithRide'), code.indexOf('async function seriesVerdictWalk'));
-      expect(walk).toContain('rideLawnCandidate(');
-      expect(walk).toContain('TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN');
-      expect(walk).not.toMatch(/previewRiderPair|hostRows/);
-      const ride = code.slice(code.indexOf('async function rideLawnExtension'), code.indexOf('async function joinOwnStopExtension'));
-      expect(ride).toContain('rideLawnCandidate(ctx)');
-      expect(ride).toContain('placeGroupedExtension(');
-    });
-  });
-
   describe('Codex round 19: splitRootsByTopupSkip and the explicit $0 override', () => {
     const { splitRootsByTopupSkip } = require('../routes/admin-schedule');
     const FG = require('../config/feature-gates');
@@ -1435,6 +1350,160 @@ describe('topUpRecurringSeriesLocked — occupancy clashes are advisory only in 
     expect(clashing.inserted.map((r) => r.scheduled_date)).toEqual(baseline.inserted.map((r) => r.scheduled_date));
     expect(clashingResult.spawnedVisits.length).toBe(baselineResult.spawnedVisits.length);
     expect(clashingResult.skipped).toBeNull();
+  });
+});
+
+describe('topUpRecurringSeriesLocked — a taken hour hands the visit off without a time (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit D4)', () => {
+  const fixtureArgs = {
+    parentOverrides: {
+      recurring_pattern: 'weekly', window_start: '09:00', window_end: '10:00',
+      estimated_duration_minutes: 60,
+    },
+    colsOverrides: {
+      window_start: {}, window_end: {}, time_window: {}, recurring_dispatch_due_date: {}, window_display: {}, route_order: {},
+    },
+  };
+  afterEach(() => { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; });
+
+  test('gate on: a first candidate another customer holds goes in on its cadence date with no time, due that date', async () => {
+    findConflictingVisits.mockReset().mockResolvedValue([]);
+    const baseline = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(baseline.conn, 10, { horizonDays: 14 });
+
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    // The hand-off probe runs first on every candidate (gate on); the first
+    // candidate's sees another customer's visit in the hour.
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
+      .mockResolvedValue([]);
+    const handed = topupScenario(fixtureArgs);
+    const result = await topUpRecurringSeriesLocked(handed.conn, 10, { horizonDays: 14 });
+
+    // Same cadence dates: the visit is not skipped and not moved to another date.
+    expect(handed.inserted.map((r) => r.scheduled_date)).toEqual(baseline.inserted.map((r) => r.scheduled_date));
+    const [first, ...rest] = handed.inserted;
+    expect(first).toMatchObject({
+      window_start: null, window_end: null, time_window: null, window_display: null, route_order: null,
+      recurring_dispatch_due_date: first.scheduled_date,
+    });
+    for (const row of rest) expect(row.window_start).toBe('09:00');
+    // Its reminder registers as the windowless placeholder, never the plan's hour.
+    expect(result.spawnedVisits[0].windowStart).toBeNull();
+    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00', windowEnd: '10:00', includeInterviews: true });
+    expect(findConflictingVisits.mock.calls[0][0].excludeCustomerId).toBeUndefined();
+  });
+
+  test('gate on: an hour only a booked interview holds is taken too (the advisory probe never sees it)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    // Interviews come back only to a probe that asks for them.
+    findConflictingVisits.mockReset().mockImplementation(async ({ includeInterviews }) => (includeInterviews
+      ? [{ id: 'interview:app-1', customer_id: null, conflict_reason: 'interview' }] : []));
+    const scenario = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+    expect(scenario.inserted[0]).toMatchObject({ window_start: null, recurring_dispatch_due_date: scenario.inserted[0].scheduled_date });
+  });
+
+  test('gate on: the hand-off probe carries the technician the insert uses, not the parent row\'s', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+    techScopedConfirmActive.mockReturnValue(true);
+    try {
+      // Another technician's stop holds the hour.
+      findConflictingVisits.mockReset()
+        .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77, technician_id: 'tech-other' }])
+        .mockResolvedValue([]);
+      // The parent's technician cannot take the visit (no assignable row), so
+      // the insert goes in unassigned — and an unassigned visit is blocked by
+      // any technician's stop. Judged as the parent's tech, it would not be.
+      const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-gone' } });
+      await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+      expect(scenario.inserted[0]).toMatchObject({ technician_id: null, window_start: null });
+    } finally {
+      techScopedConfirmActive.mockReturnValue(false);
+    }
+  });
+
+  test('gate on: the insert reuses the technician the hand-off probe read (one lookup, Codex #6476 r1)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    findConflictingVisits.mockReset().mockResolvedValue([]);
+    // The technician is free at the probe; an absence lands right after it.
+    let absenceReads = 0;
+    const otherTable = ({ table, op }) => {
+      if (table === 'technicians' && op === 'first') return { id: 'tech-1', employment_status: 'active', field_dispatchable: true };
+      if (table === 'technician_absences' && op === 'first') { absenceReads += 1; return absenceReads === 1 ? undefined : { id: 'absence-1' }; }
+      return undefined;
+    };
+    const scenario = topupScenario({ ...fixtureArgs, parentOverrides: { ...fixtureArgs.parentOverrides, technician_id: 'tech-1' }, otherTable });
+    await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+    expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00' });
+    // The probed date keeps the technician its probe read; a second lookup
+    // would have seen the absence and inserted it unassigned. The next date
+    // is read once too, and sees the absence.
+    expect(scenario.inserted[0]).toMatchObject({ technician_id: 'tech-1', window_start: '09:00' });
+    expect(scenario.inserted.length).toBeGreaterThan(1);
+    expect(scenario.inserted[1].technician_id).toBeNull();
+    expect(absenceReads).toBe(scenario.inserted.length);
+  });
+
+  test('gate on: the probe measures the place the child is inserted at, resolved once (the series property the anchor adopts)', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    const { anchorSoleProperty } = require('../services/customer-properties');
+    const currentConflict = require('../services/auto-dispatch/current-conflict');
+    anchorSoleProperty.mockClear();
+    // An unstamped legacy parent: the anchor adopts the house the series is already at.
+    anchorSoleProperty.mockImplementationOnce(async (target) => { target.property_id = 'prop-series'; target.service_address_line1 = '200 Sample Road'; });
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+      .mockResolvedValue([]);
+    const samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set());
+    try {
+      const scenario = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(scenario.conn, 10, { horizonDays: 14 });
+      expect(samePlaceSpy.mock.calls[0][1]).toMatchObject({ property_id: 'prop-series', service_address_line1: '200 Sample Road' });
+      // The insert carries that same place, from the one anchor read (no second one for it).
+      expect(scenario.inserted[0]).toMatchObject({ property_id: 'prop-series', service_address_line1: '200 Sample Road' });
+      expect(anchorSoleProperty).toHaveBeenCalledTimes(scenario.inserted.length);
+    } finally {
+      samePlaceSpy.mockRestore();
+    }
+  });
+
+  describe("gate on, the customer's own stop in the hour", () => {
+    const currentConflict = require('../services/auto-dispatch/current-conflict');
+    let samePlaceSpy;
+    beforeEach(() => {
+      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+      findConflictingVisits.mockReset()
+        .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+        .mockResolvedValueOnce([{ id: 'own-stop', customer_id: 5 }])
+        .mockResolvedValue([]);
+    });
+    afterEach(() => samePlaceSpy.mockRestore());
+
+    test('at the same place (measured from the parent): one stop, inserted with its time, as before', async () => {
+      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set(['own-stop']));
+      const own = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(own.conn, 10, { horizonDays: 14 });
+      // Measured from the new visit's own place (the template the insert copies).
+      expect(samePlaceSpy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customer_id: 5 }), [{ id: 'own-stop', customer_id: 5 }]);
+      expect(own.inserted[0].window_start).toBe('09:00');
+      expect(own.inserted[0].recurring_dispatch_due_date).toBeUndefined();
+    });
+
+    test('at another place: taken, handed off (Codex #6476 r1 P1)', async () => {
+      samePlaceSpy = jest.spyOn(currentConflict, 'samePlaceIdsAt').mockResolvedValue(new Set());
+      const other = topupScenario(fixtureArgs);
+      await topUpRecurringSeriesLocked(other.conn, 10, { horizonDays: 14 });
+      expect(other.inserted[0]).toMatchObject({ window_start: null, recurring_dispatch_due_date: other.inserted[0].scheduled_date });
+    });
+  });
+
+  test('gate off: a clash inserts with the time and makes no second probe (unchanged)', async () => {
+    findConflictingVisits.mockReset().mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }]).mockResolvedValue([]);
+    const off = topupScenario(fixtureArgs);
+    await topUpRecurringSeriesLocked(off.conn, 10, { horizonDays: 14 });
+    expect(off.inserted[0].window_start).toBe('09:00');
+    expect(findConflictingVisits.mock.calls.filter((c) => c[0] && c[0].excludeCustomerId)).toHaveLength(0);
   });
 });
 

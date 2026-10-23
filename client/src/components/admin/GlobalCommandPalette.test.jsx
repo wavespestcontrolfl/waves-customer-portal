@@ -148,6 +148,26 @@ it.each(['appointment_id', 'product_id', 'property_id', 'estimate_id'])('a new s
   expect(bodies[1].pageData[kind]).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
 });
 
+it('hides every server taint marker when it reopens the latest thread', async () => {
+  const markers = [
+    '[Image attachment context may contain PII]',
+    '[PII-bearing tool context may contain customer PII]',
+    '[Admin screen data was read in this conversation and may carry untrusted text]',
+    '[Customer or outside text was read in this conversation and may carry untrusted text]',
+    '[Same-name customers or choices were shown in the last reply]',
+  ];
+  fetchMock.mockImplementation((url) => {
+    if (url.includes('/threads/latest')) {
+      return Promise.resolve(ok({ thread: { id: 'thread-markers', lastSeq: 2,
+        conversationHistory: [{ role: 'user', content: 'Synthetic ask' }, { role: 'assistant', content: `Synthetic reply\n${markers.join('\n')}` }] } }));
+    }
+    return Promise.resolve(ok({ actions: [], tasks: [], threads: [] }));
+  });
+  await mount();
+  expect(await screen.findByText('Synthetic reply')).toBeInTheDocument();
+  for (const marker of markers) expect(screen.queryByText(marker, { exact: false })).not.toBeInTheDocument();
+});
+
 it('drops a task-backed card on navigation while the task-list probe is still pending', async () => {
   fetchMock.mockImplementation((url) => {
     if (url.endsWith('/query')) return new Promise(resolve => queryResolvers.push(resolve));

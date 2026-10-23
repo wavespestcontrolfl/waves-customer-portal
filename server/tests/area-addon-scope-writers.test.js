@@ -344,9 +344,9 @@ describe('4. the staff "Create Appointment" from a linked estimate writes the so
     const src = read('routes/admin-schedule.js');
     const rowsInsert = src.indexOf('await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);');
     const stamp = src.indexOf('writeStaffBookedAreaAddOnScopes(trx, {', rowsInsert);
-    const groups = src.indexOf("maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' })", rowsInsert);
+    const next = src.indexOf('ensurePackageFollowUpVisit({ trx, primary: svc, cols })', rowsInsert);
     expect(stamp).toBeGreaterThan(rowsInsert);
-    expect(groups).toBeGreaterThan(stamp);
+    expect(next).toBeGreaterThan(stamp);
     // the estimate row this transaction locked (Codex round 14), never the pre-lock copy
     expect(src.slice(stamp, stamp + 220)).toContain('estimate: lockedLinkedEstimate');
     expect(src.slice(stamp, stamp + 220)).not.toContain('estimate: linkedEstimate,');

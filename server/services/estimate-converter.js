@@ -139,8 +139,6 @@ function grassTypeToPersist(recurringServices, estimateData) {
 }
 
 const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
-const VisitGroups = require('./visit-groups');
-const RiderAcceptSeeding = require('./rider-accept-seeding');
 
 const WAVEGUARD_SETUP_FEE = 99;
 
@@ -4599,67 +4597,21 @@ async function rolledSeasonalFirstDate(baseDateStr) {
   return out;
 }
 
-// What seedRecurringFollowUpsForParent would hand the seeder for this
-// service/parent pair, or null when it would seed nothing. Split out so the
-// rider context can plan a lawn series' dates with the same opts.
-function followUpSeedPlan(parentRow, svc = {}, opts = {}) {
-  const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency, opts.acceptedPlanFrequency);
-  if (!pattern) return null;
-  const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
-  return {
-    // A termite bond is a billing rider on the bait program, not a bait visit:
-    // it never rides the lawn.
-    family: /^termite_bond/.test(String(recurringServiceKey(svc) || '')) ? 'termite_bond' : seedingFamilyKey(svc, parentRow),
-    pattern,
-    seedOpts: {
-      pattern,
-      visitsPerYear: annualPrepayCoverageVisits(svc, pattern, opts.acceptedPlanFrequency),
-      skipWeekends: true,
-      weekendShift: 'forward',
-      durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
-      // undefined = the seeder's parent-copy price (every caller but the
-      // multi-program reserved accept).
-      estimatedPrice: opts.estimatedPrice,
-    },
-  };
-}
-
-// GATE_PEST_RIDES_LAWN_AT_ACCEPT: a lawn host line (6-week or monthly) seeds
-// before the quarterly line that rides it, whatever order the estimate lists them in.
-function lawnHostFirst(units, lineOf, fallbackFrequency, acceptedPlanFrequency) {
-  const rank = (unit) => {
-    const line = lineOf(unit);
-    return RiderAcceptSeeding.isHostPlan(
-      seedingFamilyKey(line),
-      converterFollowUpSeedingPattern(line, {}, fallbackFrequency, acceptedPlanFrequency),
-    ) ? 0 : 1;
-  };
-  return [...units].sort((x, y) => rank(x) - rank(y));
-}
-
 async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
-  const plan = followUpSeedPlan(parentRow, svc, opts);
-  if (!plan) return { pattern: null, insertedCount: 0, insertedRows: [] };
-  // GATE_PEST_RIDES_LAWN_AT_ACCEPT: opts.riderCtx exists only while the gate is
-  // on; a quarterly series that starts with a lawn series takes its dates from
-  // the lawn's (rider-accept-seeding.js).
-  const rider = await RiderAcceptSeeding.beforeSeed(opts.riderCtx, database, parentRow, plan);
-  let ride;
-  try {
-    // No rider (gate off, not a rider, not riding) = the plain seed below.
-    ride = await RiderAcceptSeeding.seedWithRide(database, parentRow, rider, (conn, overrideDates, commitScope) => (
-      RecurringAppointmentSeeder.seedFollowUpsForParent(conn, parentRow, {
-        ...plan.seedOpts,
-        ...(overrideDates ? { overrideDates } : {}),
-        ...(commitScope ? { commitScope } : {}),
-      })));
-  } catch (seedErr) {
-    // A lawn that failed to seed hosts nothing for the units after it.
-    RiderAcceptSeeding.forgetLawn(opts.riderCtx, parentRow);
-    throw seedErr;
-  }
-  const { seedResult } = ride;
-  await RiderAcceptSeeding.afterSeed(opts.riderCtx, database, parentRow, ride.rides ? rider : null, seedResult);
+  const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency, opts.acceptedPlanFrequency);
+  if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
+  const visitsPerYear = annualPrepayCoverageVisits(svc, pattern, opts.acceptedPlanFrequency);
+  const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
+  const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
+    pattern,
+    visitsPerYear,
+    skipWeekends: true,
+    weekendShift: 'forward',
+    durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
+    // undefined = the seeder's parent-copy price (every caller but the
+    // multi-program reserved accept).
+    estimatedPrice: opts.estimatedPrice,
+  });
   if (opts.registerReminders !== false) {
     await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
   }
@@ -6235,9 +6187,6 @@ const EstimateConverter = {
       })
       : fn(database));
     const registerSeededRowsInline = !seedsInOwnTransaction && !deferFollowUpReminderRegistration;
-    // GATE_PEST_RIDES_LAWN_AT_ACCEPT (read once per accept): shared by every
-    // series seeded below so a quarterly series can ride a lawn series.
-    const riderCtx = RiderAcceptSeeding.createContext();
     const existingFromReservation = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })
       .whereNotNull('customer_id')
@@ -6822,10 +6771,7 @@ const EstimateConverter = {
             return identityMatch || recurringServiceKey({ name: row.service_type }) === unitKey;
           });
         };
-        const promotedUnitsListed = [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits];
-        const promotedUnits = riderCtx
-          ? lawnHostFirst(promotedUnitsListed, (unit) => unit.service, inferredFrequencyKey, acceptedPlanFrequency)
-          : promotedUnitsListed;
+        const promotedUnits = [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits];
         // One reserved row with a stamped price: it stands for exactly one
         // accepted line — or, when the combined route is about to rewrite it,
         // for the pair it will perform (codex #3938 r2 P1) — and its price is
@@ -7014,16 +6960,6 @@ const EstimateConverter = {
                 }
               }
               const inserted = await trx('scheduled_services').insert(standaloneRow).returning('*');
-              // Visit groups (visit-group-scope.md §2): a same-trip row and
-              // the reserved start share one physical stop — stamp them at
-              // scheduling. Gate-checked + best-effort inside maybeGroupRow.
-              // Only when the property identity is already on the row —
-              // null-property reservations group at post-commit property
-              // linkage instead (codex #3590 r10), so a customer-keyed
-              // stop can never absorb a legacy row at another address.
-              if (sameTrip && inserted[0] && inserted[0].property_id) {
-                await VisitGroups.maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'converter' });
-              }
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
@@ -7057,7 +6993,6 @@ const EstimateConverter = {
                   fallbackFrequency: unit.service.frequency,
                   acceptedPlanFrequency,
                   registerReminders: registerSeededRowsInline,
-                  riderCtx,
                   // The promoted parent is deliberately unpriced (the reserved
                   // row's first-application invoice covers the shared trip);
                   // its follow-ups bill this line's own per-visit amount.
@@ -7400,26 +7335,6 @@ const EstimateConverter = {
                   }
                 }
               }
-              // Visit groups (visit-group-scope.md §2): the reserved start
-              // had no usable catalog identity at ITS OWN insert time (the
-              // reservation resolver only stamps service_id on engine-keyed
-              // ONE-TIME rows), so the promoted same-trip row's own
-              // maybeGroupRow call above found no groupable partner and the
-              // pair never joined — the only gap: their later-quarter seeded
-              // children DO group, because the seeder's own maybeGroupRow
-              // calls run after this relink stamps the family identity.
-              // Re-run it now, for the reserved row itself, right after that
-              // relink and before the duplicate-series guard below (which
-              // only decides whether a follow-up SERIES seeds — it has no
-              // bearing on whether this trip's rows share a visit). Same
-              // null-property rule as the promoted call: a null-property
-              // reservation groups later at post-commit property linkage.
-              // Gate-checked, savepoint-wrapped and idempotent — a no-op
-              // when nothing relinked (no groupable family) or the row
-              // already carries a visit_id.
-              if (reservedStart.property_id) {
-                await VisitGroups.maybeGroupRow(reservedStart.id, { database: trx, createdBy: 'converter' });
-              }
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: reservedStart.service_id || null,
@@ -7433,7 +7348,6 @@ const EstimateConverter = {
                 fallbackFrequency: inferredFrequencyKey,
                 acceptedPlanFrequency,
                 registerReminders: registerSeededRowsInline,
-                riderCtx,
                 // The reserved row keeps the same-day total it was accepted
                 // and invoiced at; its follow-ups bill only this line.
                 estimatedPrice: reservedPerVisitSplit?.reserved,
@@ -7504,14 +7418,11 @@ const EstimateConverter = {
       // Shares the hoisted combinedScheduling so scheduling can never
       // disagree with the unit count / prepay coverage derivation.
       const { remaining, combos, standalone } = combinedScheduling;
-      const scheduleUnitsListed = [
+      const scheduleUnits = [
         ...combos.map((combo) => ({ svc: combo.service, combo, catalogServiceKey: combo.route.catalogServiceKey })),
         ...standalone.map((unit) => ({ svc: unit.service, catalogServiceKey: unit.catalogServiceKey })),
         ...remaining.map((svc) => ({ svc, catalogServiceKey: remainingUnitCatalogKey(svc, acceptedPlanFrequency) })),
       ];
-      const scheduleUnits = riderCtx
-        ? lawnHostFirst(scheduleUnitsListed, (unit) => unit.svc, inferredFrequencyKey, acceptedPlanFrequency)
-        : scheduleUnitsListed;
       // B06/B17: price every unit's seeded follow-ups from the accept route's
       // per-service amounts (see autoScheduleUnitPerVisitAmounts). Null when a
       // single-program accept (nothing to split — its one row already carries
@@ -7717,11 +7628,6 @@ const EstimateConverter = {
             const insertedId = Array.isArray(inserted)
               ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
               : (typeof inserted === 'object' ? inserted?.id : inserted);
-            // Visit groups (visit-group-scope.md §2): the recurring-unit
-            // converter path stamps like the standalone path — bare call is
-            // safe: maybeGroupRow refuses null-property/windowless rows
-            // itself, and the property-linkage regroup completes them.
-            if (insertedId) await VisitGroups.maybeGroupRow(insertedId, { database: trx, createdBy: 'converter' });
             // Accepting an estimate IS a real customer booking, so it
             // qualifies for an open inspection-credit promise. Marked
             // in-transaction (dark behind the gate): the marker commits
@@ -7742,7 +7648,6 @@ const EstimateConverter = {
                 fallbackFrequency: inferredFrequencyKey,
                 acceptedPlanFrequency,
                 registerReminders: registerSeededRowsInline,
-                riderCtx,
                 // Multi-program accept: the PARENT stays unpriced (the combined
                 // first-application invoice covers its first visit) while the
                 // follow-ups bill this unit's own quoted per-visit amount, the

@@ -241,6 +241,7 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(failed.reportV2.banner).toBeUndefined();
       expect(failed.reportV2.aftercare.evidenceSource).toBeUndefined(); // legacy path
       expect(out.instruction).toBeNull(); // the write gate freezes only a truthy claim
+      expect(out.inputsFailed).toBe(true); // the write gate turns this into the office alert (GATE_LAWN_WATERING_EVERY_VISIT)
       // The render omitted the direction: PDF storage must refuse it (the
       // uncacheable flag pdf-queue / reports-public gate on) and a pinned
       // delivery defers.
@@ -404,6 +405,32 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       const a = await signatureFor(record(), 24);
       expect(await signatureFor(record(), 24)).toBe(a);
       expect(await signatureFor(record(), 48)).not.toBe(a);
+    });
+
+    test('GATE_LAWN_WATERING_EVERY_VISIT re-keys an unfrozen visit by its logged targets; off, the stamp is as before', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const saved = process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+      delete process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+      const off = await signatureFor(record(), 24);
+      const withTargets = async (targets) => {
+        const row = record();
+        const base = fixtures();
+        const knex = makeKnex({ ...base, products_catalog: [CATALOG(24)], service_records: [row], service_products: base.service_products.map((p) => ({ ...p, targets })) });
+        return (await resolveCanonicalLawnRender({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex)).signature;
+      };
+      process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+      const savedSms = process.env.GATE_LAWN_WATERING_SMS;
+      process.env.GATE_LAWN_WATERING_SMS = 'true'; // a prerequisite of the gate
+      try {
+        const grubs = await withTargets(['White grubs']);
+        expect(grubs).not.toBe(off);
+        expect(await withTargets(['White grubs'])).toBe(grubs);
+        expect(await withTargets(['Tropical sod webworms'])).not.toBe(grubs);
+      } finally {
+        if (saved === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = saved;
+        if (savedSms === undefined) delete process.env.GATE_LAWN_WATERING_SMS; else process.env.GATE_LAWN_WATERING_SMS = savedSms;
+      }
+      expect(await signatureFor(record(), 24)).toBe(off);
     });
 
     test('a frozen visit keeps the constant stamp: a catalog edit does not re-key it', async () => {

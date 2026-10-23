@@ -150,7 +150,7 @@ describe('adapters project onto the canonical shape', () => {
     const path = require('path');
     const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
     // workflow ids: each producer's WORKFLOW constant
-    const producers = ['services/sms-suggest-mode.js', 'services/sms-auto-send.js', 'services/sms-gratitude-qualification.js', 'services/reschedule-intent-flagger.js', 'services/completion-comms-guard.js', 'services/contact-correction.js', 'services/estimate-conversion-agent.js'];
+    const producers = ['services/sms-suggest-mode.js', 'services/sms-auto-send.js', 'services/sms-gratitude-qualification.js', 'services/reschedule-intent-flagger.js', 'services/contact-correction.js', 'services/estimate-conversion-agent.js'];
     const workflows = new Set();
     for (const f of producers) for (const m of read(f).matchAll(/const [A-Z_]*WORKFLOW = '([a-z_]+)'/g)) workflows.add(m[1]);
     expect(workflows.size).toBeGreaterThanOrEqual(7);

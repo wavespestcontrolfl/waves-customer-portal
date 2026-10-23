@@ -164,11 +164,29 @@ async function labelFactsBlock({ decision, outgoingBody }) {
   return reason ? `label timing no longer current (${reason})` : null;
 }
 
+// RETIRED COMPANY FACTS (owner 2026-10-22, Codex #6447 r1-r6): a real-answers draft written before the answer-book facts
+// (prompt 25_n / 26_n; 15-24 were earlier wordings inside PR #6447, never in production) saw the old inside-spray policy (every visit unless declined) and the old payment policy (technicians take
+// cards, never cash). No word list can tell a restated old policy from a correct answer, so an UNEDITED draft from those prompts
+// is refused at send whatever it says; a person rewrites it, and a staff-edited body (it differs from the stored draft) goes out.
+// Drafts from 25_n on are not affected. (Prod 2026-10-22: 107 such drafts pending review, 1 ever accepted.)
+const ANSWER_BOOK_PROMPT_NUMBER = 25;
+function draftedBeforeAnswerBook(decision) {
+  const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
+  return !!m && (!m[1] || Number(m[1]) < ANSWER_BOOK_PROMPT_NUMBER);
+}
+const RETIRED_COMPANY_FACT_REASON_PREFIX = 'company fact retired';
+const blockReasonIsRetiredCompanyFact = (reason) => typeof reason === 'string' && reason.startsWith(RETIRED_COMPANY_FACT_REASON_PREFIX);
+function retiredCompanyFactBlock({ decision, outgoingBody }) {
+  if (!draftedBeforeAnswerBook(decision) || bodyIsStaffEdited(decision.suggested_message, outgoingBody)) return null;
+  return 'company fact retired (an unedited draft from before the 2026-10-22 company facts)';
+}
+
 // The scheduled-send version of the same check: the scheduler reads the decision row itself, and a row it cannot read (missing,
 // or not yet visible) must never mean "no snapshot, so send" - the reply guard cannot run without the decision, so it refuses.
+// It also carries the retired-company-fact check (it needs the decision's prompt_version, which the scheduler selects).
 async function scheduledLabelFactsBlock({ decision, outgoingBody }) {
   if (!decision) return 'label timing could not be checked (the agent decision was not found)';
-  return labelFactsBlock({ decision, outgoingBody });
+  return retiredCompanyFactBlock({ decision, outgoingBody }) || labelFactsBlock({ decision, outgoingBody });
 }
 
 // LIVE ETA (independent review + Codex round-1 finding, PR #5334): a
@@ -355,9 +373,12 @@ function labelFactsProviderPreSendCheck({ decisionId, getBody }) {
     let reason;
     try {
       const conn = dbi || require('../models/db');
-      const decision = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version');
+      const decision = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version', 'suggested_message');
       // a decision row that cannot be read never means "no snapshot, so send"
-      reason = decision ? await labelFactsBlockReason({ decision, outgoingBody, dbh: dbi }) : 'label_facts_decision_not_found';
+      // (the retired-company-fact check rides here too, so a scheduler read that failed earlier cannot skip it - pre-push P1)
+      reason = decision
+        ? (retiredCompanyFactBlock({ decision, outgoingBody }) || await labelFactsBlockReason({ decision, outgoingBody, dbh: dbi }))
+        : 'label_facts_decision_not_found';
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LABEL FACTS boundary recheck failed for decision ${decisionId}: ${err.message}; blocking send`);
       reason = 'label_facts_recheck_failed';
@@ -374,7 +395,9 @@ function labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot = null, inb
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     let reason;
     try {
-      reason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: labelFactsSnapshot, body: outgoingBody, inbound: inboundMessage, ...(dbi ? { conn: dbi } : {}) });
+      // an auto-send body is the AI draft itself, so a pre-answer-book prompt is refused outright
+      reason = draftedBeforeAnswerBook({ prompt_version: promptVersion }) ? 'company fact retired (an unedited draft from before the 2026-10-22 company facts)'
+        : await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: labelFactsSnapshot, body: outgoingBody, inbound: inboundMessage, ...(dbi ? { conn: dbi } : {}) });
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LABEL FACTS boundary recheck failed: ${err.message}; blocking send`);
       reason = 'label_facts_recheck_failed';
@@ -626,7 +649,9 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
     || (await openLoopsBlock({ decision }))
-    || (await etaBlock({ decision, outgoingBody }));
+    || (await etaBlock({ decision, outgoingBody }))
+    // last: a more specific reason above names what is wrong with the body itself
+    || retiredCompanyFactBlock({ decision, outgoingBody });
 }
 
 /**
@@ -658,4 +683,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, retiredCompanyFactBlock, blockReasonIsRetiredCompanyFact, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };

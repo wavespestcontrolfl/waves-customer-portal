@@ -206,6 +206,19 @@ const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
 // thread, so the taint lives in the server's record of the thread, never in
 // anything the client sends. No LIKE wildcards in it.
 const UNTRUSTED_READ_MARKER = '[Admin screen data was read in this conversation and may carry untrusted text]';
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r16): added to the ASSISTANT turn of an exchange that
+// emitted same-name candidates or offered choices. A choice label carries customer-entered
+// text and the owner's tap sends it back as the next message, so the NEXT request on the
+// thread must card every write. It is its own marker, not the untrusted-read one: it counts
+// while ANY assistant turn carrying it is under SAME_NAME_PENDING_MINUTES old, so a stale tab
+// tapping an old button after another reply is still carded. No LIKE wildcards in it.
+const SAME_NAME_CHOICE_MARKER = '[Same-name customers or choices were shown in the last reply]';
+const SAME_NAME_PENDING_MINUTES = 30;
+// GATE_IB_TARGET_RULES_V2 (Codex #6369 r19): the same idea for reads that taint ONLY under the v2
+// gate (a call log, an email search, a lead list...). A distinct marker, honored only while the
+// gate is on, so unsetting GATE_IB_TARGET_RULES_V2 (the documented rollback) un-taints those
+// threads. read_admin_data keeps UNTRUSTED_READ_MARKER, which no gate switches off.
+const UNTRUSTED_READ_V2_MARKER = '[Customer or outside text was read in this conversation and may carry untrusted text]';
 const ATTACHMENT_NOTE_RE = /^\[Operator attached \d+ images?\]$/;
 // The user turn the route persists when a saved task continues; the operator
 // never typed it.
@@ -217,7 +230,7 @@ function operatorText(content) {
   return String(content || '').split('\n')
     .filter((line) => {
       const trimmed = line.trim();
-      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== UNTRUSTED_READ_MARKER && trimmed !== CONTINUATION_TURN
+      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && trimmed !== UNTRUSTED_READ_MARKER && trimmed !== UNTRUSTED_READ_V2_MARKER && trimmed !== SAME_NAME_CHOICE_MARKER && trimmed !== CONTINUATION_TURN
         && !ATTACHMENT_NOTE_RE.test(trimmed);
     })
     .join('\n').trim();
@@ -270,15 +283,34 @@ async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes
  * when the thread cannot be read (not found for this actor, or a database
  * error) so the caller can fail closed.
  */
-async function hasUntrustedRead(actorId, threadId) {
+async function hasUntrustedRead(actorId, threadId, marker = UNTRUSTED_READ_MARKER) {
   // ONE query: the thread's primary key plus an EXISTS over that thread's own
   // turns (the thread_id index). Cost: one indexed lookup and a scan of one
   // thread's rows per owner-direct request that carries a thread id.
   const row = await db('ib_threads')
     .where({ id: threadId, admin_actor_id: actorId })
-    .first(db.raw('EXISTS (SELECT 1 FROM ib_thread_turns WHERE thread_id = ib_threads.id AND content LIKE ?) AS marked', [`%${UNTRUSTED_READ_MARKER}%`]));
+    .first(db.raw('EXISTS (SELECT 1 FROM ib_thread_turns WHERE thread_id = ib_threads.id AND content LIKE ?) AS marked', [`%${marker}%`]));
   if (!row) throw new Error('thread not readable');
   return row.marked === true;
+}
+
+/**
+ * Is a same-name choice pending on this thread: does ANY assistant turn written within the
+ * last SAME_NAME_PENDING_MINUTES carry SAME_NAME_CHOICE_MARKER? Deliberately cursor-free (no
+ * "consumed" notion): a stale tab that taps an old button after another reply still finds the
+ * marker, so its writes stay carded (Codex #6369 r17). Throws when the thread cannot be
+ * read so the caller can fail closed.
+ */
+async function hasSameNameChoicePending(actorId, threadId) {
+  const row = await db('ib_threads')
+    .where({ id: threadId, admin_actor_id: actorId })
+    .first(db.raw(`EXISTS (
+      SELECT 1 FROM ib_thread_turns t
+      WHERE t.thread_id = ib_threads.id AND t.role = 'assistant'
+        AND t.content LIKE ?
+        AND t.created_at >= NOW() - (? || ' minutes')::interval) AS pending`, [`%${SAME_NAME_CHOICE_MARKER}%`, String(SAME_NAME_PENDING_MINUTES)]));
+  if (!row) throw new Error('thread not readable');
+  return row.pending === true;
 }
 
 async function listThreads(actorId, limit = 20) {
@@ -314,7 +346,10 @@ module.exports = {
   IMAGE_TAINT_MARKER,
   PII_TAINT_MARKER,
   UNTRUSTED_READ_MARKER,
+  UNTRUSTED_READ_V2_MARKER,
+  SAME_NAME_CHOICE_MARKER,
   hasUntrustedRead,
+  hasSameNameChoicePending,
   CONTINUATION_TURN,
   purgeExpiredThreads,
   deriveTitle,

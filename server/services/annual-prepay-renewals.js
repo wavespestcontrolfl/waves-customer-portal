@@ -1639,10 +1639,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       `The promised first visit (${promisedFirstVisit}) had already passed when payment arrived. Coverage now starts ${firstTargetDate} — confirm the new date with the customer.`);
   }
 
-  // Property identity for the visit-group stamp (GH codex #3699 r8 P2):
-  // prepaid seeds carry no estimate for the linkage regroup, so an
-  // unstamped property makes maybeGroupRow refuse forever. Only the
-  // customer's SOLE active property is unambiguous (same rule as the
+  // Property identity (GH codex #3699 r8 P2): prepaid seeds carry no
+  // estimate for property linkage. Only the customer's SOLE active property
+  // is unambiguous (same rule as the
   // manual admin-schedule / admin-leads / availability bookings);
   // multi-property customers stay office-placed. Resolved once per term.
   const seedPropertyId = await coverageSeedPropertyId(term, cols, conn);
@@ -1836,12 +1835,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     }
     if (await termOwnerMovedUnderFence(trx)) return null;
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
-    // Visit groups (visit-group-scope.md §2; owner ruling 2026-08-31):
-    // prepaid timed first visits stamp like any other booking — nothing to
-    // charge, so no autopay/billing risk, and the shared stop gets one
-    // reminder/tracker. Gate-checked + best-effort + self-refusing inside
-    // maybeGroupRow (windowless seeds below never stamp — self-refused).
-    if (row?.id) await require('./visit-groups').maybeGroupRow(row.id, { database: trx, createdBy: 'seeder' });
     // Filed only once the visit actually exists: fileCoverageException writes
     // through the global connection and dedupes for 7 days, so a notice
     // emitted before a deferred/aborted insert would outlive the rollback
@@ -2024,9 +2017,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
         skipConcurrentSeed(scheduledDate);
         created = null;
       } else {
-        // Visit groups: deliberately NOT stamped — these are windowless
-        // seeds (buildInsert(date, null)), which maybeGroupRow refuses by
-        // policy; office placement is their grouping moment.
         [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
       }
     } else {

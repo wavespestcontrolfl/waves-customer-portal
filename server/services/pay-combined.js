@@ -693,16 +693,16 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
     // the in-flight signal the PI-status check must see and report.
     .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
-  // The ordinary (non-combined) checkout of an invoice that rides these visits without a packet
-  // is invalidated by the same move: its pre-issued client secret could still be confirmed with
+  // The ordinary (non-combined) checkout of an invoice that rides these visits (with or without a
+  // packet) is invalidated by the same move: its pre-issued client secret could still be confirmed with
   // Stripe directly. `invalidateVisitIds` narrows that to the visits whose Bill-To really changes.
   await markLinkedSingleInvoiceSessions(database, rows, { scheduledServiceIds: invalidateVisitIds || ids }, pending);
   return releaseWholeOrNothing(database, [rows], { deferApply });
 }
 
-// Flag the rows whose own single-invoice PaymentIntent the Bill-To change invalidates: the visit-linked
-// invoices (no packet) that MOVE to a payer (ownerTransitions, the one answer the fence and the
-// withdrawal read too). planStampedSessionRelease then cancels such an intent while it is
+// Flag the rows whose own single-invoice PaymentIntent the Bill-To change invalidates: the invoices that
+// MOVE to a payer - visit-linked or with no visit (ownerTransitions, the one answer the fence and the
+// withdrawal read too) and self-pay combined-visit invoices (the packet path's first-billed-visit rule). planStampedSessionRelease then cancels such an intent while it is
 // unconfirmed and reports it as in flight once money is moving.
 async function markLinkedSingleInvoiceSessions(database, rows, scope, pending) {
   if (!rows.length) return rows;

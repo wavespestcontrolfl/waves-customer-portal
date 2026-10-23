@@ -9,6 +9,9 @@ const { executeAutoAction } = require('../services/email/email-actions');
 const { unblockSender, manualBlockSender } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { emailSendLaterLive } = require('../config/feature-gates');
+const { parseETDateTime, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
+const { countProcessedInvoices } = require('../services/email/invoice-outcome');
 const {
   createStaffOAuthState,
   withClaimedStaffOAuthState,
@@ -176,7 +179,7 @@ router.get('/inbox', async (req, res) => {
       .limit(parsedLimit)
       .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'to_address',
         'reply_to', 'subject', 'snippet', 'has_attachments', 'received_at', 'is_read', 'is_starred',
-        'is_archived', 'classification', 'extracted_data', 'customer_id');
+        'is_archived', 'classification', 'extracted_data', 'customer_id', 'auto_action', 'expense_id');
 
     res.json({ emails, total: parseInt(count), page: parsedPage, limit: parsedLimit });
   } catch (err) {
@@ -335,6 +338,210 @@ router.post('/send', async (req, res) => {
     logger.error(`[email] Send outcome: ${unknown ? 'unknown' : 'failed'}`);
     res.status(unknown ? 202 : 502).json({ status: unknown ? 'outcome_unknown' : 'failed',
       error: unknown ? 'Check the Sent folder before retrying.' : 'The email was not accepted. Try again.' });
+  }
+});
+
+// ============================================
+// Schedule send (GATE_EMAIL_SEND_LATER; table scheduled_emails)
+// ============================================
+
+const SCHEDULE_ET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const SCHEDULE_MAX_DAYS = 366;
+const CANCELLABLE = ['scheduled', 'failed', 'outcome_unknown'];
+const CANCELLED_DAYS = 30;
+const SENT_CHECK_IN_SENT = 'Office check: found in the Gmail Sent folder';
+const SENT_CHECK_NOT_SENT = 'Office check: not in the Gmail Sent folder';
+const CANCELLED_LIST_CAP = 100;
+const { OUTCOME_UNKNOWN_ERRORS } = require('../services/email/scheduled-email-sender');
+const scheduledView = (row) => ({
+  id: row.id, to: row.to_address, subject: row.subject, draftText: row.draft_text, threadId: row.thread_id,
+  replyEmailId: row.reply_email_id, sendAt: row.send_at, status: row.status, sentAt: row.sent_at,
+  // Gmail may have accepted it (outcome_unknown, or cancelled from there):
+  // its restored draft must wait for the office's Sent-folder check.
+  mayHaveSent: OUTCOME_UNKNOWN_ERRORS.includes(row.last_error),
+});
+
+// The send time a schedule request may use, or the reason it may not. The
+// instant must read back as the same Eastern wall clock (no Feb 31, no
+// spring-forward gap), name one moment (not the repeated fall-back hour), and
+// sit between one minute and a year from now.
+function scheduleTimeError(sendAt, now = Date.now()) {
+  if (typeof sendAt !== 'string' || !SCHEDULE_ET_RE.test(sendAt)) return { error: 'sendAt must be YYYY-MM-DDTHH:MM (Eastern)' };
+  const when = parseETDateTime(sendAt);
+  const p = etParts(when);
+  const pad = (n) => String(n).padStart(2, '0');
+  const readBack = `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
+  if (readBack !== sendAt || etWallClockOccurrences(when) !== 1) return { error: 'That time does not exist once in Eastern time. Pick another.' };
+  const ahead = when.getTime() - now;
+  if (!(ahead >= 60 * 1000)) return { error: 'Pick a time at least a minute from now.' };
+  if (ahead > SCHEDULE_MAX_DAYS * 86400000) return { error: 'Pick a time within a year.' };
+  return { when };
+}
+
+// A retry whose first request ended 'failed' keeps its draft in the composer,
+// so the row's own recovery copy is used up in the same step: it leaves the
+// list (cancelled + restored), and Back to draft cannot hand the same text
+// out again after the kept draft is sent. The answer still says 'failed'.
+// A row another tab already took back is returned as it is.
+async function consumeFailedRetry(known) {
+  if (known.status !== 'failed') return known;
+  const [consumed] = await db('scheduled_emails').where({ id: known.id, status: 'failed' })
+    .update({ status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() }).returning('id');
+  return consumed ? known : db('scheduled_emails').where({ id: known.id }).first();
+}
+
+// POST /schedule — queue an email for a later send. `sendAt` is ET wall clock
+// (YYYY-MM-DDTHH:MM, like the SMS composer's scheduledFor); `body` is the
+// composer's encoded HTML (as on /send) and `draftText` its plain text, which
+// "Back to draft" restores. A repeated `clientKey` returns the first row.
+router.post('/schedule', async (req, res) => {
+  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
+  try {
+    const { to, subject, body, draftText, threadId, replyEmailId, sendAt, clientKey } = req.body || {};
+    if (!to || !body || !draftText) return res.status(400).json({ error: 'to, body and draftText required' });
+    if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
+    // A retried request finds its first row before any time check: by the
+    // retry the chosen time may be under a minute away, or already sent.
+    const known = await db('scheduled_emails').where({ client_key: clientKey }).first();
+    if (known) return res.json({ success: true, scheduled: scheduledView(await consumeFailedRetry(known)) });
+    const { when, error } = scheduleTimeError(sendAt);
+    if (error) {
+      // The refusal voids the key in the same step, so a first request
+      // still on its way cannot queue under it later; then the browser may
+      // drop the key (keyChecked). A row that landed meanwhile is returned.
+      const { voided, known: landed } = await voidClientKey(clientKey, req.technicianId);
+      if (!voided) return res.json({ success: true, scheduled: scheduledView(await consumeFailedRetry(landed)) });
+      return res.status(400).json({ error, keyChecked: true });
+    }
+    const [row] = await db('scheduled_emails').insert({
+      to_address: String(to).trim(), subject: String(subject || '').trim() || '(no subject)', body_html: body, draft_text: draftText,
+      thread_id: threadId || null, reply_email_id: replyEmailId || null, send_at: when, created_by: req.technicianId || null, client_key: clientKey,
+    }).onConflict('client_key').ignore().returning('*');
+    const saved = row || await db('scheduled_emails').where({ client_key: clientKey }).first();
+    res.json({ success: true, scheduled: scheduledView(saved) });
+  } catch (err) {
+    logger.error(`[email] schedule failed (${err.code || 'error'})`);
+    res.status(500).json({ error: 'The email was not scheduled. Try again.' });
+  }
+});
+
+// Stores a void row under clientKey (cancelled and restored: never listed,
+// never sent), unless a row is already there. Either way the key is settled
+// for good: { voided: true }, or { voided: false, known } with that row.
+async function voidClientKey(clientKey, createdBy) {
+  const [voided] = await db('scheduled_emails').insert({
+    to_address: '', subject: '(withdrawn)', body_html: '', draft_text: '', send_at: db.fn.now(), status: 'cancelled',
+    cancelled_at: db.fn.now(), restored_at: db.fn.now(), created_by: createdBy || null, client_key: clientKey,
+  }).onConflict('client_key').ignore().returning('id');
+  if (voided) return { voided: true };
+  return { voided: false, known: await db('scheduled_emails').where({ client_key: clientKey }).first() };
+}
+
+// POST /schedule/reconcile — settles a schedule request whose answer never
+// came, before the browser lets plain Send go. It returns the row stored
+// under `clientKey`; when there is none, it stores a void row under that key
+// (cancelled and restored: never listed, never sent), so the original
+// request, if it is still on its way, can no longer queue a copy.
+// It sends nothing, so it answers with the gate off too: a browser guard
+// left by a request the gate refused can always be settled.
+router.post('/schedule/reconcile', async (req, res) => {
+  const clientKey = req.body?.clientKey;
+  if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
+  try {
+    const { voided, known } = await voidClientKey(clientKey, req.technicianId);
+    if (voided) return res.json({ success: true, scheduled: null });
+    res.json({ success: true, scheduled: scheduledView(await consumeFailedRetry(known)) });
+  } catch (err) {
+    logger.error(`[email] schedule reconcile failed (${err.code || 'error'})`);
+    res.status(500).json({ error: 'Could not check that request. Try again.' });
+  }
+});
+
+// GET /scheduled — what is still waiting or needs the office, and recent
+// cancels (read-only); sent rows drop off. Answers {enabled:false} with the
+// gate off so the client hides the menu and the tab.
+// With the gate off the list still answers (enabled:false): emails already
+// queued stay visible and cancellable, since only creating and sending are
+// gated.
+router.get('/scheduled', async (req, res) => {
+  try {
+    // Every email still queued or sending, and every one that needs the
+    // office (failed, outcome_unknown: their alert says Back to draft), so
+    // history never hides one. Cancelled emails of the last CANCELLED_DAYS
+    // days are listed read-only (Show text): a cancel whose answer was lost
+    // still shows its text, but never hands it to a composer a second time.
+    const [open, cancelled] = await Promise.all([
+      db('scheduled_emails').whereIn('status', ['scheduled', 'sending', ...CANCELLABLE.slice(1)]),
+      db('scheduled_emails').where('status', 'cancelled').whereNot('to_address', '')
+        .where('cancelled_at', '>', db.raw(`now() - interval '${CANCELLED_DAYS} days'`))
+        .orderBy('cancelled_at', 'desc').limit(CANCELLED_LIST_CAP),
+    ]);
+    const rows = [...open, ...cancelled].sort((a, b) => new Date(a.send_at) - new Date(b.send_at));
+    res.json({ enabled: emailSendLaterLive(), emails: rows.map(scheduledView) });
+  } catch (err) {
+    logger.error(`[email] scheduled list failed (${err.code || 'error'})`);
+    res.status(500).json({ error: 'Scheduled emails are unavailable.' });
+  }
+});
+
+// POST /scheduled/:id/sent-check — the office's answer after checking the
+// Gmail Sent folder for an email that may have gone out: { inSent: true }
+// records it as sent; false means it never went out, and the row's recovery
+// copy is used up (the draft the office holds is the only copy). Atomic on
+// outcome_unknown; a row already taken back stays as it is. The sweep then
+// closes its alert. Sends nothing, so it answers with the gate off too.
+//
+// { takenBack: true } is the tab that took this email back itself (Back to
+// draft): its row is already cancelled, and the check records the verdict on
+// it. Without it, the row must still be outcome_unknown; one taken back
+// elsewhere answers 409, since another tab may hold the same text. Either
+// way the verdict replaces the may-have-sent marker, so the sweep can close
+// the alert only once the office has answered.
+router.post('/scheduled/:id/sent-check', async (req, res) => {
+  const inSent = req.body?.inSent;
+  if (typeof inSent !== 'boolean') return res.status(400).json({ error: 'inSent must be true or false.' });
+  const verdict = inSent ? SENT_CHECK_IN_SENT : SENT_CHECK_NOT_SENT;
+  try {
+    const changed = req.body?.takenBack === true
+      ? await db('scheduled_emails').where({ id: req.params.id, status: 'cancelled' }).whereIn('last_error', [...OUTCOME_UNKNOWN_ERRORS, verdict])
+        .update({ last_error: verdict, updated_at: db.fn.now() })
+      : await db('scheduled_emails').where({ id: req.params.id, status: 'outcome_unknown' }).update(inSent
+        ? { status: 'sent', sent_at: db.fn.now(), last_error: verdict, updated_at: db.fn.now() }
+        : { status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), last_error: verdict, updated_at: db.fn.now() });
+    if (changed) return res.json({ success: true });
+    // Nothing changed: the email was already settled elsewhere (taken back
+    // to a draft in another tab, or already checked). Its state goes back,
+    // never a success the browser could read as its own answer recorded.
+    const current = await db('scheduled_emails').where({ id: req.params.id }).first('status');
+    res.status(409).json({ status: current?.status || null, error: 'This email was already settled elsewhere.' });
+  } catch (err) {
+    logger.error(`[email] scheduled sent-check failed (${err.code || 'error'})`);
+    res.status(500).json({ error: 'Could not record the check. Try again.' });
+  }
+});
+
+// POST /scheduled/:id/cancel — Gmail's "Cancel send": the row stops and its
+// text comes back for the composer, once. The same UPDATE uses up the row's
+// recovery copy (restored_at), so no repeat, other tab or other admin can
+// take the same text into a composer again: a repeat answers 409 and the
+// Scheduled list shows the text read-only. A row Gmail is sending or has
+// sent cannot be cancelled (409).
+// Sends nothing, so it works with the gate off too (a rollback must still
+// be able to stop emails already queued).
+router.post('/scheduled/:id/cancel', async (req, res) => {
+  try {
+    const [row] = await db('scheduled_emails').where({ id: req.params.id }).whereIn('status', CANCELLABLE)
+      .update({ status: 'cancelled', cancelled_at: db.fn.now(), restored_at: db.fn.now(), updated_at: db.fn.now() }).returning('*');
+    // Its alert closes on the next sweep (the row is no longer unresolved).
+    if (row) return res.json({ success: true, draft: scheduledView(row) });
+    const current = await db('scheduled_emails').where({ id: req.params.id }).first('status');
+    if (current?.status === 'cancelled') {
+      return res.status(409).json({ cancelled: true, error: 'This email was already cancelled. Its text is under Scheduled: tap Show text.' });
+    }
+    res.status(409).json({ error: 'This email is already sending or sent, so it cannot be cancelled.' });
+  } catch (err) {
+    logger.error(`[email] scheduled cancel failed (${err.code || 'error'})`);
+    res.status(500).json({ error: 'The scheduled email was not cancelled. Try again.' });
   }
 });
 
@@ -701,7 +908,9 @@ router.get('/daily-digest', async (req, res) => {
       .filter(e => /^spam_(quarantined|trashing|trashed|blocked)/.test(e.auto_action || '')).length;
     // Kept for API back-compat; now mirrors the accurate count.
     digest.spam_blocked = digest.spam_quarantined;
-    digest.invoices_processed = digest.by_category.vendor_invoice || 0;
+    // Only invoices that reached the booking step: invoice_detected:* (not paid,
+    // no amount, failed, unauthenticated sender) is not a processed invoice.
+    digest.invoices_processed = countProcessedInvoices(todayEmails);
 
     // Blocked count today
     const [blocked] = await db('blocked_email_senders')

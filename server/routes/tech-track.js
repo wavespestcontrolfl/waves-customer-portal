@@ -179,16 +179,6 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
   const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
   await runOfficeConfirmActivation(db, hookRow || svc, 'tech-track', { skipCardRequest: true });
 
-  // Visit group (codex #3603 r5): a field-confirmed office-review booking
-  // becomes join-eligible NOW and the live advance follows immediately —
-  // group it here, AWAITED, so the tracker's row load sees its visit_id and
-  // the first tap moves the whole stop. Idempotent; best-effort by contract.
-  try {
-    await require('../services/visit-groups').maybeGroupRow(svc.id, { createdBy: 'dispatch' });
-  } catch (vgErr) {
-    logger.warn(`[tech-track] visit-group regroup after field confirm failed for ${svc.id}: ${vgErr.message}`);
-  }
-
   // Post-hook reminder repair (Codex P1 rounds 4–5): an office action can
   // commit between the hookRow snapshot and registerAppointment's insert —
   // that writer saw no reminder row to move/close, so the just-armed row

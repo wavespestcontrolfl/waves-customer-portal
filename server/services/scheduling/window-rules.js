@@ -163,8 +163,50 @@ async function probeSlotOverlap({
   }));
 }
 
+// The occupied block a row carries, derived exactly the way the parent move
+// probe derives it (window_end, else window_start + duration, default 60).
+// null for windowless rows — they carry no occupancy and skip the probe.
+// Moved here from routes/admin-schedule.js so every plan writer shares it
+// (the recurring seeder's taken-hour hand-off, plan-taken-hour.js).
+function occupancyBlockFor(row) {
+  const startMin = parseHHMM(row?.window_start);
+  if (startMin == null) return null;
+  let endMin = parseHHMM(row?.window_end);
+  if (endMin == null || endMin <= startMin) {
+    endMin = Math.min(startMin + (parseInt(row?.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+  }
+  return { start: minutesToHHMM(startMin), end: minutesToHHMM(endMin) };
+}
+
+// Best-effort destination probe for the plan writers' candidate dates: the
+// rows `template`'s own block would overlap on `date`, through the shared
+// tech-blind occupancy check with the admin status set. Probe-only, no lock
+// (routes/admin-schedule.js walkExtensionCandidates: the date is known only
+// mid-trx, and taking rung 1 then would invert occupancy.js's ORDERING
+// CONTRACT). Tech-blind always (a caller that scopes by technician filters
+// the rows itself). Options, off for the existing callers (the taken-hour
+// hand-off, scheduling/plan-taken-hour.js, sets both):
+//   excludeStatuses    the statuses that are no stop (default: the admin set);
+//   includeInterviews  the owner's booked interviews hold the hour too.
+async function seriesCandidateDateClashRows(conn, template, date, {
+  excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES, includeInterviews = false,
+} = {}) {
+  const block = occupancyBlockFor(template);
+  if (!block) return [];
+  return findConflictingVisits({
+    db: conn,
+    date,
+    windowStart: block.start,
+    windowEnd: block.end,
+    excludeStatuses,
+    ...(includeInterviews ? { includeInterviews: true } : {}),
+  });
+}
+
 module.exports = {
   parseHHMM,
+  occupancyBlockFor,
+  seriesCandidateDateClashRows,
   minutesToHHMM,
   assertAdminAppointmentWindow,
   probeSlotOverlap,

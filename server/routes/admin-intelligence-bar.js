@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive, ibTargetRulesV2Live } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const { dictatedAmountsNote } = require('../utils/spoken-money');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
@@ -92,6 +92,7 @@ const { isToolFailure, recordToolOutcome, executionOutcome, TRANSIENT_FROZEN_REA
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
+const ModelContext = require('../services/intelligence-bar/model-context');
 const MultiCard = require('../services/intelligence-bar/multi-card');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
@@ -323,7 +324,7 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/web
 // payload is the CI-only 500 flake; see server/utils/base64-validate.js.
 const { isValidBase64 } = require('../utils/base64-validate');
 // The persisted-turn markers are defined once, with the thread store.
-const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER } = IbThreads;
+const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER, UNTRUSTED_READ_V2_MARKER, SAME_NAME_CHOICE_MARKER } = IbThreads;
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 // Validate attachments server-side — never trust the client downscaler. Drop
@@ -439,7 +440,7 @@ function stripInternalHistoryMarkers(message) {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER].includes(line.trim()))
+      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER, UNTRUSTED_READ_V2_MARKER, SAME_NAME_CHOICE_MARKER].includes(line.trim()))
       .join('\n')
       .trim(),
   };
@@ -954,6 +955,19 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // The invoice edit cards (GATE_IB_INVOICE_EDITS): the invoice, the customer and the headline; the lines ride the contract.
+  edit_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'edit_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, total: `${preview.amount} (unchanged)`, changes: (preview.changes || []).map((c) => `${c.field}: ${c.before} -> ${c.after}`), sends_to_customer: 'nothing' }
+    : null),
+  archive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'archive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unarchive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unarchive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unvoid_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unvoid_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, amount: preview.amount, becomes: preview.becomes, reminders_restart: 'only when it is sent again', sends_to_customer: 'nothing' }
+    : null),
   // The invoice reminder and payment-plan cards: each names the invoice and the customer; the lines ride the contract.
   pause_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'pause_invoice_reminders'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> paused`, sends_to_customer: 'nothing' }
@@ -979,6 +993,10 @@ const PINNED_DISPLAY_BUILDERS = {
   // create_invoice: the card names the customer, the total and the lines; the details ride the contract.
   create_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'create_invoice'
     ? { customer: preview.customer_name || preview.customer_id, total: preview.total, lines: (preview.lines || []).length, notes: preview.notes || 'none', due_date: preview.due_date || 'in 30 days', status: 'draft', sends_to_customer: 'nothing' }
+    : null),
+  // set_customer_bill_to: the card names the customer and the payer; the lines ride the contract.
+  set_customer_bill_to: (params, preview) => (preview?.preview === true && preview.tool === 'set_customer_bill_to'
+    ? { customer: preview.customer_name || preview.customer_id, bill_to_now: preview.bill_to_now, new_bill_to: preview.payer_name, invoices_moving: 'none', sends_to_customer: 'nothing' }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
@@ -1025,6 +1043,11 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // The invoice edit cards bind the invoice version (and, per card, the body, credit balance or visit) they showed.
+  edit_invoice: '_verified_invoice_edit_version',
+  archive_invoice: '_verified_invoice_archive_version',
+  unarchive_invoice: '_verified_invoice_unarchive_version',
+  unvoid_invoice: '_verified_invoice_unvoid_version',
   // The reminder cards bind the invoice, its reminder row, the recipients and the message the card showed; the payment-plan
   // cards bind the invoice, the plan terms (every installment) and the reminder row.
   pause_invoice_reminders: '_verified_invoice_reminder_version',
@@ -1036,6 +1059,8 @@ const VERIFIED_VERSION_PARAMS = {
   cancel_payment_plan: '_verified_payment_plan_version',
   // create_invoice binds the customer, every line, the dates, the tax and the server-computed total the card showed.
   create_invoice: '_verified_invoice_create_version',
+  // set_customer_bill_to binds the current Bill-To, the payer and the invoices that move and stay.
+  set_customer_bill_to: '_verified_bill_to_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -1915,10 +1940,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // the SAME id the commit-time recheck passes as its own confirming
       // actor in the common case (propose then immediately confirm), so
       // technician_notice reads the same at both points.
-      const { computeCancelAppointmentImpact } = require('../services/appointment-cancel-impact');
+      // The no-text option is carried only by the replay (GATE_IB_CANCEL_WITH_EFFECTS). The bare-visit path cannot
+      // suppress the shared notice hook, so an explicit "no text" is refused rather than silently ignored.
+      if (!ibCancelWithEffectsLive() && params.notify_customer === false) {
+        return { failed: true, modelResult: { error: "Cancelling without a customer text is not enabled (GATE_IB_CANCEL_WITH_EFFECTS), so the bar can't cancel this visit without a text from here yet. Nothing was changed.", code: 'gate_off' } };
+      }
+      const { computeCancelAppointmentImpact, cancelWithEffectsRefusal } = require('../services/appointment-cancel-impact');
+      // GATE_IB_CANCEL_WITH_EFFECTS: the card also carries the invoice, credit and linked-visit effects and the
+      // customer text, and Confirm replays the Dispatch cancel. notify_customer (default true) is the card's choice.
+      const withEffects = ibCancelWithEffectsLive();
       let impact;
       try {
-        impact = await computeCancelAppointmentImpact(params.appointment_id, { actorId: getAdminActorId(req) });
+        impact = await computeCancelAppointmentImpact(params.appointment_id, {
+          actorId: getAdminActorId(req),
+          ...(withEffects ? { withEffects: true, notifyCustomer: params.notify_customer !== false } : {}),
+        });
       } catch (err) {
         logger.warn(`[intelligence-bar] cancel proposal impact unavailable for ${params.appointment_id}: ${err.message}`);
         return { failed: true, modelResult: { error: 'The cancellation effects could not be verified right now — nothing was proposed.' } };
@@ -1944,8 +1980,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with the
       // commit-side refusal (tools.js) rather than a second copy.
       if ((impact.card_cancel_refusals || []).length) {
+        if (withEffects) return { failed: true, modelResult: cancelWithEffectsRefusal(impact) };
         return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' } };
       }
+      if (withEffects) params.notify_customer = params.notify_customer !== false;
       params._frozen_cancellation_impact = impact;
       preview = { ...preview, cancellation: impact };
     }
@@ -2197,7 +2235,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // send_invoice: the stored approval names the invoice the preview resolved,
   // never the number the model sent.
-  if (['send_invoice', 'record_payment', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
+  if (['send_invoice', 'record_payment', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
@@ -3455,7 +3493,9 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
-- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, apply account credit, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoice edits (each only when it is in your tools, each its own confirmation card; none sends a message, charges a card or refunds): edit_invoice changes an unpaid invoice's title, notes or due date only (never a line item, the tax rate or the total: those stay on the Invoices page; it does not resend the invoice); archive_invoice / unarchive_invoice hide or restore a voided invoice in the list; unvoid_invoice turns a voided invoice back into a draft. Anything else on an invoice stays on the Invoices page.
+- Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for FUTURE billing on a customer who pays for themselves today and has no open unpaid invoice or checkout; no existing invoice moves. A customer with open invoices, moving existing invoices to a payer, changing or removing an existing payer, or adding a new payer stays on the customer page. There is no per-invoice Bill-To: the payer is set on the account.
 - Invoice reminders and payment plans (when they are in your tools): pause_invoice_reminders, resume_invoice_reminders and stop_invoice_reminders change one invoice's automatic reminders and send nothing; send_invoice_reminder_now texts and emails the customer the next reminder, and schedule_invoice_send sends the invoice later at a set Eastern time (give send_at_et as YYYY-MM-DDTHH:MM); create_payment_plan records a plan of equal installments and emails the customer the plan confirmation but never charges a card; cancel_payment_plan cancels the active plan. Each shows a confirmation card first. Never promise a plan collects money on its own.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
@@ -3597,7 +3637,7 @@ async function runQuery(req, res, next) {
       activeTask = started.task;
       if (!started.created) return res.status(activeTask.state === 'running' ? 202 : 200)
         .json(await IbTasks.snapshot(activeTask, getAdminActorId(req)));
-      taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target });
+      taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target, ownerDirectScope: ownerDirect });
       // A task that already wrote may have changed its own target's identity
       // (a confirmed update_customer renaming the customer), so the original
       // prompt no longer resolves to the saved customer. Post-receipt, the
@@ -3705,8 +3745,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Last, so every shared prefix above stays cacheable across logins. With
     // the platform off nothing commits directly, so the owner block must
     // stay card-aware (Codex r2 P1 on #5563).
-    if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
+    if (ownerDirectCommits) systemPrompt += OwnerDirect.ownerDirectPrompt();
     else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
+    if (ownerDirectCommits && ibTargetRulesV2Live()) systemPrompt += OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
     // GATE_DICTATION_MONEY_NORMALIZE: a dictated message's amounts are read back (clear) or asked ($61.33 or $6,133).
     if (dictationMoneyNormalizeLive() && req.body.dictation_used === true) systemPrompt += dictatedAmountsNote(prompt);
     // Live page data (current date, schedule stats, etc.) is injected on the
@@ -3734,7 +3775,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const messages = [
       ...conversationHistory.slice(-10).map(stripInternalHistoryMarkers),
       { role: 'user', content: buildUserMessageContent(`Current Eastern date: ${etDateString()}\n\n${prompt}`,
-        images, taskContext ? { ...pageData, validated_task_context: taskContext } : pageData) },
+        images, taskContext ? { ...pageData, validated_task_context: ModelContext.modelContext(taskContext) } : pageData) },
     ];
 
     let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...ToolSearch.stripServerSearchBlocks(req.ibResumedTask.checkpoint)] : messages;
@@ -3742,14 +3783,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // stripped on load and the request runs on the ordinary list (tool-search.js).
     const searchQueries = new Map();
     if (req.ibResumedTask) {
-      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
+      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext: ModelContext.modelContext(taskContext) })}` });
     }
     // Once the general admin read returned data, nothing after it runs without
     // a card (owner-direct.js, UNTRUSTED READS). Seeded from the saved history.
     const requestTaint = await OwnerDirect.loadRequestTaint({
       history: currentMessages, threadId: priorThread.threadId, actorId: getAdminActorId(req), needed: ownerDirectCommits,
-      fullAccess: actionScope.fullAccess, conversationHistory,
+      fullAccess: actionScope.fullAccess, conversationHistory, prompt,
     });
+    OwnerDirect.noteSameNameContext(requestTaint, taskContext);
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
       // ones a completed discovery round loaded but never reached (the
@@ -3793,6 +3835,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Owner-direct bulk cap: direct commits this task already made, by tool
     // (seeded so a resumed task keeps its count; Codex r1 on #5675).
     const directCommitsByTool = ownerDirectCommits ? await OwnerDirect.seedDirectCounts(activeTask) : new Map();
+    // Whom the message names and what the page shows (GATE_IB_TARGET_RULES_V2); null while the gate is off.
+    const directGrounding = ownerDirectCommits ? OwnerDirect.targetGrounding(taskContext) : null;
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
@@ -3875,7 +3919,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
         ? OwnerDirect.cappedTools(directCommitsByTool, OwnerDirect.messageDirectPlan(toolUses,
-          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope)), requestTaint))
+          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope)), requestTaint, directGrounding))
         : new Set();
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
@@ -4006,15 +4050,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // its card (Codex r2), and before the approval is stored, so
               // the bulk card that follows is not blocked (pre-push P1).
               ownerDirectVerdict: ownerDirectCommits ? (preview) => {
-                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint)) return null;
-                return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.BULK_LIMIT_RESULT } } : { direct: true };
+                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint, directGrounding)) return null;
+                return directCapped.has(toolUse.name) || OwnerDirect.dynamicCapReached(directCommitsByTool, toolUse.name) ? { refuse: { ...OwnerDirect.bulkLimitResult(toolUse.name) } } : { direct: true };
               } : null,
             });
             result = proposed.modelResult;
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult, requestTaint)) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult, requestTaint, directGrounding)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.
@@ -4238,11 +4282,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       piiTainted,
       PII_TAINT_MARKER,
     );
-    const persistedAssistantTurn = appendTaintMarker(
+    // Same-name buttons count only when they are really in the reply (no card or direct action suppressed them).
+    OwnerDirect.markSameNameChoices(requestTaint, taskContext, offeredChoices, pendingProposals.length + directActionIds.length);
+    const persistedAssistantTurn = appendTaintMarker(appendTaintMarker(appendTaintMarker(
       appendTaintMarker(appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER), piiTainted, PII_TAINT_MARKER),
-      requestTaint.untrustedRead,
+      requestTaint.untrustedGeneral,
       UNTRUSTED_READ_MARKER,
-    );
+    ), OwnerDirect.sameNameMarkerNeeded(requestTaint), SAME_NAME_CHOICE_MARKER), requestTaint.untrustedV2, UNTRUSTED_READ_V2_MARKER);
 
     // Server-persisted threads (GATE_IB_THREADS, owner-ratified 2026-08-31):
     // admin actors only, never tech or the isolated agent_estimate rail.
@@ -4576,7 +4622,9 @@ router.post('/tasks/:id/select-target', async (req, res, next) => {
     const customerId = req.body.customer_id;
     if (!UUID_RE.test(String(customerId || ''))) return res.status(400).json({ error: 'A valid customer is required' });
     const selectedTarget = { customer_id: customerId };
-    const resolved = await TaskContext.resolve({ prompt: task.request.prompt, pageData: task.request.pageData, selectedTarget });
+    const taskContextKind = task.request.context;
+    const resolved = await TaskContext.resolve({ prompt: task.request.prompt, pageData: task.request.pageData, selectedTarget,
+      ownerDirectScope: OwnerDirect.ownerDirectLive(req) && taskContextKind !== 'tech' && taskContextKind !== 'agent_estimate' });
     if (resolved.error) return res.status(409).json(resolved);
     const claimed = await IbTasks.claimResume(task.id, getAdminActorId(req), task.session_id, { selectedTarget });
     if (claimed.error) return res.status(409).json(claimed);
@@ -4784,8 +4832,10 @@ async function commitPendingAction(req, { id, contractHash }) {
     // A gate-on row that DOES carry the pin falls through to the normal
     // claim/dispatch path below; tools.js cancelAppointment re-verifies the
     // pin against a fresh impact read and refuses on drift.
+    // A card proposed with effects (GATE_IB_CANCEL_WITH_EFFECTS) also needs that gate still on.
     if (action.tool_name === 'cancel_appointment'
-      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
+      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact
+        || (action.params._frozen_cancellation_impact.with_effects === true && !ibCancelWithEffectsLive()))) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: ibCancelAppointmentLive() ? 'cancel_with_effects_unsupported' : 'cancel_gate_off' };
       await PendingActions.recordResult(action.id, result);
       await recordConfirmedGaps(action.tool_name, result);

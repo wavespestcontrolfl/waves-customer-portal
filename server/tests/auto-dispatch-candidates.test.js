@@ -187,6 +187,32 @@ describe('findValidCandidateSlots', () => {
     expect(candidates.map((c) => c.date)).toEqual(['2026-08-10']);
   });
 
+  test('records what the search saw: the window and each searched day\'s open starts before any filter, so a full week reads as full (owner audit 2026-10-22, finding 6)', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 },
+        { date: '2026-08-05', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 3, score: 2 },
+        // Dropped later (ends after the 17:00 close), still counted: the count is what find-time offered.
+        { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '16:30', end_time: '17:30', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 3, score: 1 },
+      ],
+      total_feasible: 3,
+      // The days find-time really searched: 08-07 was closed or nobody worked, so it is not here.
+      searched_dates: ['2026-08-04', '2026-08-05', '2026-08-06', '2026-08-08'],
+    });
+    const { search, drops } = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, ctx());
+    expect(drops.after_hours).toBe(1);
+    // Exactly the searched days, a full one as 0; a day the finder skipped is not listed (Codex #6468 r1).
+    expect(search.open_starts_by_date).toEqual({ '2026-08-04': 0, '2026-08-05': 2, '2026-08-06': 1, '2026-08-08': 0 });
+    expect(typeof search.date_from).toBe('string');
+    expect(typeof search.date_to).toBe('string');
+  });
+
+  test('a finder that reports no searched days lists none (never a made-up full day)', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
+    const { search } = await findValidCandidateSlots(SERVICE, { service_category: 'general', blackout: null }, ctx());
+    expect(search.open_starts_by_date).toEqual({});
+  });
+
   test('returns no candidates (and no_geo note) when the service has no usable coordinates', async () => {
     const r = await findValidCandidateSlots({ ...SERVICE, lat: null, lng: null }, prefs, ctx());
     expect(r.candidates).toEqual([]);

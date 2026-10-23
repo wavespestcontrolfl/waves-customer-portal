@@ -807,3 +807,4 @@ module.exports.callbackNumberCoachingNote = callbackNumberCoachingNote;
 module.exports.CALLBACK_NUMBER_COACHING_NOTE = CALLBACK_NUMBER_COACHING_NOTE;
 module.exports.isUsableCsrScore = isUsableCsrScore;
 module.exports.normalizeCsrScore = normalizeCsrScore;
+module.exports.CSR_SCORE_SCHEMA = CSR_SCORE_SCHEMA;

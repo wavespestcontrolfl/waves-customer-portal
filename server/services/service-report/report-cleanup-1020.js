@@ -15,6 +15,7 @@
 
 const featureGates = require('../../config/feature-gates');
 const { formatInches } = require('./lawn-watering-instruction');
+const { rulesForTargets, MODES } = require('./lawn-watering-rule');
 
 // A partial gates module (a route test double) reads as off.
 const live = () => typeof featureGates.reportCleanup1020Live === 'function' && featureGates.reportCleanup1020Live();
@@ -24,22 +25,42 @@ const live = () => typeof featureGates.reportCleanup1020Live === 'function' && f
 // (approved_report_product_facts: wateringRule, irrigationNotes, irrigationRequired), the same facts buildAftercare reads
 // through applications[].product. ONE eligibility rule decides what the cleanup may do:
 //   - a hold rule on any product: { hold: true } (no fallback; only the neutral "No special watering" line is dropped);
+//   - GATE_LAWN_WATERING_EVERY_VISIT, a use whose targets give no known direction here: { hold: true, unresolved: true }
+//     (it may be a hold, so the same: no water-in line and no "No special watering");
 //   - the water-in fallback: ONLY when every product is a structured water_in rule (or a structured "none"), or has no
 //     structured rule AND no recorded watering text at all (no irrigation_notes, no irrigation_required);
 //   - anything else (a recorded note or flag with no structured rule): null, and the normal aftercare runs unchanged.
 // The strictest water_in rule wins: the deepest amount, the shortest window.
 const hasWateringText = (facts) => !!(String(facts.irrigationNotes || '').trim() || facts.irrigationRequired != null);
 
+// A product's watering rules for this visit, read as the full instruction reads them (report-data.js
+// buildReportWateringInstruction). GATE_LAWN_WATERING_EVERY_VISIT: its logged targets pick them (a label that splits by
+// target; [] = no stored rule); off, a target-only rule (no product-wide mode) is no structured rule, as before
+// target rules existed. null = a stored rule that gives this use no direction (a logged target no entry names): its
+// watering is unknown, never "unrestricted".
+function visitRulesOf(product, facts) {
+  const rule = facts.wateringRule && typeof facts.wateringRule === 'object' ? facts.wateringRule : null;
+  if (!featureGates.lawnWateringEveryVisitLive()) return rule && MODES.includes(rule.mode) ? [rule] : [];
+  const picked = rulesForTargets(rule, product && product.targets);
+  return !picked.length && rule && (MODES.includes(rule.mode) || Array.isArray(rule.by_target)) ? null : picked;
+}
+
 function waterInRuleOf(products) {
   if (!live()) return null;
   // A product whose rule or catalog row could not be read may be a hold: no affirmative advice (report-data.js
   // withholds the full instruction on the same markers).
   if (products && (products.wateringRuleLookupFailed || products.catalogEnrichmentFailed)) return null;
-  const facts = (Array.isArray(products) ? products : []).map((p) => (p && p.approved_report_product_facts) || {});
-  const rules = facts.map((f) => (f.wateringRule && typeof f.wateringRule === 'object' ? f.wateringRule : null));
-  if (rules.some((rule) => rule && rule.mode === 'hold')) return { hold: true };
-  const eligible = facts.every((f, i) => (rules[i] ? ['water_in', 'none'].includes(rules[i].mode) : !hasWateringText(f)));
-  const waterIns = rules.filter((rule) => rule && rule.mode === 'water_in');
+  const list = Array.isArray(products) ? products : [];
+  const facts = list.map((p) => (p && p.approved_report_product_facts) || {});
+  const rules = list.map((p, i) => visitRulesOf(p, facts[i]));
+  // A known hold stands whatever else is unclear; a product whose use gave no direction blocks only water-in advice.
+  const known = rules.filter(Boolean).flat();
+  if (known.some((rule) => rule.mode === 'hold')) return { hold: true };
+  // A use whose direction is unknown here (a mixed target list, read without the catalog targets) may be a hold:
+  // no affirmative water-in, and no "No special watering" either ({ hold: true } blanks the neutral line).
+  if (rules.some((one) => one === null)) return { hold: true, unresolved: true };
+  const eligible = facts.every((f, i) => (rules[i].length ? rules[i].every((rule) => ['water_in', 'none'].includes(rule.mode)) : !hasWateringText(f)));
+  const waterIns = known.filter((rule) => rule.mode === 'water_in');
   if (!eligible || !waterIns.length) return null;
   const inches = Math.max(...waterIns.map((r) => Number(r.water_in_inches) || 0.25));
   const hours = Math.min(...waterIns.map((r) => Number(r.water_in_by_hours) || 24));

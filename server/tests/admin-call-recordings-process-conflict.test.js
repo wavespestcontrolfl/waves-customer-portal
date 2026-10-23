@@ -315,6 +315,14 @@ describe('every side-effect boundary is gated on still owning the claim', () => 
 describe('claim ceiling is derived from the provider budgets', () => {
   const { alertCeilingMinutes, providerBudgetMs } = require('../utils/claim-ceiling');
   const { PROVIDER_FETCH_TIMEOUTS_MS } = jest.requireActual('../services/call-recording-processor')._test;
+  // providerBudgetMs() reads GATE_CALL_EXTRACTION_V1_FALLBACK, so every test
+  // here starts gate-off, whatever the process environment holds.
+  const savedV1Fallback = process.env.GATE_CALL_EXTRACTION_V1_FALLBACK;
+  beforeEach(() => { delete process.env.GATE_CALL_EXTRACTION_V1_FALLBACK; });
+  afterAll(() => {
+    if (savedV1Fallback === undefined) delete process.env.GATE_CALL_EXTRACTION_V1_FALLBACK;
+    else process.env.GATE_CALL_EXTRACTION_V1_FALLBACK = savedV1Fallback;
+  });
 
   test('the mirrored budget counts every sequential leg at the processor timeouts', () => {
     // Primary + provider fallback + contact dictation transcriptions, two
@@ -335,6 +343,14 @@ describe('claim ceiling is derived from the provider budgets', () => {
     // The commitments leg reads the same env-tunable timeout the processor
     // does, so the two cannot drift apart silently.
     expect(require('../services/call-commitments').MODEL_TIMEOUT_MS).toBe(PROVIDER_FETCH_TIMEOUTS_MS.extraction);
+  });
+
+  test('GATE_CALL_EXTRACTION_V1_FALLBACK adds one dispatcher chain for the V1 backup; off adds nothing', () => {
+    const off = providerBudgetMs();
+    process.env.GATE_CALL_EXTRACTION_V1_FALLBACK = 'true';
+    const on = providerBudgetMs();
+    expect(on - off).toBe(require('../services/llm/call').DEFAULT_FALLBACK_BUDGET_MS);
+    expect(alertCeilingMinutes() * 60000).toBeGreaterThan(on);
   });
 
   test('the bell sits above every budgeted provider path', () => {

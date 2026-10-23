@@ -3,8 +3,11 @@ import {
   customReviewTimeProblem,
   reviewDelayMinutesOf,
   reviewPreviewSubmitVerdict,
+  completionReportTextExpected,
   reviewScheduledForOf,
   reviewSendPreviewPath,
+  timedReviewHint,
+  completionReviewHint,
 } from './completion-review-timing';
 
 describe('the review timing a completion posts', () => {
@@ -53,5 +56,77 @@ describe('the verdict on the send-time preview read at submit', () => {
     expect(failed.message).toMatch(/could not be re-checked/);
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: null, shown, failureNoticed: true })).toBeNull();
     expect(reviewPreviewSubmitVerdict({ reviewTiming: 'custom', fresh: null, shown: null, failureNoticed: false }).message).toMatch(/Whether automated review texts can send/);
+  });
+});
+
+// GATE_REVIEW_ASK_AFTER_REPORT (owner 2026-10-22): the server preview names the rule;
+// the Automatic hint words it as the first :14/:44 send at least 10 minutes after the report text.
+describe('the Automatic hint while the ask goes out after the report text', () => {
+  const afterReport = {
+    schedulerEnabled: true, reviewSequencesEnabled: true, afterReport: true, afterReportMinutes: 10,
+    at: '2026-10-20T15:10:00.000Z', earliestAt: '2026-10-20T15:10:00.000Z', latestAt: '2026-10-20T15:10:00.000Z',
+    bucket: 'after_report:+10m', smsSendWindowEnabled: true, cadenceTickMinutesOfHour: [14, 44],
+  };
+
+  test('names the first :14/:44 send at least 10 minutes after the report text, and the 8 PM limit (codex #6434 r12 P2)', () => {
+    const text = timedReviewHint({ reviewTiming: 'auto', preview: afterReport });
+    expect(text).toBe('Review text goes out separately at the first review send (:14 and :44 each hour) at least 10 minutes after the report text. A target after 8 PM waits for the next morning. If the report is held for the morning, it goes about 10 minutes after that report text goes out. If the report goes by the Waves app, or texts are turned off for this customer, it goes at the smart send window.');
+    expect(text).not.toMatch(/cadence tick/i);
+  });
+
+  test('GATE_REVIEW_SENDER_EVERY_5_MIN: twelve ticks read as "every 5 minutes"', () => {
+    const fast = { ...afterReport, cadenceTickMinutesOfHour: [4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59] };
+    expect(timedReviewHint({ reviewTiming: 'auto', preview: fast })).toMatch(/^Review text goes out separately at the first review send \(every 5 minutes\) at least 10 minutes after the report text\./);
+  });
+
+  test('without the send window gate the window is not promised', () => {
+    expect(timedReviewHint({ reviewTiming: 'auto', preview: { ...afterReport, smsSendWindowEnabled: false } }))
+      .toBe('Review text goes out separately at the first review send (:14 and :44 each hour) at least 10 minutes after the report text. If the report is held for the morning, it goes about 10 minutes after that report text goes out. If the report goes by the Waves app, or texts are turned off for this customer, it goes at the smart send window.');
+  });
+
+  test('an unpaid completion invoice: 10 minutes after payment', () => {
+    const { text } = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true });
+    expect(text).toMatch(/waits for the invoice to be paid, then goes out at the first review send \(:14 and :44 each hour\) at least 10 minutes after payment/);
+    // Any report not texted right away keeps the smart window (codex #6434 r11 P2).
+    expect(text).toMatch(/If the report was held for the morning: about 10 minutes after that report text or the payment, whichever is later \(a single visit's held report that went out before the payment keeps the smart send window\)\./);
+  });
+
+  test.each([
+    ['the completion text is off', { effectiveSendSms: false }],
+    ['the customer has no phone', { effectiveSendSms: true, customerPhone: '' }],
+  ])('no report text to follow (%s): the hint keeps the smart window', (_label, opts) => {
+    const now = completionReviewHint({ willReview: true, reviewTiming: 'auto', preview: afterReport, ...opts });
+    expect(now.text).toMatch(/smart send window, because no report text goes out/);
+    expect(now.text).not.toMatch(/after the report text/);
+    const paid = completionReviewHint({ willReview: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true, ...opts });
+    expect(paid.text).toMatch(/waits for the invoice to be paid, then goes out at the smart send window, because no report text goes out/);
+  });
+
+  test('gate off: the smart-window wording is unchanged', () => {
+    const off = { ...afterReport, afterReport: false, afterReportMinutes: null, cadenceTickMinutesOfHour: [14, 44], earliestAt: '2026-10-20T20:00:00.000Z', latestAt: '2026-10-20T20:30:00.000Z', at: '2026-10-20T20:15:00.000Z' };
+    expect(timedReviewHint({ reviewTiming: 'auto', preview: off })).not.toMatch(/after the report text/);
+    const { text } = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: off, reviewAwaitsPayment: true });
+    expect(text).toMatch(/smart send window computed from the payment/);
+  });
+
+  test('explicit timings keep their own wording', () => {
+    expect(timedReviewHint({ reviewTiming: 'tomorrow_8', preview: afterReport })).toMatch(/tomorrow/);
+  });
+
+  test('the preview bucket is stable between reads, so Automatic never asks for a second look', () => {
+    const shown = { ...afterReport };
+    const fresh = { ...afterReport, at: '2026-10-20T15:12:00.000Z' };
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh, shown })).toBeNull();
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: null, shown, failureNoticed: false }).message)
+      .toMatch(/time after the report text/);
+  });
+
+  test('a failed re-check without a report text names the smart send window', () => {
+    const shown = { ...afterReport };
+    expect(reviewPreviewSubmitVerdict({ reviewTiming: 'auto', fresh: null, shown, failureNoticed: false, reportTextExpected: false }).message)
+      .toMatch(/smart send window/);
+    expect(completionReportTextExpected({ effectiveSendSms: false, customerPhone: '+19415550100' })).toBe(false);
+    expect(completionReportTextExpected({ effectiveSendSms: true, customerPhone: '' })).toBe(false);
+    expect(completionReportTextExpected({ effectiveSendSms: true, customerPhone: undefined })).toBe(true);
   });
 });

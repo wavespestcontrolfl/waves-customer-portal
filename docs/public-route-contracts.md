@@ -140,10 +140,16 @@ payload (`/api/reports/:token/data` and the renders that share
 blog post the technician or the office picked at completion, frozen on the
 record (`structured_notes.blogPost`) with its live URL and re-checked at read
 to be on the marketing site's own host
-(`server/services/service-report/report-blog-post.js`). The web report
-renders it in live mode only, above the footer. Off, or nothing frozen, the
-field is `null` (the switch hides frozen posts too). Auth, headers and routes
-are unchanged.
+(`server/services/service-report/report-blog-post.js`). Owner 2026-10-22: the
+object may also carry `imageUrl`, the post's main image, read when the
+report loads from the content registry row the pick froze (its deployed
+frontmatter `hero_image.src`, else `og_image`), made absolute on the
+marketing site's host and kept only when it is on that host. A pick with no
+registry id, a row with no image, an off-host image or a failed read leaves
+`imageUrl` out; the rest of the object is unchanged. The web report renders
+it in live mode only, right under the status card, with the image and
+without the raw URL. Off, or nothing frozen, the field is `null` (the switch
+hides frozen posts too). Auth, headers and routes are unchanged.
 
 Pest Pressure technician direct score (owner ruling 2026-09-24): on the
 service-report payload (`/api/reports/:token/data` and the renders that share
@@ -2556,6 +2562,24 @@ frozen block is malformed, and once rain has covered the water-in
 completion through the LONG deadline against the larger amount, so rain after
 the short deadline still closes the later phase). No new route, token, privacy or
 rate-limit surface; `reportV2.aftercare` is unchanged by it.
+`GATE_LAWN_WATERING_EVERY_VISIT` (dark, owner 2026-10-22; needs
+`GATE_LAWN_WATERING_RULE`; gate off leaves this payload unchanged, key for key)
+changes only which instruction the same `reportV2.banner` fields carry, for an
+UNFROZEN build (a completion, or a visit that froze nothing); a frozen visit
+replays what it froze in either gate state. (1) A catalog rule with `by_target`
+entries picks the direction per logged target (`service_products.targets`), so
+one product can add a hold and a water-in; no covered target reads the product's
+top-level rule, or the first entry of a target-only rule. (2) A same-day water-in
+the label requires beside a hold that leaves it no deadline shortens each hold
+that carries a `label_minimum` to that minimum ("Skip your turf watering until
+today’s treatment has dried." or a nearer clock time), judged with a 2-hour
+drying allowance; a hold without one stays and the visit is no claim, as before.
+(3) A hold's `then_water_in` adds the long-window sentences ("Today’s treatment
+then needs about ½ inch of water by <date>." / "Rain and your regular watering
+both count.") whatever the window's length. No new key, state or route; the
+no-claim reason the office alert uses never enters the payload. The unfrozen PDF
+cache key adds the gate state and the logged targets (`:wr=1e:`); off, it is the
+same key as before. Rollback: unset the variable (frozen visits keep their text).
 `reportV2.aftercare` is a record of the visit and never changes by the clock
 (owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
 `wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
@@ -3723,7 +3747,19 @@ or that widens the hold beyond `missing_token`, is a P0),
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
 records one deduped analytics row then 302s to the DB-locked event
-URL; unknown token = untracked redirect, never blocks the reader)
+URL; unknown token = untracked redirect, never blocks the reader.
+With `GATE_NEWSLETTER_CLICK_BOUND=true` the event URL is honoured only
+when the token is a real delivery AND the event is in that send's
+`event_ids` or `alternate_event_ids`; the target is the URL the send
+carried (`newsletter_sends.event_url_snapshot`, written at send time),
+or the live `event_url` for a send made before snapshots existed. An
+unknown token, an event outside the lineup, a send whose snapshot lacks
+the event or its URL, or a membership lookup that fails goes to the homepage
+(`https://www.wavespestcontrol.com/`); a non-uuid token goes home before
+any query. A click-row write that fails AFTER membership was verified
+still sends the reader to the event. The per-IP over-budget path records
+nothing and applies the same rules. Gate off = the behaviour
+above this note, unchanged)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
 and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`

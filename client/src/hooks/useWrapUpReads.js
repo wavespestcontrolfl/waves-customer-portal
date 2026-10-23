@@ -55,7 +55,7 @@ export function useNextVisit({ enabled, customerId, requestRef }) {
 
 // The preview, read again each minute while the review is asked for (the smart window is bucketed by
 // time of day). Off, it is forgotten: a preview cached from before must not count as known at submit.
-// `recheck(reviewTiming)` is the submit-time read: it applies a fresh answer and returns the verdict
+// `recheck(reviewTiming, { reportTextExpected })` is the submit-time read: it applies a fresh answer and returns the verdict
 // (null to go on, else { message }), per the full form's guards (codex #4140 r3, r13, r18).
 export function useReviewPreview({ enabled, willReview, serviceId, serviceType, requestRef }) {
   const [preview, setPreview] = useState(null);
@@ -79,11 +79,11 @@ export function useReviewPreview({ enabled, willReview, serviceId, serviceType, 
     return () => { cancelled = true; clearInterval(timer); };
   }, [enabled, serviceId, serviceType, willReview, requestRef]);
 
-  const recheck = async (reviewTiming) => {
+  const recheck = async (reviewTiming, { reportTextExpected = true } = {}) => {
     const fresh = await fetchPreview();
     const shown = previewRef.current;
     if (fresh) setPreview(fresh);
-    const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: failureNoticedRef.current });
+    const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: failureNoticedRef.current, reportTextExpected });
     if (verdict?.noticed) failureNoticedRef.current = true;
     if (verdict?.dropShown) setPreview(null);
     return verdict;

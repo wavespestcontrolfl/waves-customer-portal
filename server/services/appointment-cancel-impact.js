@@ -150,7 +150,15 @@ async function cardRailRows(conn, scheduledServiceId) {
 // — a call-booked child, or a package visit 2). Same filter the cascade runs.
 async function linkedFollowUpRows(conn, scheduledServiceId) {
   const { applyCallFollowUpCancelFilter } = require('./call-booking-catalog');
-  return applyCallFollowUpCancelFilter(conn('scheduled_services'), scheduledServiceId).select('id');
+  return applyCallFollowUpCancelFilter(conn('scheduled_services'), scheduledServiceId)
+    .select('id', 'status', 'scheduled_date', 'service_type', 'technician_id');
+}
+
+// Row-locks the visit's live linked follow-ups (FOR UPDATE, on the cancel transaction) so none of them can be moved,
+// confirmed or billed between the check under the parent's lock and the parent's commit.
+async function lockLinkedFollowUps(trx, scheduledServiceId) {
+  const { applyCallFollowUpCancelFilter } = require('./call-booking-catalog');
+  return applyCallFollowUpCancelFilter(trx('scheduled_services'), scheduledServiceId).orderBy('id').forUpdate().select('id');
 }
 
 async function cardRailFingerprint(conn, scheduledServiceId) {
@@ -231,23 +239,10 @@ function computeRowFingerprint(row) {
   return crypto.createHash('sha256').update(stableStringify(picked)).digest('hex');
 }
 
-async function loadAppointmentFacts(scheduledServiceId) {
-  // The WHOLE row (Codex round-2 through round-4 P1s — see
-  // computeRowFingerprint above), read EXACTLY as tools.js's cancelAppointment
-  // re-reads it under its FOR UPDATE lock — trx('scheduled_services')
-  // .where('id').first() — so the two fingerprints hash the same column set.
-  // Customer columns come from a SEPARATE read: joined into this query they
-  // would ride into the proposal-side hash but never the locked one, and
-  // every confirm would refuse as drifted.
-  const serviceRow = await db('scheduled_services').where('id', scheduledServiceId).first();
-  if (!serviceRow) return null;
-  const customer = serviceRow.customer_id
-    ? await db('customers').where('id', serviceRow.customer_id)
-      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-    : null;
-  // Fallback address source ONLY (effectiveAddress above) — a legacy row with
-  // no stamped service_address_* uses the customer's current primary address.
-  const row = {
+// Fallback address source ONLY (effectiveAddress above) - a legacy row with no stamped service_address_* uses the
+// customer's current primary address. The customer's name and address ride alongside the whole service row.
+function rowWithCustomerColumns(serviceRow, customer) {
+  return {
     ...serviceRow,
     first_name: customer?.first_name ?? null,
     last_name: customer?.last_name ?? null,
@@ -257,30 +252,52 @@ async function loadAppointmentFacts(scheduledServiceId) {
     customer_state: customer?.state ?? null,
     customer_zip: customer?.zip ?? null,
   };
+}
+
+// The human-readable facts the card shows and cancelImpactsMatch compares.
+function appointmentFactsFromRow(row) {
   const customerName = [row.first_name, row.last_name].filter(Boolean).join(' ').trim() || null;
   return {
-    facts: {
-      id: row.id,
-      status: row.status || null,
-      scheduled_date: row.scheduled_date ? dateOnlyString(row.scheduled_date) : null,
-      service_type: row.service_type || null,
-      customer_name: customerName,
-      // Human-readable arrival window (Codex round-3/round-4 P1) — see
-      // formatAppointmentWindow above. Pinned automatically: part of the
-      // impact object cancelImpactsMatch already compares.
-      window: formatAppointmentWindow(row),
-      // The visit's effective service address (Codex round-4 P1) — see
-      // effectiveAddress above. Also pinned automatically: a
-      // switch_appointment_property mid-pending changes property_id (and
-      // the stamped columns), which changes this AND the row fingerprint.
-      address: effectiveAddress(row),
-    },
+    id: row.id,
+    status: row.status || null,
+    scheduled_date: row.scheduled_date ? dateOnlyString(row.scheduled_date) : null,
+    service_type: row.service_type || null,
+    customer_name: customerName,
+    // Human-readable arrival window (Codex round-3/round-4 P1) - see
+    // formatAppointmentWindow above. Pinned automatically: part of the
+    // impact object cancelImpactsMatch already compares.
+    window: formatAppointmentWindow(row),
+    // The visit's effective service address (Codex round-4 P1) - see
+    // effectiveAddress above. Also pinned automatically: a
+    // switch_appointment_property mid-pending changes property_id (and
+    // the stamped columns), which changes this AND the row fingerprint.
+    address: effectiveAddress(row),
+  };
+}
+
+async function loadAppointmentFacts(scheduledServiceId) {
+  // The WHOLE row (Codex round-2 through round-4 P1s - see
+  // computeRowFingerprint above), read EXACTLY as tools.js's cancelAppointment
+  // re-reads it under its FOR UPDATE lock - trx('scheduled_services')
+  // .where('id').first() - so the two fingerprints hash the same column set.
+  // Customer columns come from a SEPARATE read: joined into this query they
+  // would ride into the proposal-side hash but never the locked one, and
+  // every confirm would refuse as drifted.
+  const serviceRow = await db('scheduled_services').where('id', scheduledServiceId).first();
+  if (!serviceRow) return null;
+  const customer = serviceRow.customer_id
+    ? await db('customers').where('id', serviceRow.customer_id)
+      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+    : null;
+  const row = rowWithCustomerColumns(serviceRow, customer);
+  return {
+    facts: appointmentFactsFromRow(row),
     // A hash, not the raw row: keeps the impact object's own shape small
     // (the fingerprint is what the drift check needs, not a second copy of
     // every column's current value) while still covering the whole row.
     identityFingerprint: computeRowFingerprint(serviceRow),
     // Only for a legacy/unstamped row (see legacyAddressFingerprint's own
-    // header) — null when the row carries its own stamped service address,
+    // header) - null when the row carries its own stamped service address,
     // since that case is already fully covered by identityFingerprint.
     addressFingerprint: row.service_address_line1 ? null : legacyAddressFingerprint({
       line1: row.customer_address_line1, line2: row.customer_address_line2,
@@ -423,6 +440,174 @@ function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyI
   return [...new Set(refusals)].sort();
 }
 
+// GATE_IB_CANCEL_WITH_EFFECTS (owner decision 2026-10-12): the refusal codes a visit's effects no longer block. The
+// card lists each one and Confirm replays the Dispatch cancel handler, which voids the open invoices, restores the
+// credit and cancels the linked follow-up visits itself. Every other code in cardCancelRefusals keeps refusing.
+const EFFECTS_ALLOWED_REFUSALS = new Set([
+  'linked_followup', 'invoice_linked', 'card_payment_on_invoice', 'inspection_credit',
+]);
+// Added to the blockers with effects (the card is for the plain case; anything with more money than an unpaid invoice
+// stays on the Dispatch screen): a credit REDEEMED on the visit (the hourly sweep would void unpinned if the pinned
+// follow-through failed), any estimate-level deposit or annual prepay, and money on a linked visit.
+const EFFECTS_MONEY_BLOCKERS = new Set([
+  'estimate_deposit', 'inspection_credit_redeemed', 'estimate_money', 'linked_followup_money', 'combined_payment',
+  'invoice_downstream_effects',
+]);
+
+const CANCEL_FEE_DUE_MESSAGE = "This visit has a late-cancel fee due, and the bar can't cancel a visit with a fee due yet; the Dispatch screen handles the fee. Nothing was changed.";
+const CANCEL_MONEY_RULE_MESSAGE = "This visit, or a linked visit, has money or a card on it (a saved card or card request, a prepayment or prepaid plan coverage, an estimate deposit or annual prepay, an invoice that holds a payment or a card charge (on file or in progress), has a payment plan, or has setup-fee, annual-prepay or membership-dues effects, or a redeemed inspection credit), and refunds, card charges and credit reversals stay closed to the bar by the owner's rule, so the bar can't cancel it. Nothing was changed.";
+const CANCEL_COMBINED_PAYMENT_MESSAGE = "A combined card payment on this visit's invoice also covers other visits, and combined payments stay with the office by the owner's rule, so the bar can't cancel it; cancel it from Dispatch. Nothing was changed.";
+const CANCEL_STILL_UNSUPPORTED_MESSAGE = "This visit is a plan make-up visit, a follow-up visit, part of a grouped visit, or has a linked follow-up visit that is part of a grouped visit, so the bar can't cancel this visit from here yet. Nothing was changed.";
+
+// The refusal (error + code) for an impact computed WITH effects whose card_cancel_refusals is non-empty. Order: a fee
+// due, then money the bar never refunds or charges, then the cases the replay does not cover yet. null = no refusal.
+function cancelWithEffectsRefusal(impact) {
+  const reasons = impact?.card_cancel_refusals || [];
+  if (!reasons.length) return null;
+  const has = (...codes) => codes.some((code) => reasons.includes(code));
+  if (has('card_fee_agreement', 'card_rail_present') && (impact.fee?.applies === true || impact.fee?.unresolved === true)) {
+    return { error: CANCEL_FEE_DUE_MESSAGE, code: 'cancel_fee_due_unsupported' };
+  }
+  if (has('combined_payment')) return { error: CANCEL_COMBINED_PAYMENT_MESSAGE, code: 'by_owner_rule', rule: 'cancel_combined_payment' };
+  if (has('card_fee_agreement', 'card_rail_present', 'prepaid_coverage', 'invoice_holds_money', ...EFFECTS_MONEY_BLOCKERS)) {
+    return { error: CANCEL_MONEY_RULE_MESSAGE, code: 'by_owner_rule', rule: 'cancel_money_or_card' };
+  }
+  return { error: CANCEL_STILL_UNSUPPORTED_MESSAGE, code: 'cancel_with_effects_unsupported' };
+}
+
+// Estimate-level money the visit-level checks cannot see: any deposit row (any status) or annual-prepay term tied to the
+// visit's source estimate. On the handler's cancel transaction it first takes the estimate deposit ledger lock (the one
+// receipt, mint, collection and void share), so a deposit cannot land between this check and the commit.
+async function estimateMoneyReason(conn, row) {
+  if (!row.source_estimate_id) return null;
+  if (conn.isTransaction) await require('./estimate-deposits').acquireEstimateDepositLedgerLock(conn, row.source_estimate_id);
+  if (await conn('estimate_deposits').where({ estimate_id: row.source_estimate_id }).first('id')) return 'estimate_deposit_on_record';
+  if (await conn('annual_prepay_terms').where({ source_estimate_id: row.source_estimate_id }).first('id')) return 'annual_prepay_on_record';
+  return null;
+}
+
+// Voiding an invoice has downstream billing effects a card listing only "invoice voided" cannot disclose: a rodent
+// setup-fee line or claim is restored to the series (or re-billed on a replacement invoice), an annual-prepay term's
+// invoice resyncs the term, and a membership-dues invoice releases its month's coverage. Any such invoice refuses the
+// card; only a plain visit invoice is carded.
+async function invoiceDownstreamReason(conn, invoiceRows) {
+  const open = (invoiceRows || []).filter((inv) => !['void', 'refunded', 'canceled', 'cancelled'].includes(String(inv.status)));
+  if (!open.length) return null;
+  const InvoiceService = require('./invoice');
+  const setupLine = /^Bait Station Setup — one-time setup fee$/;
+  for (const inv of open) {
+    let lines = inv.line_items;
+    if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = []; } }
+    if (InvoiceService.membershipDuesStampMonth(lines)) return 'membership_dues';
+    if ((Array.isArray(lines) ? lines : []).some((li) => setupLine.test(String(li?.description || '').trim()))) return 'setup_fee_line';
+  }
+  const ids = open.map((inv) => inv.id);
+  if (await conn('setup_fee_claims').whereIn('invoice_id', ids).first('id')) return 'setup_fee_claim';
+  if (await conn('annual_prepay_terms').whereIn('prepay_invoice_id', ids).first('id')) return 'annual_prepay_invoice';
+  return invoiceVoidClassifierReason(conn, open);
+}
+
+// The bar's own void rules (void_invoice's classifier, shared): charge markers (a card charge on file, a paid date), a payment
+// on file, an unresolved saved-card charge, a payment plan, a finalized statement, and the page-only effects (dues, setup fee,
+// annual plan, combined payment, queued text). The card refuses an invoice the bar's void tool would refuse, and the pinned
+// void repeats this under the invoice lock. A deposit credit line is skipped here: the cancel restores it deliberately (the
+// estimate-level deposit checks above refuse the cases that matter). A refusal reads as a reason string; a check that could
+// not be completed throws, so the card build or the lock-time check fails closed.
+async function invoiceVoidClassifierReason(conn, openInvoices) {
+  const { invoiceVoidRefusal } = require('./invoice-void-classifier');
+  for (const inv of openInvoices) {
+    const refused = await invoiceVoidRefusal(inv, conn, { skip: ['deposit_collected'] });
+    if (!refused) continue;
+    if (refused.code === 'unverified') throw new Error(refused.error);
+    return `void_rule_${refused.reason || refused.code}`;
+  }
+  return null;
+}
+
+// The SAME money-rail checks the parent gets, on every linked visit the cancel takes along (the Dispatch cascade
+// cancels a child without running a child money follow-through): a prepayment or coverage, an estimate deposit or
+// annual prepay, a card request or hold, an inspection-credit offer, or an invoice of any kind. Any one refuses the card.
+async function linkedChildMoneyReason(conn, followUps) {
+  const ids = followUps.map((c) => c.id);
+  if (!ids.length) return null;
+  const InvoiceService = require('./invoice');
+  const InspectionCredit = require('./inspection-credit');
+  const rows = await conn('scheduled_services').whereIn('id', ids).select('*');
+  for (const row of rows || []) {
+    // A grouped child (visit_id set): its cancel runs the group hook (detach, window change, dissolve), as for the parent.
+    if (row.visit_id) return 'grouped_visit';
+    if (await prepaidCommitmentReason(conn, row)) return 'prepaid_or_coverage';
+    if (await estimateMoneyReason(conn, row)) return 'estimate_money';
+    if ((await cardRailRows(conn, row.id)).length) return 'card_rail';
+    if (await InvoiceService.anyInvoiceLinkedToVisit(conn, row.id).first('id')) return 'invoice';
+    if (await InspectionCredit.anyInspectionCreditOfferForVisit(conn, row.id).first('id')) return 'inspection_credit';
+  }
+  return null;
+}
+
+// What the Dispatch cancel replay does to the linked visits and invoices, read-only.
+async function loadLinkedEffects(scheduledServiceId, actorId = null, conn = db) {
+  const InvoiceService = require('./invoice');
+  const [invoiceRows, followUps] = await Promise.all([
+    InvoiceService.anyInvoiceLinkedToVisit(db, scheduledServiceId).orderBy('id').select('*'),
+    linkedFollowUpRows(db, scheduledServiceId),
+  ]);
+  const invoiceDownstream = await invoiceDownstreamReason(conn, invoiceRows || []);
+  const followUpMoney = await linkedChildMoneyReason(conn, followUps);
+  // Cancelling a child also runs its own tech cancel notice (transitionJobStatus -> notifyVisitCancelled): the
+  // child's assigned technician is pinned with the same rule technician_notice uses for the parent.
+  const techIds = [...new Set(followUps.map((c) => c.technician_id).filter(Boolean))];
+  const techRows = techIds.length ? await db('technicians').whereIn('id', techIds).select('id', 'name') : [];
+  const techName = new Map((techRows || []).map((t) => [String(t.id), t.name || null]));
+  const notifyGate = gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS');
+  return {
+    linked_invoices: (invoiceRows || []).map((inv) => ({
+      id: inv.id,
+      invoice_number: inv.invoice_number || null,
+      status: inv.status,
+      total: inv.total != null ? Number(inv.total) : null,
+    })),
+    linked_visits: followUps
+      .map((child) => ({
+        id: child.id,
+        status: child.status || null,
+        scheduled_date: child.scheduled_date ? dateOnlyString(child.scheduled_date) : null,
+        service_type: child.service_type || null,
+        technician_id: child.technician_id || null,
+        technician_name: child.technician_id ? (techName.get(String(child.technician_id)) || null) : null,
+        technician_notice: notifyGate && child.technician_id && String(child.technician_id) !== String(actorId || '') ? 'may_notify' : 'none',
+      }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id))),
+    followUpMoney,
+    invoiceDownstream,
+  };
+}
+
+// The with-effects block of the impact: the linked invoices and visits, the customer text, and the refusal codes that
+// still block once the allowed ones (EFFECTS_ALLOWED_REFUSALS) are set aside.
+async function loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId, row, creditReversal, conn, invoices }) {
+  const linked = await loadLinkedEffects(scheduledServiceId, actorId, conn);
+  const customerText = notifyCustomer === false
+    ? { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' }
+    : await require('./appointment-reminders').previewCancellationText(scheduledServiceId, ...(approvedText ? [{ approved: approvedText }] : []));
+  const blockers = refusals.filter((code) => !EFFECTS_ALLOWED_REFUSALS.has(code));
+  if (creditReversal) blockers.push('inspection_credit_redeemed');
+  if (await estimateMoneyReason(conn, row)) blockers.push('estimate_money');
+  if (linked.followUpMoney) blockers.push(linked.followUpMoney === 'grouped_visit' ? 'linked_followup_grouped' : 'linked_followup_money');
+  if (linked.invoiceDownstream) blockers.push('invoice_downstream_effects');
+  if (invoices.some((inv) => inv.combined_payment)) blockers.push('combined_payment');
+  return {
+    blocking: [...new Set(blockers)].sort(),
+    effects: {
+      with_effects: true,
+      notify_customer: notifyCustomer !== false,
+      customer_text: customerText,
+      linked_invoices: linked.linked_invoices,
+      linked_visits: linked.linked_visits,
+    },
+  };
+}
+
 /**
  * The exact effect set cancelling `scheduledServiceId` would produce right
  * now: the appointment identity, the late-cancel fee decision, the
@@ -431,7 +616,15 @@ function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyI
  * part cannot be read: a failed read must never pass for "no effect", so
  * callers refuse to propose or confirm a pinned cancel on a throw.
  */
-async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Date(), actorId = null } = {}) {
+async function computeCancelAppointmentImpact(scheduledServiceId, {
+  now = new Date(), actorId = null, withEffects = false, notifyCustomer = true,
+  // Opt-in, with effects: the card's pinned customer_text (so a re-check renders the same wording), and a cache of
+  // PaymentIntent lookups so the re-check under the visit lock makes no Stripe call (piCacheOnly throws instead).
+  approvedText = null, piCache = null, piCacheOnly = false,
+  // Opt-in connection for the estimate-level and money-rail reads (the handler's cancel transaction, so the estimate
+  // deposit ledger lock is held from the check to the commit). Default db: Dispatch and the bare path are unchanged.
+  conn = db,
+} = {}) {
   const loaded = await loadAppointmentFacts(scheduledServiceId);
   if (!loaded) return null;
   const { facts: appointment, row, identityFingerprint, addressFingerprint } = loaded;
@@ -440,12 +633,12 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
   const InspectionCredit = require('./inspection-credit');
   const { previewCancellationNoticeVerdict } = require('./job-status');
 
-  const prepaidCommitment = await prepaidCommitmentReason(db, row);
-  const anyCardRail = (await cardRailRows(db, scheduledServiceId)).length > 0;
-  const anyLinkedFollowUp = (await linkedFollowUpRows(db, scheduledServiceId)).length > 0;
+  const prepaidCommitment = await prepaidCommitmentReason(conn, row);
+  const anyCardRail = (await cardRailRows(conn, scheduledServiceId)).length > 0;
+  const anyLinkedFollowUp = (await linkedFollowUpRows(conn, scheduledServiceId)).length > 0;
   const [railFee, invoiceRows, customerNotice, anyInvoiceRow, anyCreditRow] = await Promise.all([
     previewCancelFee(scheduledServiceId, now),
-    InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId),
+    InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId, ...(piCache ? [{ piCache, piCacheOnly }] : [])),
     // Read-only mirror of job-status.js's real cancellation-notice hook
     // (Codex round-1 P1: the bar's card claimed cancellations never contact
     // the customer, but the shared status writer's default notice path can
@@ -491,6 +684,8 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
     credit_applied: inv.credit_applied,
     deposit_credit: inv.deposit_credit,
     payment_intent: inv.payment_intent === true,
+    ...(inv.payment_intent_id ? { payment_intent_id: inv.payment_intent_id } : {}),
+    ...(inv.combined_payment ? { combined_payment: true } : {}),
   }));
 
   // Tech-facing cancel notice (tech-visit-notifications.js#notifyVisitCancelled,
@@ -508,21 +703,33 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
     && String(row.technician_id) !== String(actorId || '')
     ? 'may_notify' : 'none';
 
+  const refusals = cardCancelRefusals({
+    row, fee, invoices, inspectionCreditReversal: creditReversal,
+    anyInvoiceLinked: Boolean(anyInvoiceRow),
+    anyInspectionCreditOffer: Boolean(anyCreditRow),
+    prepaidCommitment,
+    anyCardRail,
+    anyLinkedFollowUp,
+  });
+
+  // GATE_IB_CANCEL_WITH_EFFECTS: the effects block the card shows and the Dispatch replay produces. Computed only
+  // with the gate on, so the impact of a gate-off proposal stays byte-identical to before. `notify_customer` is the
+  // choice the card shows ("cancel without a text" sets it false) and Confirm sends to the Dispatch handler.
+  const { effects, blocking } = withEffects
+    ? await loadWithEffects(scheduledServiceId, refusals, { notifyCustomer, approvedText, actorId, row, creditReversal, conn, invoices })
+    : { effects: {}, blocking: refusals };
+
   return {
     appointment,
     fee,
     invoices,
     inspection_credit_reversal: creditReversal,
-    card_cancel_refusals: cardCancelRefusals({
-      row, fee, invoices, inspectionCreditReversal: creditReversal,
-      anyInvoiceLinked: Boolean(anyInvoiceRow),
-      anyInspectionCreditOffer: Boolean(anyCreditRow),
-      prepaidCommitment,
-      anyCardRail,
-      anyLinkedFollowUp,
-    }),
-    customer_notice: customerNotice,
+    card_cancel_refusals: blocking,
+    // With effects the Dispatch handler owns the customer text (it stands the shared notice hook down), so the hook
+    // verdict is not a second text: customer_text above is the disclosure.
+    customer_notice: withEffects ? 'none' : customerNotice,
     technician_notice: technicianNotice,
+    ...effects,
     // Codex round-5 P2 — see legacyAddressFingerprint's own header. Always
     // null for a stamped row (its address is already fully covered by
     // identity_fingerprint below).
@@ -558,7 +765,11 @@ function cancelImpactsMatch(a, b) {
 
 module.exports = {
   computeCancelAppointmentImpact,
+  cancelWithEffectsRefusal,
   linkedFollowUpRows,
+  lockLinkedFollowUps,
+  linkedChildMoneyReason,
+  invoiceDownstreamReason,
   cancelImpactsMatch,
   previewCancelFee,
   feeRailClear,
