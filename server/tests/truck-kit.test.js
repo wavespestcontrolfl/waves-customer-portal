@@ -206,6 +206,20 @@ describe('recordTruckCheck', () => {
     await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: [], now: NOW })).rejects.toMatchObject({ code: 'no_truck' });
   });
 
+  test('a truck handed to someone else while the check was open writes nothing', async () => {
+    // The lock is where the office's handover lands: once taken, the truck is no longer this technician's.
+    db.raw.mockImplementationOnce(async () => { db.__state.equipment.find((e) => e.id === TRUCK).assigned_to = 'someone-else'; return { rows: [] }; });
+    await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: results('present', 'present'), now: NOW })).rejects.toMatchObject({ code: 'kit_changed' });
+    expect(db.__state.equipment_checks).toHaveLength(0);
+  });
+
+  test('openToolAlertFor finds the open tool alert on one item only', async () => {
+    db.__state.maintenance_alerts.push({ id: 'a1', equipment_id: METER, alert_type: 'tool_missing', status: 'resolved' }, { id: 'a2', equipment_id: METER, alert_type: 'maintenance_due', status: 'new' });
+    expect(await truckKit.openToolAlertFor(METER)).toBeNull();
+    db.__state.maintenance_alerts.push({ id: 'a3', equipment_id: METER, alert_type: 'tool_damaged', status: 'acknowledged' });
+    expect(await truckKit.openToolAlertFor(METER)).toEqual({ id: 'a3' });
+  });
+
   test('refuses bad results and a list that no longer matches the kit', async () => {
     await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: 'nope', now: NOW })).rejects.toMatchObject({ code: 'invalid_results' });
     await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: [{ equipmentId: METER, state: 'gone' }], now: NOW })).rejects.toMatchObject({ code: 'invalid_results' });

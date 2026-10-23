@@ -119,6 +119,16 @@ async function kitForTruck(vehicleId, conn = db) {
   return rows.map((r) => ({ ...r, open_issue: issueFor.get(r.id) || null }));
 }
 
+// The open tool alert on one item, if any (a moved item must not carry one).
+async function openToolAlertFor(equipmentId, conn = db) {
+  const row = await conn('maintenance_alerts')
+    .where({ equipment_id: equipmentId })
+    .whereIn('alert_type', TOOL_ALERT_TYPES)
+    .whereIn('status', OPEN_ALERT_STATUSES)
+    .first('id');
+  return row || null;
+}
+
 async function lastCheckForTruck(vehicleId, conn = db) {
   const row = await conn('equipment_checks as c')
     .leftJoin('technicians as t', 'c.technician_id', 't.id')
@@ -403,9 +413,14 @@ async function closeTruckBellIfClear(vehicleId, now = new Date(), conn = db) {
 async function recordTruckCheck({ technicianId, results, now = new Date() }) {
   const wanted = normalizeResults(results);
   return db.transaction(async (trx) => {
+    const found = await truckForTechnician(technicianId, trx);
+    if (!found) throw new TruckCheckError('no_truck', 'No truck is assigned to you');
+    await lockTruck(trx, found.id);
+    // Ownership is re-read under the lock: the office hands a truck over
+    // under the same lock (routes/admin-equipment.js), so a check that
+    // started on a truck the technician no longer has writes nothing.
     const truck = await truckForTechnician(technicianId, trx);
-    if (!truck) throw new TruckCheckError('no_truck', 'No truck is assigned to you');
-    await lockTruck(trx, truck.id);
+    if (!truck || truck.id !== found.id) throw new TruckCheckError('kit_changed', 'The truck list changed since it was loaded', { kit: [] });
     const kit = await kitForTruck(truck.id, trx);
     const kitIds = new Set(kit.map((item) => item.id));
     if (wanted.size !== kit.length || [...wanted.keys()].some((id) => !kitIds.has(id))) {
@@ -458,6 +473,7 @@ module.exports = {
   serviceLinesFor,
   lockTruck,
   truckHasKeys,
+  openToolAlertFor,
   kitKeyVocabulary,
   toolGapsForTruck,
   toolGapIssue,

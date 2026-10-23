@@ -242,19 +242,26 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     // alerts with it, so the old truck's bell must be re-judged: under both
     // trucks' locks, in the same transaction as the move (truck-kit.js).
     const record = await db.transaction(async (trx) => {
+      const truckKit = require('../services/truck-kit');
       let oldTruck = null;
       if (updates.assigned_vehicle_id !== undefined) {
-        const truckKit = require('../services/truck-kit');
         const before = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id');
         oldTruck = before?.assigned_vehicle_id || null;
         if (oldTruck === updates.assigned_vehicle_id) oldTruck = null;
         for (const truckId of [oldTruck, updates.assigned_vehicle_id].filter(Boolean).sort()) await truckKit.lockTruck(trx, truckId);
+        // An unresolved tool alert belongs to the truck it was found on:
+        // the office resolves it before the tool moves, so no bell is lost.
+        if (oldTruck && await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
       }
+      // Handing a truck to another technician takes the truck's own lock, so
+      // a check in flight on it finishes (or fails ownership) first.
+      if (updates.assigned_to !== undefined) await truckKit.lockTruck(trx, req.params.id);
       const [row] = await trx('equipment').where({ id: req.params.id }).update(updates).returning('*');
-      if (row && oldTruck) await require('../services/truck-kit').closeTruckBellIfClear(oldTruck, new Date(), trx);
+      if (row && oldTruck) await truckKit.closeTruckBellIfClear(oldTruck, new Date(), trx);
       return row || null;
     });
 
+    if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance before moving the item.' });
     if (!record) return res.status(404).json({ error: 'Equipment not found' });
 
     logger.info(`Equipment updated: ${record.name} (${record.id})`);

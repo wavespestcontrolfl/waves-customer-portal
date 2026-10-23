@@ -242,6 +242,7 @@ jest.mock('../services/truck-kit', () => ({
   kitKeyVocabulary: jest.fn(async () => [{ kit_key: 'moisture_meter', label: 'Moisture meter' }]),
   lockTruck: jest.fn(async () => ({ rows: [] })),
   closeTruckBellIfClear: jest.fn(async () => true),
+  openToolAlertFor: jest.fn(async () => null),
 }));
 const truckKit = require('../services/truck-kit');
 
@@ -253,6 +254,21 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(truckKit.lockTruck.mock.calls.map(([, id]) => id).sort()).toEqual([VEHICLE, OTHER].sort());
     expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(VEHICLE, expect.any(Date), db);
+  });
+
+  test('a tool with an open truck check alert cannot move or leave its truck', async () => {
+    truckKit.openToolAlertFor.mockResolvedValueOnce({ id: 'alert-1' });
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: null } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/open truck check alert/);
+    expect(db.__state.updated).toBeNull();
+    expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
+  });
+
+  test('handing a truck to another technician takes the truck lock', async () => {
+    await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: 'tech-2' } });
+    expect(truckKit.lockTruck).toHaveBeenCalledWith(db, OTHER);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ assigned_to: 'tech-2' }));
   });
 
   test('unassigning a tool re-judges its old truck; a save that keeps the truck touches no bell', async () => {
