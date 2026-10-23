@@ -93,8 +93,11 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBe(sqft);
     expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(sqft);
     expect((await knex('customer_turf_profiles').where({ customer_id: customerId }).first()).lawn_sqft).toBe(sqft);
-    // The weekly plan's lawn-area ledger entry (codex #6498 r1 P2): a reviewed lawn at the customer's own address stamps it.
-    expect((await knex('property_preferences').where({ customer_id: customerId }).first()).irrigation_confirmed_fields).toEqual(['turf_lawn_sqft']);
+    // The weekly plan's lawn-area ledger entry (codex #6498 r1 P2): a reviewed POSITIVE lawn at the customer's own
+    // address stamps it; a zero is not a lawn, so it writes no prefs row at all.
+    const prefs = await knex('property_preferences').where({ customer_id: customerId }).first();
+    if (sqft > 0) expect(prefs.irrigation_confirmed_fields).toEqual(['turf_lawn_sqft']);
+    else expect(prefs).toBeUndefined();
   });
   test('a legacy turf edit invalidates an unreviewed value loaded in the shared editor', async () => {
     await knex('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: 4000 });
