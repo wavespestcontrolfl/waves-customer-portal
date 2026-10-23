@@ -2,6 +2,7 @@
 // the statutory statements a Florida termite contract must carry, and merge
 // fields that match the declared variables so an issue never prints "{{…}}".
 const { TEMPLATE } = require('../models/migrations/20261023120000_seed_new_construction_termite_warranty');
+const { BODY_V2 } = require('../models/migrations/20261023140000_new_construction_termite_warranty_v2');
 const { renderDocumentTemplate } = require('../services/document-template-library');
 
 const bodyVars = [...new Set([...TEMPLATE.body.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
@@ -39,5 +40,13 @@ describe('new construction termite warranty template', () => {
     const rendered = renderDocumentTemplate({ template: TEMPLATE, version: { title: TEMPLATE.title, body: TEMPLATE.body }, context });
     expect(rendered.unresolvedVariables).toEqual([]);
     expect(rendered.body).not.toContain('{{');
+  });
+
+  test('version 2 (the active text) states the real issue date and an anniversary renewal', () => {
+    expect(BODY_V2).toContain('This warranty runs from the initial treatment date, {{treatment.initial_date}}. Issued on {{warranty.issue_date}}.');
+    expect(BODY_V2).not.toContain('We issue it within 30 days');
+    expect(BODY_V2).toContain('The first renewal is due on {{warranty.renewal_due}}; later renewals are due on the same date each year.');
+    const v2Vars = [...new Set([...BODY_V2.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
+    expect(v2Vars).toEqual([...TEMPLATE.variables].sort());
   });
 });

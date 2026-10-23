@@ -17,7 +17,9 @@ const PLAN_YEARS = {
 
 export const WARRANTY_DEFAULT_STRUCTURES = 'The new home and its attached garage on this lot.';
 export const WARRANTY_DEFAULT_NOTICE_LOCATION = 'near the water heater or the electric panel';
-export const FINAL_EXTERIOR_NOT_DONE = 'Final exterior treatment: not yet performed. We perform it after final grade and record the date on your certificate. It does not change the warranty dates above.';
+// A blank date on this certificate does not prove the later visit has not
+// happened (that visit keeps its own record), so the wording stays neutral.
+export const FINAL_EXTERIOR_NOT_DONE = 'Final exterior treatment: not recorded on this certificate when this warranty was issued. It does not change the warranty dates above.';
 
 function text(value) {
   return typeof value === 'string' ? value.trim() : (value == null ? '' : String(value).trim());
@@ -64,22 +66,42 @@ export function warrantyEligible(findings = {}) {
 
 // The certificate's own values; '' where the certificate has nothing, so the
 // issue route reports the field as unfilled instead of printing a guess.
+// Street address on the certificate; else the lot (a lot-only certificate is
+// valid before the street exists); else the customer's address.
+function propertyAddress(project, findings, lot) {
+  const street = text(findings.treatment_address);
+  if (street) return street;
+  if (lot) return [lot, text(findings.permit_number) && `permit ${text(findings.permit_number)}`].filter(Boolean).join(', ');
+  return [text(project.address_line1), text(project.city), [text(project.state) || 'FL', text(project.zip)].filter(Boolean).join(' ')]
+    .filter(Boolean).join(', ');
+}
+
+// The certificate's own "Renewal due by" wins over the computed term end.
+function renewalDue(findings, termEnd) {
+  const recorded = parseDateOnly(findings.renewal_due);
+  if (recorded) return formatUs(recorded);
+  return text(findings.renewal_due) || termEnd;
+}
+
 export function pretreatWarrantyValues({ project = {}, findings = {}, today = etDateString() } = {}) {
   const initial = parseDateOnly(findings.treatment_date) || parseDateOnly(project.project_date);
   const years = warrantyPlanYears(findings.warranty_type);
   const termEnd = initial && years ? formatUs(addYears(initial, years)) : '';
   const finalDate = parseDateOnly(findings.final_exterior_date);
   const lot = [text(findings.lot_block), text(findings.subdivision)].filter(Boolean).join(', ');
+  // A legacy "Other" pick keeps the real product in product_name_other, as
+  // the certificate page and the send gate read it.
+  const product = text(findings.product_name) === 'Other' ? text(findings.product_name_other) : text(findings.product_name);
   const todayParts = parseDateOnly(today);
   return {
     project: {
       builder: text(findings.builder_contractor),
-      address: text(findings.treatment_address) || text(project.address),
+      address: propertyAddress(project, findings, lot),
       lot: lot || 'N/A',
       permit: text(findings.permit_number) || 'N/A',
     },
     treatment: {
-      product: text(findings.product_name),
+      product,
       active_ingredient: text(findings.active_ingredient),
       concentration: text(findings.concentration_pct),
       gallons: text(findings.gallons_applied),
@@ -97,7 +119,7 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
       structures: WARRANTY_DEFAULT_STRUCTURES,
       plan: text(findings.warranty_type),
       term_end: termEnd,
-      renewal_due: termEnd,
+      renewal_due: renewalDue(findings, termEnd),
       payer: text(findings.builder_contractor),
       notice_location: WARRANTY_DEFAULT_NOTICE_LOCATION,
       issue_date: todayParts ? formatUs(todayParts) : '',
@@ -112,6 +134,37 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
 }
 
 // The two lawful bases for issuing after treatment (Rule 5E-14.105(2), (3)(c)).
+// MM/DD/YYYY → { y, m, d }, or null when not a real calendar date.
+export function parseUsDate(value) {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(text(value));
+  if (!match) return null;
+  const date = { y: Number(match[3]), m: Number(match[1]), d: Number(match[2]) };
+  const check = new Date(Date.UTC(date.y, date.m - 1, date.d));
+  return check.getUTCMonth() === date.m - 1 && check.getUTCDate() === date.d ? date : null;
+}
+
+function dateKey({ y, m, d }) {
+  return y * 10000 + m * 100 + d;
+}
+
+// The contract basis must be a real date on or before the treatment date
+// (Rule 5E-14.105(2): the contract comes before any work).
+export function basisDateProblem(basisDate, initialDate) {
+  const basis = parseUsDate(basisDate);
+  if (!basis) return 'Enter the date as MM/DD/YYYY.';
+  const initial = parseUsDate(initialDate);
+  if (initial && dateKey(basis) > dateKey(initial)) return 'This date must be on or before the treatment date.';
+  return '';
+}
+
+// Days from treatment to issue; Rule 5E-14.105(3)(a) wants 30 or fewer.
+export function daysSinceTreatment(initialDate, issueDate) {
+  const a = parseUsDate(initialDate);
+  const b = parseUsDate(issueDate);
+  if (!a || !b) return null;
+  return Math.round((Date.UTC(b.y, b.m - 1, b.d) - Date.UTC(a.y, a.m - 1, a.d)) / 86400000);
+}
+
 export function warrantyContractBasis({ kind, builder = '', date = '' }) {
   if (kind === 'master') {
     return `Issued under the master agreement with ${text(builder) || 'the builder'} dated ${text(date)}.`;

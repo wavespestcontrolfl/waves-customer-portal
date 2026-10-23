@@ -58,6 +58,15 @@ describe('IssueWarrantyDialog', () => {
       contract_basis: 'Issued under the master agreement with Example Homes LLC dated 09/01/2026.',
     });
     expect(init.body.values.issuer).toEqual({ name: 'Pat Office', title: 'Office Manager' });
+    expect(init.body.values.warranty.structures).toBe('The new home and its attached garage on this lot.');
+  });
+
+  it('keeps Create disabled while the contract basis date is after treatment', () => {
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
+    fillOfficeFields();
+    fireEvent.change(document.getElementById('warranty-basis-date'), { target: { value: '10/05/2026' } });
+    expect(screen.getByText('This date must be on or before the treatment date.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create warranty' })).toBeDisabled();
   });
 
   it('names the certificate fields the issue route found empty', async () => {

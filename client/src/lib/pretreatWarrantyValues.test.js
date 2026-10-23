@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   FINAL_EXTERIOR_NOT_DONE,
   pretreatWarrantyValues,
+  basisDateProblem,
+  daysSinceTreatment,
   warrantyContractBasis,
   warrantyEligible,
   warrantyPlanYears,
@@ -74,5 +76,30 @@ describe('pretreatWarrantyValues', () => {
     expect(warrantyEligible({ ...findings, additional_applications: [{ treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care' }] })).toBe(false);
     expect(warrantyEligible({ ...findings, additional_applications: JSON.stringify([{ product_name: '' }]) })).toBe(true);
     expect(warrantyEligible({ ...findings, warranty_type: 'Addition to an existing building (no warranty required)' })).toBe(false);
+  });
+
+  it('uses the lot when there is no street, the recorded renewal date, and the real product behind "Other"', () => {
+    const v = pretreatWarrantyValues({
+      project: { address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' },
+      findings: { ...findings, treatment_address: '', renewal_due: '2027-09-15', product_name: 'Other', product_name_other: 'Taurus SC' },
+    });
+    expect(v.project.address).toBe('Lot 4, Test Grove, permit BP-0001');
+    expect(v.warranty.renewal_due).toBe('09/15/2027');
+    expect(v.treatment.product).toBe('Taurus SC');
+    const noLot = pretreatWarrantyValues({
+      project: { address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' },
+      findings: { ...findings, treatment_address: '', lot_block: '', subdivision: '' },
+    });
+    expect(noLot.project.address).toBe('1 Builder Office Rd, Sarasota, FL 34236');
+  });
+
+  it('requires a real basis date on or before treatment, and counts days to issue', () => {
+    expect(basisDateProblem('09/30/2026', '10/01/2026')).toBe('');
+    expect(basisDateProblem('10/01/2026', '10/01/2026')).toBe('');
+    expect(basisDateProblem('10/02/2026', '10/01/2026')).toBe('This date must be on or before the treatment date.');
+    expect(basisDateProblem('2026-09-30', '10/01/2026')).toBe('Enter the date as MM/DD/YYYY.');
+    expect(basisDateProblem('02/30/2026', '10/01/2026')).toBe('Enter the date as MM/DD/YYYY.');
+    expect(daysSinceTreatment('10/01/2026', '10/31/2026')).toBe(30);
+    expect(daysSinceTreatment('10/01/2026', '11/05/2026')).toBe(35);
   });
 });

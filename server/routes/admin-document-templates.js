@@ -1,4 +1,6 @@
 const express = require('express');
+const { supersedeOpenNewConstructionWarranty } = require('../services/new-construction-warranty');
+
 const router = express.Router();
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
@@ -532,6 +534,12 @@ router.post('/:key/contracts', async (req, res, next) => {
           });
         }
       }
+      await supersedeOpenNewConstructionWarranty(trx, {
+        templateKey: loaded.template.template_key,
+        customerId: customer.id,
+        context: liveContext,
+        actorId: req.technicianId,
+      });
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
         created_by: req.technicianId || null,

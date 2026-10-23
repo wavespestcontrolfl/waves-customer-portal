@@ -9,6 +9,8 @@ import {
   NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY,
   pretreatWarrantyValues,
   warrantyContractBasis,
+  basisDateProblem,
+  daysSinceTreatment,
   warrantyEligible,
 } from "../../lib/pretreatWarrantyValues";
 
@@ -44,12 +46,16 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [noticeDate, setNoticeDate] = useState("");
   const [issuerName, setIssuerName] = useState("");
   const [issuerTitle, setIssuerTitle] = useState("");
+  const [structures, setStructures] = useState(base.warranty.structures);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
 
-  const ready = [basisDate, treatmentPrice, planPrice, renewalFee, noticeDate, issuerName, issuerTitle]
-    .every((v) => v.trim()) && base.warranty.term_end && base.treatment.initial_date;
+  const basisProblem = basisDate.trim() ? basisDateProblem(basisDate, base.treatment.initial_date) : "";
+  const noticeProblem = noticeDate.trim() ? basisDateProblem(noticeDate, base.treatment.initial_date) : "";
+  const lateDays = daysSinceTreatment(base.treatment.initial_date, base.warranty.issue_date);
+  const ready = [basisDate, treatmentPrice, planPrice, renewalFee, noticeDate, issuerName, issuerTitle, structures]
+    .every((v) => v.trim()) && !basisProblem && !noticeProblem && base.warranty.term_end && base.treatment.initial_date;
 
   const issue = async () => {
     setBusy(true);
@@ -59,6 +65,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         ...base,
         warranty: {
           ...base.warranty,
+          structures: structures.trim(),
           treatment_price: treatmentPrice.trim(),
           plan_price: planPrice.trim(),
           renewal_fee: renewalFee.trim(),
@@ -105,6 +112,11 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
             through {base.warranty.term_end || "—"} · {base.treatment.product || "product missing"}. Florida requires the
             warranty within 30 days of the treatment date.
           </div>
+          {lateDays != null && lateDays > 30 && (
+            <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+              Treated {lateDays} days ago: past the 30-day limit. The warranty states its real issue date.
+            </div>
+          )}
           {signingUrl ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <div style={{ fontSize: 14, color: "#18181B" }}>
@@ -123,8 +135,13 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
               <Field id="warranty-basis-date" label={basisKind === "master" ? "Master agreement date (MM/DD/YYYY)" : "Date signed (MM/DD/YYYY)"}>
                 <input id="warranty-basis-date" value={basisDate} onChange={(e) => setBasisDate(e.target.value)} style={fieldStyle} />
               </Field>
+              {basisProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{basisProblem}</div>}
               <Field id="warranty-notice-date" label="FDACS-13692 consumer notice signed on (MM/DD/YYYY)">
                 <input id="warranty-notice-date" value={noticeDate} onChange={(e) => setNoticeDate(e.target.value)} style={fieldStyle} />
+              </Field>
+              {noticeProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{noticeProblem}</div>}
+              <Field id="warranty-structures" label="Structures covered">
+                <input id="warranty-structures" value={structures} onChange={(e) => setStructures(e.target.value)} style={fieldStyle} />
               </Field>
               <Field id="warranty-treatment-price" label="Treatment price">
                 <input id="warranty-treatment-price" value={treatmentPrice} onChange={(e) => setTreatmentPrice(e.target.value)} placeholder="$0.00" style={fieldStyle} />
