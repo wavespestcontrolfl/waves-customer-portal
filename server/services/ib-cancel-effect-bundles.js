@@ -59,6 +59,9 @@ const TABLE = 'ib_cancel_effect_bundles';
 const GRACE_MS = 10 * 60 * 1000;
 const LEASE_MS = 10 * 60 * 1000;
 const HARD_STOP_MS = 24 * 60 * 60 * 1000;
+// A text whose reminder marker was stamped 'sent' this recently may still be at the provider handoff (a paused worker
+// resumes there): the report waits this long so the send can land and leave its audit evidence.
+const IN_FLIGHT_GRACE_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
 const RETENTION_DAYS = 90;
 const BATCH = 10;
@@ -310,6 +313,8 @@ async function claimNext(token) {
 
 // A bundle the sweep must not act on: older than the hard stop, or out of attempts. CLAIMED atomically (SKIP LOCKED, a
 // report-prefixed token, no attempt counted), so only one sweep reports it and the request cannot complete it meanwhile.
+// A bundle whose approved text was stamped 'sent' in the last IN_FLIGHT_GRACE_MS with no outcome recorded is skipped for
+// now: a paused worker may be at the provider handoff, and the report is better written from the evidence once it lands.
 async function claimUnactable(token) {
   const result = await db.raw(
     `UPDATE ${TABLE}
@@ -319,11 +324,16 @@ async function claimUnactable(token) {
          WHERE status = 'pending'
            AND (lease_until IS NULL OR lease_until < now())
            AND (created_at <= now() - (? * interval '1 millisecond') OR attempts >= ?)
+           AND NOT (notify_customer IS TRUE AND notice_outcome IS NULL AND EXISTS (
+             SELECT 1 FROM appointment_reminders ar
+              WHERE ar.scheduled_service_id = ${TABLE}.scheduled_service_id
+                AND ar.cancellation_notice_state = 'sent'
+                AND ar.updated_at > now() - (? * interval '1 millisecond')))
          ORDER BY created_at
          LIMIT 1
          FOR UPDATE SKIP LOCKED)
       RETURNING *`,
-    [token, LEASE_MS, HARD_STOP_MS, MAX_ATTEMPTS],
+    [token, LEASE_MS, HARD_STOP_MS, MAX_ATTEMPTS, IN_FLIGHT_GRACE_MS],
   );
   return (result && result.rows && result.rows[0]) || null;
 }
@@ -555,6 +565,18 @@ async function verifySentCoverage(bundle, classified) {
   return classified;
 }
 
+// The text step's state for a REPORT (an expiry, an abandonment, a rebuilt receipt) when the bundle has no recorded outcome:
+// the reminder re-read per approved recipient. A marker stamped 'sent' with no accepted audit row is a send that may be at
+// the provider handoff RIGHT NOW (a paused worker resumes there and nothing can hold it under a lock), so it is reported
+// as in flight, never as "nothing more will run", and no one is told to send it again. null = nothing went out.
+const IN_FLIGHT_NOTE = 'a send was started for it and its delivery is not proven yet; it may be going out right now';
+async function reportedTextState(bundle) {
+  if (bundle.notice_outcome) return bundle.notice_outcome;
+  if (bundle.notify_customer !== true || !Array.isArray(bundle.approved_notice) || !bundle.approved_notice.length) return null;
+  const found = await noticeEvidence(bundle, null);
+  return found && found.state === 'uncertain' ? { ...found, in_flight: true, note: IN_FLIGHT_NOTE } : found;
+}
+
 // A send this sweep could not claim or complete reads "not sent" from handleCancellation, but the reminder may have been
 // taken meanwhile by the original request (it stamps 'sent' just BEFORE the provider handoff, after the status was read as
 // 'ready'): its text can still go out a moment later. So the state is re-read before anyone is told to send by hand. Only a
@@ -615,6 +637,7 @@ function noticeLines(bundle, notice) {
   if (notice.state === 'sent') return ['The approved customer text went out.'];
   const why = notice.note || notice.error || 'no reason given';
   if (notice.state === 'partial') return [`The customer text went to some recipients, not all (${why}). Do not send it again to those reached.`];
+  if (notice.state === 'uncertain' && notice.in_flight) return [`The customer text may be going out right now: ${why}. Check the message history before acting. Do not send it again.`];
   if (notice.state === 'uncertain') return [`The customer text may have gone out (${why}). Check the message history before sending it again.`];
   return [`The customer text did not go out (${why}). Send it by hand if it is still needed.`];
 }
@@ -781,12 +804,12 @@ async function finishRecovered(bundle, token, ft, notice) {
 
 // What is known about the steps when the recovery stops: the saved results of the steps that ended, and the plain fact that
 // the original request may have done some of the rest before it stopped (nothing is ever proven "not run").
-function abandonedLines(bundle, partial) {
+function abandonedLines(bundle, partial, notice) {
   const done = bundle.followthrough_done_at ? bundle.followthrough_outcome || {} : null;
   const lines = [
     done ? 'The invoice, credit and linked-visit steps had finished before the change.' : 'The invoice, credit and linked-visit steps were not confirmed finished.',
     ...(done ? followThroughLines(done) : []),
-    ...(bundle.notice_outcome ? noticeLines(bundle, bundle.notice_outcome) : []),
+    ...(notice ? noticeLines(bundle, notice) : []),
     partial || done
       ? 'Some steps may already have run before the change. Check the visit, its invoices and its linked visits.'
       : 'The recovery ran none of them, but the original request may have done some before it stopped. Check the visit, its invoices and its linked visits.',
@@ -805,14 +828,15 @@ function savedSkips(bundle) {
 
 async function finishAbandoned(bundle, token, reason, partial = false) {
   const info = await visitInfo(bundle);
-  const lines = abandonedLines(bundle, partial);
+  const notice = await reportedTextState(bundle);
+  const lines = abandonedLines(bundle, partial, notice);
   const result = withVisitFacts({
     success: true,
     appointment_id: bundle.scheduled_service_id,
     ran_dispatch_cancel: true,
     recovered_after_interruption: true,
     ...savedSkips(bundle),
-    ...(bundle.notice_outcome ? noticeFlags(bundle.notice_outcome) : {}),
+    ...(notice ? noticeFlags(notice) : {}),
     warning: `The visit is no longer the cancelled visit the card approved (${plain(reason)}), so the recovery stopped. ${lines.join(' ')}`,
   }, info);
   // No generation proof: the visit has changed, which is the very thing being reported.
@@ -910,9 +934,9 @@ async function releaseReceiptClaim(bundle, token) {
 // so a bundle whose steps all finished but whose finalization kept failing still says every step finished.
 function unactableResult(bundle, { why, open, done, notice }) {
   const reason = why === 'hard_stop' ? 'too much time passed' : 'repeated failures';
-  const head = open.length
-    ? `The approved follow-on steps of this cancel could not be confirmed (${reason}). Not confirmed finished: ${open.join(' and ')}.`
-    : `Every approved step finished, but the recovery could not be finalized (${reason}).`;
+  let head = `Every approved step finished, but the recovery could not be finalized (${reason}).`;
+  if (open.length) head = `The approved follow-on steps of this cancel could not be confirmed (${reason}). Not confirmed finished: ${open.join(' and ')}.`;
+  else if (notice && notice.in_flight) head = `The invoice, credit and linked-visit steps finished, but the customer text is not confirmed (${reason}).`;
   return {
     success: true,
     appointment_id: bundle.scheduled_service_id,
@@ -944,19 +968,31 @@ async function reportUnactable(bundle, token) {
   }
 }
 
+function expiredWhy(open, inFlight) {
+  if (open.length) return 'Approved cancel steps were not confirmed finished and will not run on their own.';
+  if (inFlight) return 'The customer text may still be going out and its delivery is not proven.';
+  return 'The approved cancel steps finished, but the recovery could not be finalized.';
+}
+
 async function reportExpired(bundle, token) {
   const why = bundle.attempts >= MAX_ATTEMPTS && new Date(bundle.created_at).getTime() > Date.now() - HARD_STOP_MS
     ? 'attempts_exhausted'
     : 'hard_stop';
-  const notice = bundle.notice_outcome || null;
+  // The text is judged on the reminder evidence, so a send stamped but not yet proven is reported as in flight and is never
+  // part of "nothing more will run" (that sentence covers only the steps listed as not confirmed).
+  const notice = await reportedTextState(bundle);
   const done = bundle.followthrough_done_at ? bundle.followthrough_outcome : null;
   const open = [
     ...(done ? [] : ['the invoice, credit and linked-visit steps']),
     ...(notice || bundle.notify_customer !== true ? [] : ['the approved customer text']),
   ];
+  const inFlight = Boolean(notice && notice.in_flight);
+  let status = 'All steps finished; only the finishing note could not be saved.';
+  if (open.length) status = `Not confirmed finished: ${open.join(' and ')}. Nothing more will run on its own for ${open.length > 1 ? 'those steps' : 'that step'}.`;
+  else if (inFlight) status = 'The invoice, credit and linked-visit steps finished. The customer text is not confirmed.';
   const lines = [
     `Approved on the card: ${pinnedSummary(bundle)}.`,
-    open.length ? `Not confirmed finished: ${open.join(' and ')}. Nothing more will run on its own.` : 'All steps finished; only the finishing note could not be saved.',
+    status,
     ...followThroughLines(done),
     ...noticeLines(bundle, notice),
     'Check the visit, its invoices, its linked visits and the customer message history.',
@@ -970,9 +1006,7 @@ async function reportExpired(bundle, token) {
       await tellOffice(bundle, info, {
         review: true,
         action: (name) => `check ${name}'s cancelled visit`,
-        why: open.length
-          ? 'Approved cancel steps were not confirmed finished and will not run on their own.'
-          : 'The approved cancel steps finished, but the recovery could not be finalized.',
+        why: expiredWhy(open, inFlight),
         lines,
       }, trx);
     },
@@ -997,7 +1031,7 @@ async function reconcileReceipt(bundle, token) {
   let writeOutputs = null;
   if (missing) {
     // The text outcome is unknown only if the request ended before liveNotice ran for a card that asked for a text.
-    const notice = bundle.notice_outcome
+    const notice = (await reportedTextState(bundle))
       || (bundle.notify_customer === true
         ? { state: 'uncertain', note: 'the app stopped before it recorded whether the text went out' }
         : { state: 'no_text' });
@@ -1111,6 +1145,7 @@ module.exports = {
   buildReceipt,
   alertSpec,
   GRACE_MS,
+  IN_FLIGHT_GRACE_MS,
   LEASE_MS,
   HARD_STOP_MS,
   MAX_ATTEMPTS,

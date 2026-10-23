@@ -6,7 +6,7 @@
  * proven on PostgreSQL in ib-cancel-effect-bundles-postgres.test.js. Synthetic ids and names only.
  */
 let mockNow = new Date('2026-10-23T15:00:00Z'); // 11:00 AM ET: inside the 8 AM to 8 PM send window
-const mockStore = { bundles: [], visits: [], history: [], customers: [], actions: [] };
+const mockStore = { bundles: [], visits: [], history: [], customers: [], actions: [], stamps: {} };
 const mockTableKey = {
   ib_cancel_effect_bundles: 'bundles',
   scheduled_services: 'visits',
@@ -149,7 +149,10 @@ jest.mock('../models/db', () => {
       // The unactable claim: pending, lease free, past the hard stop or out of attempts. No attempt is counted.
       candidate = mockStore.bundles
         .filter((x) => x.status === 'pending' && leaseFree(x)
-          && (new Date(x.created_at) <= new Date(mockNow.getTime() - a) || x.attempts >= b))
+          && (new Date(x.created_at) <= new Date(mockNow.getTime() - a) || x.attempts >= b)
+          // A text stamped 'sent' recently with no outcome recorded is skipped (a paused worker may be at the handoff).
+          && !(x.notify_customer && !x.notice_outcome && mockStore.stamps[x.scheduled_service_id]
+            && mockStore.stamps[x.scheduled_service_id] > new Date(mockNow.getTime() - bindings[4])))
         .sort((x, y) => new Date(x.created_at) - new Date(y.created_at))[0];
       if (candidate) Object.assign(candidate, { lease_owner: token, lease_until: new Date(mockNow.getTime() + leaseMs) });
     } else {
@@ -253,6 +256,7 @@ beforeEach(() => {
   setNow(new Date('2026-10-23T15:00:00Z'));
   mockStore.bundles = [];
   mockStore.actions = [];
+  mockStore.stamps = {};
   mockStore.failInsert = null;
   mockStore.visits = [
     { id: SERVICE, status: 'cancelled', customer_id: 'cust-1', service_type: 'Pest Control', scheduled_date: '2026-10-30' },
@@ -1198,12 +1202,91 @@ describe('an exhausted bundle reports what it saved', () => {
   });
 });
 
+describe('a text stamped as sent but not proven is reported as in flight, never as "nothing more will run"', () => {
+  const exhausted = (over = {}) => seedBundle({ attempts: svc.MAX_ATTEMPTS, lease_owner: null, lease_until: null, followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] }, ...over });
+
+  test('the fifth attempt paused after the stamp: the expiry waits while the stamp is fresh, then reports the text as in flight', async () => {
+    const row = exhausted();
+    mockNoticeStatus.mockResolvedValue('uncertain');
+    mockStore.stamps[SERVICE] = new Date(mockNow.getTime() - 2 * MIN);
+    // Fresh stamp: the stale send gets time to land; nothing is claimed, reported or alerted.
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ reported: 0 });
+    expect(mockRecordResult).not.toHaveBeenCalled();
+    expect(mockRaised).toEqual([]);
+    expect(row).toMatchObject({ status: 'pending', lease_owner: null });
+    // The stamp is old and still nothing proves delivery: the report says the text may be going out right now.
+    mockStore.stamps[SERVICE] = new Date(mockNow.getTime() - svc.IN_FLIGHT_GRACE_MS - MIN);
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ reported: 1 });
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.customer_text_uncertain).toBe(true);
+    expect(result.warning).toMatch(/may be going out right now/);
+    expect(result.warning).toMatch(/Do not send it again/);
+    expect(result.warning).not.toMatch(/Nothing more will run/);
+    expect(result.warning).not.toMatch(/Send it by hand/);
+    expect(result.warning).not.toMatch(/the approved customer text\./);
+    const alert = mockRaised[0];
+    expect(alert.spec.why).toMatch(/may still be going out/);
+    expect(alert.opts.detail).toMatch(/may be going out right now/);
+    expect(alert.opts.detail).not.toMatch(/Nothing more will run/);
+    expect(row.status).toBe('expired');
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+  });
+
+  test('money still open and the text in flight: "nothing more will run" names only the money steps', async () => {
+    seedBundle({ attempts: svc.MAX_ATTEMPTS, lease_owner: null, lease_until: null });
+    mockNoticeStatus.mockResolvedValue('uncertain');
+    await svc.sweepIbCancelBundles();
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.warning).toMatch(/Not confirmed finished: the invoice, credit and linked-visit steps\./);
+    expect(result.warning).not.toMatch(/and the approved customer text/);
+    expect(result.warning).toMatch(/may be going out right now/);
+    expect(mockRaised[0].opts.detail).toMatch(/Nothing more will run on its own for that step/);
+    expect(mockRaised[0].opts.detail).toMatch(/may be going out right now/);
+  });
+
+  test('once the audit lands, the same bundle is reported with the text delivered', async () => {
+    exhausted();
+    mockNoticeStatus.mockResolvedValue('delivered');
+    await svc.sweepIbCancelBundles();
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result).toMatchObject({ customer_text_sent: true });
+    expect(result.customer_text_uncertain).toBeUndefined();
+    expect(result.warning).not.toMatch(/going out right now/);
+    expect(result.warning).toMatch(/Every approved step finished/);
+  });
+
+  test('an abandonment on a stamped, unproven text says so; a rebuilt receipt shows delivered once the audit exists', async () => {
+    mockNoticeStatus.mockResolvedValue('uncertain');
+    const row = seedBundle({ attempts: 2 });
+    mockStore.visits[0].status = 'confirmed';
+    await svc.sweepIbCancelBundles();
+    const abandoned = mockRecordResult.mock.calls[0][1];
+    expect(abandoned.customer_text_uncertain).toBe(true);
+    expect(abandoned.warning).toMatch(/may be going out right now/);
+    expect(row.status).toBe('abandoned');
+  });
+
+  test('a request-finished row with no saved text outcome and a text that was later accepted rebuilds a receipt that says delivered', async () => {
+    mockNoticeStatus.mockResolvedValue('delivered');
+    seedBundle({
+      status: 'complete', finish_note: 'request', lease_owner: null, lease_until: null, notice_outcome: null,
+      finished_at: new Date(mockNow.getTime() - 15 * MIN),
+      followthrough_done_at: new Date(mockNow.getTime() - 15 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] },
+    });
+    mockStore.actions.push({ id: ACTION, result: null });
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary.receipts).toBe(1);
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.customer_text_sent).toBe(true);
+    expect(result.customer_text_uncertain).toBeUndefined();
+  });
+});
+
 describe('the hard stop and a visit that is no longer cancelled', () => {
   test('older than 24 hours: reported only, nothing runs', async () => {
     seedBundle({ created_at: new Date(mockNow.getTime() - 25 * HOUR), lease_until: new Date(mockNow.getTime() - 24 * HOUR) });
     await svc.sweepIbCancelBundles();
     expect(mockFollowThrough).not.toHaveBeenCalled();
-    expect(mockNoticeStatus).not.toHaveBeenCalled();
     expect(mockHandleCancellation).not.toHaveBeenCalled();
     expect(mockStore.bundles[0]).toMatchObject({ status: 'expired', finish_note: 'hard_stop' });
     expect(mockRaised[0].spec.severity).toBe('needs-you');

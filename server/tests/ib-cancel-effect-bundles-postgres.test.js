@@ -24,8 +24,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockFollowThrough = jest.fn(async () => ({ settled: 1 }));
 jest.mock('../services/visit-cancellation-followthrough', () => ({ runVisitCancellationFollowThrough: (...a) => mockFollowThrough(...a) }));
 const mockHandleCancellation = jest.fn(async (_id, opts) => { opts.outcome.notificationSent = true; });
+let mockNoticeStatus = 'ready';
 jest.mock('../services/appointment-reminders', () => ({
-  approvedCancellationNoticeStatus: async () => 'ready',
+  approvedCancellationNoticeStatus: async () => mockNoticeStatus,
   handleCancellation: (...a) => mockHandleCancellation(...a),
 }));
 let mockWindowOpen = true;
@@ -94,6 +95,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockWindowOpen = true;
+    mockNoticeStatus = 'ready';
     await app(TABLE).del();
     await app('job_status_history').del();
     await app('scheduled_services').del();
@@ -624,6 +626,35 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(mockRecordResult).toHaveBeenCalledTimes(1);
       expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'expired', finish_note: 'attempts_exhausted', lease_owner: null, attempts: 5 });
       expect(mockFollowThrough).not.toHaveBeenCalled();
+    });
+
+    test('a text stamped sent a moment ago holds the expiry report back; an older stamp lets it report the text as in flight (real SQL)', async () => {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      await exhaust(id);
+      await app(TABLE).where({ id }).update({ followthrough_done_at: app.fn.now(), followthrough_outcome: JSON.stringify({ money_skipped: [], linked_skipped: [] }) });
+      const reminder = randomUUID();
+      await app('appointment_reminders').insert({ id: reminder, scheduled_service_id: visit, cancellation_notice_state: 'sent', cancellation_notice_at: app.fn.now(), updated_at: app.raw("now() - interval '2 minutes'") });
+      mockNoticeStatus = 'uncertain';
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ reported: 0 });
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'pending', attempts: 5, lease_owner: null });
+      expect(mockRecordResult).not.toHaveBeenCalled();
+      // A recorded outcome, a pending marker or an old stamp does not hold the report back.
+      await app('appointment_reminders').where({ id: reminder }).update({ updated_at: app.raw("now() - interval '20 minutes'") });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ reported: 1 });
+      const result = mockRecordResult.mock.calls[0][1];
+      expect(result).toMatchObject({ customer_text_uncertain: true });
+      expect(result.warning).toMatch(/may be going out right now/);
+      expect(result.warning).not.toMatch(/Nothing more will run/);
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'expired', finish_note: 'attempts_exhausted' });
+    });
+
+    test('a fresh stamp does not hold back a bundle whose text outcome is recorded or whose card asked for no text', async () => {
+      const recorded = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      await exhaust(recorded);
+      await app(TABLE).where({ id: recorded }).update({ notice_outcome: JSON.stringify({ state: 'sent', by: 'sweep' }) });
+      await app('appointment_reminders').insert({ scheduled_service_id: visit, cancellation_notice_state: 'sent', cancellation_notice_at: app.fn.now(), updated_at: app.fn.now() });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ reported: 1 });
+      expect((await app(TABLE).where({ id: recorded }).first()).status).toBe('expired');
     });
 
     test('the claim does not count an attempt and skips a row a live request still holds', async () => {
