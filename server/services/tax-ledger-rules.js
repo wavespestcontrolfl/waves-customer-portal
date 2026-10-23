@@ -574,17 +574,26 @@ async function recordHits(hits) {
 // force re-examines stamped rows too (after a rule changed); pattern limits
 // the pass to one rule's matches (an Always decision); after = {txn_date,
 // id} continues past a row budget (the result carries more + cursor).
+// nothing to suggest: only a full forced pass still runs, to clear what
+// rules that are gone now had written
+function passHasWork(compiled, force, pattern) {
+  return compiled.length > 0 || (force && !pattern);
+}
+function rowBudget(limit) {
+  return Math.min(Math.max(1, Number(limit) || PAGE), MAX_EXAMINE);
+}
+function startCursor(start) {
+  return start && start.id && start.txn_date ? { txn_date: ymd(start.txn_date), id: String(start.id) } : null;
+}
 async function applyRules({ limit = PAGE, force = false, pattern = null, after: start = null, now = Date.now, deadline = null } = {}) {
   const stopAt = deadline || now() + PASS_TIME_BUDGET_MS;
   const counts = { examined: 0, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null };
   let compiled = compileRules(await loadRules());
-  // nothing to suggest: only a full forced pass still runs, to clear what
-  // rules that are gone now had written
-  if (!compiled.length && !(force && !pattern)) return counts;
-  const maxRows = Math.min(Math.max(1, Number(limit) || PAGE), MAX_EXAMINE);
+  if (!passHasWork(compiled, force, pattern)) return counts;
+  const maxRows = rowBudget(limit);
   const stamp = new Date().toISOString();
   const hits = new Map();
-  let after = start && start.id && start.txn_date ? { txn_date: ymd(start.txn_date), id: String(start.id) } : null;
+  let after = startCursor(start);
   let lastPageFull = false;
   let outOfTime = false;
   while (counts.examined < maxRows && !outOfTime) {
