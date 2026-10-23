@@ -407,7 +407,8 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Lawn Health Inspection', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
     // The lawn_inspection row was renamed "Lawn Assessment": the key wins over the consultation-looking name.
     expect(truckKit.serviceLinesFor('Lawn Assessment', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
-    expect(truckKit.serviceLinesFor('Lawn Assessment')).toEqual([]);
+    // By name alone it is still the diagnostic (the production row is named that way), not a consultation.
+    expect(truckKit.serviceLinesFor('Lawn Assessment')).toEqual(['lawn']);
     // ...and as a diagnostic it needs the instruments, never the spreader.
     expect(truckKit.requirementsFor('Lawn Assessment', { serviceKey: 'lawn_inspection' }).restrict).toEqual({ lawn: new Set(['soil_probe', 'soil_thermometer']) });
   });

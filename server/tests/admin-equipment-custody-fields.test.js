@@ -327,6 +327,7 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
   test('handing a truck to another technician takes the truck lock', async () => {
     await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: 'tech-2' } });
     expect(truckKit.lockTruck).toHaveBeenCalledWith(db, OTHER);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ assigned_to: 'tech-2' }));
     // So does retiring or recategorizing the vehicle row itself.
     jest.clearAllMocks();
     await run('put', '/equipment/:id', { params: { id: OTHER }, body: { status: 'retired' } });
@@ -334,7 +335,6 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     jest.clearAllMocks();
     await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed' } });
     expect(truckKit.lockTruck).not.toHaveBeenCalled();
-    expect(db.__state.updated).toEqual(expect.objectContaining({ assigned_to: 'tech-2' }));
   });
 
   test('unassigning a tool re-judges its old truck; a save that keeps the truck touches no bell', async () => {
