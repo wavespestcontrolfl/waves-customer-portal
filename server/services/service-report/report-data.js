@@ -3334,7 +3334,7 @@ async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
   return ids;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures, photoFindings = false, trendOut } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures, photoFindings = false, trendOut, preview = false } = {}) {
   if (serviceLine !== 'lawn') return null;
   const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
   if (!assessment) return null;
@@ -3680,6 +3680,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         // render freezes the settled week instead of a stale same-day object
         // being served under a key that still matches.
         weekWeatherPendingReason = 'open_window';
+      } else if (completionRainfall7dInches != null && preview) {
+        // Preview: the fetched week stands as this render's own numbers; nothing
+        // is frozen onto a record (there is none) and the render is not flagged
+        // unfrozen (no cache or delivery decision hangs on a preview).
       } else if (completionRainfall7dInches != null) {
         const canonicalWeek = await freezeLawnWeekWeather(service.id, {
           // The snapshot names the question it answers.
@@ -4224,6 +4228,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const service = applyReportIdentitySnapshot(joinedService);
   const frozenIdentity = service.report_identity_snapshot || null;
   const opts = options && typeof options === 'object' ? options : {};
+  // ADMIN REPORT PREVIEW (routes/admin-report-preview.js): `joinedService` is an
+  // in-memory record for a visit that is not completed yet (id null, no token).
+  // A preview renders what the customer would see and must leave NOTHING behind:
+  // every durable write the render path owns (week-weather freeze, visit-memory
+  // freeze, v6 copy freeze, rainfast retreat check, water-snapshot upsert, AI
+  // narrative claim, reschedule short-link mint) is skipped under this flag, and
+  // the id-keyed lookups whose column is nullable are skipped too (a null id would
+  // read as IS NULL and pick up other rows). Never set by a customer-facing route.
+  const preview = opts.preview === true;
   const propertyHistoryEnabled = opts.propertyHistoryEnabled ?? featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
   const preloadedPestPressureConfig = Object.prototype.hasOwnProperty.call(opts, 'pestPressureConfig')
     ? opts.pestPressureConfig
@@ -4631,6 +4644,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     readFailures,
     // Opt-in: only the renders that print the block read the run (never /ask).
     photoFindings: opts.lawnPhotoFindings === true,
+    // Admin preview: the week-weather freeze is skipped (see `preview` above).
+    preview,
   });
   // A photo-set photo that would not sign (the set was withheld, all or nothing):
   // the document cannot see the photo it lost, so count it where the PDF store
@@ -5755,12 +5770,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       try {
         const { computeLawnWaterIntakeSnapshot } = require('../lawn-water-area');
         const snapDate = lawnAssessment.assessmentDate || service.service_date || null;
-        waterSnapshot = await knex('lawn_water_intake_snapshots').where({ service_record_id: service.id }).first().catch(failSoft(readFailures, 'water_snapshot', null));
+        // Preview: no record to key on (service_record_id is NULLABLE here, so a null id would
+        // read as IS NULL and return another row), and the compute below must not upsert.
+        waterSnapshot = preview
+          ? null
+          : await knex('lawn_water_intake_snapshots').where({ service_record_id: service.id }).first().catch(failSoft(readFailures, 'water_snapshot', null));
         if (!waterSnapshot) {
           waterSnapshot = await computeLawnWaterIntakeSnapshot({
             customerId: service.customer_id,
             serviceId: service.service_id || null,
-            serviceRecordId: service.id,
+            // computeLawnWaterIntakeSnapshot persists only when it is handed a record id.
+            serviceRecordId: preview ? null : service.id,
             serviceDate: snapDate,
             irrigationInchesPerWeek: lawnAssessment.waterContext?.irrigationInchesPerWeek,
             targetWaterInchesPerWeek: lawnAssessment.waterContext?.targetInchesPerWeek,
@@ -5962,6 +5982,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             structuredNotes: service.structured_notes,
             serviceRecordId: service.id,
             customerId: service.customer_id,
+            preview,
             reportV2,
             assessmentId: lawnAssessment.assessmentId,
             serviceDate: visitMemoryOut.serviceDate,
@@ -6066,7 +6087,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           findingsText: lawnAssessment.observations || lawnAssessment.customerSummary || '',
           photoSummary: reportV2.photoSummary || '',
           knex,
-          skipGeneration: opts.skipNarrativeGeneration === true,
+          skipGeneration: opts.skipNarrativeGeneration === true || preview,
         });
         reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
         treatmentNarrativeRenderedSignature = narrative?.signature || null;
@@ -6179,6 +6200,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           const outcome = await resolveLawnCopyV6ForRender({
             structuredNotes: service.structured_notes,
             serviceRecordId: service.id,
+            preview,
             assessmentId: lawnAssessment.assessmentId,
             reportV2,
             ctx: { visitDate: lawnCopyVisitDate, nextVisitGapDays: lawnCopyGapDays, nextVisitIso: lawnCopyGapDays == null ? null : lawnCopyNextVisitIso, tiedFamilies: reportFacts.frozenTiedFamilies(service.structured_notes, lawnAssessment.assessmentId, reportV2.diagnosis) },
@@ -6273,7 +6295,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // retreat-check on the frozen visit memory and hands one fixed Watching
       // sentence to the lead, the same non-enumerable way as sinceLastCopy.
       // Fail closed and best-effort: any miss leaves the report as it was.
-      if (reportV2 && opts.mode === 'live' && opts.lawnRainfastWatch === true && typeof featureGates.lawnRainfastWatchLive === 'function' && featureGates.lawnRainfastWatchLive()) {
+      // Admin preview: never runs. The watch writes its retreat-check ONTO the
+      // frozen visit memory, and an open visit has neither that entry nor a
+      // finished rainfast interval to measure.
+      if (reportV2 && !preview && opts.mode === 'live' && opts.lawnRainfastWatch === true && typeof featureGates.lawnRainfastWatchLive === 'function' && featureGates.lawnRainfastWatchLive()) {
         try {
           const watch = await require('./lawn-rainfast-watch').resolveRainfastWatch({
             structuredNotes: service.structured_notes,
@@ -6363,7 +6388,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             findingsText: reportV2.photoSummary || '',
             photoSummary: reportV2.photoSummary || '',
             knex,
-            skipGeneration: opts.skipNarrativeGeneration === true,
+            skipGeneration: opts.skipNarrativeGeneration === true || preview,
           });
           reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
           // Signature of the EXACT text rendered — PDF stores key off this,
@@ -6723,7 +6748,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // visit (linked_service_record_id) by title. Live-only for the same
   // staleness reason as nextAppointment; fail-soft — errors omit the cell.
   let relatedDocuments = null;
-  if (opts.mode === 'live') {
+  // Preview: a null record id would match customer_documents rows with NO linked visit
+  // (linked_service_record_id is nullable), so the lookup is skipped, not run with a null.
+  if (opts.mode === 'live' && preview) {
+    relatedDocuments = { linked: [] };
+  } else if (opts.mode === 'live') {
     try {
       // Only THIS visit's linked rows are read — filtered in the query, not
       // after a history cap, so an old report's linked document can never
@@ -7020,7 +7049,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 // would show a dead button.
                 const verdict = require('../reschedule-eligibility').eligibility(row);
                 if (verdict && verdict.ok) {
-                  const link = await buildRescheduleLink(row.id, { customerId: service.customer_id || null, reuseExisting: true });
+                  // Preview: previewOnly never mints a short link (reuseExisting alone falls through to the mint
+                  // when none exists); it hands back the existing one or a placeholder.
+                  const link = await buildRescheduleLink(row.id, { customerId: service.customer_id || null, reuseExisting: true, previewOnly: preview });
                   if (link && link.url && !link.tooSoonToMove) rescheduleUrl = link.url;
                 }
               } catch { /* best-effort: no link, no button */ }
