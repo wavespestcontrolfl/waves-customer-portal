@@ -2471,7 +2471,7 @@ describe('suggested from this lawn', () => {
       detail: 'Art Fungicide — mapped large patch', productIds: [P_ART], items: [ADD_ONS[2]], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
     }),
     chinch: (item = ARENA_ITEM, note = null) => card('chinch', {
-      title: 'Insects: check for chinch bugs', finding: 'Photos show moderate insect damage.', check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.',
+      title: 'Insects: check for chinch bugs', finding: 'Photos show moderate insect damage.', check: 'Check first: part the grass at the sunny edge of the damaged patch, then count with a can at 4 spots and write the count in the notes.',
       detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment.`, note, productIds: [item.productId], items: [item], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
     }),
     takeAll: () => card('fungus', {

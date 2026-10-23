@@ -50,7 +50,7 @@ const YEARLY_CAP = 'annual_max_apps';
 
 const CHECKS = Object.freeze({
   fungus: 'Check first: look at the blades and the edge of the patch.',
-  chinch: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.',
+  chinch: 'Check first: part the grass at the sunny edge of the damaged patch, then count with a can at 4 spots and write the count in the notes.',
   caterpillars: 'Check first: soap flush to bring them to the surface.',
 });
 // Take-all is treated on known trouble areas only (owner 2026-10-08). The month's take-all fungicide

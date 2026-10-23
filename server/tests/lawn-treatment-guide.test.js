@@ -154,7 +154,7 @@ describe('buildCards: the rule table', () => {
     if (shown) {
       expect(cards[0]).toMatchObject({
         title: 'Insects: check for chinch bugs',
-        check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.',
+        check: 'Check first: part the grass at the sunny edge of the damaged patch, then count with a can at 4 spots and write the count in the notes.',
         detail: 'Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment.', productIds: [P_ARENA], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
       });
       expect(cards[1]).toMatchObject({

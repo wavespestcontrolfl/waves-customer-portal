@@ -1282,7 +1282,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const byKind = Object.fromEntries(result.cards.map((card) => [card.kind, card]));
       expect(byKind.weeds).toMatchObject({ finding: 'Photos show weeds on about 30% of the lawn.', productIds: [P_LEAD, P_CERT], detail: 'Test Lead WG, Test Cert Herbicide' });
       expect(byKind.fungus).toMatchObject({ productIds: [P_ART], detail: 'Test Artavia — mapped large patch', items: [expect.objectContaining({ productId: P_ART })] });
-      expect(byKind.chinch).toMatchObject({ productIds: [P_ARENA], check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.', actionLabel: 'Found at the edge. Add it' });
+      expect(byKind.chinch).toMatchObject({ productIds: [P_ARENA], check: 'Check first: part the grass at the sunny edge of the damaged patch, then count with a can at 4 spots and write the count in the notes.', actionLabel: 'Found at the edge. Add it' });
       expect(byKind.caterpillars).toMatchObject({ productIds: [P_ACE] });
       expect(byKind.dry_spots).toMatchObject({ productIds: [P_DISP] });
     });
