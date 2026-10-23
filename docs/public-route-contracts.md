@@ -5428,6 +5428,14 @@ if none was stored), never the live profile.
 `/data` also carries `lawnLimitsHash` beside the block; `PUT /:token/accept` takes it back as
 `lawnLimitsHash` and answers 409 `LAWN_LIMITS_STALE` when the live block's hash differs
 (gate on only; no block on both sides matches).
+`/data` carries an optional top-level `beforeYouBook` block behind
+`GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK` (prod dark): `{ title, sections: [{ key,
+heading, lines: [text] }], closing: text|null }`, the answer-book sections that apply
+to this estimate, already chosen and trimmed to one printed page by
+`services/estimate-before-you-book.js` (the module the pdfkit PDF also uses).
+Fixed owner copy, no prices, no customer data. The key is ABSENT with the gate
+off and on an accepted, declined or expired estimate. Only the browser-rendered estimate PDF (`EstimateProposalDocument`)
+prints it, on its own last page; the interactive estimate page ignores it.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that
