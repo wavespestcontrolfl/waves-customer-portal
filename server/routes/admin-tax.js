@@ -2417,18 +2417,29 @@ const BANK_CHANGE_BLOCKS_CLAIM = 'the bank changed this transaction after it was
 // The rule takes the category the expense gets: the pick, else the visible
 // suggestion the owner accepted (the Inbox sends no categoryId for an
 // untouched default, so the expense keeps its provenance; the rule still
-// has a category).
-function ledgerCreateExpenseGuard(req, row, categoryId) {
+// has a category). An untouched default is bound to what the Inbox showed:
+// the request carries expectedCategoryId (the suggested category, or null),
+// checked here and again inside the claim, so a rule pass or an Always
+// decision that changed the suggestion after the page loaded is a 409,
+// never a silently different category (or none) on the expense.
+const SUGGESTION_CHANGED = 'the suggested category changed while you were deciding (a rule pass or an Always decision): reload the Inbox';
+function ledgerCreateExpenseGuard(req, row, categoryId, suggested) {
   const fromLedger = !!req.body?.fromLedger;
   if (!fromLedger) return { fromLedger, ownerRule: null };
   // dark ledger = invisible ledger, this entry point included
   if (!taxLedgerRules.isOn()) return { error: [404, 'not found'] };
   const block = taxLedgerRules.inboxBlock(row);
   if (block) return { error: [409, block] };
+  let expectedCategoryId;
+  if (!req.body?.categoryId) {
+    if (!('expectedCategoryId' in (req.body || {}))) return { error: [400, 'expectedCategoryId (the suggested category shown, or null) is required when no categoryId is picked'] };
+    expectedCategoryId = req.body.expectedCategoryId ? String(req.body.expectedCategoryId) : null;
+    if ((expectedCategoryId || '') !== (suggested || '')) return { error: [409, SUGGESTION_CHANGED] };
+  }
   const wantsRule = !!(req.body?.always && categoryId);
   const ownerRule = wantsRule ? taxLedgerRules.ownerRuleFor(row, 'expense', categoryId) : null;
   if (wantsRule && !ownerRule) return { error: [400, taxLedgerRules.NO_RULE_MESSAGE] };
-  return { fromLedger, ownerRule };
+  return { fromLedger, ownerRule, expectedCategoryId };
 }
 
 // The category for a staged debit: the operator's pick, else the visible
@@ -2454,7 +2465,7 @@ async function resolveCreateExpenseCategory(req, row) {
 }
 
 // Insert + claim in ONE transaction with a CAS on status='unmatched'.
-async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnPeriod, fromLedger, ownerRule }) {
+async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnPeriod, fromLedger, ownerRule, expectedCategoryId }) {
   return db.transaction(async trx => {
     const [inserted] = await trx('expenses').insert({
       category_id: categoryId,
@@ -2482,6 +2493,8 @@ async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnP
     const patch = { status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() };
     if (fromLedger) {
       claim = claim.whereRaw(taxLedgerRules.MATCHER_EXAMINED_SQL).whereRaw(taxLedgerRules.NO_LIVE_CANDIDATES_SQL).whereRaw(taxLedgerRules.NOT_DECIDED_OR_LATER_SQL);
+      // an untouched default books the category the Inbox showed, or nothing
+      if (expectedCategoryId !== undefined) claim = claim.whereRaw("coalesce(suggestion ->> 'categoryId', '') = ?", [expectedCategoryId || '']);
       // the owner's decision supersedes the rule reading the row carried
       // (and the Later keys): a row reopened later (its expense deleted)
       // starts clean, so the next rule pass classifies it afresh instead
@@ -2516,7 +2529,8 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — refund credits use apply-refund' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
     if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
-    const ledger = ledgerCreateExpenseGuard(req, row, effectiveCreateExpenseCategory(req, row).categoryId);
+    const effective = effectiveCreateExpenseCategory(req, row);
+    const ledger = ledgerCreateExpenseGuard(req, row, effective.categoryId, effective.suggested);
     if (ledger.error) return res.status(ledger.error[0]).json({ error: ledger.error[1] });
     const category = await resolveCreateExpenseCategory(req, row);
     if (category.error) return res.status(category.error[0]).json({ error: category.error[1] });

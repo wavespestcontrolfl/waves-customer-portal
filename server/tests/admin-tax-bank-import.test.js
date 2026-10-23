@@ -514,7 +514,7 @@ describe('create-expense (gate on)', () => {
     process.env.GATE_TAX_LEDGER = 'true';
     taxLedgerRules.createRule.mockClear(); taxLedgerRules.applyRulesForPattern.mockClear();
     state.bankRow.suggestion = { noMatch: true, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'ai' };
-    const res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, always: true });
+    const res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, always: true, expectedCategoryId: 'cat-meals' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(expect.objectContaining({ ruleCreated: true, propagated: true }));
     expect(taxLedgerRules.createRule).toHaveBeenCalledWith(expect.objectContaining({ pattern: '\\bwawa\\b', kind: 'expense', categoryId: 'cat-meals', source: 'owner' }));
@@ -523,8 +523,31 @@ describe('create-expense (gate on)', () => {
     // no visible category at all (ledger suggestion of a disabled source, or none): no rule, and a plain 200
     taxLedgerRules.createRule.mockClear();
     state.bankRow.suggestion = { noMatch: true };
-    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, always: true })).status).toBe(200);
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, always: true, expectedCategoryId: null })).status).toBe(200);
     expect(taxLedgerRules.createRule).not.toHaveBeenCalled();
+  });
+
+  test('fromLedger with an untouched default: expectedCategoryId is required; a default that changed since the Inbox showed it is a 409 before any insert, and the claim repeats the check', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.suggestion = { noMatch: true, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'ai' };
+    let res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/expectedCategoryId/);
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, expectedCategoryId: 'cat-other' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/suggested category changed/);
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, expectedCategoryId: null });
+    expect(res.status).toBe(409);
+    expect(state.insertedExpenses).toHaveLength(0);
+    // the default as shown: booked, and the claim's CAS carries it
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, expectedCategoryId: 'cat-meals' });
+    expect(res.status).toBe(200);
+    const claim = state.bankUpdates.find((u) => u.patch.status === 'created_expense');
+    expect(claim.wheres).toContainEqual(["coalesce(suggestion ->> 'categoryId', '') = ?", ['cat-meals']]);
+    // a picked category needs no expectation: the operator's choice is the category
+    state.bankUpdates = [];
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, categoryId: 'cat-meals' })).status).toBe(200);
+    expect(JSON.stringify(state.bankUpdates.find((u) => u.patch.status === 'created_expense').wheres)).not.toContain("suggestion ->> 'categoryId'");
   });
 
   test('fromLedger: the claim also requires examined + no candidates, so a list parked mid-flight loses the race', async () => {

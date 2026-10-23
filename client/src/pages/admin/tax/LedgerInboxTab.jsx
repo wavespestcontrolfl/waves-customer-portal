@@ -512,8 +512,9 @@ export default function LedgerInboxTab() {
         // an untouched default is not sent: create-expense books the row's own
         // suggested category and keeps its provenance (an accepted model
         // default is still marked for verification); a picked one is the operator's
+        // (expectedCategoryId = the default shown: the claim refuses the row if it changed meanwhile)
         const picked = touched || categoryId !== (row.suggestion?.categoryId || "");
-        const made = await post(`${T}/${row.id}/create-expense`, { ...(picked ? { categoryId } : {}), fromLedger: true, always: !!always });
+        const made = await post(`${T}/${row.id}/create-expense`, { ...(picked ? { categoryId } : { expectedCategoryId: row.suggestion?.categoryId || null }), fromLedger: true, always: !!always });
         propagated = made?.propagated !== false;
       } else {
         const decided = await post(`${T}/ledger/decide`, { id: row.id, decision, always: !!always });

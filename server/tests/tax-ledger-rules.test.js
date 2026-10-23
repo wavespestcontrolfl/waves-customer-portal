@@ -468,7 +468,7 @@ describe('applyRules (suggestion-only)', () => {
     expect(state.ruleUpdates).toHaveLength(1);
     expect(state.ruleUpdates[0].wheres).toContainEqual({ id: 'evil', enabled: true });
     expect(state.ruleUpdates[0].patch).toMatchObject({ enabled: false, note: 'disabled: too slow on real descriptions (typo)', updated_at: expect.any(Date) });
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/rule evil .* disabled: over \d+ ms/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/^\[tax-ledger\] rule evil disabled: over \d+ ms/)); // never the pattern (payee text)
   });
 
   test('a pass matches its page in the worker: the evil rule above is disabled mid-pass and the page is still classified by the rules that answer', async () => {

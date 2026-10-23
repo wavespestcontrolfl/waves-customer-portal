@@ -582,9 +582,10 @@ async function matchSplit(rules, subjects, capMs, slow) {
   return left.map((l, i) => [...l, ...right[i].map((j) => j + half)]);
 }
 async function disableSlowRule(rule) {
-  logger.warn(`[tax-ledger] rule ${rule.id} (${rule.pattern}) disabled: over ${MATCH_HARD_CAP_MS} ms on a page of descriptions`);
+  // the id only: an owner pattern is payee text from a bank description (a name, possibly)
+  logger.warn(`[tax-ledger] rule ${rule.id} disabled: over ${MATCH_HARD_CAP_MS} ms on a page of descriptions`);
   await db('tax_ledger_rules').where({ id: rule.id, enabled: true }).update({
-    enabled: false, note: `disabled: too slow on real descriptions (${rule.note || rule.pattern})`, updated_at: new Date(),
+    enabled: false, note: `disabled: too slow on real descriptions${rule.note ? ` (${rule.note})` : ''}`, updated_at: new Date(),
   });
 }
 async function matchPage(compiled, subjects, { capMs = MATCH_HARD_CAP_MS } = {}) {

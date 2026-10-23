@@ -111,7 +111,7 @@ it('Business without Always still posts decide first, then create-expense marked
   const p = posts();
   expect(p.map((c) => c.url.replace(/^.*\/admin\/tax\/bank-import/, ''))).toEqual(['/ledger/decide', '/row-1/create-expense']);
   expect(p[0].body).toEqual({ id: 'row-1', decision: 'expense', categoryId: 'cat-2' }); // the preflight validates the default
-  expect(p[1].body).toEqual({ fromLedger: true, always: false }); // the claim books the row's own suggestion (a model's default keeps its AI-verify note)
+  expect(p[1].body).toEqual({ expectedCategoryId: 'cat-2', fromLedger: true, always: false }); // the claim books the row's own suggestion as shown (a model's default keeps its AI-verify note)
 });
 
 it('a category the operator re-picks to the same value as the default counts as picked', async () => {
