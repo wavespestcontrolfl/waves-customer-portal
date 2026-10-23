@@ -200,6 +200,9 @@ describe('templateIssueValues (server-built warranty)', () => {
   test('refuses blank fields, a missing or foreign project, an ineligible job and late basis dates', async () => {
     await expect(templateIssueValues(KEY, { projectId: project.id, values: office, allowUnresolved: true }, customer, conn(project))).rejects.toMatchObject({ status: 400 });
     await expect(templateIssueValues(KEY, { values: office }, customer, conn(project))).rejects.toMatchObject({ status: 400 });
+    for (const override of [{ propertyAddress: 'gate code 1234' }, { recipientName: 'Someone Else' }]) {
+      await expect(templateIssueValues(KEY, { projectId: project.id, values: office, ...override }, customer, conn(project))).rejects.toMatchObject({ status: 400 });
+    }
     await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, { id: 'someone-else' }, conn(project))).rejects.toMatchObject({ status: 404 });
     const borate = { ...project, findings: { ...findings, treatment_method: 'Wood treatment (borate)' } };
     await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(borate))).rejects.toMatchObject({ status: 409 });

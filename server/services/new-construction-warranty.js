@@ -297,6 +297,11 @@ function screenValues(values) {
 async function templateIssueValues(templateKey, body, customer, conn = db) {
   if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return body?.values || {};
   if (body?.allowUnresolved === true) throw bad('The new construction warranty cannot be issued with blank fields.');
+  // The owner's name and address come from the screened customer record;
+  // a per-request override would print unscreened text on the contract.
+  if (oneLine(body?.propertyAddress) || oneLine(body?.recipientName)) {
+    throw bad('The new construction warranty uses the customer record for the owner\'s name and address. Edit the customer instead.');
+  }
   const projectId = body?.projectId;
   if (!projectId) throw bad('Issue the new construction warranty from its pre-treat certificate.');
   // Customer row before the certificate row: the order the issue route and
