@@ -533,9 +533,9 @@ async function loadLawnWindowGuidance(dbh, svc) {
     }));
     // A staged row that only a swap rule brings in (GATE_LAWN_DEC_LARGE_PATCH_K: the December 0-0-24, a non-default row) is not guidance
     // until that rule's gate is live: with it off the brief lists exactly the products it listed before the row existed.
-    const { V13_TROUBLE_PRODUCT_SWAPS } = require('../config/lawn-v13-trouble-product-swaps');
+    const { swapOnlyRule } = require('../config/lawn-v13-trouble-product-swaps');
     const swapGates = require('../config/feature-gates');
-    const swapOnly = (p) => V13_TROUBLE_PRODUCT_SWAPS.some((rule) => rule.to === cleanText(p.productName, 120) && swapGates[rule.gate]?.() !== true);
+    const swapOnly = (p) => { const rule = swapOnlyRule(p); return !!rule && swapGates[rule.gate]?.() !== true; };
     const shaped = (summary.products || [])
       .filter((p) => !heldRows.includes(p) && !swapOnly(p))
       .map((p) => ({

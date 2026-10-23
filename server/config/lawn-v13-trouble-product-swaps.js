@@ -49,11 +49,23 @@ const V13_TROUBLE_PRODUCT_SWAPS = Object.freeze([
     line: block.primary,
     targetN: block.targetN,
     note: block.note,
+    // The staged row's gates.trigger (migration 20261023121000): what marks the row as this rule's replacement bag.
+    trigger: 'active_large_patch_mapped',
   }),
 ]);
 
 // The key of the line note the swapped bag carries (plan gateNotes), so the Fast Complete sheet can pick that note out.
 const PRODUCT_SWAP_NOTE_KEY = 'activeLargePatchPotassium';
+
+// Is this staged protocol product only a swap rule's replacement bag (the non-default December 0-0-24 row)? Readers that list a window's
+// products (the previsit brief, the customer report's protocol card) leave such a row out unless the rule's gate is live and, for the
+// report, the visit actually put the bag down. `row` is a summarized protocol product (productName / protocolProductName, defaultInPlan,
+// gates) or a staged row; the swap trigger in its gates counts as well as its name.
+function swapOnlyRule(row, rules = V13_TROUBLE_PRODUCT_SWAPS) {
+  if (!row || row.defaultInPlan === true) return null;
+  const names = [row.productName, row.protocolProductName, row.product_name].map((name) => String(name || '').trim());
+  return rules.find((rule) => names.includes(rule.to) || (rule.trigger && row.gates?.trigger === rule.trigger)) || null;
+}
 
 // What differs between the recipe block and the rule the plan applies, as a list of plain sentences ([] = they agree). Pure; the tests
 // run it, so a recipe edit that is not matched by the overlay (or the reverse) fails the build.
@@ -83,4 +95,4 @@ function swapRecipeProblems(recipe = v13, rules = V13_TROUBLE_PRODUCT_SWAPS) {
   return problems;
 }
 
-module.exports = { V13_TROUBLE_PRODUCT_SWAPS, PRODUCT_SWAP_NOTE_KEY, DEC_FROM, DEC_K_PRODUCT, SWAP_KEY, swapRecipeProblems };
+module.exports = { V13_TROUBLE_PRODUCT_SWAPS, PRODUCT_SWAP_NOTE_KEY, DEC_FROM, DEC_K_PRODUCT, SWAP_KEY, swapRecipeProblems, swapOnlyRule };
