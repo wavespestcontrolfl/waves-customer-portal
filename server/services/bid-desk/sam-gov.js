@@ -157,6 +157,8 @@ async function fetchPage({ apiKey, ncode, postedFrom, postedTo, offset, fetchImp
     } catch (err) {
       throw new SamApiError(err?.name === 'AbortError' ? 'timeout' : 'network');
     }
+    // The API answers 404 "No Data found" for an empty window (its documented response codes): that is an empty page.
+    if (res.status === 404) return { notices: [], total: 0 };
     if (!res.ok) throw new SamApiError(res.status);
     const body = await res.json().catch(() => null);
     if (!body || !Array.isArray(body.opportunitiesData)) throw new SamApiError('bad_body');

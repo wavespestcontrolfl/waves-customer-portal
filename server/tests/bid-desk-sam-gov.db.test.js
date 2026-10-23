@@ -118,6 +118,15 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect((await mockPg('bid_opportunities').where({ id: other.id }).first()).notified_at).toBeNull();
   });
 
+  test('a no-data answer (HTTP 404) for one code is an empty result; the other code still files', async () => {
+    const fetchImpl = jest.fn(async (url) => (new URL(url).searchParams.get('ncode') === sam.NAICS_CODES[0]
+      ? { ok: true, status: 200, json: async () => ({ totalRecords: 1, opportunitiesData: [notice('n-5')] }) }
+      : { ok: false, status: 404, json: async () => ({ error: 'No Data found' }) }));
+    const result = await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'test-key' });
+    expect(result).toMatchObject({ read: 1, filed: 1, rung: 1 });
+    expect(await cursor()).toBe('2026-10-21');
+  });
+
   test('an API error leaves the cursor and files nothing', async () => {
     await mockPg('system_settings').insert({ key: sam.CURSOR_KEY, value: JSON.stringify({ from: '2026-10-10' }), category: 'bid_desk' });
     const fetchImpl = jest.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
