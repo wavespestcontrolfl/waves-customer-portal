@@ -441,10 +441,14 @@ export default function LedgerInboxTab() {
   // where the last Apply rules now stopped (null = it finished): the next
   // click continues from there instead of starting over
   const resumeRef = useRef(null);
-  // rows this view settled locally: a full reload (after an Always
-  // decision) may have read the list before another row's decision
-  // committed, and its response must not bring that row back
-  const settledRef = useRef(new Set());
+  // rows this view settled locally, each with the generation at which its
+  // decision completed: a reload that STARTED before that (a full reload
+  // after an Always decision on another row) may have read the list
+  // without the decision and must not bring the row back; a request
+  // started after it is authoritative (an undo in Bank Import can reopen
+  // the row, and then it must show again)
+  const settledRef = useRef(new Map());
+  const genRef = useRef(0);
   useEffect(() => { viewRef.current = view; }, [view]);
 
   // sequenced like loadRows: two row actions overlap, each refreshes the
@@ -459,12 +463,16 @@ export default function LedgerInboxTab() {
 
   const loadRows = useCallback((v, offset) => {
     const my = ++seq.current;
+    const startedAt = genRef.current;
     setLoading(true);
     setLoadError("");
     return adminFetch(`${T}/ledger/inbox?limit=${PAGE}&offset=${offset}&view=${v}`)
       .then((d) => {
         if (my !== seq.current) return;
-        const fresh = (d.rows || []).filter((r) => !settledRef.current.has(r.id));
+        const settled = settledRef.current;
+        const fresh = (d.rows || []).filter((r) => !(settled.has(r.id) && settled.get(r.id) > startedAt));
+        // a tombstone no later request can need is dropped
+        for (const [id, at] of settled) if (at <= startedAt) settled.delete(id);
         const revived = (d.rows || []).length - fresh.length;
         setRows((prev) => (offset === 0 ? fresh : [...prev, ...fresh]));
         setTotal(Math.max(0, (d.total || 0) - revived));
@@ -487,7 +495,7 @@ export default function LedgerInboxTab() {
   // a view change shows nothing of the previous shelf while the new one loads
   useEffect(() => {
     if (!enabled) return;
-    settledRef.current = new Set();
+    settledRef.current = new Map();
     setRows([]);
     setTotal(0);
     loadRows(view, 0);
@@ -523,6 +531,7 @@ export default function LedgerInboxTab() {
       if (always && !propagated) {
         setNotice("Decision saved, but not every open row of this payee was updated yet. Click Apply rules now to finish.");
       }
+      const gen = ++genRef.current; // the decision is in: requests started from here on see it
       // a decision that keeps the row on the current shelf, or an Always
       // decision (the new rule has just re-labelled every other row of that
       // payee), reloads the view instead of hiding the row
@@ -531,7 +540,7 @@ export default function LedgerInboxTab() {
       } else if (decision === view || always) {
         await loadRows(view, 0);
       } else {
-        settledRef.current.add(row.id);
+        settledRef.current.set(row.id, gen);
         setRows((prev) => prev.filter((r) => r.id !== row.id));
         setTotal((t) => Math.max(0, t - 1));
       }

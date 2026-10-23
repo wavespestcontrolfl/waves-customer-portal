@@ -2498,8 +2498,12 @@ async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnP
       // the owner's decision supersedes the rule reading the row carried
       // (and the Later keys): a row reopened later (its expense deleted)
       // starts clean, so the next rule pass classifies it afresh instead
-      // of skipping a stale stamp
-      patch.suggestion = bankImport.suggestionMerge({}, [...taxLedgerRules.LATER_KEYS, ...bankImport.LEDGER_RULE_KEYS, ...bankImport.LEDGER_RULE_CATEGORY_KEYS]);
+      // of skipping a stale stamp. A transfer rule's flag and reason
+      // (ignore + reason, the keys the matcher's own flag uses) go with
+      // the rule, judged on the stored row: a reopened row must never read
+      // as a matcher-flagged transfer the seeds then defer to
+      patch.suggestion = bankImport.suggestionMerge({}, [...taxLedgerRules.LATER_KEYS, ...bankImport.LEDGER_RULE_KEYS, ...bankImport.LEDGER_RULE_CATEGORY_KEYS],
+        { alsoWhen: { sql: "coalesce(suggestion->'rule'->>'kind','') = 'transfer'", keys: ['ignore', 'reason'] } });
     }
     const claimed = await claim.update(patch);
     if (!claimed) {

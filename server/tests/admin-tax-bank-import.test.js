@@ -430,6 +430,8 @@ describe('create-expense (gate on)', () => {
     for (const k of ['later', 'decision', 'decidedAt']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
     // and the rule reading the row carried, category included: the owner's decision supersedes it, so a reopened row (expense deleted) gets a fresh rule pass with no stale default
     for (const k of ['rule', 'rulesAt', 'examined', 'categoryId', 'categoryName', 'irsLine', 'categorySource']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
+    // a transfer rule's own flag and reason go with it, decided on the stored row inside the UPDATE (a reopened row must not read as a matcher-flagged transfer)
+    expect(String(claim.patch.suggestion.sql)).toMatch(/^\(case when coalesce\(suggestion->'rule'->>'kind',''\) = 'transfer' then coalesce\(suggestion, '\{\}'::jsonb\)(?: - '\w+')+ - 'ignore' - 'reason' else coalesce\(suggestion, '\{\}'::jsonb\)(?: - '\w+')+ end\) \|\| \?::jsonb$/);
     // the plain Bank Import path: an Income item is never an expense; a Later row may still be booked
     state.bankUpdates = []; state.insertedExpenses = [];
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);

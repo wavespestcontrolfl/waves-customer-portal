@@ -305,6 +305,26 @@ it('a full reload after an Always decision never brings back a row decided while
   expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument();
 });
 
+it('a reload started after a decision completed shows a row the server returns again (undone in Bank Import); the tombstone applies only to requests already in flight', async () => {
+  const base = fetch;
+  let inboxCalls = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    // the server keeps returning row-1: its decision was undone elsewhere right after
+    if (String(url).includes('/ledger/inbox')) { inboxCalls += 1; return json({ rows: [row], total: 1 }); }
+    if (String(url).includes('/rules/apply')) return json({ success: true, examined: 0, suggested: 0, byKind: {}, more: false, cursor: null });
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  const card = await screen.findByTestId('ledger-row-row-1');
+  fireEvent.click(within(card).getByRole('button', { name: 'Personal' }));
+  await waitFor(() => expect(screen.queryByTestId('ledger-row-row-1')).not.toBeInTheDocument());
+  expect(screen.getByText(/0 to review|Nothing to review|No rows/i)).toBeInTheDocument();
+  // Apply rules now reloads the view: that request started after the decision, so what the server has is what shows
+  fireEvent.click(screen.getByRole('button', { name: 'Apply rules now' }));
+  await waitFor(() => expect(inboxCalls).toBeGreaterThanOrEqual(2));
+  expect(await screen.findByTestId('ledger-row-row-1')).toBeInTheDocument();
+});
+
 it('an older status answer never lands after a newer one when two row actions overlap', async () => {
   const base = fetch;
   const second = { ...row, id: 'row-2', description: 'OTHER SHOP 55' };

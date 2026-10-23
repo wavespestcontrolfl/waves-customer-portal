@@ -577,9 +577,13 @@ function isPlausibleRefundTarget(row, expense) {
 // (optionally subtracting keys first) so concurrent suggestion writers —
 // the matcher, /suggest's AI categorizer, unlink — can only append to each
 // other, never erase each other via a stale-snapshot rebuild.
-function suggestionMerge(patch, removeKeys = []) {
+// alsoWhen = { sql, keys }: keys that go only when the stored row says so,
+// judged inside the UPDATE (never from a read that may be stale by then).
+function suggestionMerge(patch, removeKeys = [], { alsoWhen = null } = {}) {
+  const drop = (k) => ` - '${String(k).replace(/'/g, "''")}'`;
   let expr = "coalesce(suggestion, '{}'::jsonb)";
-  for (const k of removeKeys) expr += ` - '${String(k).replace(/'/g, "''")}'`;
+  for (const k of removeKeys) expr += drop(k);
+  if (alsoWhen) expr = `(case when ${alsoWhen.sql} then ${expr}${alsoWhen.keys.map(drop).join('')} else ${expr} end)`;
   return db.raw(`${expr} || ?::jsonb`, [JSON.stringify(patch)]);
 }
 
