@@ -617,6 +617,20 @@ async function activate(itemId, overrides = {}) {
     await plaidSync.disconnectItem(itemId);
   });
 
+  test('the ledger import\'s named amex source (ledger-amex) blocks a feed of an American Express account the same way', async () => {
+    await mockPg('bank_transactions').insert({
+      account_label: 'ledger-amex', account_type: 'card', txn_date: '2025-12-31', source: 'ledger-csv',
+      description: 'LEDGER ROW', amount: 5, direction: 'debit', row_hash: 'a'.repeat(64),
+    });
+    plaid.exchangePublicToken.mockResolvedValueOnce({ accessToken: 'access-sandbox-secret', itemId: `item-amex-${Date.now()}` });
+    plaid.getAccounts.mockResolvedValueOnce({ accounts: ACCOUNTS.map(x => ({ ...x, account_id: `${x.account_id}-amex` })), institutionId: 'ins_10' });
+    const itemId = await plaidSync.connectItem({ publicToken: 'public-sandbox-x', institutionName: 'American Express' });
+    await expect(activate(itemId, { 'acc-card-amex': { accountLabel: 'amex-blue', syncFrom: '2025-12-31' } }))
+      .rejects.toThrow(/the ledger import through 2025-12-31 — start the feed on 2026-01-01/);
+    await activate(itemId, { 'acc-card-amex': { accountLabel: 'amex-blue', syncFrom: '2026-01-01' } });
+    await plaidSync.disconnectItem(itemId);
+  });
+
   test('CSV and feed never cover the same days for one label', async () => {
     await mockPg('bank_transactions').insert({
       account_label: 'capone-card', account_type: 'card', txn_date: '2026-09-10', source: 'csv',
