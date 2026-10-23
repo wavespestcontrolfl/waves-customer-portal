@@ -9,6 +9,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const config = require('../config');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const logger = require('./logger');
+const { errorTag } = require('./bid-kit-log');
 
 const MAX_FILE_BYTES = 15 * 1024 * 1024;
 const SIGNED_URL_SECONDS = 300;
@@ -122,7 +123,7 @@ async function deleteFile(key) {
   try {
     await s3().send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
   } catch (err) {
-    logger.warn(`[bid-kit] could not delete stored file ${keyFingerprint(key)}: ${err?.name || 'Error'}`);
+    logger.warn(`[bid-kit] could not delete stored file ${keyFingerprint(key)}: ${errorTag(err)}`);
   }
 }
 

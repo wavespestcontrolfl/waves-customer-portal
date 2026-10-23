@@ -10,6 +10,7 @@ const store = require('./bid-kit-store');
 const episodes = require('./admin-alert-episodes');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const logger = require('./logger');
+const { errorTag } = require('./bid-kit-log');
 const { composeAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { fitAction, shortDateET } = require('./admin-alert-names');
 
@@ -18,6 +19,7 @@ const CATEGORY = 'system';
 const DEDUPE_DAYS = 7;
 
 const KEY_PREFIX = 'bid-kit:expiry:';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const keyFor = (item) => `${KEY_PREFIX}${item.id}`;
 
 // The item's name as a person says it. A custom label with a code-shaped word falls back to the catalog's own words.
@@ -63,24 +65,74 @@ function qualifies(row, today) {
   return status !== catalog.STATUS.MISSING && catalog.daysBetween(today, row.expires_on) <= catalog.EXPIRING_DAYS;
 }
 
-// The bell has done its job when the paper is renewed (the date moved out of the window), the item is archived, or it is no
-// longer there: close it the same way every other source does, so it leaves the bell and a real comeback rings again.
-async function closeBells(keys, reason) {
-  if (!keys.length) return 0;
-  return episodes.closeAdminAlertKeys(db, keys, reason, { resolution: 'Cleared: this paper is renewed, archived or no longer expires within 30 days' });
+// One lock per item serializes everything that raises or closes its bell: the daily run, and the close that follows a save,
+// a file replacement or an archive. Each of them takes it, then READS THE ROW AGAIN, then decides, all in one transaction.
+// A renewal or archive that lands after the daily run listed the items but before it raises is therefore seen (the run
+// re-reads and skips), and one that lands after the raise is closed by its own close (which waits for the lock and re-reads).
+// Either order leaves the bell right. A transaction-scoped advisory lock, so it is released at commit and never blocks a save.
+function withItemLock(id, fn) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`bid-kit:expiry-item:${id}`]);
+    return fn(trx);
+  });
 }
 
-// Called after a save, a file replace or an archive. Closes this item's open bell when it no longer qualifies. A failure
-// never fails the save: the daily job closes it on its next run.
+// The bell has done its job when the paper is renewed (the date moved out of the window), the item is archived, or it is no
+// longer there: close it the same way every other source does, so it leaves the bell and a real comeback rings again.
+async function closeBells(conn, keys, reason) {
+  if (!keys.length) return 0;
+  return episodes.closeAdminAlertKeys(conn, keys, reason, { resolution: 'Cleared: this paper is renewed, archived or no longer expires within 30 days' });
+}
+
+// Called after a save, a file replace or an archive (the item passed is only a handle: the row is read again under the
+// lock). Closes the item's open bell when the fresh row no longer qualifies. A failure never fails the save: the daily job
+// closes it on its next run.
 async function syncExpiryBell(item, { now = new Date() } = {}) {
   if (!bidKitLive() || !item || !item.id) return { skipped: 'gate_off' };
   try {
-    if (qualifies(item, catalog.etToday(now))) return { closed: 0 };
-    return { closed: await closeBells([keyFor(item)], item.archived_at ? 'archived' : 'renewed') };
+    const today = catalog.etToday(now);
+    return await withItemLock(item.id, async (trx) => {
+      const fresh = await store.getItem(item.id, trx);
+      if (fresh && qualifies(fresh, today)) return { closed: 0 };
+      return { closed: await closeBells(trx, [keyFor(item)], fresh && !fresh.archived_at ? 'renewed' : 'archived') };
+    });
   } catch (err) {
-    logger.warn(`[bid-kit] closing the expiry bell failed: ${err?.name || 'Error'}`);
+    logger.warn(`[bid-kit] closing the expiry bell failed: ${errorTag(err)}`);
     return { closed: 0, failed: true };
   }
+}
+
+// One candidate from the daily run's snapshot: under the item's lock the row is read again, and the bell is raised only
+// while the FRESH row still qualifies. Returns true when it rang.
+async function raiseIfStillDue(candidate, today) {
+  return withItemLock(candidate.id, async (trx) => {
+    const fresh = await store.getItem(candidate.id, trx);
+    if (!fresh || !qualifies(fresh, today)) return false;
+    const { spec, detail } = specFor(fresh, today);
+    // The shared episode path: a bell closed after a renewal rings again when the item comes back inside the window.
+    const composed = composeAdminAlert(spec);
+    const result = await episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
+      bell: true,
+      dedupeKey: keyFor(fresh),
+      dedupeWindowMs: DEDUPE_DAYS * 86400000,
+      detail,
+      link: composed.link,
+      trx,
+      metadata: { bidKitItemId: fresh.id, ...composed.metadata },
+    });
+    return Boolean(result && result.rang);
+  });
+}
+
+// An open bell whose item the snapshot says no longer qualifies: closed under the lock, but only if the fresh row agrees.
+async function closeIfNoLongerDue(key, today) {
+  const id = key.slice(KEY_PREFIX.length);
+  if (!UUID.test(id)) return 0;
+  return withItemLock(id, async (trx) => {
+    const fresh = await store.getItem(id, trx);
+    if (fresh && qualifies(fresh, today)) return 0;
+    return closeBells(trx, [key], 'no_longer_qualifies');
+  });
 }
 
 // The daily job: one bell per qualifying item, and every open bell whose item no longer qualifies is closed.
@@ -92,36 +144,31 @@ async function runBidKitExpiryCheck({ now = new Date() } = {}) {
   try {
     rows = await store.listItems();
   } catch (err) {
-    logger.warn(`[bid-kit] expiry scan failed: ${err?.name || 'Error'}`);
+    logger.warn(`[bid-kit] expiry scan failed: ${errorTag(err)}`);
     return { scanned: 0, rang: 0, closed: 0 };
   }
   const due = rows.filter((row) => qualifies(row, today));
   let rang = 0;
   for (const item of due) {
     try {
-      const { spec, detail } = specFor(item, today);
-      // The shared episode path: a bell closed after a renewal rings again when the item comes back inside the window.
-      const composed = composeAdminAlert(spec);
-      const result = await episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
-        bell: true,
-        dedupeKey: keyFor(item),
-        dedupeWindowMs: DEDUPE_DAYS * 86400000,
-        detail,
-        link: composed.link,
-        metadata: { bidKitItemId: item.id, ...composed.metadata },
-      });
-      if (result && result.rang) rang += 1;
+      if (await raiseIfStillDue(item, today)) rang += 1;
     } catch (err) {
-      logger.warn(`[bid-kit] expiry alert failed: ${err?.name || 'Error'}`);
+      logger.warn(`[bid-kit] expiry alert failed: ${errorTag(err)}`);
     }
   }
   let closed = 0;
   try {
     const live = new Set(due.map(keyFor));
     const stale = (await episodes.openAdminAlertKeys(db, KEY_PREFIX)).filter((key) => !live.has(key));
-    closed = await closeBells(stale, 'no_longer_qualifies');
+    for (const key of stale) {
+      try {
+        closed += await closeIfNoLongerDue(key, today);
+      } catch (err) {
+        logger.warn(`[bid-kit] closing a stale expiry bell failed: ${errorTag(err)}`);
+      }
+    }
   } catch (err) {
-    logger.warn(`[bid-kit] closing stale expiry bells failed: ${err?.name || 'Error'}`);
+    logger.warn(`[bid-kit] closing stale expiry bells failed: ${errorTag(err)}`);
   }
   logger.info(`[bid-kit] expiry check scanned=${due.length} rang=${rang} closed=${closed}`);
   return { scanned: due.length, rang, closed };

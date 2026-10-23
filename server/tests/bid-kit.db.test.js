@@ -336,6 +336,18 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect(await rowOf(fact.id)).toMatchObject({ value: 'FX000000', attested_by: mockAdminId });
     });
 
+    test('a failed activity insert logs a fixed message and the error code, never the label the database error quotes', async () => {
+      const logger = require('../services/logger');
+      logger.warn.mockClear();
+      mockAdminId = randomUUID(); // not a technician: the activity_log foreign key refuses the insert
+      const label = 'Sample HOA board, board.sample@example.test, 100 Fixture Way';
+      const res = await call('POST', '', { kind: 'reference', item_key: 'reference', details: { entity: label } });
+      expect(res.status).toBe(201); // the save stands; only the activity row failed
+      const lines = logger.warn.mock.calls.map(([line]) => String(line));
+      expect(lines.filter((line) => line.includes('activity_log write failed'))).toEqual(['[bid-kit] activity_log write failed: 23503 constraint=activity_log_admin_user_id_foreign']);
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/Sample HOA|board\.sample|Fixture Way|insert into/);
+    });
+
     test('the activity log records who did what, with field names and no values', async () => {
       const created = await create({ item_key: 'w9' });
       await call('PATCH', `/${created.id}`, { value: 'On file with the office', expected_updated_at: created.updated_at });
@@ -379,10 +391,34 @@ describeDb('Bid kit (PostgreSQL)', () => {
       episodes.openAdminAlertKeys.mockResolvedValue([kept, renewed, archived, { id: randomUUID() }].map((row) => `bid-kit:expiry:${row.id}`));
       const result = await runBidKitExpiryCheck();
       expect(result.scanned).toBe(1);
-      const [, keys, reason] = episodes.closeAdminAlertKeys.mock.calls[0];
-      expect(reason).toBe('no_longer_qualifies');
+      // One locked close per stale bell.
+      const keys = episodes.closeAdminAlertKeys.mock.calls.flatMap(([, closing]) => closing);
+      expect(episodes.closeAdminAlertKeys.mock.calls.every(([, , reason]) => reason === 'no_longer_qualifies')).toBe(true);
       expect(keys).toEqual(expect.arrayContaining([`bid-kit:expiry:${renewed.id}`, `bid-kit:expiry:${archived.id}`]));
       expect(keys).not.toContain(`bid-kit:expiry:${kept.id}`);
+    });
+
+    test('a renewal or an archive that lands after the list was read but before the raise leaves no bell', async () => {
+      const store = require('../services/bid-kit-store');
+      const renewed = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) });
+      const archived = await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: addDays(5) });
+      const kept = await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(6) });
+      const realList = store.listItems;
+      const spy = jest.spyOn(store, 'listItems').mockImplementationOnce(async (...args) => {
+        const snapshot = await realList(...args);
+        // The snapshot is taken; now two admins change items before the job raises.
+        await mockPg('bid_kit_items').where({ id: renewed.id }).update({ expires_on: addDays(300), updated_at: mockPg.raw('clock_timestamp()') });
+        await mockPg('bid_kit_items').where({ id: archived.id }).update({ archived_at: mockPg.fn.now(), updated_at: mockPg.raw('clock_timestamp()') });
+        return snapshot;
+      });
+      try {
+        const result = await runBidKitExpiryCheck();
+        expect(result).toMatchObject({ scanned: 3, rang: 1 });
+      } finally {
+        spy.mockRestore();
+      }
+      const keys = episodes.raiseAdminAlertWithReopen.mock.calls.map(([, , , opts]) => opts.dedupeKey);
+      expect(keys).toEqual([`bid-kit:expiry:${kept.id}`]);
     });
 
     test('with the gate off it reads nothing', async () => {

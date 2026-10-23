@@ -5,6 +5,7 @@
 // fileInfo() for the signed-link route. Dates are read as text (YYYY-MM-DD) so no time zone can move them.
 const db = require('../models/db');
 const logger = require('./logger');
+const { errorTag } = require('./bid-kit-log');
 
 const TABLE = 'bid_kit_items';
 
@@ -112,7 +113,7 @@ async function logActivity(adminUserId, action, description, metadata) {
       metadata: metadata ? JSON.stringify(metadata) : null,
     });
   } catch (err) {
-    logger.warn(`[bid-kit] activity_log write failed: ${err.message}`);
+    logger.warn(`[bid-kit] activity_log write failed: ${errorTag(err)}`);
   }
 }
 

@@ -2,9 +2,18 @@
 // item for 7 days, admin bell only, nothing at all with the gate off. The store and the bell are stand-ins here
 // (the SQL runs in bid-kit.db.test.js); every spec is composed by the real notification rules.
 const mockRows = [];
-jest.mock('../services/bid-kit-store', () => ({ listItems: jest.fn(async () => mockRows) }));
+// What a re-read under the lock returns: a row a test changed after the snapshot, else the snapshot's own row.
+const mockFresh = new Map();
+jest.mock('../services/bid-kit-store', () => ({
+  listItems: jest.fn(async () => mockRows),
+  getItem: jest.fn(async (id) => (mockFresh.has(id) ? mockFresh.get(id) : mockRows.find((row) => row.id === id))),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../models/db', () => ({ __db: true }));
+// A transaction is a stand-in that records the advisory lock it takes.
+jest.mock('../models/db', () => {
+  const trx = { __trx: true, raw: jest.fn(async () => ({})) };
+  return { __db: true, trx, transaction: jest.fn(async (fn) => fn(trx)) };
+});
 jest.mock('../services/admin-alert-episodes', () => ({
   raiseAdminAlertWithReopen: jest.fn(),
   openAdminAlertKeys: jest.fn(),
@@ -25,10 +34,14 @@ const item = (id, over = {}) => ({
   id, kind: 'document', item_key: 'insurance_certificate', label: 'Certificate of insurance', has_file: true, value: null,
   expires_on: '2999-01-01', attested_at: null, archived_at: null, ...over,
 });
+// A row the lock's re-read will find (for a save's close, whose item is only a handle).
+const present = (row) => { mockFresh.set(row.id, row); return row; };
+const trx = require('../models/db').trx;
 const ID = (n) => `00000000-0000-4000-8000-00000000000${n}`;
 
 beforeEach(() => {
   mockRows.length = 0;
+  mockFresh.clear();
   jest.clearAllMocks();
   process.env.GATE_BID_KIT = 'true';
   raiseAdminAlert.mockImplementation(async () => ({ id: 'n1', deduped: false, rang: true }));
@@ -66,6 +79,7 @@ test('each bell is an admin bell, deduped per item for 7 days, and links to the 
   const [category, headline, why, opts] = raiseAdminAlert.mock.calls[0];
   expect(category).toBe('system');
   expect(opts).toMatchObject({ bell: true, dedupeKey: `bid-kit:expiry:${ID(1)}`, dedupeWindowMs: 7 * 86400000, link: `/admin/bid-kit?item=${ID(1)}` });
+  expect(opts.trx).toBe(trx); // raised inside the item's locked transaction
   expect(DEDUPE_DAYS).toBe(7);
   expect(keyFor({ id: ID(1) })).toBe(`bid-kit:expiry:${ID(1)}`);
   expect(opts.metadata).toMatchObject({ severity: 'needs-you', who: 'person', subject: { type: 'check', id: ID(1) }, doneWhen: 'item_renewed', bidKitItemId: ID(1) });
@@ -111,23 +125,24 @@ test('a failing bell does not stop the rest, and a failing scan does not throw',
 describe('bells close when the paper no longer needs renewing', () => {
   const CLEAR = expect.stringContaining('renewed, archived or no longer expires');
 
-  test('the daily job closes the open bell of every item that no longer qualifies, and keeps the ones that do', async () => {
+  test('the daily job closes the open bell of every item that no longer qualifies, one locked close each, and keeps the ones that do', async () => {
     mockRows.push(
       item(ID(1), { expires_on: '2026-11-04' }), // still inside the window: keeps its bell
       item(ID(2), { expires_on: '2027-10-01' }), // renewed: the date moved out
       item(ID(3), { expires_on: '2026-10-01', has_file: false }), // no longer there
     ); // ID(4) was archived (not listed at all)
     episodes.openAdminAlertKeys.mockResolvedValue([keyFor({ id: ID(1) }), keyFor({ id: ID(2) }), keyFor({ id: ID(3) }), keyFor({ id: ID(4) })]);
-    episodes.closeAdminAlertKeys.mockResolvedValue(3);
+    episodes.closeAdminAlertKeys.mockResolvedValue(1);
     const result = await runBidKitExpiryCheck({ now: NOW });
     expect(result).toEqual({ scanned: 1, rang: 1, closed: 3 });
     expect(episodes.openAdminAlertKeys).toHaveBeenCalledWith(db, 'bid-kit:expiry:');
-    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
-    const [conn, keys, reason, opts] = episodes.closeAdminAlertKeys.mock.calls[0];
-    expect(conn).toBe(db);
-    expect(keys).toEqual([keyFor({ id: ID(2) }), keyFor({ id: ID(3) }), keyFor({ id: ID(4) })]);
-    expect(reason).toBe('no_longer_qualifies');
-    expect(opts).toEqual({ resolution: CLEAR });
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledTimes(3);
+    for (const call of episodes.closeAdminAlertKeys.mock.calls) {
+      expect(call[0]).toBe(trx); // inside the item's locked transaction
+      expect(call[2]).toBe('no_longer_qualifies');
+      expect(call[3]).toEqual({ resolution: CLEAR });
+    }
+    expect(episodes.closeAdminAlertKeys.mock.calls.map(([, keys]) => keys)).toEqual([[keyFor({ id: ID(2) })], [keyFor({ id: ID(3) })], [keyFor({ id: ID(4) })]]);
   });
 
   test('a failure while closing never fails the job or hides what rang', async () => {
@@ -137,32 +152,32 @@ describe('bells close when the paper no longer needs renewing', () => {
   });
 
   test('a renewal (a save that moves the date out of the window) closes that item\'s bell at once', async () => {
-    const renewed = await syncExpiryBell(item(ID(1), { expires_on: '2027-10-01' }), { now: NOW });
+    const renewed = await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW });
     expect(renewed).toEqual({ closed: 0 }); // the mock closed nothing, but it was asked
-    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(db, [keyFor({ id: ID(1) })], 'renewed', { resolution: CLEAR });
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(trx, [keyFor({ id: ID(1) })], 'renewed', { resolution: CLEAR });
   });
 
   test('an archived item closes its bell, with the archived reason', async () => {
-    await syncExpiryBell(item(ID(1), { expires_on: '2026-10-01', archived_at: new Date() }), { now: NOW });
-    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(db, [keyFor({ id: ID(1) })], 'archived', { resolution: CLEAR });
+    await syncExpiryBell(present(item(ID(1), { expires_on: '2026-10-01', archived_at: new Date() })), { now: NOW });
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(trx, [keyFor({ id: ID(1) })], 'archived', { resolution: CLEAR });
   });
 
   test('an item that still qualifies keeps its bell (a file replaced while the date is still inside or past the window)', async () => {
     for (const expires_on of ['2026-10-01', '2026-11-04', '2026-11-22']) {
-      await syncExpiryBell(item(ID(1), { expires_on }), { now: NOW });
+      await syncExpiryBell(present(item(ID(1), { expires_on })), { now: NOW });
     }
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
   test('with the gate off the save path closes nothing and touches nothing', async () => {
     delete process.env.GATE_BID_KIT;
-    expect(await syncExpiryBell(item(ID(1), { expires_on: '2027-10-01' }), { now: NOW })).toEqual({ skipped: 'gate_off' });
+    expect(await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW })).toEqual({ skipped: 'gate_off' });
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
   test('a failed close never fails the save', async () => {
     episodes.closeAdminAlertKeys.mockRejectedValueOnce(new Error('db down'));
-    expect(await syncExpiryBell(item(ID(1), { expires_on: '2027-10-01' }), { now: NOW })).toEqual({ closed: 0, failed: true });
+    expect(await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW })).toEqual({ closed: 0, failed: true });
   });
 
   test('qualifies is by date: unsigned items count, missing, undated and archived ones do not', () => {
@@ -171,5 +186,93 @@ describe('bells close when the paper no longer needs renewing', () => {
     expect(qualifies(item(ID(1), { expires_on: '2026-11-04', has_file: false }), today)).toBe(false);
     expect(qualifies(item(ID(1), { expires_on: null }), today)).toBe(false);
     expect(qualifies(item(ID(1), { expires_on: '2026-10-01', archived_at: new Date() }), today)).toBe(false);
+  });
+});
+
+describe('the per-item lock and the re-read', () => {
+  const lockCalls = () => trx.raw.mock.calls.map(([sql, params]) => [sql, params[0]]);
+  const LOCK = 'SELECT pg_advisory_xact_lock(hashtext(?))';
+
+  test('every raise takes the item\'s own lock first and reads the row again inside it', async () => {
+    mockRows.push(item(ID(1), { expires_on: '2026-11-04' }), item(ID(2), { expires_on: '2026-10-01' }));
+    await runBidKitExpiryCheck({ now: NOW });
+    expect(lockCalls()).toEqual([[LOCK, `bid-kit:expiry-item:${ID(1)}`], [LOCK, `bid-kit:expiry-item:${ID(2)}`]]);
+    expect(store.getItem.mock.calls.map(([id, conn]) => [id, conn])).toEqual([[ID(1), trx], [ID(2), trx]]);
+  });
+
+  test('a renewal that lands after the snapshot but before the raise leaves no bell: the fresh row does not qualify', async () => {
+    mockRows.push(item(ID(1), { expires_on: '2026-11-04' }), item(ID(2), { expires_on: '2026-11-05' }));
+    // After the list was read, someone renewed item 1 and archived item 2.
+    present(item(ID(1), { expires_on: '2027-10-01' }));
+    present(item(ID(2), { expires_on: '2026-11-05', archived_at: new Date() }));
+    expect(await runBidKitExpiryCheck({ now: NOW })).toEqual({ scanned: 2, rang: 0, closed: 0 });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('the bell is raised from the fresh row, not the snapshot', async () => {
+    mockRows.push(item(ID(1), { expires_on: '2026-11-04' }));
+    present(item(ID(1), { expires_on: '2026-11-10' })); // moved, but still inside the window
+    await runBidKitExpiryCheck({ now: NOW });
+    expect(raiseAdminAlert.mock.calls[0][1]).toBe('Estimates — renew Certificate of insurance, expires Nov 10');
+  });
+
+  test('a save\'s close waits on the same lock and re-reads: a row that qualifies again keeps its bell', async () => {
+    // The handle passed in says "renewed", but the fresh row (changed again) is back inside the window.
+    present(item(ID(1), { expires_on: '2026-11-04' }));
+    expect(await syncExpiryBell({ id: ID(1) }, { now: NOW })).toEqual({ closed: 0 });
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(lockCalls()).toEqual([[LOCK, `bid-kit:expiry-item:${ID(1)}`]]);
+    // And a handle whose row is gone closes the bell.
+    await syncExpiryBell({ id: ID(2) }, { now: NOW });
+    expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[keyFor({ id: ID(2) })], 'archived']);
+  });
+
+  test('closing a stale bell takes the item\'s lock too, and leaves the bell when the fresh row qualifies again', async () => {
+    episodes.openAdminAlertKeys.mockResolvedValue([keyFor({ id: ID(5) }), keyFor({ id: ID(6) }), 'bid-kit:expiry:not-an-id']);
+    mockRows.push(item(ID(5), { expires_on: '2027-10-01' }), item(ID(6), { expires_on: '2027-10-01' }));
+    present(item(ID(6), { expires_on: '2026-11-04' })); // came back inside the window after the snapshot
+    const result = await runBidKitExpiryCheck({ now: NOW });
+    expect(result.closed).toBe(0);
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
+    expect(episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual([keyFor({ id: ID(5) })]);
+    expect(lockCalls().map(([, key]) => key)).toEqual([`bid-kit:expiry-item:${ID(5)}`, `bid-kit:expiry-item:${ID(6)}`]);
+  });
+
+  test('normal expiring items still ring', async () => {
+    mockRows.push(item(ID(1), { expires_on: '2026-10-25' }), item(ID(2), { expires_on: '2026-10-01' }), item(ID(3), { expires_on: '2999-01-01' }));
+    expect(await runBidKitExpiryCheck({ now: NOW })).toEqual({ scanned: 2, rang: 2, closed: 0 });
+  });
+});
+
+describe('no raw database error text reaches a log or the error handler', () => {
+  const logger = require('../services/logger');
+  const { errorTag, scrubError } = require('../services/bid-kit-log');
+  const SECRET = 'Jane Q. Sample, jane.sample@example.test, 100 Fixture Way';
+  const dbError = () => Object.assign(new Error(`insert into "bid_kit_items" ("label") values ('${SECRET}') - value too long`), { code: '22001', constraint: 'bid_kit_items_label_len' });
+  const logged = () => JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls, logger.info.mock.calls]);
+
+  test('the tag is the code (or name) and the constraint, never the message', () => {
+    expect(errorTag(dbError())).toBe('22001 constraint=bid_kit_items_label_len');
+    expect(errorTag(new TypeError('boom jane.sample@example.test'))).toBe('TypeError');
+    expect(errorTag(null)).toBe('Error');
+    const safe = scrubError(dbError());
+    expect(safe.message).toBe('Bid kit request failed (22001 constraint=bid_kit_items_label_len)');
+    expect(safe.code).toBe('22001');
+    expect(safe.stack).not.toMatch(/Jane|jane\.sample|Fixture Way/);
+  });
+
+  test('a failing scan, raise, close and stale close all log the tag only', async () => {
+    mockRows.push(item(ID(1), { expires_on: '2026-11-04', label: SECRET }));
+    raiseAdminAlert.mockRejectedValueOnce(dbError());
+    episodes.openAdminAlertKeys.mockResolvedValueOnce([keyFor({ id: ID(7) })]);
+    episodes.closeAdminAlertKeys.mockRejectedValue(dbError());
+    mockFresh.set(ID(7), undefined);
+    await runBidKitExpiryCheck({ now: NOW });
+    store.listItems.mockRejectedValueOnce(dbError());
+    await runBidKitExpiryCheck({ now: NOW });
+    await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01', label: SECRET })), { now: NOW });
+    expect(logger.warn).toHaveBeenCalled();
+    expect(logged()).not.toMatch(/Jane|jane\.sample|Fixture Way|insert into|bid_kit_items\\?"/);
+    expect(logged()).toContain('22001');
   });
 });

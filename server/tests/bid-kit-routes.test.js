@@ -6,7 +6,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 const mockDb = jest.fn();
 jest.mock('../models/db', () => {
   const db = (...args) => mockDb(...args);
-  db.transaction = (...args) => mockDb(...args);
+  // The expiry bell's per-item lock runs in a transaction: a stand-in that just runs the callback (the lock is a no-op here).
+  db.transaction = async (fn) => fn({ raw: async () => ({}) });
   db.raw = (...args) => mockDb(...args);
   db.fn = { now: () => 'now()' };
   return db;
@@ -816,6 +817,36 @@ describe('no link to business_credentials', () => {
     for (const file of ['routes/admin-bid-kit.js', 'services/bid-kit-store.js', 'services/bid-kit-expiry.js', 'services/bid-kit-files.js', '../shared/bid-kit-catalog.cjs']) {
       const code = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
       expect(code).not.toMatch(/business_credentials|credential_id|credential_number/);
+    }
+  });
+});
+
+describe('no raw database error text reaches the error handler', () => {
+  const SECRET = 'Jane Q. Sample, jane.sample@example.test, 100 Fixture Way';
+  const dbError = () => Object.assign(new Error(`insert into "bid_kit_items" ("label") values ('${SECRET}') - value too long`), { code: '22001' });
+
+  test('a failing write passes on a fixed message with the code, never the message that quotes the label', async () => {
+    store.createItem.mockRejectedValueOnce(dbError());
+    const res = await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'custom', label: SECRET });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Bid kit request failed (22001)');
+    expect(JSON.stringify(res.body)).not.toMatch(/Jane|jane\.sample|Fixture Way|insert into/);
+  });
+
+  test('the same for a list, a patch, a sign-off, an upload and an archive', async () => {
+    const item = await create({ item_key: 'w9', value: 'On file' });
+    const failures = [
+      [store.listItems, () => call('GET', '/api/admin/bid-kit')],
+      [store.updateItem, () => call('PATCH', `/api/admin/bid-kit/${item.id}`, { notes: 'x', expected_updated_at: item.updated_at })],
+      [store.updateItem, () => call('POST', `/api/admin/bid-kit/${item.id}/attest`, { expected_updated_at: item.updated_at })],
+      [store.replaceFile, () => upload(item.id)],
+      [store.archiveItem, () => archive(item.id)],
+    ];
+    for (const [fn, request] of failures) {
+      fn.mockRejectedValueOnce(dbError());
+      const res = await request();
+      expect(res.status).toBe(500);
+      expect(JSON.stringify(res.body)).not.toMatch(/Jane|jane\.sample|Fixture Way|insert into/);
     }
   });
 });

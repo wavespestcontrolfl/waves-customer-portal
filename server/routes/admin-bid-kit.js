@@ -7,6 +7,7 @@ const { bidKitLive } = require('../config/feature-gates');
 const store = require('../services/bid-kit-store');
 const files = require('../services/bid-kit-files');
 const expiry = require('../services/bid-kit-expiry');
+const { scrubError } = require('../services/bid-kit-log');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const { validCalendarDate } = require('../utils/datetime-et');
 
@@ -136,7 +137,7 @@ router.get('/', async (req, res, next) => {
       summary: catalog.summarize(catalog.buildChecklist(live, { today })),
     });
   } catch (err) {
-    next(err);
+    next(scrubError(err));
   }
 });
 
@@ -166,7 +167,7 @@ router.get('/facts-sheet', async (req, res, next) => {
       }));
     res.json({ today, facts, documents });
   } catch (err) {
-    next(err);
+    next(scrubError(err));
   }
 });
 
@@ -188,7 +189,7 @@ router.post('/', async (req, res, next) => {
     await activity(req, 'bid_kit_created', outcome.item);
     return res.status(201).json({ item: present(statusRow(outcome.item), catalog.etToday()) });
   } catch (err) {
-    return next(err);
+    return next(scrubError(err));
   }
 });
 
@@ -214,7 +215,7 @@ router.patch('/:id', async (req, res, next) => {
     await expiry.syncExpiryBell(statusRow(outcome.item));
     return res.json({ item: present(statusRow(outcome.item), catalog.etToday()) });
   } catch (err) {
-    return next(err);
+    return next(scrubError(err));
   }
 });
 
@@ -235,7 +236,7 @@ router.post('/:id/attest', async (req, res, next) => {
     await activity(req, 'bid_kit_attested', outcome.item);
     return res.json({ item: present(statusRow(outcome.item), today) });
   } catch (err) {
-    return next(err);
+    return next(scrubError(err));
   }
 });
 
@@ -246,7 +247,7 @@ function receiveFile(req, res, next) {
     if (!err) return next();
     if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'The file is larger than 15 MB' });
     if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') return res.status(400).json({ error: 'Send one file in the "file" field' });
-    return next(err);
+    return next(scrubError(err));
   });
 }
 
@@ -275,7 +276,7 @@ router.post('/:id/file', receiveFile, async (req, res, next) => {
   } catch (err) {
     if (stored) await files.deleteFile(stored.key);
     if (err instanceof files.FileError) return res.status(err.status).json({ error: err.message });
-    return next(err);
+    return next(scrubError(err));
   }
 });
 
@@ -287,7 +288,7 @@ router.get('/:id/file', async (req, res, next) => {
     return res.json({ url, file_name: info.fileName, expires_in: files.SIGNED_URL_SECONDS });
   } catch (err) {
     if (err instanceof files.FileError) return res.status(err.status).json({ error: err.message });
-    return next(err);
+    return next(scrubError(err));
   }
 });
 
@@ -306,7 +307,7 @@ router.delete('/:id', async (req, res, next) => {
     logger.info(`[bid-kit] item archived (${row.item_key})`);
     return res.json({ success: true, item: present(statusRow(row), catalog.etToday()) });
   } catch (err) {
-    return next(err);
+    return next(scrubError(err));
   }
 });
 
