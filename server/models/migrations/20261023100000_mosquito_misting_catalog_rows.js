@@ -371,6 +371,30 @@ exports.down = async function down(knex) {
       removableIds.push(entry.id);
     }
   }
+  // The two endpoints of a preserved add-on link are ONE unit: both service_addons foreign keys are ON DELETE CASCADE, so deleting
+  // an endpoint would delete the link a retained endpoint still keeps. If either endpoint is retained, retain both (the other is
+  // deactivated with it, its profile, tax row and rule stay) and say so.
+  if (ownedAddonIds.size) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const link of state.addons || []) {
+        if (!link || !link.parent || !link.addon) continue;
+        const parent = state.services.find((entry) => entry && entry.id === link.parent);
+        const addon = state.services.find((entry) => entry && entry.id === link.addon);
+        if (!parent || !addon) continue;
+        const [kept, pulled] = retained.has(parent.key) && !retained.has(addon.key) ? [parent, addon]
+          : (retained.has(addon.key) && !retained.has(parent.key) ? [addon, parent] : [null, null]);
+        if (!kept) continue;
+        retained.add(pulled.key);
+        const at = removableIds.indexOf(pulled.id);
+        if (at >= 0) removableIds.splice(at, 1);
+        await knex('services').where({ id: pulled.id }).update({ is_active: false });
+        console.warn(`[mosquito-misting-conversion-catalog] down: ${pulled.key} (${pulled.id}) is the other end of the add-on link kept by ${kept.key} - service retained and deactivated so the link survives`);
+        changed = true;
+      }
+    }
+  }
   // The add-on link goes only when both of its services go; a retained service keeps its link, profile, tax row and rule.
   if (ownedAddonIds.size && (await knex.schema.hasTable('service_addons'))) {
     const retainedIds = new Set(state.services.filter((entry) => entry && retained.has(entry.key)).map((entry) => entry.id));

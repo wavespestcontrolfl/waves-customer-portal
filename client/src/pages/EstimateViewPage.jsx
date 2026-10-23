@@ -1520,9 +1520,15 @@ export function oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode) {
   // P1) — PPB previews it via extraInvoiceRows, so it is not an "after
   // completion" extra either.
   const setup = (Array.isArray(breakdown?.items) ? breakdown.items : [])
-    .filter((row) => isWaveGuardSetupBreakdownRow(row) || isRodentBaitSetupBreakdownRow(row))
+    .filter((row) => isWaveGuardSetupBreakdownRow(row) || isRodentBaitSetupBreakdownRow(row) || isMistingInstallBreakdownRow(row))
     .reduce((sum, row) => sum + (Number(row.amount ?? row.price ?? row.total) || 0), 0);
   return Math.max(0, Math.round((total - setup) * 100) / 100);
+}
+
+// The misting installation rides the one-time breakdown but is invoiced up front with the accept (PPB previews it via
+// extraInvoiceRows), so it is not an "after completion" extra either.
+export function isMistingInstallBreakdownRow(item = {}) {
+  return String(item?.service || '').toLowerCase() === 'mosquito_misting_installation';
 }
 
 export function isRodentBaitSetupBreakdownRow(item = {}) {
@@ -9041,9 +9047,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Up-front rows beyond the WaveGuard setup (codex #3591 r33 P1): the
   // frozen rodent bait-station setup is invoiced beside the first
   // application by BOTH accept paths, so the payment choice previews it.
-  const rodentSetupInvoiceRows = Number(pricing?.rodentBaitSetupFee?.amount) > 0
-    ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
-    : [];
+  const rodentSetupInvoiceRows = [
+    ...(Number(pricing?.rodentBaitSetupFee?.amount) > 0
+      ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
+      : []),
+    // The mosquito misting installation (misting PR 2a) is invoiced up front beside the first application on the standard,
+    // invoice-mode and annual-prepay invoices, never prepay-waived: PPB previews it as its own row, labeled by the tier.
+    ...(Number(pricing?.mistingInstallFee?.amount) > 0
+      ? [{ label: pricing.mistingInstallFee.label || 'Mosquito Misting System Installation', amount: Number(pricing.mistingInstallFee.amount) }]
+      : []),
+  ];
   // The after-visit card promise the capture surfaces render (GitHub Codex #5481
   // r3): the server's best-case promise (/data afterVisitConsent + version) AND
   // an invoice shape that is actually deferred to the first visit — a setup-only

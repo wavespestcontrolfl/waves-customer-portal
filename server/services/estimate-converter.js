@@ -2291,7 +2291,12 @@ function frozenPrepayOneTimeLines(estimateData = {}) {
   const rodentSetup = Number(frozenRodentBaitSetupAmount(estimateData)) || 0;
   const install = frozenMistingInstall(estimateData);
   const mistingInstall = install ? install.amount : 0;
-  return { rodentSetup, mistingInstall, total: roundMoney(rodentSetup + mistingInstall) };
+  return {
+    rodentSetup,
+    mistingInstall,
+    mistingInstallDescription: install ? install.description : null,
+    total: roundMoney(rodentSetup + mistingInstall),
+  };
 }
 
 // Mosquito misting install office bell (misting PR 2a). The install amount is already a named line on the acceptance invoice

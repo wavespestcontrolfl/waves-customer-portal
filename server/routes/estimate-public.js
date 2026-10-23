@@ -6233,13 +6233,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // this card shows must carry it too — the customer was shown an invoice
   // $99 under the one actually created (codex #3591 r9 P1). Same frozen
   // resolver the accept uses; a locked estimate discloses nothing.
-  const rodentSetupDueToday = !locked
-    ? require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData)
-    : 0;
-  const standardSetupDue = Math.round((setupDueToday + rodentSetupDueToday) * 100) / 100;
-  const standardSetupLabel = setupDueToday > 0 && rodentSetupDueToday > 0
+  // The misting installation (misting PR 2a) rides the same invoices as its own marked line, so it joins every total this card shows
+  // through the same frozen-lines helper the accept and the prepay quote use.
+  const dueTodayOneTimeLines = !locked
+    ? require('../services/estimate-converter').frozenPrepayOneTimeLines(estData)
+    : { rodentSetup: 0, mistingInstall: 0, mistingInstallDescription: null, total: 0 };
+  const rodentSetupDueToday = dueTodayOneTimeLines.rodentSetup;
+  const mistingInstallDueToday = dueTodayOneTimeLines.mistingInstall || 0;
+  const mistingInstallDueLabel = dueTodayOneTimeLines.mistingInstallDescription || 'Mosquito Misting System Installation';
+  const standardSetupDue = Math.round((setupDueToday + rodentSetupDueToday + mistingInstallDueToday) * 100) / 100;
+  const standardBaseSetupLabel = setupDueToday > 0 && rodentSetupDueToday > 0
     ? 'WaveGuard + bait station setup'
     : (rodentSetupDueToday > 0 ? 'bait station setup' : 'WaveGuard setup');
+  const standardSetupLabel = mistingInstallDueToday > 0
+    ? ((setupDueToday > 0 || rodentSetupDueToday > 0) ? `${standardBaseSetupLabel} + misting system installation` : 'misting system installation')
+    : standardBaseSetupLabel;
   const standardInvoiceFirstApplicationAmount = !selectedServiceTierBillsMonthlyForView
     && firstServiceVisitTotal != null
     && firstServiceVisitTotal > 0
@@ -6258,6 +6266,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     && require('../config/feature-gates').pafSetupFeeLive()
     && setupDueToday > 0
     && rodentSetupDueToday <= 0
+    && !(mistingInstallDueToday > 0)
     && !(standardInvoiceFirstApplicationAmount > 0)
     && monthlyTierVisitCountsResolvable(pricingFrequenciesForView);
   const standardInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy({
@@ -6314,7 +6323,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const prepayRefreshRate = annualPrepayWaivesMembership ? 0 : prepayComponents.discountRate;
   // The setup attr is emitted only when a setup is due, so the attribute
   // shape of every non-rodent page stays byte-identical.
-  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"${rodentSetupDueToday > 0 ? ` data-prepay-setup-due="${Number(rodentSetupDueToday)}"` : ''}`;
+  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"${(rodentSetupDueToday + mistingInstallDueToday) > 0 ? ` data-prepay-setup-due="${Math.round((Number(rodentSetupDueToday) + Number(mistingInstallDueToday)) * 100) / 100}"` : ''}`;
   // Effective rate can drop below 1% when the lawn program minimum (or the
   // non-discountable margin floor) protects most of the base — show one
   // decimal there so the copy never reads "save 0%".
@@ -6335,9 +6344,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // the setup line is taxed with the rest (converter r7), so it joins the
   // subtotal BEFORE tax.
   const prepayInvoiceTotal = annualPrepayWaivesMembership
-    ? Math.round((annualTotal + rodentSetupDueToday) * 100) / 100
+    ? Math.round((annualTotal + rodentSetupDueToday + mistingInstallDueToday) * 100) / 100
     : (() => {
-      const base = Math.round((Math.max(0, prepayResolved.amount) + rodentSetupDueToday) * 100) / 100;
+      const base = Math.round((Math.max(0, prepayResolved.amount) + rodentSetupDueToday + mistingInstallDueToday) * 100) / 100;
       // Commercial prepay is taxed on the taxable pest share — quote the
       // TAX-INCLUSIVE total here so the page matches the invoice/PaymentIntent
       // the converter creates (same blended rate + post-discount allocation +
@@ -6410,6 +6419,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
           ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>` : ''}
           ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong data-rodent-setup-due="${Number(rodentSetupDueToday)}">${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
+          ${mistingInstallDueToday > 0 ? `<div class="payment-summary-row"><span>${escapeHtml(mistingInstallDueLabel)}</span><strong data-misting-install-due="${Number(mistingInstallDueToday)}">${fmtMoney(mistingInstallDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
           ${standardInvoiceTotal > 0 && !payAfterSetupFeeCopy ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
@@ -6431,6 +6441,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
           ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong>${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
+          ${mistingInstallDueToday > 0 ? `<div class="payment-summary-row"><span>${escapeHtml(mistingInstallDueLabel)}</span><strong>${fmtMoney(mistingInstallDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
@@ -6550,7 +6561,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     return it.quoteRequired !== true && oneTimeItemAmount(it) > 0;
   });
   const ssrAvgOneTime = ssrMonthlyAverage
-    && ((showMembershipFee && membershipFee > 0 && !membershipSetupWaivedForExistingCustomer) || rodentSetupDueToday > 0 || ssrAvgAdditiveOneTime);
+    && ((showMembershipFee && membershipFee > 0 && !membershipSetupWaivedForExistingCustomer) || rodentSetupDueToday > 0 || mistingInstallDueToday > 0 || ssrAvgAdditiveOneTime);
   const ssrAvgContext = `${monthlyAverageShared.CONTEXT_LINE}${ssrAvgOneTime ? ' One-time charges are not in the average.' : ''}`;
   const ssrAvgSummaryHtml = !ssrMonthlyAverage ? '' : (ssrMonthlyAverage.showPlan ? `
       <div ${ssrAvgAttrs} data-mode-only="recurring" style="margin-top:16px;padding:14px 16px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;font-size:16px;color:#1B2C5B;max-width:900px">
@@ -28779,9 +28790,23 @@ async function buildPricingBundleInner(estimate) {
   // legacy row may carry only stored totals — acceptance bills the frozen
   // setup for all of them, so all of them must preview it. Omitted entirely
   // when no setup was disclosed (payload byte-identical).
-  const frozenRodentSetupForPreview = require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData);
+  const previewOneTimeLines = require('../services/estimate-converter').frozenPrepayOneTimeLines(estData);
+  const frozenRodentSetupForPreview = previewOneTimeLines.rodentSetup;
   const rodentBaitSetupFeeField = frozenRodentSetupForPreview > 0
     ? { rodentBaitSetupFee: { service: 'rodent_bait_setup', amount: frozenRodentSetupForPreview, label: 'Bait Station Setup', waivedWithPrepay: false } }
+    : {};
+  // The misting installation (misting PR 2a): billed up front on the standard, invoice-mode and annual-prepay invoices as its own
+  // marked line, never prepay-waived. Same helper as the accept, so the preview equals the invoice. Omitted when no priced install
+  // was disclosed (payload byte-identical).
+  const mistingInstallFeeField = previewOneTimeLines.mistingInstall > 0
+    ? {
+      mistingInstallFee: {
+        service: 'mosquito_misting_installation',
+        amount: previewOneTimeLines.mistingInstall,
+        label: previewOneTimeLines.mistingInstallDescription || 'Mosquito Misting System Installation',
+        waivedWithPrepay: false,
+      },
+    }
     : {};
   const withManualDiscount = (payload = {}) => {
     const manual = normalizeManualDiscountSummary(estData);
@@ -29065,6 +29090,7 @@ async function buildPricingBundleInner(estimate) {
       setupFee: firstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees,
       ...rodentBaitSetupFeeField,
+      ...mistingInstallFeeField,
       oneTimeBreakdown: storedOneTimeBreakdown,
       ...(serviceCadenceCombos && serviceCadenceCombos.length ? { serviceCadenceCombos } : {}),
       source: 'v1_engine_shape',
@@ -29157,6 +29183,7 @@ async function buildPricingBundleInner(estimate) {
       setupFee: fallbackFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees: fallbackFirstVisitFees,
       ...rodentBaitSetupFeeField,
+      ...mistingInstallFeeField,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
     }), estimate, estData), treeShrubPalmCountForEstData(estData));
@@ -29352,6 +29379,7 @@ async function buildPricingBundleInner(estimate) {
     setupFee: engineFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
     firstVisitFees: engineFirstVisitFees,
     ...rodentBaitSetupFeeField,
+      ...mistingInstallFeeField,
     source: 'engine_invocation',
   }), estimate, estData, { anchorEngineResult }), treeShrubPalmCountForEstData(estData, anchorEngineResult));
   setEstimatePricingCache(estimate, payload);

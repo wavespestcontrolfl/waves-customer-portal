@@ -371,7 +371,7 @@ describe('audit 4: engine-origin install, one prepay total helper, install bell 
     });
     expect(draft.lineItems.some(misting.isMistingInstallLine)).toBe(true);
     expect(draft.amount).toBe(Math.round((59 + INSTALL) * 100) / 100);
-    expect(converter.frozenPrepayOneTimeLines(data)).toEqual({ rodentSetup: 0, mistingInstall: INSTALL, total: INSTALL });
+    expect(converter.frozenPrepayOneTimeLines(data)).toEqual({ rodentSetup: 0, mistingInstall: INSTALL, mistingInstallDescription: 'Essential system (drum) Installation', total: INSTALL });
   });
 
   test('frozenPrepayOneTimeLines: misting + pest prepay quote total equals the minted invoice total; no misting is unchanged', () => {
@@ -388,7 +388,7 @@ describe('audit 4: engine-origin install, one prepay total helper, install bell 
     expect(lines.mistingInstall).toBe(INSTALL);
     const plain = estimateData(undefined, { pest: { frequency: 'quarterly' } });
     const noMisting = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })) };
-    expect(converter.frozenPrepayOneTimeLines(noMisting)).toEqual({ rodentSetup: 0, mistingInstall: 0, total: 0 });
+    expect(converter.frozenPrepayOneTimeLines(noMisting)).toEqual({ rodentSetup: 0, mistingInstall: 0, mistingInstallDescription: null, total: 0 });
     expect(plain.result).toBeDefined();
   });
 
@@ -424,5 +424,63 @@ describe('audit 4: engine-origin install, one prepay total helper, install bell 
       expect(out.body).toContain('before the first plan application on the first plan visit');
       expect(spy).not.toHaveBeenCalled();
     } finally { spy.mockRestore(); }
+  });
+});
+
+describe('audit 5: the customer previews carry the install line the invoices bill', () => {
+  test('standard, invoice-mode and prepay previews equal the invoice builders (one helper, one amount)', () => {
+    const data = estimateData(undefined, { pest: { frequency: 'quarterly' } });
+    const lines = converter.frozenPrepayOneTimeLines(data);
+    const { buildEstimateInvoiceModeDraft } = require('../routes/estimate-public');
+    const firstApplication = 59;
+    // standard: the invoice the accept mints = install + first application
+    const standardInvoice = Math.round((lines.mistingInstall + firstApplication) * 100) / 100;
+    const standardPreview = Math.round((lines.total + firstApplication) * 100) / 100;
+    expect(standardPreview).toBe(standardInvoice);
+    // invoice-mode: the draft bills the same install
+    const install = converter.frozenMistingInstall(data);
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: { id: 5, monthly_total: 59 }, recurringSvcList: [{ name: 'Mosquito Misting Service Plan' }], recurringFirstVisitAmount: firstApplication,
+      effectiveBillingCadence: { frequencyLabel: 'Monthly' }, selectedFrequency: { label: 'Monthly' }, mistingInstall: install,
+    });
+    expect(draft.amount).toBe(standardPreview);
+    // prepay: the quote adds the same amount to the coverage total, as the minted invoice does
+    const recurring = data.result.recurring.services;
+    const baseAnnual = recurring.reduce((sum, row) => sum + (Number(row.annual) || 0), 0);
+    const resolved = converter.resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices: recurring, estimateData: data });
+    expect(Math.round((resolved.amount + lines.total) * 100) / 100).toBe(Math.round((resolved.amount + install.amount) * 100) / 100);
+    expect(lines.mistingInstallDescription).toBe(install.description);
+  });
+
+  test('the payload field is built from the helper, labeled by the tier, and omitted when there is no install', () => {
+    const src = read('routes/estimate-public.js');
+    expect(src).toContain('const previewOneTimeLines = require(\'../services/estimate-converter\').frozenPrepayOneTimeLines(estData);');
+    expect(src).toContain("const mistingInstallFeeField = previewOneTimeLines.mistingInstall > 0");
+    expect(src).toContain("service: 'mosquito_misting_installation',\n        amount: previewOneTimeLines.mistingInstall,");
+    expect(src).toContain("label: previewOneTimeLines.mistingInstallDescription || 'Mosquito Misting System Installation',");
+    expect((src.match(/\.\.\.mistingInstallFeeField,/g) || [])).toHaveLength(3);
+    // no misting: the helper reports zero, the conditional yields {} and the payload is unchanged
+    const none = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })) };
+    expect(converter.frozenPrepayOneTimeLines(none).mistingInstall).toBe(0);
+  });
+
+  test('the due-today cards, the legacy prepay total and the prepay refresh attribute all carry the install', () => {
+    const src = read('routes/estimate-public.js');
+    expect(src).toContain('const dueTodayOneTimeLines = !locked');
+    expect(src).toContain('const standardSetupDue = Math.round((setupDueToday + rodentSetupDueToday + mistingInstallDueToday) * 100) / 100;');
+    expect(src).toContain('Math.round((Math.max(0, prepayResolved.amount) + rodentSetupDueToday + mistingInstallDueToday) * 100) / 100');
+    expect(src).toContain('Math.round((annualTotal + rodentSetupDueToday + mistingInstallDueToday) * 100) / 100');
+    expect(src).toContain('data-prepay-setup-due="${Math.round((Number(rodentSetupDueToday) + Number(mistingInstallDueToday)) * 100) / 100}"');
+    expect(src).toContain('data-misting-install-due="${Number(mistingInstallDueToday)}"');
+    // the commercial tax blend still takes only the rodent setup, as the converter does
+    expect(src).toContain('taxableOneTimeAmount: rodentSetupDueToday,');
+    // the install is not deferred to the first visit
+    expect(src).toContain('&& !(mistingInstallDueToday > 0)');
+  });
+
+  test('the client previews the install via the same extraInvoiceRows seam and keeps it out of the after-completion extras', () => {
+    const client = fs.readFileSync(path.join(__dirname, '..', '..', 'client/src/pages/EstimateViewPage.jsx'), 'utf8');
+    expect(client).toContain('pricing?.mistingInstallFee?.amount');
+    expect(client).toContain('isMistingInstallBreakdownRow(row)');
   });
 });
