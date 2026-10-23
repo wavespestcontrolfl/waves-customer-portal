@@ -232,6 +232,10 @@ describe('patternFromDescription', () => {
     ['ACME2 HARDWARE', '\\bacme\\d*\\b'],
     // a third wildcard would break the grammar's cap: two words instead of a rule that is refused later
     ['ALPHA BETA GAMMA9 CITY', '\\balpha\\W*beta\\b'],
+    // DDA / PUR / ATM framing never anchors a rule either
+    ['VISA DDA PURCHASE 1234 WAWA', '\\bwawa\\b'],
+    ['POS PUR WAWA 5519', '\\bwawa\\b'],
+    ['ATM WDL 0042', null],
   ];
   test.each(cases)('%s → %s', (description, expected) => {
     expect(svc.patternFromDescription(description)).toBe(expected);
@@ -300,17 +304,20 @@ describe('patternFromDescription reads the prefix matching reads', () => {
 describe('the rule table is capped', () => {
   test('at MAX_ENABLED_RULES enabled rules a new rule or a re-enable is refused; the same slot and a disable are not', async () => {
     const many = Array.from({ length: svc.MAX_ENABLED_RULES }, (_, i) => ({ id: `r${i}`, pattern: `payee${i}`, kind: 'personal', enabled: true, priority: 10, created_at: '2026-01-01' }));
-    state.rules = many; state.inserted = [];
+    state.rules = many; state.inserted = []; mockDb.raw.mockClear();
     await expect(svc.createRule({ pattern: 'wawa', kind: 'personal' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/rule table holds 250 enabled rules/) });
     expect(state.inserted).toHaveLength(0);
-    // the same pattern again is that slot, not a new one
+    // the same pattern again is that slot, not a new one; the count and the write run under the rule-table lock
     await expect(svc.createRule({ pattern: 'payee3', kind: 'personal' })).resolves.toBeTruthy();
+    expect(mockDb.raw).toHaveBeenCalledWith('select pg_advisory_xact_lock(?)', [expect.any(Number)]);
+    expect(mockDb.transaction).toHaveBeenCalled();
     // re-enabling a disabled rule takes a slot; disabling never does
     state.bankRow = { id: 'r-off', kind: 'personal', category_id: null, enabled: false, pattern: 'oldpayee' };
     await expect(svc.updateRule('r-off', { enabled: true })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/rule table holds/) });
     await expect(svc.updateRule('r-off', { enabled: false })).resolves.toBeTruthy();
-    state.rules = many.slice(0, 10);
+    state.rules = many.slice(0, 10); mockDb.raw.mockClear();
     await expect(svc.updateRule('r-off', { enabled: true })).resolves.toBeTruthy();
+    expect(mockDb.raw).toHaveBeenCalledWith('select pg_advisory_xact_lock(?)', [expect.any(Number)]); // the re-enable takes its slot under the lock
     state.rules = [];
   });
 });

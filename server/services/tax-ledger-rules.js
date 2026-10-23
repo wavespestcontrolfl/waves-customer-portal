@@ -353,7 +353,9 @@ const STOP = new Set(['the', 'and', 'inc', 'llc', 'ltd', 'corp', 'com', 'www', '
   'withdrawal', 'deposit', 'zelle', 'money', 'sent', 'received', 'from', 'ppd', 'des', 'ref', 'trace', 'bill', 'pay', 'epay', 'electronic', 'eft', 'intl', 'fee', 'des',
   'tst', 'sq', 'paypal', 'pp', 'apl', 'amzn',
   // more statement framing ("DBT CRD 1234 WAWA", "CHKCARD", "PURCH AUTH"): never a payee
-  'dbt', 'crd', 'crdt', 'dbit', 'chkcard', 'chkcrd', 'purch', 'auth', 'pin', 'sig', 'tran', 'trn', 'txn', 'pending', 'temp', 'hold', 'recur']);
+  'dbt', 'crd', 'crdt', 'dbit', 'chkcard', 'chkcrd', 'purch', 'auth', 'pin', 'sig', 'tran', 'trn', 'txn', 'pending', 'temp', 'hold', 'recur',
+  // more statement framing ("VISA DDA PURCHASE", "POS PUR", "ATM WDL", "MISC SVC CHG"): never a payee
+  'dda', 'pur', 'purc', 'atm', 'wdl', 'dep', 'tfr', 'trnsfr', 'chg', 'misc', 'svc']);
 const TOKEN_RE = /[a-z][a-z&'.\-]*/g;
 const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function patternFromDescription(description) {
@@ -490,6 +492,21 @@ async function assertRuleRoom(pattern, conn = db) {
   const canonical = canonicalPattern(pattern);
   const [{ n }] = await conn('tax_ledger_rules').where({ enabled: true }).whereNot({ pattern: canonical }).count({ n: '*' });
   if (Number(n) >= MAX_ENABLED_RULES) throw httpError(400, `the rule table holds ${MAX_ENABLED_RULES} enabled rules: disable or delete rules before adding one`);
+}
+// The cap's count and the write it guards run under one advisory lock, so
+// two concurrent writes (two Always actions on different rows) cannot both
+// read 249 and commit 251. A caller already in a transaction locks that
+// transaction; otherwise one is opened for the count and the write.
+const RULE_TABLE_LOCK = 72310231;
+async function withRuleTableLock(conn, fn) {
+  if (conn.isTransaction) {
+    await conn.raw('select pg_advisory_xact_lock(?)', [RULE_TABLE_LOCK]);
+    return fn(conn);
+  }
+  return conn.transaction(async (trx) => {
+    await trx.raw('select pg_advisory_xact_lock(?)', [RULE_TABLE_LOCK]);
+    return fn(trx);
+  });
 }
 const hasKey = (sug, k) => sug[k] !== undefined && sug[k] !== null;
 
@@ -716,17 +733,20 @@ async function createRule({ pattern, kind, categoryId = null, note = null, prior
   if (!KINDS.includes(kind)) throw httpError(400, `kind must be one of ${KINDS.join(', ')}`);
   const cat = await resolveCategory(categoryId, conn);
   if (kind === 'expense' && !cat) throw httpError(400, 'an expense rule needs a categoryId');
-  await assertRuleRoom(pattern, conn);
-  await assertPatternFast(pattern); // last: the probe takes a worker slot
+  await assertRuleRoom(pattern, conn); // the cheap refusal first (repeated under the lock below)
+  await assertPatternFast(pattern); // the probe takes a worker slot: after the cheap checks, never under the lock
   const row = {
     pattern: canonicalPattern(pattern), kind, category_id: cat ? cat.id : null, irs_line: cat ? cat.irs_line : null,
     note: note ? String(note).slice(0, 500) : null, priority: Number.isFinite(Number(priority)) ? Number(priority) : OWNER_PRIORITY,
     enabled: true, source, updated_at: new Date(),
   };
-  const [saved] = await conn('tax_ledger_rules').insert(row).onConflict('pattern')
-    .merge({ kind: row.kind, category_id: row.category_id, irs_line: row.irs_line, note: row.note, priority: row.priority, enabled: true, source: row.source, updated_at: row.updated_at })
-    .returning('*');
-  return saved;
+  return withRuleTableLock(conn, async (trx) => {
+    await assertRuleRoom(pattern, trx);
+    const [saved] = await trx('tax_ledger_rules').insert(row).onConflict('pattern')
+      .merge({ kind: row.kind, category_id: row.category_id, irs_line: row.irs_line, note: row.note, priority: row.priority, enabled: true, source: row.source, updated_at: row.updated_at })
+      .returning('*');
+    return saved;
+  });
 }
 
 async function ruleUpdatePatch(patch) {
@@ -751,13 +771,17 @@ async function updateRule(id, patch = {}) {
     const next = { kind: row.kind !== undefined ? row.kind : current.kind, category_id: row.category_id !== undefined ? row.category_id : current.category_id };
     if (next.kind === 'expense' && !next.category_id) throw httpError(400, 'an expense rule needs a categoryId');
   }
-  // re-enabling takes a slot under the cap; disabling never does
-  if (row.enabled === true && !current.enabled) await assertRuleRoom(current.pattern);
-  if (patch.pattern !== undefined) await assertPatternFast(patch.pattern); // last: the probe takes a worker slot
+  if (patch.pattern !== undefined) await assertPatternFast(patch.pattern); // the probe takes a worker slot: after the cheap checks, never under the lock
   row.updated_at = new Date();
-  const [saved] = await db('tax_ledger_rules').where({ id }).update(row).returning('*');
-  if (!saved) throw httpError(404, 'rule not found');
-  return saved;
+  const write = async (trx) => {
+    const [saved] = await trx('tax_ledger_rules').where({ id }).update(row).returning('*');
+    if (!saved) throw httpError(404, 'rule not found');
+    return saved;
+  };
+  // re-enabling takes a slot under the cap: counted and written under the
+  // lock; disabling never does
+  if (row.enabled === true && !current.enabled) return withRuleTableLock(db, async (trx) => { await assertRuleRoom(current.pattern, trx); return write(trx); });
+  return write(db);
 }
 
 // The Always rule for an expense is written by create-expense (fromLedger +

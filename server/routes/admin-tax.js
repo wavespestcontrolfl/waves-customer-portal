@@ -3168,6 +3168,9 @@ function taxLedgerOn() { return taxLedgerRules.isOn(); }
 router.get('/bank-import/ledger/status', async (req, res, next) => {
   try {
     if (!taxLedgerOn()) return res.json({ enabled: false });
+    // like every Bank Import snapshot: an expense deleted while the page is
+    // open leaves its row linked to nothing until this heal reopens it
+    await healBankImportSnapshot();
     // the seeds are written at runtime: the first status after the flip
     // must count them, not report "0 rules" until the Rules panel opens
     await taxLedgerRules.ensureSeedRules();
@@ -3195,6 +3198,7 @@ router.use('/bank-import/ledger', (req, res, next) => {
 // not in the P&L until recorded as a sale)
 router.get('/bank-import/ledger/inbox', async (req, res, next) => {
   try {
+    await healBankImportSnapshot(); // a reopened row (its expense deleted since) is in this list
     const rawLimit = parseInt(req.query.limit, 10);
     const limit = Number.isFinite(rawLimit) ? Math.min(200, Math.max(1, rawLimit)) : 50;
     const rawOffset = parseInt(req.query.offset, 10);

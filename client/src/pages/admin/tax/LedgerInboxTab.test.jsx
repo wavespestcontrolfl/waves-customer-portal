@@ -295,6 +295,36 @@ it('a full reload after an Always decision never brings back a row decided while
   expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument();
 });
 
+it('an older status answer never lands after a newer one when two row actions overlap', async () => {
+  const base = fetch;
+  const second = { ...row, id: 'row-2', description: 'OTHER SHOP 55' };
+  const pendingStatus = [];
+  let statusCalls = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/status')) {
+      statusCalls += 1;
+      if (statusCalls === 1) return json({ enabled: true, rules: 3, inbox: 2 });
+      return new Promise((r) => { pendingStatus.push((body) => r(json(body))); });
+    }
+    if (u.includes('/ledger/inbox')) return json({ rows: [row, second], total: 2 });
+    if (u.includes('/ledger/decide')) return json({ success: true, action: 'ignored', ruleCreated: false });
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByText('OTHER SHOP 55');
+  fireEvent.click(within(screen.getByTestId('ledger-row-row-1')).getByRole('button', { name: 'Personal' }));
+  await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
+  fireEvent.click(within(screen.getByTestId('ledger-row-row-2')).getByRole('button', { name: 'Personal' }));
+  await waitFor(() => expect(pendingStatus).toHaveLength(2));
+  // the newer refresh (after row-2) answers first with the true count; the older one (after row-1) answers later and must be ignored
+  await act(async () => { pendingStatus[1]({ enabled: true, rules: 3, inbox: 0 }); });
+  await screen.findByText(/0 rows to review/);
+  await act(async () => { pendingStatus[0]({ enabled: true, rules: 3, inbox: 1 }); });
+  expect(screen.getByText(/0 rows to review/)).toBeInTheDocument();
+  expect(screen.queryByText(/1 rows to review/)).not.toBeInTheDocument();
+});
+
 it('a rule saved with priority 0 keeps 0 (lower runs first); a blank priority is the default 10', async () => {
   const base = fetch;
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {

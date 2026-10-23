@@ -59,6 +59,14 @@ jest.mock('../services/job-costing', () => ({ calculateJobCost: jest.fn(() => Pr
 jest.mock('../services/bank-import', () => ({
   ...jest.requireActual('../services/bank-import'),
   runDeterministicMatching: jest.fn(() => Promise.resolve({ scanned: 0 })),
+  // the snapshot heal every Bank Import read runs first (ledger reads too)
+  resetDanglingLinks: jest.fn(() => Promise.resolve(0)),
+  healEditedExpenseLinks: jest.fn(() => Promise.resolve(0)),
+  healUnreconciledLinks: jest.fn(() => Promise.resolve(0)),
+  healOrphanRefunds: jest.fn(() => Promise.resolve(0)),
+  verifyPendingExpenseClaims: jest.fn(() => Promise.resolve(0)),
+  verifyPendingPayoutClaims: jest.fn(() => Promise.resolve(0)),
+  retryPendingEchoes: jest.fn(() => Promise.resolve(0)),
 }));
 // The service has its own suite; the route test asserts the wiring, the gate
 // and the error mapping. isOn stays real so the gate reads the env.
@@ -118,6 +126,17 @@ describe('gate darkness (bank import on, ledger off)', () => {
 
 describe('gate on', () => {
   beforeEach(() => { process.env.GATE_TAX_LEDGER = 'true'; });
+
+  test('the ledger snapshots heal dangling links first, like the Bank Import ones (an expense deleted while the page is open reopens its row)', async () => {
+    const bankImport = require('../services/bank-import');
+    bankImport.resetDanglingLinks.mockClear();
+    state.counts = { tax_ledger_rules: 1, bank_transactions: 0 };
+    expect((await get(`${P}/status`)).status).toBe(200);
+    expect(bankImport.resetDanglingLinks).toHaveBeenCalledTimes(1);
+    expect((await get(`${P}/inbox?view=open`)).status).toBe(200);
+    expect(bankImport.resetDanglingLinks).toHaveBeenCalledTimes(2);
+    expect(bankImport.verifyPendingExpenseClaims).toHaveBeenCalled();
+  });
 
   test('status counts enabled rules and open rows, later rows excluded', async () => {
     state.counts = { tax_ledger_rules: 37, bank_transactions: 12 };

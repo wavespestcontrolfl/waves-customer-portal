@@ -426,10 +426,14 @@ export default function LedgerInboxTab() {
   const settledRef = useRef(new Set());
   useEffect(() => { viewRef.current = view; }, [view]);
 
+  // sequenced like loadRows: two row actions overlap, each refreshes the
+  // header, and the older answer must not land after the newer one
+  const statusSeq = useRef(0);
   const loadStatus = useCallback(() => {
+    const my = ++statusSeq.current;
     return adminFetch(`${T}/ledger/status`)
-      .then(setStatus)
-      .catch((e) => setLoadError(e.message));
+      .then((s) => { if (my === statusSeq.current) setStatus(s); })
+      .catch((e) => { if (my === statusSeq.current) setLoadError(e.message); });
   }, []);
 
   const loadRows = useCallback((v, offset) => {
