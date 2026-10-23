@@ -78,7 +78,7 @@ const SECTIONS = [
     key: 'rodent',
     heading: 'If your estimate includes rodent trapping',
     lines: [
-      { rank: 1, text: 'Rodent trapping includes the setup visit and one trap check. Any trap checks after that are billed separately.' },
+      { rank: 1, text: 'Rodent trapping includes the setup visit and the trap checks listed on your estimate. Extra trap checks beyond those are quoted separately.' },
     ],
   },
 ];

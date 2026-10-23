@@ -65,7 +65,7 @@ const PHRASE = {
   pest: 'IF YOUR ESTIMATE INCLUDES PEST CONTROL',
   lawn: 'Your lawn plan covers fertilizer',
   termite: 'We do not tent',
-  rodent: 'Rodent trapping includes the setup visit',
+  rodent: 'Rodent trapping includes the setup visit and the trap checks listed',
   contract: 'no long-term contract',
   prepay: 'If you prepay for the year',
   wdo: 'WDO (termite) inspection report',
