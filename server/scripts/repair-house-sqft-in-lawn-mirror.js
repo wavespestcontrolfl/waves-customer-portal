@@ -116,8 +116,11 @@ function classify({ customer, turf, primary, estimates, leads }) {
   }
   for (const l of leads || []) {
     if (l.lead_type !== QUOTE_LEAD_TYPE) continue;
-    const n = Number(parseData(l.extracted_data).homeSqFt);
-    if (Number.isFinite(n) && Math.round(n) === propertySqft) evidence.push({ houseField: 'lead.extracted_data.homeSqFt', leadId: l.id, createdAt: l.created_at });
+    const data = parseData(l.extracted_data);
+    const n = Number(data.homeSqFt);
+    // A lead row is minted by the property lookup and re-typed in place on each calculation, so its created_at is
+    // the mint; the quote request's own time is extracted_data.wizard_submitted_at (codex #6520 r3 P2).
+    if (Number.isFinite(n) && Math.round(n) === propertySqft) evidence.push({ houseField: 'lead.extracted_data.homeSqFt', leadId: l.id, createdAt: data.wizard_submitted_at || l.created_at });
   }
   if (!evidence.length) return { class: 'unproven', propertySqft };
   const primaryMatches = !!primary && Number(primary.property_sqft) === propertySqft;

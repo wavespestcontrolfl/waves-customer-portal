@@ -83,6 +83,16 @@ describe('write provenance (pre-push audit on 75ecf0d2f9)', () => {
     expect(classify(row(new Date(Date.parse('2026-10-08T20:33:19Z') - QUOTE_WRITE_WINDOW_MS - 1000).toISOString(), 2614, '2026-10-08T20:33:19Z')).class).toBe('legacy_ambiguous_review');
     expect(classify(row(null, 2614, '2026-10-08T20:33:19Z')).class).toBe('legacy_ambiguous_review');
   });
+
+  test('lead evidence is timed by the quote submission, not the lookup mint (codex #6520 r3 P2)', () => {
+    // Lookup minted the lead at 20:10, the visitor submitted at 20:33 and the customer row was created then.
+    const lead = { id: 'l1', lead_type: 'quote_wizard', created_at: '2026-10-08T20:10:00Z', extracted_data: JSON.stringify({ stage: 'quote_calculated', wizard_submitted_at: '2026-10-08T20:33:10Z', homeSqFt: 2614 }) };
+    const r = { ...row('2026-10-08T20:33:05Z', 2614, '2026-10-08T20:33:19Z'), estimates: [], leads: [lead] };
+    expect(classify(r)).toMatchObject({ class: 'house_in_lawn_mirror', leadId: 'l1' });
+    // Without a submission stamp the mint time is all there is: outside the window → review.
+    const unstamped = { ...lead, extracted_data: JSON.stringify({ homeSqFt: 2614 }) };
+    expect(classify({ ...r, leads: [unstamped] }).class).toBe('legacy_ambiguous_review');
+  });
 });
 
 describe('parseArgs', () => {
