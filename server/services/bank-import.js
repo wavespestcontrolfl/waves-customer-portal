@@ -1951,6 +1951,7 @@ async function ledgerCoverage(year) {
 }
 
 module.exports = {
+  EXPENSE_DATE_WINDOW_DAYS,
   parseStatementCsv,
   withRowHashes,
   hashRow,
