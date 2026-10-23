@@ -30,7 +30,7 @@ const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
 const bermudaRemoval = require('./lawn-bermuda-removal');
-const { FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
+const { FUNGUS_NITROGEN_NOTE_KEY, RECLAIMED_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
 const { PRODUCT_SWAP_NOTE_KEY } = require('../config/lawn-v13-trouble-product-swaps');
 const { CHINCH_TETRINO_NOTE_KEY } = require('../config/lawn-v13-chinch-rate');
 const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
@@ -542,11 +542,14 @@ function programRateFor(item, programRows) {
   return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
 }
 
-// GATE_LAWN_NOV_LARGE_PATCH_N / GATE_LAWN_DEC_LARGE_PATCH_K: a nitrogen line the plan sized for the reduced target (or the potassium bag the plan swapped in) keeps the plan's note on the sheet (the planned row
-// prints its gateNotes). Only that note is carried: every other planned row is the payload it was. `{}` when the plan did not cut the bag.
-// GATE_LAWN_CHINCH_TETRINO_RATE: the Tetrino line the plan sized at the raised chinch rate keeps its note the same way.
-function fungusNitrogenNoteOf(item) {
-  const texts = (Array.isArray(item.gateNotes) ? item.gateNotes : []).filter((note) => (note?.key === FUNGUS_NITROGEN_NOTE_KEY || note?.key === CHINCH_TETRINO_NOTE_KEY || note?.key === PRODUCT_SWAP_NOTE_KEY) && note.text).map((note) => note.text);
+// GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N: a nitrogen line the plan sized for a reduced target (or left at its full rate on
+// a reclaimed lawn because it carries the pre-emergent or the winter potash) keeps the plan's note on the sheet (the planned row prints its
+// gateNotes). GATE_LAWN_CHINCH_TETRINO_RATE: the Tetrino line the plan sized at the raised chinch rate keeps its note the same way.
+// GATE_LAWN_DEC_LARGE_PATCH_K: so does the potassium bag the plan swapped in. Only those notes are carried: every other planned row is the
+// payload it was. `{}` when the plan wrote none.
+const NITROGEN_NOTE_KEYS = [FUNGUS_NITROGEN_NOTE_KEY, RECLAIMED_NITROGEN_NOTE_KEY, CHINCH_TETRINO_NOTE_KEY, PRODUCT_SWAP_NOTE_KEY];
+function nitrogenNoteOf(item) {
+  const texts = (Array.isArray(item.gateNotes) ? item.gateNotes : []).filter((note) => NITROGEN_NOTE_KEYS.includes(note?.key) && note.text).map((note) => note.text);
   return texts.length ? { gateNotes: texts } : {};
 }
 
@@ -760,7 +763,7 @@ async function sheetPlanned({ plan, items, addOns }, knex) {
       ratePer1000: item.mix?.ratePer1000 ?? null,
       rateUnit: item.mix?.rateUnit ?? null,
       ...programRateFor(item, programRows),
-      ...fungusNitrogenNoteOf(item),
+      ...nitrogenNoteOf(item),
       approvedForReport: entry.approvedForReport,
       wateringRule: entry.rule,
       wateringSummary: entry.ruleSummary,

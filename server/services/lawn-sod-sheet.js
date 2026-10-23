@@ -245,6 +245,32 @@ async function loadSwapRow(knex) {
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
+// GATE_LAWN_RECLAIMED_HALF_N: the swap bag is plain 24-0-11, which carries no pre-emergent, so on a reclaimed lawn it takes the same half
+// nitrogen as any other N line. The decision is the plan engine's ONE nitrogenDecision (the bag's stated nitrogen is the target; the rate
+// scales with it), never a second copy. Gate off, not reclaimed or a failed read: the bag as it was (the engine is not even loaded).
+// Returns the swap bag (the baseline for the plan window when it could be resolved, else the visit day's), with `reclaimedNote` (the line note the plan writes for a halved bag) when it was halved.
+async function reclaimedSwapBag({ swapBag, swapRow, visitDay, knex, svc, grass }) {
+  if (!featureGates.lawnReclaimedHalfNLive()) return swapBag;
+  const engine = require('./waveguard-plan-engine');
+  // v13 is the visit's actual protocol, decided the way the planner decides it: GATE_LAWN_V13 live AND the visit not pinned to another
+  // version (or unresolvable). An older pinned protocol, or the v13 gate off, keeps the bag as it was.
+  if (featureGates.lawnV13Live?.() !== true) return swapBag;
+  const { onV13, windowMonth } = await engine.visitOnV13Protocol(knex, svc, { trackKey: grass });
+  if (!onV13) return swapBag;
+  // The month of the plan window the bag replaces: the pinned window under the completion defaults (a 9x April visit moved into May still
+  // replaces April's 0.5 lb N pass), else the service date's month, exactly as the planner reads it. The baseline bag follows that month.
+  const planMonth = (windowMonth && require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled() ? windowMonth : null)
+    || Number(String(visitDay || '').slice(5, 7));
+  const baseline = swapBagFor(visitDay, planMonth);
+  const decision = await engine.nitrogenDecision(knex, svc, { targetN: baseline.lbN, monthNumber: planMonth, v13Active: true });
+  if (decision?.reclaimed !== 'half' || !(decision.cut < baseline.lbN)) return baseline;
+  const lbPer1000 = round2((baseline.lbPer1000 * decision.cut) / baseline.lbN);
+  const [note] = engine.nitrogenCutNotes(
+    { rateSource: 'target_n_analysis', targetNPer1000: decision.cut, ratePer1000: lbPer1000 }, swapRow, { reclaimedWater: 'half', nitrogenCut: decision.cut },
+  );
+  return { ...baseline, lbPer1000, lbN: decision.cut, reclaimedNote: note?.text || null };
+}
+
 // The swap bag as a plan-shaped item, built from the item it replaces (method, area) and the
 // bag's own catalog row (watering rule, name). The rate is the owner's: 2.5 lb per 1,000 sq ft.
 function swapItemFor(original, swapRow, ruleFor, bag) {
@@ -260,6 +286,7 @@ function swapItemFor(original, swapRow, ruleFor, bag) {
     areaUnit: sqft ? 'sqft' : null,
     ratePer1000: bag.lbPer1000,
     rateUnit: 'lb',
+    ...(bag.reclaimedNote ? { gateNotes: [bag.reclaimedNote] } : {}),
     approvedForReport: entry.approvedForReport,
     wateringRule: entry.rule,
     wateringSummary: entry.ruleSummary,
@@ -288,16 +315,17 @@ async function loadSodForContext({ svc, knex, readFailures, plannedProducts, rul
     if (!laid) return none;
     if (!(await visitIsAtSodHome(svc, knex))) return none;
     const visitDay = etCalendarDayOf(svc.scheduled_date);
+    const grass = await grassOf(svc, knex);
     const holds = sodHolds({
       sodLaidOn: laid,
       sodCovers: prefs.sod_covers,
       sodArea: prefs.sod_area,
       sodRootedOn: prefs.sod_rooted_on,
       visitDate: visitDay,
-      grass: await grassOf(svc, knex),
+      grass,
     });
     if (!holds?.active) return none;
-    return await withLines({ holds, visitDay, knex, plannedProducts, ruleFor });
+    return await withLines({ holds, visitDay, knex, svc, grass, plannedProducts, ruleFor });
   } catch (err) {
     // No driver message: it can echo SQL and bound values.
     logger.warn(`[lawn-sod-sheet] sod record unavailable for ${svc?.id}: ${err?.code || err?.name || 'Error'}`);
@@ -463,7 +491,7 @@ async function classifyLines({ holds, plannedProducts, knex }) {
 // The bag swap: the primary spreader line is the pre-emergent fertilizer bag, the
 // pre-emergent is held and the fertilizer is not (lawn-sod-holds: swapPreEmergentBag).
 // Adds the swap line after the bag and holds the bag (writes into `lines`).
-async function applyBagSwap({ holds, visitDay, knex, ruleFor, items, classesById, lines }) {
+async function applyBagSwap({ holds, visitDay, knex, svc, grass, ruleFor, items, classesById, lines }) {
   if (!holds.swapPreEmergentBag) return { swap: null, nextItems: items };
   const bag = items.find((item) => {
     const classes = classesById.get(lowerId(item.productId)) || [];
@@ -478,7 +506,7 @@ async function applyBagSwap({ holds, visitDay, knex, ruleFor, items, classesById
     return { swap: { resolved: false, forProductId: bagId, reason: SWAP_BY_HAND }, nextItems: items };
   }
   // October: 2.5 lb per 1,000. April (the 9-visit plan): 2.1 lb per 1,000. Keyed on the visit's month in lawn-sod-holds.
-  const swapBag = swapBagFor(visitDay);
+  const swapBag = await reclaimedSwapBag({ swapBag: swapBagFor(visitDay), swapRow, visitDay, knex, svc, grass });
   const swapItem = swapItemFor(bag, swapRow, ruleFor, swapBag);
   lines[bagId] = { held: true, kinds: ['preEmergent'], reason: `Held: new sod. ${startsWords('preEmergent', holds.preEmergent)} Use ${swapRow.name} instead.` };
   return {
@@ -530,9 +558,9 @@ function plannedHeldOf(holds, items, classesById) {
  * planned line is held, and no swap is left for the technician to do by hand (a bag spread by
  * hand is a product applied). The completion preflight re-derives it from this same function.
  */
-async function withLines({ holds, visitDay, knex, plannedProducts, ruleFor }) {
+async function withLines({ holds, visitDay, knex, svc, grass, plannedProducts, ruleFor }) {
   const { items, lines, classesById } = await classifyLines({ holds, plannedProducts, knex });
-  const { swap, nextItems } = await applyBagSwap({ holds, visitDay, knex, ruleFor, items, classesById, lines });
+  const { swap, nextItems } = await applyBagSwap({ holds, visitDay, knex, svc, grass, ruleFor, items, classesById, lines });
 
   // Every primary line held (the swap bag, when added, is a line that is not): nothing goes
   // down on the whole lawn today.

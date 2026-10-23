@@ -313,6 +313,41 @@ describe('buildLawnFastContext', () => {
     expect(spray).not.toHaveProperty('gateNotes');
   });
 
+  test('GATE_LAWN_RECLAIMED_HALF_N: the half-nitrogen note and the pre-emergent bag note ride the planned line onto the sheet, as the only notes carried', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const HALF = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
+    const KEPT = 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.';
+    const lineWith = (note) => ({
+      product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast',
+      mix: { amount: 15.625, amountUnit: 'lb', ratePer1000: 1.5625, rateUnit: 'lb', treatedSqft: 10000 },
+      gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, note],
+    });
+    for (const text of [HALF, KEPT]) {
+      buildPlanForService.mockResolvedValue({ completionDefaults: { items: [lineWith({ key: 'reclaimedNitrogen', severity: 'note', text })] } });
+      const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+      expect(ctx.plannedProducts.items[0]).toMatchObject({ productId: P_GRAN, gateNotes: [text] });
+    }
+  });
+
+  test('the reclaimed lawn with active fungus: BOTH the half-nitrogen note and the fungus spreader instruction ride the planned line onto the sheet', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const HALF = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
+    const FUNGUS = 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.';
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [{
+          product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast',
+          mix: { amount: 15.625, amountUnit: 'lb', ratePer1000: 1.5625, rateUnit: 'lb', treatedSqft: 10000 },
+          gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, { key: 'reclaimedNitrogen', severity: 'note', text: HALF }, { key: 'activeFungusNitrogen', severity: 'note', text: FUNGUS }],
+        }],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    expect(ctx.plannedProducts.items[0].gateNotes).toEqual([HALF, FUNGUS]);
+  });
+
   test('GATE_LAWN_CHINCH_TETRINO_RATE: a Tetrino line the plan sized at the raised rate keeps its chinch note and amount on the sheet; no other planned row gains a note', async () => {
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';

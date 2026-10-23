@@ -10,8 +10,8 @@ const {
   matchCatalogProduct,
   visitNutrientTargets,
   sheetReadsPlansStep,
+  nitrogenCutNotes,
   visitProjectionLive,
-  fungusNitrogenNotes,
   productSwapNotes,
   chinchRateRows,
   chinchTetrinoNotes,
@@ -1063,10 +1063,11 @@ router.get('/lawn-mix', async (req, res, next) => {
     // the sheet keeps the 12x step, warns, and checks no limits.
     const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q));
     const { visit: recipeStep, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
-    // The visit the sheet reads: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_DEC_LARGE_PATCH_K) its copy with the cut nitrogen or the swapped bag stated, so the
-    // line text, the objective and the amount agree. Only a visit the planner would also plan on v13, and only for the month of the
-    // window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
-    const { visit, targets: nutrientTargets, nitrogenCut, chinchRate, productSwap } = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }) });
+    // The visit the sheet reads: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N, GATE_LAWN_DEC_LARGE_PATCH_K) its copy
+    // with the cut nitrogen or the swapped bag stated, so the line text, the objective and the amount agree. Only a visit the planner would also
+    // plan on v13, and only for the month of the window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
+    const nitrogen = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }) });
+    const { visit, targets: nutrientTargets, chinchRate, productSwap } = nitrogen;
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
@@ -1168,7 +1169,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
-        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...fungusNitrogenNotes(plannedMix, nitrogenCut), ...chinchTetrinoNotes(v13Line?.row, plannedMix, chinchRate), ...productSwapNotes(product, productSwap, v13Rows)]) : {}),
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...nitrogenCutNotes(plannedMix, product, nitrogen), ...chinchTetrinoNotes(v13Line?.row, plannedMix, chinchRate), ...productSwapNotes(product, productSwap, v13Rows)]) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render

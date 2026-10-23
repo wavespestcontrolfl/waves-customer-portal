@@ -1361,6 +1361,70 @@ describe('the November nitrogen target on the lawn brief', () => {
   });
 });
 
+// GATE_LAWN_RECLAIMED_HALF_N: the brief states a reclaimed lawn's nitrogen bag the way the plan sizes it (half), and leaves a pre-emergent bag alone.
+describe('the nitrogen target on the lawn brief for a reclaimed property', () => {
+  const { LAWN_V13_VERSION } = require('../services/lawn-program');
+  const water = require('../services/lawn-reclaimed-water');
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_RECLAIMED_HALF_N'];
+  const BAG = 'LESCO 24-0-11 with PolyPlus OPTI';
+  const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
+  const visit = (month, name, targetN) => mockSummarize.mockReturnValue({
+    version: LAWN_V13_VERSION,
+    window: { key: `m${month}`, month, title: 'Visit', visitType: 'granular', goal: 'Feed' },
+    products: [{ productName: name, productId: 'p1', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, gates: { targetN, blackoutSensitive: true } }],
+  });
+  let reclaimed;
+  beforeEach(() => {
+    for (const name of GATES) process.env[name] = 'true';
+    reclaimed = jest.spyOn(water, 'isReclaimedService').mockResolvedValue(true);
+  });
+  afterEach(() => { for (const name of GATES) delete process.env[name]; reclaimed.mockRestore(); });
+  const bagFor = async (date, name) => {
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: date, property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }] }));
+    expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+    const guidance = storedBrief(state).brief.product_guidance;
+    return [...guidance.products, ...guidance.conditional_products].find((p) => p.name === name);
+  };
+
+  test('the bag states half the nitrogen with the reason and the normal figure', async () => {
+    visit(2, BAG, '0.75 lb N/1000');
+    expect((await bagFor('2026-02-10', BAG)).gates).toEqual({ targetN: '0.375 lb N/1000 (reclaimed water, half; normal 0.75 lb N/1000)', blackoutSensitive: true });
+    expect(reclaimed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'svc-1' }), { strict: true });
+  });
+
+  test('a pre-emergent plus fertilizer bag keeps its stated target', async () => {
+    visit(10, DIMENSION, '0.73 lb N/1000');
+    expect((await bagFor('2026-10-14', DIMENSION)).gates.targetN).toBe('0.73 lb N/1000');
+  });
+
+  test('the December potash bag (states K2O) keeps its stated target', async () => {
+    mockSummarize.mockReturnValue({
+      version: LAWN_V13_VERSION,
+      window: { key: 'dec', month: 12, title: 'December', visitType: 'granular', goal: 'Feed' },
+      products: [{ productName: 'LESCO 10-0-22 50% PolyPlus OPTI45', productId: 'p1', role: 'nutrition', applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', defaultInPlan: true, gates: { targetN: '0.45 lb N/1000', targetK2O: '0.99 lb K2O/1000', blackoutSensitive: true } }],
+    });
+    expect((await bagFor('2026-12-10', 'LESCO 10-0-22 50% PolyPlus OPTI45')).gates.targetN).toBe('0.45 lb N/1000');
+  });
+
+  test('a lawn that is not reclaimed, and the gate off (no read), keep the stored target', async () => {
+    visit(2, BAG, '0.75 lb N/1000');
+    reclaimed.mockResolvedValue(false);
+    expect((await bagFor('2026-02-10', BAG)).gates.targetN).toBe('0.75 lb N/1000');
+    reclaimed.mockClear();
+    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+    reclaimed.mockResolvedValue(true);
+    expect((await bagFor('2026-02-10', BAG)).gates.targetN).toBe('0.75 lb N/1000');
+    expect(reclaimed).not.toHaveBeenCalled();
+  });
+
+  test('a failed property read aborts the generation, as the brief\'s other reads do', async () => {
+    visit(2, BAG, '0.75 lb N/1000');
+    reclaimed.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2026-02-10', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }] }));
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('db down');
+  });
+});
+
 // GATE_LAWN_CHINCH_TETRINO_RATE (owner 2026-10-22): the brief states the May Tetrino rate the way the plan does.
 describe('the May Tetrino rate on the lawn brief', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');

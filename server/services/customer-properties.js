@@ -68,6 +68,8 @@ function isNewAddress(existingProps, candidate = {}) {
   return !(existingProps || []).some((p) => addressKey(p) === key);
 }
 
+const RECLAIMED_COLUMNS = ['reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at'];
+
 /** Active properties for a customer, primary first. */
 async function listProperties(customerId, conn = db) {
   if (!customerId) return [];
@@ -75,9 +77,17 @@ async function listProperties(customerId, conn = db) {
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
   const customer = await conn('customers').where({ id: customerId }).first('contact_role');
-  return properties.map(property => {
+  // GATE_LAWN_RECLAIMED_HALF_N off: the old payload exactly, without the three reclaimed-water columns.
+  const showReclaimed = (require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true);
+  // Gate on: each row carries the answer the plan uses, including one inherited from a merged-away copy of the address.
+  const rows = showReclaimed
+    ? await Promise.all(properties.map(property => require('./lawn-reclaimed-water').effectiveReclaimedRow(conn, property)))
+    : properties;
+  return rows.map(property => {
     const unavailable = primaryPropertyUnavailable(property, customer);
-    return { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
+    const row = { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
+    if (!showReclaimed) for (const column of RECLAIMED_COLUMNS) delete row[column];
+    return row;
   });
 }
 
@@ -223,7 +233,18 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source, lockWait
  * customers.address_* (filled only when empty), so the ~310 mirror readers see a
  * service address. Returns { created, propertyId }.
  */
-async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
+// A coordinate pair the picker selected: both finite numbers (or numeric strings) inside the globe; anything else is ignored, never an error
+// (the coordinates are a bonus on the address, not part of what staff typed). Rounded to the column's 7 decimals.
+const coordinateNumber = (value) => (value === null || value === '' || typeof value === 'boolean' ? NaN : Number(value));
+const validCoordinates = (lat, lng) => Number.isFinite(coordinateNumber(lat)) && Number.isFinite(coordinateNumber(lng))
+  && Math.abs(coordinateNumber(lat)) <= 90 && Math.abs(coordinateNumber(lng)) <= 180 && !(coordinateNumber(lat) === 0 && coordinateNumber(lng) === 0);
+const roundCoordinate = (value) => Math.round(coordinateNumber(value) * 1e7) / 1e7;
+// The address picker's coordinates as insert columns: a validated pair, rounded, or nothing. They feed only the reclaimed-water meter
+// match, so GATE_LAWN_RECLAIMED_HALF_N off stores nothing (the old insert exactly).
+const pickerCoordinateColumns = (lat, lng) => ((require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true) && validCoordinates(lat, lng)
+  ? { latitude: roundCoordinate(lat), longitude: roundCoordinate(lng) } : {});
+
+async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, latitude = null, longitude = null, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
   const street = String(address_line1 || '').trim();
   if (!customerId || !street) return { created: false, propertyId: null };
 
@@ -283,6 +304,9 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
     city: city || null,
     state: state || 'FL',
     zip: zip || null,
+    // The address picker's selected coordinates (staff-added address), when the caller has validated ones: the county reclaimed-water match
+    // and the route planner read them. Absent = the property stays coordinate-less until an enrichment sets them, as before.
+    ...pickerCoordinateColumns(latitude, longitude),
     address_key: key,
     source,
     active: true,
@@ -455,18 +479,47 @@ async function completePrimaryCore(customerId, call, conn) {
 // directory's own street normalizer: USPS suffix and directional spellings,
 // unit tails; city/state case and ZIP+4 ignored), so a unit-only or
 // format-only edit ("100 Bay Cove" → "100 Bay Cv") clears nothing.
-function neighborhoodResetOnMove(from, to) {
+function addressMoved(from, to) {
   const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
   // sameStreetLine compares the street only, so the house number is its own test.
   const houseNumber = (line) => (String(line || '').match(/^\s*(\d+)/) || [])[1] || '';
-  const moved = houseNumber(from.address_line1) !== houseNumber(to.address_line1)
+  return houseNumber(from.address_line1) !== houseNumber(to.address_line1)
     || !sameStreetLine(stripTrailingUnit(from.address_line1), stripTrailingUnit(to.address_line1))
     || !same(from.city, to.city)
     || !same(from.state, to.state)
     || normalizeZip(from.zip) !== normalizeZip(to.zip);
-  return moved
+}
+
+function neighborhoodResetOnMove(from, to) {
+  return addressMoved(from, to)
     ? { neighborhood_id: null, neighborhood_source: null, county_subdivision: null, neighborhood_checked_at: null }
     : {};
+}
+
+// GATE_LAWN_RECLAIMED_HALF_N: whether a lawn is watered with reclaimed water belongs to the HOME, not the row. A genuine street/locality
+// move (the same canonical test as the neighborhood reset: a unit-only or format-only edit clears nothing) drops the answer, whoever gave
+// it (county, office or customer), so the next county tick settles the new address and the office is asked again. Cleared whatever the
+// gate says, so a value saved while the gate was on cannot outlive the address it described. Only when the row has a value to clear, so a
+// property that never had one is not written to (and a database without the columns is not touched).
+function reclaimedResetOnMove(from, to) {
+  const hasValue = from.reclaimed_water != null || from.reclaimed_water_source != null || from.reclaimed_water_checked_at != null;
+  return hasValue && addressMoved(from, to)
+    ? { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null }
+    : {};
+}
+
+// GATE_LAWN_RECLAIMED_HALF_N: a unit-only or format-only edit (addressMoved false) does not move the building, so a property whose
+// reclaimed answer is the county's keeps its coordinates. Clearing them would fire the coordinate-reset trigger (migration
+// 20261023110000) and drop a still-valid county verdict, putting the lawn back on full nitrogen until the next county tick. Gate off, or
+// no county answer, or a real move: the coordinates clear exactly as before.
+function coordsResetOnSync(from, to, preserveCoords) {
+  return preserveCoords || keepsCountyReclaimedPin(from, to) ? {} : { latitude: null, longitude: null };
+}
+function keepsCountyReclaimedPin(from, to) {
+  const countyAnswer = from.reclaimed_water_source === 'county_meter'
+    || (from.reclaimed_water_source == null && from.reclaimed_water_checked_at != null);
+  return countyAnswer && from.latitude != null && from.longitude != null && !addressMoved(from, to)
+    && (require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true);
 }
 
 /**
@@ -523,14 +576,11 @@ async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = fal
   // preserveCoords (r43): a unit-only edit does not move the building — the
   // caller keeps the still-valid coordinates instead of gambling on the
   // best-effort re-geocode.
-  if (!preserveCoords) {
-    next.latitude = null;
-    next.longitude = null;
-  }
+  Object.assign(next, coordsResetOnSync(primary, next, preserveCoords));
   // A street/locality move takes the property out of its neighborhood (and
   // the shared gate code) — an office pick included — so clear it for a later
   // relink, whatever the caller does with coords.
-  Object.assign(next, neighborhoodResetOnMove(primary, next));
+  Object.assign(next, neighborhoodResetOnMove(primary, next), reclaimedResetOnMove(primary, next));
   next.updated_at = new Date();
   // Errors PROPAGATE (no swallow) so a transactional caller can roll back the
   // mirror edit + surface a 409 on a unique address-index collision rather than
@@ -874,6 +924,34 @@ function propertyActionError(message, statusCode = 400, code = 'invalid_property
   return Object.assign(new Error(message), { statusCode, status: statusCode, isOperational: true, code });
 }
 
+// The fields a saved property may be edited or added with beyond its address, each with its one normalization/validation rule and, where the
+// write stamps other columns with it, those columns. manualPropertyFields applies `normalize`; editManualProperty applies `columns`.
+// reclaimed_water (GATE_LAWN_RECLAIMED_HALF_N) is the office's answer for the lawn water: true, false, or null = back to the county match. It
+// changes a nitrogen dose, so it goes through this audited writer, with its source ('office') and time written alongside.
+const EDITABLE_FIELDS = {
+  label: { normalize: value => value || null },
+  occupancy_type: { normalize: value => {
+    if (!OCCUPANCY_TYPES.includes(value)) throw propertyActionError('invalid occupancy_type');
+    return value;
+  } },
+  relationship: { normalize: value => {
+    const relationship = require('../constants/property-relationships').normalizeRelationship(value);
+    if (!relationship.ok) throw propertyActionError('invalid relationship');
+    return relationship.value;
+  } },
+  reclaimed_water: {
+    normalize: (value, kind) => {
+      if (kind !== 'edit' || !(require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true)) throw propertyActionError('reclaimed_water cannot be set here');
+      if (value !== null && typeof value !== 'boolean') throw propertyActionError('reclaimed_water must be true, false or null');
+      return value;
+    },
+    columns: (value, trx) => ({
+      reclaimed_water_source: value === null ? null : 'office',
+      reclaimed_water_checked_at: value === null ? null : trx.fn.now(),
+    }),
+  },
+};
+
 function manualPropertyFields(kind, input = {}) {
   for (const [field, max] of Object.entries(PROPERTY_FIELD_LIMITS)) {
     if (input[field] == null) continue;
@@ -881,15 +959,8 @@ function manualPropertyFields(kind, input = {}) {
     if (input[field].length > max) throw propertyActionError(`${field} must be ${max} characters or fewer`);
   }
   const changes = {};
-  if (input.label !== undefined) changes.label = input.label || null;
-  if (input.occupancy_type !== undefined) {
-    if (!OCCUPANCY_TYPES.includes(input.occupancy_type)) throw propertyActionError('invalid occupancy_type');
-    changes.occupancy_type = input.occupancy_type;
-  }
-  if (input.relationship !== undefined) {
-    const relationship = require('../constants/property-relationships').normalizeRelationship(input.relationship);
-    if (!relationship.ok) throw propertyActionError('invalid relationship');
-    changes.relationship = relationship.value;
+  for (const [field, { normalize }] of Object.entries(EDITABLE_FIELDS)) {
+    if (input[field] !== undefined) changes[field] = normalize(input[field], kind);
   }
   if (kind !== 'add') return changes;
   if (!String(input.address_line1 || '').trim()) throw propertyActionError('address_line1 is required');
@@ -948,7 +1019,7 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
       if (!Object.keys(changes).length) throw propertyActionError('nothing to update');
       preview = { ...base, property: { id: target.id, address: propertyAddressLabel(target) },
         before: Object.fromEntries(Object.keys(changes).map(key => [key, target[key]])), changes,
-        effects: 'Updates only this saved property’s label, relationship or occupancy. Account, billing, appointment and recurring-service addresses are unchanged.' };
+        effects: 'Updates only this saved property’s label, relationship, occupancy or reclaimed-water answer. Account, billing, appointment and recurring-service addresses are unchanged.' };
     } else if (TARGET_PREVIEWS[kind]) {
       preview = { ...base, ...await TARGET_PREVIEWS[kind](conn, customerId, target, primary, customer, properties) };
     } else throw propertyActionError('Unknown property operation');
@@ -1181,6 +1252,8 @@ async function previewPropertyRemoval(conn, customerId, target, _primary, custom
 
 const TARGET_PREVIEWS = { primary: previewPrimaryPropertyChange, remove: previewPropertyRemoval };
 
+const appliedResult = (applied) => (applied && typeof applied === 'object' ? applied : { id: applied });
+
 async function writeManualProperty(customerId, kind, input, propertyId, options, apply) {
   const changes = manualPropertyFields(kind, input);
   return db.transaction(async trx => {
@@ -1193,10 +1266,13 @@ async function writeManualProperty(customerId, kind, input, propertyId, options,
     if (options.expectedVersion && options.expectedVersion !== preview._version) {
       throw propertyActionError('The customer or properties changed. Request a fresh preview.', 409, 'preview_changed');
     }
-    const savedId = await apply(trx, loaded, changes);
+    // apply returns the property id, or { id, audit } when the write also changed rows the preview does not show (their before-state goes
+    // into the audit metadata).
+    const { id: savedId, audit: auditExtra } = appliedResult(await apply(trx, loaded, changes));
     const auditId = await require('./audit-log').recordAuditEvent({
       actor_type: 'admin', actor_id: options.actorId || null, action: `customer_property_${kind}`,
-      resource_type: 'customer_property', resource_id: savedId, metadata: { customer_id: customerId, fields: Object.keys(changes) },
+      resource_type: 'customer_property', resource_id: savedId,
+      metadata: { customer_id: customerId, fields: Object.keys(changes), values: changes, before: preview.before || null, ...auditExtra },
       critical: true, trx,
     });
     const properties = await listProperties(customerId, trx);
@@ -1224,7 +1300,7 @@ async function addManualProperty(customerId, input, options = {}) {
   return writeManualProperty(customerId, 'add', input, null, options, async (trx, _loaded, changes) => {
     await completePrimaryFromCall(customerId, changes, { conn: trx });
     await ensurePrimaryProperty(customerId, { conn: trx });
-    const result = await recordCallProperty({ customerId, ...changes, occupancyType: changes.occupancy_type, source: 'manual', conn: trx });
+    const result = await recordCallProperty({ customerId, ...changes, latitude: input?.latitude, longitude: input?.longitude, occupancyType: changes.occupancy_type, source: 'manual', conn: trx });
     if (!result.created) throw propertyActionError('A property with that street already exists for this customer', 409, 'property_exists');
     return result.propertyId;
   });
@@ -1232,10 +1308,32 @@ async function addManualProperty(customerId, input, options = {}) {
 
 async function editManualProperty(customerId, propertyId, input, options = {}) {
   return writeManualProperty(customerId, 'edit', input, propertyId, options, async (trx, _loaded, changes) => {
+    const stamps = Object.assign({}, ...Object.keys(changes).map(field => EDITABLE_FIELDS[field].columns?.(changes[field], trx)));
     await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
-      .update({ ...changes, updated_at: trx.fn.now() });
-    return propertyId;
+      .update({ ...changes, ...stamps, updated_at: trx.fn.now() });
+    if (!('reclaimed_water' in changes)) return propertyId;
+    const superseded = await supersedeMergedReclaimedAnswers(trx, customerId, propertyId);
+    // The answer the plan used before this edit may have been one of these inherited answers: the audit keeps them.
+    return superseded.length ? { id: propertyId, audit: { superseded_reclaimed_answers: superseded } } : propertyId;
   });
+}
+
+// The office's reclaimed-water answer (Automatic included) is now THE answer for this home: a person's answer left on a merged-away copy of
+// the same address (isReclaimedService falls back to it while the active copy has none) is cleared in the same transaction, so "Automatic"
+// really hands the home back to the county match instead of reviving the old answer.
+async function supersedeMergedReclaimedAnswers(trx, customerId, propertyId) {
+  const { address_key: addressKey } = await trx('customer_properties').where({ id: propertyId }).first('address_key') || {};
+  if (!addressKey) return [];
+  const rows = await trx('customer_properties')
+    .where({ customer_id: customerId, active: false, address_key: addressKey })
+    .whereIn('reclaimed_water_source', ['office', 'customer'])
+    .forUpdate()
+    .select('id', 'reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at');
+  if (!rows.length) return [];
+  await trx('customer_properties').whereIn('id', rows.map(row => row.id))
+    .update({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null, updated_at: trx.fn.now() });
+  return rows.map(row => ({ property_id: row.id, reclaimed_water: row.reclaimed_water, reclaimed_water_source: row.reclaimed_water_source,
+    reclaimed_water_checked_at: row.reclaimed_water_checked_at }));
 }
 
 async function removeManualProperty(customerId, propertyId, options = {}) {

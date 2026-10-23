@@ -29,6 +29,38 @@ function formatPropertyAddress(p) {
   return [street, locality].filter(Boolean).join(", ");
 }
 
+function selectedCoordinates(selected, form) {
+  if (!selected || selected.lat == null || selected.lng == null) return {};
+  const same = (a, b) => String(a || "").toLowerCase().replace(/[^a-z0-9]/g, "") === String(b || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const unchanged = same(selected.line1, form.address_line1) && same(selected.city, form.city) && same(selected.state, form.state)
+    && String(selected.zip || "").slice(0, 5) === String(form.zip || "").slice(0, 5);
+  return unchanged ? { latitude: selected.lat, longitude: selected.lng } : {};
+}
+
+// The reclaimed-water control (GATE_LAWN_RECLAIMED_HALF_N). A person's answer (office or customer) is shown as the choice; with no
+// answer the control reads "Automatic" and the line under it says what the county meter match found.
+function reclaimedChoice(p) {
+  if (p.reclaimed_water_source === "office" || p.reclaimed_water_source === "customer") return p.reclaimed_water ? "yes" : "no";
+  return "";
+}
+// What a reclaimed answer does: half nitrogen, only on lawn visits the plan actually halves (a v13 program visit; a bag that carries the
+// pre-emergent or the winter potassium keeps its full rate), so the line says "eligible v13 lawn visits", never "lawn visits".
+const HALF_N = "Half nitrogen on eligible v13 lawn visits.";
+// Not "full nitrogen": other plan rules (a mapped fungus area) can still lower a dose, so the line says only what reclaimed water does not do.
+const FULL_N = "No reclaimed-water nitrogen cut.";
+function reclaimedHint(p) {
+  const said = p.reclaimed_water ? "reclaimed" : "not reclaimed";
+  const effect = p.reclaimed_water ? HALF_N : FULL_N;
+  // An answer kept from a customer record merged into this one: shown as the choice, so "Automatic" can clear it.
+  if (p.reclaimed_water_inherited) return `From a merged customer record: ${p.reclaimed_water_source === "customer" ? "customer" : "office"} said ${said}. ${effect}`;
+  if (p.reclaimed_water_source === "customer") return `Customer said ${said}. ${effect}`;
+  if (p.reclaimed_water_source === "office") return `Office said ${said}. ${effect}`;
+  if (p.reclaimed_water === true) return `County meter found at this address. ${HALF_N}`;
+  // The county job stamps its check time on a property at no meter (answer and source stay empty).
+  if (p.reclaimed_water === false || (p.reclaimed_water == null && p.reclaimed_water_checked_at)) return `No county reclaimed meter at this address. ${FULL_N}`;
+  return `Not checked against the county meters. ${FULL_N}`;
+}
+
 /**
  * Service addresses on file for one customer (customer_properties). Reads
  * GET /admin/customers/:id/properties; adds via POST; edits occupancy/label
@@ -62,6 +94,8 @@ export default function CustomerPropertiesPanelV2({
   const [properties, setProperties] = useState([]);
   // Resolved once from the list response: a dark feature mounts no row editors.
   const [serviceAreasEnabled, setServiceAreasEnabled] = useState(false);
+  // GATE_LAWN_RECLAIMED_HALF_N, resolved from the same list response: dark = no control.
+  const [reclaimedEnabled, setReclaimedEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
   const [adding, setAdding] = useState(false);
@@ -100,6 +134,7 @@ export default function CustomerPropertiesPanelV2({
     setLoadErr("");
     setCanChangePrimary(false);
     setServiceAreasEnabled(false);
+    setReclaimedEnabled(false);
     setPrimaryPreview(null);
     // A refreshed preview is obsolete; an in-flight write still owns its lock.
     setPreviewBusy(false);
@@ -109,6 +144,7 @@ export default function CustomerPropertiesPanelV2({
           setProperties(Array.isArray(d.properties) ? d.properties : []);
           setCanChangePrimary(d.canChangePrimary === true);
           setServiceAreasEnabled(d.propertyServiceAreas === true);
+          setReclaimedEnabled(d.reclaimedWater === true);
         }
       })
       .catch((e) => {
@@ -148,6 +184,10 @@ export default function CustomerPropertiesPanelV2({
           city: form.city.trim(),
           state: stateCode,
           zip: form.zip.trim(),
+          // The selected address's coordinates, only while the typed street, city and ZIP are still the ones selected (an edited address would
+          // otherwise keep the old pin); the server validates them and ignores a bad pair. Only with GATE_LAWN_RECLAIMED_HALF_N on: the
+          // coordinates feed the reclaimed-water meter match, so a dark gate sends the old body.
+          ...(reclaimedEnabled ? selectedCoordinates(selectedAddressRef.current, form) : {}),
           occupancy_type: form.occupancy_type || "unknown",
           relationship: form.relationship || null,
           label: form.label.trim() || null,
@@ -186,6 +226,26 @@ export default function CustomerPropertiesPanelV2({
       if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setProperties(Array.isArray(d.properties) ? d.properties : []);
     } catch (err) {
       if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowErr(err.message || "Could not update property");
+    } finally {
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowBusy(null);
+    }
+  };
+
+  // The office answer for the reclaimed-water control: "yes", "no", or "" to hand the property back to the county meter match.
+  // Same one-write lock and list replacement as patchRow.
+  const putReclaimed = async (propertyId, choice) => {
+    if (writeBusy) return;
+    const seq = ++rowMutationSeq.current;
+    setRowBusy(propertyId);
+    setRowErr("");
+    try {
+      const d = await adminFetch(
+        `/admin/customers/${customerId}/properties/${propertyId}/reclaimed-water`,
+        { method: "PUT", body: JSON.stringify({ reclaimed: choice === "" ? null : choice === "yes" }) },
+      );
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setProperties(Array.isArray(d.properties) ? d.properties : []);
+    } catch (err) {
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowErr(err.message || "Could not update reclaimed water");
     } finally {
       if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowBusy(null);
     }
@@ -359,6 +419,22 @@ export default function CustomerPropertiesPanelV2({
                     ))}
                   </Select>
                 </div>
+                {reclaimedEnabled && (
+                  <div className="max-w-64" data-testid="reclaimed-water-control">
+                    <Select
+                      aria-label={`Reclaimed water for ${p.address_line1}`}
+                      value={reclaimedChoice(p)}
+                      disabled={!canEdit || writeBusy}
+                      onChange={(e) => putReclaimed(p.id, e.target.value)}
+                      className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
+                    >
+                      <option value="">Reclaimed water: automatic</option>
+                      <option value="yes">Reclaimed water: yes</option>
+                      <option value="no">Reclaimed water: no</option>
+                    </Select>
+                    <p className="mt-1 text-14 text-ink-secondary">{reclaimedHint(p)}</p>
+                  </div>
+                )}
                 {canEdit && canChangePrimary && !p.is_primary && (
                   <div className="max-w-64">
                     <Button variant="secondary" size="sm" className="text-14" disabled={writeBusy || !p.primary_change_eligible} onClick={() => previewPrimary(p.id)}>
@@ -403,6 +479,9 @@ export default function CustomerPropertiesPanelV2({
                     city: parts.city || form.city,
                     state: parts.state || form.state,
                     zip: parts.zip || form.zip,
+                    // The picker's own coordinates for THIS selection (null when the lookup returned none).
+                    lat: Number.isFinite(parts.lat) ? parts.lat : null,
+                    lng: Number.isFinite(parts.lng) ? parts.lng : null,
                   };
                   setForm((f) => ({
                     ...f,

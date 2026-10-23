@@ -267,6 +267,15 @@ function cogsTotalLine(terms) {
 
 // Tag on the four lawn protocol entries while they hold the v13 program.
 const LAWN_V13_TAG = 'lawn-v13';
+// Tag on them while they hold the reclaimed-water wording (GATE_LAWN_RECLAIMED_HALF_N, a v13-only text: "the app halves the N"). It is a
+// second axis of what the entries say, so a flip of that gate alone also marks the KB and both corpora stale for the 15-minute reconcile,
+// instead of leaving "the tech logs half" searchable until the nightly sync (a tech could then halve a dose the app already halved).
+const LAWN_RECLAIMED_TAG = 'lawn-reclaimed-half-n';
+function lawnWordingLive() {
+  const gates = require('../config/feature-gates');
+  const v13 = gates.lawnV13Live?.() === true;
+  return { v13, reclaimed: v13 && gates.lawnReclaimedHalfNLive?.() === true };
+}
 // Which program each index corpus last finished syncing ('v13' | 'legacy'), written to
 // system_settings only AFTER that corpus's sync succeeds. The four entry tags say what the
 // KB entries hold; these say what the index chunks hold, so a failure after the entries
@@ -379,7 +388,8 @@ function protocolEntry(programKey, track, tags) {
 // program they hold.
 function lawnProtocolEntries() {
   const { lawnProtocols } = require('./lawn-program');
-  const v13Tags = require('../config/feature-gates').lawnV13Live?.() === true ? [LAWN_V13_TAG] : [];
+  const live = lawnWordingLive();
+  const v13Tags = [...(live.v13 ? [LAWN_V13_TAG] : []), ...(live.reclaimed ? [LAWN_RECLAIMED_TAG] : [])];
   return Object.entries(lawnProtocols() || {})
     .map(([trackId, track]) => protocolEntry(trackId, track, ['lawn', trackId, ...v13Tags]))
     .filter(Boolean);
@@ -389,14 +399,15 @@ function lawnProtocolEntries() {
 // track keys of the v13 recipe. The track set is part of the marker so a recipe that gains or loses a
 // track (v13 dropped bahia) marks an already-indexed corpus stale, and the next 15-minute reconcile
 // rebuilds it, instead of waiting for the nightly sync with the removed text still searchable.
-function lawnCorpusMarker(v13) {
+// '+reclaimed' is added while the chunks hold the reclaimed-water wording (absent = the original wording, the marker unchanged).
+function lawnCorpusMarker(v13, reclaimed = false) {
   if (!v13) return 'legacy';
-  return `v13:${Object.keys(require('../config/lawn-protocol-v13.json')).sort().join(',')}`;
+  return `v13:${Object.keys(require('../config/lawn-protocol-v13.json')).sort().join(',')}${reclaimed ? '+reclaimed' : ''}`;
 }
 
 // The index corpora still on the other program (a corpus with no chunks is never stale).
-async function staleCorpora(gateOn) {
-  const want = lawnCorpusMarker(gateOn);
+async function staleCorpora(gateOn, reclaimedOn = false) {
+  const want = lawnCorpusMarker(gateOn, reclaimedOn);
   const keys = Object.values(LAWN_CORPUS_MARKERS);
   const stored = Object.fromEntries((await db('system_settings').whereIn('key', keys).select('key', 'value')).map((row) => [row.key, row.value]));
   const stale = Object.keys(LAWN_CORPUS_MARKERS).filter((source) => stored[LAWN_CORPUS_MARKERS[source]] !== want);
@@ -1048,7 +1059,7 @@ const KnowledgeBaseService = {
   // program. No entry yet is not stale: the nightly sync creates it; a partial set (some of
   // the four missing) is. Two small reads when nothing changed.
   async lawnKnowledgeStale() {
-    const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
+    const { v13: gateOn, reclaimed: reclaimedOn } = lawnWordingLive();
     const slugs = lawnTrackSlugs();
     const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
     const held = rows.filter((row) => slugs.includes(row.slug));
@@ -1056,18 +1067,23 @@ const KnowledgeBaseService = {
     // An entry for a track this program does not have (bahia once v13 is live) is the other program's.
     if (held.length < rows.length) return true;
     if (rows.some((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG) !== gateOn)) return true;
-    return (await staleCorpora(gateOn)).length > 0;
+    if (rows.some((row) => normalizeTags(row.tags).includes(LAWN_RECLAIMED_TAG) !== reclaimedOn)) return true;
+    return (await staleCorpora(gateOn, reclaimedOn)).length > 0;
   },
 
   // The lawn program an index corpus is ABOUT to load, read before its load so a gate flip
   // mid-sync can only make the marker conservative: 'protocol' loads lawnProtocols() (the
   // gate); 'kb' loads the stored KB entries (what their tags say they hold).
   async lawnCorpusProgram(source) {
-    if (source === 'protocol') return lawnCorpusMarker(require('../config/feature-gates').lawnV13Live?.() === true);
+    if (source === 'protocol') {
+      const live = lawnWordingLive();
+      return lawnCorpusMarker(live.v13, live.reclaimed);
+    }
     const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
     // What the stored entries hold does not depend on the gate: the complete v13 set (its own tracks) all tagged v13.
     const v13Slugs = Object.keys(require('../config/lawn-protocol-v13.json')).map((trackId) => `protocol-${slugify(trackId)}`);
-    return lawnCorpusMarker(rows.length === v13Slugs.length && rows.every((row) => v13Slugs.includes(row.slug) && normalizeTags(row.tags).includes(LAWN_V13_TAG)));
+    const v13 = rows.length === v13Slugs.length && rows.every((row) => v13Slugs.includes(row.slug) && normalizeTags(row.tags).includes(LAWN_V13_TAG));
+    return lawnCorpusMarker(v13, v13 && rows.every((row) => normalizeTags(row.tags).includes(LAWN_RECLAIMED_TAG)));
   },
 
   // Called by syncCorpus for the 'protocol' and 'kb' corpora after a sync that really ran
@@ -1094,14 +1110,14 @@ const KnowledgeBaseService = {
     );
   },
 
-  // Unsetting (or setting) GATE_LAWN_V13 must not wait for the 2:40 / 3:30 AM runs:
+  // Unsetting (or setting) GATE_LAWN_V13, or GATE_LAWN_RECLAIMED_HALF_N under it, must not wait for the 2:40 / 3:30 AM runs:
   // the lawn protocol entries and the knowledge-index corpora built from them
   // (protocol directly, kb through those entries) are rewritten from lawnProtocols()
   // as soon as this notices they hold the other program. Cheap no-op otherwise.
   // The index rows re-embed on the next nightly run; full-text search is current now.
   async reconcileLawnProtocolKnowledge() {
     if (!(await this.lawnKnowledgeStale())) return { stale: false };
-    const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
+    const live = lawnWordingLive();
     const kb = await this.syncLawnProtocolEntries();
     const index = {};
     // Each corpus that still holds the other program, kb after the entries above so the
@@ -1111,7 +1127,7 @@ const KnowledgeBaseService = {
     const { CONNECTORS } = require('./knowledge-index/connectors');
     // syncCorpus itself writes the marker (see recordLawnCorpusProgram), and only when the
     // sync really ran: a skipped corpus leaves it stale for the next tick.
-    for (const source of await staleCorpora(gateOn)) {
+    for (const source of await staleCorpora(live.v13, live.reclaimed)) {
       index[source] = await syncCorpus(CONNECTORS.find((connector) => connector.source === source));
     }
     logger.info(`[kb-sync] Lawn protocol knowledge reconciled: ${JSON.stringify({ kb, index })}`);
