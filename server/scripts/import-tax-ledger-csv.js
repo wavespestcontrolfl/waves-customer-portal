@@ -235,9 +235,14 @@ function rowHash(source, date, description, amount, direction, ordinal) {
  * uniforms, postage ...) is parked for review rather than relabelled.
  */
 const SOFTWARE_27A = /software|subscription|saas|\bapp\b|hosting|domain|cloud|\bai\b|api|website|web ?site|email|phone service|technology|plugin|license key/i;
+// A processor fee on line 10 is not booked: the P&L adds every synced Stripe
+// fee on its own (pnl-report) and a manual expense for it would count it
+// twice. Such a row is parked with that note; other line 10 items book.
+const PROCESSOR_FEE_RE = /stripe|processing fee|processor fee|merchant fee|card fee|payment fee|transaction fee/i;
 function categoryNameForLine(line, category) {
   const key = String(line || '').trim().toLowerCase();
   if (!key) return null;
+  if (key === '10' && PROCESSOR_FEE_RE.test(String(category || ''))) return null;
   if (key === '27a') {
     const text = String(category || '');
     if (/dues|education|training|association|membership/i.test(text)) return 'Training & Education';
@@ -322,7 +327,8 @@ function mapRow(row, ordinal, basename) {
     const categoryName = categoryNameForLine(line, row.category);
     if (!categoryName) {
       bank.status = 'unmatched';
-      bank.suggestion = reviewSuggestion(row, {});
+      const processorFee = line === '10' && PROCESSOR_FEE_RE.test(String(row.category || ''));
+      bank.suggestion = reviewSuggestion(row, processorFee ? { note: 'processor fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced' } : {});
       out.unmatchedLine = row.sched_c_line || '(none)';
       out.businessParked = true; // business by the ledger, no category to book it under here
       return out;
@@ -466,12 +472,18 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   // deleted since (the FK is null, or the matcher reopened it) is not done
   const existing = new Map();
   for (const part of chunk(mapped.map(m => m.bank.row_hash), HASH_LOOKUP_CHUNK)) {
-    const found = await db('bank_transactions').whereIn('row_hash', part).select('row_hash', 'status', 'matched_expense_id', 'matched_payout_id', 'suggestion', 'description');
+    const found = await db('bank_transactions').whereIn('row_hash', part).select('id', 'row_hash', 'status', 'matched_expense_id', 'matched_payout_id', 'suggestion', 'description');
     found.forEach(f => existing.set(f.row_hash, f));
   }
   const dates = rows.map(r => r.date).sort();
   const range = [dates[0], dates[dates.length - 1]];
   const existingBank = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).whereNot('source', SOURCE_TAG)
+    .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction', 'suggestion') : [];
+  // the rows earlier ledger runs loaded in this range: a row whose text was
+  // corrected since has a new hash, and must still find its old self (same
+  // account, day, amount and direction) instead of loading twice. They sit
+  // in the overlap pools only; the refusal above counts other sources.
+  const priorLedgerRows = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).where({ source: SOURCE_TAG })
     .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction', 'suggestion') : [];
   // expenses this importer made on an earlier run are the ledger's own, not
   // "already there from elsewhere": they are linked from a ledger bank row
@@ -511,17 +523,18 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   // the expenses the overlapping portal rows are booked under: their category
   // is compared with the ledger's (a different business category is a
   // conflict for the owner, not an answer)
-  const bookedIds = [...new Set([...existingBank, ...existing.values()].map(f => f.matched_expense_id).filter(Boolean))];
+  const bookedIds = [...new Set([...existingBank, ...priorLedgerRows, ...existing.values()].map(f => f.matched_expense_id).filter(Boolean))];
   const bookedExpenses = new Map(bookedIds.length ? (await db('expenses').whereIn('id', bookedIds).select('id', 'category_id')).map(e => [e.id, e]) : []);
   const categoryNames = new Map(categories.map(c => [c.id, c.name]));
-  return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, accountsById, bookedExpenses, categoryNames, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+  return { existing, existingBank, priorLedgerRows, handExpenses, coveredExpenses, linkedRows, masks, accountsById, bookedExpenses, categoryNames, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
 }
 
 // Pools of the portal's rows, consumed one-for-one as ledger rows match them.
-function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRows = [], masks = new Map(), accountsById = new Map() }) {
+function buildPools({ existingBank, priorLedgerRows = [], handExpenses, coveredExpenses = [], linkedRows = [], masks = new Map(), accountsById = new Map() }) {
   const ids = { masks, accountsById };
+  const pooled = [...existingBank, ...priorLedgerRows];
   const bankLeft = new Map();
-  existingBank.forEach(f => { const k = tupleKey(f); if (!bankLeft.has(k)) bankLeft.set(k, []); bankLeft.get(k).push(f); });
+  pooled.forEach(f => { const k = tupleKey(f); if (!bankLeft.has(k)) bankLeft.set(k, []); bankLeft.get(k).push(f); });
   // A feed writes its own text for a transaction ("Wawa" against the
   // statement's "DEBIT CARD PURCHASE - WAWA 5519 ..."), so a same-account
   // row of the same day, amount and direction with DIFFERENT text is the
@@ -529,7 +542,7 @@ function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRo
   // imported, listed with both texts), never booked on top of it.
   const looseKey = f => `${ymdOf(f.txn_date)}|${Number(f.amount).toFixed(2)}|${f.direction}`;
   const looseLeft = new Map();
-  existingBank.forEach(f => { const k = looseKey(f); if (!looseLeft.has(k)) looseLeft.set(k, []); looseLeft.get(k).push(f); });
+  pooled.forEach(f => { const k = looseKey(f); if (!looseLeft.has(k)) looseLeft.set(k, []); looseLeft.get(k).push(f); });
   const dropLoose = (row) => {
     const list = looseLeft.get(looseKey(row)) || [];
     const j = list.indexOf(row);
@@ -548,7 +561,9 @@ function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRo
   // identity); only the rows in the file's range sit in the pools above.
   const rowsOfExpense = new Map();
   linkedRows.forEach(f => { if (!rowsOfExpense.has(f.matched_expense_id)) rowsOfExpense.set(f.matched_expense_id, []); rowsOfExpense.get(f.matched_expense_id).push(f); });
-  const pooledById = new Map(existingBank.map(f => [f.id, f]));
+  const pooledById = new Map(pooled.map(f => [f.id, f]));
+  // a row settled by its hash is accounted for: out of both pools by id
+  const dropById = (id) => { const f = pooledById.get(id); if (f) { dropExact(f); dropLoose(f); } };
   const handByAmount = new Map();
   [...handExpenses, ...coveredExpenses].forEach(e => { const k = Number(e.gross != null ? e.gross : e.amount).toFixed(2); if (!handByAmount.has(k)) handByAmount.set(k, []); handByAmount.get(k).push(e); });
   const dropExact = (row) => {
@@ -589,7 +604,7 @@ function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRo
     (rowsOfExpense.get(e.id) || []).forEach(f => { const pooled = pooledById.get(f.id); if (pooled) { dropExact(pooled); dropLoose(pooled); } });
     return { expense: e, days: dayNumber(ymdOf(e.expense_date)) - dayNumber(date), covered: rowsOfExpense.has(e.id) };
   };
-  return { bankLeft, looseKey, looseLeft, dropLoose, dropExact, dropExpense, takeHand };
+  return { bankLeft, looseKey, looseLeft, dropLoose, dropExact, dropById, dropExpense, takeHand };
 }
 
 /** Days since the epoch for a YYYY-MM-DD string (calendar arithmetic only). */
@@ -692,6 +707,7 @@ function reconcileRows(mapped, rows, portal) {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
       settled.add(i);
+      pools.dropById(prior.id);
       const why = reloadReason(prior, m, portal);
       if (why) held.push(note(i, prior.description || rows[i].description, 'this ledger (loaded before)', `${why}; ${reading(m, i)} (decide it in Bank Import)`));
       else duplicates += 1;

@@ -245,6 +245,15 @@ describe('categoryNameForLine', () => {
     expect(categoryNameForLine(line, 'anything')).toBe(name);
   });
 
+  test('a processor fee on line 10 is parked with the double-count note; another line 10 item books', () => {
+    expect(categoryNameForLine('10', 'Stripe processing fees')).toBeNull();
+    expect(categoryNameForLine('10', 'Merchant fee')).toBeNull();
+    expect(categoryNameForLine('10', 'Sales commission to a referrer')).toBe('Commissions & Fees');
+    const m = mapRow(parsedRow({ sched_c_line: '10', category: 'Stripe processing fees' }), 0, 'l.csv');
+    expect([m.bank.status, m.expense, m.businessParked]).toEqual(['unmatched', null, true]);
+    expect(m.bank.suggestion.note).toMatch(/the P&L adds synced Stripe fees on its own/);
+  });
+
   test('27a splits on Dues or education', () => {
     expect(categoryNameForLine('27a', 'Software subscriptions')).toBe('Software & Technology');
     expect(categoryNameForLine('27a', 'Website hosting')).toBe('Software & Technology');
@@ -469,6 +478,20 @@ describe('run', () => {
     expect(counts).toMatchObject({ inserted: 0, held: 1, duplicates: 7 });
     expect(report).toMatch(/loaded by an earlier run but its expense was deleted since; the ledger says expense \(Supplies\)/);
     expect(db.tables().expenses.find(e => e.vendor_name === 'ACME SUPPLY 4471')).toBeUndefined(); // nothing re-booked by guesswork
+  });
+
+  test('a rerun with a corrected description (new hash) finds its old self by account, day and amount: held, not loaded twice', async () => {
+    const db = makeFakeDb();
+    await run({ file, db });
+    const rows = parseLedgerCsv(fs.readFileSync(file, 'utf8'));
+    const edited = rows.map((r) => ({ ...r }));
+    edited.find((r) => r.description === 'ACME SUPPLY 4471').description = 'ACME SUPPLY 4471 BRADENTON';
+    fs.writeFileSync(file, csv(...edited.map((r) => row({ source: r.source, date: r.date, description: r.description, amount: String(r.amount.toFixed(2)), direction: r.direction, class: r.class, category: r.category, sched_c_line: r.sched_c_line, flag: r.flag }))));
+    const { counts, report } = await run({ file, db });
+    expect(counts).toMatchObject({ inserted: 0, held: 1, duplicates: 7 });
+    expect(report).toMatch(/the same charge under other text; the ledger says expense \(Supplies\)\]  \(portal: "ACME SUPPLY 4471" in ledger-3098\)/);
+    expect(db.tables().expenses).toHaveLength(4);
+    expect(db.tables().bank_transactions).toHaveLength(8);
   });
 
   test('second run inserts nothing and creates no duplicate expense', async () => {
