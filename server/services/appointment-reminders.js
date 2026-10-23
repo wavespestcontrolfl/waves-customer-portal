@@ -3000,7 +3000,10 @@ async function revertWindowHeldStamp({ record, noticeToken, cancelGeneration }) 
       return await db.transaction(async (trx) => {
         await assertCancelGeneration(trx, cancelGeneration);
         const reverted = await trx('appointment_reminders')
-          .where({ id: record.id, cancellation_notice_state: 'sent' })
+          .where({ id: record.id })
+          // 'sent' = the pre-dispatch stamp was made; 'pending_approved' = the window closed before the stamp (the claim keeps the
+          // marker state), so the claim is simply still untouched. Either way the row under THIS claim's token is parked.
+          .whereIn('cancellation_notice_state', ['sent', 'pending_approved'])
           .where('cancellation_notice_at', noticeToken)
           .update({ cancellation_notice_state: 'pending_approved', updated_at: new Date() });
         return reverted === 1;
@@ -3023,7 +3026,7 @@ async function revertWindowHeldStamp({ record, noticeToken, cancelGeneration }) 
 
 // The recovery sweep's approved send found the send window closed BEFORE any recipient was reached (the first handoff check
 // crossed 8 PM ET): nothing was sent, so the claim is not a failure. The approved marker goes back to its untouched state
-// (a stamp made just before the hold is reverted under this claim's token, inside the bundle + generation fence) and the sweep
+// (a stamp made just before the hold is reverted, an unstamped claim is kept, both under this claim's token and inside the bundle + generation fence) and the sweep
 // parks the bundle to the next window (options.cancelGeneration.windowHeld, set only when the revert happened). Any partial
 // fan-out keeps its terminal handling. Returns true when parked.
 async function parkWindowHeldApprovedNotice({ record, noticeToken, options, sendOutcome }) {

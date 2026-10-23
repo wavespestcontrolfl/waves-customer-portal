@@ -13,7 +13,7 @@ const mockState = {
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const q = {
-      where: (...a) => { mockState.wheres.push([table, ...a]); return q; }, whereNull: () => q, whereIn: () => q, whereNotNull: (...a) => { (mockState.notNulls ||= []).push([table, ...a]); return q; },
+      where: (...a) => { mockState.wheres.push([table, ...a]); return q; }, whereNull: () => q, whereIn: (...a) => { (mockState.wheresIn ||= []).push([table, ...a]); return q; }, whereNotNull: (...a) => { (mockState.notNulls ||= []).push([table, ...a]); return q; },
       whereRaw: (...a) => { mockState.raws.push([table, ...a]); return q; }, whereNot: () => q,
       leftJoin: () => q, select: () => q, orderBy: (...a) => { (mockState.orders ||= []).push([table, ...a]); return q; },
       first: async () => {
@@ -561,8 +561,24 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
     dbMock.transaction.mockImplementation(original);
     expect(order).toEqual(['begin', 'proof', 'end']);
     expect(fence.windowHeld).toBe(true);
-    expect(mockState.wheres).toContainEqual(['appointment_reminders', { id: 'rem-1', cancellation_notice_state: 'sent' }]);
+    expect(mockState.wheres).toContainEqual(['appointment_reminders', { id: 'rem-1' }]);
+    expect(mockState.wheresIn).toContainEqual(['appointment_reminders', 'cancellation_notice_state', ['sent', 'pending_approved']]);
     expect(noticeWrites().pop()).toBe('pending_approved');
+  });
+
+  // The messaging rail checks the send window BEFORE the pre-dispatch check: an after-hours request can hold with the claim still
+  // untouched (never stamped). That must park too; the generic finalizer would otherwise suppress the approved text for good.
+  test('a window hold that never reaches the pre-dispatch stamp parks the bundle and suppresses nothing', async () => {
+    mockSendCustomerMessage.mockImplementationOnce(async () => (
+      { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' }));
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome });
+    expect(fence.windowHeld).toBe(true);
+    expect(noticeWrites()).not.toContain('sent');
+    expect(noticeWrites()).not.toContain('suppressed');
+    expect(noticeWrites().pop()).toBe('pending_approved');
+    expect(outcome.notificationSent).toBe(false);
   });
 
   test.each(['lease_lost', 'visit_restored_since'])('a worker that lost its lease or whose visit changed (%s) before the rollback reverts nothing and parks nothing', async (reason) => {
