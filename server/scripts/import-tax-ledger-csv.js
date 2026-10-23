@@ -227,27 +227,30 @@ const SOFTWARE_27A = /software|subscription|saas|\bapp\b|hosting|domain|cloud|\b
 // A processor fee on line 10 is not booked: the P&L adds every synced Stripe
 // fee on its own (pnl-report) and a manual expense for it would count it
 // twice. Such a row is parked with that note; other line 10 items book.
-const PROCESSOR_FEE_RE = /stripe|processing fee|processor fee|merchant fee|card fee|payment fee|transaction fee/i;
-const PROCESSOR_NOTE = 'processor fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced';
-// The ledger marks a processor fee by its processor_match column (the row
-// matched a processor record) or, on line 10, by its text.
+// Only a STRIPE fee is parked: the P&L adds every synced Stripe fee on its
+// own (pnl-report), so a manual expense for one would count it twice. Any
+// other processor's fee (the Square years), a bank's merchant fee or a
+// generic "processing fee" is in no sync and books as the expense it is.
+// The processor_match column (the row matched a processor record, Square or
+// Stripe) is part of the reading a rerun compares, not a reason to park.
+const STRIPE_RE = /\bstripe\b/i;
+const PROCESSOR_NOTE = 'Stripe fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced';
 function processorMarked(row) {
   return /^(y|yes|true|1)$/i.test(String(row.processor_match || '').trim());
 }
-function processorFee(row, line) {
-  return processorMarked(row) || (String(line) === '10' && PROCESSOR_FEE_RE.test(String(row.category || '')));
+function processorFee(row) {
+  return STRIPE_RE.test(String(row.description || '')) || STRIPE_RE.test(String(row.category || ''));
 }
 // The note a parked business row carries: why it is not booked here. Bank
 // Import shows it under the row and on its Create expense button, so the
 // category the importer refused is never picked unknowingly.
 function parkNote(row, line) {
-  if (processorFee(row, line)) return { note: PROCESSOR_NOTE };
+  if (processorFee(row)) return { note: PROCESSOR_NOTE };
   return { note: `no category in the portal for line ${line || '(none)'}; the ledger says ${row.class}: "${row.category}". Pick the category knowingly, or leave it for the return` };
 }
 function categoryNameForLine(line, category) {
   const key = String(line || '').trim().toLowerCase();
   if (!key) return null;
-  if (key === '10' && PROCESSOR_FEE_RE.test(String(category || ''))) return null;
   if (key === '27a') {
     const text = String(category || '');
     if (/dues|education|training|association|membership/i.test(text)) return 'Training & Education';
@@ -333,10 +336,10 @@ function mapRow(row, ordinal, basename) {
 
   if (BUSINESS_CLASSES.has(row.class)) {
     const line = row.sched_c_line || CLASS_DEFAULT_LINE[row.class] || '';
-    const categoryName = processorFee(row, line) ? null : categoryNameForLine(line, row.category);
+    const categoryName = processorFee(row) ? null : categoryNameForLine(line, row.category);
     if (!categoryName) {
       bank.status = 'unmatched';
-      bank.suggestion = reviewSuggestion(row, parkNote(row, line));
+      bank.suggestion = reviewSuggestion(row, { manualLink: true, ...parkNote(row, line) });
       out.unmatchedLine = row.sched_c_line || '(none)';
       out.businessParked = true; // business by the ledger, no category to book it under here
       return out;
@@ -388,7 +391,9 @@ function mapNonBusinessRow(row, out, base) {
 function parkForReview(mapped, row, extra = parkNote(row, row.sched_c_line)) {
   mapped.bank.status = 'unmatched';
   mapped.bank.match_method = null;
-  mapped.bank.suggestion = reviewSuggestion(row, extra);
+  // every parked row is the owner's to decide: the matcher offers its
+  // candidates and never links one by itself (manualLink)
+  mapped.bank.suggestion = reviewSuggestion(row, { manualLink: true, ...extra });
   mapped.expense = null;
   mapped.unmatchedLine = row.sched_c_line || '(none)';
   mapped.businessParked = true;

@@ -245,9 +245,10 @@ describe('categoryNameForLine', () => {
     expect(categoryNameForLine(line, 'anything')).toBe(name);
   });
 
-  test('a processor fee on line 10 is parked with the double-count note; another line 10 item books', () => {
-    expect(categoryNameForLine('10', 'Stripe processing fees')).toBeNull();
-    expect(categoryNameForLine('10', 'Merchant fee')).toBeNull();
+  test('line 10 books as Commissions & Fees whatever its text; only a Stripe fee is parked (see the Stripe fee test)', () => {
+    // the line maps to its category whatever the text; parking a Stripe fee is mapRow's call, from the text
+    expect(categoryNameForLine('10', 'Stripe processing fees')).toBe('Commissions & Fees');
+    expect(categoryNameForLine('10', 'Merchant fee')).toBe('Commissions & Fees');
     expect(categoryNameForLine('10', 'Sales commission to a referrer')).toBe('Commissions & Fees');
     const m = mapRow(parsedRow({ sched_c_line: '10', category: 'Stripe processing fees' }), 0, 'l.csv');
     expect([m.bank.status, m.expense, m.businessParked]).toEqual(['unmatched', null, true]);
@@ -614,19 +615,36 @@ describe('shared helpers', () => {
     expect(() => parseArgs(['--file', 'x.csv', '--skip-existing'])).toThrow(/unknown argument: --skip-existing/);
   });
 
-  test('a processor fee is parked, not booked: marked by processor_match on any business row, or by its text on line 10', () => {
-    const marked = mapRow(parsedRow({ sched_c_line: '10', category: 'Commissions and fees', processor_match: 'Y' }), 0, 'l.csv');
-    expect(marked.expense).toBeNull();
-    expect(marked.bank.status).toBe('unmatched');
-    expect(marked.bank.suggestion).toMatchObject({ review: true, note: expect.stringMatching(/processor fee: the P&L adds synced Stripe fees on its own/) });
-    const marked22 = mapRow(parsedRow({ sched_c_line: '22', category: 'Supplies', processor_match: 'y' }), 0, 'l.csv');
-    expect(marked22.expense).toBeNull();
-    const plain = mapRow(parsedRow({ sched_c_line: '10', category: 'Commissions and fees', processor_match: '' }), 0, 'l.csv');
-    expect(plain.expense).not.toBeNull();
-    expect(plain.categoryName).toBe('Commissions & Fees');
+  test('only a Stripe fee is parked (the P&L adds synced Stripe fees itself); any other processor or bank fee, marked or not, books as the expense it is', () => {
+    const stripe = mapRow(parsedRow({ sched_c_line: '10', description: 'STRIPE FEE 0042', category: 'Commissions and fees' }), 0, 'l.csv');
+    expect(stripe.expense).toBeNull();
+    expect(stripe.bank.status).toBe('unmatched');
+    expect(stripe.bank.suggestion).toMatchObject({ review: true, manualLink: true, note: expect.stringMatching(/^Stripe fee: the P&L adds synced Stripe fees on its own/) });
+    const byCategory = mapRow(parsedRow({ sched_c_line: '27a', description: 'PAYMENT 0042', category: 'Stripe processing fees' }), 0, 'l.csv');
+    expect(byCategory.expense).toBeNull();
+    // a Square-era fee, a bank's merchant fee, a row the ledger matched to a processor record: none of these is in the Stripe sync
+    for (const over of [
+      { sched_c_line: '10', description: 'SQ *FEE 0042', category: 'Commissions and fees', processor_match: 'Y' },
+      { sched_c_line: '10', description: 'BANK MERCHANT FEE', category: 'Processing fee' },
+      { sched_c_line: '22', description: 'ACME SUPPLY 4471', category: 'Supplies', processor_match: 'y' },
+    ]) {
+      const m = mapRow(parsedRow(over), 0, 'l.csv');
+      expect(m.expense).not.toBeNull();
+    }
+    expect(mapRow(parsedRow({ sched_c_line: '10', description: 'SQ *FEE 0042', category: 'Commissions and fees', processor_match: 'Y' }), 0, 'l.csv').categoryName).toBe('Commissions & Fees');
     // a processor deposit (money in) is the ordinary ignored payout, unchanged
     const deposit = mapRow(parsedRow({ class: 'income_proc', direction: 'in', sched_c_line: '', category: 'Income', processor_match: 'Y' }), 0, 'l.csv');
     expect(deposit.bank.status).toBe('ignored');
+  });
+
+  test('every parked business row is manual-only for the matcher (manualLink), whatever parked it', () => {
+    const noLine = mapRow(parsedRow({ sched_c_line: '24a', category: 'Travel' }), 0, 'l.csv');
+    expect(noLine.bank.suggestion).toMatchObject({ review: true, manualLink: true });
+    const interest = mapRow(parsedRow({ class: 'interest', sched_c_line: '16b', category: 'Card interest' }), 0, 'l.csv');
+    expect(interest.bank.suggestion).toMatchObject({ review: true, manualLink: true });
+    // a plain review row (not a business row) carries no marker: the matcher may link it as usual
+    const review = mapRow(parsedRow({ class: 'review', sched_c_line: '' }), 0, 'l.csv');
+    expect(review.bank.suggestion.manualLink).toBeUndefined();
   });
 
   test('every row stores the ledger reading a rerun compares (class, category, line), the ignored classes too', () => {
@@ -708,21 +726,21 @@ describe('what the portal already holds', () => {
     expect(report).toMatch(/the file now reads it differently/);
   });
 
-  test('a rerun that marks a booked row as a processor fee (processor_match) holds it; the same mark spelled another way is a duplicate', async () => {
+  test('a rerun that adds the processor mark to a booked row holds it (the reading changed); the same mark spelled another way is a duplicate', async () => {
     const file = fixture(row({ description: 'CARD PROCESSOR FEE', amount: '3.20', sched_c_line: '10', category: 'Commissions and fees' }));
     const db = makeFakeDb({ categories: [{ id: 'cat-c', name: 'Commissions & Fees' }] });
     await run({ file, db });
-    expect(db.tables().expenses).toHaveLength(1); // booked: no mark, generic text
+    expect(db.tables().expenses).toHaveLength(1); // booked: a generic fee is not a Stripe fee
     fs.writeFileSync(file, csv(row({ description: 'CARD PROCESSOR FEE', amount: '3.20', sched_c_line: '10', category: 'Commissions and fees', processor_match: 'Y' })));
     const { counts, report } = await run({ file, db });
     expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 0, held: 1, parked: 0, portalExpenses: 0 });
-    expect(report).toMatch(/\[loaded by an earlier run as expense \(Commissions and fees, line 10\); the file now reads it differently \(change it in Bank Import, not by re-import\); the ledger says expense\]/);
-    expect(db.tables().expenses).toHaveLength(1); // nothing deleted by guesswork: the owner deletes it in Bank Import
-    // a fresh file whose mark is spelled 'yes' on the next run reads the same as 'Y'
+    expect(report).toMatch(/\[loaded by an earlier run as expense \(Commissions and fees, line 10\); the file now reads it differently \(change it in Bank Import, not by re-import\); the ledger says expense \(Commissions & Fees\)\]/);
+    expect(db.tables().expenses).toHaveLength(1); // nothing deleted by guesswork: the owner changes it in Bank Import
+    // the mark spelled 'yes' on the next run reads the same as 'Y'
     const file2 = fixture(row({ description: 'OTHER PROCESSOR FEE', amount: '4.10', sched_c_line: '10', category: 'Commissions and fees', processor_match: 'Y' }));
     const db2 = makeFakeDb({ categories: [{ id: 'cat-c', name: 'Commissions & Fees' }] });
     await run({ file: file2, db: db2 });
-    expect(db2.tables().expenses).toHaveLength(0); // parked
+    expect(db2.tables().expenses).toHaveLength(1); // booked (the mark alone parks nothing)
     fs.writeFileSync(file2, csv(row({ description: 'OTHER PROCESSOR FEE', amount: '4.10', sched_c_line: '10', category: 'Commissions and fees', processor_match: 'yes' })));
     expect((await run({ file: file2, db: db2 })).counts).toMatchObject({ duplicates: 1, held: 0 });
   });
