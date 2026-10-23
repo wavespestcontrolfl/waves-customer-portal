@@ -154,6 +154,26 @@ describe('fetchPage', () => {
   });
 });
 
+describe('fetchAll', () => {
+  const page = (n, total) => ({ ok: true, status: 200, json: async () => ({ totalRecords: total, opportunitiesData: Array.from({ length: n }, (_, i) => ({ noticeId: `x${i}` })) }) });
+
+  test('pages by zero-based page index until a short page', async () => {
+    const fetchImpl = jest.fn()
+      .mockResolvedValueOnce(page(sam.PAGE_LIMIT, sam.PAGE_LIMIT + 3))
+      .mockResolvedValueOnce(page(3, sam.PAGE_LIMIT + 3));
+    const notices = await sam.fetchAll({ apiKey: 'k', ncode: '561710', postedFrom: 'a', postedTo: 'b', fetchImpl });
+    expect(notices).toHaveLength(sam.PAGE_LIMIT + 3);
+    expect(fetchImpl.mock.calls.map(([u]) => new URL(u).searchParams.get('offset'))).toEqual(['0', '1']);
+  });
+
+  test('more pages than the cap is an error, so the cursor cannot move past unread notices', async () => {
+    const fetchImpl = jest.fn(async () => page(sam.PAGE_LIMIT, sam.PAGE_LIMIT * (sam.MAX_PAGES + 1)));
+    await expect(sam.fetchAll({ apiKey: 'k', ncode: '561710', postedFrom: 'a', postedTo: 'b', fetchImpl }))
+      .rejects.toThrow('too_many_pages');
+    expect(fetchImpl).toHaveBeenCalledTimes(sam.MAX_PAGES);
+  });
+});
+
 test('the scheduler checks the SAM gate before the cron lock and logs only the safe error', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
   const at = source.indexOf("'0 25 7 * * *'");

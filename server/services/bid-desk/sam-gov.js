@@ -166,14 +166,16 @@ async function fetchPage({ apiKey, ncode, postedFrom, postedTo, offset, fetchImp
   }
 }
 
+// SAM.gov's `offset` is a zero-based PAGE index, not a record offset. A window with more pages than MAX_PAGES throws,
+// so an incomplete read never moves the cursor past notices it did not see.
 async function fetchAll({ apiKey, ncode, postedFrom, postedTo, fetchImpl }) {
   const notices = [];
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const { notices: batch, total } = await fetchPage({ apiKey, ncode, postedFrom, postedTo, offset: page * PAGE_LIMIT, fetchImpl });
+    const { notices: batch, total } = await fetchPage({ apiKey, ncode, postedFrom, postedTo, offset: page, fetchImpl });
     notices.push(...batch);
-    if (batch.length < PAGE_LIMIT || notices.length >= total) break;
+    if (batch.length < PAGE_LIMIT || notices.length >= total) return notices;
   }
-  return notices;
+  throw new SamApiError('too_many_pages');
 }
 
 // ---------- cursor ----------
@@ -288,6 +290,6 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
 }
 
 module.exports = {
-  runSamGovPoll, mapOpportunity, fetchPage, safeError, SamApiError, etYmd, apiDate, addDays,
-  CURSOR_KEY, NAICS_CODES, SERVICE_ZIP3, LOG,
+  runSamGovPoll, mapOpportunity, fetchPage, fetchAll, safeError, SamApiError, etYmd, apiDate, addDays,
+  CURSOR_KEY, NAICS_CODES, SERVICE_ZIP3, LOG, PAGE_LIMIT, MAX_PAGES,
 };
