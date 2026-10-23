@@ -2570,6 +2570,11 @@ async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, can
   const cancelBundles = require('../services/ib-cancel-effect-bundles');
   await cancelBundles.liveStart(req);
   if (req.ibCancelBundleLost) return cancelNoticeOutcome;
+  // One fence for the whole post-commit work (null without a recovery record): the text claim and the handoff stamp, then every
+  // follow-through step, each re-prove in their own transaction that this request still owns the bundle and the visit is still
+  // the approved cancel. A request that paused past its lease cannot send an untouched text after the office was told otherwise.
+  const fence = await cancelBundles.liveFence(req);
+  if (req.ibCancelBundleLost) return cancelNoticeOutcome;
   let outcome = cancelNoticeOutcome;
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
@@ -2582,14 +2587,15 @@ async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, can
       ...(outcome ? { outcome } : {}),
       // Set only by cancelServiceFromBar: the text the Intelligence Bar card approved, per recipient.
       ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
+      ...(fence && req.ibApprovedCancelNotice ? { cancelGeneration: fence } : {}),
     });
   } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
+  // A refused claim or handoff stamp (lost lease, restored visit, busy): the text is the sweep's now, so record nothing.
+  if (await cancelBundles.liveStandDown(req, fence)) return outcome;
   await cancelBundles.liveNotice(req, outcome);
   // The text step may have outlasted the request's lease: the sweep can have taken the bundle (and abandoned it after a restore)
   // meanwhile. Renew the lease, and when ownership is gone run NO money, linked-visit or tracker step.
   if (!req.ibCancelBundleLost) await cancelBundles.liveStart(req);
-  if (req.ibCancelBundleLost) return outcome;
-  const fence = await cancelBundles.liveFence(req);
   if (req.ibCancelBundleLost) return outcome;
 
   // Share fee outcome alerts, invoice cleanup, and tracker updates with series cancellations. The helper uses the committed

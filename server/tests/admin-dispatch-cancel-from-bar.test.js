@@ -359,6 +359,38 @@ describe('the recovery bundle rides the cancel transaction', () => {
     expect(args.cancelFence).toMatchObject({ visitId: 'svc-bar-1', restorations: 0, bundleId: 'x', leaseToken: 'request', hits: [] });
   });
 
+  test('the approved text is claimed and handed off under the same fence (bundle, request lease, generation)', async () => {
+    await run();
+    const opts = mockHandleCancellation.mock.calls[0][1];
+    expect(opts.cancelGeneration).toMatchObject({ visitId: 'svc-bar-1', bundleId: 'x', leaseToken: 'request', hits: [] });
+    expect(opts.approvedNotice).toEqual(approvedNotice);
+    // The follow-through shares the fence object (one set of hits for the whole request).
+    expect(mockRunFollowThrough.mock.calls[0][0].cancelFence).toBe(opts.cancelGeneration);
+    // A card that chose no text sends nothing and passes no generation to the text step.
+    mockHandleCancellation.mockClear();
+    await run({ notifyCustomer: false, approvedNotice: null });
+    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toBeUndefined();
+  });
+
+  test.each([
+    ['the lease was taken over before the claim', 'lease_lost', false],
+    ['the visit was restored before the claim', 'visit_restored_since', true],
+    ['the visit was busy at the handoff stamp', 'visit_busy', true],
+  ])('a fence refusal at the text claim or handoff (%s): no outcome is recorded, no follow-through runs, the sweep owns the text', async (_label, hit, released) => {
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      opts.cancelGeneration.hits.push(hit);
+      opts.outcome.notificationSent = false;
+      opts.outcome.notificationError = 'cancellation fence';
+    });
+    const { json } = await run();
+    expect(json.success).toBe(true);
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+    const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
+    expect(updates.some((u) => u.notice_outcome !== undefined || u.status === 'complete')).toBe(false);
+    expect(updates.some((u) => u.lease_owner === null && u.lease_until === null)).toBe(released);
+  });
+
   test.each([
     ['the lease was taken over', 'lease_lost', false],
     ['the visit was restored meanwhile', 'visit_restored_since', true],
