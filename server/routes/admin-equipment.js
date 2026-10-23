@@ -253,6 +253,15 @@ function trucksTouched(id, row, updates) {
     row.category === 'vehicle' && ['status', 'category', 'assigned_to'].some((key) => updates[key] !== undefined) ? id : null,
   ].filter(Boolean))].sort();
 }
+// A form opened before another save landed: the dialog sends the status,
+// the truck and the row version (updated_at) it loaded, and a stored value
+// that differs refuses the save (a stale full payload would otherwise move
+// the tool back, resurrect it, or revert its kit key).
+function staleForm(expected, before) {
+  if (expected.status !== undefined && expected.status !== null && String(expected.status) !== String(before.status)) return true;
+  if (expected.assigned_vehicle_id !== undefined && (expected.assigned_vehicle_id || null) !== (before.assigned_vehicle_id || null)) return true;
+  return expected.updated_at !== undefined && expected.updated_at !== null && !sameInstant(expected.updated_at, before.updated_at);
+}
 async function applyAssetUpdate(trx, id, updates, expected = {}) {
   const truckKit = require('../services/truck-kit');
   // The item row itself is serialized first (one advisory lock per row), so
@@ -269,14 +278,7 @@ async function applyAssetUpdate(trx, id, updates, expected = {}) {
   // Truck, category OR status: an alert outcome (Lost / Retired) that landed
   // while this save waited must not be undone by the dialog's full payload.
   if (!before || ['assigned_vehicle_id', 'category', 'status'].some((key) => before[key] !== first[key])) return 'moved';
-  // ...nor by a form opened before it landed: the dialog sends the status
-  // and the truck it loaded (expected_*) and a stored value that differs
-  // refuses the save (a stale form would otherwise move the tool back).
-  if (expected.status !== undefined && expected.status !== null && String(expected.status) !== String(before.status)) return 'stale-status';
-  if (expected.assigned_vehicle_id !== undefined && (expected.assigned_vehicle_id || null) !== (before.assigned_vehicle_id || null)) return 'stale-status';
-  // The row version the dialog loaded (updated_at) covers every other column
-  // the full payload carries back (kit key included): any save since refuses.
-  if (expected.updated_at !== undefined && expected.updated_at !== null && !sameInstant(expected.updated_at, before.updated_at)) return 'stale-status';
+  if (staleForm(expected, before)) return 'stale-status';
   const refusal = await writeRefusal(trx, id, updates, before);
   if (refusal) return refusal;
   const moved = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id;
