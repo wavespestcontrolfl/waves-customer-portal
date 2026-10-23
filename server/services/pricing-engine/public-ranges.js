@@ -423,13 +423,13 @@ function buildRows() {
     }));
     add('mosquito_misting_plan', () => rangeRow({
       key: 'mosquito_misting_plan',
-      name: 'Mosquito Misting Service Plan (monthly application)',
+      name: `Mosquito Misting Service Plan (${Number(constants.MOSQUITO_MISTING.plan.visitsPerYear) === 12 ? 'monthly application' : `${Number(constants.MOSQUITO_MISTING.plan.visitsPerYear)} applications a year`})`,
       unit: 'per application',
       values: sweepValues(
         MISTING_SWEEP,
         (opts) => sp.priceMosquitoMisting({}, opts),
         (r) => (r.quoteRequired ? NaN : r.perApp)),
-      notes: 'One application a month; solution refills are billed per refill application.',
+      notes: `${Number(constants.MOSQUITO_MISTING.plan.visitsPerYear)} applications a year (the configured plan cadence); solution refills are billed per refill application.`,
     }));
   }
 
