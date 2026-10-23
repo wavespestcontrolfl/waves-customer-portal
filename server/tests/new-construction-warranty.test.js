@@ -65,7 +65,7 @@ describe('templateIssueValues (server-built warranty)', () => {
     concentration_pct: '0.06', gallons_applied: '180', square_footage: '1800', applicator_name: 'Sam Tester', applicator_fdacs_id: 'JF000000',
     warranty_type: 'Builder 1-year, renewable yearly to year 5',
   };
-  const project = { id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_type: 'pre_treatment_termite_certificate', findings: JSON.stringify(findings) };
+  const project = { id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_date: '2026-10-01', project_type: 'pre_treatment_termite_certificate', findings: JSON.stringify(findings) };
   const locks = [];
   const conn = (row) => () => ({ where() { return this; }, forUpdate() { locks.push(row && row.id); return this; }, first: async () => row });
   const office = {
@@ -109,13 +109,19 @@ describe('templateIssueValues (server-built warranty)', () => {
       const row = { ...project, findings: { ...findings, ...bad } };
       await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(row))).rejects.toMatchObject({ status: 409 });
     }
-    for (const renewal_due of ['2025-09-15', '2026-10-01', '2027-10-02']) {
+    for (const renewal_due of ['2025-09-15', '2026-10-01', '2027-09-15', '2027-10-02']) {
       const row = { ...project, findings: { ...findings, renewal_due } };
       await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(row))).rejects.toMatchObject({ status: 409 });
     }
-    const recorded = { ...project, findings: { ...findings, renewal_due: '2027-09-15' } };
+    const recorded = { ...project, findings: { ...findings, renewal_due: '2027-10-01' } };
     await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(recorded)))
-      .resolves.toMatchObject({ warranty: { renewal_due: '09/15/2027' } });
+      .resolves.toMatchObject({ warranty: { renewal_due: '10/01/2027' } });
+    // project_date is the treatment date; a legacy findings date that disagrees stops the issue.
+    const twoDates = { ...project, findings: { ...findings, treatment_date: '2026-11-15' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(twoDates))).rejects.toMatchObject({ status: 409 });
+    const projectDateOnly = { ...project, findings: { ...findings, treatment_date: '' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(projectDateOnly)))
+      .resolves.toMatchObject({ treatment: { initial_date: '10/01/2026' } });
   });
 
   test('screens every printed value: an access code or a "safe" claim is refused by field name', async () => {

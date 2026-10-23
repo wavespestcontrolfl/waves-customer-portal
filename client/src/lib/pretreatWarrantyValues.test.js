@@ -44,13 +44,13 @@ describe('pretreatWarrantyValues', () => {
   });
 
   it('prints a recorded final exterior date and runs a prepaid plan to its term', () => {
-    const v = pretreatWarrantyValues({ findings: { ...findings, warranty_type: 'Renewable 5-year retreatment bond', final_exterior_date: '2026-12-15' } });
+    const v = pretreatWarrantyValues({ project: { project_date: '2026-10-01' }, findings: { ...findings, warranty_type: 'Renewable 5-year retreatment bond', final_exterior_date: '2026-12-15' } });
     expect(v.treatment.final_exterior_line).toBe('Final exterior treatment date: 12/15/2026.');
     expect(v.warranty.term_end).toBe('10/01/2031');
     expect(v.warranty.plan_price).toBe('');
   });
 
-  it('falls back to the project date and handles Feb 29', () => {
+  it('takes the treatment date from the project and handles Feb 29', () => {
     const v = pretreatWarrantyValues({ project: { project_date: '2028-02-29' }, findings: { ...findings, treatment_date: '' } });
     expect(v.treatment.initial_date).toBe('02/29/2028');
     expect(v.warranty.term_end).toBe('02/28/2029');
@@ -72,13 +72,13 @@ describe('pretreatWarrantyValues', () => {
     expect(warrantyEligible({ ...findings, warranty_type: 'Addition to an existing building (no warranty required)' })).toBe(false);
   });
 
-  it('uses the lot when there is no street, the recorded renewal date, and the real product behind "Other"', () => {
+  it('uses the lot when there is no street, the term end as renewal, and the real product behind "Other"', () => {
     const v = pretreatWarrantyValues({
-      project: { address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' },
+      project: { project_date: '2026-10-01', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' },
       findings: { ...findings, treatment_address: '', renewal_due: '2027-09-15', product_name: 'Other', product_name_other: 'Taurus SC' },
     });
     expect(v.project.address).toBe('Lot 4, Test Grove, permit BP-0001');
-    expect(v.warranty.renewal_due).toBe('09/15/2027');
+    expect(v.warranty.renewal_due).toBe('10/01/2027');
     expect(v.treatment.product).toBe('Taurus SC');
     const noLot = pretreatWarrantyValues({
       project: { address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' },

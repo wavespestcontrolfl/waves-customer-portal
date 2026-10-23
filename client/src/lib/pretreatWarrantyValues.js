@@ -83,15 +83,9 @@ function propertyAddress(findings, lot) {
   return '';
 }
 
-// The certificate's own "Renewal due by" wins over the computed term end.
-function renewalDue(findings, termEnd) {
-  const recorded = parseDateOnly(findings.renewal_due);
-  if (recorded) return formatUs(recorded);
-  return text(findings.renewal_due) || termEnd;
-}
-
 export function pretreatWarrantyValues({ project = {}, findings = {}, today = etDateString() } = {}) {
-  const initial = parseDateOnly(findings.treatment_date) || parseDateOnly(project.project_date);
+  // project_date is the treatment date (the server refuses a legacy findings date that disagrees).
+  const initial = parseDateOnly(project.project_date);
   const years = warrantyPlanYears(findings.warranty_type);
   const termEnd = initial && years ? formatUs(addYears(initial, years)) : '';
   const finalDate = parseDateOnly(findings.final_exterior_date);
@@ -126,7 +120,7 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
       structures: WARRANTY_DEFAULT_STRUCTURES,
       plan: text(findings.warranty_type),
       term_end: termEnd,
-      renewal_due: renewalDue(findings, termEnd),
+      renewal_due: termEnd,
       payer: '',
       notice_location: '',
       issue_date: todayParts ? formatUs(todayParts) : '',

@@ -181,15 +181,20 @@ function officeFields(body, initial) {
 }
 
 function certificateValues(project, findings) {
-  const initial = certificateDate(findings, 'treatment_date', 'The treatment date') || parseIso(project.project_date);
+  // project_date is the certificate's treatment date; a legacy
+  // findings.treatment_date must agree with it, never override it.
+  const initial = parseIso(project.project_date);
   if (!initial) throw bad('The certificate has no treatment date.');
+  const legacyDate = certificateDate(findings, 'treatment_date', 'The treatment date');
+  if (legacyDate && key(legacyDate) !== key(initial)) throw bad('The certificate has two different treatment dates. Fix the certificate first.', 409);
   const termEnd = us(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)]));
   const lot = [oneLine(findings.lot_block), oneLine(findings.subdivision)].filter(Boolean).join(', ');
   const finalDate = certificateDate(findings, 'final_exterior_date', 'The final exterior date');
   const recordedRenewal = certificateDate(findings, 'renewal_due', 'Renewal due by');
-  // A recorded renewal must fall inside this term: after treatment, no later than its end.
-  if (recordedRenewal && (key(recordedRenewal) <= key(initial) || key(recordedRenewal) > key(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)])))) {
-    throw bad('Renewal due by on the certificate must be after the treatment date and within the warranty term.', 409);
+  // Renewal is due when the guaranteed term ends; a recorded date that
+  // differs would end coverage early, so it stops the issue.
+  if (recordedRenewal && us(recordedRenewal) !== termEnd) {
+    throw bad(`Renewal due by on the certificate must be the term end, ${termEnd}.`, 409);
   }
   // The send gate takes square or linear feet; one of them must be there.
   if (!oneLine(findings.square_footage) && !oneLine(findings.linear_feet)) throw bad('The certificate has no square or linear feet.', 409);
@@ -214,7 +219,7 @@ function certificateValues(project, findings) {
         number: `NCW-${String(project.id).replace(/-/g, '').slice(0, 8).toUpperCase()}`,
         plan: oneLine(findings.warranty_type),
         term_end: termEnd,
-        renewal_due: recordedRenewal ? us(recordedRenewal) : termEnd,
+        renewal_due: termEnd,
       },
     },
   };
