@@ -241,7 +241,8 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
 
 // The asset update, inside one transaction. Returns the updated row, null
 // (not found) or a refusal word the handler maps to a 409.
-const ITEM_COLUMNS = ['assigned_vehicle_id', 'category', 'assigned_to', 'status'];
+const ITEM_COLUMNS = ['assigned_vehicle_id', 'category', 'assigned_to', 'status', 'updated_at'];
+const sameInstant = (a, b) => (a == null && b == null) || (a != null && b != null && new Date(a).getTime() === new Date(b).getTime());
 // Every truck a write can touch: the target truck, the item's truck on a move
 // or any status change, and the vehicle row itself when the write can change
 // whether it serves as a truck (status, category, technician).
@@ -273,6 +274,9 @@ async function applyAssetUpdate(trx, id, updates, expected = {}) {
   // refuses the save (a stale form would otherwise move the tool back).
   if (expected.status !== undefined && expected.status !== null && String(expected.status) !== String(before.status)) return 'stale-status';
   if (expected.assigned_vehicle_id !== undefined && (expected.assigned_vehicle_id || null) !== (before.assigned_vehicle_id || null)) return 'stale-status';
+  // The row version the dialog loaded (updated_at) covers every other column
+  // the full payload carries back (kit key included): any save since refuses.
+  if (expected.updated_at !== undefined && expected.updated_at !== null && !sameInstant(expected.updated_at, before.updated_at)) return 'stale-status';
   const refusal = await writeRefusal(trx, id, updates, before);
   if (refusal) return refusal;
   const moved = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id;
@@ -348,11 +352,11 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     // A tool that leaves a truck (moved or unassigned) takes its open tool
     // alerts with it, so the old truck's bell must be re-judged: under both
     // trucks' locks, in the same transaction as the move (truck-kit.js).
-    const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates, { status: req.body.expected_status, assigned_vehicle_id: req.body.expected_assigned_vehicle_id }));
+    const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates, { status: req.body.expected_status, assigned_vehicle_id: req.body.expected_assigned_vehicle_id, updated_at: req.body.expected_updated_at }));
     if (record === 'moved') return res.status(409).json({ error: 'Another save changed this item (its truck, category or status). Reload and try again.' });
     if (record === 'vehicle-cargo') return res.status(409).json({ error: 'This item is now a vehicle; a vehicle cannot ride on a truck. Reload and try again.' });
     if (record === 'riders') return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
-    if (record === 'stale-status') return res.status(409).json({ error: 'This item changed since you opened it (its status or truck). Reload and try again.' });
+    if (record === 'stale-status') return res.status(409).json({ error: 'This item changed since you opened it. Reload and try again.' });
     if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
     if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });

@@ -731,19 +731,23 @@ router.get('/alerts', async (req, res, next) => {
 // only close the alert. The truck's office bell closes once no tool alert on
 // it is open. Admin only: an item's status is an office call.
 const TOOL_OUTCOME_STATUS = { found: null, repaired: null, replaced: null, lost: 'lost', retired: 'retired' };
+// A missing tool is found, replaced or lost; a damaged one repaired, replaced or retired.
+const OUTCOMES_BY_ALERT_TYPE = { tool_missing: ['found', 'replaced', 'lost'], tool_damaged: ['repaired', 'replaced', 'retired'] };
 const OPEN_TOOL_ALERT_STATUSES = ['new', 'acknowledged'];
 
 // Why a status change on an alert is refused, or null. A truck-check alert
 // closes from the office (the technician's own path is the next truck check,
 // which finds the tool), only by resolving it, only with an outcome from the
 // fixed list; a plain maintenance alert keeps its old reach.
-function alertTransitionRefusal({ toolAlert, status, outcome, techRole }) {
+function alertTransitionRefusal({ toolAlert, alertType, status, outcome, techRole }) {
   if ((toolAlert || outcome !== undefined) && techRole !== 'admin') return { code: 403, error: 'Admin access required' };
   if (outcome !== undefined) {
     if (!toolAlert) return { code: 400, error: 'outcome applies to truck check alerts only' };
     if (!Object.prototype.hasOwnProperty.call(TOOL_OUTCOME_STATUS, outcome)) {
       return { code: 400, error: 'outcome must be found, repaired, replaced, lost or retired' };
     }
+    const allowed = OUTCOMES_BY_ALERT_TYPE[alertType] || [];
+    if (!allowed.includes(outcome)) return { code: 400, error: `a ${alertType === 'tool_missing' ? 'missing' : 'damaged'} tool resolves as ${allowed.join(', ')}` };
     if (status !== 'resolved') return { code: 400, error: 'an outcome resolves the alert' };
   }
   // (The Fleet tab lists status=new only, so an acknowledged tool alert
@@ -762,7 +766,7 @@ router.put('/alerts/:id', async (req, res, next) => {
     const existing = await db('maintenance_alerts').where('id', req.params.id).first();
     if (!existing) return res.status(404).json({ error: 'Alert not found' });
     const toolAlert = truckKit.TOOL_ALERT_TYPES.includes(existing.alert_type);
-    const refusal = alertTransitionRefusal({ toolAlert, status, outcome, techRole: req.techRole });
+    const refusal = alertTransitionRefusal({ toolAlert, alertType: existing.alert_type, status, outcome, techRole: req.techRole });
     if (refusal) return res.status(refusal.code).json({ error: refusal.error });
     const updates = { status, updated_at: db.fn.now() };
     if (status === 'resolved') {

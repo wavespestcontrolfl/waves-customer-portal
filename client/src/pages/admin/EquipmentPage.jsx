@@ -508,6 +508,7 @@ function EquipmentTab({
                   kit_key: e.kit_key ?? "",
                   expected_status: e.status ?? null,
                   expected_assigned_vehicle_id: e.assigned_vehicle_id ?? null,
+                  expected_updated_at: e.updated_at ?? null,
                   condition_rating: e.condition_rating ?? ""
                 });
               }} type="button" variant="secondary" className="min-w-11" disabled={saving}>

@@ -222,6 +222,9 @@ test('an outcome is admin-only, tool-alert-only, from the fixed list, and resolv
   expect((await put('a-missing', { status: 'resolved', outcome: 'lost' }, 'technician')).statusCode).toBe(403);
   expect((await put('a-due', { status: 'resolved', outcome: 'lost' })).statusCode).toBe(400);
   expect((await put('a-missing', { status: 'resolved', outcome: 'vanished' })).statusCode).toBe(400);
+  // A valid word for the other kind of alert is still refused.
+  expect((await put('a-missing', { status: 'resolved', outcome: 'repaired' })).statusCode).toBe(400);
+  expect((await put('a-missing', { status: 'resolved', outcome: 'retired' })).statusCode).toBe(400);
   expect((await put('a-missing', { status: 'acknowledged', outcome: 'lost' })).statusCode).toBe(400);
   expect(db.__state.alerts['a-missing'].status).toBe('new');
   expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();

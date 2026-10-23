@@ -18,7 +18,7 @@ const TRUCK = { id: 'v1', name: 'Synthetic truck', asset_tag: 'VEH-001', categor
 const TOOL = {
   id: 'e1', name: 'Synthetic moisture meter', category: 'tool', status: 'active', asset_tag: 'T-001', location: 'van',
   condition_rating: 7, assigned_vehicle_id: 'v1', assigned_vehicle_name: 'Synthetic truck', assigned_vehicle_tag: 'VEH-001',
-  assigned_to: 't1', assigned_tech_name: 'Synthetic tech',
+  assigned_to: 't1', assigned_tech_name: 'Synthetic tech', updated_at: '2026-10-23T12:00:00.000Z',
 };
 const LOOSE = { id: 'e2', name: 'Synthetic duster', category: 'tool', status: 'active', assigned_vehicle_id: null, assigned_tech_name: 'Unassigned' };
 const DEAD_TRUCK = { id: 'v9', name: 'Synthetic old van', asset_tag: 'VEH-009', category: 'vehicle', status: 'retired', assigned_tech_name: 'Unassigned' };
@@ -109,7 +109,7 @@ describe('assets custody', () => {
     expect(puts[0]).toEqual(expect.objectContaining({
       asset_tag: 'T-001', location: 'storage', assigned_vehicle_id: null, assigned_to: 't1', condition_rating: 6,
       // The status the form loaded rides along, so a stale form cannot resurrect a lost item.
-      expected_status: 'active', expected_assigned_vehicle_id: 'v1',
+      expected_status: 'active', expected_assigned_vehicle_id: 'v1', expected_updated_at: '2026-10-23T12:00:00.000Z',
     }));
   });
 

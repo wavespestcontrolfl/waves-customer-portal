@@ -318,6 +318,10 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     const back = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Edited', assigned_vehicle_id: VEHICLE, expected_assigned_vehicle_id: VEHICLE } });
     expect(back.statusCode).toBe(409);
     expect(back.body.error).toMatch(/changed since you opened it/);
+    // Any other save since the form loaded (a kit key change, say) is caught by the row version.
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE, status: 'active', updated_at: '2026-10-23T12:00:00.000Z' };
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Edited', expected_updated_at: '2026-10-23T11:00:00.000Z' } })).statusCode).toBe(409);
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Edited', expected_updated_at: '2026-10-23T12:00:00.000Z' } })).statusCode).toBe(200);
     db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE };
   });
 
