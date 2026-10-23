@@ -171,8 +171,9 @@ describe('suggestionFor', () => {
   });
   test('review flags the row and may pre-fill a category', () => {
     expect(svc.suggestionFor({ ...base, kind: 'review', note: 'helper or personal?', category_id: 'cat-2', category_name: 'Contract Labor', irs_line: '11' }))
-      .toEqual(expect.objectContaining({ review: true, note: 'helper or personal?', categoryId: 'cat-2', irsLine: '11' }));
+      .toEqual(expect.objectContaining({ review: true, note: 'helper or personal?', categoryId: 'cat-2', irsLine: '11', categorySource: 'rule' }));
     expect(svc.suggestionFor({ ...base, kind: 'review' }).ignore).toBeUndefined();
+    expect(svc.suggestionFor({ ...base, kind: 'review' }).categorySource).toBeUndefined();
   });
 });
 
@@ -327,6 +328,8 @@ describe('applyRules (suggestion-only)', () => {
     expect(byId.b5.merged).toEqual({ rulesAt: expect.any(String) });
     const hits = Object.fromEntries(state.ruleUpdates.map((u) => [u.wheres[0].id, u.patch.hits.bindings[0]]));
     expect(hits).toEqual({ 'r-gas': 2, 'r-acme': 1 });
+    // recording a hit is not an edit: a seed row stays pristine for the reconcile
+    for (const u of state.ruleUpdates) expect(u.patch.updated_at).toBeUndefined();
   });
 
   test('without force only unstamped rows are read; a payee pass (force + pattern) writes that rule only and stamps nothing else', async () => {
@@ -630,6 +633,8 @@ describe('visibleSuggestion (the kill switch)', () => {
     // an owner decision survives the gate: the Income shelf flag and the decision itself
     expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'review' }, income: true, decision: 'income', decidedAt: 'd', reason: 'x', noMatch: true }))
       .toEqual({ income: true, decision: 'income', decidedAt: 'd', reason: 'x', noMatch: true });
+    // a review rule's pre-filled category is rule-owned too
+    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'review' }, review: true, note: 'n', categoryId: 'c', categorySource: 'rule', noMatch: true })).toEqual({ noMatch: true });
     // an AI category (not categorySource rule) stays
     expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'review' }, categoryId: 'ai', categorySource: 'ai' })).toEqual({ categoryId: 'ai', categorySource: 'ai' });
     expect(svc.visibleSuggestion(null)).toBeNull();

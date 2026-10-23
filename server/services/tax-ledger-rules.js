@@ -193,7 +193,8 @@ function suggestionFor(rule) {
   if (rule.kind === 'transfer') return { ...base, ignore: true, reason: `transfer per ledger rule${rule.note ? `: ${rule.note}` : ''}` };
   if (rule.kind === 'personal') return { ...base, personal: true, reason: `personal per ledger rule${rule.note ? `: ${rule.note}` : ''}` };
   if (rule.kind === 'income') return { ...base, income: true, reason: rule.note || INCOME_REASON };
-  return { ...base, review: true, note: rule.note || null, categoryId: rule.category_id || null, categoryName: rule.category_name || null, irsLine: rule.irs_line || null };
+  // the pre-filled category of a review rule is rule-owned too (the kill switch removes it)
+  return { ...base, review: true, note: rule.note || null, categoryId: rule.category_id || null, categoryName: rule.category_name || null, irsLine: rule.irs_line || null, categorySource: rule.category_id ? 'rule' : undefined };
 }
 
 // Payee pattern from a bank description for an owner rule: drop the bank's
@@ -341,7 +342,8 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
     after = cursorOf(rows[rows.length - 1]);
   }
   for (const [id, n] of hits) {
-    await db('tax_ledger_rules').where({ id }).update({ hits: db.raw('hits + ?', [n]), last_hit_at: new Date(), updated_at: new Date() });
+    // hits are not an edit: updated_at stays, so a seed row stays pristine
+    await db('tax_ledger_rules').where({ id }).update({ hits: db.raw('hits + ?', [n]), last_hit_at: new Date() });
   }
   if (lastPageFull && counts.examined >= maxRows) { counts.more = true; counts.cursor = after; }
   return counts;
