@@ -184,12 +184,12 @@ async function cancelVisitTracker(id, { actorId, reason, source, linkedChildren,
     if (!result?.ok) reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);
     // A fence refusal is not a tracker fault: the recovery sweep reports it (the visit is no longer the approved cancel).
     if (result?.reason === 'cancel_fence') return;
-    await recordTrackTransitionResultFailure({ jobId: id, action: 'cancel', actorId, result });
+    await recordTrackTransitionResultFailure({ jobId: id, action: 'cancel', actorId, result, cancelFence });
   } catch (e) {
     reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);
     if (e && e.code === 'CANCEL_FENCE') return;
     logger.error(`[${source}] cancel track transition failed for ${id}: ${e.message}`);
-    await recordTrackTransitionFailure({ jobId: id, action: 'cancel', actorId, error: e });
+    await recordTrackTransitionFailure({ jobId: id, action: 'cancel', actorId, error: e, cancelFence });
   }
 }
 
@@ -258,13 +258,12 @@ async function runVisitCancellationFollowThrough({
     // A fence refusal during the money step means the visit changed (or is busy): the bundle's own restoration alert or
     // retry owns it, so no generic fee alert and no tracker cancel on top.
     if (cancelFence && cancelFence.hits.length) continue;
-    // A restore can also land while the money step reads (no refusal recorded, a fee_step_error outcome): prove the cancel
-    // again right before the alert, so a live visit never gets a "cancellation fee" alert. (The tracker cancel proves it
-    // again inside its own transaction.)
-    if (cancelFence && !(await cancelFenceStands(cancelFence))) continue;
-    // One normalized outcome for BOTH rails and thrown failures. The alert
-    // service ignores clean outcomes, so no duplicate decision tree here.
-    await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: feeOutcome });
+    // One normalized outcome for BOTH rails and thrown failures. The alert service ignores clean outcomes, so no duplicate
+    // decision tree here. With a fence the alert row is written in the transaction that proves the generation (a restore
+    // that landed while the money step read raises no "cancellation fee" alert for a live visit); a refusal lands on
+    // cancelFence.hits and no tracker cancel follows it.
+    await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: feeOutcome, ...(cancelFence ? { cancelFence } : {}) });
+    if (cancelFence && cancelFence.hits.length) continue;
     await cancelVisitTracker(id, ctx);
   }
 
