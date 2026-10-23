@@ -5392,6 +5392,15 @@ season copy from it and never derives an interval itself. The `cadence`
 interval line and projected `months` the entry carried from #3755 were
 dropped on 2026-09-06 once the page stopped reading them (owner
 2026-09-05: education, not a schedule).
+`/data` carries an optional top-level `lawnLimits` block behind
+`GATE_ESTIMATE_LAWN_LIMITS` (prod dark): `{ heading, paragraphs: [{ key,
+text }] }` on a recurring lawn estimate only. `key` is `always`, one grass
+name (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) or
+`virus_streaks`, from the customer's turf profile flags. Fixed owner copy
+(`services/estimate-lawn-limits.js`), no prices, no customer data. The key is
+ABSENT with the gate off and on any non-lawn estimate. The React page and the
+browser-rendered PDF print it as given; the legacy server page and the pdfkit
+PDF print the same module's text.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that

@@ -156,6 +156,7 @@ const {
 const featureGates = require('../config/feature-gates');
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
+const { lawnLimitsBlock, lawnLimitsForEstimate } = require('../services/estimate-lawn-limits');
 
 function lawnCalendarBlock(services) {
   if (!featureGates.isEnabled('estimateLawnCalendar')) return {};
@@ -7678,6 +7679,11 @@ ${shellTopBar()}
   </section>
   `}
 
+  ${opts.lawnLimits?.heading && Array.isArray(opts.lawnLimits.paragraphs) && opts.lawnLimits.paragraphs.length ? `<div class="card" data-lawn-limits="true">
+    <h2>${escapeHtml(opts.lawnLimits.heading)}</h2>
+    ${opts.lawnLimits.paragraphs.map((p) => `<p class="ai-blurb" data-lawn-limit="${escapeHtml(p.key)}">${escapeHtml(p.text)}</p>`).join('\n    ')}
+  </div>` : ''}
+
   ${quoteRequired || isOneTimeOnly || commercialManualAccept ? '' : `<div class="card" data-mode-only="recurring">
     <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
     <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
@@ -9944,6 +9950,8 @@ async function handleEstimateView(req, res, next) {
 
     let rateReviewTermsRendered = false;
     const legacyGreetingFirstName = await resolveEstimateGreetingFirstName(estimate, contact);
+    // GATE_ESTIMATE_LAWN_LIMITS: the same "What we can and can't fix" copy as /data (null = nothing printed).
+    const legacyLawnLimits = await lawnLimitsForEstimate(estimate);
     const renderLegacyPage = (renderOpts = {}) => renderEstimatePageHtml(req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
@@ -10005,6 +10013,7 @@ async function handleEstimateView(req, res, next) {
       committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
     }), {
       showYourWork,
+      ...(legacyLawnLimits ? { lawnLimits: legacyLawnLimits } : {}),
       prepayBaseRate,
       monthlyBilledEstimate,
       payAfterFirstVisitCopy,
@@ -29379,9 +29388,12 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
+    // GATE_ESTIMATE_LAWN_LIMITS: the same "What we can and can't fix" copy the page prints (null = nothing printed).
+    const lawnLimits = await lawnLimitsForEstimate(documentEstimate);
     generateEstimateProposalPDF(documentEstimate, res, {
       ...documentBilling,
       ...(withholdRateReviewTerms ? { withholdRateReviewTerms: true } : {}),
+      ...(lawnLimits ? { lawnLimits } : {}),
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
       acceptance: await acceptanceRecordForEstimate(documentEstimate, { strict: true }),
@@ -30787,6 +30799,12 @@ async function composeEstimateDataPayload(estimate, {
       // an interval itself. A frequency with no catalog plan is omitted and
       // renders nothing; the key is absent when nothing resolves.
       ...lawnCalendarBlock(pricingBundle.services),
+      // "What we can and can't fix" (GATE_ESTIMATE_LAWN_LIMITS): the owner's fixed lawn
+      // paragraph plus one line per flag on the customer's turf profile, from the one
+      // copy module the PDF fallback also prints. Recurring lawn estimates only; the
+      // key is absent otherwise (and with the gate off), so those responses stay
+      // byte-identical. Copy only: no prices.
+      ...(await lawnLimitsBlock(estimate)),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.

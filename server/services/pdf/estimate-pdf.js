@@ -27,6 +27,7 @@ const {
   commercialTermLines, proposalCallbackTermsEligible, proposalMakesNoGuaranteeClaim, proposalRateReviewTermsEligible, resolveProposalBillingContext,
 } = require('../estimate-proposal-billing');
 const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims.cjs');
+const { lawnLimitsForEstimate } = require('../estimate-lawn-limits');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -462,6 +463,27 @@ function totalsBlock(ctx, totals, y) {
   return y;
 }
 
+// "What we can and can't fix" (GATE_ESTIMATE_LAWN_LIMITS): the page's lawn
+// limits copy, from the same module (estimate-lawn-limits.js). `lawnLimits` is
+// resolved by the caller (null = print nothing), so gate off and non-lawn
+// documents are the document as it was.
+const lawnLimitsOf = (billing) => (billing && billing.lawnLimits) || null;
+function lawnLimitsBlock(ctx, lawnLimits, y) {
+  const { doc } = ctx;
+  const paragraphs = Array.isArray(lawnLimits?.paragraphs) ? lawnLimits.paragraphs : [];
+  if (paragraphs.length === 0) return y;
+  y = ensureSpace(ctx, y + 4, 60);
+  y = sectionLabel(doc, lawnLimits.heading, L, y);
+  for (const { text } of paragraphs) {
+    doc.fontSize(10).font('Helvetica');
+    const lineH = doc.heightOfString(text, { width: W, lineGap: 1.5 });
+    y = ensureSpace(ctx, y, lineH + 4);
+    doc.fontSize(10).font('Helvetica').fillColor(BODY).text(text, L, y, { width: W, lineGap: 1.5 });
+    y += lineH + 5;
+  }
+  return y + 6;
+}
+
 function termsBlock(ctx, proposal, totals, y) {
   const { doc } = ctx;
   const lines = [];
@@ -622,6 +644,8 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   y = correctiveWorkBlock(ctx, proposal.correctiveWork, y);
   y = responsibilitiesBlock(ctx, proposal.customerResponsibilities, y);
   y = totalsBlock(ctx, totals, y + 4);
+  // GATE_ESTIMATE_LAWN_LIMITS: absent unless the caller passed the block, so the document is unchanged without it.
+  y = lawnLimitsBlock(ctx, lawnLimitsOf(billing), y);
   y = termsBlock(ctx, proposal, totals, y + 8);
   acceptanceBlock(ctx, billing?.acceptance || null, y + 8);
 
@@ -651,7 +675,9 @@ function streamToBuffer(streamFn) {
 // already resolved it.
 async function buildEstimateProposalPDFBuffer(estimate, billing = null) {
   const resolved = billing || await resolveProposalBillingContext(estimate);
-  return streamToBuffer((sink) => generateEstimateProposalPDF(estimate, sink, resolved));
+  // GATE_ESTIMATE_LAWN_LIMITS: null (nothing printed) with the gate off or on a non-lawn estimate.
+  const lawnLimits = await lawnLimitsForEstimate(estimate);
+  return streamToBuffer((sink) => generateEstimateProposalPDF(estimate, sink, lawnLimits ? { ...resolved, lawnLimits } : resolved));
 }
 
 // SendGrid / EmailTemplateLibrary attachment shape (base64 content).

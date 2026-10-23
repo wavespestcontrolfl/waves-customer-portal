@@ -268,3 +268,78 @@ it.each(["bermuda", "bahia"])("an already-enabled bermuda removal switch stays v
   });
   await waitFor(() => expect(screen.queryByLabelText(/Bermuda removal add-on/)).toBeNull());
 });
+
+// GATE_ESTIMATE_LAWN_LIMITS: the office flags other grasses and suspected virus streaks from the
+// estimate photos. The section shows only while the server says the gate is on, and the flags go
+// out inside the general profile save.
+const lawnLimitsProfileFetch = ({ available, profile = {} }) =>
+  vi.fn(async (url, options = {}) => {
+    if (url.endsWith("/admin/lawn-assessment/customers")) {
+      return response({ customers: [customer] });
+    }
+    if (url.endsWith("/admin/customers/customer-1/turf-profile")) {
+      if (options.method === "PUT") {
+        return response({ profile: { id: "profile-1", ...JSON.parse(options.body) } });
+      }
+      return response({
+        irrigation_home_changed_at: null,
+        ...(available
+          ? { lawnLimitsAvailable: true, otherGrassOptions: ["carpetgrass", "bahiagrass", "bermudagrass", "torpedograss", "dallisgrass"] }
+          : {}),
+        profile: { id: "profile-1", grass_type: "st_augustine", ...profile },
+      });
+    }
+    throw new Error(`Unexpected request: ${options.method || "GET"} ${url}`);
+  });
+
+it("gate off: the lawn limit flags are not shown", async () => {
+  vi.stubGlobal("fetch", lawnLimitsProfileFetch({ available: false }));
+  render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByRole("button", { name: "Profile" }));
+  await screen.findByRole("heading", { name: /Turf Profile/ });
+  expect(screen.queryByTestId("lawn-limit-flags")).toBeNull();
+  expect(screen.queryByLabelText(/Other grass:/)).toBeNull();
+  expect(screen.queryByLabelText(/Virus streaks suspected/)).toBeNull();
+});
+
+it("gate on: shows a box for each grass and the virus flag, reflects the stored flags, and saves the changes", async () => {
+  vi.stubGlobal(
+    "fetch",
+    lawnLimitsProfileFetch({ available: true, profile: { other_grasses: ["carpetgrass"], virus_streaks_suspected: null } }),
+  );
+  render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByRole("button", { name: "Profile" }));
+  const carpet = await screen.findByLabelText("Other grass: carpetgrass");
+  expect(carpet.checked).toBe(true);
+  for (const name of ["bahiagrass", "bermudagrass", "torpedograss", "dallisgrass"]) {
+    expect(screen.getByLabelText(`Other grass: ${name}`).checked).toBe(false);
+  }
+  expect(screen.getByLabelText(/Virus streaks suspected/).checked).toBe(false);
+
+  fireEvent.click(screen.getByLabelText("Other grass: dallisgrass"));
+  fireEvent.click(screen.getByLabelText(/Virus streaks suspected/));
+  fireEvent.click(screen.getByRole("button", { name: "Save Turf Profile" }));
+  await waitFor(() => {
+    const call = fetch.mock.calls.find(([url, options]) => String(url).endsWith("/turf-profile") && options?.method === "PUT");
+    expect(call).toBeTruthy();
+    const body = JSON.parse(call[1].body);
+    expect(body.other_grasses).toEqual(["carpetgrass", "dallisgrass"]);
+    expect(body.virus_streaks_suspected).toBe(true);
+  });
+});
+
+it("gate on: unchecking the last grass sends an empty list so the flag clears", async () => {
+  vi.stubGlobal("fetch", lawnLimitsProfileFetch({ available: true, profile: { other_grasses: ["bahiagrass"], virus_streaks_suspected: true } }));
+  render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByRole("button", { name: "Profile" }));
+  fireEvent.click(await screen.findByLabelText("Other grass: bahiagrass"));
+  fireEvent.click(screen.getByLabelText(/Virus streaks suspected/));
+  fireEvent.click(screen.getByRole("button", { name: "Save Turf Profile" }));
+  await waitFor(() => {
+    const call = fetch.mock.calls.find(([url, options]) => String(url).endsWith("/turf-profile") && options?.method === "PUT");
+    expect(call).toBeTruthy();
+    const body = JSON.parse(call[1].body);
+    expect(body.other_grasses).toEqual([]);
+    expect(body.virus_streaks_suspected).toBe(false);
+  });
+});

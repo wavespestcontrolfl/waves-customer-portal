@@ -117,6 +117,9 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   const [bermudaRemovalAvailable, setBermudaRemovalAvailable] = useState(false);
   const bermudaRemovalEligibleGrass = ["st_augustine", "zoysia"].includes(turfProfile?.grass_type);
   const [bermudaRemovalSaving, setBermudaRemovalSaving] = useState(false);
+  // GATE_ESTIMATE_LAWN_LIMITS: the server lists the grasses the office may flag only while the
+  // gate is on (the keys are absent otherwise), so the section shows only then.
+  const [otherGrassOptions, setOtherGrassOptions] = useState(null);
   // The county field was EDITED in this session. The save re-sends every
   // loaded field, so the server needs an explicit signal that the county
   // was reviewed for the current address — after a move, that review is
@@ -341,6 +344,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       const d = await adminFetch(`/admin/customers/${customerId}/turf-profile`);
       profileHomeStampRef.current = d.irrigation_home_changed_at ?? null;
       setBermudaRemovalAvailable(d.bermudaRemovalAvailable === true);
+      setOtherGrassOptions(d.lawnLimitsAvailable === true && Array.isArray(d.otherGrassOptions) ? d.otherGrassOptions : null);
       // Server returns { profile: row | null }. Coerce nulls to ''
       // so the form's controlled inputs don't drop to uncontrolled.
       const p = d.profile;
@@ -1069,6 +1073,38 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   />
                 ))}
               </fieldset>
+              {/* GATE_ESTIMATE_LAWN_LIMITS: from the estimate photos. Each flag adds one line to the
+                  lawn estimate's "What we can and can't fix" block. */}
+              {otherGrassOptions && (
+                <fieldset className="mb-3 grid gap-2 border-0 p-0" data-testid="lawn-limit-flags">
+                  <legend className="mb-1 text-ui-body font-medium text-zinc-900">
+                    Seen in the estimate photos
+                  </legend>
+                  {otherGrassOptions.map((name) => {
+                    const current = Array.isArray(turfProfile.other_grasses) ? turfProfile.other_grasses : [];
+                    return (
+                      <Checkbox
+                        key={name}
+                        label={`Other grass: ${name}`}
+                        checked={current.includes(name)}
+                        onChange={(e) =>
+                          updateProfileField(
+                            "other_grasses",
+                            e.target.checked
+                              ? [...current.filter((g) => g !== name), name]
+                              : current.filter((g) => g !== name),
+                          )
+                        }
+                      />
+                    );
+                  })}
+                  <Checkbox
+                    label="Virus streaks suspected (Floratam)"
+                    checked={turfProfile.virus_streaks_suspected === true}
+                    onChange={(e) => updateProfileField("virus_streaks_suspected", e.target.checked)}
+                  />
+                </fieldset>
+              )}
               {bermudaRemovalAvailable && (bermudaRemovalEligibleGrass || turfProfile.bermuda_removal === true) && (
                   <div className="mb-3">
                     <Checkbox
