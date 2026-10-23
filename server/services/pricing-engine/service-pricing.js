@@ -5002,15 +5002,19 @@ function resolveMistingChoice(options) {
   const M = MOSQUITO_MISTING;
   const reasons = [];
   const stamped = isPlainObject(options.knobs) ? options.knobs : null;
-  let tier = String(options.tier ?? stamped?.tier ?? M.defaultTier).trim().toLowerCase();
+  // An invalid explicit choice records its reason and falls back to the STAMPED normalized choice on a replay (the tier or
+  // solution the sent quote was actually priced as), and to the live default only on a fresh quote (Codex #6503 r11).
+  const stampedTier = stamped && hasOwn(M.tiers, String(stamped.tier ?? '').toLowerCase()) ? String(stamped.tier).toLowerCase() : null;
+  const stampedSolution = stamped && hasOwn(M.refills, String(stamped.refillSolution ?? '').toLowerCase()) ? String(stamped.refillSolution).toLowerCase() : null;
+  let tier = String(options.tier ?? stampedTier ?? M.defaultTier).trim().toLowerCase();
   if (!hasOwn(M.tiers, tier)) {
     reasons.push('mosquito_misting_unknown_tier');
-    tier = M.defaultTier;
+    tier = stampedTier || M.defaultTier;
   }
-  let solution = String(options.solution ?? stamped?.refillSolution ?? M.defaultSolution).trim().toLowerCase();
+  let solution = String(options.solution ?? stampedSolution ?? M.defaultSolution).trim().toLowerCase();
   if (!hasOwn(M.refills, solution)) {
     reasons.push('mosquito_misting_unknown_solution');
-    solution = M.defaultSolution;
+    solution = stampedSolution || M.defaultSolution;
   }
   return { tier, solution, reasons };
 }
@@ -5141,7 +5145,8 @@ function mistingOversizeResult(base, reasons) {
 
 function buildMistingPricedResult(base, basis, reasons) {
   const { extraNozzles, extraRisers } = base;
-  const price = Math.round(basis.tierPrice + extraNozzles * basis.extraNozzlePrice + extraRisers * basis.extraRiserPrice);
+  // Cents are kept: the DB-authoritative row may hold fractional tier or overage prices (Codex #6503 r11).
+  const price = Math.round((basis.tierPrice + extraNozzles * basis.extraNozzlePrice + extraRisers * basis.extraRiserPrice) * 100) / 100;
   const materialCost = Math.round((basis.hardwareCost + extraNozzles * basis.extraNozzleCost + extraRisers * basis.extraRiserCost) * 100) / 100;
   const laborCost = Math.round(basis.installTechs * basis.installHours * basis.laborRate * 100) / 100;
   const totalCost = Math.round((materialCost + laborCost) * 100) / 100;

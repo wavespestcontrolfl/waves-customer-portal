@@ -819,3 +819,35 @@ describe('Codex round 10: manual-quote stamp, reminder recheck, client no-bookin
   });
 });
 
+describe('Codex round 11: invalid choices replay as stamped; cents survive', () => {
+  const { priceMosquitoMisting } = require('../services/pricing-engine/service-pricing');
+  const { applyMosquitoMistingPricingConfig } = require('../services/pricing-engine/mosquito-misting-config');
+  const { MOSQUITO_MISTING, mosquitoMistingPricingDefaults } = require('../services/pricing-engine/constants');
+  afterEach(() => { applyMosquitoMistingPricingConfig(null, MOSQUITO_MISTING); });
+
+  test('an invalid explicit tier / solution replays as the tier and solution the quote was priced as, not the live default', () => {
+    const first = priceMosquitoMisting({}, { tier: 'platinum', solution: 'organic' });
+    expect(first.tier).toBe('smart');
+    expect(first.solution).toBe('standard');
+    expect(first.manualReviewReasons).toEqual(expect.arrayContaining(['mosquito_misting_unknown_tier', 'mosquito_misting_unknown_solution']));
+    const live = { defaultTier: MOSQUITO_MISTING.defaultTier, defaultSolution: MOSQUITO_MISTING.defaultSolution };
+    try {
+      MOSQUITO_MISTING.defaultTier = 'essential'; MOSQUITO_MISTING.defaultSolution = 'premium';
+      const replay = priceMosquitoMisting({}, { tier: 'platinum', solution: 'organic', knobs: first.pricingKnobs });
+      expect(replay.tier).toBe('smart');
+      expect(replay.solution).toBe('standard');
+      expect(replay.installation.price).toBe(first.installation.price);
+      expect(replay.refill.perFill).toBe(first.refill.perFill);
+      expect(priceMosquitoMisting({}, { tier: 'platinum' }).tier).toBe('essential');
+    } finally { Object.assign(MOSQUITO_MISTING, live); }
+  });
+
+  test('a fractional configured tier or overage price keeps its cents in the installation price', () => {
+    const row = JSON.parse(JSON.stringify(mosquitoMistingPricingDefaults()));
+    row.tiers.smart.price = 4595.49; row.extraNozzlePrice = 75.25;
+    expect(applyMosquitoMistingPricingConfig(row, MOSQUITO_MISTING).applied).toBe(true);
+    const r = priceMosquitoMisting({}, { tier: 'smart', nozzles: 37 });
+    expect(r.installation.price).toBe(4745.99);
+  });
+});
+
