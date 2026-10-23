@@ -389,7 +389,7 @@ const ornRow = (extra = {}) => ({ productId: 'orn', name: ORN, applicationMethod
 
 it('the 13-0-13 rule applies to a Tree & Shrub visit only, and to that product only', () => {
   expect(isBedFeedRow({ name: ORN }, 'Tree & Shrub Care')).toBe(true);
-  expect(isBedFeedRow({ name: ORN }, 'Lawn Care')).toBe(false);
+  expect(isBedFeedRow({ name: ORN }, 'Lawn Care')).toBe(true); // by identity on any visit (Codex #6516 r9)
   expect(isBedFeedRow({ name: 'LESCO 8-0-12 Palm' }, 'Tree & Shrub Care')).toBe(false);
   expect(isBedFeedRow(null, 'Tree & Shrub Care')).toBe(false);
 });
@@ -440,13 +440,13 @@ it('Tree & Shrub work is the visit\'s own line or a Tree & Shrub companion, from
   expect(visitHasTreeShrubWork(null)).toBe(false);
 });
 
-it('on a lawn visit with a Tree & Shrub companion the 13-0-13 row needs the treated square feet; on a plain lawn visit it does not', () => {
+it('a 13-0-13 row needs the treated square feet on a lawn visit with a Tree & Shrub companion and on a plain lawn visit (Codex #6516 r9)', () => {
   expect(isBedFeedRow({ name: ORN }, 'Lawn Care', true)).toBe(true);
-  expect(isBedFeedRow({ name: ORN }, 'Lawn Care')).toBe(false);
+  expect(isBedFeedRow({ name: ORN }, 'Lawn Care')).toBe(true);
   expect(isBedFeedRow({ name: 'LESCO 8-0-12 Palm' }, 'Lawn Care', true)).toBe(false);
   const row = ornRow({ applicationMethod: 'granular_broadcast', areaUnit: 'sqft' });
   expect(completionProductRowProblem(lawnWithCompanion(), [row], () => 'Lawn Care')).toBe(`Enter the treated square feet for ${ORN}.`);
-  expect(completionProductRowProblem({ serviceType: 'Lawn Care' }, [{ ...row, areaValue: '' }], () => 'Lawn Care')).not.toBe(`Enter the treated square feet for ${ORN}.`);
+  expect(completionProductRowProblem({ serviceType: 'Lawn Care' }, [{ ...row, areaValue: '' }], () => 'Lawn Care')).toBe(`Enter the treated square feet for ${ORN}.`);
   expect(completionProductRowProblem(lawnWithCompanion(), [{ ...row, areaValue: 900 }], () => 'Lawn Care')).toBeFalsy();
 });
 
@@ -455,7 +455,8 @@ it('the pre-submit county-limit line shows for a 13-0-13 on a lawn visit with a 
   const lawnProduct = { name: 'Celsius WG', rate: '9', rateUnit: 'oz', catalogRateUnit: 'oz', maxLabelRatePer1000: 4 };
   const lines = treeShrubRateAdvisories({ selectedProducts: [orn, lawnProduct], highRateSelectedProducts: [lawnProduct], primaryIsTreeShrub: false, treeShrubWork: true });
   expect(lines).toEqual([`${ORN} rate 10 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`]);
-  expect(treeShrubRateAdvisories({ selectedProducts: [orn], highRateSelectedProducts: [], primaryIsTreeShrub: false, treeShrubWork: false })).toEqual([]);
+  // A plain lawn visit shows the county line for a 13-0-13 too (classified by identity, Codex #6516 r9).
+  expect(treeShrubRateAdvisories({ selectedProducts: [orn], highRateSelectedProducts: [], primaryIsTreeShrub: false, treeShrubWork: false })).toHaveLength(1);
   expect(treeShrubRateAdvisories({ selectedProducts: [orn, lawnProduct], highRateSelectedProducts: [lawnProduct], primaryIsTreeShrub: true, treeShrubWork: true })).toHaveLength(2);
 });
 

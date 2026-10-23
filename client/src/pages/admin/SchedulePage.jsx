@@ -10219,8 +10219,12 @@ const BED_FEED_NAME = /\b13-0-13\b/;
 // The row is classified by the product's identity (its 13-0-13 name) whenever the visit has ANY Tree & Shrub work: the row's own
 // line, or `treeShrubWork` (a Tree & Shrub primary or companion, see visitHasTreeShrubWork). A lawn-primary visit with a Tree &
 // Shrub companion records the same product against the same county cap.
+// Classified by product identity on ANY visit: the server judges every saved 13-0-13 row against the county cap whatever the
+// service line, so a 13-0-13 picked on a plain lawn visit must carry its bed area too, never the turf area (Codex #6516 r9).
+// serviceType and treeShrubWork are kept for call-site compatibility.
+ 
 export function isBedFeedRow(product, serviceType = "", treeShrubWork = false) {
-  return BED_FEED_NAME.test(String(product?.name || "")) && (treeShrubWork || serviceLineFromType(serviceType) === "tree_shrub");
+  return BED_FEED_NAME.test(String(product?.name || ""));
 }
 
 // True when the visit has Tree & Shrub work: its own line or a Tree & Shrub companion (the
@@ -10244,7 +10248,8 @@ export function bedFeedStartArea({ currentPropertyAreas, propertyAreaLine, prope
 // over treated area, like the server's cap check) on any visit with Tree & Shrub work.
 export function treeShrubRateAdvisories({ selectedProducts, highRateSelectedProducts, primaryIsTreeShrub, treeShrubWork }) {
   const labelRows = primaryIsTreeShrub ? highRateSelectedProducts.filter((product) => !isBedFeedRow(product, "", treeShrubWork)) : [];
-  const bedRows = treeShrubWork ? selectedProducts.filter((product) => isBedFeedRow(product, "", true)) : [];
+  // A 13-0-13 row gets its county-limit line on any visit (classified by identity, like the server audit).
+  const bedRows = selectedProducts.filter((product) => isBedFeedRow(product));
   return [...labelRows, ...bedRows].map((product) => treeShrubHighRateAdvisory(product, "Tree & Shrub Care")).filter(Boolean);
 }
 
