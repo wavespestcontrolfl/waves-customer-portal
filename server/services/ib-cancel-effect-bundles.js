@@ -770,6 +770,7 @@ async function runBundle(bundle, token) {
       if (!step.done) return 'deferred';
       notice = step.outcome;
       await ownedUpdate(bundle.id, token, { notice_outcome: JSON.stringify({ ...notice, by: 'sweep' }) });
+      known = { ...known, notice_outcome: { ...notice, by: 'sweep' } };
     }
     await finishRecovered(bundle, token, ft || {}, notice);
     return 'recovered';

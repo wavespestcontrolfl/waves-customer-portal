@@ -778,6 +778,23 @@ describe('the terminal status re-proves the cancellation generation', () => {
     expect(mockRaised[1].opts.dedupeKey).toBe(mockRaised[0].opts.dedupeKey);
   });
 
+  test('a partial send followed by a restore at the terminal proof: the abandonment keeps the delivery evidence', async () => {
+    noTextBundle();
+    mockStore.bundles[0].notify_customer = true;
+    mockStore.bundles[0].approved_notice = NOTICE;
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => { Object.assign(opts.outcome, { notificationSent: true, notificationPartial: true, notificationError: 'second recipient not reached' }); });
+    mockRecordResult.mockImplementationOnce(async () => {
+      mockStore.visits[0].status = 'confirmed';
+      mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
+      return true;
+    });
+    await svc.sweepIbCancelBundles();
+    expect(mockStore.bundles[0].status).toBe('abandoned');
+    const final = mockRecordResult.mock.calls[1][1];
+    expect(final).toMatchObject({ customer_text_sent: true, customer_text_partial: true });
+    expect(final.warning).toMatch(/Do not send it again to those reached/);
+  });
+
   test('a visit that is only busy at the terminal proof keeps the bundle pending and the next pass finishes it', async () => {
     noTextBundle();
     const fenceModule = require('../services/cancel-generation-fence');
