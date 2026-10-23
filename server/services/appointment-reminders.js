@@ -2987,18 +2987,50 @@ async function alreadyAcceptedByPriorAttempt({ approvedSend, acceptedCancellatio
   return !approvedSend && cancellationGroupAccepted(record, priorClaimToken);
 }
 
+// The window-held rollback, as the fence's own transaction: the proof (this runner still owns its bundle, the visit is still the
+// approved cancel; bundle row then visit row, share + NOWAIT, same order as everywhere) and the revert of the stamp share ONE
+// transaction, and the revert must hit exactly the row stamped under THIS claim's token. A worker that paused past its lease
+// (another worker claimed and finished the bundle from the stamped state) is refused with lease_lost and rolls back nothing,
+// so it can never restore an approved marker behind a terminal bundle. A merely busy fence is retried briefly; a changed
+// cancel keeps the finalizer's terminal handling. Returns true only when the marker was restored by this claim.
+async function revertWindowHeldStamp({ record, noticeToken, cancelGeneration }) {
+  const { assertCancelGeneration } = require('./cancel-generation-fence');
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await db.transaction(async (trx) => {
+        await assertCancelGeneration(trx, cancelGeneration);
+        const reverted = await trx('appointment_reminders')
+          .where({ id: record.id, cancellation_notice_state: 'sent' })
+          .where('cancellation_notice_at', noticeToken)
+          .update({ cancellation_notice_state: 'pending_approved', updated_at: new Date() });
+        return reverted === 1;
+      });
+    } catch (err) {
+      if (!err || err.code !== 'CANCEL_FENCE') throw err;
+      const busy = ['visit_busy', 'bundle_busy'].includes(err.fenceReason);
+      if (busy && attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 150));
+        continue;
+      }
+      // Nothing was reverted: the finalizer leaves the marker as it is for a lost lease or a still-busy fence (the owner of the
+      // bundle decides), and the fence hit tells the sweep to stop or retry.
+      if (busy || err.fenceReason === 'lease_lost') cancelGeneration.retryable = true;
+      return false;
+    }
+  }
+  return false;
+}
+
 // The recovery sweep's approved send found the send window closed BEFORE any recipient was reached (the first handoff check
 // crossed 8 PM ET): nothing was sent, so the claim is not a failure. The approved marker goes back to its untouched state
-// (a stamp made just before the hold is reverted under this claim's token) and the sweep parks the bundle to the next window
-// (options.cancelGeneration.windowHeld). Any partial fan-out keeps its terminal handling. Returns true when parked.
+// (a stamp made just before the hold is reverted under this claim's token, inside the bundle + generation fence) and the sweep
+// parks the bundle to the next window (options.cancelGeneration.windowHeld, set only when the revert happened). Any partial
+// fan-out keeps its terminal handling. Returns true when parked.
 async function parkWindowHeldApprovedNotice({ record, noticeToken, options, sendOutcome }) {
   if (!options.cancelGeneration || !options.approvedNotice) return false;
   if (sendOutcome.providerAccepted === true || sendOutcome.dispatchUncertain === true) return false;
   if (sendOutcome.windowHeldAny !== true) return false;
-  await db('appointment_reminders')
-    .where({ id: record.id, cancellation_notice_state: 'sent' })
-    .where('cancellation_notice_at', noticeToken)
-    .update({ cancellation_notice_state: 'pending_approved', updated_at: new Date() });
+  if (!(await revertWindowHeldStamp({ record, noticeToken, cancelGeneration: options.cancelGeneration }))) return false;
   options.cancelGeneration.windowHeld = true;
   return true;
 }

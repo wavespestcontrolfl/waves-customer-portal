@@ -782,6 +782,22 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       await app('ib_pending_actions').insert({ id: own, result: JSON.stringify({ success: true, recovered_after_interruption: true, recovery_final: true, from: 'sweep-1' }) });
       await recordResult(own, { success: true, recovered_after_interruption: true, recovery_final: true, from: 'stale-worker' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
       expect(await read(own)).toMatchObject({ from: 'sweep-1' });
+      // A request's ordinary save (the /confirm-action write after a long pause) never replaces the recovery's FINAL receipt, yet
+      // still writes a plain first result and overwrites a non-final one exactly as before.
+      const finalId = randomUUID();
+      const plainId = randomUUID();
+      const firstId = randomUUID();
+      await app('ib_pending_actions').insert({ id: firstId, result: null });
+      await app('ib_pending_actions').insert([
+        { id: finalId, result: JSON.stringify({ success: true, recovered_after_interruption: true, recovery_final: true, from: 'sweep' }) },
+        { id: plainId, result: JSON.stringify({ success: true, from: 'earlier' }) },
+      ]);
+      await recordResult(finalId, { success: true, from: 'late-request' }, { keepRecoveryFinal: true });
+      await recordResult(plainId, { success: true, from: 'request' }, { keepRecoveryFinal: true });
+      await recordResult(firstId, { success: true, from: 'first-write' }, { keepRecoveryFinal: true });
+      expect(await read(finalId)).toMatchObject({ from: 'sweep', recovery_final: true });
+      expect(await read(plainId)).toEqual({ success: true, from: 'request' });
+      expect(await read(firstId)).toEqual({ success: true, from: 'first-write' });
       // The request's pointer save (onlyIfEmpty only) never replaces a sweep receipt or another pointer.
       await recordResult(empty, { recovery_owns_outcome: true }, { onlyIfEmpty: true });
       expect(await read(empty)).toEqual({ from: 'sweep' });

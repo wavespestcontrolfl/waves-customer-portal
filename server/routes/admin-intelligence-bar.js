@@ -5136,7 +5136,7 @@ async function commitPendingAction(req, { id, contractHash }) {
     // result is saved only if the action has none (the sweep's own receipt then replaces this pointer or stays).
     let receiptSaved = result && result.recovery_owns_outcome === true
       ? await PendingActions.recordResult(action.id, result, { onlyIfEmpty: true })
-      : await PendingActions.recordResult(action.id, result);
+      : await PendingActions.recordResult(action.id, result, { keepRecoveryFinal: true });
     await recordConfirmedGaps(action.tool_name, result);
     if (receiptSaved === false) {
       // Some domains save the receipt atomically with their mutation.

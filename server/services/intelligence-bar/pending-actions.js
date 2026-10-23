@@ -572,7 +572,7 @@ async function retireExpiredAction(id, requestedBy, { trx = null } = {}) {
   return row ? { ...row, params: paramsOf(row) } : null;
 }
 
-async function recordResult(id, result, { database = db, critical = false, onlyIfEmpty = false, replaceRecoveryPointer = false } = {}) {
+async function recordResult(id, result, { database = db, critical = false, onlyIfEmpty = false, replaceRecoveryPointer = false, keepRecoveryFinal = false } = {}) {
   try {
     const query = database('ib_pending_actions').where({ id });
     if (critical) query.where({ status: 'confirmed' }).whereNotNull('consumed_at');
@@ -584,6 +584,9 @@ async function recordResult(id, result, { database = db, critical = false, onlyI
         this.whereNull('result').orWhereRaw("result->>'recovery_owns_outcome' = 'true'");
       });
     } else if (onlyIfEmpty) query.whereNull('result');
+    // An ordinary (request) save never replaces the cancel recovery's FINAL receipt: a request that paused past the receipt-gap
+    // window can reach this write after the sweep wrote it. A plain first write (no receipt, or any other one) is unchanged.
+    if (keepRecoveryFinal) query.whereRaw("COALESCE(result->>'recovery_final', 'false') <> 'true'");
     const updated = await query.update({
       result: JSON.stringify(result ?? null),
       updated_at: database.fn.now(),

@@ -284,7 +284,7 @@ describe('the /confirm-action commit', () => {
     expect(call.headers[ADMIN_READ_HEADER]).toBe(adminReadMarkerValue([2]));
     expect(body.result).toMatchObject({ success: true, fields_changed: ['body', 'name'], record: { id: ID } });
     expect(JSON.stringify(body)).not.toContain('sk_live_NOT_FOR_THE_MODEL');
-    expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ success: true }));
+    expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ success: true }), { keepRecoveryFinal: true });
     expect(JSON.stringify(mockRecordResult.mock.calls)).not.toContain('owner-token-abcdef');
   });
 

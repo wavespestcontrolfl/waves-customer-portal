@@ -109,10 +109,10 @@ describe('/confirm-action receipt for a cancel the recovery sweep took over', ()
     expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ text_retry_pending: true }), { onlyIfEmpty: true });
   });
 
-  test('an ordinary result is saved exactly as before (no options)', async () => {
+  test('an ordinary result is saved as a plain first write that never replaces the recovery\'s final receipt', async () => {
     executeTool.mockResolvedValue({ success: true, appointment_id: 'svc-1' });
     await confirm();
     expect(mockRecordResult).toHaveBeenCalledTimes(1);
-    expect(mockRecordResult.mock.calls[0]).toHaveLength(2);
+    expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ appointment_id: 'svc-1' }), { keepRecoveryFinal: true });
   });
 });

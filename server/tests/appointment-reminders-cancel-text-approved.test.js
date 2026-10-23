@@ -539,6 +539,62 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
     expect(outcome.notificationSent).toBe(false);
   });
 
+  // The rollback of the stamp is the fence's own transaction: proof (bundle + visit) then the revert, matched to THIS claim's token.
+  const holdAfterStamp = (after = () => {}) => mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+    await input.preDispatchCheck();
+    after();
+    return { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' };
+  });
+  const noticeWrites = () => mockState.updates.filter((u) => 'cancellation_notice_state' in u).map((u) => u.cancellation_notice_state);
+
+  test('the window-held rollback proves the fence and reverts the stamp in ONE transaction, on the row under this claim\'s token', async () => {
+    const dbMock = require('../models/db');
+    const order = [];
+    const original = dbMock.transaction.getMockImplementation();
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    holdAfterStamp(() => {
+      dbMock.transaction.mockImplementationOnce(async (fn) => { order.push('begin'); const out = await fn(dbMock); order.push('end'); return out; });
+      mockFence.mockImplementationOnce(async () => { order.push('proof'); });
+      mockState.wheres.length = 0;
+    });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    dbMock.transaction.mockImplementation(original);
+    expect(order).toEqual(['begin', 'proof', 'end']);
+    expect(fence.windowHeld).toBe(true);
+    expect(mockState.wheres).toContainEqual(['appointment_reminders', { id: 'rem-1', cancellation_notice_state: 'sent' }]);
+    expect(noticeWrites().pop()).toBe('pending_approved');
+  });
+
+  test.each(['lease_lost', 'visit_restored_since'])('a worker that lost its lease or whose visit changed (%s) before the rollback reverts nothing and parks nothing', async (reason) => {
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    holdAfterStamp(() => { mockFence.mockRejectedValueOnce(Object.assign(new Error(`cancellation fence: ${reason}`), { code: 'CANCEL_FENCE', fenceReason: reason })); });
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome });
+    expect(fence.windowHeld).toBeUndefined();
+    expect(outcome.notificationSent).toBe(false);
+    // The stamp stays as the new owner found it: the only restoring write is the original claim, never a revert after the stamp.
+    const writes = noticeWrites();
+    expect(writes.slice(writes.indexOf('sent') + 1)).not.toContain('pending_approved');
+    expect(fence.retryable === true).toBe(reason === 'lease_lost');
+  });
+
+  test('a busy fence at the rollback is retried; when it clears the marker is restored and the bundle parks', async () => {
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    holdAfterStamp(() => {
+      mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: bundle_busy'), { code: 'CANCEL_FENCE', fenceReason: 'bundle_busy' }));
+    });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    expect(fence.windowHeld).toBe(true);
+    expect(noticeWrites().pop()).toBe('pending_approved');
+  });
+
+  test('a rollback that hits no row (the claim token moved on) does not park the bundle', async () => {
+    const fence = { visitId: 'svc-1', restorations: 2, hits: [] };
+    holdAfterStamp(() => { mockState.claim = 0; });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    expect(fence.windowHeld).toBeUndefined();
+  });
+
   test('a window hold on the first recipient followed by a blocked second recipient still parks (nobody reached)', async () => {
     mockState.customer = {
       ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
