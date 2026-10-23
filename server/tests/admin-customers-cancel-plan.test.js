@@ -119,6 +119,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     r.customer_id === term.customer_id
     && !r.non_coverage
     && String(r.status) !== 'cancelled'
+    && String(r.scheduled_date) >= String(term.term_start).slice(0, 10)
     && String(r.scheduled_date) <= String(term.term_end).slice(0, 10))),
   recordDecision: (...args) => mockRecordDecision(...args),
   // ADMIN-BUG-R18: an already-decided term takes the run's disposition.
@@ -395,10 +396,10 @@ describe('POST /:id/cancel-plan/preview', () => {
       prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active',
     }];
     mockState.scheduled_services = [
-      { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+      { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       // A DIFFERENT service completed in the window (not a coverage row —
       // the canonical helper filters it by service type).
-      { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-05-01', non_coverage: true },
+      { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-07-01', non_coverage: true },
       { id: 's3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
       // Full covered set: coverage_visit_count is 4 and a short set now
       // refuses end_of_coverage (coverage_rows_incomplete).
@@ -1555,7 +1556,7 @@ describe('POST /:id/cancel-plan', () => {
       // refuses end_of_coverage (coverage_rows_incomplete) — tests that
       // need a different world overwrite scheduled_services themselves.
       mockState.scheduled_services = [
-        { id: 'cv1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 'cv1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
         { id: 'cv2', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-08-01' },
         { id: 'cv3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-11-01' },
         { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
@@ -1725,7 +1726,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a repair retry after the refunded term LEFT coverage carries the recorded prepay facts — the financial record is never blanked', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       ];
       // Attempt 1: term decided, refund recorded, confirmation failed —
       // the acceptance stays open for a repair.
@@ -1757,7 +1758,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('now + refund: coverage cancelled, refund RECORDED on the case + office task — nothing refunded automatically', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       ];
       const res = await postCancel(baseUrl, { effectiveDate: 'now' });
       expect(res.status).toBe(200);
@@ -1966,7 +1967,7 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a covered visit completing DURING the commit re-prices the refund from the post-sweep rows and flags the run for review', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
         { id: 's3', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-10-01' },
       ];
       // The lock serializes admin commits, not technician completion: s3
@@ -1994,7 +1995,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.annual_prepay_terms[0].renewal_decision = 'cancel';
       mockState.annual_prepay_terms[0].status = 'cancelled';
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       ];
       mockState.service_requests = [{
         id: 'req-9', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
@@ -2048,8 +2049,8 @@ describe('POST /:id/cancel-plan', () => {
       // A covered visit completed between the attempts: live refund is now
       // 2 remaining ($240), not the recorded 3 ($360).
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
-        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-07-01' },
       ];
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
@@ -2366,7 +2367,7 @@ describe('POST /:id/cancel-plan', () => {
         prepay_amount: '10.01', coverage_visit_count: 10, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
       }];
       mockState.scheduled_services = Array.from({ length: 5 }, (_, n) => ({
-        id: `done-${n}`, customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: `2026-0${4 + n}-01`,
+        id: `done-${n}`, customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: `2026-0${6 + (n % 3)}-1${n}`,
       }));
       const body = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
       // 1001¢ × 5 ÷ 10 = 500.5¢ → $5.01 (float dollars round to $5.00).
@@ -2510,8 +2511,8 @@ describe('POST /:id/cancel-plan', () => {
       // Run 1 proposed $360 (3 remaining), lost its task AND its outcome
       // stamp; a covered visit completed since — live is $240.
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
-        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-07-01' },
       ];
       mockState.cancellation_cases = [{
         id: 'case-9', customer_id: 'cust-1', service_request_id: 'req-9', status: 'committed',
@@ -2712,11 +2713,11 @@ describe('POST /:id/cancel-plan', () => {
 
     test('a coverage visit completed BEFORE activation (deliberately unstamped) counts as consumed — its slice is never refunded', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
         // Completed inside the pending window: reconciliation settles or
         // credits its invoice; the stamp never lands, but the visit consumed
         // a coverage slice all the same.
-        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-03-05' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: null, scheduled_date: '2026-06-05' },
       ];
       const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
@@ -2751,7 +2752,7 @@ describe('POST /:id/cancel-plan', () => {
       mockState.invoices = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', stripe_charge_id: null }];
       mockState.payments = [{ id: 'pay-1', status: 'succeeded', refund_status: 'partial', refund_amount: '100.00', metadata: { invoice_id: 'inv-1' } }];
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15' },
       ];
       const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ amount: null, needsManualCalc: true, reason: 'prior_refund_activity' }));
@@ -2828,9 +2829,9 @@ describe('POST /:id/cancel-plan', () => {
 
     test('refund math ignores completed visits stamped to ANOTHER term (overlapping terms)', () => withServer(async (baseUrl) => {
       mockState.scheduled_services = [
-        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-04-01', annual_prepay_term_id: 'term-1' },
-        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-05-01', annual_prepay_term_id: null },
-        { id: 's3', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-01', annual_prepay_term_id: 'term-OTHER' },
+        { id: 's1', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-06-15', annual_prepay_term_id: 'term-1' },
+        { id: 's2', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-07-01', annual_prepay_term_id: null },
+        { id: 's3', customer_id: 'cust-1', status: 'completed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2026-07-15', annual_prepay_term_id: 'term-OTHER' },
       ];
       const body = await (await postCancel(baseUrl, { effectiveDate: 'now' })).json();
       expect(body.refund).toEqual(expect.objectContaining({ completedVisits: 2, remainingVisits: 2, amount: 240, needsManualCalc: false }));
