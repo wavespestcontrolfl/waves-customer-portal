@@ -142,6 +142,7 @@ function ongoingScenario({
   failAddonRead = false,
   // Dates the global occupancy probe reports as clashing ('*' = every date).
   clashDates = [],
+  colsOverrides = {},
 }) {
   const parent = {
     id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
@@ -158,7 +159,7 @@ function ongoingScenario({
   const addonInserts = [];
   const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
-      if (op === 'columnInfo') return COLS;
+      if (op === 'columnInfo') return { ...COLS, ...colsOverrides };
       if (op === 'first') {
         const firstCall = calls.find((c) => c[0] === 'first');
         if (calls.some((c) => c[0] === 'count')) return { c: String(upcomingCount) };
@@ -356,11 +357,11 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(src).toContain("cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring');");
   });
 
-  test('P1: auto-extend skips a candidate day another visit already occupies (global occupancy probe)', async () => {
-    // The blackout nudge can land a candidate on an adjacent day that holds
-    // an overlapping visit from ANOTHER series/customer — the series-date
-    // dedupe is blind to those. The walk must probe global occupancy and
-    // advance to the next cadence step instead of double-booking.
+  test('auto-extend books the cadence date even when another visit occupies it — never skips a slot', async () => {
+    // A clash used to advance the walk to the next cadence step, so a busy
+    // calendar dropped whole visits (a quarterly plan lost two quarters,
+    // 2026-10-22). Hand-off off, the overlap is logged and the visit keeps
+    // the plan's hour on its cadence date (Oct 15 is that date: 3rd Wednesday).
     const { conn, inserted } = ongoingScenario({
       upcomingCount: 1,
       sibling: undefined,
@@ -368,8 +369,28 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     });
     await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(1);
-    expect(inserted[0].scheduled_date).not.toBe('2098-10-15');
-    expect(inserted[0].scheduled_date > '2098-10-15').toBe(true);
+    expect(inserted[0]).toMatchObject({ scheduled_date: '2098-10-15', window_start: '08:00' });
+  });
+
+  test('gate on: a completion-time extend on a taken hour hands off — cadence date, no time, windowless reminder', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    try {
+      const { conn, inserted } = ongoingScenario({
+        upcomingCount: 1,
+        sibling: undefined,
+        clashDates: '*',
+        colsOverrides: { window_start: {}, window_end: {}, time_window: {}, window_display: {}, route_order: {}, recurring_dispatch_due_date: {} },
+      });
+      await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
+      expect(inserted).toHaveLength(1);
+      expect(inserted[0]).toMatchObject({
+        scheduled_date: '2098-10-15', window_start: null, window_end: null, time_window: null, recurring_dispatch_due_date: '2098-10-15',
+      });
+      expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+        901, 5, '2098-10-15T08:00', 'Quarterly Pest Control',
+        'recurring_auto_extend', { sendConfirmation: false, closeReminderWindows: true, fromCommittedRow: true },
+      );
+    } finally { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; }
   });
 
   test('falls back to the parent template when no sibling carries the flag', async () => {
@@ -852,7 +873,7 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
 // `customer` = the customers row the billable-amount gate reads; null (the
 // default for the older scenarios) models an unreadable customer, which skips
 // the gate exactly as the make-recurring spawn does.
-function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [], customer = null, decision = null } = {}) {
+function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [], customer = null, decision = null, weeklyValue = null, blackoutRows = [], colsOverrides = {} } = {}) {
   const state = {
     parent: {
       id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
@@ -885,7 +906,7 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
   };
   const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
-      if (op === 'columnInfo') return COLS;
+      if (op === 'columnInfo') return { ...COLS, ...colsOverrides };
       if (op === 'first') {
         const firstCall = calls.find((c) => c[0] === 'first');
         if (calls.some((c) => c[0] === 'count')) return { c: String(upcomingCount()) };
@@ -954,6 +975,8 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
       if (op === 'insert' || op === 'insertReturning') { state.auditInserts.push(data); return [1]; }
     }
     if (table === 'activity_log') { state.activityInserts.push(data); return [1]; }
+    if (table === 'system_settings') return op === 'first' && weeklyValue ? { value: weeklyValue } : null;
+    if (table === 'schedule_blackout_dates') return op === 'await' ? blackoutRows.map((date) => ({ date })) : [];
     if (table === 'customers') {
       // Eligibility selects identity; financial reads below retain the
       // separately supplied billing fixture for these extension scenarios.
@@ -1253,7 +1276,7 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     }
   });
 
-  test('P1: the alert-route extension probes global occupancy — a clashing candidate day is skipped', async () => {
+  test('the alert-route extension books a cadence date another visit occupies — never skips a slot', async () => {
     const { state, handler } = alertActionScenario({
       seriesRows: [
         { scheduled_date: '2098-01-15', status: 'completed' },
@@ -1261,31 +1284,57 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
         { scheduled_date: '2098-07-15', status: 'completed' },
       ],
       alertRow: { id: 60, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
-      clashDates: ['2098-10-15'],
+      clashDates: '*',
     });
-    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '60', action: 'extend', count: 1, adminUserId: null });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '60', action: 'extend', count: 2, adminUserId: null });
     expect(out.status).toBe(200);
-    expect(state.insertedVisits).toHaveLength(1);
-    expect(state.insertedVisits[0].scheduled_date).not.toBe('2098-10-15');
-    expect(state.insertedVisits[0].scheduled_date > '2098-10-15').toBe(true);
+    expect(state.insertedVisits.map((v) => v.scheduled_date)).toEqual(['2098-10-15', '2099-01-21']);
+    for (const v of state.insertedVisits) expect(v.window_start).toBe('08:00');
+  });
+
+  test('gate on: the alert-route extension hands a taken hour off and registers the windowless reminder, not the plan hour', async () => {
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    try {
+      const { state, handler } = alertActionScenario({
+        seriesRows: [
+          { scheduled_date: '2098-01-15', status: 'completed' },
+          { scheduled_date: '2098-04-15', status: 'completed' },
+          { scheduled_date: '2098-07-15', status: 'completed' },
+        ],
+        alertRow: { id: 64, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+        clashDates: '*',
+        colsOverrides: { window_start: {}, window_end: {}, time_window: {}, window_display: {}, route_order: {}, recurring_dispatch_due_date: {} },
+      });
+      const out = await runRecurringAlertAction(makeConn(handler), { idParam: '64', action: 'extend', count: 1, adminUserId: null });
+      expect(out.status).toBe(200);
+      expect(state.insertedVisits).toHaveLength(1);
+      expect(state.insertedVisits[0]).toMatchObject({
+        scheduled_date: '2098-10-15', window_start: null, window_end: null, time_window: null, recurring_dispatch_due_date: '2098-10-15',
+      });
+      expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+        900, 5, '2098-10-15T08:00', expect.any(String),
+        'recurring_alert_action', { sendConfirmation: false, closeReminderWindows: true, fromCommittedRow: true },
+      );
+    } finally { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; }
   });
 
   test('P0: a PARTIAL extension throws (all-or-nothing) — the alert stays unresolved and no shortfall can overbook a retry', async () => {
-    // Only the first placeable candidate is free; every later day clashes.
+    // Only the first candidate (Oct 15) is placeable; the business is closed
+    // from the next day through every later cadence step the walk may try.
     // Committing the partial and leaving the alert open would overbook on
-    // retry (the UI resubmits the FULL count) — the action must throw so
-    // the trx rolls the partial insert back and the retry starts clean.
-    let allowed = null;
+    // retry (the UI resubmits the FULL count) — the action must throw so the
+    // trx rolls the partial insert back and the retry starts clean.
+    const closed = [];
+    for (let d = new Date(Date.UTC(2098, 9, 16)); d <= new Date(Date.UTC(2112, 11, 31)); d.setUTCDate(d.getUTCDate() + 1)) {
+      closed.push(d.toISOString().slice(0, 10));
+    }
     const { state, handler } = alertActionScenario({
       seriesRows: [
         { scheduled_date: '2098-04-15', status: 'completed' },
         { scheduled_date: '2098-07-15', status: 'completed' },
       ],
       alertRow: { id: 62, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
-      clashDates: (d) => {
-        if (allowed === null) { allowed = d; return false; }
-        return d !== allowed;
-      },
+      blackoutRows: closed,
     });
     await expect(
       runRecurringAlertAction(makeConn(handler), { idParam: '62', action: 'extend', count: 3, adminUserId: null }),
@@ -1294,9 +1343,8 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
   });
 
   test('P1: an extension that places ZERO visits fails (409) and leaves the alert OPEN', async () => {
-    // Every candidate clashes (stand-in for all-weekdays-off / fully
-    // blacked-out configs): the walk creates nothing, so resolving the
-    // alert and returning 200 would silently dismiss the banner while the
+    // Every weekday configured off: the walk creates nothing, so resolving
+    // the alert and returning 200 would silently dismiss the banner while the
     // requested extension never happened. The action must throw (trx rolls
     // back) and the alert row must stay unresolved.
     const { state, handler } = alertActionScenario({
@@ -1305,7 +1353,7 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
         { scheduled_date: '2098-07-15', status: 'completed' },
       ],
       alertRow: { id: 61, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
-      clashDates: '*',
+      weeklyValue: '[0,1,2,3,4,5,6]',
     });
     await expect(
       runRecurringAlertAction(makeConn(handler), { idParam: '61', action: 'extend', count: 2, adminUserId: null }),
