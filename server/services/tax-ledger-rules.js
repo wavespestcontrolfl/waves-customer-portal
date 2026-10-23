@@ -287,7 +287,8 @@ async function loadRules(conn = db) {
 //   unrelated rows are neither written nor stamped.
 // - A row the matcher already flagged as an internal transfer (ignore
 //   without a rule) is left as it is by a seed; an owner rule outranks the
-//   heuristic and writes over it.
+//   heuristic and writes its classification alongside the flag (the flag
+//   stays: the matcher's rescan would only put it back).
 // - after = {txn_date, id} continues a pass past its row budget: the result
 //   carries more:true and the cursor to send back.
 const NOT_DECIDED_SQL = "(suggestion -> 'decision') is null";
@@ -334,11 +335,12 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
       if (pattern && !writes) continue;
       const stale = !writes && !pattern && force && !!sug.rule && !matcherTransfer;
       const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
-      // an owner rule writing over the matcher's flag drops that flag, which
-      // may be the row's only examination evidence: keep the evidence
-      if (writes && matcherFlag && !MATCHER_KEYS.some((k) => sug[k] !== undefined && sug[k] !== null)) patch.examined = true;
+      // an owner rule writing over the matcher's flag keeps that flag: it is
+      // the matcher's (its rescan would only put it back) and it is the row's
+      // examination evidence; the owner's category rides alongside it
+      const removeKeys = (writes || stale) ? CLASSIFICATION_KEYS.filter((k) => !(writes && matcherFlag && (k === 'ignore' || k === 'reason'))) : [];
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL)
-        .update({ suggestion: bankImport.suggestionMerge(patch, (writes || stale) ? CLASSIFICATION_KEYS : []), updated_at: new Date() });
+        .update({ suggestion: bankImport.suggestionMerge(patch, removeKeys), updated_at: new Date() });
       if (stale) counts.cleared += 1;
       if (!writes) continue;
       counts.suggested += 1;

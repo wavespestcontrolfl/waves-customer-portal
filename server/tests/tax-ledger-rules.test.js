@@ -337,11 +337,11 @@ describe('applyRules (suggestion-only)', () => {
     state.bankRows = [{ id: 'b5', txn_date: '2026-01-06', description: 'COSTCO GAS #3', direction: 'debit', suggestion: { ignore: true, reason: 'internal transfer?' } }];
     const out = await svc.applyRules({ force: true });
     expect(out.suggested).toBe(1);
-    expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ categoryId: 'cat-v', categorySource: 'rule', examined: true }));
-    expect(state.updates[0].patch.suggestion.removed).toContain('ignore');
-    // with another matcher marker present the row needs no extra evidence
-    state.updates = []; state.bankRows[0].suggestion = { ignore: true, noMatch: true };
-    await svc.applyRules({ force: true });
+    expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ categoryId: 'cat-v', categorySource: 'rule' }));
+    // the matcher's flag stays (its rescan would only put it back; it is the row's evidence)
+    expect(state.updates[0].patch.suggestion.removed).not.toContain('ignore');
+    expect(state.updates[0].patch.suggestion.removed).not.toContain('reason');
+    expect(state.updates[0].patch.suggestion.removed).toContain('categoryId');
     expect(state.updates[0].patch.suggestion.merged.examined).toBeUndefined();
     // the same rule as a seed does not
     state.rules[0].source = 'seed'; state.updates = [];
