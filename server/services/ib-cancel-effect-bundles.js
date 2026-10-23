@@ -175,11 +175,14 @@ function notHeldBySweep() {
 // reminder is re-read, and the outcome the request reports (and its receipt) says delivered / partial / uncertain, never
 // "send it by hand". Any other not-sent reason (no reminder, consent, a failed send) stays not sent.
 async function settleRequestNotice(row, outcome, classified) {
-  if (classified.state !== 'not_sent' || !row || !Array.isArray(row.approved_notice) || !row.approved_notice.length) return classified;
+  if (!['not_sent', 'sent'].includes(classified.state) || !row || !Array.isArray(row.approved_notice) || !row.approved_notice.length) return classified;
   const status = await require('./appointment-reminders').approvedCancellationNoticeStatus(row.scheduled_service_id, {
     recipientKeys: row.approved_notice.map((entry) => entry.recipient_key),
   });
+  // "Sent" from an unclaimed send rests on ANY accepted audit row, so it is verified per approved recipient too: a recipient
+  // the other sender never reached downgrades it to partial (or uncertain), and the receipt says so.
   if (status === 'delivered') {
+    if (classified.state === 'sent') return classified;
     Object.assign(outcome, { notificationSent: true, notificationError: null });
     return { state: 'sent', note: NOTICE_TERMINAL_BY_STATUS.delivered.note };
   }
@@ -201,7 +204,7 @@ function liveNotice(req, outcome) {
   const classified = classifyNoticeOutcome(outcome);
   if (!id || !classified) return Promise.resolve(null);
   return guarded('notice outcome', async () => {
-    const row = classified.state === 'not_sent'
+    const row = classified.state === 'not_sent' || classified.state === 'sent'
       ? await db(TABLE).where({ id }).first('scheduled_service_id', 'approved_notice')
       : null;
     const settled = await settleRequestNotice(row, outcome, classified);
@@ -437,8 +440,11 @@ async function sendApprovedNotice(bundle, svc) {
     if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
     throw new Error(`the visit was busy (${fence.hits.join(', ')}); the text will retry`);
   }
-  const classified = classifyNoticeOutcome(reported)
+  let classified = classifyNoticeOutcome(reported)
     || { state: 'uncertain', error: 'no result was reported' };
+  // A send this sweep could not claim reports "sent" on ANY accepted audit row (the request may have texted one approved
+  // recipient between the readiness check and the claim). Coverage is proven per approved recipient before it is recorded.
+  if (classified.state === 'sent') classified = await verifySentCoverage(bundle, classified);
   // Nothing went out and the claim was refused: the visit may have changed between the check and the claim. Say so
   // instead of recording a send failure.
   if (classified.state === 'not_sent') {
@@ -447,6 +453,15 @@ async function sendApprovedNotice(bundle, svc) {
     return { done: true, outcome: await reclassifyUnclaimedSend(bundle, classified) };
   }
   return { done: true, outcome: classified };
+}
+
+async function verifySentCoverage(bundle, classified) {
+  const status = await require('./appointment-reminders').approvedCancellationNoticeStatus(bundle.scheduled_service_id, {
+    recipientKeys: bundle.approved_notice.map((entry) => entry.recipient_key),
+  });
+  if (status === 'partial') return { ...NOTICE_TERMINAL_BY_STATUS.partial };
+  if (status === 'uncertain') return { ...NOTICE_TERMINAL_BY_STATUS.uncertain };
+  return classified;
 }
 
 // A send this sweep could not claim or complete reads "not sent" from handleCancellation, but the reminder may have been

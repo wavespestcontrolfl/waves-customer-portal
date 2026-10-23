@@ -611,6 +611,43 @@ describe('the text claim is bound to the original cancellation', () => {
   });
 });
 
+describe('an unclaimed send that reads "sent" is checked per approved recipient', () => {
+  // The request texted ONE approved recipient between this sweep's readiness check and its claim: handleCancellation reports
+  // "sent" on any accepted audit row. The sweep must not record full delivery while another approved recipient is unreached.
+  const lateSent = (laterStatus) => {
+    seedBundle();
+    mockNoticeStatus.mockResolvedValueOnce('ready').mockResolvedValueOnce(laterStatus);
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => { Object.assign(opts.outcome, { notificationSent: true }); });
+  };
+
+  test.each([
+    ['partial', 'partial', true],
+    ['uncertain', 'uncertain', true],
+    ['delivered', 'sent', false],
+  ])('the reminder then reads %s -> recorded %s', async (laterStatus, expected, rings) => {
+    lateSent(laterStatus);
+    await svc.sweepIbCancelBundles();
+    expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: expected });
+    expect(mockRaised[0].spec.severity).toBe(rings ? 'needs-you' : 'fyi');
+  });
+
+  test('the same check on the request side: sent with a recipient unreached is recorded partial and the request outcome says so', async () => {
+    const row = seedBundle();
+    mockNoticeStatus.mockResolvedValueOnce('partial');
+    const outcome = { notificationSent: true };
+    await svc.liveNotice({ ibCancelBundleId: row.id }, outcome);
+    expect(row.notice_outcome).toMatchObject({ state: 'partial', by: 'request' });
+    expect(outcome.notificationPartial).toBe(true);
+  });
+
+  test('the request side with every approved recipient proven stays sent', async () => {
+    const row = seedBundle();
+    mockNoticeStatus.mockResolvedValueOnce('delivered');
+    await svc.liveNotice({ ibCancelBundleId: row.id }, { notificationSent: true });
+    expect(row.notice_outcome).toMatchObject({ state: 'sent', by: 'request' });
+  });
+});
+
 describe('a text claim the fence refused', () => {
   test('only busy: nothing is saved or sent, and the text retries on the next pass', async () => {
     seedBundle();
