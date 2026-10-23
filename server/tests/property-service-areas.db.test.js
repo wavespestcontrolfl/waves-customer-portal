@@ -36,7 +36,7 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
       t.uuid('technician_id'); t.string('status').defaultTo('scheduled'); t.date('scheduled_date'); t.string('service_type');
       for (const key of ['service_address_line1','service_address_line2','service_address_city','service_address_zip']) t.string(key);
     });
-    await knex.schema.createTable('property_preferences', t => { t.uuid('customer_id').primary(); t.timestamp('irrigation_home_changed_at'); t.date('sod_laid_on'); t.string('sod_covers', 8); t.string('sod_area', 120); t.date('sod_rooted_on'); });
+    await knex.schema.createTable('property_preferences', t => { t.uuid('customer_id').primary(); t.timestamp('irrigation_home_changed_at'); t.jsonb('irrigation_confirmed_fields'); t.date('sod_laid_on'); t.string('sod_covers', 8); t.string('sod_area', 120); t.date('sod_rooted_on'); });
     await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.string('grass_type'); t.timestamp('updated_at'); });
     await knex.schema.createTable('audit_log', t => {
       t.increments('id'); t.string('actor_type'); t.uuid('actor_id'); t.string('action'); t.string('resource_type'); t.uuid('resource_id');
@@ -93,6 +93,8 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBe(sqft);
     expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(sqft);
     expect((await knex('customer_turf_profiles').where({ customer_id: customerId }).first()).lawn_sqft).toBe(sqft);
+    // The weekly plan's lawn-area ledger entry (codex #6498 r1 P2): a reviewed lawn at the customer's own address stamps it.
+    expect((await knex('property_preferences').where({ customer_id: customerId }).first()).irrigation_confirmed_fields).toEqual(['turf_lawn_sqft']);
   });
   test('a legacy turf edit invalidates an unreviewed value loaded in the shared editor', async () => {
     await knex('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: 4000 });
