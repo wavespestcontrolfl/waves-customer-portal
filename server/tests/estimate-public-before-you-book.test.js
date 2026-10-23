@@ -167,24 +167,14 @@ describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)
     });
   });
 
-  test('the prepay refund line prints only when the payload itself offers annual prepay', async () => {
+  test('the conditional prepay refund line follows the 90-day rule, not the payload verdict (Codex #6504 r4)', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
-    const refundLine = (body) => body.beforeYouBook.sections.flatMap((x) => x.lines).some((l) => l.includes('If you prepay for the year'));
+    const refundLine = (body) => body.beforeYouBook.sections.flatMap((x) => x.lines).some((l) => l.includes('If your estimate offers a prepaid year'));
     dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'] }) };
-    await withServer(async (baseUrl) => {
-      const body = await getData(baseUrl);
-      expect(body.pricing.annualPrepayEligible).toBe(true);
-      expect(refundLine(body)).toBe(true);
-    });
-    // The pricing payload offers no prepay (a termite bond rider cannot prepay): the page does not mention a prepay refund.
-    // A new id: the pricing bundle is cached per estimate id for a few minutes.
-    dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control', 'termite_bond'], overrides: { id: 'est-byb-bond' } }) };
-    await withServer(async (baseUrl) => {
-      const body = await getData(baseUrl);
-      expect(body.pricing.annualPrepayEligible).toBe(false);
-      expect(refundLine(body)).toBe(false);
-    });
+    await withServer(async (baseUrl) => { expect(refundLine(await getData(baseUrl))).toBe(false); });
+    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+    dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'], overrides: { id: 'est-byb-rule' } }) };
+    await withServer(async (baseUrl) => { expect(refundLine(await getData(baseUrl))).toBe(true); });
   });
 
   test('gate on, pest-only estimate: the same sections (service sections are worded "if your estimate includes")', async () => {

@@ -844,12 +844,18 @@ export default function EstimateProposalDocument({ data, token }) {
             <SectionHeader>{data.beforeYouBook.title || 'Before you book'}</SectionHeader>
             {data.beforeYouBook.sections.map((section) => (
               <div className="doc-keep" key={section.key} style={{ marginTop: 8 }}>
-                <div style={{ fontSize: 10.5, fontWeight: 700, color: NAVY }}>{section.heading}</div>
-                {(section.lines || []).map((line) => <Bullet key={line}>{line}</Bullet>)}
+                {/* 14px: the customer readability floor (waves-design); the server trims the page for this size. */}
+                <div style={{ fontSize: 14, fontWeight: 700, color: NAVY }}>{section.heading}</div>
+                {(section.lines || []).map((line) => (
+                  <div key={line} style={{ display: 'flex', gap: 7, padding: '2px 0', fontSize: 14, lineHeight: 1.45, color: INK }}>
+                    <span aria-hidden="true" style={{ color: MUTED }}>&bull;</span>
+                    <span>{line}</span>
+                  </div>
+                ))}
               </div>
             ))}
             {data.beforeYouBook.closing ? (
-              <p style={{ margin: '10px 0 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{data.beforeYouBook.closing}</p>
+              <p style={{ margin: '10px 0 0', fontSize: 14, lineHeight: 1.5, color: INK }}>{data.beforeYouBook.closing}</p>
             ) : null}
           </div>
         ) : null}

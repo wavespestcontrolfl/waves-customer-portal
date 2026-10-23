@@ -40,7 +40,7 @@ const SECTIONS = [
       { rank: 2, when: (s) => s.planTerms, text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
       // The neutral line whenever the plan terms do not apply, so such an estimate never reads as month-to-month.
       { rank: 3, when: (s) => !s.planTerms, text: 'Termite plans and commercial accounts follow the agreement you sign.' },
-      { rank: 2, when: (s, o) => o.prepayRefundOffered === true, text: 'If you prepay for the year and cancel within 90 days, we refund the visits we have not done yet. After 90 days there is no refund, and your paid visits stay on your schedule through the end of the prepaid term.' },
+      { rank: 2, when: (s, o) => o.prepayRefundRule === true, text: 'If your estimate offers a prepaid year and you prepay, you can cancel within 90 days and we refund the visits we have not done yet. After 90 days there is no refund, and your paid visits stay on your schedule through the end of the prepaid term.' },
       { rank: 4, text: 'Mail checks to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.' },
     ],
   },
@@ -60,7 +60,7 @@ const SECTIONS = [
     key: 'lawn',
     heading: 'If your estimate includes a lawn plan',
     lines: [
-      { rank: 1, text: 'Your lawn plan covers fertilizer, weed control and insect control, on a seasonal rotation. It does not include mowing. Check your visit card for when to mow.' },
+      { rank: 1, text: 'Your lawn plan covers fertilizer, weed control and insect control, on a seasonal rotation. It does not include mowing.' },
       { rank: 2, text: 'Weed control takes about 10 to 14 days to show, and some weeds need a second round.' },
       { rank: 2, text: "Please water on your county's watering days, early in the morning, deeply and less often." },
       { rank: 3, text: 'Lawn insects such as chinch bugs are part of the plan. Your technician checks at the next visit and treats where we confirm them and the label allows.' },
@@ -86,8 +86,8 @@ const SECTIONS = [
 const CLOSING = { rank: 3, text: (phone) => `Questions before you book? Call us at ${phone} and we will help.` };
 
 // The page: { title, sections: [{ key, heading, lines: [{ rank, text }] }], closing }.
-// `signals.planTerms` = the estimate-wide plan terms apply; `opts.prepayRefundOffered` = the estimate
-// offers an annual prepay AND the 90-day refund rule is live; `opts.phone` = the support number.
+// `signals.planTerms` = the estimate-wide plan terms apply; `opts.prepayRefundRule` = the 90-day refund
+// rule is live; `opts.phone` = the support number.
 function buildBeforeYouBook(signals = {}, opts = {}) {
   const sections = SECTIONS
     .map((section) => ({ key: section.key, heading: section.heading, lines: section.lines
@@ -134,31 +134,17 @@ function planTermsApply(estimate, proposal) {
   }
 }
 
-// The two estimate-dependent verdicts. `annualPrepayOffered`: the /data payload's own verdict (top-level or
-// any selectable frequency) when the caller has it; otherwise the same two checks that verdict is made from.
-// A failed read is "no": never a guess.
-function estimateSignals(estimate, proposal, { annualPrepayOffered } = {}) {
-  let prepayOffered = annualPrepayOffered;
-  if (prepayOffered === undefined) {
-    try {
-      const pub = require('../routes/estimate-public');
-      const estData = pub.parseEstimateDataSafe(estimate);
-      prepayOffered = pub.annualPrepayEligibleForEstimateData(estData) && pub.annualPrepayHasSellableIncentive(estimate, estData, {});
-    } catch (err) {
-      logger.warn?.(`[estimate-before-you-book] prepay read failed: ${err.message}`);
-      prepayOffered = false;
-    }
-  }
-  return {
-    signals: { planTerms: planTermsApply(estimate, proposal) },
-    prepayOffered: featureGates.prepayRefund90DayLive?.() === true && prepayOffered === true,
-  };
+// The one estimate-dependent verdict (the no-contract line), plus the 90-day refund rule's gate. The refund
+// line is worded "if your estimate offers a prepaid year", so it needs no prepay verdict (Codex #6504 r1/r4
+// kept finding prepay shapes a local verdict missed).
+function estimateSignals(estimate, proposal) {
+  return { signals: { planTerms: planTermsApply(estimate, proposal) }, prepayRefundRule: featureGates.prepayRefund90DayLive?.() === true };
 }
 
 // The page for one estimate, untrimmed. `proposal` = normalizeProposal(estimate).
-function beforeYouBookForEstimate(estimate, proposal, opts = {}) {
-  const { signals, prepayOffered } = estimateSignals(estimate, proposal || {}, opts);
-  return buildBeforeYouBook(signals, { prepayRefundOffered: prepayOffered, phone: WAVES_SUPPORT_PHONE_DISPLAY });
+function beforeYouBookForEstimate(estimate, proposal) {
+  const { signals, prepayRefundRule } = estimateSignals(estimate, proposal || {});
+  return buildBeforeYouBook(signals, { prepayRefundRule, phone: WAVES_SUPPORT_PHONE_DISPLAY });
 }
 
 // Keep the page to ONE page. Priority order: while the page is taller than `available`, drop the
@@ -183,25 +169,25 @@ function trimByRank(page, { lineHeight, headingH, closingGap, available }) {
   return { ...page, sections: sections.filter((section) => section.lines.length), closing };
 }
 
-// Browser document (estimate-doc-pdf.js renders the client document at 11.5px type on a 7.5 x 10 in
+// Browser document (estimate-doc-pdf.js renders this page at 14px type, the customer readability floor on a 7.5 x 10 in
 // page). The server cannot measure text, so it estimates, measured on a rendered sample: about 115
-// characters a line (a bullet's width), 17px a line, 4px between bullets, 30px for a section heading,
+// characters a line (a bullet's width), 21px a line, 4px between bullets, 34px for a section heading,
 // 40px for the page's own title row. 820px of the 960px page keeps the footer line and a safety margin.
-const DOC_CHARS_PER_LINE = 115;
-const DOC_LINE_PX = 17;
+const DOC_CHARS_PER_LINE = 92;
+const DOC_LINE_PX = 21;
 const DOC_BULLET_GAP_PX = 4;
-const DOC_HEADING_PX = 30;
+const DOC_HEADING_PX = 34;
 const DOC_TITLE_PX = 40;
 const DOC_PAGE_PX = 820;
 
 // The `/data` payload fragment: `{ beforeYouBook: { title, sections: [{ key, heading, lines: [text] }],
 // closing } }`, already chosen and trimmed for this estimate, or nothing (gate off, or the estimate is
 // accepted, declined or expired), so a gate-off response is byte-identical to before. Copy only: no prices. Never throws: a failure is "no page".
-function beforeYouBookBlock(estimate, { open = estimateIsOpen(estimate), annualPrepayOffered } = {}) {
+function beforeYouBookBlock(estimate, { open = estimateIsOpen(estimate) } = {}) {
   if (featureGates.estimateBeforeYouBookLive?.() !== true || open !== true) return {};
   try {
     const { normalizeProposal } = require('./estimate-proposal');
-    const page = trimByRank(beforeYouBookForEstimate(estimate, normalizeProposal(estimate), { annualPrepayOffered }), {
+    const page = trimByRank(beforeYouBookForEstimate(estimate, normalizeProposal(estimate)), {
       lineHeight: (text) => Math.ceil(text.length / DOC_CHARS_PER_LINE) * DOC_LINE_PX + DOC_BULLET_GAP_PX,
       headingH: DOC_HEADING_PX,
       closingGap: DOC_BULLET_GAP_PX,

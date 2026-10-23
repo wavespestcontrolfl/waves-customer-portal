@@ -67,7 +67,7 @@ const PHRASE = {
   termite: 'We do not tent',
   rodent: 'Rodent trapping includes the setup visit and the trap checks listed',
   contract: 'no long-term contract',
-  prepay: 'If you prepay for the year',
+  prepay: 'If your estimate offers a prepaid year',
   wdo: 'WDO (termite) inspection report',
 };
 
@@ -151,16 +151,14 @@ describe('estimate PDF Before you book page', () => {
     expect(extractPdfText(live)).toContain(PHRASE.scheduling);
   });
 
-  test('the prepay refund line needs an annual prepay offer and the 90-day rule live', async () => {
+  test('the prepay refund line is conditional ("if your estimate offers a prepaid year") and follows only the 90-day rule (Codex #6504 r4)', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const recurring = fixture('byb-p1', [pest]);
     expect(extractPdfText(await render(recurring))).not.toContain(PHRASE.prepay);
     process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     expect(extractPdfText(await render(recurring))).toContain(PHRASE.prepay);
-    // No recurring line, no prepay offer.
-    expect(extractPdfText(await render(fixture('byb-p2', [], [{ name: 'One-Time Pest Control' }])))).not.toContain(PHRASE.prepay);
-    // A termite bond rider cannot prepay.
-    expect(extractPdfText(await render(fixture('byb-p3', [pest, termiteBond])))).not.toContain(PHRASE.prepay);
+    // worded conditionally, so it needs no prepay verdict: the same line on any open estimate
+    expect(extractPdfText(await render(fixture('byb-p3', [pest, termiteBond])))).toContain(PHRASE.prepay);
   });
 
   test('an estimate with every service type still adds exactly one page, scheduling first', async () => {
@@ -282,18 +280,13 @@ describe('Before you book: terms scope, prepay verdict, structured service keys,
     expect(plain).not.toContain(NEUTRAL);
   });
 
-  test('the prepay refund line follows the offer: not for an existing customer, not when the payload offers none', async () => {
+  test('the payload block carries the same conditional refund line with the 90-day rule on', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
-    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
     const recurring = fixture('byb-pp1', [pest]);
-    expect(extractPdfText(await render(recurring))).toContain(PHRASE.prepay);
-    // The pricing payload hides annual prepay from an existing customer (membershipSnapshot.isExistingCustomer).
-    const existing = { ...recurring, estimate_data: { ...recurring.estimate_data, membershipSnapshot: { isExistingCustomer: true } } };
-    expect(extractPdfText(await render(existing))).not.toContain(PHRASE.prepay);
-    // /data hands its own verdict (a floor-capped offer is hidden there): the block follows it, whatever the mix says.
-    const lines = (opts) => (beforeYouBookBlock(recurring, { open: true, ...opts }).beforeYouBook?.sections || []).flatMap((x) => x.lines).join(' ');
-    expect(lines({ annualPrepayOffered: true })).toContain(PHRASE.prepay);
-    expect(lines({ annualPrepayOffered: false })).not.toContain(PHRASE.prepay);
+    const lines = () => (beforeYouBookBlock(recurring, { open: true }).beforeYouBook?.sections || []).flatMap((x) => x.lines).join(' ');
+    expect(lines()).not.toContain(PHRASE.prepay);
+    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+    expect(lines()).toContain(PHRASE.prepay);
   });
 
   test('a feature-gates mock without the reader never breaks the page or the document (CI regression)', () => {
