@@ -20,8 +20,11 @@ export const WARRANTY_DEFAULT_STRUCTURES = 'The new home and its attached garage
 // happened (that visit keeps its own record), so the wording stays neutral.
 export const FINAL_EXTERIOR_NOT_DONE = 'Final exterior treatment: not recorded on this certificate when this warranty was issued. It does not change the warranty dates above.';
 
+// One line, no "**": a certificate field can never become its own clause or
+// a bold line in the warranty (the issue route does the same server-side).
 function text(value) {
-  return typeof value === 'string' ? value.trim() : (value == null ? '' : String(value).trim());
+  const raw = typeof value === 'string' ? value : (value == null ? '' : String(value));
+  return raw.replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function parseDateOnly(value) {

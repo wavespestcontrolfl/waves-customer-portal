@@ -1,5 +1,5 @@
 const express = require('express');
-const { supersedeOpenNewConstructionWarranty } = require('../services/new-construction-warranty');
+const { supersedeOpenNewConstructionWarranty, warrantySafeValues } = require('../services/new-construction-warranty');
 
 const router = express.Router();
 const db = require('../models/db');
@@ -396,7 +396,7 @@ router.post('/:key/contracts', async (req, res, next) => {
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    const values = req.body?.values || {};
+    const values = warrantySafeValues(loaded.template.template_key, req.body?.values || {});
     const context = buildCustomerDocumentContext(customer, values);
     // The agreement may cover a property that differs from the customer's
     // primary address (rental/second property): buildCustomerDocumentContext

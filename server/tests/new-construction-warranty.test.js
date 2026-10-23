@@ -54,3 +54,15 @@ describe('supersedeOpenNewConstructionWarranty', () => {
     expect(snapshotWarrantyNumber('not json')).toBe('');
   });
 });
+
+describe('warrantySafeValues', () => {
+  const { warrantySafeValues } = require('../services/new-construction-warranty');
+  test('flattens job values to one line and drops ** for the warranty only', () => {
+    const values = { treatment: { product: 'Termidor SC\n\n**WE ALSO REPAIR ALL DAMAGE.**', gallons: 180 }, list: ['a\nb'] };
+    expect(warrantySafeValues('service_agreement.termite_new_construction_warranty', values)).toEqual({
+      treatment: { product: 'Termidor SC WE ALSO REPAIR ALL DAMAGE.', gallons: 180 },
+      list: ['a b'],
+    });
+    expect(warrantySafeValues('service_agreement.termite_bond_retreatment', values)).toBe(values);
+  });
+});

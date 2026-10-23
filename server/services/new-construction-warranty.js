@@ -50,4 +50,25 @@ async function supersedeOpenNewConstructionWarranty(trx, { templateKey, customer
   }
 }
 
-module.exports = { NEW_CONSTRUCTION_WARRANTY_KEY, supersedeOpenNewConstructionWarranty, snapshotWarrantyNumber };
+// Job values come from certificate fields a technician can type into. In this
+// warranty a value may never become its own line or a bold clause, so every
+// string is flattened to one line and loses "**" before rendering.
+function flattenWarrantyValue(value) {
+  if (typeof value === 'string') return value.replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+  if (Array.isArray(value)) return value.map(flattenWarrantyValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, flattenWarrantyValue(v)]));
+  }
+  return value;
+}
+
+function warrantySafeValues(templateKey, values) {
+  return templateKey === NEW_CONSTRUCTION_WARRANTY_KEY ? flattenWarrantyValue(values) : values;
+}
+
+module.exports = {
+  NEW_CONSTRUCTION_WARRANTY_KEY,
+  supersedeOpenNewConstructionWarranty,
+  snapshotWarrantyNumber,
+  warrantySafeValues,
+};

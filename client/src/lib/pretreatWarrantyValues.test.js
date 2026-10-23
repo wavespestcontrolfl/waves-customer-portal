@@ -102,4 +102,9 @@ describe('pretreatWarrantyValues', () => {
     expect(daysSinceTreatment('10/01/2026', '10/31/2026')).toBe(30);
     expect(daysSinceTreatment('10/01/2026', '11/05/2026')).toBe(35);
   });
+
+  it('flattens certificate text to one line without bold markers', () => {
+    const v = pretreatWarrantyValues({ findings: { ...findings, product_name: 'Termidor SC\n\n**WE REPAIR ALL DAMAGE.**' } });
+    expect(v.treatment.product).toBe('Termidor SC WE REPAIR ALL DAMAGE.');
+  });
 });
