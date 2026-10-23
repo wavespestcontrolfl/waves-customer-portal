@@ -328,11 +328,15 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
       // the matcher's own "internal transfer?" flag (ignore without a rule)
       // holds against a seed; a rule the owner wrote outranks the heuristic
       // (a vendor whose descriptor says AUTOPAY is the usual case)
-      const matcherTransfer = !!(sug.ignore && !sug.rule) && !(rule && rule.source === 'owner');
+      const matcherFlag = !!(sug.ignore && !sug.rule);
+      const matcherTransfer = matcherFlag && !(rule && rule.source === 'owner');
       const writes = !!rule && !matcherTransfer && (!pattern || rule.pattern === pattern);
       if (pattern && !writes) continue;
       const stale = !writes && !pattern && force && !!sug.rule && !matcherTransfer;
       const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
+      // an owner rule writing over the matcher's flag drops that flag, which
+      // may be the row's only examination evidence: keep the evidence
+      if (writes && matcherFlag && !MATCHER_KEYS.some((k) => sug[k] !== undefined && sug[k] !== null)) patch.examined = true;
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL)
         .update({ suggestion: bankImport.suggestionMerge(patch, (writes || stale) ? CLASSIFICATION_KEYS : []), updated_at: new Date() });
       if (stale) counts.cleared += 1;
