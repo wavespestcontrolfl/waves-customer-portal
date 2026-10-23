@@ -292,6 +292,26 @@ describe('assertPatternFast (worker probe)', () => {
     for (const s of strings) expect(s).toHaveLength(300);
     expect(strings.some((s) => s.endsWith('costco'))).toBe(true);
   });
+
+  test('probes are capped: PROBE_CONCURRENCY run at once, PROBE_QUEUE wait, the rest are a 429 at once; slots are handed on', async () => {
+    const burst = svc.PROBE_CONCURRENCY + svc.PROBE_QUEUE;
+    const probes = [];
+    for (let i = 0; i < burst; i += 1) probes.push(svc.assertPatternFast('wawa'));
+    // the one over the cap is refused immediately, without a worker
+    await expect(svc.assertPatternFast('wawa')).rejects.toMatchObject({ status: 429, message: expect.stringMatching(/too many pattern checks/) });
+    await expect(Promise.all(probes)).resolves.toEqual(new Array(burst).fill(true));
+    // every slot is released afterwards: a new probe runs
+    await expect(svc.assertPatternFast('wawa')).resolves.toBe(true);
+  });
+
+  test('the probe is the last check: a bad kind or a missing category is refused before any worker starts', async () => {
+    const { Worker } = require('worker_threads');
+    const started = jest.spyOn(require('worker_threads'), 'Worker').mockImplementation((...args) => new Worker(...args));
+    await expect(svc.createRule({ pattern: 'wawa', kind: 'nope' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/kind must be/) });
+    await expect(svc.createRule({ pattern: 'wawa', kind: 'expense' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/needs a categoryId/) });
+    expect(started).not.toHaveBeenCalled();
+    started.mockRestore();
+  });
 });
 
 describe('the matcher knows every key a rule owns', () => {

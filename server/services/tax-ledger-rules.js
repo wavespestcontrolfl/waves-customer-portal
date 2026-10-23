@@ -227,7 +227,26 @@ function probeStrings(pattern) {
   }
   return out;
 }
-async function assertPatternFast(pattern, { budgetMs = PROBE_BUDGET_MS } = {}) {
+// Each probe is a Worker (a few MiB of RSS): at most PROBE_CONCURRENCY run
+// at once and PROBE_QUEUE more wait their turn, so a burst of rule writes
+// cannot exhaust the shared process; the rest get a 429 and retry. The
+// probe is the last check before a write: kind, category and the current
+// rule are validated first, so a request that fails for another reason
+// never takes a slot.
+const PROBE_CONCURRENCY = 2;
+const PROBE_QUEUE = 8;
+const probeGate = { running: 0, waiting: [] };
+function acquireProbe() {
+  if (probeGate.running < PROBE_CONCURRENCY) { probeGate.running += 1; return Promise.resolve(); }
+  if (probeGate.waiting.length >= PROBE_QUEUE) return Promise.reject(httpError(429, 'too many pattern checks at once; try again in a moment'));
+  return new Promise((resolve) => probeGate.waiting.push(resolve));
+}
+function releaseProbe() {
+  const next = probeGate.waiting.shift();
+  if (next) next(); // the slot passes to the next waiter: running stays the same
+  else probeGate.running -= 1;
+}
+async function probePattern(pattern, budgetMs) {
   const { Worker } = require('worker_threads');
   const worker = new Worker(require.resolve('./tax-ledger-pattern-probe-worker'), { workerData: { pattern: String(pattern), strings: probeStrings(String(pattern)) } });
   const verdict = await new Promise((resolve) => {
@@ -237,6 +256,12 @@ async function assertPatternFast(pattern, { budgetMs = PROBE_BUDGET_MS } = {}) {
     worker.once('exit', () => { clearTimeout(timer); resolve({ exited: true }); });
   });
   await worker.terminate().catch(() => {});
+  return verdict;
+}
+async function assertPatternFast(pattern, { budgetMs = PROBE_BUDGET_MS } = {}) {
+  await acquireProbe();
+  let verdict;
+  try { verdict = await probePattern(pattern, budgetMs); } finally { releaseProbe(); }
   if (verdict.slow) throw httpError(400, `pattern is too slow on a long description (it must finish within ${budgetMs} ms); simplify it`);
   if (verdict.error) throw httpError(400, `pattern is not a valid regular expression: ${verdict.error}`);
   return true;
@@ -633,10 +658,10 @@ async function resolveCategory(categoryId, conn = db) {
 
 async function createRule({ pattern, kind, categoryId = null, note = null, priority = OWNER_PRIORITY, source = 'owner', conn = db }) {
   compilePattern(pattern);
-  await assertPatternFast(pattern);
   if (!KINDS.includes(kind)) throw httpError(400, `kind must be one of ${KINDS.join(', ')}`);
   const cat = await resolveCategory(categoryId, conn);
   if (kind === 'expense' && !cat) throw httpError(400, 'an expense rule needs a categoryId');
+  await assertPatternFast(pattern); // last: the probe takes a worker slot
   const row = {
     pattern: canonicalPattern(pattern), kind, category_id: cat ? cat.id : null, irs_line: cat ? cat.irs_line : null,
     note: note ? String(note).slice(0, 500) : null, priority: Number.isFinite(Number(priority)) ? Number(priority) : OWNER_PRIORITY,
@@ -650,7 +675,7 @@ async function createRule({ pattern, kind, categoryId = null, note = null, prior
 
 async function ruleUpdatePatch(patch) {
   const row = {};
-  if (patch.pattern !== undefined) { compilePattern(patch.pattern); await assertPatternFast(patch.pattern); row.pattern = canonicalPattern(patch.pattern); }
+  if (patch.pattern !== undefined) { compilePattern(patch.pattern); row.pattern = canonicalPattern(patch.pattern); }
   if (patch.kind !== undefined) { if (!KINDS.includes(patch.kind)) throw httpError(400, `kind must be one of ${KINDS.join(', ')}`); row.kind = patch.kind; }
   if (patch.categoryId !== undefined) { const cat = await resolveCategory(patch.categoryId); row.category_id = cat ? cat.id : null; row.irs_line = cat ? cat.irs_line : null; }
   if (patch.note !== undefined) row.note = patch.note ? String(patch.note).slice(0, 500) : null;
@@ -669,6 +694,7 @@ async function updateRule(id, patch = {}) {
     const next = { kind: row.kind !== undefined ? row.kind : current.kind, category_id: row.category_id !== undefined ? row.category_id : current.category_id };
     if (next.kind === 'expense' && !next.category_id) throw httpError(400, 'an expense rule needs a categoryId');
   }
+  if (patch.pattern !== undefined) await assertPatternFast(patch.pattern); // last: the probe takes a worker slot
   row.updated_at = new Date();
   const [saved] = await db('tax_ledger_rules').where({ id }).update(row).returning('*');
   if (!saved) throw httpError(404, 'rule not found');
@@ -766,7 +792,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 
 module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON,
-  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, assertPatternFast, probeStrings, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
+  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, assertPatternFast, probeStrings, PROBE_CONCURRENCY, PROBE_QUEUE, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };
