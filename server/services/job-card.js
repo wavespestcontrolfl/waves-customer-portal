@@ -1685,8 +1685,13 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     // required tool the assigned truck lacks is a hold like stock or weather.
     // Read behind the gate so the poll pays nothing while the kit is dark.
     if (require('../config/feature-gates').truckKitLive?.()) {
-      const tools = await require('./truck-kit').toolGapIssue({ technicianId: facts.technicianId, serviceLine: facts.serviceLine }, dbh);
-      if (tools) readiness.issues.push(tools);
+      try {
+        const tools = await require('./truck-kit').toolGapIssue({ technicianId: facts.technicianId, serviceLine: facts.serviceLine }, dbh);
+        if (tools) readiness.issues.push(tools);
+      } catch (err) {
+        // The stock and weather holds stand; the tools read is reported, not fatal.
+        logger.warn(`[job-card] truck kit read failed for ${facts.serviceId}: ${err?.message || err}`);
+      }
     }
     return readiness;
   }

@@ -95,6 +95,14 @@ test('an outcome is admin-only, tool-alert-only, from the fixed list, and resolv
   expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
 });
 
+test('a technician cannot resolve a truck-check alert at all, with or without an outcome', async () => {
+  expect((await put('a-missing', { status: 'resolved' }, 'technician')).statusCode).toBe(403);
+  expect(db.__state.alerts['a-missing'].status).toBe('new');
+  expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
+  // Other alerts keep today's reach (closed at the staff default-deny flip).
+  expect((await put('a-due', { status: 'resolved' }, 'technician')).statusCode).toBe(200);
+});
+
 test('a plain resolve of a maintenance alert is unchanged: no item write, no bell check', async () => {
   const res = await put('a-due', { status: 'resolved' });
   expect(res.statusCode).toBe(200);

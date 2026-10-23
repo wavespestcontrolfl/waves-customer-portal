@@ -1353,6 +1353,11 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
         const lit = await jobCard.buildJobCard('svc1', { dbh: withTexts({}, []), readinessOnly: true, deps: { ...deps, protocols: {} }, now: new Date('2026-09-04T12:00:00Z') });
         expect(spy).toHaveBeenCalledWith(expect.objectContaining({ serviceLine: expect.any(String) }), expect.anything());
         expect(lit.issues).toContainEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });
+        // A failed kit read never takes the poll down: the other holds stand.
+        spy.mockRejectedValueOnce(new Error('kit_key column missing'));
+        const degraded = await jobCard.buildJobCard('svc1', { dbh: withTexts({}, []), readinessOnly: true, deps: { ...deps, protocols: {} }, now: new Date('2026-09-04T12:00:00Z') });
+        expect(degraded.issues.some((issue) => issue.kind === 'tools')).toBe(false);
+        expect(Array.isArray(degraded.issues)).toBe(true);
       } finally { spy.mockRestore(); delete process.env.GATE_TRUCK_KIT; }
     });
 

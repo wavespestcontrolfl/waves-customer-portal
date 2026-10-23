@@ -700,8 +700,10 @@ router.put('/alerts/:id', async (req, res, next) => {
     const existing = await db('maintenance_alerts').where('id', req.params.id).first();
     if (!existing) return res.status(404).json({ error: 'Alert not found' });
     const toolAlert = truckKit.TOOL_ALERT_TYPES.includes(existing.alert_type);
+    // A truck-check alert closes from the office (the technician's own path is
+    // the next truck check, which finds the tool); the outcome is admin-only too.
+    if ((toolAlert || outcome !== undefined) && req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
     if (outcome !== undefined) {
-      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       if (!toolAlert) return res.status(400).json({ error: 'outcome applies to truck check alerts only' });
       if (!Object.prototype.hasOwnProperty.call(TOOL_OUTCOME_STATUS, outcome)) {
         return res.status(400).json({ error: 'outcome must be found, repaired, replaced, lost or retired' });

@@ -31,6 +31,7 @@ jest.mock('../models/db', () => {
     c.whereNotIn = (col, vals) => add((r) => !vals.includes(r[norm(col)]));
     c.whereNull = (col) => add((r) => r[norm(col)] == null);
     c.whereNotNull = (col) => add((r) => r[norm(col)] != null);
+    c.whereNot = (col, val) => add((r) => r[norm(col)] !== val);
     c.distinct = (...cols) => { c.cols = cols; c.distinctOn = cols; return c; };
     c.leftJoin = (...args) => { c.joins.push(args); return c; };
     c.join = (...args) => { c.joins.push(args); return c; };
@@ -276,6 +277,15 @@ describe('recordTruckCheck', () => {
     await truckKit.recordTruckCheck({ technicianId: TECH, results: results('present', 'present'), now: NOW });
     expect(db.__state.maintenance_alerts[0]).toEqual(expect.objectContaining({ status: 'resolved', resolved_at: NOW, resolved_by: 'truck check by Synthetic Tech' }));
     expect(closeAdminAlertKeys).toHaveBeenCalledTimes(1);
+  });
+
+  test('a tool that was missing and is now damaged keeps one open alert', async () => {
+    await truckKit.recordTruckCheck({ technicianId: TECH, results: results('missing', 'present'), now: daysAgo(7) });
+    await truckKit.recordTruckCheck({ technicianId: TECH, results: results('damaged', 'present'), now: NOW });
+    const open = db.__state.maintenance_alerts.filter((a) => a.status === 'new');
+    expect(open).toHaveLength(1);
+    expect(open[0]).toEqual(expect.objectContaining({ equipment_id: METER, alert_type: 'tool_damaged' }));
+    expect(db.__state.maintenance_alerts.find((a) => a.alert_type === 'tool_missing')).toEqual(expect.objectContaining({ status: 'resolved', resolved_by: 'truck check by Synthetic Tech: now damaged' }));
   });
 
   test('a very long truck name still fits the headline', () => {

@@ -277,6 +277,14 @@ async function openToolAlert({ line, technician, now, conn }) {
     .whereIn('status', OPEN_ALERT_STATUSES)
     .orderBy('created_at', 'desc')
     .first('id');
+  // A tool reported missing last time and damaged now (or the reverse) keeps
+  // one open alert: the other type's alert is closed as superseded.
+  await conn('maintenance_alerts')
+    .where({ equipment_id: line.equipmentId })
+    .whereIn('alert_type', TOOL_ALERT_TYPES)
+    .whereNot('alert_type', alertType)
+    .whereIn('status', OPEN_ALERT_STATUSES)
+    .update({ status: 'resolved', resolved_at: now, resolved_by: `truck check by ${who}: now ${line.state}`, updated_at: now });
   if (open) {
     await conn('maintenance_alerts').where({ id: open.id }).update({ description, updated_at: now });
     return open.id;
