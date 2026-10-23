@@ -20107,7 +20107,19 @@ const CallRecordingProcessor = {
                   // 2026-10-04, "same time") — the time visit 1's own hours
                   // checks already passed; only the date can come from the call.
                   const primaryStart = String(primaryRow.window_start || '').slice(0, 5);
-                  const fuStart = packageFollowUp && /^\d{2}:\d{2}$/.test(primaryStart) ? primaryStart : fuPlan.windowStart;
+                  const plannedFuStart = packageFollowUp && /^\d{2}:\d{2}$/.test(primaryStart) ? primaryStart : fuPlan.windowStart;
+                  // A copied hour (the call set none) that another stop holds
+                  // on visit 2's date moves to the nearest free whole hour that
+                  // day (GATE_CALL_FOLLOWUP_FREE_HOUR, owner 2026-10-22;
+                  // scheduling/plan-taken-hour.js). A time set on the call and a
+                  // package visit 2 keep theirs.
+                  const fuStart = await require('./scheduling/plan-taken-hour').callFollowUpStart(trx, {
+                    visit1: primaryRow,
+                    customerId,
+                    defaultTechnicianId,
+                    date: fuPlan.scheduledDate,
+                    start: plannedFuStart,
+                  }, { hourStated: fuPlan.hourStated === true, packageVisit: packageFollowUp });
                   const [fuH, fuM] = fuStart.split(':').map(Number);
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
                   // A package visit 2 is the same treatment as visit 1, so it
@@ -20248,7 +20260,8 @@ const CallRecordingProcessor = {
                           idempotency_key: computeAppointmentIdempotencyKey({
                             callLogId: call.id,
                             schedulingStatus: 'follow_up',
-                            confirmedStartAt: `${fuPlan.scheduledDate}T${fuStart}`,
+                            // The planned hour, so a retry keys the same follow-up whatever free hour it got.
+                            confirmedStartAt: `${fuPlan.scheduledDate}T${plannedFuStart}`,
                             primaryServiceCategory: serviceType,
                             addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
                           }),
