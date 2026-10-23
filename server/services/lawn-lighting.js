@@ -36,19 +36,36 @@ const HARD_SHADOWS = Object.freeze(['yes', 'no', 'unknown']);
 const COLOR_NO_CHANGE_POINTS = 8;
 
 // Which light reads may be compared on color, symmetric. Only these pairs:
-//   full_sun   with full_sun                     (same hard light)
-//   overcast   with overcast or open_shade       (both even, diffuse light)
-//   open_shade with open_shade or overcast
-// mixed_sun_shade (sun and shade in one frame), low_light and unknown are never
-// compatible, not even with themselves.
+//   full_sun        with full_sun or mixed_sun_shade   (sunlit turf, in direct sun)
+//   mixed_sun_shade with mixed_sun_shade or full_sun
+//   overcast        with overcast or open_shade        (both even, diffuse light)
+//   open_shade      with open_shade or overcast
+// Sun is never compared with diffuse light. A sunny frame with tree or house shadows
+// (mixed_sun_shade) is the same direct sun as full_sun: under the lighting prompt the
+// model reads the sunlit and the shadowed turf each against its own light (the LIGHT
+// block in lawn-visit-input.js), so the shadows do not move the color score. The
+// 2026-10-22 replay of 6 customers' visit pairs kept the color comparison for 1 of 6
+// when mixed_sun_shade compared with nothing, almost every sunny SW Florida yard
+// having a shadow on it (owner 2026-10-22: option B on the report prompt review). low_light and unknown are never compatible, not even with
+// themselves.
 const COMPATIBLE = Object.freeze({
-  full_sun: Object.freeze(['full_sun']),
+  full_sun: Object.freeze(['full_sun', 'mixed_sun_shade']),
+  mixed_sun_shade: Object.freeze(['full_sun', 'mixed_sun_shade']),
   overcast: Object.freeze(['overcast', 'open_shade']),
   open_shade: Object.freeze(['overcast', 'open_shade']),
 });
 
+// A visit whose usable photos sit in different kinds of light (sun beside cloud or
+// shade, or any low light in the mix): its one color score rests on no single light,
+// so it is never compared. Also the light of one photo whose read contradicts itself:
+// overcast or open shade with hard shadows across the turf (a hard shadow needs direct
+// sun), so that read never joins the sun group or the diffuse group. The model never
+// answers it (LIGHTING is the model's closed set), and it is in no COMPATIBLE row.
+const MIXED_LIGHT = 'mixed_light';
+
 const DIFFUSE = new Set(['overcast', 'open_shade']);
-const HARD_LIGHT = new Set(['full_sun', 'overcast', 'open_shade']);
+// Direct sun, with or without shadows on the turf: the visit-level sun group.
+const SUNNY = new Set(['full_sun', 'mixed_sun_shade']);
 const USABLE_QUALITY = new Set(['adequate', 'limited']);
 
 /**
@@ -64,13 +81,17 @@ function normalizeLightRead(entry) {
 }
 
 /**
- * The light a photo counts as for comparison: hard shadows across the turf make
- * any single-light read a mixed one (shadowed and sunlit turf in one frame).
+ * The light a photo counts as for comparison. Hard shadows across the turf mean
+ * direct sun on part of it: full sun with hard shadows is sun with shadows (the sun
+ * group), and an overcast or open-shade read with hard shadows contradicts itself,
+ * so it is mixed light and never compared.
  */
 function effectiveLight(read) {
   if (!read || typeof read !== 'object') return 'unknown';
   const { lighting, hard_shadows: hardShadows } = normalizeLightRead(read);
-  return hardShadows === true && HARD_LIGHT.has(lighting) ? 'mixed_sun_shade' : lighting;
+  if (hardShadows !== true) return lighting;
+  if (lighting === 'full_sun') return 'mixed_sun_shade';
+  return DIFFUSE.has(lighting) ? MIXED_LIGHT : lighting;
 }
 
 /** True when two light reads (visit or photo level) may be compared on color. */
@@ -83,7 +104,7 @@ function lightsCompatible(a, b) {
  * @returns {{comparable:boolean, reason:null|'light_unknown'|'light_differs'}}
  */
 function colorComparability(currentLight, priorLight) {
-  const known = (light) => LIGHTING.includes(light) && light !== 'unknown';
+  const known = (light) => (LIGHTING.includes(light) && light !== 'unknown') || light === MIXED_LIGHT;
   if (!known(currentLight) || !known(priorLight)) return { comparable: false, reason: 'light_unknown' };
   return lightsCompatible(currentLight, priorLight)
     ? { comparable: true, reason: null }
@@ -148,8 +169,10 @@ const readUnderShotList = (promptVersion) => typeof promptVersion === 'string' &
  *   - no such photo, or any of them unknown       -> unknown
  *   - all the same                                -> that light
  *   - all overcast / open shade                   -> overcast (open_shade if none is overcast)
- *   - anything else (sun beside shade, low light) -> mixed_sun_shade, or low_light when
- *     every non-matching photo is low light
+ *   - all direct sun (full sun, sun with shadows) -> mixed_sun_shade
+ *   - anything else (sun beside cloud or shade,    -> mixed_light, never compared
+ *     any low light in a mix, or any photo in
+ *     mixed light: a diffuse read with hard shadows)
  * @param {Array<{light:string, quality?:string, zone?:string|null}>} photos
  */
 function visitLightFromPhotos(photos, { shotList: shotListPrompt = true } = {}) {
@@ -159,12 +182,13 @@ function visitLightFromPhotos(photos, { shotList: shotListPrompt = true } = {}) 
   const overview = (Array.isArray(photos) ? photos : [])
     .filter((p) => p && USABLE_QUALITY.has(p.quality) && (!shotListPrompt || shotList.areaWeight(p.zone) > 0));
   if (!overview.length) return 'unknown';
-  const lights = overview.map((p) => (LIGHTING.includes(p.light) ? p.light : 'unknown'));
+  const lights = overview.map((p) => (LIGHTING.includes(p.light) || p.light === MIXED_LIGHT ? p.light : 'unknown'));
   if (lights.includes('unknown')) return 'unknown';
   const distinct = new Set(lights);
   if (distinct.size === 1) return lights[0];
   if (lights.every((l) => DIFFUSE.has(l))) return lights.includes('overcast') ? 'overcast' : 'open_shade';
-  return lights.every((l) => l === 'low_light') ? 'low_light' : 'mixed_sun_shade';
+  // Full sun beside sun with shadows is still direct sun; any other mix is mixed light.
+  return lights.every((l) => SUNNY.has(l)) ? 'mixed_sun_shade' : MIXED_LIGHT;
 }
 
 /**
@@ -217,6 +241,7 @@ module.exports = {
   HARD_SHADOWS,
   COLOR_NO_CHANGE_POINTS,
   COMPATIBLE,
+  MIXED_LIGHT,
   normalizeLightRead,
   effectiveLight,
   lightsCompatible,
