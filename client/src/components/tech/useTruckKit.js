@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -33,22 +33,30 @@ export function lastCheckedLabel(checkedAt, now = new Date()) {
 // The Today card and the Tools tile read this once per mount. A read that
 // fails leaves `data` null: the card and the tile simply stay away (the
 // truck check page shows the error and a retry).
+// Latest wins: a reload aborts the read in flight, and a read that was
+// superseded anyway (sequence guard, like the schedule loader) never writes
+// its stale answer over a fresher one.
 export default function useTruckKit() {
   const [state, setState] = useState({ loading: true, data: null, error: '' });
-  const load = useCallback(async (signal) => {
+  const seq = useRef(0);
+  const inflight = useRef(null);
+  const load = useCallback(async () => {
+    if (inflight.current) inflight.current.abort();
+    const controller = new AbortController();
+    inflight.current = controller;
+    const mine = ++seq.current;
     setState((prev) => ({ ...prev, loading: true, error: '' }));
     try {
-      const data = await fetchTruckKit(signal);
-      if (!signal?.aborted) setState({ loading: false, data, error: '' });
+      const data = await fetchTruckKit(controller.signal);
+      if (mine === seq.current && !controller.signal.aborted) setState({ loading: false, data, error: '' });
     } catch (err) {
-      if (err?.name === 'AbortError') return;
+      if (err?.name === 'AbortError' || mine !== seq.current) return;
       setState({ loading: false, data: null, error: err?.message || 'Could not load your truck' });
     }
   }, []);
   useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => controller.abort();
+    void load();
+    return () => { seq.current += 1; if (inflight.current) inflight.current.abort(); };
   }, [load]);
   // Stable, so a page can fold it into its own route refresh without churn.
   const reload = useCallback(() => load(), [load]);

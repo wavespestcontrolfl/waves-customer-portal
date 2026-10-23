@@ -569,12 +569,15 @@ async function closeTruckBellIfClear(vehicleId, now = new Date(), conn = db) {
 // check must never read as done while the office was not told. One
 // transaction, serialized per truck by an advisory lock, so two devices (or a
 // retry after a timeout) can never open the same item's alert twice.
-async function recordTruckCheck({ technicianId, results, now = new Date() }) {
+async function recordTruckCheck({ technicianId, results, now: nowOverride = null }) {
   const wanted = normalizeResults(results);
   return db.transaction(async (trx) => {
     const found = await truckForTechnician(technicianId, trx);
     if (!found) throw new TruckCheckError('no_truck', 'No truck is assigned to you');
     await lockTruck(trx, found.id);
+    // The check's time is taken AFTER the lock, so checks serialized on the
+    // truck carry timestamps in commit order (the latest check is the latest).
+    const now = nowOverride || new Date();
     // Ownership is re-read under the lock: the office hands a truck over
     // under the same lock (routes/admin-equipment.js), so a check that
     // started on a truck the technician no longer has writes nothing.
