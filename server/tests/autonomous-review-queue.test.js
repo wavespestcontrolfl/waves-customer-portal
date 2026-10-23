@@ -184,9 +184,10 @@ describe('autonomous-review-queue read model helpers', () => {
       recommended_links: [expect.objectContaining({ url: '/contact/' })],
     });
     expect(item.draft.title).toBe('Draft');
+    // A shadow-mode blog never published, so it can be dismissed (owner 2026-10-22).
     expect(item.review_actions).toMatchObject({
       can_requeue: false,
-      can_dismiss: false,
+      can_dismiss: true,
       can_approve_trust_build: false,
     });
   });
@@ -522,5 +523,65 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
     await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
       .rejects.toThrow('reached transaction');
     expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Owner 2026-10-22: 24 Aug-Sep drafts sat in the review queue (and the parked
+// digest's "awaiting review" count) but every dismiss was refused, because
+// their last run failed a gate, ran in shadow, or gave up. None opened a PR.
+describe('a run that never published can be dismissed', () => {
+  const db = require('../models/db');
+  const { decideReviewItem } = require('../services/content/autonomous-review-queue');
+
+  function mockDismiss(opportunity, run) {
+    const oppUpdates = [];
+    const chainFor = (result) => ({
+      where: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      forUpdate: jest.fn(function () { return this; }),
+      first: jest.fn(() => Promise.resolve(result)),
+      update: jest.fn((p) => { oppUpdates.push(p); return Promise.resolve(1); }),
+    });
+    const pick = (table) => chainFor(table === 'opportunity_queue' ? opportunity : run);
+    db.mockImplementation(pick);
+    db.transaction = jest.fn(async (cb) => cb(pick));
+    return oppUpdates;
+  }
+
+  const opp = (over = {}) => ({ id: 'opp-1', status: 'pending_review', action_type: 'refresh_existing_page', skip_reason: 'claims_ledger_failed', signal_metadata: '{}', ...over });
+  const run = (over = {}) => ({ id: 'run-1', action_type: 'refresh_existing_page', outcome: 'skipped_gate_fail', skip_reason: 'claims_ledger_failed', astro_pr_url: null, published_url: null, astro_pr_merged_at: null, reviewer_notes: null, ...over });
+
+  test.each([
+    ['a refresh that failed a gate', opp(), run()],
+    ['a shadow-mode refresh', opp({ skip_reason: 'shadow_would_gate' }), run({ outcome: 'skipped_shadow_mode', shadow_mode: true })],
+    ['a blog whose writer gave up', opp({ action_type: 'new_supporting_blog', skip_reason: 'attempts_exhausted' }), run({ action_type: 'new_supporting_blog', outcome: 'failed_agent', skip_reason: null })],
+    ['a shadow-mode blog', opp({ action_type: 'new_supporting_blog', skip_reason: 'shadow_would_gate' }), run({ action_type: 'new_supporting_blog', outcome: 'skipped_shadow_mode' })],
+  ])('%s: Dismiss is offered and it closes the item', async (_label, o, r) => {
+    expect(reviewActions({ opportunity: o, run: r }).can_dismiss).toBe(true);
+    const updates = mockDismiss(o, r);
+    await decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }).catch(() => {});
+    expect(updates).toContainEqual(expect.objectContaining({ status: 'skipped' }));
+  });
+
+  test.each([
+    ['an opened website PR', run({ astro_pr_url: 'https://github.com/x/y/pull/1' })],
+    ['a merged website PR', run({ astro_pr_merged_at: new Date() })],
+    ['a live page', run({ published_url: 'https://example.test/page/' })],
+    ['a publish that failed after it started', run({ outcome: 'failed_publish' })],
+    ['a publish in flight', run({ outcome: 'publishing_named_competitor' })],
+  ])('a run with %s still refuses a dismiss', async (_label, r) => {
+    const updates = mockDismiss(opp(), r);
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/already decided/) });
+    expect(updates.find((u) => u.status === 'skipped')).toBeFalsy();
+  });
+
+  test('a blog with a merged PR stays engine-managed', async () => {
+    const o = opp({ action_type: 'new_supporting_blog', skip_reason: 'attempts_exhausted' });
+    const r = run({ action_type: 'new_supporting_blog', outcome: 'failed_agent', astro_pr_url: 'https://github.com/x/y/pull/2' });
+    expect(reviewActions({ opportunity: o, run: r }).can_dismiss).toBe(false);
+    mockDismiss(o, r);
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/managed by the engine/) });
   });
 });
