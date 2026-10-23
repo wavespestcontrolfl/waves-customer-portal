@@ -224,6 +224,15 @@ describe('legacy server-rendered page — lawn limits', () => {
     expect(html).not.toContain('can&#39;t fix');
   });
 
+  test('the page script attests the block: the hash with a block, empty without, sent with both accepts', () => {
+    const block = buildLawnLimits({ otherGrasses: ['bermudagrass'] });
+    const withBlock = renderPage('ssr-token-3', estimate(), data(), null, { lawnLimits: block });
+    expect(withBlock).toContain(`const LAWN_LIMITS_HASH = ${JSON.stringify(require('../services/estimate-lawn-limits').lawnLimitsHash(block))};`);
+    expect(renderPage('ssr-token-4', estimate(), data())).toContain('const LAWN_LIMITS_HASH = "";');
+    expect(withBlock.match(/payload\.lawnLimitsHash = LAWN_LIMITS_HASH/g)).toHaveLength(2);
+    expect(withBlock).toContain("data.code === 'LAWN_LIMITS_STALE'");
+  });
+
   test('with the option: the heading and every paragraph, escaped', () => {
     const html = renderPage('ssr-token-2', estimate(), data(), null, { lawnLimits: buildLawnLimits({ otherGrasses: ['bermudagrass'], virusStreaksSuspected: true }) });
     expect(html).toContain('data-lawn-limits="true"');

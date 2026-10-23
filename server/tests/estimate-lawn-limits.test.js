@@ -145,7 +145,7 @@ describe('which estimates carry it', () => {
     const block = await limits.lawnLimitsForEstimate(lawnEstimate(), { knex });
     expect(block.heading).toBe("What we can and can't fix");
     expect(keysOf(block)).toEqual(['always', 'bahiagrass', 'torpedograss', 'virus_streaks']);
-    expect(await limits.lawnLimitsBlock(lawnEstimate(), { knex })).toEqual({ lawnLimits: block });
+    expect(await limits.lawnLimitsBlock(lawnEstimate(), { knex })).toEqual({ lawnLimits: block, lawnLimitsHash: limits.lawnLimitsHash(block) });
   });
 
   test('gate on, lawn estimate, no profile or NULL flags: the fixed paragraph alone', async () => {
@@ -320,7 +320,7 @@ describe('an open estimate follows the live flags; an accepted one prints only i
       world({ profiles: [] }),
     ]) {
       expect(await limits.lawnLimitsForEstimate(accepted, { knex })).toEqual(atAccept);
-      expect(await limits.lawnLimitsBlock(accepted, { knex })).toEqual({ lawnLimits: atAccept });
+      expect(await limits.lawnLimitsBlock(accepted, { knex })).toEqual({ lawnLimits: atAccept, lawnLimitsHash: limits.lawnLimitsHash(atAccept) });
       expect(knex.calls).toEqual([]);
     }
   });
@@ -417,5 +417,41 @@ describe('the customer accept stamps the block inside its transaction (contract)
     expect(open).toBeGreaterThan(read);
     expect(write).toBeGreaterThan(open);
     expect(write).toBeGreaterThan(flip);
+  });
+});
+
+describe('the accept attestation hash', () => {
+  const a = limits.buildLawnLimits();
+  const b = limits.buildLawnLimits({ otherGrasses: ['carpetgrass'] });
+  afterEach(() => { delete process.env.GATE_ESTIMATE_LAWN_LIMITS; });
+
+  test('a hash is stable, differs with any printed word, and is empty for no block', () => {
+    expect(limits.lawnLimitsHash(a)).toMatch(/^[0-9a-f]{32}$/);
+    expect(limits.lawnLimitsHash(a)).toBe(limits.lawnLimitsHash(limits.buildLawnLimits()));
+    expect(limits.lawnLimitsHash(a)).not.toBe(limits.lawnLimitsHash(b));
+    expect(limits.lawnLimitsHash({ ...a, paragraphs: [{ key: 'always', text: `${a.paragraphs[0].text}.` }] })).not.toBe(limits.lawnLimitsHash(a));
+    for (const none of [null, undefined, {}, { heading: 'x', paragraphs: [] }]) expect(limits.lawnLimitsHash(none)).toBe('');
+  });
+
+  test('gate off: never stale', () => {
+    expect(limits.lawnLimitsAttestationStale(b, 'anything')).toBe(false);
+    expect(limits.lawnLimitsAttestationStale(null, 'anything')).toBe(false);
+  });
+
+  test('gate on: match, mismatch, old client, and no block on either side', () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    expect(limits.lawnLimitsAttestationStale(a, limits.lawnLimitsHash(a))).toBe(false);
+    expect(limits.lawnLimitsAttestationStale(a, limits.lawnLimitsHash(b))).toBe(true);
+    expect(limits.lawnLimitsAttestationStale(a, undefined)).toBe(true);
+    expect(limits.lawnLimitsAttestationStale(a, 42)).toBe(true);
+    expect(limits.lawnLimitsAttestationStale(null, undefined)).toBe(false);
+    expect(limits.lawnLimitsAttestationStale(null, '')).toBe(false);
+    expect(limits.lawnLimitsAttestationStale(null, limits.lawnLimitsHash(a))).toBe(true);
+  });
+
+  test('/data-side fragment carries the hash of the block it carries', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const frag = await limits.lawnLimitsBlock(lawnEstimate(), { knex: world() });
+    expect(frag.lawnLimitsHash).toBe(limits.lawnLimitsHash(frag.lawnLimits));
   });
 });

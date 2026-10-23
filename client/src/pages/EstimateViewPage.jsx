@@ -7773,6 +7773,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // version, or 409s TERMS_VERSION_STALE if the copy moved under us.
           // Never for annual prepay: the line is not shown for that lane (paid
           // up front), so nothing is attested and nothing is recorded.
+          // GATE_ESTIMATE_LAWN_LIMITS: the hash /data served with the "What we can and can't fix"
+          // block THIS TAB RENDERED (absent when it rendered none). The server recomputes the live
+          // block and 409s LAWN_LIMITS_STALE on any difference, so an accept never lands on words
+          // the customer did not see.
+          lawnLimitsHash: data?.lawnLimits ? (data.lawnLimitsHash || undefined) : undefined,
           termsVersion: (paymentPreference !== 'prepay_annual' && data?.acceptanceTerms?.version) || undefined,
           // …and which SCOPE of that version it rendered — 'plan' (the
           // Services line carried the annual rate review sentence) or
@@ -7964,6 +7969,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             setInlineCardIntent(null);
             await loadEstimate({ preserveSelection: true });
             throw new Error(body.error || 'Your payment terms were updated — please review them and confirm again.');
+          }
+          if (body.code === 'LAWN_LIMITS_STALE') {
+            // The lawn limits copy changed since this tab loaded: nothing was accepted. Refetch so
+            // the card is the one the server will record, keep the reservation and selections,
+            // and ask for one more tap.
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'This estimate was refreshed. Please review it and confirm again.');
           }
           if (body.code === 'TERMS_VERSION_STALE') {
             // The acceptance copy changed since this tab loaded — refetch so

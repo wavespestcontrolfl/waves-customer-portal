@@ -13,6 +13,7 @@
 // No prices and no send logic here: the block is copy only.
 // ============================================================
 
+const crypto = require('crypto');
 const featureGates = require('../config/feature-gates');
 const db = require('../models/db');
 const logger = require('./logger');
@@ -205,11 +206,30 @@ async function stampLawnLimitsAtAccept(trx, estimateId, block) {
   });
 }
 
+// A short fingerprint of a block's printed words, '' for no block. The page echoes the one /data
+// served with its accept; the accept compares it with the live block's (render-bound attestation,
+// like the terms version): any difference in the words the customer saw is a reload prompt.
+function lawnLimitsHash(block) {
+  const paragraphs = Array.isArray(block?.paragraphs) ? block.paragraphs : [];
+  if (!block || typeof block.heading !== 'string' || !paragraphs.length) return '';
+  const canonical = JSON.stringify([block.heading, paragraphs.map((p) => [p.key, p.text])]);
+  return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+}
+
+// Is the attestation an accept sent stale against the live block? Gate off: never (nothing was
+// shown, nothing is checked). Otherwise the hashes must match; no block on both sides matches
+// ('' = ''), and an old client that sends no hash is stale exactly when a block exists now.
+function lawnLimitsAttestationStale(liveBlock, attestedHash) {
+  if (featureGates.estimateLawnLimitsLive?.() !== true) return false;
+  const attested = typeof attestedHash === 'string' ? attestedHash.trim().slice(0, 64) : '';
+  return lawnLimitsHash(liveBlock) !== attested;
+}
+
 // The /data payload fragment: `{ lawnLimits }` or nothing, so a gate-off or
 // non-lawn response is byte-identical to before.
 async function lawnLimitsBlock(estimate, opts) {
   const lawnLimits = await lawnLimitsForEstimate(estimate, opts);
-  return lawnLimits ? { lawnLimits } : {};
+  return lawnLimits ? { lawnLimits, lawnLimitsHash: lawnLimitsHash(lawnLimits) } : {};
 }
 
 module.exports = {
@@ -233,5 +253,7 @@ module.exports = {
   lawnLimitsToStampAtAccept,
   lawnLimitsToStampForId,
   stampLawnLimitsAtAccept,
+  lawnLimitsHash,
+  lawnLimitsAttestationStale,
   lawnLimitsBlock,
 };

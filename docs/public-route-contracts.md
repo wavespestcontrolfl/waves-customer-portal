@@ -5404,6 +5404,9 @@ PDF print the same module's text.
 An accepted, declined, expired or otherwise terminal estimate carries only the
 block stored in `estimate_data.lawnLimitsAtAccept` when it was accepted (absent
 if none was stored), never the live profile.
+`/data` also carries `lawnLimitsHash` beside the block; `PUT /:token/accept` takes it back as
+`lawnLimitsHash` and answers 409 `LAWN_LIMITS_STALE` when the live block's hash differs
+(gate on only; no block on both sides matches).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that
