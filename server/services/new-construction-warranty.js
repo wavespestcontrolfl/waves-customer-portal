@@ -289,6 +289,31 @@ function screenValues(values) {
   return values;
 }
 
+// What an issue request may carry: no blank fields, a certificate, and no
+// per-request name or address override (the owner's name and address print
+// from the screened customer record).
+function issueRequestProjectId(body) {
+  if (body?.allowUnresolved === true) throw bad('The new construction warranty cannot be issued with blank fields.');
+  if (oneLine(body?.propertyAddress) || oneLine(body?.recipientName)) {
+    throw bad('The new construction warranty uses the customer record for the owner\'s name and address. Edit the customer instead.');
+  }
+  if (!body?.projectId) throw bad('Issue the new construction warranty from its pre-treat certificate.');
+  return body.projectId;
+}
+
+// Section 1 prints the owner's or agent's name and complete address (Rule
+// 5E-14.105(2)(a)), so the customer record must have one and pass the screen.
+function assertCustomerPrintable(customer) {
+  if (![customer.address_line1, customer.city, customer.zip].every((part) => oneLine(part))) {
+    throw bad("Add the owner's or agent's full mailing address (street, city, ZIP) to the customer first.", 409);
+  }
+  const failing = ['first_name', 'last_name', 'company_name', 'address_line1', 'address_line2', 'city', 'zip']
+    .filter((field) => customerCopyViolations(oneLine(customer[field])).length > 0);
+  if (failing.length) {
+    throw bad(`Remove the access code or banned wording from the customer record: ${failing.join(', ')}.`, 409);
+  }
+}
+
 // Values for one issue of the warranty, built server-side from the project
 // named in the request. The issue route calls it again inside its
 // transaction with `trx`, which locks the certificate row, so the snapshot is
@@ -296,14 +321,7 @@ function screenValues(values) {
 // values through.
 async function templateIssueValues(templateKey, body, customer, conn = db) {
   if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return body?.values || {};
-  if (body?.allowUnresolved === true) throw bad('The new construction warranty cannot be issued with blank fields.');
-  // The owner's name and address come from the screened customer record;
-  // a per-request override would print unscreened text on the contract.
-  if (oneLine(body?.propertyAddress) || oneLine(body?.recipientName)) {
-    throw bad('The new construction warranty uses the customer record for the owner\'s name and address. Edit the customer instead.');
-  }
-  const projectId = body?.projectId;
-  if (!projectId) throw bad('Issue the new construction warranty from its pre-treat certificate.');
+  const projectId = issueRequestProjectId(body);
   // Customer row before the certificate row: the order the issue route and
   // a customer merge both take, so the two cannot deadlock.
   await conn('customers').where({ id: customer.id }).forUpdate().first('id');
@@ -311,16 +329,7 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   if (!project || project.project_type !== 'pre_treatment_termite_certificate' || project.customer_id !== customer.id) {
     throw bad('Pre-treat certificate not found for this customer.', 404);
   }
-  // Rule 5E-14.105(2)(a): the owner's or agent's complete address.
-  if (![customer.address_line1, customer.city, customer.zip].every((part) => oneLine(part))) {
-    throw bad("Add the owner's or agent's full mailing address (street, city, ZIP) to the customer first.", 409);
-  }
-  // The customer's name and address print on the contract too (section 1).
-  const customerFields = ['first_name', 'last_name', 'company_name', 'address_line1', 'address_line2', 'city', 'zip']
-    .filter((field) => customerCopyViolations(oneLine(customer[field])).length > 0);
-  if (customerFields.length) {
-    throw bad(`Remove the access code or banned wording from the customer record: ${customerFields.join(', ')}.`, 409);
-  }
+  assertCustomerPrintable(customer);
   const findings = parseFindings(project.findings);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
   const { initial, values } = certificateValues(project, findings);
