@@ -9886,6 +9886,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           decisions: Array.isArray(review.decisions) ? review.decisions : (Array.isArray(review.findings) ? review.findings : []),
           photos: reviewPhotos,
           observations: typeof review.observations === 'string' ? review.observations : '',
+          // GATE_TS_LIGHTING: the preview's light read, only when its own signature
+          // checks out; otherwise null and the visit's light stays unknown.
+          light: require('./tree-shrub-lighting').verifiedLightFromReview(review, svc.id, reviewPhotosHash),
         });
       } else {
         const scorePhotos = scorable.map(({ p, row }) => ({
