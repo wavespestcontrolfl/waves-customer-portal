@@ -147,7 +147,7 @@ async function trackOwnership(req, write) {
 function liveStart(req) {
   const id = req && req.ibCancelBundleId;
   if (!id) return Promise.resolve(null);
-  return guarded('heartbeat', () => db(TABLE)
+  return trackOwnership(req, guarded('heartbeat', () => db(TABLE)
     .where({ id, status: 'pending' })
     .where(function leaseFree() {
       this.whereNull('lease_until').orWhere('lease_until', '<', db.fn.now()).orWhere('lease_owner', REQUEST_LEASE);
@@ -156,7 +156,7 @@ function liveStart(req) {
       lease_owner: REQUEST_LEASE,
       lease_until: nowPlusMs(db, LEASE_MS),
       updated_at: db.fn.now(),
-    }));
+    })));
 }
 
 /** handleCancellation's reported outcome -> the stored text state. */

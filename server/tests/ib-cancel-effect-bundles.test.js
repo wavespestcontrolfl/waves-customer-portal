@@ -335,6 +335,18 @@ describe('the request marks its bundle complete', () => {
     expect(row.status).toBe('complete');
   });
 
+  test('the start heartbeat also notes a takeover, so a later failed write cannot hide it', async () => {
+    const taken = seedBundle({ status: 'recovered', lease_owner: null, lease_until: null, finished_at: new Date(mockNow.getTime() - MIN) });
+    const req = { ibCancelBundleId: taken.id };
+    await svc.liveStart(req);
+    expect(req.ibCancelBundleLost).toBe(true);
+    mockStore.bundles = [];
+    const mine = seedBundle({ lease_owner: 'request', lease_until: new Date(mockNow.getTime() + MIN) });
+    const ok = { ibCancelBundleId: mine.id };
+    await svc.liveStart(ok);
+    expect(ok.ibCancelBundleLost).toBeUndefined();
+  });
+
   test('a request that finds the sweep owns the bundle flags it, so its receipt cannot overwrite the sweep; the normal path sets no flag', async () => {
     const lost = seedBundle({ lease_owner: 'sweep-token', lease_until: new Date(mockNow.getTime() + 5 * MIN) });
     const lostReq = { ibCancelBundleId: lost.id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } };
