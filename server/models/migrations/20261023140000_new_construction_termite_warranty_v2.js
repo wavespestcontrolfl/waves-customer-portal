@@ -57,8 +57,7 @@ exports.down = async function down(knex) {
   const v1 = await knex('document_template_versions').where({ template_id: template.id, version_number: 1 }).first();
   const v2 = await knex('document_template_versions').where({ template_id: template.id, version_number: 2 }).first();
   if (!v2) return;
-  // Only while v2 is still active: a version published after it stays.
-  await knex('document_templates').where({ id: template.id, active_version_id: v2.id }).update({ active_version_id: v1 ? v1.id : null });
+  await knex('document_templates').where({ id: template.id }).update({ active_version_id: v1 ? v1.id : null });
   const issued = await knex('customer_contracts').where({ document_template_id: template.id }).first();
   if (!issued) await knex('document_template_versions').where({ id: v2.id }).del();
 };
