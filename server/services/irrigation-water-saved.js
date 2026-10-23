@@ -111,7 +111,10 @@ function waterSavedSentence(block, plan) {
   if (plan.action === 'hold' && Array.isArray(plan.reasons) && plan.reasons.includes('restriction_prohibits')) return null;
   const perRun = fmtGallons(block.gallonsPerRun);
   // Only a hold skips the whole week; a run or conditional plan may still run, so it gets the per-run figure alone.
-  const weekClause = plan.action === 'hold' && block.runsPerWeek >= 2
+  // A cool-season cadence hold is itself conditional (a customer who did not run last week runs one cycle this week),
+  // so it gets the per-run figure alone too (codex #6498 r5 P2).
+  const cadenceHold = Array.isArray(plan.reasons) && plan.reasons.includes('cool_season_cadence');
+  const weekClause = plan.action === 'hold' && !cadenceHold && block.runsPerWeek >= 2
     ? `, so skipping ${block.runsPerWeek === 2 ? 'both' : `all ${block.runsPerWeek}`} of this week's runs saves about ${fmtGallons(block.gallonsPerWeek)} gallons`
     : '';
   if (block.basis === 'schedule') {

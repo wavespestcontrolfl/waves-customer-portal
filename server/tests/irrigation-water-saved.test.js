@@ -98,6 +98,12 @@ describe('the sentence — where it prints and where it stays silent', () => {
     expect(waterSavedSentence({ ...SCHEDULE, runsPerWeek: 1 }, hold)).toBe("Each run you skip is about 1,550 gallons on your lawn, from the sprinkler schedule in your portal and your lawn's size on file.");
   });
 
+  test('a cool-season cadence hold is conditional (run one cycle if you did not last week): per-run figure only (codex #6498 r5)', () => {
+    const cadence = { ...hold, reasons: [...(hold.reasons || []), 'cool_season_cadence'] };
+    expect(waterSavedSentence(SCHEDULE, cadence)).toBe("Each run you skip is about 1,550 gallons on your lawn, from the sprinkler schedule in your portal and your lawn's size on file.");
+    expect(waterSavedSentence(DEFAULT, cadence)).not.toMatch(/this week's runs/);
+  });
+
   test('run and conditional plans get the per-run figure only (the week may still run)', () => {
     expect(run.action).toBe('run');
     expect(waterSavedSentence(DEFAULT, run)).toBe("Each 20-minute run you skip is about 1,550 gallons on your lawn. That assumes a typical half-inch run over your lawn's size on file; enter your zone minutes and watering days under Irrigation in your portal and we'll use those instead.");
