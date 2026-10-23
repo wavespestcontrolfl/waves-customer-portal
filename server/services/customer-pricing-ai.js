@@ -846,6 +846,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // 'estimated', which correctly keeps the stories_estimated review marker
   // for estimates that guessed).
   let storiesFromSeed = false;
+  let homeSqFtFromSeed = false;
   if (propertySeed) {
     // A field the lookup REJECTED is not a gap the seed may fill (codex
     // #3367 PR r14) — the lookup said to verify that measurement (or the
@@ -854,7 +855,10 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     // an exact figure with the caveat stripped off. Left unfilled, the
     // pricer's own missing-property handling applies and the offer demotes.
     const seedMayFill = (field) => !lookupRejectedFields.has(field);
-    if (seedMayFill('homeSqFt') && !homeSqFt && propertySeed.homeSqFt > 0) homeSqFt = propertySeed.homeSqFt;
+    if (seedMayFill('homeSqFt') && !homeSqFt && propertySeed.homeSqFt > 0) {
+      homeSqFt = propertySeed.homeSqFt;
+      homeSqFtFromSeed = true;
+    }
     if (seedMayFill('lotSqFt') && !lotSqFt && propertySeed.lotSqFt > 0) lotSqFt = propertySeed.lotSqFt;
     if (seedMayFill('lawnSqFt') && !lawnKnownZero && !(lawnSqFt > 0) && propertySeed.lawnSqFt > 0) {
       lawnSqFt = propertySeed.lawnSqFt;
@@ -938,6 +942,21 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     features,
     bedArea: bedArea || undefined,
     bedAreaSource: bedArea ? bedAreaSource : undefined,
+    // A seeded homeSqFt is only as trusted for the Tree & Shrub open-parcel
+    // basis as the source estimate stamped it (Codex #6398 security r19): a
+    // public quote stamps false (body-controlled), and an unstamped seed has
+    // unknown provenance, so both mark the footprint untrusted and the
+    // pricer parks a lot-inferred T&S line instead of publishing a bed shrunk
+    // by an inflated home size. Only an explicitly trusted stamp (and the
+    // server-measured footprint it came with) passes through. A homeSqFt
+    // from the stored profile or the lookup is the resolver's own: no verdict.
+    ...(homeSqFtFromSeed
+      ? {
+        treeShrubFootprintTrusted: propertySeed.treeShrubFootprintTrusted === true,
+        ...(propertySeed.treeShrubFootprintTrusted === true && propertySeed.treeShrubFootprintSqFt > 0
+          ? { treeShrubFootprintSqFt: propertySeed.treeShrubFootprintSqFt } : {}),
+      }
+      : {}),
     yearBuilt,
     constructionMaterial,
     foundationType,

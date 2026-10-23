@@ -411,6 +411,12 @@ describe('buildReportCrossSell', () => {
     const street = require('../services/estimate-property-linkage')
       .normalizedEstimateStreet('123 Gulf Dr, Sarasota, FL 34236');
 
+    // The T&S footprint-trust stamp rides with the dimensions (Codex #6398
+    // security r19): false and true round-trip, an unstamped estimate is null.
+    expect((await loadEstimateSeed(seedDb({ treeShrubFootprintTrusted: false }), 'cust-1', street)).treeShrubFootprintTrusted).toBe(false);
+    expect(await loadEstimateSeed(seedDb({ treeShrubFootprintTrusted: true, treeShrubFootprintSqFt: 1900 }), 'cust-1', street)).toMatchObject({ treeShrubFootprintTrusted: true, treeShrubFootprintSqFt: 1900 });
+    expect(await loadEstimateSeed(seedDb({}), 'cust-1', street)).toMatchObject({ treeShrubFootprintTrusted: null, treeShrubFootprintSqFt: null });
+
     const withGarage = await loadEstimateSeed(seedDb({ attachedGarage: true }), 'cust-1', street);
     expect(withGarage.features.attachedGarage).toBe(true);
 

@@ -613,6 +613,33 @@ describe('customer pricing AI helpers', () => {
     }
   });
 
+  test('a seeded homeSqFt is trusted for the T&S open-parcel basis only as far as the source estimate stamped it (Codex #6398 security r19)', async () => {
+    // Lookup miss, no stored dimensions: the seed fills homeSqFt and lotSqFt.
+    // A public-quote seed (stamped false) and an unstamped seed both park the
+    // lot-inferred T&S line; a trusted stamp prices it, and the seeded
+    // server-measured footprint (not the body homeSqFt) drives the bed.
+    const run = (seed) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => null,
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-seed-trust', property_sqft: null, lot_sqft: null }),
+      propertySeed: { lotSqFt: 30000, stories: 1, storiesSource: 'lookup', ...seed },
+    });
+    const review = (r) => r.options?.[0]?.manualReview;
+    const stampedFalse = await run({ homeSqFt: 12000, treeShrubFootprintTrusted: false });
+    const unstamped = await run({ homeSqFt: 12000 });
+    const trusted = await run({ homeSqFt: 12000, treeShrubFootprintTrusted: true, treeShrubFootprintSqFt: 2000 });
+    const honest = await run({ homeSqFt: 2000, treeShrubFootprintTrusted: true, treeShrubFootprintSqFt: 2000 });
+    expect(review(stampedFalse)).toBe(true);
+    expect(review(unstamped)).toBe(true);
+    expect(review(trusted)).toBe(false);
+    expect(review(honest)).toBe(false);
+    // The trusted footprint, not the inflated body size, is the basis: the
+    // inflated-but-trusted quote prices the same bed as the honest one.
+    expect(trusted.options?.[0]?.perVisit).toBe(honest.options?.[0]?.perVisit);
+    expect(trusted.options?.[0]?.perVisit).toBeGreaterThan(0);
+  });
+
   test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
     // The vision schema permits 'POSSIBLE' for pool and poolCage, and the
     // adoption rule maps only 'YES' to true. So an observed-but-undecided

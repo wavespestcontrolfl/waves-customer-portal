@@ -429,6 +429,14 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     bedAreaSource: cleanString(inputs.bedAreaSource),
     stories: positiveOrNull(inputs.stories),
     storiesSource: cleanString(inputs.storiesSource),
+    // The Tree & Shrub open-parcel basis trusts a seeded footprint only as
+    // far as the source estimate did (Codex #6398 security r19): a public
+    // quote stamps treeShrubFootprintTrusted false on its body-controlled
+    // homeSqFt, so copying the dimension without the stamp handed the
+    // customer-pricing engine a footprint with no provenance. true / false
+    // ride through; an unstamped estimate carries null (unknown).
+    treeShrubFootprintTrusted: typeof inputs.treeShrubFootprintTrusted === 'boolean' ? inputs.treeShrubFootprintTrusted : null,
+    treeShrubFootprintSqFt: positiveOrNull(inputs.treeShrubFootprintSqFt),
     // Non-dimensional pricing evidence rides with the dimensions (codex
     // #3367 PR r1): a pool-cage home whose accepted estimate carried the
     // modifiers must not price as a bare property on a lookup cache miss.
