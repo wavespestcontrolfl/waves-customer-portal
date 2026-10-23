@@ -606,6 +606,9 @@ function guidedProductIds(loaded, sheet, takeAllMapped = false) {
     // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons. The large patch Artavia row the
     // pick passed over (Group 11 stacking on a take-all lawn) is held the same way.
     takeAllProductIds: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId),
+    // The large patch Artavia rows passed over for Group 11 stacking: the sheet treats them as blocked from the start (no list, no search),
+    // until a fresh guide answer replaces this decision with its own blocked list.
+    group11HeldProductIds: guide.group11HeldAddOns(candidates, rows, { takeAllMapped }).map((candidate) => candidate.item.productId),
   };
 }
 

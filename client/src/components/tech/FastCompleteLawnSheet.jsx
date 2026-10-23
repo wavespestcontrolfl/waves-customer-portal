@@ -236,7 +236,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, methodCorrection: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null, newSod: null,
+  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, methodCorrection: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], group11HeldProductIds: [], troubleAreas: null, newSod: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -295,7 +295,7 @@ const SOD_RECORD_STALE_CODES = ['sod_record_changed', 'sod_not_this_home'];
 const SOD_UNSURE_MESSAGE = 'The sheet could not confirm the save. Tap the box again.';
 const SOD_REOPEN_MESSAGE = 'Saved. The sheet could not reload the holds. Close this visit and open it again.';
 // The parts of the context that come from the visit's plan: the re-read after the rooted tick replaces them together.
-const PLAN_CONTEXT_FIELDS = ['planned', 'addOns', 'addOnsMonth', 'plannedUnavailable', 'weedMix', 'chinch', 'guidedProductIds', 'takeAllProductIds', 'troubleAreas', 'mixHelp'];
+const PLAN_CONTEXT_FIELDS = ['planned', 'addOns', 'addOnsMonth', 'plannedUnavailable', 'weedMix', 'chinch', 'guidedProductIds', 'takeAllProductIds', 'group11HeldProductIds', 'troubleAreas', 'mixHelp'];
 // A context re-read the sheet can rebuild from: the visit still takes this sheet, the plan was read, the sod record was checked.
 const sodRereadUsable = (next) => !!next && !next.loadError && !next.handoff && !next.blockedReason && !next.plannedUnavailable && !next.newSod?.unavailable;
 const SOD_REREAD_MESSAGE = 'Saved. The sheet could not reload the holds. Tap the box again.';
@@ -353,6 +353,8 @@ const optionalContextFields = (data) => ({
   // GATE_LAWN_TROUBLE_AREAS: the closed list of places, the known trouble areas and what a limit closes where; null otherwise.
   troubleAreas: troubleAreasOf(data),
   takeAllProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.takeAllProductIds) ? data.plannedProducts.takeAllProductIds : [],
+  // Group 11 stacking: the large patch Artavia rows passed over for a take-all lawn. Blocked from the start, whatever the guide read does.
+  group11HeldProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.group11HeldProductIds) ? data.plannedProducts.group11HeldProductIds : [],
   // GATE_LAWN_NEW_SOD_NOTE: the banner, the held lines and the rooted tick; null while the gate is off or the home has no hold today.
   newSod: newSodOf(data),
 });
@@ -623,7 +625,8 @@ function guideGovernance({ ctx, guide, status, checks }) {
   const chinchItem = lowerIds([chinch?.item?.productId, ...Object.values(chinch?.byPlace || {}).map((decision) => decision.item?.productId)]);
   const weedOffered = lowerIds([weedMix, ...Object.values(weedMix?.byPlace || {})]
     .filter((decision) => decision && ['lead', 'replacement'].includes(decision.mode)).flatMap((decision) => decision.productIds || []));
-  const blocked = lowerIds(answered ? guide.blockedProductIds : []);
+  // Before the guide answers, and when its read failed, the context's Group 11 rows stand as blocked; a fresh answer carries its own blocked list.
+  const blocked = lowerIds(answered ? guide.blockedProductIds : ctx.group11HeldProductIds);
   const cardIds = lowerIds(cards.flatMap((card) => [...cardAllIds(card), ...card.items.map((item) => item.productId)]));
   const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => cardAllIds(card)));
   const weedGroup = lowerIds(weedMix?.groupProductIds);

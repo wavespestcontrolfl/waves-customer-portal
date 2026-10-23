@@ -233,8 +233,9 @@ describe('treatment guide: a failed take-all lookup is read as mapped, never as 
     jest.spyOn(require('../services/waveguard-plan-engine'), 'v13ProtocolRows').mockReturnValue(rows);
     const loaded = { eligible: true, plan: { protocol: { structured: {} } }, addOns: [{ product: { id: 'vel', name: N.VEL } }, { product: { id: 'art', name: N.ART } }] };
     const sheet = { addOns: [{ productId: 'vel', name: N.VEL }, { productId: 'art', name: N.ART }] };
-    expect(guidedProductIds(loaded, sheet, false)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: [] });
-    expect(guidedProductIds(loaded, sheet, true)).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'] });
+    expect(guidedProductIds(loaded, sheet, false)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: [], group11HeldProductIds: [] });
+    // The held row is also named on its own, so the sheet blocks it from the start (no list, no search) whatever the guide read does.
+    expect(guidedProductIds(loaded, sheet, true)).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'], group11HeldProductIds: ['art'] });
   });
 
   test('the active-area read throws (or the property cannot be resolved): the lawn counts as mapped, so the guide suggests Velista and never Artavia', async () => {
