@@ -531,14 +531,13 @@ const withVisitFacts = (result, info) => ({
   ...(info.day ? { date: info.day } : {}),
 });
 
+// Saves the receipt on the pending action. A failed save THROWS (recordResult reports a database failure as false, and the
+// caller then leaves the row retryable instead of marking it finished with no receipt). A save that finds the receipt already
+// there (onlyIfEmpty) is a success: the request's own receipt wins.
 async function recordOnPendingAction(bundle, result) {
   if (!bundle.pending_action_id) return;
-  try {
-    // onlyIfEmpty: a request that is alive after all records its own receipt over this one.
-    await require('./intelligence-bar/pending-actions').recordResult(bundle.pending_action_id, result, { onlyIfEmpty: true });
-  } catch (err) {
-    logger.warn(`[ib-cancel-bundle] could not record the receipt on pending action: ${scrub(err && err.message)}`);
-  }
+  const saved = await require('./intelligence-bar/pending-actions').recordResult(bundle.pending_action_id, result, { onlyIfEmpty: true });
+  if (saved === false) throw new Error('the receipt could not be saved on the pending action');
 }
 
 // The office alert (docs/admin-notifications.md): a headline that names the customer, a one-sentence why, the full
@@ -558,13 +557,16 @@ function alertSpec(bundle, info, { review, action, why }) {
 }
 
 async function tellOffice(bundle, info, { review, action, why, lines }) {
-  await require('./admin-alert-compose').raiseAdminAlert('alert', alertSpec(bundle, info, { review, action, why }), {
+  // notifyAdmin reports a failed save as null (it never throws); a deliberate suppression is an object, not a failure. A failed
+  // alert THROWS, so the row stays retryable (the dedupe key keeps a retry from doubling a row that did land).
+  const raised = await require('./admin-alert-compose').raiseAdminAlert('alert', alertSpec(bundle, info, { review, action, why }), {
     dedupeKey: `ib-cancel-bundle:${bundle.id}`,
     detail: [`Visit: ${[info.name, info.service, info.day].filter(Boolean).join(', ') || 'a cancelled visit'}.`, ...lines].join('\n'),
     bell: review,
     fyiRow: true,
     metadata: { bundleId: bundle.id, scheduledServiceId: bundle.scheduled_service_id, source: 'ib-cancel-recovery' },
   });
+  if (!raised) throw new Error('the office alert could not be saved');
 }
 
 // ── Sweep steps ───────────────────────────────────────────────────────────────────────────────────────────────

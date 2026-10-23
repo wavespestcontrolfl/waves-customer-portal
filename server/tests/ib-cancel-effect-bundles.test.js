@@ -185,7 +185,7 @@ jest.mock('../services/admin-alert-compose', () => {
   const actual = jest.requireActual('../services/admin-alert-compose');
   return {
     ...actual,
-    raiseAdminAlert: jest.fn(async (category, spec, opts) => { actual.composeAdminAlert(spec); mockRaised.push({ category, spec, opts }); }),
+    raiseAdminAlert: jest.fn(async (category, spec, opts) => { actual.composeAdminAlert(spec); mockRaised.push({ category, spec, opts }); return { id: 'notif-1' }; }),
   };
 });
 
@@ -871,6 +871,62 @@ describe('a complete bundle whose receipt was never saved', () => {
     await svc.sweepIbCancelBundles();
     expect(nested.receipts).toBe(0);
     expect(mockRaised).toHaveLength(1);
+  });
+});
+
+describe('a receipt or alert that did not save keeps the row retryable', () => {
+  const composer = () => require('../services/admin-alert-compose');
+  const FT = { money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'paid_since_card' }], linked_skipped: [] };
+  const cases = {
+    recovered: { seed: () => seedBundle(), open: { status: 'pending' }, done: { status: 'recovered' } },
+    abandoned: {
+      seed: () => { mockStore.visits[0].status = 'confirmed'; return seedBundle(); },
+      open: { status: 'pending' }, done: { status: 'abandoned' },
+    },
+    expired: { seed: () => seedBundle({ attempts: svc.MAX_ATTEMPTS, lease_owner: null, lease_until: null }), open: { status: 'pending' }, done: { status: 'expired' } },
+    receipt: {
+      seed: () => {
+        mockStore.actions.push({ id: ACTION, result: null });
+        return seedBundle({
+          status: 'complete', finish_note: 'request', lease_owner: null, lease_until: null, finished_at: new Date(mockNow.getTime() - 15 * MIN),
+          followthrough_done_at: new Date(mockNow.getTime() - 15 * MIN), followthrough_outcome: FT, notice_outcome: { state: 'sent', by: 'request' },
+        });
+      },
+      open: { status: 'complete', finish_note: 'request' }, done: { status: 'complete', finish_note: 'request+receipt' },
+    },
+  };
+
+  for (const [name, c] of Object.entries(cases)) {
+    test(`${name}: a receipt save that reports failure (false) is not marked finished and is saved on the next pass`, async () => {
+      const row = c.seed();
+      mockRecordResult.mockResolvedValueOnce(false);
+      const first = await svc.sweepIbCancelBundles();
+      expect(first.failed).toBe(1);
+      expect(row).toMatchObject({ ...c.open, lease_owner: null });
+      expect(mockRaised).toEqual([]);
+      const second = await svc.sweepIbCancelBundles();
+      expect(second.failed).toBe(0);
+      expect(row).toMatchObject(c.done);
+      expect(mockRaised).toHaveLength(1);
+    });
+
+    test(`${name}: an office alert that was not saved (null) is not marked finished and is raised on the next pass`, async () => {
+      const row = c.seed();
+      composer().raiseAdminAlert.mockResolvedValueOnce(null);
+      const first = await svc.sweepIbCancelBundles();
+      expect(first.failed).toBe(1);
+      expect(row).toMatchObject({ ...c.open, lease_owner: null });
+      const second = await svc.sweepIbCancelBundles();
+      expect(second.failed).toBe(0);
+      expect(row).toMatchObject(c.done);
+    });
+  }
+
+  test('a deliberately suppressed alert (an object, not null) is a success', async () => {
+    const row = seedBundle();
+    composer().raiseAdminAlert.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'preference_disabled' });
+    expect((await svc.sweepIbCancelBundles()).failed).toBe(0);
+    expect(row.status).toBe('recovered');
   });
 });
 
