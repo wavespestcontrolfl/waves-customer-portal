@@ -61,6 +61,14 @@ function pageUrl(offset) {
   return url.toString();
 }
 
+// A raw ArcGIS coordinate as a number, or NaN. null, '' and booleans would coerce to 0 and pass as a real point, so only a number or a
+// non-blank numeric string counts.
+function rawCoordinate(value) {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim() !== '') return Number(value);
+  return NaN;
+}
+
 // One ArcGIS answer to points. A feature with no usable geometry, or one that is retired or not in service, is dropped; the server reports its own error as a 200 body.
 function parsePage(body) {
   if (!body || typeof body !== 'object') throw Object.assign(new Error('county layer answered with no body'), { code: 'bad_body' });
@@ -72,10 +80,10 @@ function parsePage(body) {
   const points = [];
   for (const feature of features) {
     const objectid = Number(feature?.attributes?.OBJECTID);
-    const lng = Number(feature?.geometry?.x);
-    const lat = Number(feature?.geometry?.y);
+    const lng = rawCoordinate(feature?.geometry?.x);
+    const lat = rawCoordinate(feature?.geometry?.y);
     if (!Number.isInteger(objectid) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) continue;
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) continue;
     if (!isInService(feature.attributes)) continue;
     points.push({ objectid, lat, lng });
   }

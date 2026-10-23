@@ -59,6 +59,12 @@ describe('the paging parser', () => {
     expect(() => meters.parsePage(null)).toThrow();
   });
 
+  test('null, blank and boolean coordinates and the (0, 0) point are dropped, never read as 0', () => {
+    const page = meters.parsePage({ features: [feature(1, null, null), feature(2, '', ' '), feature(3, false, true), feature(4, 0, 0), feature(5, '-82.4', '27.5')] });
+    expect(page.points).toEqual([{ objectid: 5, lat: 27.5, lng: -82.4 }]);
+    expect(page.received).toBe(5);
+  });
+
   test('pages by the offset of what it received until the county stops saying there is more; repeated ids count once', async () => {
     const pages = [
       body([feature(1, -82.4, 27.5), feature(2, -82.4001, 27.5)], true),
