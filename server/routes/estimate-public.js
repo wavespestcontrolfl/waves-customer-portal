@@ -156,7 +156,9 @@ const {
 const featureGates = require('../config/feature-gates');
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
-const { lawnLimitsBlock, lawnLimitsForEstimate } = require('../services/estimate-lawn-limits');
+const {
+  lawnLimitsBlock, lawnLimitsForEstimate, lawnLimitsToStampAtAccept, stampLawnLimitsAtAccept,
+} = require('../services/estimate-lawn-limits');
 
 function lawnCalendarBlock(services) {
   if (!featureGates.isEnabled('estimateLawnCalendar')) return {};
@@ -11999,6 +12001,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         ...estimate, estimate_data: acceptedEstDataForPricing || estimate.estimate_data },
         serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
         selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences }) : null;
+    // GATE_ESTIMATE_LAWN_LIMITS: the "What we can and can't fix" block as it reads at acceptance, frozen
+    // onto the estimate in the accept transaction below (null = nothing to freeze). Read before the
+    // transaction opens. Terminal rows print only this stored block (estimate-lawn-limits.js).
+    const lawnLimitsAtAccept = await lawnLimitsToStampAtAccept(estimate);
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -12849,6 +12855,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ),
         });
       }
+      await stampLawnLimitsAtAccept(trx, estimate.id, lawnLimitsAtAccept);
       if (recordAcceptanceTerms) {
         const [acceptanceRow] = await trx('estimate_acceptances').insert({
           estimate_id: estimate.id,

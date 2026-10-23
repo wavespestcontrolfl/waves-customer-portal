@@ -8,6 +8,7 @@ const AcceptSnapshot = require('./estimate-accept-snapshot');
 const { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon } = require('./lead-estimate-link');
 const { normalizeProposal } = require('./estimate-proposal');
 const proposalWin = require('./proposal-win');
+const lawnLimits = require('./estimate-lawn-limits');
 const {
   estimateDataHasUnresolvedManagerApproval,
   commercialRiskTypeReviewNeeded,
@@ -1231,6 +1232,7 @@ async function acceptInTransaction(trx, ctx) {
   const claimed = await claimEstimateRow(trx, ctx, estimate);
   if (claimed.outcome) return finishAccept(ctx, claimed.outcome);
   const { updatedEstimate } = claimed;
+  await lawnLimits.stampLawnLimitsAtAccept(trx, ctx.estimateId, ctx.lawnLimitsAtAccept);
   // Race guard: re-derive proposal mode from the CLAIMED row; a toggle that
   // committed between the read and the guarded UPDATE would mis-route the
   // conversion.
@@ -1354,6 +1356,10 @@ async function markEstimateManuallyAccepted({
     effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
     convertLog: [],
   };
+
+  // GATE_ESTIMATE_LAWN_LIMITS: the block as it reads now, frozen onto the estimate in the accept
+  // transaction (null with the gate off or a non-lawn estimate: nothing is read or written).
+  ctx.lawnLimitsAtAccept = await lawnLimits.lawnLimitsToStampForId(estimateId, database);
 
   const claim = await runAcceptTransaction(database, ctx);
   if (ctx.dryRun) return { dryRun: true, alreadyAccepted: claim.alreadyAccepted, billingTerm: normalizedBillingTerm, effects: claim.effects };

@@ -133,15 +133,76 @@ async function loadLawnLimitFlags(customerId, propertyId = null, knex = db) {
   }
 }
 
-// The block for one estimate row, or null: gate off, not a recurring lawn estimate, or a lawn
-// recorded as a grass other than St. Augustine. Every surface (the /data payload and every
-// PDF path) calls this. The estimate's own property decides which property's profile counts.
-async function lawnLimitsForEstimate(estimate, { knex = db } = {}) {
+// The key the block is frozen under in estimate_data when the estimate is accepted.
+const SNAPSHOT_KEY = 'lawnLimitsAtAccept';
+
+// A terminal estimate shows what the customer accepted (or nothing), never the live profile:
+// accepted or declined or expired, price locked, past its expiry, or archived. Mirrors the
+// accept-active rule of the estimate page (isEstimateAcceptActive) without importing it.
+function lawnLimitsFrozen(estimate, now = new Date()) {
+  if (!estimate) return false;
+  if (['accepted', 'declined', 'expired'].includes(String(estimate.status || '').trim().toLowerCase())) return true;
+  if (estimate.price_locked_at || estimate.archived_at) return true;
+  return !!estimate.expires_at && new Date(estimate.expires_at) < now;
+}
+
+// The block stored at accept, validated to the shape the surfaces print, or null (accepted before
+// this shipped, the gate was off at accept, or not a lawn estimate: no block, never a live read).
+function storedLawnLimits(estimate) {
+  let data = estimate?.estimate_data;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return null; }
+  }
+  const stored = data && typeof data === 'object' ? data[SNAPSHOT_KEY] : null;
+  if (!stored || typeof stored.heading !== 'string' || !stored.heading || !Array.isArray(stored.paragraphs)) return null;
+  const paragraphs = stored.paragraphs
+    .filter((p) => p && typeof p.key === 'string' && typeof p.text === 'string' && p.text)
+    .map((p) => ({ key: p.key, text: p.text }));
+  return paragraphs.length ? { heading: stored.heading, paragraphs } : null;
+}
+
+// The block as the profile says it NOW: gate on, a recurring lawn estimate, a lawn that is not
+// recorded as another grass. The estimate's own property decides which property's profile counts.
+async function liveLawnLimitsForEstimate(estimate, { knex = db } = {}) {
   if (featureGates.estimateLawnLimitsLive?.() !== true) return null;
   if (!estimate || !estimateHasRecurringLawn(estimate)) return null;
   const flags = await loadLawnLimitFlags(estimate.customer_id, estimate.property_id, knex);
   if (NOT_ST_AUGUSTINE.has(flags.grassKey)) return null;
   return buildLawnLimits(flags);
+}
+
+// The block one estimate row shows, or null. Every surface (the /data payload and every PDF path)
+// calls this. Gate off: nothing. An OPEN estimate follows the live profile; an accepted, declined,
+// expired or otherwise terminal one prints only the block stored when it was accepted, so a later
+// edit to the turf profile never changes an accepted document.
+async function lawnLimitsForEstimate(estimate, opts = {}) {
+  if (featureGates.estimateLawnLimitsLive?.() !== true) return null;
+  if (lawnLimitsFrozen(estimate)) return storedLawnLimits(estimate);
+  return liveLawnLimitsForEstimate(estimate, opts);
+}
+
+// What an accept stores: the live block at the moment of acceptance (null = nothing to store).
+// Read BEFORE the accept transaction opens (the reads must not run inside it).
+async function lawnLimitsToStampAtAccept(estimate, opts = {}) {
+  return liveLawnLimitsForEstimate(estimate, opts);
+}
+
+// Same for a caller that has only the estimate id (the manual accept).
+async function lawnLimitsToStampForId(estimateId, knex = db) {
+  if (featureGates.estimateLawnLimitsLive?.() !== true) return null;
+  const estimate = await knex('estimates').where({ id: estimateId }).first();
+  return liveLawnLimitsForEstimate(estimate, { knex });
+}
+
+// Inside the accept transaction: write the block onto the estimate being accepted. No block, no write.
+async function stampLawnLimitsAtAccept(trx, estimateId, block) {
+  if (!block) return;
+  await trx('estimates').where({ id: estimateId }).update({
+    estimate_data: trx.raw(
+      `jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{${SNAPSHOT_KEY}}', ?::jsonb)`,
+      [JSON.stringify(block)],
+    ),
+  });
 }
 
 // The /data payload fragment: `{ lawnLimits }` or nothing, so a gate-off or
@@ -164,6 +225,13 @@ module.exports = {
   loadLawnLimitFlags,
   profileAppliesToProperty,
   NOT_ST_AUGUSTINE,
+  SNAPSHOT_KEY,
+  lawnLimitsFrozen,
+  storedLawnLimits,
+  liveLawnLimitsForEstimate,
   lawnLimitsForEstimate,
+  lawnLimitsToStampAtAccept,
+  lawnLimitsToStampForId,
+  stampLawnLimitsAtAccept,
   lawnLimitsBlock,
 };

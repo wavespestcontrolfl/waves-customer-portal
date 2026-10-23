@@ -152,4 +152,29 @@ describe('estimate-pdf lawn limits (pdfkit fallback)', () => {
     expect(text).not.toContain(PHRASE.carpetgrass);
     expect(text).not.toContain(PHRASE.virus);
   });
+
+  test('an accepted estimate prints its stored block, not the live profile', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    // The profile now flags carpetgrass and virus; the block stored at accept had dallisgrass only.
+    profileRow({ other_grasses: ['carpetgrass'], virus_streaks_suspected: true });
+    const stored = limits.buildLawnLimits({ otherGrasses: ['dallisgrass'] });
+    const accepted = {
+      ...lawnEstimate(), status: 'accepted', price_locked_at: '2026-10-22T00:00:00Z',
+      estimate_data: { ...lawnEstimate().estimate_data, lawnLimitsAtAccept: stored },
+    };
+    const text = await render(accepted);
+    expect(text).toContain(PHRASE.fixed);
+    expect(text).toContain('We saw dallisgrass in your lawn');
+    expect(text).not.toContain(PHRASE.carpetgrass);
+    expect(text).not.toContain(PHRASE.virus);
+  });
+
+  test('an accepted estimate with nothing stored prints no block', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    profileRow({ other_grasses: ['carpetgrass'], virus_streaks_suspected: true });
+    const text = await render({ ...lawnEstimate(), status: 'accepted', price_locked_at: '2026-10-22T00:00:00Z' });
+    expect(text).not.toContain(PHRASE.always);
+    expect(text).not.toContain(PHRASE.carpetgrass);
+    expect(db).not.toHaveBeenCalled();
+  });
 });

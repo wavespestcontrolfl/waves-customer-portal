@@ -5401,6 +5401,9 @@ name (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) or
 ABSENT with the gate off and on any non-lawn estimate. The React page and the
 browser-rendered PDF print it as given; the legacy server page and the pdfkit
 PDF print the same module's text.
+An accepted, declined, expired or otherwise terminal estimate carries only the
+block stored in `estimate_data.lawnLimitsAtAccept` when it was accepted (absent
+if none was stored), never the live profile.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that

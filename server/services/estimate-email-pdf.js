@@ -73,6 +73,8 @@ const BOOKKEEPING_KEYS = new Set([
   'leadServiceHandoffAttempt', 'leadServiceHandoffAt', 'leadServiceRevertPending', 'reportCtaMint',
   'retiredBySentEstimate', 'automation', 'assessment_exception', 'scheduled_service_id',
   'addressUnverifiedClearedBy', 'addressUnverifiedFlag',
+  // The lawn limits block frozen at accept (estimate-lawn-limits.js): written once, with the accept.
+  'lawnLimitsAtAccept',
 ]);
 
 function parseData(row) {

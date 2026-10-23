@@ -178,6 +178,41 @@ describe('GET /:token/data — lawn limits (GATE_ESTIMATE_LAWN_LIMITS)', () => {
   });
 });
 
+describe('GET /:token/data — a terminal estimate prints only its stored block', () => {
+  const STORED = buildLawnLimits({ otherGrasses: ['bahiagrass'] });
+  const accepted = (stored) => {
+    const row = estimateRow({ services: ['lawn_care'], overrides: { status: 'accepted', accepted_at: new Date().toISOString(), price_locked_at: new Date().toISOString() } });
+    if (stored) row.estimate_data = { ...row.estimate_data, lawnLimitsAtAccept: stored };
+    return row;
+  };
+  beforeEach(() => { process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true'; });
+
+  test('accepted with a stored block: the stored block, whatever the profile says now', async () => {
+    dbRows = { estimates: accepted(STORED), customer_turf_profiles: PROFILE, customer_properties: PROPERTIES, customers: { lawn_type: null } };
+    await withServer(async (baseUrl) => {
+      const body = await getData(baseUrl);
+      expect(body.estimate).toBeDefined();
+      expect(body.lawnLimits).toEqual(STORED);
+    });
+  });
+
+  test('accepted before this shipped (nothing stored): no block, even though the live profile has flags', async () => {
+    dbRows = { estimates: accepted(null), customer_turf_profiles: PROFILE, customer_properties: PROPERTIES, customers: { lawn_type: null } };
+    await withServer(async (baseUrl) => {
+      const body = await getData(baseUrl);
+      expect(body.estimate).toBeDefined();
+      expect(body).not.toHaveProperty('lawnLimits');
+    });
+  });
+
+  test('an open estimate still follows the live flags', async () => {
+    dbRows = { estimates: estimateRow({ services: ['lawn_care'] }), customer_turf_profiles: PROFILE, customer_properties: PROPERTIES, customers: { lawn_type: null } };
+    await withServer(async (baseUrl) => {
+      expect((await getData(baseUrl)).lawnLimits.paragraphs.map((p) => p.key)).toEqual(['always', 'carpetgrass', 'dallisgrass', 'virus_streaks']);
+    });
+  });
+});
+
 describe('legacy server-rendered page — lawn limits', () => {
   const { renderPage } = estimatePublicRouter;
   const estimate = () => ({ id: 'est-ssr-1', status: 'sent', customerName: 'Pat Tester', address: '123 Trust Ln, Bradenton, FL 34203', monthlyTotal: 42.3, annualTotal: 507.6, onetimeTotal: 0, quoteRequired: false });
