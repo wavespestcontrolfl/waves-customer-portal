@@ -421,7 +421,7 @@ describe('approvedCancellationNoticeStatus', () => {
 // not promise that: PostgreSQL re-checks only the updated tuple after a lock wait).
 describe('handleCancellation with cancelGeneration (the cancel recovery sweep)', () => {
   const FENCE = { visitId: 'svc-1', restorations: 2, hits: [] };
-  const approvedNotice = [{ recipient_key: 'any', body: 'x' }];
+  const approvedNotice = [{ recipient_key: require('crypto').createHash('sha256').update('9415550101', 'utf8').digest('hex').slice(0, 16), body: 'Hi Synthia, your visit is cancelled.' }];
   const run = (outcome = {}) => AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: FENCE, outcome });
 
   test('the fence is proven inside a transaction, before the marker is claimed, and only the approved marker is claimed', async () => {
@@ -432,6 +432,45 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
     expect(require('../models/db').transaction).toHaveBeenCalled();
     expect(mockState.wheres).toContainEqual(['appointment_reminders', { id: 'rem-1', cancellation_notice_state: 'pending_approved' }]);
     expect(mockState.updates.find((u) => 'cancellation_notice_state' in u)).toMatchObject({ cancellation_notice_state: 'pending_approved' });
+  });
+
+  // handleCancellation's own "close the reminder" write (cancelled: true), run on an older snapshot after a concurrent
+  // restore, could re-close the LIVE visit's reminder and suppress its future reminders. For a fenced send it moves inside
+  // the share-locked transaction, after the proof.
+  test('the reminder close is not an unfenced write: it runs in the fenced transaction, after the proof, never before', async () => {
+    const order = [];
+    mockFence.mockImplementationOnce(async () => { order.push(['fence', mockState.updates.filter((u) => u.cancelled === true).length]); });
+    await run();
+    expect(order).toEqual([['fence', 0]]);
+    expect(mockState.updates.filter((u) => u.cancelled === true)).toHaveLength(1);
+  });
+
+  // One more proof right before the stamp that precedes the provider handoff (a point-in-time check: the handoff itself cannot
+  // be un-sent, and the claim's token already fails if a restore cleared the marker).
+  test('the pre-dispatch stamp re-proves the generation and aborts the handoff when the visit was restored', async () => {
+    mockSendCustomerMessage.mockClear();
+    await run();
+    const preDispatch = mockSendCustomerMessage.mock.calls[0][0].preDispatchCheck;
+    expect(typeof preDispatch).toBe('function');
+    mockFence.mockClear();
+    expect(await preDispatch()).toEqual({ ok: true });
+    expect(mockFence).toHaveBeenCalledWith(expect.anything(), FENCE);
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE' }));
+    expect(await preDispatch()).toMatchObject({ ok: false, code: 'appointment_restored' });
+  });
+
+  test('without cancelGeneration the pre-dispatch check never consults the fence', async () => {
+    mockSendCustomerMessage.mockClear();
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, outcome: {} });
+    mockFence.mockClear();
+    await mockSendCustomerMessage.mock.calls[0][0].preDispatchCheck();
+    expect(mockFence).not.toHaveBeenCalled();
+  });
+
+  test('a refused fence leaves the reminder open (no close at all)', async () => {
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE' }));
+    await run();
+    expect(mockState.updates.filter((u) => u.cancelled === true)).toEqual([]);
   });
 
   test('a refused fence claims and sends nothing, and says so', async () => {
@@ -451,8 +490,9 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
     expect(outcome.notificationSent).toBe(false);
   });
 
-  test('without cancelGeneration the fence is never consulted (the request and Dispatch are unchanged)', async () => {
+  test('without cancelGeneration the fence is never consulted and the close is the ordinary guarded write (the request and Dispatch are unchanged)', async () => {
     await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, outcome: {} });
     expect(mockFence).not.toHaveBeenCalled();
+    expect(mockState.updates.filter((u) => u.cancelled === true)).toHaveLength(1);
   });
 });

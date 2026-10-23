@@ -83,6 +83,7 @@ const mockFence = jest.fn(async () => {});
 jest.mock('../services/cancel-generation-fence', () => ({ assertCancelGeneration: (...a) => mockFence(...a) }));
 
 const InvoiceService = require('../services/invoice');
+const db = require('../models/db');
 
 const deposit = (amt) => JSON.stringify([{ category: 'service', amount: 125 }, { category: 'deposit_credit', amount: -amt, estimate_id: 'est-1' }]);
 const INV_A = { id: 'inv-a', invoice_number: 'WPC-TEST-1', status: 'sent', total: '50.00', credit_applied: '0.00', line_items: deposit(75), scheduled_service_id: 'svc-1' };
@@ -492,6 +493,11 @@ describe('cancelFence (the cancel recovery sweep)', () => {
     const voided = await sweep();
     expect([...voided]).toEqual(['inv-a', 'inv-b']);
     expect(mockFence).toHaveBeenCalledTimes(4);
+    // The first proof of each invoice runs on a manual transaction held across the Stripe triage and released after the
+    // candidate settles (a restore waits for it instead of landing mid-way); the second is inside the void transaction.
+    const holds = mockFence.mock.calls.filter(([conn]) => conn === db.__lockTrx);
+    expect(holds.length).toBeGreaterThanOrEqual(1);
+    expect(db.__lockTrx.rollback).toHaveBeenCalled();
     expect(mockFence).toHaveBeenCalledWith(expect.anything(), FENCE);
     expect(mockReverse).toHaveBeenCalledWith(expect.objectContaining({ pinnedReversalOfferIds: ['offer-1'], cancelFence: FENCE }));
   });

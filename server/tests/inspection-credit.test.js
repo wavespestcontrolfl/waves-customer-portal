@@ -592,6 +592,44 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(mockFence).not.toHaveBeenCalled();
   });
 
+  // A rebind moves the offer to ANOTHER booking: for the recovery sweep it is a write on the cancelled booking's behalf, so it
+  // is fenced inside the rebind's own transaction, before its offer update, exactly like the reversal.
+  it('a recovery rebind re-proves the cancellation inside its transaction before it moves the offer', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = [{ id: 'svc-other' }];
+    const fence = { visitId: 'svc-2', restorations: 0, hits: [] };
+    const order = [];
+    mockFence.mockReset();
+    mockFence.mockImplementation(async () => { order.push(`fence@${mockUpdates.length}`); });
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-other' });
+    // The rebind's own fence ran before its (first) offer update.
+    expect(order).toContain('fence@0');
+    expect(mockFence).toHaveBeenCalledWith(expect.anything(), fence);
+  });
+
+  it('a booking restored before the rebind: the offer is not moved, and nothing is reversed either', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = [{ id: 'svc-other' }];
+    const fence = { visitId: 'svc-2', restorations: 0, hits: [] };
+    mockFence.mockReset();
+    // The sweep's point-in-time check passes; the rebind's in-transaction proof is refused (a restore landed in between).
+    mockFence.mockResolvedValueOnce(undefined).mockRejectedValue(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE' }));
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockUpdates.some((u) => 'redeemed_scheduled_service_id' in u)).toBe(false);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
   it('a lapsed offer closes out instead of dangling reopened', async () => {
     mockOffers = [{
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',

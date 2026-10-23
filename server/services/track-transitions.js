@@ -1552,6 +1552,39 @@ async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = n
  * Admin-only cancel. Extends token expiry to NOW()+24h so the customer
  * can still see the cancelled state for a day.
  */
+// Recovery sweep only (cancelFence, services/cancel-generation-fence.js). The tracker flip's own transaction proves the
+// generation, but its share lock ends at the commit. These two helpers keep the two writes that follow under the same proof:
+//  - the technician-state cleanup runs in a transaction that share-locks the visit and proves the generation first, and takes
+//    the tech_status row NOWAIT (a busy row refuses at once instead of waiting while the visit lock is held);
+//  - the stale "cancelled" refresh broadcast is sent only after a fresh check that the visit is still the approved cancel.
+async function clearTechStateUnderFence(svc, cancelFence) {
+  const { assertCancelGeneration, CancelFenceError } = require('./cancel-generation-fence');
+  try {
+    await db.transaction(async (trx) => {
+      await assertCancelGeneration(trx, cancelFence);
+      await clearTechCurrentJob({ tech_id: svc.technician_id, current_job_id: svc.id, status: 'idle', conn: trx, noWait: true });
+    });
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      cancelFence.hits.push('tech_state_busy');
+      throw new CancelFenceError('tech_state_busy');
+    }
+    throw err;
+  }
+}
+
+async function approvedCancelStillStands(cancelFence) {
+  if (!cancelFence) return true;
+  const { assertCancelGeneration, isCancelFence } = require('./cancel-generation-fence');
+  try {
+    await assertCancelGeneration(db, cancelFence);
+    return true;
+  } catch (err) {
+    if (isCancelFence(err)) return false;
+    throw err;
+  }
+}
+
 // cancelFence (the Intelligence Bar cancel recovery sweep only, services/cancel-generation-fence.js): this function
 // would cancel a LIVE visit, so with a fence it only ever finishes the cancellation the card approved. A visit
 // restored since is left alone ({ ok: false, reason: 'cancel_fence' }), re-proved inside the cancelling transaction.
@@ -1576,6 +1609,7 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
     // canonical status transition will repair it and append history.
     if (svc.status === 'cancelled') {
       await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
+      if (!(await approvedCancelStillStands(cancelFence))) return { ok: false, reason: 'cancel_fence' };
       emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
       return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
     }
@@ -1647,21 +1681,28 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
 
   if (svc.track_state === 'cancelled') {
     await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
+    if (!(await approvedCancelStillStands(cancelFence))) return { ok: false, reason: 'cancel_fence' };
     emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
     return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
   if (svc.technician_id) {
     try {
-      await clearTechCurrentJob({
-        tech_id: svc.technician_id,
-        current_job_id: svc.id,
-        status: 'idle',
-      });
+      if (cancelFence) {
+        await clearTechStateUnderFence(svc, cancelFence);
+      } else {
+        await clearTechCurrentJob({
+          tech_id: svc.technician_id,
+          current_job_id: svc.id,
+          status: 'idle',
+        });
+      }
     } catch (err) {
+      if (err && err.code === 'CANCEL_FENCE') return { ok: false, reason: 'cancel_fence' };
       logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
     }
   }
   await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
+  if (!(await approvedCancelStillStands(cancelFence))) return { ok: false, reason: 'cancel_fence' };
   emitCustomerTrackRefresh(svc, 'cancelled', now);
   return {
     ok: true,

@@ -255,6 +255,9 @@ async function runVisitCancellationFollowThrough({
     // tracker cancel at all (each mutation below re-proves it again inside its own transaction).
     if (cancelFence && !(await cancelFenceStands(cancelFence))) continue;
     const feeOutcome = await settleVisitMoney(id, ctx);
+    // A fence refusal during the money step means the visit changed (or is busy): the bundle's own restoration alert or
+    // retry owns it, so no generic fee alert and no tracker cancel on top.
+    if (cancelFence && cancelFence.hits.length) continue;
     // One normalized outcome for BOTH rails and thrown failures. The alert
     // service ignores clean outcomes, so no duplicate decision tree here.
     await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: feeOutcome });

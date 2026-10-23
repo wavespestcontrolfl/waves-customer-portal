@@ -66,7 +66,18 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       t.uuid('scheduled_service_id');
       t.timestamp('cancellation_notice_at', { useTz: true });
       t.text('cancellation_notice_state');
+      t.boolean('cancelled').notNullable().defaultTo(false);
       t.timestamp('updated_at', { useTz: true });
+    });
+    await app.schema.createTable('tech_status', (t) => {
+      t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()'));
+      t.uuid('tech_id');
+      t.uuid('current_job_id');
+      t.text('status');
+      t.float('lat');
+      t.float('lng');
+      t.timestamp('updated_at', { useTz: true });
+      t.timestamp('location_updated_at', { useTz: true });
     });
     await migration.up(app);
     svc = require('../services/ib-cancel-effect-bundles');
@@ -86,6 +97,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     await app('job_status_history').del();
     await app('scheduled_services').del();
     await app('appointment_reminders').del();
+    await app('tech_status').del();
     await app('customers').del();
     await app('customers').insert({ id: customer, first_name: 'Synthia', last_name: 'Tester' });
     await app('scheduled_services').insert({ id: visit, customer_id: customer, status: 'cancelled', service_type: 'Pest Control', scheduled_date: '2099-01-15' });
@@ -336,6 +348,59 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(new Date((await app('appointment_reminders').where({ id: row.id }).first()).cancellation_notice_at).getTime()).toBe(replaced.getTime());
       // The new generation's own claim goes through.
       expect((await claimApprovedNoticeForGeneration(row, fence(1))).claimed).toBe(1);
+    });
+  });
+
+  // The reminder close that handleCancellation does before it claims: for a fenced send it moves INSIDE the share-locked
+  // claim transaction. Run on an older snapshot after a concurrent restore, the unfenced version re-closed the LIVE visit's
+  // reminder and suppressed its future reminders.
+  describe('reminder close and technician state under the fence', () => {
+    const { claimApprovedNoticeForGeneration } = jest.requireActual('../services/appointment-reminders');
+    const fence = (restorations = 0) => ({ visitId: visit, restorations, hits: [] });
+    const reminder = async () => (await app('appointment_reminders').insert({ scheduled_service_id: visit, cancellation_notice_state: 'pending_approved', cancellation_notice_at: app.raw("now() - interval '30 minutes'") }).returning('*'))[0];
+
+    test('a standing cancel closes the reminder in the same transaction as the claim', async () => {
+      const row = await reminder();
+      expect((await claimApprovedNoticeForGeneration(row, fence())).claimed).toBe(1);
+      expect((await app('appointment_reminders').where({ id: row.id }).first()).cancelled).toBe(true);
+    });
+
+    test('a restore in flight, then committed: the claim never closes the (now live) visit\'s reminder', async () => {
+      const row = await reminder();
+      const trxR = await app.transaction();
+      await trxR('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      await trxR('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed' });
+      await expect(claimApprovedNoticeForGeneration(row, fence())).rejects.toMatchObject({ fenceReason: 'visit_busy' });
+      await trxR.commit();
+      await expect(claimApprovedNoticeForGeneration(row, fence())).rejects.toMatchObject({ fenceReason: 'visit_is_confirmed' });
+      expect((await app('appointment_reminders').where({ id: row.id }).first()).cancelled).toBe(false);
+    });
+
+    test('the technician-state cleanup takes tech_status NOWAIT under the fence, and a restore in flight refuses it before any write', async () => {
+      const { clearTechCurrentJob } = jest.requireActual('../services/tech-status');
+      const tech = randomUUID();
+      await app('tech_status').insert({ tech_id: tech, current_job_id: visit, status: 'on_job' });
+      const { assertCancelGeneration: prove } = require('../services/cancel-generation-fence');
+      const clear = () => app.transaction(async (trx) => {
+        await prove(trx, fence());
+        return clearTechCurrentJob({ tech_id: tech, current_job_id: visit, status: 'idle', conn: trx, noWait: true });
+      });
+      // A busy tech_status row fails at once instead of waiting while the visit share lock is held.
+      const holder = await app.transaction();
+      await holder('tech_status').where({ tech_id: tech }).forUpdate().first('id');
+      const started = Date.now();
+      await expect(clear()).rejects.toMatchObject({ code: '55P03' });
+      expect(Date.now() - started).toBeLessThan(2000);
+      await holder.rollback();
+      // A restore in flight refuses the cleanup before it touches tech_status.
+      const trxR = await app.transaction();
+      await trxR('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      await expect(clear()).rejects.toMatchObject({ fenceReason: 'visit_busy' });
+      await trxR.rollback();
+      expect((await app('tech_status').where({ tech_id: tech }).first()).current_job_id).toBe(visit);
+      // Standing cancel, free row: cleared.
+      await clear();
+      expect((await app('tech_status').where({ tech_id: tech }).first()).current_job_id).toBeNull();
     });
   });
 

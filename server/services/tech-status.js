@@ -163,10 +163,14 @@ async function setTechJobStatus({ tech_id, status, current_job_id }) {
  * being closed. This avoids wiping a newer en-route assignment when an
  * old tab completes/cancels a stale job.
  */
-async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' }) {
+// `conn` (optional, the cancel recovery sweep): run on the caller's transaction, which holds the cancel-generation share lock.
+// `noWait`: take the tech_status row with FOR UPDATE NOWAIT first, so a busy row fails at once (55P03) instead of waiting
+// while the visit lock is held (no lock-order deadlock with a tech transition that locks tech_status, then the visit).
+async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle', conn = db, noWait = false }) {
   if (!tech_id || !current_job_id) return null;
+  if (noWait) await conn('tech_status').where({ tech_id, current_job_id }).forUpdate().noWait().first('id');
 
-  const [row] = await db('tech_status')
+  const [row] = await conn('tech_status')
     .where({ tech_id, current_job_id })
     .update({
       status,

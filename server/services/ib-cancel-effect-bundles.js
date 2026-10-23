@@ -344,8 +344,25 @@ async function sendApprovedNotice(bundle, svc) {
   if (classified.state === 'not_sent') {
     const standing = await cancelStillStands(bundle);
     if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
+    return { done: true, outcome: await reclassifyUnclaimedSend(bundle, classified) };
   }
   return { done: true, outcome: classified };
+}
+
+// A send this sweep could not claim or complete reads "not sent" from handleCancellation, but the reminder may have been
+// taken meanwhile by the original request (it stamps 'sent' just BEFORE the provider handoff, after the status was read as
+// 'ready'): its text can still go out a moment later. So the state is re-read before anyone is told to send by hand. Only a
+// terminal 'suppressed' marker (the approved send failed or was blocked) stays a plain not-sent; anything delivered or in
+// flight is recorded sent, partial or uncertain, which never advises a resend.
+async function reclassifyUnclaimedSend(bundle, classified) {
+  const AppointmentReminders = require('./appointment-reminders');
+  const status = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, {
+    recipientKeys: bundle.approved_notice.map((entry) => entry.recipient_key),
+  });
+  if (status === 'suppressed') return classified;
+  if (status === 'delivered') return { state: 'sent', note: NOTICE_TERMINAL_BY_STATUS.delivered.note };
+  if (status === 'partial') return { ...NOTICE_TERMINAL_BY_STATUS.partial };
+  return { state: 'uncertain', note: 'Another send already holds this text and its delivery is not proven. It was NOT sent again.' };
 }
 
 async function recoverNotice(bundle, svc) {

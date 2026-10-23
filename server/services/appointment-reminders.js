@@ -2616,7 +2616,7 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
 // with `cancelGeneration` (a cancel-generation fence: { visitId, restorations, hits }). Its claim is its own small
 // transaction: it takes FOR SHARE NOWAIT on the VISIT row first and proves the visit is still cancelled with the pinned
 // restoration count (services/cancel-generation-fence.js), and only then claims the reminder's untouched approved marker,
-// all before the transaction ends. While the share lock is held no restore can change the visit's status, so no new
+// (the reminder's own close included) all before the transaction ends. While the share lock is held no restore can change the visit's status, so no new
 // cancellation (which needs a restore first) can replace this reminder's marker between the proof and the claim; a restore
 // or re-cancel already in flight holds the visit lock and makes the claim fail at once (visit_busy). A single UPDATE with
 // generation subqueries was NOT enough: PostgreSQL re-checks only the updated tuple after a lock wait, so a replaced marker
@@ -2627,6 +2627,9 @@ async function claimApprovedNoticeForGeneration(record, cancelGeneration) {
   const noticeToken = require('./job-status').nextClaimTs();
   const claimed = await db.transaction(async (trx) => {
     await assertCancelGeneration(trx, cancelGeneration);
+    // The reminder close handleCancellation skips for a fenced send: under the same share lock, so it can never land on a
+    // restored visit's reminder.
+    await trx('appointment_reminders').where({ id: record.id }).update({ cancelled: true, updated_at: new Date() });
     return trx('appointment_reminders')
       .where({ id: record.id, cancellation_notice_state: 'pending_approved' })
       .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending_approved', updated_at: noticeToken });
@@ -2854,7 +2857,7 @@ function makeCancellationFinalizer({ record, scheduledServiceId, options, notice
 
 // Lease-ownership recheck AT the provider handoff (codex r6): customer lookup, prefs, rendering, and the line lookup all
 // run between the claim check and dispatch - a worker paused past the 15-minute lease must not send after a sweep reclaim.
-function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome }) {
+function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome, cancelGeneration = null }) {
   return async () => {
     const own = await db('appointment_reminders')
       .where({ id: record.id })
@@ -2871,6 +2874,17 @@ function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimSta
       .first('status');
     if (String(svc?.status) !== 'cancelled') {
       return { ok: false, code: 'appointment_restored', reason: `appointment is now ${svc?.status || 'missing'}` };
+    }
+    // The recovery sweep's approved text (cancelGeneration): one more proof of the approved cancellation right before the stamp
+    // that precedes the provider handoff. A point-in-time check: the handoff cannot be un-sent, and the claim's token already
+    // fails if a restore cleared the marker (the same window the request itself has).
+    if (cancelGeneration) {
+      try {
+        await require('./cancel-generation-fence').assertCancelGeneration(db, cancelGeneration);
+      } catch (err) {
+        if (err && err.code === 'CANCEL_FENCE') return { ok: false, code: 'appointment_restored', reason: err.message };
+        throw err;
+      }
     }
     // Durable pre-dispatch stamp (codex r21): a process exit
     // between provider acceptance and audit persistence must
@@ -2935,7 +2949,7 @@ async function sendCancellationNotice({ record, scheduledServiceId, options, not
       return renderCancellationBody({ customer, contact, record, scheduledServiceId, approvedNotice });
     }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
       sendOutcome,
-      preDispatchCheck: makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome }),
+      preDispatchCheck: makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimStatesWithSent, noticeToken, sendOutcome, cancelGeneration: options.cancelGeneration }),
     });
     if (noticeSent) {
       logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
@@ -5137,7 +5151,10 @@ const AppointmentReminders = {
       // Guarded in ONE statement (codex r20): a restoration committing
       // between the status read above and this write must not be
       // re-closed.
-      const closed = await db('appointment_reminders')
+      // The recovery sweep (cancelGeneration) closes the reminder INSIDE its fenced claim transaction instead
+      // (claimApprovedNoticeForGeneration): this statement, run on an older snapshot after a concurrent restore, could
+      // re-close the live visit's reminder and suppress its future reminders.
+      const closed = options.cancelGeneration ? true : await db('appointment_reminders')
         .where({ id: record.id })
         .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
         .update({ cancelled: true, updated_at: new Date() });

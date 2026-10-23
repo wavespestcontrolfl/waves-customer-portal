@@ -1463,7 +1463,7 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
  *
  * Returns true only when the offer actually rebound. Never throws.
  */
-async function rebindRedeemedOffer(offerId, bookingId) {
+async function rebindRedeemedOffer(offerId, bookingId, cancelFence = null) {
   try {
     let rebound = false;
     await db.transaction(async (trx) => {
@@ -1472,6 +1472,8 @@ async function rebindRedeemedOffer(offerId, bookingId) {
         .forUpdate()
         .first('id');
       if (!locked) return;
+      // Recovery sweep only: the offer moves only while the booking it leaves is still the cancelled one the card approved.
+      if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelFence);
       const booking = await trx('scheduled_services')
         .where({ id: bookingId })
         .forUpdate()
@@ -1697,6 +1699,9 @@ async function reverseInspectionCreditForBooking({
     let reversed = 0;
     for (const offer of redeemedOffers) {
       try {
+        // Recovery sweep only: no office alert, rebind or reversal for a booking that is no longer the approved cancel
+        // (a point-in-time check; every write below re-proves the generation inside its own transaction).
+        if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(db, cancelFence);
         // FIRST (PR #3178 r17 P1): an invoice for this cancelled booking
         // still holding money — paid, processing, unverifiable PI,
         // anything outside the resolved set — may have the credit
@@ -1735,12 +1740,12 @@ async function reverseInspectionCreditForBooking({
           to: offer.expires_at,
           excludeIds: [scheduledServiceId, offer.source_scheduled_service_id],
         });
-        if (alternate && await rebindRedeemedOffer(offer.id, alternate.id)) {
+        if (alternate && await rebindRedeemedOffer(offer.id, alternate.id, cancelFence)) {
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
           continue;
         }
         const { seriesChild } = await findLiveSeriesChildForReversal(offer, scheduledServiceId);
-        if (seriesChild && await rebindRedeemedOffer(offer.id, seriesChild.id)) {
+        if (seriesChild && await rebindRedeemedOffer(offer.id, seriesChild.id, cancelFence)) {
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live series child ${seriesChild.id} — anchor cancelled, series continues`);
           continue;
         }

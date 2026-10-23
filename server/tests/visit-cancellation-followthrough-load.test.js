@@ -504,6 +504,27 @@ describe('cancelFence (the cancel recovery sweep)', () => {
     expect(recordTrackTransitionFailure).not.toHaveBeenCalled();
   });
 
+  it('a refusal during the money step raises no generic fee alert and cancels no tracker: the bundle\'s restoration alert owns it', async () => {
+    const invoice = require('../services/invoice');
+    // The void sweep is refused by the fence (it records the hit and swallows the error, as the real helper does) and the
+    // invoice stays open, which would normally end as a fee_step_error and a generic unresolved-fee alert.
+    invoice.voidOpenInvoicesForCancelledService.mockImplementationOnce(async (_id, opts) => { opts.cancelFence.hits.push('visit_busy'); });
+    mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
+    const hitFence = { ...FENCE, hits: [] };
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: hitFence }));
+    expect(hitFence.hits).toEqual(['visit_busy']);
+    expect(mockAlertUnresolved).not.toHaveBeenCalled();
+    expect(require('../services/track-transitions').cancel).not.toHaveBeenCalled();
+  });
+
+  it('with no refusal the same unresolved invoice still raises the fee alert (the suppression is only for fence hits)', async () => {
+    mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: { ...FENCE, hits: [] } }));
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' } });
+  });
+
   it('without a fence the calls carry no cancelFence key (unchanged for every other caller)', async () => {
     const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
     await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL } } });

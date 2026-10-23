@@ -498,12 +498,36 @@ describe('the text claim is bound to the original cancellation', () => {
     expect(mockStore.bundles[0].finish_note).toBe('visit_is_confirmed_during_recovery');
   });
 
-  test('a genuine send failure with the visit still cancelled stays a not-sent text', async () => {
+  // The send this sweep could not claim reads "not sent", but the original request may have stamped the reminder 'sent'
+  // (just before its provider handoff) after the status was read as ready. The state is re-read before any hand-send advice.
+  const unclaimed = async (laterStatus) => {
     seedBundle();
-    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => { Object.assign(opts.outcome, { notificationSent: false, notificationError: 'customer opted out' }); });
+    mockNoticeStatus.mockResolvedValueOnce('ready').mockResolvedValueOnce(laterStatus);
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      Object.assign(opts.outcome, { notificationSent: false, notificationError: 'A cancellation notice is already being handled for this visit' });
+    });
     await svc.sweepIbCancelBundles();
-    expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'not_sent' });
-    expect(mockStore.bundles[0].status).toBe('recovered');
+    return mockStore.bundles[0];
+  };
+
+  test('a genuine send failure (the marker ended terminal suppressed) stays a not-sent text', async () => {
+    const row = await unclaimed('suppressed');
+    expect(row.notice_outcome).toMatchObject({ state: 'not_sent' });
+    expect(row.status).toBe('recovered');
+    expect(mockRaised[0].opts.detail).toContain('Send it by hand');
+  });
+
+  test.each([
+    ['sent marker with no audit yet (the request is mid-handoff)', 'uncertain', 'uncertain'],
+    ['sent marker with the audit now present', 'delivered', 'sent'],
+    ['sent marker, some recipients proven', 'partial', 'partial'],
+    ['marker untouched or another marker (unknown who holds it)', 'ready', 'uncertain'],
+    ['a marker the card did not approve', 'other', 'uncertain'],
+  ])('a lost claim where the reminder now reads: %s -> recorded %s, never "send it by hand"', async (_label, laterStatus, expected) => {
+    const row = await unclaimed(laterStatus);
+    expect(row.notice_outcome).toMatchObject({ state: expected });
+    expect(mockRaised[0].opts.detail).not.toContain('Send it by hand');
+    expect(mockHandleCancellation).toHaveBeenCalledTimes(1);
   });
 });
 
