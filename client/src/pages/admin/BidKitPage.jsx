@@ -61,15 +61,17 @@ const sendFile = (row, file) => {
   form.append("file", file);
   return api(`/${row.id}/file`, { method: "POST", body: form });
 };
-// A file for an item with no row yet gets a blank row first, so the file has a place to live. When the file then fails (a
-// refused name, a bad type, a stale version), that row would stay behind as an empty phantom, so it is archived again.
+// A file for an item with no row yet gets a blank row first, so the file has a place to live. That row is never removed
+// automatically: after a failure the page reads the list again, the row shows as missing (which is true) with the error
+// beside it, and a retry uploads to that same row. Archiving it here could hit a row another admin just updated, or one
+// whose upload did succeed with the answer lost.
 async function uploadFor(entry, file) {
   if (entry.row) return sendFile(entry.row, file);
   const { item: created } = await createItem(entry.item, {});
   try {
     return await sendFile(created, file);
   } catch (err) {
-    await archiveItem(created).catch(() => {});
+    err.note = "The item was added without a file. Upload again, or archive it.";
     throw err;
   }
 }
@@ -547,9 +549,12 @@ function useKitActions(load, closeEditors) {
         closeEditors();
         setMessage({ text: CONFLICT_MESSAGE, error: true });
         await load();
-      } else {
-        setMessage({ text: `Not saved: ${err.message}`, error: true });
+        return false;
       }
+      setMessage({ text: `Not saved: ${err.message}${err.note ? ` ${err.note}` : ""}`, error: true });
+      // After any failure the list is read again, so the page shows what the server holds (a lost answer, a row just
+      // created) and never acts on a row it only remembers.
+      await load();
       return false;
     } finally {
       setBusy(false);

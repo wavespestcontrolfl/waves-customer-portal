@@ -242,30 +242,95 @@ it("uploading a file on an item with no row creates the row first, then sends th
   expect(uploaded.mock.calls[0][0].body.get("expected_updated_at")).toBe("2026-10-23T17:00:00.000Z");
 });
 
-it("a failed first upload archives the row it just created, so no empty row is left behind", async () => {
-  const blank = row({ id: "new1", item_key: "ipm_plan", file: null, status: "missing", updated_at: "2026-10-23T17:00:00.000Z" });
-  const archived = vi.fn(() => reply({ success: true }));
+// An item with no row yet: the page creates a blank row, then uploads to it. The row is never archived by the page.
+const BLANK = row({ id: "new1", item_key: "ipm_plan", label: "IPM plan", file: null, status: "missing", updated_at: "2026-10-23T17:00:00.000Z" });
+const WITHOUT_PLAN = ITEMS.filter((item) => item.id !== "i7");
+const pdf = (name = "ipm.pdf") => new File(["%PDF-1.4"], name, { type: "application/pdf" });
+
+it("a failed first upload leaves the created row in place, and a retry uploads to that same row: one row, file stored on it, nothing archived", async () => {
+  let created = false;
+  let tries = 0;
+  const create = vi.fn(() => { created = true; return reply({ item: BLANK }, { status: 201 }); });
+  const send = vi.fn(() => (tries++ === 0
+    ? reply({ error: "File storage is not configured" }, { ok: false, status: 500 })
+    : reply({ item: row({ ...BLANK, file: { name: "ipm.pdf", contentType: "application/pdf", size: 8 }, status: "unattested" }) })));
+  const archive = vi.fn(() => reply({ success: true }));
   route({
-    "GET /admin/bid-kit/": () => reply(payload(ITEMS.filter((item) => item.id !== "i7"))),
-    "POST /admin/bid-kit/": () => reply({ item: blank }, { status: 201 }),
-    "POST /admin/bid-kit/new1/file": () => reply({ error: "That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID." }, { ok: false, status: 400 }),
-    "DELETE /admin/bid-kit/new1": archived,
+    "GET /admin/bid-kit/": () => reply(payload(created ? [...WITHOUT_PLAN, BLANK] : WITHOUT_PLAN)),
+    "POST /admin/bid-kit/": create,
+    "POST /admin/bid-kit/new1/file": send,
+    "DELETE /admin/bid-kit/new1": archive,
   });
   renderPage();
   await screen.findByText("FDACS business license copy");
-  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [new File(["%PDF-1.4"], "W9-123-45-6789.pdf", { type: "application/pdf" })] } });
-  expect(await screen.findByText(/Not saved: That looks like a tax ID/)).toBeInTheDocument();
-  expect(archived).toHaveBeenCalledTimes(1);
+
+  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [pdf()] } });
+  expect(await screen.findByText(/Not saved: File storage is not configured The item was added without a file/)).toBeInTheDocument();
+  // The page read the list again: the created row is there, missing, with its own Upload file button, and was not archived.
+  await waitFor(() => expect(document.getElementById("bid-kit-new1")).not.toBeNull());
+  expect(within(rowFor("IPM plan")).getByText("Missing")).toBeInTheDocument();
+  expect(archive).not.toHaveBeenCalled();
+
+  // Retry: the upload goes to the same row, with that row's version, and no second row is created.
+  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [pdf()] } });
+  await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(send.mock.calls[1][0].body.get("expected_updated_at")).toBe("2026-10-23T17:00:00.000Z");
+  expect(archive).not.toHaveBeenCalled();
+  expect(screen.getAllByRole("heading", { level: 3, name: "IPM plan" })).toHaveLength(1);
 });
 
-it("an upload on an item that already has a row never creates or archives anything when it fails", async () => {
-  const send = vi.fn(() => reply({ error: "The file is larger than 15 MB" }, { ok: false, status: 413 }));
-  const unexpected = vi.fn(() => reply({}));
-  route({ "GET /admin/bid-kit/": () => reply(payload()), "POST /admin/bid-kit/i7/file": send, "POST /admin/bid-kit/": unexpected, "DELETE /admin/bid-kit/i7": unexpected });
+it("another admin's update between the create and the upload: the upload's 409 archives nothing, closes the editors and shows the latest row", async () => {
+  let created = false;
+  const theirs = row({ ...BLANK, source_document: "Other admin's note", updated_at: "2026-10-23T17:05:00.000Z" });
+  const archive = vi.fn(() => reply({ success: true }));
+  route({
+    "GET /admin/bid-kit/": () => reply(payload(created ? [...WITHOUT_PLAN, theirs] : WITHOUT_PLAN)),
+    "POST /admin/bid-kit/": () => { created = true; return reply({ item: BLANK }, { status: 201 }); },
+    "POST /admin/bid-kit/new1/file": () => reply({ error: "This item changed since you opened it. Reload and check it again." }, { ok: false, status: 409 }),
+    "DELETE /admin/bid-kit/new1": archive,
+  });
   renderPage();
   await screen.findByText("FDACS business license copy");
-  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [new File(["%PDF-1.4"], "big.pdf", { type: "application/pdf" })] } });
+  fireEvent.click(within(rowFor("W-9")).getByRole("button", { name: "Edit" }));
+  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [pdf()] } });
+  expect(await screen.findByText(CONFLICT)).toBeInTheDocument();
+  await waitFor(() => expect(within(rowFor("IPM plan")).getByText(/Other admin's note/)).toBeInTheDocument());
+  expect(archive).not.toHaveBeenCalled();
+  expect(screen.queryByRole("form", { name: "Edit W-9" })).toBeNull();
+});
+
+it("a lost answer after a successful upload archives nothing: the reload shows the stored file", async () => {
+  let created = false;
+  let stored = false;
+  const withFile = row({ ...BLANK, file: { name: "ipm.pdf", contentType: "application/pdf", size: 8 }, status: "unattested", updated_at: "2026-10-23T17:02:00.000Z" });
+  const archive = vi.fn(() => reply({ success: true }));
+  route({
+    "GET /admin/bid-kit/": () => reply(payload(created ? [...WITHOUT_PLAN, stored ? withFile : BLANK] : WITHOUT_PLAN)),
+    "POST /admin/bid-kit/": () => { created = true; return reply({ item: BLANK }, { status: 201 }); },
+    // The server stored the file, but the answer never reached the page.
+    "POST /admin/bid-kit/new1/file": () => { stored = true; return Promise.reject(new TypeError("Failed to fetch")); },
+    "DELETE /admin/bid-kit/new1": archive,
+  });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [pdf()] } });
+  expect(await screen.findByText(/Not saved: Failed to fetch/)).toBeInTheDocument();
+  await waitFor(() => expect(within(rowFor("IPM plan")).getByText("ipm.pdf")).toBeInTheDocument());
+  expect(within(rowFor("IPM plan")).getByRole("button", { name: "Open file" })).toBeInTheDocument();
+  expect(archive).not.toHaveBeenCalled();
+});
+
+it("a failed upload on a row that already exists reads the list again and never creates or archives anything", async () => {
+  let reads = 0;
+  const send = vi.fn(() => reply({ error: "The file is larger than 15 MB" }, { ok: false, status: 413 }));
+  const unexpected = vi.fn(() => reply({}));
+  route({ "GET /admin/bid-kit/": () => { reads += 1; return reply(payload()); }, "POST /admin/bid-kit/i7/file": send, "POST /admin/bid-kit/": unexpected, "DELETE /admin/bid-kit/i7": unexpected });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.change(within(rowFor("IPM plan")).getByLabelText("File for IPM plan"), { target: { files: [pdf("big.pdf")] } });
   expect(await screen.findByText(/Not saved: The file is larger than 15 MB/)).toBeInTheDocument();
+  await waitFor(() => expect(reads).toBe(2));
   expect(unexpected).not.toHaveBeenCalled();
 });
 
