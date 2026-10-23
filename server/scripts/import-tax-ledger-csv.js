@@ -206,11 +206,13 @@ function sameAccount(source, accountLabel, masks) {
 }
 // A portal row's account: a Plaid row carries the account's stable id, so a
 // renamed Plaid label (plaid_accounts is updated, old rows keep the old
-// label) still resolves to its mask; other rows go by their label.
+// label) still resolves to its mask, and that mask is the answer either way
+// (a stale label that happens to contain the digits never overrides it);
+// rows without that identity go by their label.
 function sameAccountRow(source, row, ids) {
   const code = String(source || '').trim().toLowerCase();
   const byId = row.plaid_account_id ? ids.masksById.get(String(row.plaid_account_id)) : null;
-  if (byId && byId.toLowerCase() === code) return true;
+  if (byId) return byId.toLowerCase() === code;
   return sameAccount(source, row.account_label, ids.masks);
 }
 
@@ -458,7 +460,7 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   const dates = rows.map(r => r.date).sort();
   const range = [dates[0], dates[dates.length - 1]];
   const existingBank = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).whereNot('source', SOURCE_TAG)
-    .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction') : [];
+    .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction', 'suggestion') : [];
   // expenses this importer made on an earlier run are the ledger's own, not
   // "already there from elsewhere": they are linked from a ledger bank row
   // the file's range widened by the matcher window: a receipt dated days
@@ -593,6 +595,11 @@ function openReason(row, m) {
   if (row.status === 'unmatched') return 'the same row is open in the portal, not booked';
   // the portal said ignore, the ledger books an expense: a conflict for the owner, not an answer
   if (row.status === 'ignored' && m.expense) return 'the portal ignored this row but the ledger books it as an expense (unignore and decide it)';
+  // a refund credit ignored without being applied leaves its expense at the
+  // gross amount; a RELEASED refund (releasedRefundOf) is accounted for
+  if (row.status === 'ignored' && m.unmatchedLine === 'refund' && !(row.suggestion && row.suggestion.releasedRefundOf)) {
+    return 'the portal ignored this refund credit without applying it (unignore it and apply it to the original expense in Bank Import)';
+  }
   if (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) return 'the same row is in the portal but its expense was deleted (the next matching pass reopens it)';
   if (row.status === 'matched_payout' && !row.matched_payout_id) return 'the same row is in the portal but its payout link is gone (the next matching pass reopens it)';
   return null;

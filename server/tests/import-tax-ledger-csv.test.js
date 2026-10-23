@@ -762,6 +762,16 @@ describe('--skip-existing and expenses', () => {
     const { counts, report } = await run({ file, db, skipExisting: true });
     expect(counts).toMatchObject({ overlaps: 0, held: 1, inserted: 0 });
     expect(report).toMatch(/the portal ignored this row but the ledger books it as an expense/);
+    // a refund credit the portal ignored WITHOUT applying it leaves the expense at its gross
+    // amount: held; a released refund (releasedRefundOf) is accounted for: an overlap
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY REFUND', amount: '12.50', direction: 'in', class: 'refund', sched_c_line: '', category: 'Refund' })));
+    for (const [suggestion, expected] of [[null, { held: 1, overlaps: 0 }], [{ releasedRefundOf: 'exp-9' }, { held: 0, overlaps: 1 }]]) {
+      const dbr = makeFakeDb();
+      dbr.tables().bank_transactions.push({ id: 'up-r', row_hash: 'hr', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: 'ACME SUPPLY REFUND', amount: 12.5, direction: 'credit', status: 'ignored', suggestion });
+      const out = await run({ file, db: dbr, skipExisting: true });
+      expect([suggestion, out.counts.held, out.counts.overlaps]).toEqual([suggestion, expected.held, expected.overlaps]);
+      if (!suggestion) expect(out.report).toMatch(/ignored this refund credit without applying it/);
+    }
     // the ledger says personal too: the portal's ignore is the same answer
     fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'personal', sched_c_line: '', category: 'Personal' })));
     const db2 = makeFakeDb();
@@ -779,10 +789,11 @@ describe('--skip-existing and expenses', () => {
     db.tables().plaid_accounts.push({ account_id: 'plaid-acct-1', account_label: 'main checking 3098', mask: '3098' });
     db.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h1', source: 'plaid', account_label: 'main checking', plaid_account_id: 'plaid-acct-1', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
     expect((await run({ file, db, skipExisting: true })).counts).toMatchObject({ overlaps: 1, held: 0, inserted: 0 });
-    // another Plaid account's row (other mask) is not this account, whatever its label says
+    // another Plaid account's row (other mask) is not this account, even when its stale label
+    // carries the ledger's digits: the resolved mask is the answer either way
     const db2 = makeFakeDb();
-    db2.tables().plaid_accounts.push({ account_id: 'plaid-acct-2', account_label: 'main checking', mask: '7777' });
-    db2.tables().bank_transactions.push({ id: 'pl-2', row_hash: 'h2', source: 'plaid', account_label: 'main checking', plaid_account_id: 'plaid-acct-2', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
+    db2.tables().plaid_accounts.push({ account_id: 'plaid-acct-2', account_label: 'savings 7777', mask: '7777' });
+    db2.tables().bank_transactions.push({ id: 'pl-2', row_hash: 'h2', source: 'plaid', account_label: 'old label 3098', plaid_account_id: 'plaid-acct-2', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
     expect((await run({ file, db: db2, skipExisting: true })).counts).toMatchObject({ overlaps: 0, unsure: 1, inserted: 1 });
   });
 
