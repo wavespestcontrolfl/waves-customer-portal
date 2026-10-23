@@ -587,10 +587,12 @@ function evaluateProjectReadiness({
         ok:
           hasMeaningfulValue(findings?.warranty_type) &&
           !/^no warranty$/i.test(String(findings?.warranty_type).trim()),
+        hard: true,
       },
       {
         label: "Time of treatment",
         ok: hasMeaningfulValue(findings?.treatment_time),
+        hard: true,
       },
     );
   }
