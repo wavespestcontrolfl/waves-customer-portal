@@ -4,7 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const {
-  HEADER, parseLedgerCsv, mapRow, categoryNameForLine, rowHash, tupleKey, vendorsAgree, sameAccount, summarize, withOrdinals, parseArgs, run,
+  HEADER, parseLedgerCsv, mapRow, categoryNameForLine, rowHash, tupleKey, sameAccount, summarize, withOrdinals, parseArgs, run,
 } = require('../scripts/import-tax-ledger-csv');
 
 const HEADER_LINE = HEADER.join(',');
@@ -352,7 +352,7 @@ describe('run', () => {
     const db = makeFakeDb();
     const { report, counts } = await run({ file, dryRun: true, db });
     expect(report).toMatch(/^DRY RUN/);
-    expect(counts).toEqual({ read: 8, inserted: 8, duplicates: 0, overlaps: 0, held: 0, unsure: 0 });
+    expect(counts).toEqual({ read: 8, inserted: 8, duplicates: 0, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
     expect(db.tables().bank_transactions).toHaveLength(0);
     expect(db.tables().expenses).toHaveLength(0);
     expect(db.log.writes).toBe(0);
@@ -363,7 +363,7 @@ describe('run', () => {
     const db = makeFakeDb();
     const { report, counts } = await run({ file, db });
     expect(report).not.toMatch(/DRY RUN/);
-    expect(counts).toEqual({ read: 8, inserted: 8, duplicates: 0, overlaps: 0, held: 0, unsure: 0 });
+    expect(counts).toEqual({ read: 8, inserted: 8, duplicates: 0, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
 
     const { bank_transactions: bank, expenses } = db.tables();
     expect(bank).toHaveLength(8);
@@ -393,7 +393,7 @@ describe('run', () => {
     await run({ file, db });
     const before = { bank: db.tables().bank_transactions.length, exp: db.tables().expenses.length };
     const second = await run({ file, db });
-    expect(second.counts).toEqual({ read: 8, inserted: 0, duplicates: 8, overlaps: 0, held: 0, unsure: 0 });
+    expect(second.counts).toEqual({ read: 8, inserted: 0, duplicates: 8, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
     expect(db.tables().bank_transactions).toHaveLength(before.bank);
     expect(db.tables().expenses).toHaveLength(before.exp);
   });
@@ -423,7 +423,7 @@ describe('run', () => {
     };
     blind.transaction = realDb.transaction;
     const { counts, summary } = await run({ file, db: blind });
-    expect(counts).toEqual({ read: 8, inserted: 7, duplicates: 1, overlaps: 0, held: 0, unsure: 0 });
+    expect(counts).toEqual({ read: 8, inserted: 7, duplicates: 1, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
     // the summary covers the seven rows that landed, not the raced one
     expect(summary.rows).toBe(7);
     const clean = await run({ file, db: makeFakeDb() });
@@ -493,7 +493,7 @@ describe('shared helpers', () => {
     // an expense in the range refuses too
     const db2 = makeFakeDb();
     db2.tables().expenses.push({ id: 'e1', expense_date: target.date, amount: '5.00', vendor_name: 'X' });
-    await expect(run({ file, db: db2 })).rejects.toThrow(/0 bank row\(s\).*1 expense\(s\)/);
+    await expect(run({ file, db: db2 })).rejects.toThrow(/0 bank row\(s\).*1 hand-entered expense\(s\)/);
   });
 
   test('--skip-existing: a bank row of the SAME account, day, amount and direction is left out; the account is read from the label or the Plaid mask', async () => {
@@ -510,7 +510,7 @@ describe('shared helpers', () => {
     db.tables().plaid_accounts.push({ account_label: 'checking-main', mask: '3098' });
     db.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h2', source: 'plaid', account_label: 'checking-main', txn_date: new Date(`${second.date}T00:00:00`), description: 'Corner Fuel 12', amount: '4.00', direction: 'debit', status: 'created_expense' });
     const { counts, summary, report } = await run({ file, db, skipExisting: true });
-    expect(counts).toEqual({ read: 2, inserted: 0, duplicates: 0, overlaps: 2, held: 0, unsure: 0 });
+    expect(counts).toEqual({ read: 2, inserted: 0, duplicates: 0, overlaps: 2, held: 0, unsure: 0, handExpenses: 0 });
     expect(summary.rows).toBe(0);
     expect(report).toMatch(/already in the portal:\s+2 /);
     expect(db.tables().expenses).toHaveLength(0);
@@ -525,7 +525,7 @@ describe('shared helpers', () => {
     const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
     db.tables().bank_transactions.push({ id: 'up-9', row_hash: 'h9', source: 'csv', account_label: 'capone-card-9731', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'unmatched' });
     const { counts, report } = await run({ file, db, skipExisting: true });
-    expect(counts).toEqual({ read: 1, inserted: 1, duplicates: 0, overlaps: 0, held: 0, unsure: 1 });
+    expect(counts).toEqual({ read: 1, inserted: 1, duplicates: 0, overlaps: 0, held: 0, unsure: 1, handExpenses: 0 });
     expect(report).toMatch(/check these:\s+1 /);
     expect(report).toMatch(/portal account: capone-card-9731/);
     expect(db.tables().expenses).toHaveLength(1);
@@ -542,14 +542,14 @@ describe('shared helpers', () => {
     const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
     db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: 'Corner Fuel 12', amount: '4.00', direction: 'debit', status: 'created_expense' });
     const { counts } = await run({ file, db, skipExisting: true });
-    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0 });
+    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0, handExpenses: 0 });
     expect(db.tables().expenses).toHaveLength(1);
     expect(tupleKey({ txn_date: '2024-05-01', description: 'a  b', amount: '1', direction: 'debit' })).toBe('2024-05-01|A B|1.00|debit');
     expect(tupleKey({ txn_date: new Date(2024, 4, 1), description: 'A B', amount: 1, direction: 'debit' })).toBe('2024-05-01|A B|1.00|debit');
   });
 });
 
-describe('--skip-existing against expenses', () => {
+describe('--skip-existing and expenses', () => {
   const fixture = (...extra) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
     const file = path.join(dir, 'ledger-2025.csv');
@@ -557,57 +557,45 @@ describe('--skip-existing against expenses', () => {
     return file;
   };
 
-  test('an expense for the same day, amount and payee words leaves the ledger row out; a second ledger row for it loads as new', async () => {
-    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50' }));
+  test('a hand-entered expense in the range refuses without the flag; with it, it is listed, never matched by guesswork', async () => {
+    const file = fixture();
     const db = makeFakeDb();
     const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
-    db.tables().expenses.push({ id: 'exp-hand', expense_date: first.date, amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies', category_id: 'cat-3' });
-    const { counts } = await run({ file, db, skipExisting: true });
-    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0 });
-    expect(db.tables().expenses).toHaveLength(2); // the hand-entered one + one new, not three
-    expect(db.tables().bank_transactions).toHaveLength(1);
+    db.tables().expenses.push({ id: 'exp-hand', expense_date: first.date, amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies' });
+    await expect(run({ file, db })).rejects.toThrow(/1 hand-entered expense\(s\)/);
+    // same day and amount: the ledger row is held for the owner, not booked on top of it
+    const { counts, report } = await run({ file, db, skipExisting: true });
+    expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 0, overlaps: 0, held: 1, unsure: 0, handExpenses: 1 });
+    expect(report).toMatch(/hand-entered expenses:\s+1 in this range/);
+    expect(report).toMatch(/Acme Supply\s+12\.50/);
+    expect(report).toMatch(/\(portal: "Acme Supply" in a hand-entered expense\)/);
+    expect(db.tables().expenses).toHaveLength(1);
+    // a different amount on the same day is not held
+    const db2 = makeFakeDb();
+    db2.tables().expenses.push({ id: 'exp-other', expense_date: first.date, amount: '99.00', vendor_name: 'Acme Supply', description: 'supplies' });
+    const out2 = await run({ file, db: db2, skipExisting: true });
+    expect(out2.counts).toEqual({ read: 1, inserted: 1, duplicates: 0, overlaps: 0, held: 0, unsure: 0, handExpenses: 1 });
+    expect(db2.tables().expenses).toHaveLength(2);
   });
 
-  test('a bank row and the expense it is linked to are one transaction: two identical ledger rows skip one and load one', async () => {
-    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50' }));
+  test('an expense linked to a bank row is covered through that row: not listed, and the refusal does not count it', async () => {
+    const file = fixture();
     const db = makeFakeDb();
     const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
     db.tables().expenses.push({ id: 'exp-up', expense_date: first.date, amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
     db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card-3098', txn_date: first.date, description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-up' });
+    await expect(run({ file, db })).rejects.toThrow(/1 bank row\(s\).*0 hand-entered/);
     const { counts } = await run({ file, db, skipExisting: true });
-    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0 });
-    expect(db.tables().expenses).toHaveLength(2);
-    // the other way round: the expense matched first (bank row in another account) still consumes its bank row
-    const db2 = makeFakeDb();
-    db2.tables().expenses.push({ id: 'exp-up', expense_date: first.date, amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
-    db2.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card-9731', txn_date: first.date, description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-up' });
-    const second = await run({ file, db: db2, skipExisting: true });
-    // the expense is linked to a bank row of ANOTHER account: it is another charge, not this one
-    expect(second.counts).toEqual({ read: 2, inserted: 2, duplicates: 0, overlaps: 0, held: 0, unsure: 2 });
-    expect(db2.tables().expenses).toHaveLength(3);
+    expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 0, overlaps: 1, held: 0, unsure: 0, handExpenses: 0 });
+    expect(db.tables().expenses).toHaveLength(1);
   });
 
-  test('a different payee on the same day and amount is not a match', async () => {
+  test('expenses an earlier ledger run made are the ledger\'s own: a second run is not refused for them', async () => {
     const file = fixture();
     const db = makeFakeDb();
-    const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
-    db.tables().expenses.push({ id: 'exp-other', expense_date: first.date, amount: '12.50', vendor_name: 'Acme Roofing', description: 'roof' });
-    const { counts } = await run({ file, db, skipExisting: true });
-    expect(counts).toEqual({ read: 1, inserted: 1, duplicates: 0, overlaps: 0, held: 0, unsure: 0 });
-    expect(db.tables().expenses).toHaveLength(2);
-  });
-
-  test('vendorsAgree: equal word lists, or a two-word-or-longer run inside the other; one shared word is never enough', () => {
-    expect(vendorsAgree('Acme Supply', 'ACME SUPPLY 4471')).toBe(true);
-    expect(vendorsAgree('THE HOME DEPOT #123', 'Home Depot')).toBe(true);
-    expect(vendorsAgree('WAWA', 'WAWA 5519')).toBe(true);
-    expect(vendorsAgree('ONLINE PAYMENT ACME SUPPLY CO', 'ACME SUPPLY')).toBe(true);
-    expect(vendorsAgree('ACME SUPPLY', 'ACME ROOFING')).toBe(false);
-    expect(vendorsAgree('ACME', 'ACME SUPPLY 4471')).toBe(false);
-    expect(vendorsAgree('Corner Fuel', 'ACME SUPPLY 4471')).toBe(false);
-    expect(vendorsAgree('THE UPS STORE 1234', 'THE CORNER CAFE')).toBe(false);
-    expect(vendorsAgree('DEBIT CARD PURCHASE', 'CARD PAYMENT')).toBe(false);
-    expect(vendorsAgree('', 'ACME')).toBe(false);
+    await run({ file, db });
+    const second = await run({ file, db });
+    expect(second.counts).toEqual({ read: 1, inserted: 0, duplicates: 1, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
   });
 
   test('sameAccount: the ledger source (last four or amex) must appear in the label or equal the Plaid mask', () => {
@@ -626,7 +614,7 @@ describe('--skip-existing against expenses', () => {
     const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
     db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card-3098', txn_date: first.date, description: first.description, amount: '12.50', direction: 'debit', status: 'unmatched' });
     const { counts, report } = await run({ file, db, dryRun: true, skipExisting: true });
-    expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 0, overlaps: 1, held: 0, unsure: 0 });
+    expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 0, overlaps: 1, held: 0, unsure: 0, handExpenses: 0 });
     expect(report).toMatch(/DRY RUN/);
     expect(db.log.writes).toBe(0);
   });
@@ -643,16 +631,15 @@ describe('--skip-existing against expenses', () => {
     db.tables().plaid_accounts.push({ account_label: 'checking-main', mask: '3098' });
     db.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h2', source: 'plaid', account_label: 'checking-main', txn_date: first.date, description: 'Wawa', amount: '41.10', direction: 'debit', status: 'unmatched' });
     const { counts, report } = await run({ file, db, skipExisting: true });
-    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 0, held: 1, unsure: 0 });
+    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 0, held: 1, unsure: 0, handExpenses: 0 });
     expect(report).toMatch(/held, not imported:\s+1 /);
     expect(report).toMatch(/\(portal: "Wawa" in checking-main\)/);
     expect(db.tables().expenses).toHaveLength(1);
     expect(db.tables().expenses[0].vendor_name).toBe('ACME SUPPLY 4471');
-    // another account's row of the same day and amount does not hold it
     const db2 = makeFakeDb();
     db2.tables().bank_transactions.push({ id: 'pl-2', row_hash: 'h3', source: 'csv', account_label: 'card-9731', txn_date: first.date, description: 'Wawa', amount: '41.10', direction: 'debit', status: 'unmatched' });
     const second = await run({ file, db: db2, skipExisting: true });
-    expect(second.counts).toEqual({ read: 2, inserted: 2, duplicates: 0, overlaps: 0, held: 0, unsure: 0 });
+    expect(second.counts).toEqual({ read: 2, inserted: 2, duplicates: 0, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
   });
 
   test('an exact match later in the file reserves its portal row before a looser match earlier in the file', async () => {
@@ -666,26 +653,8 @@ describe('--skip-existing against expenses', () => {
     const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
     db.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h2', source: 'plaid', account_label: 'checking 3098', txn_date: first.date, description: 'Wawa', amount: '41.10', direction: 'debit', status: 'unmatched' });
     const { counts } = await run({ file, db, skipExisting: true });
-    // the exact "Wawa" row (second in the file) is the overlap; the first row has no same-account row left: imported
-    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0 });
+    expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0, handExpenses: 0 });
     expect(db.tables().expenses[0].vendor_name).toBe('DEBIT CARD PURCHASE - WAWA 5519 BRADENTON FL');
-  });
-
-  test('an expense linked to a bank row outside the file range still carries that account; a bank row used through its expense leaves every pool', async () => {
-    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50' }));
-    const db = makeFakeDb();
-    const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
-    // the expense sits in range; its bank row posted a week later, in ANOTHER account
-    db.tables().expenses.push({ id: 'exp-late', expense_date: first.date, amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
-    db.tables().bank_transactions.push({ id: 'b-late', row_hash: 'hl', source: 'csv', account_label: 'card-9731', txn_date: '2030-01-01', description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-late' });
-    const out = await run({ file, db, skipExisting: true });
-    expect(out.counts).toEqual({ read: 2, inserted: 2, duplicates: 0, overlaps: 0, held: 0, unsure: 0 });
-    // same account: one ledger row is left out for the expense, and its bank row is gone from the loose pool too
-    const db2 = makeFakeDb();
-    db2.tables().expenses.push({ id: 'exp-same', expense_date: first.date, amount: '12.50', vendor_name: 'Acme Supply', description: 'x' });
-    db2.tables().bank_transactions.push({ id: 'b-same', row_hash: 'hs', source: 'plaid', account_label: 'card-3098', txn_date: first.date, description: 'Acme', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-same' });
-    const out2 = await run({ file, db: db2, skipExisting: true });
-    expect(out2.counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0 });
   });
 
   test('parseArgs reads --skip-existing', () => {

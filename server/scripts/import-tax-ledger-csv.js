@@ -175,34 +175,6 @@ function sameAccount(source, accountLabel, masks) {
   return !!mask && mask.toLowerCase() === code;
 }
 
-function expenseKey(date, amount) {
-  return `${ymdOf(date)}|${Number(amount).toFixed(2)}`;
-}
-// Words that say nothing about the payee: bank framing, legal suffixes,
-// card and payment words. The anchor word of a vendor is its first word
-// that is not one of these.
-const GENERIC_VENDOR_WORDS = new Set(['THE', 'AND', 'INC', 'LLC', 'LTD', 'CORP', 'COM', 'WWW', 'NET', 'ORG', 'CARD', 'DEBIT', 'CREDIT', 'PURCHASE',
-  'PAYMENT', 'PMT', 'ONLINE', 'STORE', 'POS', 'ACH', 'CHECK', 'CHK', 'RECURRING', 'AUTOPAY', 'MOBILE', 'DIGITAL', 'ZELLE', 'MONEY', 'SENT', 'RECEIVED',
-  'FROM', 'TO', 'FOR', 'WITH', 'INTL', 'USA', 'US', 'FL', 'BRADENTON', 'SARASOTA', 'VENICE', 'TAMPA', 'PARRISH', 'ORLANDO']);
-const vendorWords = v => String(v || '').toUpperCase().replace(/[^A-Z ]+/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !GENERIC_VENDOR_WORDS.has(w));
-/**
- * Same payee, strictly enough for an automatic link: the two word lists are
- * equal, or the shorter one (at least two words) runs inside the longer one
- * in order. One shared word is not enough ("ACME SUPPLY" is not
- * "ACME ROOFING"; a lone "ACME" links to nothing but "ACME").
- */
-function vendorsAgree(a, b) {
-  const wa = vendorWords(a); const wb = vendorWords(b);
-  if (!wa.length || !wb.length) return false;
-  const [short, long] = wa.length <= wb.length ? [wa, wb] : [wb, wa];
-  if (short.length === long.length) return short.every((w, i) => w === long[i]);
-  if (short.length < 2) return false;
-  for (let i = 0; i + short.length <= long.length; i += 1) {
-    if (short.every((w, j) => w === long[i + j])) return true;
-  }
-  return false;
-}
-
 /** sha256 over the ledger identity tuple plus the in-file ordinal. */
 function rowHash(source, date, description, amount, direction, ordinal) {
   const tuple = `ledger|${source}|${date}|${description}|${Number(amount).toFixed(2)}|${direction}|${ordinal}`;
@@ -382,17 +354,19 @@ function formatTable(map, title) {
   return [`${title}:`, ...keys.map(k => `  ${k.padEnd(28)} ${String(map[k].count).padStart(5)}  ${fmtMoney(map[k].cents).padStart(14)}`)];
 }
 
-function formatReport({ dryRun, file, read, inserted, duplicates, overlaps = 0, held = [], unsure = [], summary }) {
+function formatReport({ dryRun, file, read, inserted, duplicates, overlaps = 0, held = [], unsure = [], handExpenses = [], summary }) {
   const lines = [
     `${dryRun ? 'DRY RUN - nothing written. ' : ''}Ledger import report for ${path.basename(file)}`,
     `rows read:                 ${read}`,
     `${dryRun ? 'would insert:              ' : 'inserted:                  '}${inserted}`,
     `skipped as duplicate:      ${duplicates}`,
     `already in the portal:     ${overlaps} (left out: a bank row of the same account, day, amount and direction, or an expense of the same day, amount and payee)`,
-    `held, not imported:        ${held.length} (a bank row of the SAME account has the same day, amount and direction under different text; decide it in Bank Import)`,
+    `held, not imported:        ${held.length} (a bank row of the SAME account, or a hand-entered expense, has the same day and amount; decide it in Bank Import)`,
     ...held.slice(0, 50).map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  (portal: "${h.other}" in ${h.account})`),
     `check these:               ${unsure.length} (imported; a bank row of ANOTHER or an unknown account has the same day, amount and direction)`,
     ...unsure.slice(0, 50).map(u => `  line ${u.line}  ${u.date}  ${u.description}  ${u.amount}  (portal account: ${u.other})`),
+    `hand-entered expenses:     ${handExpenses.length} in this range, not matched by guesswork; check each against the ledger once`,
+    ...handExpenses.slice(0, 50).map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}`),
     `${dryRun ? 'expenses to create:' : 'expenses created:'}`.padEnd(27) + summary.expensesCreated,
     ...formatTable(summary.byStatus, 'by status'),
     ...formatTable(summary.expensesByCategory, `expenses ${dryRun ? 'to create' : 'created'} by category`),
@@ -440,12 +414,13 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
   // The ledger is the book of record for a year the portal did not cover.
   // When the portal already holds rows for this date range from a bank feed
   // or an upload, or expenses, the import stops and says so; with
-  // --skip-existing it leaves out every ledger row that matches one of them
-  // (same day, amount and direction, in the SAME account for a bank row;
-  // same day, amount and payee words for an expense), one-for-one, and lists
-  // a match whose account it cannot tell as imported-but-check. Nothing is
-  // claimed, linked or merged: a charge is never booked twice, and the
-  // decision on an ambiguous one is the owner's, in Bank Import.
+  // --skip-existing it leaves out every ledger row that matches a bank row of
+  // the SAME account, day, amount and direction (exact text: skipped; other
+  // text: held), one-for-one, and lists a match whose account it cannot tell
+  // as imported-but-check. Expenses are never matched by guesswork; the
+  // hand-entered ones in the range are listed. Nothing is claimed, linked or
+  // merged: a charge is never booked twice, and an ambiguous one is the
+  // owner's call, in Bank Import.
   const dates = rows.map(r => r.date).sort();
   const range = [dates[0], dates[dates.length - 1]];
   const existingBank = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).whereNot('source', SOURCE_TAG)
@@ -454,10 +429,15 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
   // "already there from elsewhere": they are linked from a ledger bank row
   const ledgerMade = new Set(rows.length ? (await db('bank_transactions').where({ source: SOURCE_TAG }).whereBetween('txn_date', range).whereNotNull('matched_expense_id')
     .select('matched_expense_id')).map(r => r.matched_expense_id) : []);
-  const existingExpenses = rows.length ? (await db('expenses').whereBetween('expense_date', range)
-    .select('id', 'expense_date', 'amount', 'vendor_name', 'description')).filter(e => !ledgerMade.has(e.id)) : [];
-  if ((existingBank.length || existingExpenses.length) && !skipExisting) {
-    throw fail(`the portal already holds ${existingBank.length} bank row(s) from a feed or upload and ${existingExpenses.length} expense(s) between ${range[0]} and ${range[1]}; rerun with --skip-existing to leave out the ledger rows that match them (same day, amount, direction and account; same day, amount and payee for an expense)`);
+  // Expenses linked to a bank row are covered through that row. The rest are
+  // hand-entered: never matched by payee guesswork (text varies, amounts
+  // move with refunds); a ledger expense of the same day and amount is held
+  // for the owner, and the report lists them all to check once.
+  const linkedExpenseIds = new Set(existingBank.map(f => f.matched_expense_id).filter(Boolean));
+  const handExpenses = rows.length ? (await db('expenses').whereBetween('expense_date', range)
+    .select('id', 'expense_date', 'amount', 'vendor_name', 'description')).filter(e => !ledgerMade.has(e.id) && !linkedExpenseIds.has(e.id)) : [];
+  if ((existingBank.length || handExpenses.length) && !skipExisting) {
+    throw fail(`the portal already holds ${existingBank.length} bank row(s) from a feed or upload and ${handExpenses.length} hand-entered expense(s) between ${range[0]} and ${range[1]}; rerun with --skip-existing to leave out the ledger rows that match a bank row of the same account, day, amount and direction (hand-entered expenses are listed for you to check)`);
   }
   const masks = new Map((await db('plaid_accounts').select('account_label', 'mask')).map(a => [String(a.account_label), String(a.mask || '')]));
   const bankLeft = new Map();
@@ -475,35 +455,11 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
     const j = list.indexOf(row);
     if (j !== -1) list.splice(j, 1);
   };
-  const expenseLeft = new Map();
-  existingExpenses.forEach(e => { const k = expenseKey(e.expense_date, e.amount); if (!expenseLeft.has(k)) expenseLeft.set(k, []); expenseLeft.get(k).push(e); });
-  // an expense linked to a bank row carries that row's account: it can only
-  // match a ledger row of the same account (an unlinked, hand-entered
-  // expense has no account and matches on day, amount and payee alone). The
-  // linked row may sit outside the file's date range (an expense dated by
-  // the receipt, a bank row by the posting), so it is looked up by id.
-  const bankByExpense = new Map(existingBank.filter(f => f.matched_expense_id).map(f => [f.matched_expense_id, f]));
-  const unresolved = existingExpenses.map(e => e.id).filter(id => !bankByExpense.has(id));
-  for (const part of chunk(unresolved, HASH_LOOKUP_CHUNK)) {
-    const links = await db('bank_transactions').whereIn('matched_expense_id', part).select('id', 'account_label', 'matched_expense_id', 'txn_date', 'description', 'amount', 'direction');
-    links.forEach(f => { if (!bankByExpense.has(f.matched_expense_id)) bankByExpense.set(f.matched_expense_id, f); });
-  }
-  const accountFits = (source, e) => !bankByExpense.has(e.id) || sameAccount(source, bankByExpense.get(e.id).account_label, masks);
-  // A bank row and the expense it is linked to are ONE transaction: using
-  // either takes the other out of its pool, so a second identical ledger
-  // row is not skipped twice for one charge.
-  const dropExpense = (id) => {
-    for (const [k, list] of expenseLeft) {
-      const j = list.findIndex(e => e.id === id);
-      if (j !== -1) { list.splice(j, 1); if (!list.length) expenseLeft.delete(k); return; }
-    }
-  };
-  const dropBankLinkedTo = (expenseId) => {
-    for (const [k, list] of bankLeft) {
-      const j = list.findIndex(f => f.matched_expense_id === expenseId);
-      if (j !== -1) { const [used] = list.splice(j, 1); if (!list.length) bankLeft.delete(k); dropLoose(used); return; }
-    }
-  };
+  // A hand-entered expense of the same day and amount may be this very
+  // charge entered by hand: the ledger expense row is HELD (listed with the
+  // expense), one-for-one, never booked on top of it. No payee guessing.
+  const handLeft = new Map();
+  handExpenses.forEach(e => { const k = `${ymdOf(e.expense_date)}|${Number(e.amount).toFixed(2)}`; if (!handLeft.has(k)) handLeft.set(k, []); handLeft.get(k).push(e); });
 
   const categories = await db('expense_categories').select('id', 'name');
   const categoryIds = new Map(categories.map(c => [c.name, c.id]));
@@ -524,7 +480,6 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
     if (same !== -1) {
       const [used] = pool.splice(same, 1);
       dropLoose(used);
-      if (used.matched_expense_id) dropExpense(used.matched_expense_id);
       overlaps += 1;
       exactUsed.add(i);
     }
@@ -534,16 +489,11 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
     if (exactUsed.has(i)) return;
     const pool = bankLeft.get(tupleKey(m.bank)) || [];
     if (pool.length) unsure.push({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other: pool[0].account_label || '(no label)' });
-    // an expense of the same day, amount and payee (and account, when its
-    // bank row tells one) is the surer match: it goes before the loose hold,
-    // and takes its linked bank row out of every pool
     if (m.expense) {
-      const pool2 = expenseLeft.get(expenseKey(rows[i].date, m.bank.amount)) || [];
-      const idx = pool2.findIndex(e => accountFits(rows[i].source, e) && vendorsAgree(e.vendor_name || e.description, m.bank.description));
-      if (idx !== -1) {
-        const [used] = pool2.splice(idx, 1);
-        dropBankLinkedTo(used.id);
-        overlaps += 1;
+      const hand = handLeft.get(`${rows[i].date}|${Number(m.bank.amount).toFixed(2)}`) || [];
+      if (hand.length) {
+        const used = hand.shift();
+        held.push({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other: used.vendor_name || used.description || '(no text)', account: 'a hand-entered expense' });
         return;
       }
     }
@@ -554,7 +504,6 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
       const exact = bankLeft.get(tupleKey(used)) || [];
       const j = exact.indexOf(used);
       if (j !== -1) exact.splice(j, 1);
-      if (used.matched_expense_id) dropExpense(used.matched_expense_id);
       held.push({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other: used.description, account: used.account_label || '(no label)' });
       return;
     }
@@ -611,8 +560,8 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
   const landed = dryRun ? fresh : fresh.filter(m => !m.skipped);
   // Rows lost to an insert-time conflict are not in the report's tallies.
   const summary = summarize(landed);
-  const counts = { read: rows.length, inserted, duplicates, overlaps, held: held.length, unsure: unsure.length };
-  const report = formatReport({ dryRun, file, read: rows.length, inserted, duplicates, overlaps, held, unsure, summary });
+  const counts = { read: rows.length, inserted, duplicates, overlaps, held: held.length, unsure: unsure.length, handExpenses: handExpenses.length };
+  const report = formatReport({ dryRun, file, read: rows.length, inserted, duplicates, overlaps, held, unsure, handExpenses, summary });
   log(report);
   return { report, counts, summary };
 }
@@ -654,7 +603,6 @@ module.exports = {
   mapRow,
   categoryNameForLine,
   tupleKey,
-  vendorsAgree,
   sameAccount,
   rowHash,
   summarize,
