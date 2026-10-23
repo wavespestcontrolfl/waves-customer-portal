@@ -27,7 +27,6 @@ const DEFAULTS = mosquitoMistingPricingDefaults();
 
 const PRICE = [0, 20000];
 const COST = [0, 20000];
-const COUNT = [0, 200];
 const BOUNDS = Object.freeze({
   price: PRICE,
   hardwareCost: COST,

@@ -8,7 +8,6 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { MOSQUITO_MISTING } = require('../services/pricing-engine/constants');
 const config = require('../services/pricing-engine/mosquito-misting-config');
 const { priceMosquitoMisting } = require('../services/pricing-engine/service-pricing');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
@@ -314,6 +313,140 @@ describe('acceptance of a priced misting estimate is pending misting PR 2, even 
     } finally {
       constants.MOSQUITO_MISTING_CONVERSION_READY = false;
     }
+  });
+});
+
+describe('replay resolves an implicit tier and solution from the stamp, not the live defaults', () => {
+  test('a saved `mosquitoMisting: true` input replays the system it was sold as after the defaults change', () => {
+    const { MOSQUITO_MISTING: M } = require('../services/pricing-engine/constants');
+    const first = priceMosquitoMisting(PROPERTY, {});
+    expect(first.tier).toBe('smart');
+    expect(first.installation.price).toBe(4595);
+    const savedTier = M.defaultTier;
+    const savedSolution = M.defaultSolution;
+    try {
+      M.defaultTier = 'essential';
+      M.defaultSolution = 'premium';
+      const fresh = priceMosquitoMisting(PROPERTY, {});
+      expect(fresh.tier).toBe('essential');
+      expect(fresh.installation.price).toBe(3795);
+      const replay = priceMosquitoMisting(PROPERTY, { knobs: first.pricingKnobs });
+      expect(replay.tier).toBe('smart');
+      expect(replay.solution).toBe('standard');
+      expect(replay.installation.price).toBe(first.installation.price);
+      expect(replay.annual).toBe(first.annual);
+      expect(replay.refill.perFill).toBe(first.refill.perFill);
+      expect(replay.manualReviewReasons).toEqual([]);
+      // an explicit option still wins, and a mismatch with the stamp skips the stamp
+      const explicit = priceMosquitoMisting(PROPERTY, { tier: 'essential', knobs: first.pricingKnobs });
+      expect(explicit.tier).toBe('essential');
+      expect(explicit.installation.price).toBe(3795);
+      // through the engine, with the saved input shape `true`
+      const est = generateEstimate({ ...PROPERTY, services: { mosquitoMisting: true }, mistingPricingKnobs: first.pricingKnobs });
+      expect(est.lineItems.find((l) => l.service === 'mosquito_misting').installation.price).toBe(4595);
+    } finally {
+      M.defaultTier = savedTier;
+      M.defaultSolution = savedSolution;
+    }
+  });
+});
+
+describe('an authored proposal keeps the misting identity', () => {
+  const { normalizeBuilding, normalizePrograms } = require('../services/estimate-proposal');
+  // The PUT stores buildings / programs through these normalizers; the detector reads what they persist.
+  const authored = (lines, programs) => ({
+    result: { recurring: { services: [{ service: 'pest_control', mo: 40 }] } },
+    proposal: {
+      enabled: true,
+      buildings: [normalizeBuilding({ name: 'Home', lineItems: lines })],
+      ...(programs ? { programs: normalizePrograms(programs) } : {}),
+    },
+  });
+  const planLine = { description: 'Mosquito Misting Service Plan — 12 applications/yr', unitPrice: 59, frequency: 'per_application', visitsPerYear: 12 };
+  const installLine = { service: 'mosquito_misting_installation', description: 'Essential system (drum) Installation', unitPrice: 4000, frequency: 'one_time' };
+  const commercialLine = { service: 'commercial_pest', originalRequestedService: 'mosquito_misting', label: 'Mosquito Misting System (commercial)', description: 'Commercial misting', unitPrice: 9000, frequency: 'one_time' };
+  const plainLine = { description: 'Quarterly pest control', unitPrice: 120, frequency: 'quarterly' };
+
+  test('the normalizers keep the identity on a misting line and a program, and change nothing else', () => {
+    const data = authored([planLine, installLine, commercialLine, plainLine], [{ service: 'mosquito', label: 'Mosquito Misting Service Plan', frequencyPerYear: 12, pricePerApplication: 59 }]);
+    const lines = data.proposal.buildings[0].lineItems;
+    expect(lines[0].service).toBe('mosquito_misting');
+    expect(lines[1].service).toBe('mosquito_misting_installation');
+    expect(lines[2]).toMatchObject({ service: 'mosquito_misting', originalRequestedService: 'mosquito_misting' });
+    expect(lines[3]).not.toHaveProperty('service');
+    expect(data.proposal.programs[0]).toMatchObject({ service: 'mosquito', identity: 'mosquito_misting' });
+    const plain = authored([plainLine], [{ service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 120 }]);
+    expect(plain.proposal.buildings[0].lineItems[0]).not.toHaveProperty('service');
+    expect(plain.proposal.programs[0]).not.toHaveProperty('identity');
+  });
+
+  test.each([['the plan line', [planLine]], ['the install line', [installLine]], ['the commercial manual-quote line', [commercialLine]]])('%s: gated with the gate off, accept-pending with the gate on', (_n, lines) => {
+    const data = authored(lines);
+    expect(data.proposal.enabled).toBe(true);
+    expect(mapper.estimateMistingAcceptBlocked(data)).toBe(true);
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+    delete process.env.GATE_MOSQUITO_MISTING;
+    expect(mapper.estimateMistingGated(data)).toBe(true);
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_GATED' });
+    expect(mapper.gatedAddOnStaffRefusal(data, 'accepting')).toMatchObject({ code: 'MOSQUITO_MISTING_GATED' });
+  });
+
+  test('a misting PROGRAM is detected', () => {
+    const data = authored([plainLine], [{ service: 'other', identity: 'mosquito_misting', label: 'Misting plan', frequencyPerYear: 12, pricePerApplication: 59 }]);
+    expect(mapper.estimateMistingAcceptBlocked(data)).toBe(true);
+  });
+
+  test('a proposal with no misting line is not carried, and the retained engine rows do not leak through proposal mode', () => {
+    const none = authored([plainLine]);
+    expect(mapper.estimateDataCarriesMosquitoMisting(none)).toBe(false);
+    expect(mapper.estimateMistingAcceptBlocked(none)).toBe(false);
+    const leftover = { ...none, engineResult: { lineItems: [{ service: 'mosquito_misting', annual: 708 }] } };
+    expect(mapper.estimateDataCarriesMosquitoMisting(leftover)).toBe(false);
+  });
+
+  test('the free design visit is not the misting system, and an unpriced misting line does not block', () => {
+    const design = authored([{ service: 'mosquito_misting_system', description: 'Mosquito Misting System Service', unitPrice: 0, frequency: 'one_time' }, plainLine]);
+    expect(mapper.estimateDataCarriesMosquitoMisting(design)).toBe(false);
+    const unpriced = authored([{ ...planLine, unitPrice: 0 }, plainLine]);
+    expect(mapper.estimateDataCarriesMosquitoMisting(unpriced)).toBe(true);
+    expect(mapper.estimateMistingAcceptBlocked(unpriced)).toBe(false);
+  });
+});
+
+describe('bare "misting" stays the barrier mosquito program', () => {
+  const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
+  const normalizer = require('../utils/service-normalizer');
+
+  test('the shared predicate: key-first, then the system / service plan phrases only', () => {
+    for (const yes of ['mosquito_misting', 'mosquito_misting_system', 'mosquito_misting_install', 'Mosquito Misting Service Plan', 'Mosquito Misting System Service']) {
+      expect(isMistingSystemIdentity(yes)).toBe(true);
+    }
+    for (const no of ['21-day mosquito misting', 'mosquito misting', 'misting', 'Mosquito Misting', 'Mosquito Control', 'mosquito', '', null, undefined]) {
+      expect(isMistingSystemIdentity(no)).toBe(false);
+    }
+  });
+
+  test('recurringServiceKey and the seeder', () => {
+    expect(converter.recurringServiceKey({ name: '21-day mosquito misting' })).toBe('mosquito');
+    expect(converter.recurringServiceKey({ name: 'Mosquito Misting' })).toBe('mosquito');
+    expect(seeder.serviceKeyFor({ name: '21-day mosquito misting' })).toBe('mosquito');
+    for (const svc of [{ service: 'mosquito_misting' }, { name: 'Mosquito Misting Service Plan' }, { name: 'Mosquito Misting System Service' }]) {
+      expect(converter.recurringServiceKey(svc)).toBe('mosquito_misting');
+      expect(seeder.serviceKeyFor(svc)).toBe('mosquito_misting');
+    }
+  });
+
+  test('the existing-services resolver and the add-service request', () => {
+    const { toQualifyingKeys } = require('../services/waveguard-existing-services');
+    expect(toQualifyingKeys('21-day mosquito misting')).toContain('mosquito');
+    expect(toQualifyingKeys('Mosquito Misting Service Plan')).not.toContain('mosquito');
+    expect(toQualifyingKeys('mosquito_misting')).not.toContain('mosquito');
+  });
+
+  test('the service-name normalizer', () => {
+    expect(normalizer.normalizeServiceType('21-day mosquito misting')).toBe('Mosquito Barrier Treatment');
+    expect(normalizer.normalizeServiceType('Mosquito Misting Service Plan')).toBe('Mosquito Misting Service Plan');
+    expect(normalizer.normalizeServiceType('Mosquito Misting System Service')).toBe('Mosquito Misting System Service');
   });
 });
 

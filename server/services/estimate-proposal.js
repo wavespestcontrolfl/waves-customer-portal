@@ -65,6 +65,7 @@ function normalizeFrequency(value) {
 const { PROPOSAL_UNITS, roundDecimal, proposalLineAmount } = require('../../shared/proposal-bid.cjs');
 
 function normalizeLineItem(raw = {}) {
+  const mistingIdentity = require('../utils/mosquito-misting-system').mistingProposalIdentity(raw);
   const quantity = num(raw.quantity, 1) > 0 ? roundDecimal(raw.quantity ?? 1) : 1;
   // Proposal lines are commercial quote amounts — never negative. Clamp at the
   // authoritative normalizer (the PDF and computeProposalTotals both read this)
@@ -85,6 +86,9 @@ function normalizeLineItem(raw = {}) {
   return {
     ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
     description: String(raw.description || raw.name || '').slice(0, 300),
+    // The mosquito misting SYSTEM keeps a canonical identity (GATE_MOSQUITO_MISTING) so an authored proposal, whose lines
+    // otherwise carry no service, is still seen by the gated-estimate and acceptance-pending refusals. Other lines are unchanged.
+    ...(mistingIdentity ? { service: mistingIdentity, ...(raw.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}), ...(raw.quoteRequired === true ? { quoteRequired: true } : {}) } : {}),
     quantity,
     ...(Object.hasOwn(PROPOSAL_UNITS, raw.unit) ? { unit: raw.unit } : {}),
     unitPrice,
@@ -216,6 +220,7 @@ const PROGRAM_FAMILIES = ['pest', 'lawn', 'tree_shrub', 'mosquito', 'termite', '
 
 function normalizeProgram(raw = {}) {
   const family = PROGRAM_FAMILIES.includes(String(raw.service || '').trim()) ? String(raw.service).trim() : 'other';
+  const mistingIdentity = require('../utils/mosquito-misting-system').mistingProposalIdentity(raw);
   const frequencyPerYear = (() => {
     const n = Number(raw.frequencyPerYear ?? raw.visitsPerYear);
     return Number.isFinite(n) && n >= 1 && n <= 52 ? Math.round(n) : 0;
@@ -227,6 +232,7 @@ function normalizeProgram(raw = {}) {
   const annual = roundMoney(pricePerApplication * frequencyPerYear);
   return {
     service: family,
+    ...(mistingIdentity ? { identity: 'mosquito_misting' } : {}),
     label: cleanString(raw.label ?? raw.name, 120) || 'Recurring service program',
     frequencyPerYear,
     pricePerApplication,
@@ -552,6 +558,7 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
       // The per-application lines already cover the recurring side.
       if (havePerApplicationRecurring || suppressRecurringPricing) continue;
       lineItems.push(normalizeLineItem({
+        service: line.service,
         description: line.displayName || line.name || line.service || 'Recurring service',
         unitPrice: monthly,
         frequency: 'monthly',
@@ -559,6 +566,7 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
       }));
     } else if (oneTime > 0) {
       lineItems.push(normalizeLineItem({
+        service: line.service,
         description: line.displayName || line.name || line.service || 'One-time service',
         unitPrice: oneTime,
         frequency: 'one_time',
@@ -614,6 +622,7 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
         const isCharged = charged.includes(row);
         if (!isCharged && !included.includes(row)) continue;
         lineItems.push(normalizeLineItem({
+          service: row.service,
           description: isCharged
             ? (row.label || row.service || 'One-time service')
             : `${row.label || row.service || 'One-time service'} (Included)`,

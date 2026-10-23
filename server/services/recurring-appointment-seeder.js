@@ -7,6 +7,7 @@ const {
   etNthWeekdayOfMonth,
 } = require('../utils/datetime-et');
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 const { isAssignable, absentTechDays } = require('./technician-eligibility');
@@ -220,7 +221,7 @@ function serviceKeyFor(value = {}) {
   if (/\+/.test(raw) && /pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
   if (/lawn|turf|fertili[sz]|weed|fungus|chinch/.test(raw)) return 'lawn_care';
   // The misting system plan is not the barrier program: no barrier cadence or follow-up seeding for it.
-  if (/misting/.test(raw)) return 'mosquito_misting';
+  if (isMistingSystemIdentity(raw)) return 'mosquito_misting';
   if (/mosquito/.test(raw)) return 'mosquito';
   if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
   if (/palm/.test(raw)) return 'palm_injection';

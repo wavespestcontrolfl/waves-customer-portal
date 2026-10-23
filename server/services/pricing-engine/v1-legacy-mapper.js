@@ -1702,7 +1702,8 @@ function proposalCarriesMisting(proposal) {
     ...(proposal.buildings || []).flatMap((building) => building?.lineItems || []),
     ...(proposal.programs || []), ...(proposal.correctiveWork || []),
   ];
-  return lines.some((line) => line?.service === 'mosquito_misting' || line?.service === 'mosquito_misting_installation');
+  const { mistingProposalIdentity } = require('../../utils/mosquito-misting-system');
+  return lines.some((line) => !!mistingProposalIdentity(line));
 }
 function estimateDataCarriesMosquitoMisting(estimateDataRaw, { pricingAuthority = null } = {}) {
   let d = estimateDataRaw;
@@ -1745,7 +1746,11 @@ function estimateDataCarriesPricedMisting(estimateDataRaw, { pricingAuthority = 
       ...(d.proposal.buildings || []).flatMap((building) => building?.lineItems || []),
       ...(d.proposal.programs || []), ...(d.proposal.correctiveWork || []),
     ];
-    return lines.some((line) => (line?.service === 'mosquito_misting' || line?.service === 'mosquito_misting_installation') && line.quoteRequired !== true);
+    const { mistingProposalIdentity } = require('../../utils/mosquito-misting-system');
+    const numberOf = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    // Priced = carries an amount (a line's unitPrice / amount, a program's pricePerApplication); a quote-required line does not count.
+    return lines.some((line) => !!mistingProposalIdentity(line) && line.quoteRequired !== true
+      && (numberOf(line.unitPrice) > 0 || numberOf(line.amount) > 0 || numberOf(line.pricePerApplication) > 0));
   }
   const rows = storedMistingRows(d, { pricingAuthority });
   if (rows.length) return rows.some((row) => row.quoteRequired !== true);

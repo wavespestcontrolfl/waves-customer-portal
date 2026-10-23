@@ -63,7 +63,7 @@ const SERVICE_TYPE_MAP = [
   // The misting SYSTEM is not the barrier treatment: keep its own label.
   // The lead-only design visit keeps its own catalog name (migration 20260924000020).
   { match: /misting\s*system/i,                             type: 'Mosquito Misting System Service' },
-  { match: /misting/i,                                      type: 'Mosquito Misting Service Plan' },
+  { match: /misting\s*service\s*plan/i,                    type: 'Mosquito Misting Service Plan' },
   { match: /seasonal.*mosquito|mosquito.*seasonal/i,        type: 'Seasonal Mosquito Control Service' },
   { match: /monthly.*mosquito|mosquito.*monthly/i,          type: 'Monthly Mosquito Control Service' },
   { match: /mosquito/i,                                     type: 'Mosquito Barrier Treatment' },

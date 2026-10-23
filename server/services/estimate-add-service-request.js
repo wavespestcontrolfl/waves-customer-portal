@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const { greetingFirstName } = require('../utils/greeting-first-name');
+const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const logger = require('./logger');
 const AccountMembershipEmail = require('./account-membership-email');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -99,7 +100,7 @@ function normalizeRequestedServiceKey(value) {
   if (!raw) return null;
   if (Object.prototype.hasOwnProperty.call(SERVICE_LABELS, raw)) return raw;
   if (raw.includes('lawn')) return 'lawn_care';
-  if (raw.includes('misting')) return null;
+  if (isMistingSystemIdentity(raw)) return null;
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite')) return 'termite_bait';
   if (raw.includes('pest')) return 'pest_control';

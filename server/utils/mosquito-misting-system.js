@@ -71,6 +71,35 @@ const MISTING_SYSTEM_NAME_PATTERN = /\bmisting[\s_-]+systems?\b/i;
 // "service" is excluded on purpose — see the module comment above.
 const MISTING_SYSTEM_SUBTYPE_QUALIFIER_PATTERN = /\b(install(?:ation|ed|s)?|maint(?:ain\w*|enance)|refill\w*|repair\w*)\b/i;
 
+// ONE predicate for "is this row the misting SYSTEM (the engine's install + plan line and the design-visit family), not the
+// barrier mosquito program?". The barrier program's own copy says "misting" ("21-day misting", "mosquito misting"), so a bare
+// "misting" is NEVER the system. A row is the system when its KEY is `mosquito_misting` or any `mosquito_misting_*` key, or
+// (a name, no key) when it contains the phrase "misting system" or "misting service plan". Every resolver that classifies by
+// key or name uses this instead of its own includes('misting').
+const MISTING_SYSTEM_KEY_PATTERN = /^mosquito_misting(?:_[a-z0-9_]+)?$/;
+const MISTING_SYSTEM_PLAN_NAME_PATTERN = /\bmisting[\s_-]+(?:systems?|service[\s_-]+plans?)\b/i;
+function isMistingSystemIdentity(value) {
+  const raw = String(value == null ? '' : value).trim().toLowerCase();
+  if (!raw) return false;
+  return MISTING_SYSTEM_KEY_PATTERN.test(raw) || MISTING_SYSTEM_PLAN_NAME_PATTERN.test(raw);
+}
+
+// The misting SYSTEM identity of a proposal line or program (estimate-proposal.js keeps it through normalization, so the gate and
+// the acceptance-pending refusals can still see a priced misting row once staff authors a proposal). Key fields are matched by
+// key shape (`mosquito_misting`, `mosquito_misting_installation`, ...) EXCEPT the free design visit `mosquito_misting_system`,
+// which is a different identity; text fields only by the engine's own plan phrase or the commercial manual-quote label.
+const MISTING_PROPOSAL_KEY_PATTERN = /^mosquito_misting(?!_system$)(?:_[a-z0-9_]+)?$/;
+const MISTING_PROPOSAL_TEXT_PATTERN = /misting\s+service\s+plan|misting\s+system\s*\(commercial\)/i;
+function mistingProposalIdentity(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const keys = [raw.service, raw.serviceKey, raw.service_key, raw.originalRequestedService, raw.identity, raw.family]
+    .map((v) => String(v == null ? '' : v).trim().toLowerCase()).filter(Boolean);
+  const hit = keys.find((k) => MISTING_PROPOSAL_KEY_PATTERN.test(k));
+  if (hit) return hit.includes('installation') ? 'mosquito_misting_installation' : 'mosquito_misting';
+  const text = [raw.label, raw.name, raw.description].map((v) => String(v == null ? '' : v)).join(' ');
+  return MISTING_PROPOSAL_TEXT_PATTERN.test(text) ? 'mosquito_misting' : null;
+}
+
 function normalizeServiceKey(serviceKey) {
   return serviceKey ? String(serviceKey).trim().toLowerCase() : '';
 }
@@ -94,7 +123,7 @@ function matchesMistingSystemName(...values) {
  */
 function isMistingSystemService({ serviceKey, name, text } = {}) {
   const key = normalizeServiceKey(serviceKey);
-  if (key === MISTING_SYSTEM_SERVICE_KEY || key === MISTING_ENGINE_SERVICE_KEY) return true;
+  if (key === MISTING_SYSTEM_SERVICE_KEY || key === MISTING_ENGINE_SERVICE_KEY || MISTING_SYSTEM_KEY_PATTERN.test(key)) return true;
   return matchesMistingSystemName(name, text);
 }
 
@@ -138,6 +167,8 @@ function isMistingSystemServiceUnconfigured({ serviceKey, name } = {}) {
 module.exports = {
   MISTING_SYSTEM_SERVICE_KEY,
   MISTING_ENGINE_SERVICE_KEY,
+  isMistingSystemIdentity,
+  mistingProposalIdentity,
   MISTING_SYSTEM_NAME_PATTERN,
   isMistingSystemService,
   isMistingDesignConsultation,

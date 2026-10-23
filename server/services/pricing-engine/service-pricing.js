@@ -4995,14 +4995,18 @@ function priceMosquitoMisting(property, options = {}) {
   const M = MOSQUITO_MISTING;
   const reasons = [];
 
-  let tier = String(options.tier ?? M.defaultTier).trim().toLowerCase();
+  // A replay (options.knobs, the stored quote-time snapshot) resolves an IMPLICIT tier or solution from the stamp itself, so a
+  // saved input like `mosquitoMisting: true` replays the system it was sold as even after the live defaults change. An
+  // explicit option still wins; a mismatch with the stamp still skips the stamp (below).
+  const stamped = options.knobs && typeof options.knobs === 'object' && !Array.isArray(options.knobs) ? options.knobs : null;
+  let tier = String(options.tier ?? stamped?.tier ?? M.defaultTier).trim().toLowerCase();
   if (!Object.prototype.hasOwnProperty.call(M.tiers, tier)) {
     reasons.push('mosquito_misting_unknown_tier');
     tier = M.defaultTier;
   }
   const tierCfg = M.tiers[tier];
 
-  let solution = String(options.solution ?? M.defaultSolution).trim().toLowerCase();
+  let solution = String(options.solution ?? stamped?.refillSolution ?? M.defaultSolution).trim().toLowerCase();
   if (!Object.prototype.hasOwnProperty.call(M.refills, solution)) {
     reasons.push('mosquito_misting_unknown_solution');
     solution = M.defaultSolution;
