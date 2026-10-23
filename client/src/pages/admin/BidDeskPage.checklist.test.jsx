@@ -291,3 +291,22 @@ it("downloads a document through the email attachment route, built by the page f
   await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
   expect(adminFetch).toHaveBeenCalledWith("/admin/email/message/m1/attachment/g%2F1", { skipContentType: true });
 });
+
+it("offers Add missing lines once the type changes on a checklist that is already started", async () => {
+  let type = "quote";
+  const lines = [item(1, { template_key: "base.bid_form" }), item(2)];
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({
+      bid: bid({ solicitation_type: type }), checklist: lines, checklist_progress: { checked: 0, required: 2, total: 2 },
+      checklist_missing: type === "quote" ? 0 : 15,
+    })),
+    "PATCH /admin/bid-desk/b1": () => { type = "itb"; return reply({ ok: true, bid: bid({ solicitation_type: "itb" }) }); },
+  });
+  renderPage();
+  await screen.findByLabelText("Line 1");
+  expect(screen.queryByRole("button", { name: "Add missing lines for this type" })).toBeNull();
+  fireEvent.change(screen.getByLabelText("Solicitation type"), { target: { value: "itb" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
+  expect(await screen.findByRole("button", { name: "Add missing lines for this type" })).toBeInTheDocument();
+});

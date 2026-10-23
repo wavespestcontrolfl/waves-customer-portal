@@ -308,11 +308,12 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
     }
   }, [bidId, onProgress]);
 
-  // A linked or unlinked estimate changes the summary the server builds.
+  // A linked or unlinked estimate, or a new solicitation type, changes what the server builds (the estimate summary,
+  // and how many template lines for the type the bid does not carry yet).
   useEffect(() => {
     if (first.current) { first.current = false; return; }
     refresh().catch(() => {});
-  }, [bid.estimate_id, refresh]);
+  }, [bid.estimate_id, bid.solicitation_type, refresh]);
 
   // Runs one checklist call, then reloads the lines. Returns whether it worked.
   const run = async (call) => {
