@@ -32,7 +32,8 @@ function formatPropertyAddress(p) {
 function selectedCoordinates(selected, form) {
   if (!selected || selected.lat == null || selected.lng == null) return {};
   const same = (a, b) => String(a || "").toLowerCase().replace(/[^a-z0-9]/g, "") === String(b || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const unchanged = same(selected.line1, form.address_line1) && same(selected.city, form.city) && String(selected.zip || "").slice(0, 5) === String(form.zip || "").slice(0, 5);
+  const unchanged = same(selected.line1, form.address_line1) && same(selected.city, form.city) && same(selected.state, form.state)
+    && String(selected.zip || "").slice(0, 5) === String(form.zip || "").slice(0, 5);
   return unchanged ? { latitude: selected.lat, longitude: selected.lng } : {};
 }
 

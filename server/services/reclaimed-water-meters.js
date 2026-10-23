@@ -210,9 +210,15 @@ async function matchProperties({ knex = defaultDb, now = new Date(), all = true 
       if (!all) q.where((w) => w.whereNull('reclaimed_water_checked_at').orWhere('reclaimed_water_checked_at', '<', layerAt));
     })
     .select('id', 'latitude', 'longitude', 'reclaimed_water_source');
-  const found = rows.filter((row) => atMeter(index, Number(row.latitude), Number(row.longitude)));
-  const gone = rows.filter((row) => row.reclaimed_water_source === 'county_meter' && !found.includes(row));
-  const missed = rows.filter((row) => row.reclaimed_water_source == null && !found.includes(row));
+  // One pass: each row lands in exactly one group (a linear classification, never a search of the matched list per row).
+  const found = [];
+  const gone = [];
+  const missed = [];
+  for (const row of rows) {
+    if (atMeter(index, Number(row.latitude), Number(row.longitude))) found.push(row);
+    else if (row.reclaimed_water_source === 'county_meter') gone.push(row);
+    else missed.push(row);
+  }
   // A property at no meter keeps no value (source and answer NULL) but carries the time it was checked: "no county meter here".
   const at = now.toISOString();
   let written = 0;

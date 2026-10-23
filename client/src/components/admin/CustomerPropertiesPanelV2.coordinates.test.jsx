@@ -71,6 +71,15 @@ describe('CustomerPropertiesPanelV2: coordinates of a picked address', () => {
     expect(body).not.toHaveProperty('longitude');
   });
 
+  it('changing only the state after the pick sends no coordinates (the pin was for the picked state)', async () => {
+    const fetchMock = await openAndPick(PARTS);
+    fireEvent.change(document.getElementById('cp-state'), { target: { value: 'GA' } });
+    const body = await save(fetchMock);
+    expect(body).toMatchObject({ address_line1: '30 Bay Rd', state: 'GA' });
+    expect(body).not.toHaveProperty('latitude');
+    expect(body).not.toHaveProperty('longitude');
+  });
+
   it('typing an address by hand (no pick) sends no coordinates', async () => {
     window.__PICK__ = PARTS;
     const fetchMock = vi.fn((url, opts = {}) => (opts.method === 'POST' ? json({ properties: [PRIMARY] }, 201) : json(LIST_ON)));
