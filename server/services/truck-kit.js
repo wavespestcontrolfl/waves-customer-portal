@@ -127,7 +127,9 @@ function linesForService(serviceType, serviceKey, serviceCategory = null) {
 // key, a foam job the drill kit), by service key or by name for legacy rows.
 const PROMOTED_KITS = [
   { keys: ['bait_station_key'], key: /bait|cartridge|monitoring|station/i, name: /\b(bait\s*station|termite\s*bait|cartridge|monitoring)\b/i },
-  { keys: ['foam_drill_kit'], key: /foam|drill/i, name: /\b(foam|drill)\b/i },
+  // termite_spot_treatment resolves through the foam_drill protocol
+  // (protocol-matcher.js; engine key termite_foam): same kit.
+  { keys: ['foam_drill_kit'], key: /foam|drill|spot/i, name: /\b(foam|drill|spot\s*treatment)\b/i },
 ];
 function promotedKeysFor(serviceType, serviceKey) {
   const out = [];

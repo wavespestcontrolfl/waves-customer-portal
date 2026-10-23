@@ -56,7 +56,9 @@ export default function TechTruckCheckPage() {
       const res = await fetch(`${API}/api/tech/truck-check`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getAdminAuthToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ results: kit.map((item) => ({ equipmentId: item.id, state: stateOf(item), note: noteOf(item) })) }),
+        // A note typed for a missing or damaged item and then switched back
+        // to Here never rides along on a present result.
+        body: JSON.stringify({ results: kit.map((item) => ({ equipmentId: item.id, state: stateOf(item), note: stateOf(item) === 'present' ? '' : noteOf(item) })) }),
       });
       const body = await res.json().catch(() => ({}));
       if (res.status === 409 && body.code === 'kit_changed') {

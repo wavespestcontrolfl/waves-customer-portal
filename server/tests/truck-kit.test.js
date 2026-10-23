@@ -405,6 +405,8 @@ describe('tool gaps by kit key', () => {
     ])];
     expect(truckKit.requirementsFor('Termite Bait Station System', { serviceKey: 'termite_bait' })).toEqual({ lines: ['termite'], promote: new Set(['bait_station_key']), restrict: null });
     expect(truckKit.requirementsFor('Drill and Foam Treatment', { serviceKey: 'foam_drill' }).promote).toEqual(new Set(['foam_drill_kit']));
+    expect(truckKit.requirementsFor('Termite Spot Treatment Service', { serviceKey: 'termite_spot_treatment' }).promote).toEqual(new Set(['foam_drill_kit']));
+    expect(truckKit.requirementsFor('Termite Spot Treatment Service').promote).toEqual(new Set(['foam_drill_kit']));
     expect(truckKit.requirementsFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' }).promote).toEqual(new Set());
     db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
     expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'WDO Inspection (Termite Letter)' })).toBeNull();
