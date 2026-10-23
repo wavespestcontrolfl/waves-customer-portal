@@ -569,16 +569,23 @@ function askMatchWorker(patterns, subjects, capMs) {
     worker.postMessage({ subjects });
   }).finally(() => worker.terminate().catch(() => {}));
 }
-// hits[i] = indexes into `rules` that match subjects[i]; a rule that
-// overruns the cap on its own goes to `slow` and matches nothing
-async function matchSplit(rules, subjects, capMs, slow) {
-  const out = await askMatchWorker(rules.map((r) => r.pattern), subjects, capMs);
+// hits[i] = indexes into `rules` that match subjects[i]. One absolute
+// deadline covers the whole page, the halving included: N slow rules would
+// otherwise cost 2N-1 capped workers in a row (minutes) long after the pass
+// budget. A rule that overruns a FULL cap on its own goes to `slow` and
+// matches nothing; rules the deadline left unjudged (a shortened budget says
+// nothing about them) go to `skipped`.
+async function matchSplit(rules, subjects, capMs, deadline, slow, skipped) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) { skipped.push(...rules); return subjects.map(() => []); }
+  const budget = Math.min(capMs, remaining);
+  const out = await askMatchWorker(rules.map((r) => r.pattern), subjects, budget);
   if (out.hits) return out.hits;
   if (out.error) throw new Error(`rule matching failed: ${out.error}`);
-  if (rules.length === 1) { slow.push(rules[0]); return subjects.map(() => []); }
+  if (rules.length === 1) { (budget >= capMs ? slow : skipped).push(rules[0]); return subjects.map(() => []); }
   const half = Math.ceil(rules.length / 2);
-  const left = await matchSplit(rules.slice(0, half), subjects, capMs, slow);
-  const right = await matchSplit(rules.slice(half), subjects, capMs, slow);
+  const left = await matchSplit(rules.slice(0, half), subjects, capMs, deadline, slow, skipped);
+  const right = await matchSplit(rules.slice(half), subjects, capMs, deadline, slow, skipped);
   return left.map((l, i) => [...l, ...right[i].map((j) => j + half)]);
 }
 async function disableSlowRule(rule) {
@@ -588,13 +595,28 @@ async function disableSlowRule(rule) {
     enabled: false, note: `disabled: too slow on real descriptions${rule.note ? ` (${rule.note})` : ''}`, updated_at: new Date(),
   });
 }
-async function matchPage(compiled, subjects, { capMs = MATCH_HARD_CAP_MS } = {}) {
+// The page deadline: the first attempt plus one capped attempt per halving
+// level, enough to isolate one slow rule (about 20 s at the checked-in caps
+// for 250 rules), never the 2N-1 attempts N slow rules would take. When it
+// is spent the page is not judged (null): nothing is stamped on a partial
+// answer, the pass stops with the page's own cursor, and the next pass
+// retries it with the slow rules found so far disabled.
+function pageDeadline(capMs, n) {
+  return Date.now() + capMs * (2 + Math.ceil(Math.log2(Math.max(2, n))));
+}
+async function matchPage(compiled, subjects, { capMs = MATCH_HARD_CAP_MS, deadline = pageDeadline(capMs, compiled.length) } = {}) {
   if (!compiled.length || !subjects.length) return subjects.map(() => []);
   const slow = [];
-  const hits = await matchSplit(compiled, subjects.map((s) => String(s || '').slice(0, MAX_DESCRIPTION)), capMs, slow);
+  const skipped = [];
+  const hits = await matchSplit(compiled, subjects.map((s) => String(s || '').slice(0, MAX_DESCRIPTION)), capMs, deadline, slow, skipped);
   for (const r of slow) await disableSlowRule(r);
+  if (skipped.length) {
+    logger.warn(`[tax-ledger] rule matching ran out of time on a page: ${skipped.length} rule(s) not judged (${slow.length} disabled); the page is retried on the next pass`);
+    return null;
+  }
   return hits;
 }
+const RETRY_PAGE = Symbol('retry-page');
 
 // One page of open, matcher-examined, undecided rows, oldest first.
 function rulePassPage({ pageSize, force, after }) {
@@ -698,7 +720,7 @@ async function applyRules(options = {}) {
   await acquirePass();
   try { return await runPass(options); } finally { releasePass(); }
 }
-async function runPass({ limit = PAGE, force = false, pattern = null, after: start = null, now = Date.now, deadline = null } = {}) {
+async function runPass({ limit = PAGE, force = false, pattern = null, after: start = null, now = Date.now, deadline = null, matchCapMs = MATCH_HARD_CAP_MS } = {}) {
   const stopAt = deadline || now() + PASS_TIME_BUDGET_MS;
   const counts = { examined: 0, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null };
   let compiled = compileRules(await loadRules());
@@ -718,7 +740,9 @@ async function runPass({ limit = PAGE, force = false, pattern = null, after: sta
     // the versioned UPDATE below refuses the older result
     compiled = compileRules(await loadRules());
     lastPageFull = rows.length >= pageSize;
-    const stoppedAt = await examinePage(rows, { compiled, pattern, force, stamp, counts, hits, now, stopAt, lastPageFull });
+    const stoppedAt = await examinePage(rows, { compiled, pattern, force, stamp, counts, hits, now, stopAt, lastPageFull, matchCapMs });
+    // the page's matching ran out of time: stop here and report THIS page's start as the cursor
+    if (stoppedAt === RETRY_PAGE) { outOfTime = true; break; }
     if (stoppedAt) { outOfTime = true; after = stoppedAt; break; }
     if (!lastPageFull) break;
     after = cursorOf(rows[rows.length - 1]);
@@ -731,8 +755,9 @@ async function runPass({ limit = PAGE, force = false, pattern = null, after: sta
 // One page of a pass: classify each row and write what lands. Out of time
 // with rows still to read, it stops and returns the cursor of the row it
 // stopped on (null = the page was finished).
-async function examinePage(rows, { compiled, pattern, force, stamp, counts, hits, now, stopAt, lastPageFull }) {
-  const matched = await matchPage(compiled, rows.map((r) => r.description));
+async function examinePage(rows, { compiled, pattern, force, stamp, counts, hits, now, stopAt, lastPageFull, matchCapMs }) {
+  const matched = await matchPage(compiled, rows.map((r) => r.description), { capMs: Math.min(matchCapMs || MATCH_HARD_CAP_MS, MATCH_HARD_CAP_MS) });
+  if (!matched) return RETRY_PAGE;
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
     counts.examined += 1;
@@ -752,14 +777,17 @@ async function applyRulesForPattern(pattern, { budget = MAX_EXAMINE, maxRounds =
   let after = null;
   let rounds = 0;
   const totals = { examined: 0, suggested: 0 };
+  let more = false;
   do {
     const out = await applyRules({ limit: budget, force: true, pattern, after, now, deadline });
     totals.examined += out.examined;
     totals.suggested += out.suggested;
-    after = out.more ? out.cursor : null;
+    // more with no cursor = the page at the start is retried (its matching ran out of time)
+    more = !!out.more;
+    after = out.cursor || null;
     rounds += 1;
-  } while (after && rounds < maxRounds && now() < deadline);
-  return { ...totals, complete: !after };
+  } while (more && rounds < maxRounds && now() < deadline);
+  return { ...totals, complete: !more };
 }
 
 // The kill switch: with GATE_TAX_LEDGER off, nothing a RULE wrote drives
@@ -796,13 +824,15 @@ async function applyAfterImport(where, { budget = 2000, now = Date.now } = {}) {
     const deadline = now() + LOOP_TIME_BUDGET_MS;
     const totals = { examined: 0, suggested: 0, cleared: 0 };
     let after = null;
+    let more = false;
     do {
       const out = await applyRules({ limit: Math.min(PAGE, budget - totals.examined), after, now, deadline });
       totals.examined += out.examined;
       totals.suggested += out.suggested;
       totals.cleared += out.cleared;
-      after = out.more ? out.cursor : null;
-    } while (after && totals.examined < budget && now() < deadline);
+      more = !!out.more;
+      after = out.cursor || null; // no cursor with more: the same page again (its matching ran out of time)
+    } while (more && totals.examined < budget && now() < deadline);
     return totals;
   } catch (err) {
     logger.warn(`[tax-ledger] rule pass after ${where} failed: ${err.message}`);

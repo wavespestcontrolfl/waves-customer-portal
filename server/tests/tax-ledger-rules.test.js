@@ -471,6 +471,40 @@ describe('applyRules (suggestion-only)', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/^\[tax-ledger\] rule evil disabled: over \d+ ms/)); // never the pattern (payee text)
   });
 
+  test('one deadline covers a page: when several rules overrun, the halving stops at the deadline, the rules it did not judge are not disabled, and the page is not judged (null)', async () => {
+    const ten = Array.from({ length: 10 }, (_, i) => 'z'.repeat(i + 1)).join('|');
+    const evil = (id) => ({ id, pattern: `(${ten})(${ten})z?z?z?.*z.*x`, priority: 1 });
+    const compiled = svc.compileRules([evil('e1'), evil('e2'), { id: 'fast', pattern: 'wawa', priority: 3 }]);
+    const subjects = ['WAWA 1', `${'z'.repeat(290)} COSTCO`];
+    const t0 = Date.now();
+    await expect(svc.matchPage(compiled, subjects, { capMs: 100, deadline: Date.now() + 150 })).resolves.toBeNull();
+    expect(Date.now() - t0).toBeLessThan(1500); // never 2N-1 capped attempts
+    expect(state.ruleUpdates).toHaveLength(0); // a shortened budget says nothing about a rule
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/ran out of time on a page: \d+ rule\(s\) not judged \(0 disabled\)/));
+    // the default deadline is enough to isolate ONE slow rule per page: that rule is disabled and the page is retried
+    state.ruleUpdates = [];
+    await expect(svc.matchPage(compiled, subjects, { capMs: 100 })).resolves.toBeNull();
+    expect(state.ruleUpdates.map((u) => u.wheres[0].id)).toEqual(['e1']);
+    // with time for the whole halving, both are isolated and disabled, and the fast rule still answers
+    state.ruleUpdates = [];
+    const hits = await svc.matchPage(compiled, subjects, { capMs: 100, deadline: Date.now() + 3000 });
+    expect(hits).toEqual([[2], []]);
+    expect(state.ruleUpdates.map((u) => u.wheres[0].id).sort()).toEqual(['e1', 'e2']);
+  });
+
+  test('a pass whose page matching ran out of time stamps nothing and reports the page\'s own start as the cursor (more, no cursor for the first page); the loops run it again', async () => {
+    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
+    const ten = Array.from({ length: 10 }, (_, i) => 'z'.repeat(i + 1)).join('|');
+    state.rules = ['e1', 'e2', 'e3', 'e4'].map((id) => ({ id, pattern: `(${ten})(${ten})z?z?z?.*z.*x`, kind: 'personal', priority: 1, enabled: true, source: 'owner' }));
+    state.bankRows = [{ id: 'b1', txn_date: '2026-01-02', description: `${'z'.repeat(290)} WAWA`, direction: 'debit', suggestion: { noMatch: true } }];
+    const out = await svc.applyRules({ limit: 10, deadline: Number.MAX_SAFE_INTEGER, matchCapMs: 60 });
+    expect(out).toMatchObject({ examined: 0, suggested: 0, more: true, cursor: null });
+    expect(state.updates).toHaveLength(0); // nothing stamped on a partial answer
+    // the Always propagation loop treats it as not complete, not as done
+    const prop = await svc.applyRulesForPattern(state.rules[0].pattern, { maxRounds: 2 });
+    expect(prop.complete).toBe(false);
+  }, 60000);
+
   test('a pass matches its page in the worker: the evil rule above is disabled mid-pass and the page is still classified by the rules that answer', async () => {
     process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
     const ten = Array.from({ length: 10 }, (_, i) => 'z'.repeat(i + 1)).join('|');

@@ -400,20 +400,24 @@ function InboxNotices({ status, view, notice, loadError, categoryError, onRetryC
 const MAX_ROUNDS_PER_CLICK = 400;
 // Follows the server's cursor from startAfter; returns the totals and the
 // cursor to resume from when the per-click stop came first (null = done).
+// more without a cursor means the server retries that page from its start
+// (its matching ran out of time and a slow rule was just disabled).
 async function runRulePass(onProgress, startAfter = null) {
   const sum = { examined: 0, suggested: 0, cleared: 0 };
   let after = startAfter;
+  let more = false;
   let rounds = 0;
   do {
     const d = await post(`${T}/ledger/rules/apply`, after ? { after } : {});
     sum.examined += d.examined || 0;
     sum.suggested += d.suggested || 0;
     sum.cleared += d.cleared || 0;
-    after = d.more && d.cursor ? d.cursor : null;
+    more = !!d.more;
+    after = d.cursor || null;
     rounds += 1;
-    onProgress(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}${after ? "…" : "."}`);
-  } while (after && rounds < MAX_ROUNDS_PER_CLICK);
-  return { sum, after };
+    onProgress(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}${more ? "…" : "."}`);
+  } while (more && rounds < MAX_ROUNDS_PER_CLICK);
+  return { sum, more, after };
 }
 
 export default function LedgerInboxTab() {
@@ -556,9 +560,9 @@ export default function LedgerInboxTab() {
     setApplying(true);
     setNotice("");
     try {
-      const { sum, after } = await runRulePass(setNotice, resumeRef.current);
-      resumeRef.current = after;
-      setNotice(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}.${after ? " More rows remain: click Apply rules now again to continue from where this stopped." : ""}`);
+      const { sum, more, after } = await runRulePass(setNotice, resumeRef.current);
+      resumeRef.current = more ? after : null;
+      setNotice(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}.${more ? " More rows remain: click Apply rules now again to continue from where this stopped." : ""}`);
       await loadStatus();
       // the view the user is on now, not the one the pass started from
       await loadRows(viewRef.current, 0);
