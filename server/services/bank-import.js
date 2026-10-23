@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const db = require('../models/db');
 const logger = require('./logger');
+const { gateEnvValue } = require('../config/feature-gates');
 
 const PAYOUT_DATE_WINDOW_DAYS = 3;  // Stripe arrival vs bank posting drift
 const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
@@ -1354,14 +1355,18 @@ function hasUnresolvedBankChange(row) {
 }
 
 // The matcher writes its transfer flag only on a row that carries no flag
-// and no owner ruling: tax-ledger-rules replaces the flag with the owner's
-// classification or an Income decision (suggestion.decision) and keeps the
-// examination evidence under 'examined', so a rescan must not relabel that
-// row as an internal transfer in Bank Import. The human actions on it are
-// still refreshed. The UPDATE repeats the check (NO_OWNER_RULING_SQL) so a
-// decision made after the read wins too.
-function transferFlagWanted(sug) { return !sug || (!sug.ignore && !sug.examined && !sug.decision); }
+// and no owner ruling. An Inbox decision (suggestion.decision) is the
+// owner's explicit word and always holds. An owner RULE's override
+// ('examined' without a decision: tax-ledger-rules replaced the flag with the
+// rule's classification) holds only while GATE_TAX_LEDGER is on: with the
+// ledger off its classification is hidden, so the matcher's warning comes
+// back rather than leaving a card payment as a plain debit. The human
+// actions on the row are still refreshed. The UPDATE repeats the check so a
+// ruling made after the read wins too.
+function transferFlagWanted(sug, ledgerOn) { return !sug || (!sug.ignore && !sug.decision && !(ledgerOn && sug.examined)); }
+const NO_DECISION_SQL = "(suggestion is null or (suggestion -> 'decision') is null)";
 const NO_OWNER_RULING_SQL = "(suggestion is null or ((suggestion -> 'decision') is null and not jsonb_exists(suggestion, 'examined')))";
+function ledgerRulesOn() { return !!(gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_LEDGER')); }
 
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
@@ -1462,6 +1467,8 @@ async function runDeterministicMatching({ limit } = {}) {
   // caller's "more rows pending" surface must not read as done
   moreRemaining = moreRemaining || reconciliation.morePending;
   const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted, claimVerifyReverted: reconciliation.claimVerifyReverted, payoutVerifyReverted: reconciliation.payoutVerifyReverted };
+  const ledgerOn = ledgerRulesOn();
+  const rulingGuardSql = ledgerOn ? NO_OWNER_RULING_SQL : NO_DECISION_SQL;
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
@@ -1512,10 +1519,10 @@ async function runDeterministicMatching({ limit } = {}) {
       const staleActionKeys = row.direction === 'credit'
         ? ['refundCandidates', 'refundCandidatesTotal']
         : ['candidates', 'candidatesTotal'];
-      if (transferFlagWanted(row.suggestion)) {
+      if (transferFlagWanted(row.suggestion, ledgerOn)) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_OWNER_RULING_SQL).update({
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(rulingGuardSql).update({
           suggestion: suggestionMerge({ ...transfer, ...actionPatch }, hasActions ? ['noMatch'] : []),
           updated_at: new Date(),
         });
