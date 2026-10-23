@@ -17,6 +17,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/admin-alert-episodes', () => ({
   raiseAdminAlertWithReopen: jest.fn(),
   openAdminAlertKeys: jest.fn(),
+  openAdminAlertMetadata: jest.fn(),
   closeAdminAlertKeys: jest.fn(),
 }));
 
@@ -46,6 +47,7 @@ beforeEach(() => {
   process.env.GATE_BID_KIT = 'true';
   raiseAdminAlert.mockImplementation(async () => ({ id: 'n1', deduped: false, rang: true }));
   episodes.openAdminAlertKeys.mockResolvedValue([]);
+  episodes.openAdminAlertMetadata.mockResolvedValue([]);
   episodes.closeAdminAlertKeys.mockResolvedValue(0);
 });
 afterEach(() => { delete process.env.GATE_BID_KIT; });
@@ -185,6 +187,44 @@ describe('bells close when the paper no longer needs renewing', () => {
   test('a failed close never fails the save', async () => {
     episodes.closeAdminAlertKeys.mockRejectedValueOnce(new Error('db down'));
     expect(await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW })).toEqual({ closed: 0, failed: true });
+  });
+
+  describe('an item listed in the standing count', () => {
+    const { OVERFLOW_KEY } = require('../services/bid-kit-expiry');
+    const standingRaises = () => raiseAdminAlert.mock.calls.filter(([, , , opts]) => opts.dedupeKey === OVERFLOW_KEY);
+
+    test('renewed: it leaves the count at once, and the rest stay listed with their dates', async () => {
+      episodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(1), ID(2)] }]);
+      present(item(ID(2), { expires_on: '2026-11-04' }));
+      await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW });
+      expect(episodes.openAdminAlertMetadata).toHaveBeenCalledWith(db, OVERFLOW_KEY);
+      expect(standingRaises()).toHaveLength(1);
+      const opts = standingRaises()[0][3];
+      expect(opts.metadata).toMatchObject({ count: 1, itemKeys: [ID(2)] });
+      expect(opts.detail).toContain('Nov 4');
+      expect(opts.ringOnRefresh({}, {})).toBe(false);
+    });
+
+    test('the last listed item archived: the count closes', async () => {
+      episodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(1)] }]);
+      await syncExpiryBell(present(item(ID(1), { expires_on: '2026-10-01', archived_at: new Date() })), { now: NOW });
+      expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(trx, [OVERFLOW_KEY], 'count_zero', expect.objectContaining({ resolution: expect.any(String) }));
+      expect(standingRaises()).toHaveLength(0);
+    });
+
+    test('a corrected date that still qualifies shows in the count; an item not listed leaves the count alone', async () => {
+      episodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(1)] }]);
+      await syncExpiryBell(present(item(ID(1), { expires_on: '2026-11-09' })), { now: NOW });
+      expect(standingRaises()[0][3].detail).toContain('Nov 9');
+      raiseAdminAlert.mockClear();
+      await syncExpiryBell(present(item(ID(3), { expires_on: '2027-10-01' })), { now: NOW });
+      expect(standingRaises()).toHaveLength(0);
+    });
+
+    test('a failed refresh never fails the save', async () => {
+      episodes.openAdminAlertMetadata.mockRejectedValueOnce(new Error('db down'));
+      expect(await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW })).toEqual({ closed: 0 });
+    });
   });
 
   test('qualifies is by date: unsigned items count, missing, undated and archived ones do not', () => {

@@ -328,6 +328,11 @@ describe('tax IDs are never stored: one detector', () => {
     ['123\u200B45\u200B6789', true, 'zero-width spaces inside an SSN'], ['12\u00AD3456789', true, 'soft hyphen inside an EIN'],
     ['SSN 123\u201445\u20146789', true, 'SSN with em dashes'], ['EIN 12\u20143456789', true, 'EIN with an em dash'],
     ['2026\u201410\u201423', false, 'date with em dashes'], ['Policy 1234\u20145678', false, 'eight digits with an em dash'],
+    // A tax phrase with punctuation between or inside its words.
+    ['Tax-ID: 123 456 789', true, 'hyphenated tax id'], ['Tax/ID: 1234 56789', true, 'slashed tax id'], ['tax_id 1234 56789', true, 'underscored tax id'],
+    ['Tax I.D. 123 456 789', true, 'dotted I.D.'], ['E.I.N.: 1234 56789', true, 'dotted E.I.N.'], ['EIN1234 56789', true, 'phrase run into the digits'],
+    ['Fed. ID 123 456 789', true, 'fed id'], ['Soc. Sec. 1234 56789', true, 'soc sec'], ['SSN# 1234 56789', true, 'SSN#'],
+    ['Martin 1234 56789', false, 'tin inside a word is no phrase'], ['Tax 1234 56789', false, 'bare tax is no phrase'],
   ];
 
   test.each(TYPED)('typed text %j: refused = %s (%s)', (text, refused) => {

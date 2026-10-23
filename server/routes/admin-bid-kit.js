@@ -129,6 +129,13 @@ const sameInstant = (a, b) => new Date(a).getTime() === new Date(b).getTime();
 // The activity log never holds a custom label, value or detail (a custom label can hold a name, phone, email or address):
 // a catalog item is named by its catalog label, a custom row by the fixed words "custom item", and an edit lists the
 // changed field NAMES only. The metadata keeps the id, the item key and those field names.
+// The fields a save really changed: the stored row before and after, field by field (a date as its calendar day, limits and
+// details as JSON). The editor sends every visible field, so the request's keys are not the change.
+function changedFields(before, after, fields) {
+  const norm = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : v && typeof v === 'object' ? JSON.stringify(v) : v ?? null);
+  return fields.filter((field) => norm(before && before[field]) !== norm(after && after[field]));
+}
+
 async function activity(req, action, row, changed) {
   const entry = catalog.catalogItem(row.item_key);
   const name = entry ? entry.label : 'custom item';
@@ -224,7 +231,7 @@ router.patch('/:id', async (req, res, next) => {
     });
     if (outcome.notFound) return res.status(404).json({ error: 'Not found' });
     if (outcome.error) return res.status(outcome.error.status).json({ error: outcome.error.message });
-    await activity(req, 'bid_kit_updated', outcome.item, Object.keys(rest));
+    await activity(req, 'bid_kit_updated', outcome.item, changedFields(outcome.before, outcome.item, Object.keys(rest)));
     await expiry.syncExpiryBell(statusRow(outcome.item));
     return res.json({ item: present(statusRow(outcome.item), catalog.etToday()) });
   } catch (err) {

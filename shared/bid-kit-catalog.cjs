@@ -140,8 +140,9 @@ const SIGN_OFF_REFUSAL = {
 //   (C) exactly nine contiguous digits that are not part of a longer digit run, label or not;
 //   (D) nine digits in any other grouping ("1234 56789", "123.456.789"), when a tax phrase appears anywhere in the same text.
 // There is no reach: a phrase before the digits, after them or far away all count. The phrases are EIN, FEIN, TIN, ITIN, SSN,
-// taxpayer, tax id, tax identification, tax number, tax no, tax #, federal id, federal tax, employer id, employer
-// identification, social security, W9, W-9 and W 9. Bare "tax" is no phrase ("Local business tax receipt" is fine).
+// taxpayer, tax id, tax identification, tax number, tax no, tax #, federal (or fed) id or tax, employer id, employer
+// identification, social security, soc sec and W9, with any punctuation between or inside their words ("Tax-ID", "E.I.N.").
+// Bare "tax" is no phrase ("Local business tax receipt" is fine).
 // In a FILE NAME ({ fileName: true }) any nine-digit run in any grouping is refused, phrase or not.
 // Not refused: runs of 8 digits or of 10 or more, dates, phone numbers, and a grouped number with no tax phrase.
 // A run is a maximal chain of digit groups joined by separators; nine digits means some consecutive groups of the chain add up
@@ -154,10 +155,15 @@ const SSN_SHAPE = new RegExp(`(?<!\\d)\\d{3}${SEPARATOR}\\d{2}${SEPARATOR}\\d{4}
 const EIN_SHAPE = new RegExp(`(?<!\\d)\\d{2}${SEPARATOR}\\d{7}(?!\\d)`);
 const NINE_CONTIGUOUS = /(?<!\d)\d{9}(?!\d)/;
 const DIGIT_CHAIN = new RegExp(`\\d+(?:${SEPARATOR}\\d+)*`, 'g');
-const TAX_PHRASE = new RegExp([
-  '\\b(?:EIN|FEIN|TIN|ITIN|SSN)\\b', '\\bW[-\\s]?9\\b', '\\btaxpayer', '\\btax\\s*id\\b', '\\btax\\s+identification', '\\btax\\s+number',
-  '\\btax\\s+no\\b', '\\btax\\s*#', '\\bfederal\\s+id\\b', '\\bfederal\\s+tax', '\\bemployer\\s+id\\b', '\\bemployer\\s+identification', '\\bsocial\\s+security',
-].join('|'), 'i');
+// A tax phrase is matched on the words alone: lowercased, "#" read as "no", letters and digits split apart, and every other run
+// of characters read as one space, so "Tax-ID", "Tax/ID", "tax_id", "Tax I.D.", "E.I.N." and "EIN1234" read as "tax id",
+// "tax i d", "e i n" and "ein 1234".
+const TAX_PHRASE = new RegExp(`(?:^| )(?:${[
+  'f?ein', 'i?tin', 'ssn', 'f e i n', 'e i n', 'i t i n', 't i n', 's s n', 'w ?9', 'taxpayer', 'tax ?(?:id|i d)', 'tax identification',
+  'tax number', 'tax no', 'fed(?:eral)? (?:id|i d|tax)', 'employer (?:id|i d|identification)', 'social security', 'soc(?:ial)? sec',
+].join('|')})(?= |$)`);
+const phraseText = (t) => t.toLowerCase().replace(/#/g, ' no ').replace(/([a-z])(\d)/g, '$1 $2').replace(/(\d)([a-z])/g, '$1 $2')
+  .replace(/[^a-z0-9]+/g, ' ').trim();
 const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID. A nine-digit number with no letters cannot be stored: save it with its letters, or keep it in the file.';
 
 // True when some consecutive digit groups of a separator-joined chain add up to exactly nine digits.
@@ -182,7 +188,7 @@ function detectTaxId(text, { fileName = false } = {}) {
   const t = screenText(text);
   if (SSN_SHAPE.test(t) || EIN_SHAPE.test(t) || NINE_CONTIGUOUS.test(t)) return true;
   if (!hasNineDigitGrouping(t)) return false;
-  return fileName || TAX_PHRASE.test(t);
+  return fileName || TAX_PHRASE.test(phraseText(t));
 }
 
 // A whole item as it will be stored (stored values with an edit applied). Each text field is screened alone, and every

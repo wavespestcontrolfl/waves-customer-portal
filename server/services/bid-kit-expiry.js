@@ -94,16 +94,34 @@ async function closeBells(conn, keys, reason) {
 // closes it on its next run.
 async function syncExpiryBell(item, { now = new Date() } = {}) {
   if (!bidKitLive() || !item || !item.id) return { skipped: 'gate_off' };
+  const today = catalog.etToday(now);
+  let result;
   try {
-    const today = catalog.etToday(now);
-    return await withItemLock(item.id, async (trx) => {
+    result = await withItemLock(item.id, async (trx) => {
       const fresh = await store.getItem(item.id, trx);
       if (fresh && qualifies(fresh, today)) return { closed: 0 };
       return { closed: await closeBells(trx, [keyFor(item)], fresh && !fresh.archived_at ? 'renewed' : 'archived') };
     });
   } catch (err) {
     logger.warn(`[bid-kit] closing the expiry bell failed: ${errorTag(err)}`);
-    return { closed: 0, failed: true };
+    result = { closed: 0, failed: true };
+  }
+  await refreshOverflowFor(item.id, today);
+  return result;
+}
+
+// An item listed in the standing count (it had no bell because the run's budget was spent): after its save, file replace or
+// archive the count is rebuilt from its listed items read again, so a renewed or archived paper leaves the list at once and a
+// corrected date shows. The count closes when nothing is left. A failure never fails the save: the daily run rebuilds it.
+async function refreshOverflowFor(itemId, today) {
+  try {
+    const standing = (await episodes.openAdminAlertMetadata(db, OVERFLOW_KEY)).find((meta) => meta.dedupeKey === OVERFLOW_KEY);
+    const listed = standing && Array.isArray(standing.itemKeys) ? standing.itemKeys : [];
+    if (!listed.includes(itemId)) return;
+    const rows = await Promise.all(listed.map((id) => store.getItem(id)));
+    await syncOverflowRow(rows.filter((row) => row && qualifies(row, today)).sort(byUrgency), today, true);
+  } catch (err) {
+    logger.warn(`[bid-kit] refreshing the standing expiry count failed: ${errorTag(err)}`);
   }
 }
 

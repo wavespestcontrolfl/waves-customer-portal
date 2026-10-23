@@ -92,11 +92,12 @@ jest.mock('../services/bid-kit-store', () => {
       if (!row || row.archived_at) return { notFound: true };
       const decision = compute(view(row));
       if (decision.error) return { error: decision.error };
+      const before = view({ ...row });
       const patch = { ...decision.patch };
       if ('limits' in patch) patch.limits = parse(patch.limits);
       if ('details' in patch) patch.details = parse(patch.details);
       if (Object.keys(patch).length) Object.assign(row, patch, { updated_at: stamp() });
-      return { item: view(row) };
+      return { item: view(row), before };
     }),
     replaceFile: jest.fn(async (id, file, expectedUpdatedAt) => {
       const row = rows.get(id);
@@ -264,6 +265,20 @@ describe('create and list', () => {
     expect(patched.status).toBe(200);
     expect(JSON.stringify(store.activity[1])).not.toContain('JB000000');
     expect(store.activity[1].metadata.fields).toEqual(['value']);
+  });
+
+  test('the activity log lists only the fields a save really changed, even when the editor sends every field', async () => {
+    const item = await create({ item_key: 'insurance_certificate', source_document: 'Broker letter', checked_on: '2026-10-01' });
+    store.activity.length = 0;
+    const every = { value: null, source_document: 'Broker letter', checked_on: '2026-10-01', expires_on: '2027-01-15', notes: null, limits: null };
+    const first = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { ...every, expected_updated_at: item.updated_at });
+    expect(first.status).toBe(200);
+    expect(store.activity[0].metadata.fields).toEqual(['expires_on']);
+    expect(store.activity[0].description).toMatch(/updated: expires_on$/);
+    const again = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { ...every, expected_updated_at: first.body.item.updated_at });
+    expect(again.status).toBe(200);
+    expect(store.activity[1].metadata.fields).toBeUndefined(); // a save that changed nothing names no field
+    expect(store.activity[1].description).toMatch(/updated$/);
   });
 
   test('kind and item_key are checked against the catalog; custom needs a label', async () => {
