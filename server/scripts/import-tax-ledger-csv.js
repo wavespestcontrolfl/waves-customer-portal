@@ -458,7 +458,7 @@ function formatReport({ dryRun, file, read, inserted, duplicates, held = [], par
     `parked for review:         ${parked.length} (loaded as open rows, no expense: an expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days is already in the portal; link or create it in Bank Import)`,
     ...parked.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
     `expenses in the portal:    ${portalExpenses.length} entered by hand or from a feed within ${EXPENSE_DATE_WINDOW_DAYS} days of this file's dates (never matched by guesswork: a ledger expense row of the same amount nearby is parked above; check each once)`,
-    ...portalExpenses.map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}${grossNote(e)}`),
+    ...portalExpenses.map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}${grossNote(e)}${e.claimedByRow ? ' (linked to a feed or upload row)' : ''}`),
     `${dryRun ? 'expenses to create:' : 'expenses created:'}`.padEnd(27) + summary.expensesCreated,
     ...formatTable(summary.byStatus, 'by status'),
     ...formatTable(summary.expensesByCategory, `expenses ${dryRun ? 'to create' : 'created'} by category`),
@@ -544,8 +544,20 @@ async function loadPortalState(db, mapped, rows) {
     .select('id', 'expense_date', 'amount', 'vendor_name', 'description', 'payment_method')).filter(e => !ledgerMade.has(e.id));
   // compared at the gross amount (one small query per expense: a one-off run over a handful of rows)
   for (const e of portalExpenses) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, db)).toFixed(2));
+  const claimedBy = await claimsOf(db, portalExpenses);
+  for (const e of portalExpenses) e.claimedByRow = claimedBy.has(e.id);
   const categories = await db('expense_categories').select('id', 'name');
-  return { existing, portalExpenses, ledgerMade, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+  return { existing, portalExpenses, claimedBy, ledgerMade, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+}
+
+// The bank row (a feed or an upload, any posting date) an expense is already
+// linked to: such an expense cannot be linked again (one bank row per
+// expense), so a ledger row near it is that charge already in the portal.
+async function claimsOf(dbOrTrx, expenses) {
+  if (!expenses.length) return new Map();
+  const rows = await dbOrTrx('bank_transactions').whereIn('matched_expense_id', expenses.map(e => e.id)).whereNot('source', SOURCE_TAG)
+    .select('id', 'matched_expense_id', 'account_label', 'txn_date');
+  return new Map(rows.map(r => [r.matched_expense_id, r]));
 }
 
 // A portal row that no longer has the expense the earlier run made: the FK
@@ -628,8 +640,29 @@ function nearbyExpenses(portalExpenses, row, bank) {
 // Import's Link selector reads (the matcher's own), the ledger's category
 // for Create expense, and manualLink. Used at reconcile time and again at
 // write time (the recheck inside the row's transaction).
-function parkNear(m, near, categoryIds) {
+// the candidates endpoint's order (newest first, then id), so the stored
+// first page and the pages the UI loads after it are one list
+const candidateOrder = (a, b) => ymdOf(b.expense_date).localeCompare(ymdOf(a.expense_date)) || String(a.id).localeCompare(String(b.id));
+function splitNearby(nearby, claimedBy) {
+  return {
+    near: nearby.filter(e => !claimedBy.has(e.id)),
+    covered: nearby.filter(e => claimedBy.has(e.id)).map(e => ({ ...e, claimedBy: claimedBy.get(e.id) })),
+  };
+}
+// A ledger row near an expense that a feed or upload row already holds: that
+// charge is in the portal through that row, so this one is parked with no
+// candidates (the link could never succeed) and the owner ignores it, or
+// creates the expense if it is a different purchase.
+function parkCovered(m, covered) {
   const row = m.ledgerRow;
+  const first = [...covered].sort(candidateOrder)[0];
+  const why = `already booked in the portal: ${covered.length === 1 ? 'an expense' : `${covered.length} expenses`} of the same amount linked to a feed or upload row (${first.claimedBy.account_label || 'no label'}, posted ${ymdOf(first.claimedBy.txn_date)})`;
+  parkForReview(m, row, { note: `${why}: ignore this row if it is the same charge, or create the expense here if it is a different purchase`, manualLink: true });
+  return why;
+}
+function parkNear(m, nearUnsorted, categoryIds) {
+  const row = m.ledgerRow;
+  const near = [...nearUnsorted].sort(candidateOrder);
   const why = describeNearby(near, row.date, m.bank.amount);
   const categoryId = categoryIds.get(m.categoryName) || null;
   parkForReview(m, row, {
@@ -664,7 +697,7 @@ function describeNearby(near, date, amount) {
 // would leave it out again. A business row whose category is missing from
 // this database is parked the same way.
 function reconcileRows(mapped, rows, portal) {
-  const { existing, portalExpenses, categoryIds } = portal;
+  const { existing, portalExpenses, claimedBy, categoryIds } = portal;
   const fresh = [];
   const held = [];
   const parked = [];
@@ -680,11 +713,10 @@ function reconcileRows(mapped, rows, portal) {
       return;
     }
     if (m.expense) {
-      const near = nearbyExpenses(portalExpenses, rows[i], m.bank);
-      if (near.length) {
-        const why = parkNear(m, near, categoryIds);
-        parked.push({ ...note(i, `${why}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
-      } else if (!categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
+      const { near, covered } = splitNearby(nearbyExpenses(portalExpenses, rows[i], m.bank), claimedBy);
+      if (covered.length) parked.push({ ...note(i, `${parkCovered(m, covered)}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
+      else if (near.length) parked.push({ ...note(i, `${parkNear(m, near, categoryIds)}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
+      else if (!categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     }
     fresh.push(m);
   });
@@ -703,25 +735,75 @@ async function noteHeldRows(db, held) {
   }
 }
 
-// The nearby check again, inside the row's write transaction: an expense
-// entered by hand (or by any other writer) after the snapshot was read
-// must park this row, not be doubled by it. Expenses the ledger made (an
-// earlier run, or this run so far) are the ledger's own and never count.
-async function nearbyAtWrite(trx, m, portal, createdIds) {
+// The nearby check again, on a fresh read: an expense entered by hand (or
+// by any other writer) after the snapshot must park this row, not be
+// doubled by it. Expenses the ledger made (an earlier run, or this run so
+// far) are the ledger's own and never count.
+async function nearbyAtWrite(dbOrTrx, m, portal, createdIds) {
   const date = m.ledgerRow.date;
-  const rows = await trx('expenses').whereBetween('expense_date', [shiftDays(date, -EXPENSE_DATE_WINDOW_DAYS), shiftDays(date, EXPENSE_DATE_WINDOW_DAYS)])
+  const rows = await dbOrTrx('expenses').whereBetween('expense_date', [shiftDays(date, -EXPENSE_DATE_WINDOW_DAYS), shiftDays(date, EXPENSE_DATE_WINDOW_DAYS)])
     .select('id', 'expense_date', 'amount', 'vendor_name', 'description', 'payment_method');
   const others = rows.filter(e => !portal.ledgerMade.has(e.id) && !createdIds.has(e.id));
-  for (const e of others) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, trx)).toFixed(2));
-  return nearbyExpenses(others, m.ledgerRow, m.bank);
+  for (const e of others) e.gross = Number((Number(e.amount) + await appliedRefundTotal(e.id, dbOrTrx)).toFixed(2));
+  const nearby = nearbyExpenses(others, m.ledgerRow, m.bank);
+  return splitNearby(nearby, await claimsOf(dbOrTrx, nearby));
+}
+// The park a recheck chose, and its report line.
+function parkAtWrite(m, found, portal, when) {
+  const why = found.covered.length ? parkCovered(m, found.covered) : parkNear(m, found.near, portal.categoryIds);
+  const row = m.ledgerRow;
+  return { line: row.line, description: row.description, amount: Number(row.amount).toFixed(2), date: row.date, why: `${why} (${when}); the ledger says ${row.class}${m.categoryName ? ` (${m.categoryName})` : ''}`, rowHash: m.bank.row_hash };
+}
+
+// One expense row: the recheck, then the expense and the bank row in one
+// transaction (a failure leaves no orphan expense), then the check once more
+// on a fresh snapshot after the commit, the matcher's post-claim verify:
+// READ COMMITTED does not lock what is not there yet, so an expense another
+// writer committed between the recheck and the insert shows up only now.
+// Found, the just-made expense is deleted and the row parked, in one
+// transaction. An expense that commits after this verify is a later
+// expense, the line the matcher draws too. Returns the park's report line,
+// or null when the expense stands.
+async function writeExpenseRow(db, m, portal, createdIds) {
+  let parkedAtWrite = null;
+  let expenseId = null;
+  await db.transaction(async trx => {
+    const found = await nearbyAtWrite(trx, m, portal, createdIds);
+    if (found.near.length || found.covered.length) {
+      parkedAtWrite = parkAtWrite(m, found, portal, 'entered after this run started');
+      const res = await trx('bank_transactions').insert({ ...m.bank }).onConflict('row_hash').ignore().returning('id');
+      if (!res.length) throw new DuplicateRace('row_hash already present');
+      return;
+    }
+    const [exp] = await trx('expenses')
+      .insert({ ...m.expense, category_id: portal.categoryIds.get(m.categoryName) })
+      .returning('id');
+    expenseId = exp && typeof exp === 'object' ? exp.id : exp;
+    const res = await trx('bank_transactions')
+      .insert({ ...m.bank, matched_expense_id: expenseId, matched_at: new Date() })
+      .onConflict('row_hash')
+      .ignore()
+      .returning('id');
+    if (!res.length) throw new DuplicateRace('row_hash already present');
+  });
+  if (parkedAtWrite) return parkedAtWrite;
+  createdIds.add(expenseId); // the ledger's own from here on: never a candidate for its own row
+  const after = await nearbyAtWrite(db, m, portal, createdIds);
+  if (!after.near.length && !after.covered.length) return null;
+  const line = parkAtWrite(m, after, portal, 'entered while this run wrote it');
+  await db.transaction(async trx => {
+    await trx('bank_transactions').where({ row_hash: m.bank.row_hash, matched_expense_id: expenseId })
+      .update({ status: 'unmatched', matched_expense_id: null, match_method: null, matched_at: null, suggestion: m.bank.suggestion, updated_at: new Date() });
+    await trx('expenses').where({ id: expenseId }).delete();
+  });
+  createdIds.delete(expenseId);
+  return line;
 }
 
 // Writes the fresh rows: non-expense rows in bulk (row_hash conflicts
-// ignored, only the rows that landed count), expense rows one transaction
-// each (the recheck, the expense, the bank row), so a failure leaves no
-// orphan expense. A row the recheck parks is written parked (no expense).
+// ignored, only the rows that landed count), expense rows one at a time
+// (writeExpenseRow). A park is reported only once its row has landed.
 async function writeRows(db, fresh, portal) {
-  const { categoryIds } = portal;
   const createdIds = new Set();
   const parked = [];
   let inserted = 0;
@@ -740,29 +822,9 @@ async function writeRows(db, fresh, portal) {
   }
   for (const m of fresh.filter(x => x.expense)) {
     try {
-      await db.transaction(async trx => {
-        const near = await nearbyAtWrite(trx, m, portal, createdIds);
-        if (near.length) {
-          const why = parkNear(m, near, categoryIds);
-          const res = await trx('bank_transactions').insert({ ...m.bank }).onConflict('row_hash').ignore().returning('id');
-          if (!res.length) throw new DuplicateRace('row_hash already present');
-          const row = m.ledgerRow;
-          parked.push({ line: row.line, description: row.description, amount: Number(row.amount).toFixed(2), date: row.date, why: `${why} (entered after this run started); the ledger says ${row.class}${m.categoryName ? ` (${m.categoryName})` : ''}`, rowHash: m.bank.row_hash });
-          return;
-        }
-        const [exp] = await trx('expenses')
-          .insert({ ...m.expense, category_id: categoryIds.get(m.categoryName) })
-          .returning('id');
-        const expenseId = exp && typeof exp === 'object' ? exp.id : exp;
-        const res = await trx('bank_transactions')
-          .insert({ ...m.bank, matched_expense_id: expenseId, matched_at: new Date() })
-          .onConflict('row_hash')
-          .ignore()
-          .returning('id');
-        if (!res.length) throw new DuplicateRace('row_hash already present');
-        createdIds.add(expenseId);
-      });
+      const line = await writeExpenseRow(db, m, portal, createdIds);
       inserted += 1;
+      if (line) parked.push(line);
     } catch (err) {
       if (err instanceof DuplicateRace) { duplicates += 1; m.skipped = true; continue; }
       throw err;
