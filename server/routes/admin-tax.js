@@ -2095,6 +2095,21 @@ router.post('/bank-import/upload', async (req, res, next) => {
         e.status = 400;
         throw e; // rolls back before any insert
       }
+      // The ledger import's rows are the record for the days they cover,
+      // every account at once (they hash differently from a statement's,
+      // so the two can never be deduped): a statement inside those days is
+      // refused, as the import refuses a statement's days. Read under the
+      // ledger lock the import holds for its whole run and the feed setup
+      // takes for its check.
+      await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [bankImport.LEDGER_LOCK_KEY]);
+      const days = [...new Set(toInsert.map(r => r.txn_date))].sort();
+      const ledgerRows = await trx('bank_transactions').where({ source: 'ledger-csv' })
+        .whereBetween('txn_date', [days[0], days[days.length - 1]]).orderBy('txn_date', 'asc').limit(1).select('txn_date');
+      if (ledgerRows.length) {
+        const e = new Error(`the ledger import already holds rows between ${days[0]} and ${days[days.length - 1]} (this statement's days): those days are the ledger's record and cannot be deduped against a statement — classify them in Bank Import, or correct the ledger file and load it again`);
+        e.status = 400;
+        throw e; // rolls back before any insert
+      }
       // A Plaid feed on this label covers some days (live: its start date
       // onward; history: each day it already imported rows for, even if
       // since stopped). CSV and feed rows can't be deduped against each other
@@ -2453,7 +2468,8 @@ function effectiveCreateExpenseCategory(req, row) {
 }
 async function resolveCreateExpenseCategory(req, row) {
   const { visible, suggested, categoryId } = effectiveCreateExpenseCategory(req, row);
-  const usedAi = !req.body?.categoryId && !!suggested && visible?.categorySource !== 'rule';
+  // the verify note is for a model's category: not a deterministic rule's, and not one the ledger import carried (the owner's own books)
+  const usedAi = !req.body?.categoryId && !!suggested && !['rule', 'ledger'].includes(visible?.categorySource);
   let deductible = parseFloat(row.amount);
   if (categoryId) {
     const cat = await db('expense_categories').where({ id: categoryId }).first('name');

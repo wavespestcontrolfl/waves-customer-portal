@@ -498,6 +498,33 @@ describe("Finance workflow preservation", () => {
       expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change")?.body)
         .toEqual({ action: "apply", expected: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" }, plaidRemoved: null } }));
   });
+  it("shows the ledger's note under a parked row and on its Create expense button", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: false, bankChanges: 0, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    const base = { txn_date: "2025-03-14", account_label: "ledger-3098", account_type: "bank", direction: "debit", amount: 61.5, status: "unmatched" };
+    const note = 'no category in the portal for line 16b; the ledger says interest: "Card interest". Pick the category knowingly, or leave it for the return';
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({
+      hasMore: false,
+      transactions: [
+        { ...base, id: "row-parked", description: "INTEREST CHARGE ON PURCHASES", suggestion: { review: true, note } },
+        { ...base, id: "row-near", description: "ACME SUPPLY 4471", suggestion: { review: true, manualLink: true, note: "an expense of the same amount already in the portal: \"Acme Supply\" dated the same day: link this row to that expense in Bank Import, or create the expense there if it is a different purchase", categoryId: "cat-1", categoryName: "Supplies", categorySource: "ledger" } },
+        { ...base, id: "row-plain", description: "Plain purchase", suggestion: null },
+      ],
+    }));
+    open(TaxPage);
+    await taxSection("Expenses", "Import");
+    const parked = (await screen.findByText("INTEREST CHARGE ON PURCHASES")).closest("tr");
+    expect(within(parked).getByText(/no category in the portal for line 16b/)).toBeInTheDocument();
+    // the note reads at the 14px floor, and a category the ledger carried is named as the ledger's, not the AI's
+    expect(within(parked).getByText(/no category in the portal for line 16b/).className).toMatch(/\btext-sm\b/);
+    const near = screen.getByText("ACME SUPPLY 4471").closest("tr");
+    expect(within(near).getByText("Ledger: Supplies")).toBeInTheDocument();
+    expect(within(parked).getByRole("button", { name: "Create expense" }).getAttribute("title")).toMatch(/no category in the portal for line 16b/);
+    const plain = screen.getByText("Plain purchase").closest("tr");
+    expect(within(plain).queryByText(/no category in the portal/)).not.toBeInTheDocument();
+    expect(within(plain).getByRole("button", { name: "Create expense" }).getAttribute("title")).toBeNull();
+  });
   it("keeps bank-change Dismiss and Disconnect reachable after the Plaid feed is switched off", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>
       response({ enabled: true, plaidEnabled: false, bankChanges: 1, counts: {} }));

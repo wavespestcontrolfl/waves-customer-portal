@@ -391,6 +391,40 @@ function badRequest(msg) {
 // the sync cursor: the transactions Plaid already delivered for it were
 // skipped, and only a full re-sync (idempotent on transaction id) brings
 // them back.
+// The ledger import (server/scripts/import-tax-ledger-csv.js) labels its
+// rows ledger-<source>: the account's last four, or a NAMED source (each
+// maps to the institution whose feed carries that account; the list lives
+// in bank-import, the ledger import reads it too).
+const { LEDGER_NAMED_SOURCES } = bankImport;
+function ledgerLabelsFor(a, account, item) {
+  const labels = [a.label, `ledger-${String(account.mask || '').trim()}`];
+  for (const named of LEDGER_NAMED_SOURCES) if (named.institution.test(String(item && item.institution_name || ''))) labels.push(named.label);
+  return labels;
+}
+
+// Rows from another source for this label — a CSV statement, an EARLIER
+// feed of the same bank account (a replacement connection gets new
+// transaction ids), or the ledger import's rows for this bank account
+// (labelled ledger-<last four>, ledger-<named source>, or this label) —
+// can't be deduped against this feed, so it must start AFTER the last day
+// they cover. This account's own rows are excluded: re-syncing them is
+// idempotent by id. Checked under the label lock the CSV upload also takes.
+async function assertFeedStartsAfterPriorRows(trx, a, account, item) {
+  const ledgerLabels = ledgerLabelsFor(a, account, item);
+  const prior = await trx('bank_transactions')
+    .where(q => q
+      .where(q1 => q1.whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
+        .where(q2 => q2.where({ source: 'csv' })
+          .orWhere(q3 => q3.where({ source: 'plaid' }).whereRaw('plaid_account_id is distinct from ?', [account.account_id]))))
+      .orWhere(q4 => q4.where({ source: 'ledger-csv' }).whereRaw(`upper(trim(account_label)) in (${ledgerLabels.map(() => 'upper(?)').join(', ')})`, ledgerLabels)))
+    .max('txn_date as last_date')
+    .first();
+  const lastPrior = toDateOnly(prior.last_date);
+  if (lastPrior && a.syncFrom <= lastPrior) {
+    throw badRequest(`"${a.label}" already has rows from a statement, an earlier feed or the ledger import through ${lastPrior} — start the feed on ${addDaysStr(lastPrior, 1)} or later`);
+  }
+}
+
 async function setupItem(itemId, input) {
   if (!Array.isArray(input) || input.length === 0 || input.length > 50) throw badRequest('accounts[] is required');
   const today = etDateString(new Date());
@@ -426,6 +460,10 @@ async function setupItem(itemId, input) {
     for (const label of [...enabledLabels].sort()) {
       await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`bank-import-label:${label}`]);
     }
+    // then the ledger key (after the label keys, a fixed order): a ledger
+    // import in progress holds it until its last row is written, so the
+    // check below sees that import's rows, never a half-written portal
+    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [bankImport.LEDGER_LOCK_KEY]);
     const others = await trx('plaid_accounts as pa')
       .join('plaid_items as pi', 'pi.id', 'pa.plaid_item_id')
       .whereNot('pa.plaid_item_id', itemId)
@@ -443,22 +481,7 @@ async function setupItem(itemId, input) {
       if (existing && existing.account_type !== a.accountType) {
         throw badRequest(`"${a.label}" is already imported as ${ACCOUNT_TYPE_NOUN[existing.account_type]} — keep that type, or use a different label`);
       }
-      // Rows from another source for this label — a CSV statement, or an
-      // EARLIER feed of the same bank account (a replacement connection
-      // gets new transaction ids) — can't be deduped against this feed,
-      // so it must start AFTER the last day they cover. This account's
-      // own rows are excluded: re-syncing them is idempotent by id.
-      // Checked under the label lock the CSV upload also takes.
-      const prior = await trx('bank_transactions')
-        .whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
-        .where(q => q.where({ source: 'csv' })
-          .orWhere(q2 => q2.where({ source: 'plaid' }).whereRaw('plaid_account_id is distinct from ?', [byId.get(a.id).account_id])))
-        .max('txn_date as last_date')
-        .first();
-      const lastPrior = toDateOnly(prior.last_date);
-      if (lastPrior && a.syncFrom <= lastPrior) {
-        throw badRequest(`"${a.label}" already has rows from a statement or an earlier feed through ${lastPrior} — start the feed on ${addDaysStr(lastPrior, 1)} or later`);
-      }
+      await assertFeedStartsAfterPriorRows(trx, a, byId.get(a.id), item);
     }
     let resetCursor = false;
     for (const a of cleaned) {
