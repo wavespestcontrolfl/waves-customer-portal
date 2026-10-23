@@ -2813,6 +2813,10 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
 });
 
 const INCOME_SHELF_IGNORE = 'this receipt is on the ledger Inbox\'s Income shelf: nothing has counted it as revenue yet. Mark it Recorded there once its sale is in the portal, or decide it Personal or Transfer there';
+// the shelf guard only where the Inbox can take the row: a row with live
+// link candidates (a payout or refund the matcher is still asking about)
+// belongs to Bank Import, Ignore included, or nothing could resolve it
+const INBOX_TAKES_ROW_SQL = () => `(${taxLedgerRules.ON_INCOME_SHELF_SQL} and ${taxLedgerRules.NO_LIVE_CANDIDATES_SQL})`;
 router.post('/bank-import/:id/ignore', async (req, res, next) => {
   try {
     // a receipt on the ledger's Income shelf (an Income decision, or an
@@ -2820,11 +2824,11 @@ router.post('/bank-import/:id/ignore', async (req, res, next) => {
     // on: the shelf exists so that nothing leaves it uncounted
     const ledgerOn = taxLedgerRules.isOn();
     let q = db('bank_transactions').where({ id: req.params.id }).whereIn('status', ['unmatched']);
-    if (ledgerOn) q = q.whereRaw(`not ${taxLedgerRules.ON_INCOME_SHELF_SQL}`);
+    if (ledgerOn) q = q.whereRaw(`not ${INBOX_TAKES_ROW_SQL()}`);
     const changed = await q.update({ status: 'ignored', updated_at: new Date() });
     if (!changed) {
       const row = ledgerOn ? await db('bank_transactions').where({ id: req.params.id }).first('status', 'suggestion') : null;
-      if (row && row.status === 'unmatched' && String(row.suggestion?.income) === 'true') return res.status(409).json({ error: INCOME_SHELF_IGNORE });
+      if (row && row.status === 'unmatched' && String(row.suggestion?.income) === 'true' && !taxLedgerRules.hasLiveCandidates(row)) return res.status(409).json({ error: INCOME_SHELF_IGNORE });
       return res.status(409).json({ error: 'only unmatched rows can be ignored' });
     }
     res.json({ success: true });

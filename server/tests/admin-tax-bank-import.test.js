@@ -1319,10 +1319,23 @@ describe('generic Ignore and the ledger Income shelf', () => {
     const res = await post('/admin/tax/bank-import/bt-1/ignore', {});
     expect(res.status).toBe(409);
     expect((await res.json()).error).toMatch(/Income shelf.*Recorded/);
-    expect(state.bankUpdates[0].wheres).toContainEqual(["not coalesce(suggestion->>'income','') = 'true'", undefined]);
+    expect(state.bankUpdates[0].wheres).toContainEqual([`not (coalesce(suggestion->>'income','') = 'true' and ${taxLedgerRules.NO_LIVE_CANDIDATES_SQL})`, undefined]);
     // any other refused row keeps the plain answer
     state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: null };
     expect((await (await post('/admin/tax/bank-import/bt-1/ignore', {})).json()).error).toMatch(/only unmatched rows/);
+  });
+  test('with the ledger on, an Income-shelf row with live link candidates is ignored from Bank Import: the Inbox cannot take it, so the guard leaves it alone', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow = { id: 'bt-1', status: 'unmatched', suggestion: { noMatch: true, income: true, rule: { id: 'r', kind: 'income' }, payoutCandidates: [{ id: 'po-1' }] } };
+    expect((await post('/admin/tax/bank-import/bt-1/ignore', {})).status).toBe(200);
+    const guard = state.bankUpdates[0].wheres.find((w) => Array.isArray(w) && String(w[0]).startsWith('not ('));
+    expect(guard[0]).toContain("jsonb_array_length(suggestion->'payoutCandidates')");
+    // the refusal with candidates (a race: the row changed) is the plain one, not the shelf's
+    state.bankUpdateResult = 0;
+    expect((await (await post('/admin/tax/bank-import/bt-1/ignore', {})).json()).error).toMatch(/only unmatched rows/);
+    // the same row once its candidates are gone: refused, so it is decided on the shelf
+    state.bankRow.suggestion.payoutCandidates = [];
+    expect((await (await post('/admin/tax/bank-import/bt-1/ignore', {})).json()).error).toMatch(/Income shelf/);
   });
   test('with the ledger off there is no shelf: the update carries no Income guard', async () => {
     delete process.env.GATE_TAX_LEDGER;

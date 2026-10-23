@@ -346,11 +346,14 @@ function compileRules(rules) {
 function creditOfMerchant(rule) {
   return { ...rule, kind: 'review', category_id: null, category_name: null, irs_line: null, note: `money in from a business merchant (${rule.note || rule.pattern}): a refund to apply in Bank Import, or income` };
 }
-function matchRule(description, compiled, direction = null) {
+// matched: the worker's answer for this description (indexes into
+// compiled, see matchPage); without it the regexes run here (unit checks).
+function matchRule(description, compiled, direction = null, matched = null) {
   const d = String(description || '').slice(0, MAX_DESCRIPTION);
-  for (const r of compiled) {
+  for (let i = 0; i < compiled.length; i += 1) {
+    const r = compiled[i];
     if (direction && r.kind === 'income' && direction !== 'credit') continue;
-    if (!r.re.test(d)) continue;
+    if (matched ? !matched.includes(i) : !r.re.test(d)) continue;
     if (direction === 'credit' && r.kind === 'expense') return creditOfMerchant(r);
     return r;
   }
@@ -544,6 +547,54 @@ async function withRuleTableLock(conn, fn) {
 }
 const hasKey = (sug, k) => sug[k] !== undefined && sug[k] !== null;
 
+// Rule matching runs off the event loop. The grammar bounds a pattern's
+// shape and the probe bounds its time on adversarial strings, but neither
+// is proof for every real description (two overlapping alternations and a
+// wildcard can still take seconds on one long line). So a pass sends each
+// page of descriptions to a worker thread holding the compiled patterns and
+// waits at most MATCH_HARD_CAP_MS for the answer. Over the cap the worker is
+// terminated and the page is matched again in halves of the rule set, down
+// to the one rule that overruns on its own: that rule matches nothing, is
+// disabled with a note (an edit, so the seed refresh leaves it off) and the
+// pass goes on without it. The request loop never runs an owner's regex.
+const MATCH_HARD_CAP_MS = 2000;
+function askMatchWorker(patterns, subjects, capMs) {
+  const { Worker } = require('worker_threads');
+  const worker = new Worker(require.resolve('./tax-ledger-match-worker'), { workerData: { patterns } });
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ slow: true }), capMs);
+    worker.once('message', (msg) => { clearTimeout(timer); resolve(msg); });
+    worker.once('error', (err) => { clearTimeout(timer); resolve({ error: err.message }); });
+    worker.once('exit', () => { clearTimeout(timer); resolve({ error: 'the matching worker exited without an answer' }); });
+    worker.postMessage({ subjects });
+  }).finally(() => worker.terminate().catch(() => {}));
+}
+// hits[i] = indexes into `rules` that match subjects[i]; a rule that
+// overruns the cap on its own goes to `slow` and matches nothing
+async function matchSplit(rules, subjects, capMs, slow) {
+  const out = await askMatchWorker(rules.map((r) => r.pattern), subjects, capMs);
+  if (out.hits) return out.hits;
+  if (out.error) throw new Error(`rule matching failed: ${out.error}`);
+  if (rules.length === 1) { slow.push(rules[0]); return subjects.map(() => []); }
+  const half = Math.ceil(rules.length / 2);
+  const left = await matchSplit(rules.slice(0, half), subjects, capMs, slow);
+  const right = await matchSplit(rules.slice(half), subjects, capMs, slow);
+  return left.map((l, i) => [...l, ...right[i].map((j) => j + half)]);
+}
+async function disableSlowRule(rule) {
+  logger.warn(`[tax-ledger] rule ${rule.id} (${rule.pattern}) disabled: over ${MATCH_HARD_CAP_MS} ms on a page of descriptions`);
+  await db('tax_ledger_rules').where({ id: rule.id, enabled: true }).update({
+    enabled: false, note: `disabled: too slow on real descriptions (${rule.note || rule.pattern})`, updated_at: new Date(),
+  });
+}
+async function matchPage(compiled, subjects, { capMs = MATCH_HARD_CAP_MS } = {}) {
+  if (!compiled.length || !subjects.length) return subjects.map(() => []);
+  const slow = [];
+  const hits = await matchSplit(compiled, subjects.map((s) => String(s || '').slice(0, MAX_DESCRIPTION)), capMs, slow);
+  for (const r of slow) await disableSlowRule(r);
+  return hits;
+}
+
 // One page of open, matcher-examined, undecided rows, oldest first.
 function rulePassPage({ pageSize, force, after }) {
   let q = db('bank_transactions')
@@ -581,10 +632,10 @@ function ruleVerdict(sug, rule, pattern, force) {
   const stale = fellToSeed || (!writes && !pattern && !!force && hasKey(sug, 'rule') && !matcherFlag);
   return { matcherFlag, writes, stale };
 }
-function classifyRow(row, compiled, { pattern, force, stamp }) {
+function classifyRow(row, compiled, { pattern, force, stamp, matched = null }) {
   const sug = row.suggestion || {};
   if (sug.decision || !matcherExamined(row)) return { skip: true };
-  const rule = matchRule(row.description, compiled, row.direction);
+  const rule = matchRule(row.description, compiled, row.direction, matched);
   const { matcherFlag, writes, stale } = ruleVerdict(sug, rule, pattern, force);
   if (pattern && !writes) return { skip: true };
   const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
@@ -674,10 +725,11 @@ async function runPass({ limit = PAGE, force = false, pattern = null, after: sta
 // with rows still to read, it stops and returns the cursor of the row it
 // stopped on (null = the page was finished).
 async function examinePage(rows, { compiled, pattern, force, stamp, counts, hits, now, stopAt, lastPageFull }) {
+  const matched = await matchPage(compiled, rows.map((r) => r.description));
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
     counts.examined += 1;
-    const c = classifyRow(row, compiled, { pattern, force, stamp });
+    const c = classifyRow(row, compiled, { pattern, force, stamp, matched: matched[i] });
     if (!c.skip) await applyClassification(row, c, counts, hits);
     if (now() >= stopAt && (i < rows.length - 1 || lastPageFull)) return cursorOf(row);
   }
@@ -912,7 +964,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 }
 
 module.exports = {
-  KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON, MAX_ENABLED_RULES, PASS_TIME_BUDGET_MS, LOOP_TIME_BUDGET_MS, PASS_CONCURRENCY, PASS_QUEUE,
+  KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON, MAX_ENABLED_RULES, PASS_TIME_BUDGET_MS, LOOP_TIME_BUDGET_MS, PASS_CONCURRENCY, PASS_QUEUE, MATCH_HARD_CAP_MS, matchPage,
   NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, hasOpenDecision, assertPatternFast, probeStrings, PROBE_CONCURRENCY, PROBE_QUEUE, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,

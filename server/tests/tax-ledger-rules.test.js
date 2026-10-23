@@ -449,6 +449,42 @@ describe('applyRules (suggestion-only)', () => {
     expect((await svc.applyRules({ limit: 500 })).more).toBe(false);
   });
 
+  test('matchPage answers per description with the indexes of the rules that match, in rule order, from a worker thread', async () => {
+    const compiled = svc.compileRules([{ id: 'a', pattern: 'costco', priority: 10 }, { id: 'b', pattern: 'gas', priority: 20 }]);
+    await expect(svc.matchPage(compiled, ['COSTCO GAS 1', 'WAWA', '', null])).resolves.toEqual([[0, 1], [], [], []]);
+    await expect(svc.matchPage(compiled, [])).resolves.toEqual([]);
+    await expect(svc.matchPage([], ['COSTCO'])).resolves.toEqual([[]]);
+  });
+
+  test('a rule that passes the grammar and the probe but overruns the cap on a real description is isolated, matches nothing, and is disabled with a note; the other rules still match', async () => {
+    // two overlapping alternations, three optionals and two wildcards: within every grammar cap, ~8 s on 300 z characters
+    const ten = Array.from({ length: 10 }, (_, i) => 'z'.repeat(i + 1)).join('|');
+    const evil = `(${ten})(${ten})z?z?z?.*z.*x`;
+    const compiled = svc.compileRules([{ id: 'fast1', pattern: 'wawa', priority: 1 }, { id: 'evil', pattern: evil, priority: 2, note: 'typo' }, { id: 'fast2', pattern: 'costco', priority: 3 }]);
+    expect(compiled.map((r) => r.id)).toEqual(['fast1', 'evil', 'fast2']);
+    // 290 z characters: the match is on the description's first 300 characters, like the in-process check
+    const subjects = ['WAWA 1', `${'z'.repeat(290)} COSTCO`];
+    await expect(svc.matchPage(compiled, subjects, { capMs: 150 })).resolves.toEqual([[0], [2]]);
+    expect(state.ruleUpdates).toHaveLength(1);
+    expect(state.ruleUpdates[0].wheres).toContainEqual({ id: 'evil', enabled: true });
+    expect(state.ruleUpdates[0].patch).toMatchObject({ enabled: false, note: 'disabled: too slow on real descriptions (typo)', updated_at: expect.any(Date) });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/rule evil .* disabled: over \d+ ms/));
+  });
+
+  test('a pass matches its page in the worker: the evil rule above is disabled mid-pass and the page is still classified by the rules that answer', async () => {
+    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
+    const ten = Array.from({ length: 10 }, (_, i) => 'z'.repeat(i + 1)).join('|');
+    state.rules = [
+      { id: 'evil', pattern: `(${ten})(${ten})z?z?z?.*z.*x`, kind: 'personal', priority: 1, enabled: true, source: 'owner', note: 'typo' },
+      { id: 'ok', pattern: 'wawa', kind: 'expense', priority: 2, enabled: true, source: 'seed', category_id: 'cat-1', category_name: 'Supplies', irs_line: '22' },
+    ];
+    state.bankRows = [{ id: 'b1', txn_date: '2026-01-02', description: `${'z'.repeat(290)} WAWA`, direction: 'debit', suggestion: { noMatch: true } }];
+    const out = await svc.applyRules({ limit: 10, deadline: Number.MAX_SAFE_INTEGER });
+    expect(out).toMatchObject({ examined: 1, suggested: 1, byKind: { expense: 1 } });
+    expect(state.updates[0].patch.suggestion.merged.rule.id).toBe('ok');
+    expect(state.ruleUpdates.find((u) => u.patch.enabled === false).wheres).toContainEqual({ id: 'evil', enabled: true });
+  }, 30000);
+
   test('hasOpenDecision: a Later or Income decision shelves an open row (the Plaid sync then parks changes on it); anything else does not', () => {
     expect(svc.hasOpenDecision({ later: true, decision: 'later' })).toBe(true);
     expect(svc.hasOpenDecision({ income: true, decision: 'income' })).toBe(true);
