@@ -61,6 +61,8 @@ const SERVICE_TYPE_MAP = [
   // Mosquito — cadence identities are catalog services (mosquito_seasonal /
   // mosquito_monthly) and must survive; the bare pattern is the legacy fallback.
   // The misting SYSTEM is not the barrier treatment: keep its own label.
+  // The lead-only design visit keeps its own catalog name (migration 20260924000020).
+  { match: /misting\s*system/i,                             type: 'Mosquito Misting System Service' },
   { match: /misting/i,                                      type: 'Mosquito Misting Service Plan' },
   { match: /seasonal.*mosquito|mosquito.*seasonal/i,        type: 'Seasonal Mosquito Control Service' },
   { match: /monthly.*mosquito|mosquito.*monthly/i,          type: 'Monthly Mosquito Control Service' },
