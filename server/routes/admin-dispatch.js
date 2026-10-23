@@ -2559,6 +2559,51 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
 });
 
 router.put('/:serviceId/status', serviceStatusHandler);
+// The post-commit effects of a cancel (the text, then the invoice/credit/linked-visit follow-through), for the Dispatch handler and
+// the Intelligence Bar replay. Only the Intelligence Bar cancel carries a recovery record (req.ibCancelBundleId, written in the
+// cancel transaction by cancelServiceFromBar): the request takes its lease, notes the text outcome and marks the record complete.
+// If liveStart reports the bundle is no longer the request's (the recovery sweep holds or finished it, it expired and staff are
+// resolving it by hand, or the heartbeat could not be written) the request does NOT run the effects: the sweep owns them, and a
+// request that paused past its lease must not send an untouched text or move money after the office was told otherwise.
+// Returns the text outcome the reply reports.
+async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, cancelNoticeOutcome }) {
+  const cancelBundles = require('../services/ib-cancel-effect-bundles');
+  await cancelBundles.liveStart(req);
+  if (req.ibCancelBundleLost) return cancelNoticeOutcome;
+  let outcome = cancelNoticeOutcome;
+  try {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    // Out-param so the response can tell the operator the cancel committed but the requested text didn't go out (missing
+    // reminder row/phone, consent block, provider failure).
+    outcome = notifyCustomer !== false ? {} : null;
+    req.ibCancelNoticeOutcome = outcome;
+    await AppointmentReminders.handleCancellation(svc.id, {
+      sendNotification: notifyCustomer !== false,
+      ...(outcome ? { outcome } : {}),
+      // Set only by cancelServiceFromBar: the text the Intelligence Bar card approved, per recipient.
+      ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
+    });
+  } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
+  await cancelBundles.liveNotice(req, outcome);
+
+  // Share fee outcome alerts, invoice cleanup, and tracker updates with series cancellations. The helper uses the committed
+  // cancellation time so retrying a failed fee check never moves a timely cancel into the window.
+  await require('../services/visit-cancellation-followthrough').runVisitCancellationFollowThrough({
+    targetIds: [svc.id],
+    actorId: req.technicianId,
+    waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+    reason: notes || null,
+    source: 'admin-dispatch',
+    // Set only by cancelServiceFromBar: the linked visits the card approved (each re-checked under its lock).
+    ...(req.ibApprovedLinkedChildren ? { linkedChildren: req.ibApprovedLinkedChildren, linkedChildReport: req.ibLinkedChildReport } : {}),
+    // Set only by cancelServiceFromBar: the money effects the card showed (invoices to void at those amounts and PaymentIntents,
+    // credits to reverse, no card rail). The follow-through acts on these only.
+    ...(req.ibApprovedMoney ? { pinnedEffects: { [svc.id]: req.ibApprovedMoney }, moneyReport: req.ibMoneyReport } : {}),
+  });
+  await cancelBundles.liveFinish(req);
+  return outcome;
+}
+
 // What the recovery record tells the Intelligence Bar's reply: the sweep took the bundle over while the request ran (its lease
 // ran out, so the sweep owns the outcome), and/or the approved text has no terminal outcome yet (the sweep sends it).
 function ibRecoveryReplyFlags(req) {
@@ -3348,40 +3393,7 @@ async function serviceStatusHandler(req, res, next) {
       // Only the Intelligence Bar cancel carries a recovery record (req.ibCancelBundleId, written in the cancel
       // transaction by cancelServiceFromBar): this request keeps its lease, notes the text outcome and marks the record
       // complete. If the process dies first, the recovery sweep finishes what the card approved (ib-cancel-effect-bundles.js).
-      const cancelBundles = require('../services/ib-cancel-effect-bundles');
-      await cancelBundles.liveStart(req);
-      try {
-        const AppointmentReminders = require('../services/appointment-reminders');
-        // Out-param so the response can tell the operator the cancel
-        // committed but the requested text didn't go out (missing reminder
-        // row/phone, consent block, provider failure).
-        cancelNoticeOutcome = notifyCustomer !== false ? {} : null;
-        req.ibCancelNoticeOutcome = cancelNoticeOutcome;
-        await AppointmentReminders.handleCancellation(svc.id, {
-          sendNotification: notifyCustomer !== false,
-          ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
-          // Set only by cancelServiceFromBar: the text the Intelligence Bar card approved, per recipient.
-          ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
-        });
-      } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
-      await cancelBundles.liveNotice(req, cancelNoticeOutcome);
-
-      // Share fee outcome alerts, invoice cleanup, and tracker updates with
-      // series cancellations. The helper uses the committed cancellation time
-      // so retrying a failed fee check never moves a timely cancel into the window.
-      await require('../services/visit-cancellation-followthrough').runVisitCancellationFollowThrough({
-        targetIds: [svc.id],
-        actorId: req.technicianId,
-        waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
-        reason: notes || null,
-        source: 'admin-dispatch',
-        // Set only by cancelServiceFromBar: the linked visits the card approved (each re-checked under its lock).
-        ...(req.ibApprovedLinkedChildren ? { linkedChildren: req.ibApprovedLinkedChildren, linkedChildReport: req.ibLinkedChildReport } : {}),
-        // Set only by cancelServiceFromBar: the money effects the card showed (invoices to void at those amounts and
-        // PaymentIntents, credits to reverse, no card rail). The follow-through acts on these only.
-        ...(req.ibApprovedMoney ? { pinnedEffects: { [svc.id]: req.ibApprovedMoney }, moneyReport: req.ibMoneyReport } : {}),
-      });
-      await cancelBundles.liveFinish(req);
+      cancelNoticeOutcome = await runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, cancelNoticeOutcome });
       // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
       // inside a 9-application plan adds one back at the end of the series.
       // Only this single-visit branch — the 'following' / 'series' scope

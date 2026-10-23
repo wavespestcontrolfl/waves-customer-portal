@@ -326,6 +326,9 @@ describe('the recovery bundle rides the cancel transaction', () => {
     const { json } = await run();
     expect(json.success).toBe(true);
     expect(json.recoveryOwnsOutcome).toBe(true);
+    // The sweep owns the effects now: a paused request that resumes sends no text and moves no money.
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
   });
 
   test('an approved text with no terminal outcome: the reply carries textRetryScheduled (the sweep sends it)', async () => {
