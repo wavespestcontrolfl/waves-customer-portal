@@ -12,6 +12,8 @@ jest.mock('../services/lawn-trouble-areas', () => ({
 
 const featureGates = require('../config/feature-gates');
 const { V13_CHINCH_TETRINO, CHINCH_TETRINO_NOTE_KEY, CHINCH_TETRINO_NOTE } = require('../config/lawn-v13-chinch-rate');
+const caps = require('../config/lawn-v13-count-caps');
+const limits = require('../services/application-limits');
 const engine = require('../services/waveguard-plan-engine');
 const { archivedLawnRecipeMatches } = require('../services/lawn-completion-defaults');
 const v13 = require('../config/lawn-protocol-v13.json');
@@ -114,6 +116,44 @@ describe('visitNutrientTargets for the May visit', () => {
     mockHasArea.mockResolvedValue(true);
     const found = await engine.visitNutrientTargets({}, service, { visit: visitOf('st_augustine', 'Nov'), month: 'Nov', v13Active: true });
     expect('chinchRate' in found).toBe(false);
+  });
+});
+
+describe('the raise needs room under the label limits (chinchRaiseFits)', () => {
+  let capSpy;
+  let limitSpy;
+  beforeEach(() => {
+    capSpy = jest.spyOn(caps, 'capIdMap').mockResolvedValue(new Map([['tet', caps.v13CountCapFor('Tetrino Insecticide')], ['arena', caps.v13CountCapFor('Arena 50 WDG')]]));
+    limitSpy = jest.spyOn(limits, 'checkLimits').mockResolvedValue({ allowed: true, blocks: [], warnings: [] });
+  });
+  afterEach(() => { capSpy.mockRestore(); limitSpy.mockRestore(); });
+  const svc = { ...service, customer_id: 'cust-1', scheduled_date: '2027-05-10' };
+  const decide = (opts = {}) => engine.chinchTetrinoRate({}, svc, { monthNumber: 5, v13Active: true, ...opts });
+
+  test('asks the limit reader about Tetrino only (not Arena), at the raised rate, for the visit date, leaving the visit\'s own rows out', async () => {
+    expect(await decide()).toBe(0.735);
+    expect(limitSpy).toHaveBeenCalledTimes(1);
+    const [customer, product, date, , opts] = limitSpy.mock.calls[0];
+    expect([customer, product]).toEqual(['cust-1', 'tet']);
+    expect(date.toISOString()).toBe(new Date('2027-05-10T16:00:00Z').toISOString());
+    expect(opts).toEqual({ proposed: { ratePer1000: 0.735, unit: 'fl oz' }, proposal: true, excludeScheduledServiceId: 'svc-1', propertyId: service.property_id });
+  });
+
+  test('a hard block keeps the normal rate; a warning does not', async () => {
+    limitSpy.mockResolvedValue({ allowed: false, blocks: [{ type: 'annual_max_rate', message: 'x' }], warnings: [] });
+    expect(await decide()).toBeNull();
+    limitSpy.mockResolvedValue({ allowed: true, blocks: [], warnings: [{ type: 'annual_max_rate', message: 'approaching' }] });
+    expect(await decide()).toBe(0.735);
+  });
+
+  test('no mapped area reads no limit; a failed limit read keeps the normal rate, or throws when strict', async () => {
+    mockHasArea.mockResolvedValue(false);
+    expect(await decide()).toBeNull();
+    expect(limitSpy).not.toHaveBeenCalled();
+    mockHasArea.mockResolvedValue(true);
+    limitSpy.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    expect(await decide()).toBeNull();
+    await expect(decide({ strict: true })).rejects.toThrow('db down');
   });
 });
 

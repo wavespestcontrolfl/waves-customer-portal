@@ -802,14 +802,42 @@ async function hasChinchMapped(knex, service, { strict = false } = {}) {
   }
 }
 
+// Would a Tetrino application at the raised rate fit the label limits the v13 cap entry holds (lawn-v13-count-caps.js: 1.47 fl oz per
+// 1,000 sq ft a year, 28 days between applications), over the lawn's recorded applications and this visit's date? The same limit reader the
+// plan uses (application-limits checkLimits, the visit's own ledger rows left out). A hard block = the raise does not fit, and the visit
+// plans the normal rate (which the plan then judges by the same reader: if even that is blocked, the line is held with the limit's
+// message). The Tetrino product is found by the cap entry's identity; one that cannot be found leaves the raise to the plan's own limit
+// read. `strict`: a failed read throws; otherwise it keeps the normal rate.
+async function chinchRaiseFits(knex, service, { strict = false } = {}) {
+  const { capIdMap } = require('../config/lawn-v13-count-caps');
+  const limits = require('./application-limits');
+  try {
+    const ids = [...(await capIdMap(knex))].filter(([, entry]) => entry.name === V13_CHINCH_TETRINO.productName).map(([id]) => id);
+    for (const id of ids) {
+      const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, id, toServiceDate(service.scheduled_date), k, {
+        proposed: { ratePer1000: V13_CHINCH_TETRINO.ratePer1000, unit: V13_CHINCH_TETRINO.rateUnit }, proposal: true,
+        excludeScheduledServiceId: service.id, propertyId: service.property_id || null,
+      }));
+      if (result?.blocks?.length) return false;
+    }
+    return true;
+  } catch (err) {
+    logger.warn(`[plan] chinch Tetrino limits unreadable for ${service?.id}: ${err?.code || err?.name || 'Error'}`);
+    if (strict) throw err;
+    return false;
+  }
+}
+
 // The ONE decision whether the May Tetrino rate at one property is raised, for every reader that states it (the plan, the tank sheet,
 // the previsit brief): the raised rate (config/lawn-v13-chinch-rate.js), else null. Gate first: with GATE_LAWN_CHINCH_TETRINO_RATE off
 // (or not a v13 program) nothing is read. Only May; `normalRate` is the visit's stated rate, and a rate already at or above the raised
-// one is never touched. `strict`: a failed area read throws (see hasChinchMapped).
+// one is never touched. The raise needs a mapped chinch area AND room under the label limits (chinchRaiseFits). `strict`: a failed read
+// throws (see hasChinchMapped).
 async function chinchTetrinoRate(knex, service, { monthNumber, statedRate = V13_CHINCH_TETRINO.normalRate, v13Active, strict = false }) {
   if (!v13Active || !featureGates.lawnChinchTetrinoRateLive()) return null;
   if (monthNumber !== V13_CHINCH_TETRINO.month || !(Number(statedRate) < V13_CHINCH_TETRINO.ratePer1000)) return null;
-  return (await hasChinchMapped(knex, service, { strict })) ? V13_CHINCH_TETRINO.ratePer1000 : null;
+  if (!(await hasChinchMapped(knex, service, { strict }))) return null;
+  return (await chinchRaiseFits(knex, service, { strict })) ? V13_CHINCH_TETRINO.ratePer1000 : null;
 }
 
 const isChinchTetrinoRow = (row) => !!row && [row.productName, row.protocolProductName].some((name) => String(name || '').trim() === V13_CHINCH_TETRINO.productName);

@@ -7,8 +7,9 @@
  * `troubleType` that is ACTIVE or was resolved within `resolvedWithinDays` days, the May line is planned at the top rate instead.
  *
  * The entry applies to the visit whose month number is `month`, to the one product `productName`, and only RAISES its stated rate
- * (a row already at or above `ratePer1000` is unchanged). Nothing else moves. One May application at 0.735 uses half of the 64 fl oz
- * a year, so the label's yearly limit is not reached by this visit.
+ * (a row already at or above `ratePer1000` is unchanged). Nothing else moves. The raise must fit the label limits the Tetrino entry of
+ * lawn-v13-count-caps.js enforces (1.47 fl oz per 1,000 sq ft a year = two maximum-rate passes, 28 days between applications); if it does
+ * not, the visit plans `normalRate` (waveguard-plan-engine chinchRaiseFits).
  * Kept in code, not in a protocol row, so no migration is needed and the gate off leaves every stored row as it was.
  */
 const V13_CHINCH_TETRINO = Object.freeze({

@@ -14,12 +14,14 @@ const TET = 'Tetrino Insecticide';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_CHINCH_TETRINO_RATE'];
 const NOTE = "Chinch bugs mapped here: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.";
+const caps = require('../config/lawn-v13-count-caps');
 const day = etDateString(addETDays(new Date(), -1));
 
 describeDb('May Tetrino chinch rate through PostgreSQL', () => {
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
   let owned;
   let knex;
+  let tetId;
 
   async function clone(table) {
     await knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [owned.schema, table, table]);
@@ -44,6 +46,7 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
       name: TET, category: 'insecticide', product_type: 'insecticide', default_rate_per_1000: 0.367, rate_unit: 'fl oz',
       label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'fl oz', active: true,
     }).returning('*');
+    tetId = tet.id;
     const [staged] = await knex('lawn_protocols').insert({ protocol_key: KEY, version: LAWN_V13_VERSION, name: 'Fixture v13', status: 'staged', grass_track: 'bermuda', region: 'swfl', effective_from: '2000-01-01' }).returning('*');
     const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: staged.id, month: 5, window_key: 'may_v13_tetrino_hose', title: 'May', visit_type: 'hose' }).returning('*');
     await knex('lawn_protocol_products').insert({
@@ -54,7 +57,7 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   }, 90000);
   afterAll(async () => { if (owned) await owned.dispose(); });
-  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); });
+  beforeEach(async () => { setGates(); caps.resetV13CapIdentity(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); });
   afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
   // A May visit at a fresh full-sun lawn of 10,000 sq ft, optionally with mapped areas ({ type, status, clearedDaysAgo }).
@@ -69,7 +72,15 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
         source: 'tech_tap', first_seen_on: day, last_seen_on: day, cleared_at: clearedAt,
       });
     }
-    return f.visit(0, { scheduled_date: '2027-05-10' });
+    const visit = await f.visit(0, { scheduled_date: '2027-05-10' });
+    visit.customerId = f.customerId;
+    return visit;
+  }
+  // Earlier Tetrino applications of the visit's customer: [date, rate] (rate null = unreadable).
+  async function earlier(visit, rows) {
+    for (const [date, rate] of rows) {
+      await knex('property_application_history').insert({ customer_id: visit.customerId, product_id: tetId, application_date: date, application_rate: rate, rate_unit: rate == null ? null : 'fl oz' });
+    }
   }
   const plan = (visit) => buildPlanForService(visit.id, { db: knex, includeCompletionDefaults: true });
   const tetOf = (list) => list.find((item) => item.product?.name === TET);
@@ -165,5 +176,62 @@ describeDb('May Tetrino chinch rate through PostgreSQL', () => {
       expect(tetOf(lenient.mixCalculator.items).mix.ratePer1000).toBe(0.367);
       expect(JSON.stringify(lenient)).not.toContain('chinchTetrinoRate');
     } finally { spy.mockRestore(); }
+  });
+  // The label limits (lawn-v13-count-caps.js: 1.47 fl oz per 1,000 sq ft a year, 28 days between applications) gate the raise.
+  describe('the raise needs room under the label limits', () => {
+    const planned = async (areas, rows) => {
+      const visit = await mayVisit(areas);
+      await earlier(visit, rows);
+      return plan(visit);
+    };
+    const rateOf = (result) => tetOf(result.mixCalculator.items)?.mix?.ratePer1000;
+
+    test('one earlier maximum-rate pass (28+ days back): the second maximum-rate pass fits the year exactly (2 x 0.735 = 1.47) and is raised', async () => {
+      const result = await planned([{ type: 'chinch' }], [['2027-02-02', 0.735]]);
+      expect(rateOf(result)).toBe(0.735);
+      expect(tetOf(result.mixCalculator.items).gateNotes).toContainEqual(expect.objectContaining({ key: 'chinchTetrinoRate' }));
+    });
+
+    test('earlier 0.735 + 0.3: the raised pass would pass 1.47, so the visit plans 0.367 (1.402), with the recipe text and no chinch note', async () => {
+      const result = await planned([{ type: 'chinch' }], [['2027-01-05', 0.735], ['2027-02-16', 0.3]]);
+      const item = tetOf(result.mixCalculator.items);
+      expect(item.mix.ratePer1000).toBe(0.367);
+      expect(item.raw).toMatch(/^Tetrino Insecticide \u2014 0\.367 fl oz per 1,000 sq ft, sunny turf only/);
+      expect(JSON.stringify(item.gateNotes)).not.toContain('chinchTetrinoRate');
+      expect(tetOf(result.completionDefaults.items).mix.ratePer1000).toBe(0.367);
+      expect(result.propertyGate.blocks.map((block) => block.code)).not.toContain('lawn_v13_annual_limit');
+    });
+
+    test('two earlier maximum-rate passes: the year is full, so even 0.367 is held with the limit\'s message and no amount', async () => {
+      const result = await planned([{ type: 'chinch' }], [['2027-01-05', 0.735], ['2027-02-16', 0.735]]);
+      expect(tetOf(result.mixCalculator.items).mix).toBeNull();
+      const blocks = result.propertyGate.blocks.filter((block) => block.code === 'lawn_v13_annual_limit');
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0].message).toMatch(/Tetrino Insecticide.*LIMIT REACHED/);
+    });
+
+    test('28-day interval: an earlier pass 27 days before the visit holds the line (no raise); 28 days before still allows the raise', async () => {
+      const held = await planned([{ type: 'chinch' }], [['2027-04-13', 0.367]]);
+      expect(tetOf(held.mixCalculator.items).mix).toBeNull();
+      expect(held.propertyGate.blocks.some((block) => block.code === 'lawn_v13_annual_limit' && /only 27 days since last app \(min 28\)\. Next allowed: 5\/11\/2027/.test(block.message))).toBe(true);
+      const ok = await planned([{ type: 'chinch' }], [['2027-04-12', 0.367]]);
+      expect(rateOf(ok)).toBe(0.735);
+    });
+
+    test('limits are the same with the chinch gate OFF (the cap entry enforces the label for every Tetrino pass): 27 days holds the normal rate too', async () => {
+      const visit = await mayVisit([]);
+      await earlier(visit, [['2027-04-13', 0.367]]);
+      setGates(GATES.filter((name) => name !== 'GATE_LAWN_CHINCH_TETRINO_RATE'));
+      const off = await plan(visit);
+      expect(tetOf(off.mixCalculator.items).mix).toBeNull();
+      const clear = await mayVisit([]);
+      await earlier(clear, [['2027-04-12', 0.367]]);
+      expect(rateOf(await plan(clear))).toBe(0.367);
+    });
+
+    test('an earlier pass with no readable rate counts as a maximum-rate pass: one such pass + the raise fits (1.47), two do not', async () => {
+      expect(rateOf(await planned([{ type: 'chinch' }], [['2027-02-02', null]]))).toBe(0.735);
+      expect(rateOf(await planned([{ type: 'chinch' }], [['2027-01-05', null], ['2027-02-16', 0.2]]))).toBe(0.367);
+    });
   });
 });

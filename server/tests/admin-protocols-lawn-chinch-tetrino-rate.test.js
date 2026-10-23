@@ -24,6 +24,7 @@ jest.mock('../services/lawn-trouble-areas', () => ({
   hasAreaOfType: (...args) => mockHasArea(...args),
 }));
 
+const caps = require('../config/lawn-v13-count-caps');
 const db = require('../models/db');
 const operatingLayer = require('../services/lawn-protocol-operating-layer');
 const adminProtocolsRouter = require('../routes/admin-protocols');
@@ -66,7 +67,10 @@ async function lawnMix(query) {
 
 const sheet = (extra = {}) => lawnMix({ month: '5', scheduledServiceId: VISIT, ...extra });
 const tetrino = (body) => body.items.find((item) => item.product?.name === TET);
-const limitRate = () => mockCheckLimits.mock.calls.find((call) => call[1] === 'tet')?.[4]?.proposed?.ratePer1000;
+// The last rate the limit reader was asked to judge for Tetrino (the plan's own read, after the raise decision's).
+const limitRates = () => mockCheckLimits.mock.calls.filter((call) => call[1] === 'tet').map((call) => call[4]?.proposed?.ratePer1000);
+const limitRate = () => limitRates().at(-1);
+let capSpy;
 let visit;
 
 beforeEach(() => {
@@ -75,6 +79,7 @@ beforeEach(() => {
   mockCheckLimits.mockReset().mockResolvedValue({ allowed: true, blocks: [], warnings: [] });
   mockPropertyOf.mockReset().mockImplementation(async (knex, svc) => svc?.property_id || null);
   mockHasArea.mockReset().mockResolvedValue(true);
+  capSpy = jest.spyOn(caps, 'capIdMap').mockResolvedValue(new Map([['tet', caps.v13CountCapFor('Tetrino Insecticide')]]));
   for (const name of GATES) process.env[name] = 'true';
   operatingLayer.getProtocolWindowContext.mockResolvedValue({ protocol: { version: LAWN_V13_VERSION } });
   operatingLayer.summarizeProtocolContext.mockReturnValue(V13_SUMMARY);
@@ -90,7 +95,7 @@ beforeEach(() => {
     throw new Error(`Unexpected table: ${table}`);
   });
 });
-afterEach(() => { for (const name of [...GATES, 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY']) delete process.env[name]; });
+afterEach(() => { capSpy.mockRestore(); for (const name of [...GATES, 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY']) delete process.env[name]; });
 
 describe('chinch mapped, gate on', () => {
   test('May Tetrino is sized at 0.735 fl oz per 1,000 sq ft on the sunny half, with the technician note', async () => {
@@ -106,6 +111,13 @@ describe('chinch mapped, gate on', () => {
   test('the yearly-limit read judges the same raised rate the sheet quotes', async () => {
     await sheet();
     expect(limitRate()).toBe(0.735);
+  });
+
+  test('the raise is judged by the limit reader first: Tetrino, the visit date, the raised rate as the proposed application', async () => {
+    await sheet();
+    const first = mockCheckLimits.mock.calls.find((call) => call[1] === 'tet');
+    expect(first[0]).toBe('cust-1');
+    expect(first[4]).toMatchObject({ proposed: { ratePer1000: 0.735, unit: 'fl oz' }, proposal: true, excludeScheduledServiceId: VISIT, propertyId: PROPERTY });
   });
 
   test('the text staff read agrees: the line and the visit primary state 0.735, none still says 0.367', async () => {
@@ -145,6 +157,42 @@ describe('no raise', () => {
     const body = await lawnMix({ month: '5' });
     expect(tetrino(body).jobMix.ratePer1000).toBe(0.367);
     expect(mockHasArea).not.toHaveBeenCalled();
+  });
+});
+
+describe('the raise must fit the label limits (yearly amount, 28 days)', () => {
+  const BLOCK = { type: 'annual_max_rate', message: 'Tetrino Insecticide: this year\'s applications on the lawn total 50% of the yearly label amount (1.47 fl oz per 1,000 sq ft); this application brings it to 100.1% — THIS APPLICATION WOULD EXCEED IT.' };
+  // Blocks any application judged at the raised rate; the normal rate fits.
+  const blockRaisedOnly = () => mockCheckLimits.mockImplementation(async (customer, product, date, k, opts) => (opts?.proposed?.ratePer1000 > 0.4 ? { allowed: false, blocks: [BLOCK], warnings: [] } : { allowed: true, blocks: [], warnings: [] }));
+
+  test('the raised rate would exceed a limit but the normal rate fits: the sheet plans 0.367, no note, no block', async () => {
+    blockRaisedOnly();
+    const body = await sheet();
+    expect(tetrino(body).jobMix.ratePer1000).toBe(0.367);
+    expect(tetrino(body).raw).toMatch(/^Tetrino Insecticide \u2014 0\.367 fl oz per 1,000 sq ft/);
+    expect(tetrino(body).gateNotes.map((note) => note.key)).not.toContain('chinchTetrinoRate');
+    expect(limitRates()).toEqual([0.735, 0.367]);
+    expect(body.blocks || []).toEqual([]);
+  });
+
+  test('even the normal rate is blocked (28-day interval): the raise is not made and the line is held with the limit\'s own message', async () => {
+    const interval = { type: 'min_interval_days', message: 'Tetrino Insecticide: only 27 days from another application (min 28).' };
+    mockCheckLimits.mockResolvedValue({ allowed: false, blocks: [interval], warnings: [] });
+    const body = await sheet();
+    expect(tetrino(body).jobMix).toBeNull();
+    expect(JSON.stringify(body)).toContain('only 27 days from another application (min 28)');
+    expect(JSON.stringify(body)).not.toContain('chinchTetrinoRate');
+  });
+
+  test('a warning-level finding (approaching the yearly amount) does not stop the raise', async () => {
+    mockCheckLimits.mockResolvedValue({ allowed: true, blocks: [], warnings: [{ type: 'annual_max_rate', message: 'approaching' }] });
+    expect(tetrino(await sheet()).jobMix.ratePer1000).toBe(0.735);
+  });
+
+  test('a limit read that fails keeps 0.367 on the lenient sheet', async () => {
+    mockCheckLimits.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    const body = await sheet();
+    expect(JSON.stringify(body)).not.toContain('chinchTetrinoRate');
   });
 });
 

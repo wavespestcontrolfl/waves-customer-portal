@@ -154,8 +154,8 @@ describe('buildCards: the rule table', () => {
     if (shown) {
       expect(cards[0]).toMatchObject({
         title: 'Insects: check for chinch bugs',
-        check: 'Check first: part the grass at the sunny edge of the damaged patch, then count with a can at 4 spots and write the count in the notes.',
-        detail: 'Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment.', productIds: [P_ARENA], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
+        check: 'Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.',
+        detail: 'Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment, recheck at 5 and 12 days.', productIds: [P_ARENA], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
       });
       expect(cards[1]).toMatchObject({
         title: 'Insects: check for caterpillars', check: 'Check first: soap flush to bring them to the surface.', productIds: [P_ACE], actionLabel: 'Found them. Add it',
@@ -174,7 +174,7 @@ describe('buildCards: the rule table', () => {
     expect(kinds(run({ insect: 'severe' }, { offers: { ...OFFERS, chinch: null } }))).toEqual(['caterpillars']);
     const fallback = { item: item(P_TALAK, 'Atticus Talak 7.9 F'), note: 'Arena yearly limit reached; Atticus is used in its place.' };
     const cards = run({ insect: 'severe' }, { offers: { ...OFFERS, chinch: fallback } });
-    expect(cards[0]).toMatchObject({ kind: 'chinch', productIds: [P_TALAK], note: fallback.note, detail: 'Chinch bugs at the edge of the damage: Atticus Talak 7.9 F, spot treatment.' });
+    expect(cards[0]).toMatchObject({ kind: 'chinch', productIds: [P_TALAK], note: fallback.note, detail: 'Chinch bugs at the edge of the damage: Atticus Talak 7.9 F, spot treatment, recheck at 5 and 12 days.' });
   });
 
   test('caterpillars: no Acelepryn add-on this month, no card', () => {

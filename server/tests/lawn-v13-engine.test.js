@@ -969,7 +969,7 @@ describe('chinch bug trigger wording (owner 2026-10-08: the edge of a damaged pa
       expect(v13[grass].notes.join('\n')).not.toMatch(/float test/);
     }
     const chinch = ['Apr', 'May', 'Jun'].map((m) => lines(v13.st_augustine.visits.find((v) => v.month === m).secondary).find((l) => l.startsWith('Arena 50 WDG')));
-    const tail = ', 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later (SiteOne: Arena S.E., Florida only)';
+    const tail = ', 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch, recheck at 5 and 12 days; a second application no sooner than 8 weeks later (SiteOne: Arena S.E., Florida only)';
     expect(chinch).toEqual([
       `Arena 50 WDG — chinch bugs found at the edge of a damaged patch (count first)${tail}`,
       `Arena 50 WDG — chinch bugs outside the sunny turf, found at the edge of a damaged patch (count first)${tail}`,
@@ -980,14 +980,24 @@ describe('chinch bug trigger wording (owner 2026-10-08: the edge of a damaged pa
 });
 
 describe('chinch count line and sugarcane mosaic virus line (owner 2026-10-22)', () => {
-  const COUNT = 'Chinch bugs: always count before treating. Push a bottomless can 3 in into the soil at 4 spots on the edge of the damage, fill with water, count for 5 minutes, and write the count in the visit notes. Big-eyed bugs (wide head, bulging eyes) are predators: do not count them. Recheck a treated area at 5 and 12 days.';
+  const COUNT = require('../config/lawn-chinch-count').chinchCountNote();
+  const LITERAL_COUNT = 'Chinch bugs: always count before treating. Push a bottomless can 3 in into the soil at 4 spots on the edge of the damage, fill with water, count for 5 minutes, and write the count in the visit notes. Big-eyed bugs (wide head, bulging eyes) are predators: do not count them. Recheck a treated area at 5 and 12 days.';
   const VIRUS = 'Sugarcane mosaic virus (lethal viral necrosis) is confirmed in Sarasota, Manatee and Charlotte. Yellow streaks between the veins on Floratam or ProVista, mostly September to January, with no chinch bugs and healthy roots: photo, note and call the office; Waves sends a sample to the UF Plant Diagnostic Center at its own cost. Do not sell a fungicide or insecticide for it (UF: pesticides do not work). Mow or walk suspect lawns last. For new sod, recommend Palmetto or CitraBlue, never Floratam or ProVista.';
+  test('the shared constant builds the owner\'s count line word for word, and the Fast Complete card text from the same facts', () => {
+    expect(COUNT).toBe(LITERAL_COUNT);
+    expect(require('../config/lawn-chinch-count').chinchCardCheck()).toBe('Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.');
+  });
+
   test.each(V13_GRASSES)('%s: the chinch note opens with the count line, keeps the Arena and 2(ee) text, and the virus line is its own note once', (grass) => {
     const notes = v13[grass].notes;
     const chinch = notes.filter((n) => n.startsWith('Chinch bugs'));
     expect(chinch).toHaveLength(1);
     expect(chinch[0].startsWith(`${COUNT} Where chinch bugs are found`)).toBe(true);
     expect(chinch[0]).toContain('Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre');
+    // The recheck sits on the Arena chinch lines the way the caterpillar line carries "recheck in 7 days".
+    const arenaLines = v13[grass].visits.flatMap((visit) => lines(visit.secondary)).filter((l) => l.startsWith('Arena 50 WDG \u2014 chinch'));
+    expect(arenaLines).toHaveLength(3);
+    for (const line of arenaLines) expect(line).toContain('into the thatch, recheck at 5 and 12 days; a second application');
     expect(chinch[0]).toContain('Florida 2(ee) recommendation for southern chinch bug');
     expect(notes.filter((n) => n === VIRUS)).toHaveLength(1);
     expect(notes.indexOf(VIRUS)).toBe(notes.indexOf(chinch[0]) + 1);
@@ -998,7 +1008,7 @@ describe('Arena at the label\'s low turf rate (owner 2026-10-08)', () => {
   test('every Arena line states 0.147 oz (6.4 oz per acre) and the 8-week repeat; the program note says so once, cites the label and names the current Florida 2(ee) sheet', () => {
     const arena = Array.from(new Set([4, 5, 6].flatMap((m) => lines(visitFor(m).secondary).filter((l) => l.startsWith('Arena 50 WDG')))));
     expect(arena).toHaveLength(2);
-    for (const line of arena) expect(line).toMatch(/0\.147 oz per 1,000 sq ft \(6\.4 oz per acre\) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later/);
+    for (const line of arena) expect(line).toMatch(/0\.147 oz per 1,000 sq ft \(6\.4 oz per acre\) in 4 gal per 1,000 sq ft into the thatch, recheck at 5 and 12 days; a second application no sooner than 8 weeks later/);
     for (const grass of V13_GRASSES) {
       const note = v13[grass].notes.find((n) => n.startsWith('Chinch bugs'));
       expect(note).toContain('Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label\'s turf range; about 1.4 level teaspoons)');
