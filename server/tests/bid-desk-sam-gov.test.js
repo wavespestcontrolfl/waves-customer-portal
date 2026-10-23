@@ -155,7 +155,7 @@ describe('fetchPage', () => {
     const fetchImpl = jest.fn(async () => ({ ok: false, status: 429, json: async () => ({}) }));
     let caught;
     try {
-      await sam.fetchPage({ apiKey: 'SECRET-KEY-123', ncode: '561710', postedFrom: '09/22/2026', postedTo: '10/22/2026', offset: 0, fetchImpl });
+      await sam.fetchPage({ apiKey: 'SECRET-KEY-123', filter: { ncode: '561710', state: 'FL' }, postedFrom: '09/22/2026', postedTo: '10/22/2026', offset: 0, fetchImpl });
     } catch (err) {
       caught = err;
     }
@@ -172,13 +172,13 @@ describe('fetchPage', () => {
 
   test('a network failure never carries the request URL', async () => {
     const fetchImpl = jest.fn(async () => { throw new TypeError('fetch failed for https://api.sam.gov/?api_key=SECRET'); });
-    await expect(sam.fetchPage({ apiKey: 'SECRET', ncode: '561730', postedFrom: 'a', postedTo: 'b', offset: 0, fetchImpl }))
+    await expect(sam.fetchPage({ apiKey: 'SECRET', filter: { ncode: '561730' }, postedFrom: 'a', postedTo: 'b', offset: 0, fetchImpl }))
       .rejects.toThrow('SAM.gov request failed (HTTP network)');
   });
 
   test('a body without opportunitiesData is an error, not an empty day', async () => {
     const fetchImpl = jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ error: 'x' }) }));
-    await expect(sam.fetchPage({ apiKey: 'k', ncode: '561730', postedFrom: 'a', postedTo: 'b', offset: 0, fetchImpl }))
+    await expect(sam.fetchPage({ apiKey: 'k', filter: { ncode: '561730' }, postedFrom: 'a', postedTo: 'b', offset: 0, fetchImpl }))
       .rejects.toThrow('bad_body');
   });
 });
@@ -190,14 +190,14 @@ describe('fetchAll', () => {
     const fetchImpl = jest.fn()
       .mockResolvedValueOnce(page(sam.PAGE_LIMIT, sam.PAGE_LIMIT + 3))
       .mockResolvedValueOnce(page(3, sam.PAGE_LIMIT + 3));
-    const notices = await sam.fetchAll({ apiKey: 'k', ncode: '561710', postedFrom: 'a', postedTo: 'b', fetchImpl });
+    const notices = await sam.fetchAll({ apiKey: 'k', filter: { ncode: '561710' }, postedFrom: 'a', postedTo: 'b', fetchImpl });
     expect(notices).toHaveLength(sam.PAGE_LIMIT + 3);
     expect(fetchImpl.mock.calls.map(([u]) => new URL(u).searchParams.get('offset'))).toEqual(['0', '1']);
   });
 
   test('more pages than the cap is an error, so the cursor cannot move past unread notices', async () => {
     const fetchImpl = jest.fn(async () => page(sam.PAGE_LIMIT, sam.PAGE_LIMIT * (sam.MAX_PAGES + 1)));
-    await expect(sam.fetchAll({ apiKey: 'k', ncode: '561710', postedFrom: 'a', postedTo: 'b', fetchImpl }))
+    await expect(sam.fetchAll({ apiKey: 'k', filter: { ncode: '561710' }, postedFrom: 'a', postedTo: 'b', fetchImpl }))
       .rejects.toThrow('too_many_pages');
     expect(fetchImpl).toHaveBeenCalledTimes(sam.MAX_PAGES);
   });

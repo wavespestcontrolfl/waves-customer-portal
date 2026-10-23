@@ -242,6 +242,33 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect((await mockPg('bid_opportunities').whereIn('id', Object.values(ids)).where({ needs_date_confirmation: true })).length).toBe(0);
   });
 
+  test('an open bid is re-read by notice id, so an archive outside the posted-date window still reaches it', async () => {
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-13')]), apiKey: 'test-key' });
+    const [filed] = await samBids();
+    await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid', created_at: NOW });
+    // Date-filtered like the API: the posted-date search finds nothing new; only the by-id read returns the notice.
+    const later = new Date('2026-10-29T12:00:00Z');
+    const fetchImpl = jest.fn(async (url) => {
+      const params = new URL(url).searchParams;
+      const body = params.get('noticeid') === 'n-13'
+        ? { totalRecords: 1, opportunitiesData: [notice('n-13', { active: 'No' })] }
+        : { totalRecords: 0, opportunitiesData: [] };
+      return { ok: true, status: 200, json: async () => body };
+    });
+    expect(await sam.runSamGovPoll({ now: later, fetchImpl, apiKey: 'test-key' })).toMatchObject({ refreshed: 1, rung: 1 });
+    const byId = fetchImpl.mock.calls.map(([u]) => new URL(u).searchParams).find((p) => p.get('noticeid'));
+    expect(byId.get('postedFrom')).toBe('10/21/2026');
+    expect(byId.get('ncode')).toBeNull();
+    const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
+    expect(bid.source_active).toBe(false);
+    expect(bid.needs_date_confirmation).toBe(true);
+
+    // Archived bids are not re-read again.
+    fetchImpl.mockClear();
+    await sam.runSamGovPoll({ now: later, fetchImpl, apiKey: 'test-key' });
+    expect(fetchImpl.mock.calls.some(([u]) => new URL(u).searchParams.get('noticeid'))).toBe(false);
+  });
+
   test('a cursor older than a year is clamped to the API window', async () => {
     await mockPg('system_settings').insert({ key: sam.CURSOR_KEY, value: JSON.stringify({ from: '2024-01-01' }), category: 'bid_desk' });
     const fetchImpl = fakeFetch([]);

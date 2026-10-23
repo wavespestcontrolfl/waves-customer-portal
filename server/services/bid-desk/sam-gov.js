@@ -38,6 +38,8 @@ const MAX_PAGES = 5;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
 // The API's longest posted-date range is one year.
 const MAX_WINDOW_DAYS = 364;
+// Open SAM.gov bids re-read by notice id each run (one API call each; a registered key allows 1,000 calls a day).
+const REFRESH_LIMIT = 25;
 
 // ---------- pure helpers ----------
 
@@ -139,9 +141,10 @@ class SamApiError extends Error {
 }
 
 // One page of notices. Errors name the HTTP status only: the request URL carries the API key.
-async function fetchPage({ apiKey, ncode, postedFrom, postedTo, offset, fetchImpl }) {
+// `filter` is the search: { ncode, state } for discovery, { noticeid } to re-read one notice already filed.
+async function fetchPage({ apiKey, filter, postedFrom, postedTo, offset, fetchImpl }) {
   const params = new URLSearchParams({
-    api_key: apiKey, postedFrom, postedTo, ncode, state: 'FL', limit: String(PAGE_LIMIT), offset: String(offset),
+    api_key: apiKey, postedFrom, postedTo, ...filter, limit: String(PAGE_LIMIT), offset: String(offset),
   });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -165,10 +168,10 @@ async function fetchPage({ apiKey, ncode, postedFrom, postedTo, offset, fetchImp
 
 // SAM.gov's `offset` is a zero-based PAGE index, not a record offset. A window with more pages than MAX_PAGES throws,
 // so an incomplete read never moves the cursor past notices it did not see.
-async function fetchAll({ apiKey, ncode, postedFrom, postedTo, fetchImpl }) {
+async function fetchAll({ apiKey, filter, postedFrom, postedTo, fetchImpl }) {
   const notices = [];
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const { notices: batch, total } = await fetchPage({ apiKey, ncode, postedFrom, postedTo, offset: page, fetchImpl });
+    const { notices: batch, total } = await fetchPage({ apiKey, filter, postedFrom, postedTo, offset: page, fetchImpl });
     notices.push(...batch);
     if (batch.length < PAGE_LIMIT || notices.length >= total) return notices;
   }
@@ -263,18 +266,37 @@ function safeError(err) {
   return `${err?.name || 'Error'}${err?.code ? ` ${err.code}` : ''}`;
 }
 
-// Every notice posted in the window, once per notice id across the NAICS codes. A failure on any code throws before
-// the cursor moves, so the next run reads the same window again.
-async function collectNotices({ apiKey, postedFrom, postedTo, fetchImpl }) {
+// Every notice posted in the window, once per notice id across the NAICS codes, plus the latest version of each open
+// SAM.gov bid already filed. The posted-date window alone would never see an older notice again once it is archived
+// without a repost, so each run re-reads the open bids by notice id: republish, a removed deadline and an archive all
+// reach refreshPatch the same way. A failure on any call throws before the cursor moves, so the next run tries again.
+async function collectNotices({ apiKey, postedFrom, postedTo, now, fetchImpl }) {
   const seen = new Map();
-  for (const ncode of NAICS_CODES) {
-    const notices = await fetchAll({ apiKey, ncode, postedFrom, postedTo, fetchImpl });
+  const add = (notices, onlyId = null) => {
     for (const notice of notices) {
       const id = text(notice?.noticeId);
-      if (id && !seen.has(id)) seen.set(id, notice);
+      if (id && (!onlyId || id === onlyId)) seen.set(id, notice);
     }
+  };
+  for (const ncode of NAICS_CODES) {
+    add(await fetchAll({ apiKey, filter: { ncode, state: 'FL' }, postedFrom, postedTo, fetchImpl }));
+  }
+  const oldest = etDayOffset(now, -MAX_WINDOW_DAYS);
+  for (const bid of await openSamBids()) {
+    // From the day before the bid was filed (its notice was posted by then), inside the API's one-year range.
+    const filedFrom = etDayOffset(new Date(bid.created_at), -1);
+    const from = filedFrom < oldest ? oldest : filedFrom;
+    const { notices } = await fetchPage({ apiKey, filter: { noticeid: bid.external_id }, postedFrom: apiDate(from), postedTo, offset: 0, fetchImpl });
+    add(notices, bid.external_id);
   }
   return [...seen.values()];
+}
+
+// Open SAM.gov bids whose notice is still listed active: the ones a change on SAM.gov could still affect.
+async function openSamBids() {
+  return db('bid_opportunities').where({ source: 'sam_gov', historical: false }).whereIn('status', OPEN_STATUSES)
+    .whereNot('source_active', false).whereNotNull('external_id')
+    .orderBy('created_at').limit(REFRESH_LIMIT).select('external_id', 'created_at');
 }
 
 async function fileNotices(notices, now) {
@@ -303,7 +325,7 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
   const stored = (await readCursor()) || etDayOffset(now, -FIRST_RUN_LOOKBACK_DAYS);
   let from = stored < oldest ? oldest : stored;
   if (from > today) from = today;
-  const notices = await collectNotices({ apiKey: key, postedFrom: apiDate(from), postedTo: apiDate(today), fetchImpl });
+  const notices = await collectNotices({ apiKey: key, postedFrom: apiDate(from), postedTo: apiDate(today), now, fetchImpl });
   const counts = await fileNotices(notices, now);
   await writeCursor(etDayOffset(now, -CURSOR_OVERLAP_DAYS));
   // The bells go out through the Bid Desk's one owed-bell sweep (also run every 15 minutes, so a failure retries there).
