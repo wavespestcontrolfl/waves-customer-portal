@@ -19,13 +19,13 @@ describe("grouped workspaces", () => {
       expect(searchAdminWorkspacePages(admin, query).map((item) => item.id)).toContain(id);
     }
     expect(searchAdminWorkspacePages(admin, 'accounting').map((item) => item.id)).toEqual(['banking', 'taxes']);
-    const tech = getAdminWorkspaceGroups('technician', { agent_estimate: true, bid_desk: true });
+    const tech = getAdminWorkspaceGroups('technician', { agent_estimate: true, bid_desk: true, bid_kit: true });
     expect(searchAdminWorkspacePages(tech, 'Sales')).toEqual([]);
     expect(searchAdminWorkspacePages(tech, 'Contracts')).toEqual([]);
     expect(searchAdminWorkspacePages(admin, 'Agent estimate')).toEqual([]);
   });
   it("keeps every canonical destination exactly once, plus the existing Estimates subview", () => {
-    const groups = getAdminWorkspaceGroups('admin', { agent_estimate: true, bid_desk: true });
+    const groups = getAdminWorkspaceGroups('admin', { agent_estimate: true, bid_desk: true, bid_kit: true });
     const ids = groups.flatMap(({ items }) => items.map(({ id }) => id));
     expect(groups).toHaveLength(12);
     expect(ids).toHaveLength(new Set(ids).size);
@@ -34,7 +34,7 @@ describe("grouped workspaces", () => {
 
   it("applies leaf roles and gates even beneath accessible parents", () => {
     expect(getAdminWorkspaceGroups(null)).toEqual([]);
-    const techIds = getAdminWorkspaceGroups('technician', { agent_estimate: true, bid_desk: true }).flatMap(({ items }) => items.map(({ id }) => id));
+    const techIds = getAdminWorkspaceGroups('technician', { agent_estimate: true, bid_desk: true, bid_kit: true }).flatMap(({ items }) => items.map(({ id }) => id));
     expect(new Set(techIds)).toEqual(new Set(Object.values(ADMIN_NAV_ITEMS).filter((item) => !item.adminOnly && item.id !== 'more').map(({ id }) => id)));
     const adminIds = getAdminWorkspaceGroups('admin').flatMap(({ items }) => items.map(({ id }) => id));
     expect(adminIds).not.toContain('agentEstimate');
@@ -45,6 +45,11 @@ describe("grouped workspaces", () => {
     expect(onIds).toContain('bidDesk');
     expect(getAdminWorkspaceGroups('admin', { bid_desk: true }).find(({ id }) => id === 'sales').items.map(({ id }) => id)).toContain('bidDesk');
     expect(getAdminWorkspaceSelection({ pathname: '/admin/bid-desk' })).toEqual({ groupId: 'sales', itemId: 'bidDesk' });
+    // Bid kit shows only while the server sends the bid_kit flag (GATE_BID_KIT on), and only to an admin.
+    expect(adminIds).not.toContain('bidKit');
+    expect(techIds).not.toContain('bidKit');
+    expect(getAdminWorkspaceGroups('admin', { bid_kit: true }).find(({ id }) => id === 'sales').items.map(({ id }) => id)).toContain('bidKit');
+    expect(getAdminWorkspaceSelection({ pathname: '/admin/bid-kit' })).toEqual({ groupId: 'sales', itemId: 'bidKit' });
     expect(techIds).not.toEqual(expect.arrayContaining(['contracts', 'toolHealth', 'estimates']));
     // The gate-code directory is a view of Customers but admin only on its own.
     expect(techIds).not.toContain('gateCodes');
@@ -82,7 +87,7 @@ describe("admin navigation registry", () => {
     expect(compactSections(ADMIN_DESKTOP_NAV_SECTIONS)).toEqual([
       { section: "Overview", itemIds: ["dashboard"] },
       { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
-      { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "bidDesk", "priceMatch", "contracts"] },
+      { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "bidDesk", "bidKit", "priceMatch", "contracts"] },
       { section: "Communications", itemIds: ["communications"] },
       { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
       { section: "People", itemIds: ["staff", "recruiting"] },
