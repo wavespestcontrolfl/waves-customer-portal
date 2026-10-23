@@ -934,6 +934,8 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
   const warranty = String(f.warranty_type || '').trim();
   const renewableContract = /renewable/i.test(warranty);
   const noWarranty = certificateHasNoWarranty(f);
+  // The warranty call to action needs a recorded warranty (blank hides it, as before).
+  const hideWarrantyCta = noWarranty || !warranty;
 
   return (
     <div data-testid="termite-notice-sticker" style={{
@@ -1061,7 +1063,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
       }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700 }}>
-            {noWarranty ? 'Questions about your termite protection' : 'Activate your termite warranty'}
+            {hideWarrantyCta ? 'Questions about your termite protection' : 'Activate your termite warranty'}
           </div>
           <div style={{ fontSize: 14, opacity: 0.8, marginTop: 2 }}>
             Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
@@ -1069,7 +1071,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
         </div>
         <div style={{ fontSize: 16, fontWeight: 600, textAlign: 'right' }}>
           <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>{WAVES_PHONE_DISPLAY}</a>
-          {!noWarranty && (
+          {!hideWarrantyCta && (
             <>
               <br />
               <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', whiteSpace: 'nowrap' }}>wavespestcontrol.com/register</a>
@@ -1301,12 +1303,13 @@ function CertificateHeader({ detailsOnly }) {
   );
 }
 
-// No warranty recorded: blank, legacy "No warranty", or an addition to an
-// existing building (Rule 5E-14.105(3)(d)). Both layouts then drop the
-// warranty call to action.
+// Staff recorded that no warranty applies: the legacy "No warranty" choice
+// or an addition to an existing building (Rule 5E-14.105(3)(d)). A blank
+// warranty is missing data, not "no contract", so it gets neither the
+// no-contract sentence nor a hidden gate-off footer.
 function certificateHasNoWarranty(f) {
   const warranty = String(f?.warranty_type || '').trim();
-  return !warranty || /^no warranty$/i.test(warranty) || /^addition to an existing building/i.test(warranty);
+  return /^no warranty$/i.test(warranty) || /^addition to an existing building/i.test(warranty);
 }
 
 function CertificateWarrantyFooter() {

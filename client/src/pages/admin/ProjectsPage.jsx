@@ -464,6 +464,23 @@ function meaningfulApplicationRows(findings) {
   );
 }
 
+// Mirrors the server's staff-send checks (admin-projects.js
+// pretreatStaffSendChecks): Rule 5E-14.105(3) warranty choice and the FBC
+// 105.10 time of treatment, both hard.
+function pretreatStaffSendChecks(findings, typeCfg) {
+  const warrantyOptions =
+    (typeCfg?.findingsFields || []).find((item) => item.key === "warranty_type")?.options || [];
+  return [
+    {
+      label:
+        'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)',
+      ok: warrantyOptions.includes(String(findings?.warranty_type || "").trim()),
+      hard: true,
+    },
+    { label: "Time of treatment", ok: isClockTime(findings?.treatment_time), hard: true },
+  ];
+}
+
 // Mirrors server/services/final-exterior-screen.js isClockTime ("HH:MM").
 function isClockTime(value) {
   const match = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(String(value ?? "").trim());
@@ -586,59 +603,8 @@ function evaluateProjectReadiness({
         label: "Applicator attestation",
         ok: hasMeaningfulValue(findings?.applicator_attestation),
       },
-      // Mirrors the server's staff-send checks (Rule 5E-14.105(3); FBC 105.10).
-      {
-        label:
-          'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)',
-        ok: (
-          (typeCfg?.findingsFields || []).find((item) => item.key === "warranty_type")
-            ?.options || []
-        ).includes(String(findings?.warranty_type || "").trim()),
-        hard: true,
-      },
-      {
-        label: "Time of treatment",
-        ok: isClockTime(findings?.treatment_time),
-        hard: true,
-      },
+      ...pretreatStaffSendChecks(findings, typeCfg),
     );
-    if (
-      [
-        "final_exterior_date",
-        "final_exterior_product",
-        "final_exterior_active_ingredient",
-        "final_exterior_applicator_name",
-        "final_exterior_time",
-      ].some((key) => hasMeaningfulValue(findings?.[key]))
-    ) {
-      required.push(
-        {
-          label: "Date of final exterior treatment",
-          ok: hasMeaningfulValue(findings?.final_exterior_date),
-          hard: true,
-        },
-        {
-          label: "Time of final exterior treatment",
-          ok: isClockTime(findings?.final_exterior_time),
-          hard: true,
-        },
-        {
-          label: "Final exterior product",
-          ok: typeof findings?.final_exterior_product === "string" && findings.final_exterior_product.trim().length > 0,
-          hard: true,
-        },
-        {
-          label: "Final exterior active ingredient",
-          ok: typeof findings?.final_exterior_active_ingredient === "string" && findings.final_exterior_active_ingredient.trim().length > 0,
-          hard: true,
-        },
-        {
-          label: "Final exterior applicator",
-          ok: typeof findings?.final_exterior_applicator_name === "string" && findings.final_exterior_applicator_name.trim().length > 0,
-          hard: true,
-        },
-      );
-    }
   }
 
   const text = [recommendations, ...Object.values(findings || {})]

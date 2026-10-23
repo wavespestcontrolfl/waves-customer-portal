@@ -212,41 +212,27 @@ describe('admin project route guards', () => {
     // FBC 105.10 lists the time of treatment.
     expect(hardKeys(evaluate({ ...complete, treatment_time: '' }, true))).toEqual(['cert_treatment_time']);
     expect(hardKeys(evaluate({ ...complete, treatment_time: '25:99' }, true))).toEqual(['cert_treatment_time']);
-    // A recorded final exterior treatment is its own full record.
-    const exterior = {
-      final_exterior_date: '2026-06-01', final_exterior_time: '09:30', final_exterior_product: 'Termidor SC',
-      final_exterior_active_ingredient: 'Fipronil', final_exterior_applicator_name: 'Sam Tester',
-    };
-    expect(evaluate({ ...complete, ...exterior }, true).missing).toEqual([]);
-    expect(hardKeys(evaluate({ ...complete, final_exterior_product: 'Termidor SC' }, true))).toEqual([
-      'cert_final_exterior_date', 'cert_final_exterior_time', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator',
-    ]);
-    expect(hardKeys(evaluate({ ...complete, final_exterior_date: '2026-06-01', final_exterior_time: '09:30' }, true))).toEqual([
-      'cert_final_exterior_product', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator',
-    ]);
-    expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_time: 'gate code 1234' }, true))).toEqual(['cert_final_exterior_time']);
-    expect(hardKeys(evaluate({
-      ...complete, ...exterior, final_exterior_product: false, final_exterior_active_ingredient: false, final_exterior_applicator_name: 7,
-    }, true))).toEqual(['cert_final_exterior_product', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator']);
-    // Judged as the customer sees it: an impossible date or a value the public page blanks fails.
-    expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_date: '2026-02-30' }, true))).toEqual(['cert_final_exterior_date']);
-    expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_date: '2026-05-01' }, true))).toEqual(['cert_final_exterior_date']);
-    expect(hardKeys(evaluate({ ...complete, ...exterior, final_exterior_product: 'pet-safe Termidor' }, true))).toEqual(['cert_final_exterior_product']);
+    // The final exterior fields fill the notice's reference blank; the later
+    // visit's full record is its own certificate, so they never gate the send.
+    expect(evaluate({ ...complete, final_exterior_product: 'Termidor SC' }, true).missing).toEqual([]);
 
     // A certificate held before these checks existed still releases once paid.
-    const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '', final_exterior_date: '2026-06-01' }, false);
+    const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '' }, false);
     expect(legacy.missing).toEqual([]);
     expect(legacy.hardMissing).toEqual([]);
   });
 
-  test('an edit to a published certificate may not add a staff-send failure, but a legacy one still saves other edits', () => {
+  test('an edit to a published certificate may not leave a field it touched failing; a legacy one still saves other edits', () => {
     const project = { project_type: 'pre_treatment_termite_certificate', report_token: 'tok' };
     const legacy = { warranty_type: 'No warranty', comments: 'old' };
-    // Already failing on warranty + time: editing a note adds nothing new.
+    const keys = (r) => (r ? r.missing.map((m) => m.key) : []);
+    // Already failing on warranty + time: editing a note is fine.
     expect(publishedCertificateEditRejection(project, { findings: { ...legacy, comments: 'new' } }, { findings: legacy })).toBeNull();
-    // Adding an undated final exterior record is a new failure.
-    expect(publishedCertificateEditRejection(project, { findings: { ...legacy, final_exterior_product: 'Termidor SC' } }, { findings: legacy }).missing
-      .map((m) => m.key)).toEqual(['cert_final_exterior_date', 'cert_final_exterior_time', 'cert_final_exterior_active_ingredient', 'cert_final_exterior_applicator']);
+    // Touching a failing field without fixing it is refused.
+    expect(keys(publishedCertificateEditRejection(project, { findings: { ...legacy, warranty_type: 'None' } }, { findings: legacy }))).toEqual(['cert_warranty']);
+    expect(keys(publishedCertificateEditRejection(project, { findings: { ...legacy, treatment_time: 'garbage' } }, { findings: legacy }))).toEqual(['cert_treatment_time']);
+    // Fixing it passes.
+    expect(publishedCertificateEditRejection(project, { findings: { ...legacy, warranty_type: 'Renewable 5-year retreatment bond' } }, { findings: legacy })).toBeNull();
     // A draft (no link yet) is judged at send, not on save.
     expect(publishedCertificateEditRejection({ project_type: 'pre_treatment_termite_certificate' }, { findings: {} }, { findings: legacy })).toBeNull();
   });

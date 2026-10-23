@@ -123,7 +123,7 @@ const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_c
 // screen runs here at write time: a claim ("pet-safe", "EPA-approved") or an
 // access code is refused, not stored. reports-public blanks the same keys at
 // egress, and the detail payload names them for the staff preview.
-const { failingFinalExteriorKeys, isClockTime, screenFinalExteriorFindings } = require('../services/final-exterior-screen');
+const { failingFinalExteriorKeys, isClockTime } = require('../services/final-exterior-screen');
 // The final exterior date is a completed treatment on a legal document:
 // blank, or a real YYYY-MM-DD no later than today (ET), like project_date,
 // and never before the initial treatment (same day allowed).
@@ -165,34 +165,36 @@ function finalExteriorRejectionForUpdate(project, updates, current) {
 }
 
 // The public link reads the live findings, so an edit to a certificate that
-// already has a link must not add a staff-send failure (a cleared warranty
-// or time, an undated final exterior record). A legacy certificate that
-// already fails keeps saving other edits: only NEW failures are refused.
+// already has a link must not leave a staff-send field failing that the edit
+// touched (a cleared warranty, a garbage time, "No warranty" -> "None"). A
+// legacy certificate that already fails keeps saving edits to OTHER fields.
 function publishedCertificateEditRejection(project, updates, current) {
   if (project.project_type !== 'pre_treatment_termite_certificate' || updates.findings === undefined) return null;
   if (!(current.report_token || current.sent_at || project.report_token || project.sent_at)) return null;
-  const typeCfg = getProjectType(project.project_type);
-  const failing = (findings, projectDate) => pretreatStaffSendChecks(normalizeFindings(findings), typeCfg, projectDate).filter((c) => !c.ok);
-  const before = new Set(failing(current.findings, current.project_date).map((c) => c.key));
-  const added = failing(updates.findings, updates.project_date !== undefined ? updates.project_date : current.project_date)
-    .filter((c) => !before.has(c.key));
-  if (!added.length) return null;
+  const before = normalizeFindings(current.findings);
+  const after = normalizeFindings(updates.findings);
+  const failing = pretreatStaffSendChecks(after, getProjectType(project.project_type))
+    .filter((c) => !c.ok && String(after[c.field] ?? '') !== String(before[c.field] ?? ''));
+  if (!failing.length) return null;
   return {
-    error: `This certificate is already published — complete ${added.map((c) => c.label).join('; ')} before saving.`,
+    error: `This certificate is already published — complete ${failing.map((c) => c.label).join('; ')} before saving.`,
     code: 'published_certificate_incomplete',
-    missing: added.map(({ key, label }) => ({ key, label })),
+    missing: failing.map(({ key, label }) => ({ key, label })),
   };
 }
 
 // Re-judges the staff-send checks on the row as it stands after the send
 // claim (an edit can land between the first read and the claim; edits are
-// fenced once the row is 'sending').
-async function pretreatClaimedSendMissing(projectId, projectType) {
-  if (projectType !== 'pre_treatment_termite_certificate') return [];
-  const row = await db('projects').select('findings', 'project_date').where({ id: projectId }).first();
-  return pretreatStaffSendChecks(normalizeFindings(row?.findings), getProjectType(projectType), row?.project_date)
-    .filter((c) => !c.ok)
-    .map(({ key, label }) => ({ key, label }));
+// fenced once the row is 'sending'). Throws an operational 422; both send
+// routes' catch blocks release every claim they took.
+async function assertPretreatStillSendable(projectId, projectType) {
+  if (projectType !== 'pre_treatment_termite_certificate') return;
+  const row = await db('projects').select('findings').where({ id: projectId }).first();
+  const missing = pretreatStaffSendChecks(normalizeFindings(row?.findings), getProjectType(projectType)).filter((c) => !c.ok);
+  if (!missing.length) return;
+  throw Object.assign(new Error(`Project report is missing required compliance details (cannot be overridden): ${missing.map((c) => c.label).join('; ')}`), {
+    isOperational: true, statusCode: 422, status: 422, code: 'missing_compliance_details',
+  });
 }
 
 // Create-path checks on a legal document's dates, first failure wins: the
@@ -795,40 +797,18 @@ function pretreatWarrantyOk(value, typeCfg) {
   return (field?.options || []).includes(String(value || '').trim());
 }
 
-// The final exterior names print on the record line, so they must be real
-// text: an API-written false or number would pass hasMeaningfulValue and
-// then render as nothing.
-function isFilledText(value) {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
-const FINAL_EXTERIOR_RECORD_KEYS = ['final_exterior_date', 'final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name', 'final_exterior_time'];
-
 // Checks added 2026-10-23 run only on a staff send (/send, /send-with-invoice),
 // never on the automatic release of a paid held report: a certificate held
 // before these checks existed must still deliver once paid (see the note in
-// certApplicationChecks).
-function pretreatStaffSendChecks(findings, typeCfg, projectDate) {
-  // The final exterior record is judged as the customer will see it: the
-  // public page blanks a screened value, and a legacy or imported row may
-  // carry a date the write guard would refuse today.
-  const exterior = screenFinalExteriorFindings(findings) || {};
-  const checks = [
-    { key: 'cert_warranty', label: 'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)', ok: pretreatWarrantyOk(findings.warranty_type, typeCfg), hard: true },
-    // FBC 105.10 lists the time and date of each treatment.
-    { key: 'cert_treatment_time', label: 'Time of treatment', ok: isClockTime(findings.treatment_time), hard: true },
+// certApplicationChecks). The final exterior fields are not here: they fill
+// the notice's reference blank, and the later visit's full FBC 105.10 record
+// (area, concentration, gallons) is its own certificate.
+function pretreatStaffSendChecks(findings, typeCfg) {
+  return [
+    { key: 'cert_warranty', field: 'warranty_type', label: 'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)', ok: pretreatWarrantyOk(findings.warranty_type, typeCfg), hard: true },
+    // FBC 105.10 lists the time and date of the treatment.
+    { key: 'cert_treatment_time', field: 'treatment_time', label: 'Time of treatment', ok: isClockTime(findings.treatment_time), hard: true },
   ];
-  if (FINAL_EXTERIOR_RECORD_KEYS.some((key) => hasMeaningfulValue(findings[key]))) {
-    checks.push(
-      { key: 'cert_final_exterior_date', label: 'Date of final exterior treatment', ok: hasMeaningfulValue(exterior.final_exterior_date) && !finalExteriorDateProblem(exterior.final_exterior_date, findings.treatment_date || projectDate), hard: true },
-      { key: 'cert_final_exterior_time', label: 'Time of final exterior treatment', ok: isClockTime(exterior.final_exterior_time), hard: true },
-      // The later treatment is its own record (FBC 105.10): product, chemical and applicator too.
-      { key: 'cert_final_exterior_product', label: 'Final exterior product', ok: isFilledText(exterior.final_exterior_product), hard: true },
-      { key: 'cert_final_exterior_active_ingredient', label: 'Final exterior active ingredient', ok: isFilledText(exterior.final_exterior_active_ingredient), hard: true },
-      { key: 'cert_final_exterior_applicator', label: 'Final exterior applicator', ok: isFilledText(exterior.final_exterior_applicator_name), hard: true },
-    );
-  }
-  return checks;
 }
 
 function evaluateProjectSendReadiness({ project, customer, staffSend = false }) {
@@ -880,7 +860,7 @@ function evaluateProjectSendReadiness({ project, customer, staffSend = false }) 
       // requirement when paired with the typed name + FDACS ID + date.
       { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
-    if (staffSend) required.push(...pretreatStaffSendChecks(findings, typeCfg, project?.project_date));
+    required.push(...(staffSend ? pretreatStaffSendChecks(findings, typeCfg) : []));
   }
 
   // Termite Phase-3 compliance content (Codex P1 r2 on #2703): the termite
@@ -3620,15 +3600,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     };
     revertManualHoldClaimOnError = revertManualHoldClaim;
 
-    const claimedMissing = await pretreatClaimedSendMissing(project.id, project.project_type);
-    if (claimedMissing.length) {
-      await revertManualHoldClaim();
-      await revertSendClaim();
-      return res.status(422).json({
-        error: 'Project report is missing required compliance details (cannot be overridden)',
-        missing: claimedMissing,
-      });
-    }
+    await assertPretreatStillSendable(project.id, project.project_type);
 
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
       logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
@@ -5040,20 +5012,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     deliveryClaim = { previousStatus: previousDeliveryStatus, token: deliveryClaimToken };
 
-    // Same post-claim re-judge as /send: an edit between the first read and
-    // this claim must not slip past the staff-send certificate checks.
-    const claimedMissing = await pretreatClaimedSendMissing(project.id, project.project_type);
-    if (claimedMissing.length) {
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
-      claimedInvoice = null;
-      await reverseProjectCreditOnAbort();
-      await revertDeliveryClaimOnAbort(project.id);
-      return res.status(422).json({
-        error: 'Project report is missing required compliance details (cannot be overridden)',
-        missing: claimedMissing,
-      });
-    }
+    // Same post-claim re-judge as /send (the catch below releases the claims).
+    await assertPretreatStillSendable(project.id, project.project_type);
 
     // Report link + portal visibility — mirror /send so a token_only WDO report
     // never leaks into the customer portal via the `portal_visible IS NULL` +

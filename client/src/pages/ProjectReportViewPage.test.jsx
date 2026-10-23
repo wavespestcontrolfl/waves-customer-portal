@@ -247,6 +247,22 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
+  it('a blank warranty is missing data, not "no contract": no no-contract sentence, gate-off footer kept', async () => {
+    const on = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      pretreatStickerReport: true,
+      findings: { ...findings, warranty_type: '' },
+    }));
+    const sticker = await on.findByTestId('termite-notice-sticker');
+    expect(sticker).not.toHaveTextContent('No retreatment contract covers this treatment');
+    expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
+    on.unmount();
+    const off = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      findings: { ...findings, warranty_type: '' },
+    }));
+    await off.findAllByText(/Pre-Construction Termite Protection/i);
+    expect(off.getByText(/Activate Your Termite Warranty/i)).toBeInTheDocument();
+  });
+
   it('gate off: an addition to an existing building drops the warranty footer', async () => {
     const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       findings: { ...findings, warranty_type: 'Addition to an existing building (no warranty required)' },

@@ -581,8 +581,10 @@ describe('send-with-invoice hold_report_until_paid', () => {
       });
       const body = await res.json();
       expect(res.status).toBe(422);
-      expect(body.missing.map((m) => m.key)).toEqual(['cert_treatment_time']);
+      expect(body.error).toContain('Time of treatment');
       expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      // The catch released the delivery claim.
+      expect((updates.projects || []).some((u) => u.delivery_status !== undefined && u.delivery_status !== 'sending')).toBe(true);
       expect((updates.projects || []).some((u) => u.report_token)).toBe(false);
     });
   });
