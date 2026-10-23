@@ -48,7 +48,13 @@ suite('reclaimed water edits against isolated Postgres', () => {
     const visit = { id: 'svc-merged', property_id: property.id, customer_id: customerA };
     try {
       expect(await isReclaimedService(db, visit)).toBe(true);
-      expect((await put(property.id, { reclaimed: null })).status).toBe(200);
+      // The panel shows the answer the plan uses, marked as inherited, so the office can see it and reset it.
+      const listed = (await api(`/api/admin/customers/${customerA}/properties`)).body.properties.find((p) => p.id === property.id);
+      expect(listed).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_inherited: true });
+      const reset = await put(property.id, { reclaimed: null });
+      expect(reset.status).toBe(200);
+      expect(reset.body.properties.find((p) => p.id === property.id)).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
+      expect(reset.body.properties.find((p) => p.id === property.id)).not.toHaveProperty('reclaimed_water_inherited');
       expect(await db('customer_properties').where({ id: mergedId }).first()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
       expect(await isReclaimedService(db, visit)).toBe(false);
     } finally {

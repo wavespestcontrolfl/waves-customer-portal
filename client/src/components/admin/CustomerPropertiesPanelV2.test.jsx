@@ -67,6 +67,22 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(document.body.textContent).not.toMatch(/Lawn visits use half the nitrogen/);
   });
 
+  it('an answer inherited from a merged record shows as the choice, says where it came from, and Automatic clears it', async () => {
+    const inherited = { ...PRIMARY, reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_inherited: true };
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (opts.method === 'PUT') return jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: null, reclaimed_water_source: null }] });
+      return jsonResponse({ properties: [inherited], reclaimedWater: true });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    const select = await screen.findByLabelText('Reclaimed water for 10 Palm Ave');
+    expect(select).toHaveValue('yes');
+    expect(screen.getByText('From a merged customer record: office said reclaimed. Half nitrogen on eligible v13 lawn visits.')).toBeInTheDocument();
+    fireEvent.change(select, { target: { value: '' } });
+    await waitFor(() => expect(screen.getByText('Not checked against the county meters. Lawn visits use the full nitrogen.')).toBeInTheDocument());
+    expect(JSON.parse(fetchMock.mock.calls.find(([, o]) => o?.method === 'PUT')[1].body)).toEqual({ reclaimed: null });
+  });
+
   it('shows no reclaimed-water control while the gate is off, and a read-only view cannot change it', async () => {
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse({ properties: [PRIMARY], reclaimedWater: false })));
     const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);

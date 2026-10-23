@@ -49,6 +49,8 @@ const FULL_N = "Lawn visits use the full nitrogen.";
 function reclaimedHint(p) {
   const said = p.reclaimed_water ? "reclaimed" : "not reclaimed";
   const effect = p.reclaimed_water ? HALF_N : FULL_N;
+  // An answer kept from a customer record merged into this one: shown as the choice, so "Automatic" can clear it.
+  if (p.reclaimed_water_inherited) return `From a merged customer record: ${p.reclaimed_water_source === "customer" ? "customer" : "office"} said ${said}. ${effect}`;
   if (p.reclaimed_water_source === "customer") return `Customer said ${said}. ${effect}`;
   if (p.reclaimed_water_source === "office") return `Office said ${said}. ${effect}`;
   if (p.reclaimed_water === true) return `County meter found at this address. ${HALF_N}`;

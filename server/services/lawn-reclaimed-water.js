@@ -32,7 +32,18 @@ async function mergedPersonAnswer(k, addressKey, customerId) {
   return k('customer_properties').where({ customer_id: customerId, active: false, address_key: addressKey })
     .whereIn('reclaimed_water_source', PERSON_SOURCES)
     .orderBy('reclaimed_water_checked_at', 'desc', 'last')
-    .first('reclaimed_water');
+    .first('reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at');
+}
+
+/**
+ * The answer the plan uses for an ACTIVE property row, for screens: the row's own person answer; else a person answer inherited from a
+ * merged-away copy of the same address (marked reclaimed_water_inherited, so the office sees it and can reset it with "Automatic"); else the
+ * row's own county verdict or nothing. Same resolution as isReclaimedService, so the panel and the plan never disagree.
+ */
+async function effectiveReclaimedRow(k, row) {
+  if (PERSON_SOURCES.includes(row.reclaimed_water_source)) return row;
+  const merged = await mergedPersonAnswer(k, row.address_key, row.customer_id);
+  return merged ? { ...row, ...merged, reclaimed_water_inherited: true } : row;
 }
 
 // The property a visit is for: the visit's own link, else the resolver the whole lawn program uses (null = unresolvable).
@@ -70,4 +81,4 @@ async function isReclaimedService(knex, svc, { strict = false } = {}) {
   }
 }
 
-module.exports = { propertyIdOf, isReclaimedService };
+module.exports = { propertyIdOf, isReclaimedService, effectiveReclaimedRow };

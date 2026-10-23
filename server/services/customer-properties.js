@@ -79,7 +79,11 @@ async function listProperties(customerId, conn = db) {
   const customer = await conn('customers').where({ id: customerId }).first('contact_role');
   // GATE_LAWN_RECLAIMED_HALF_N off: the old payload exactly, without the three reclaimed-water columns.
   const showReclaimed = require('../config/feature-gates').lawnReclaimedHalfNLive();
-  return properties.map(property => {
+  // Gate on: each row carries the answer the plan uses, including one inherited from a merged-away copy of the address.
+  const rows = showReclaimed
+    ? await Promise.all(properties.map(property => require('./lawn-reclaimed-water').effectiveReclaimedRow(conn, property)))
+    : properties;
+  return rows.map(property => {
     const unavailable = primaryPropertyUnavailable(property, customer);
     const row = { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
     if (!showReclaimed) for (const column of RECLAIMED_COLUMNS) delete row[column];
