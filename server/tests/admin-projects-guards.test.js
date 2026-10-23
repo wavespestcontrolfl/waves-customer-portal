@@ -19,6 +19,7 @@ const {
   detectedImageMime,
   validateUploadedImage,
   evaluateProjectSendReadiness,
+  publishedCertificateEditRejection,
   dropStaleCertTreatmentDate,
   resolveWdoInspectionFee,
   wdoAddendumPhotoCaption,
@@ -171,6 +172,69 @@ describe('admin project route guards', () => {
       expect(readiness.required.map((item) => item.key)).not.toContain('photos');
       expect(readiness.required.map((item) => item.key)).not.toContain('recommendations');
     }
+  });
+
+  test('a staff send of a pre-treat certificate needs a lawful warranty and the time of treatment; the paid release does not re-check them', () => {
+    const complete = {
+      treatment_address: '12 Test Lane, Bradenton, FL 34202',
+      treatment_method: 'Soil barrier (chemical)',
+      product_name: 'Termidor SC',
+      active_ingredient: 'fipronil',
+      concentration_pct: '0.060',
+      square_footage: '1800',
+      gallons_applied: '90',
+      applicator_name: 'Sam Tester',
+      applicator_fdacs_id: 'JF000000',
+      applicator_attestation: 'I attest.',
+      treatment_time: '08:40',
+      warranty_type: 'Renewable 5-year retreatment bond',
+    };
+    const evaluate = (findings, staffSend) => evaluateProjectSendReadiness({
+      project: {
+        id: 'project-cert',
+        customer_id: 'customer-1',
+        project_date: '2026-05-18',
+        project_type: 'pre_treatment_termite_certificate',
+        findings,
+      },
+      customer: { id: 'customer-1' },
+      staffSend,
+    });
+    const hardKeys = (r) => r.hardMissing.map((m) => m.key);
+
+    expect(evaluate(complete, true).missing).toEqual([]);
+    // Rule 5E-14.105(3): only an addition to an existing building may go without a warranty.
+    expect(evaluate({ ...complete, warranty_type: 'Addition to an existing building (no warranty required)' }, true).missing).toEqual([]);
+    expect(hardKeys(evaluate({ ...complete, warranty_type: 'No warranty' }, true))).toEqual(['cert_warranty']);
+    expect(hardKeys(evaluate({ ...complete, warranty_type: '' }, true))).toEqual(['cert_warranty']);
+    // Only the form's own choices pass; free text from the update route does not.
+    expect(hardKeys(evaluate({ ...complete, warranty_type: 'None' }, true))).toEqual(['cert_warranty']);
+    // FBC 105.10 lists the time of treatment.
+    expect(hardKeys(evaluate({ ...complete, treatment_time: '' }, true))).toEqual(['cert_treatment_time']);
+    expect(hardKeys(evaluate({ ...complete, treatment_time: '25:99' }, true))).toEqual(['cert_treatment_time']);
+    // The final exterior fields fill the notice's reference blank; the later
+    // visit's full record is its own certificate, so they never gate the send.
+    expect(evaluate({ ...complete, final_exterior_product: 'Termidor SC' }, true).missing).toEqual([]);
+
+    // A certificate held before these checks existed still releases once paid.
+    const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '' }, false);
+    expect(legacy.missing).toEqual([]);
+    expect(legacy.hardMissing).toEqual([]);
+  });
+
+  test('an edit to a published certificate may not leave a field it touched failing; a legacy one still saves other edits', () => {
+    const project = { project_type: 'pre_treatment_termite_certificate', report_token: 'tok' };
+    const legacy = { warranty_type: 'No warranty', comments: 'old' };
+    const keys = (r) => (r ? r.missing.map((m) => m.key) : []);
+    // Already failing on warranty + time: editing a note is fine.
+    expect(publishedCertificateEditRejection(project, { findings: { ...legacy, comments: 'new' } }, { findings: legacy })).toBeNull();
+    // Touching a failing field without fixing it is refused.
+    expect(keys(publishedCertificateEditRejection(project, { findings: { ...legacy, warranty_type: 'None' } }, { findings: legacy }))).toEqual(['cert_warranty']);
+    expect(keys(publishedCertificateEditRejection(project, { findings: { ...legacy, treatment_time: 'garbage' } }, { findings: legacy }))).toEqual(['cert_treatment_time']);
+    // Fixing it passes.
+    expect(publishedCertificateEditRejection(project, { findings: { ...legacy, warranty_type: 'Renewable 5-year retreatment bond' } }, { findings: legacy })).toBeNull();
+    // A draft (no link yet) is judged at send, not on save.
+    expect(publishedCertificateEditRejection({ project_type: 'pre_treatment_termite_certificate' }, { findings: {} }, { findings: legacy })).toBeNull();
   });
 
   test('certificate send readiness requires a finished-solution concentration only for liquid soil barriers', () => {

@@ -57,17 +57,34 @@ function staleReplay(matchedAt, now) {
   return null;
 }
 
+// node-cron 3.0.3 with recovery on fires most ticks TWICE (seen in
+// production from 2026-10-21: every cron logged at :00 and again at :01).
+// After a tick it stores the matched time with the milliseconds cut to 0;
+// the next check, a second later, replays the previous second, whose
+// matched time (milliseconds kept) is now later than the stored one, so the
+// same occurrence matches again. Each task therefore remembers the matched
+// second it last ran and skips a repeat of it. A manual run (no Date) is
+// never skipped.
+function matchedSecond(matchedAt) {
+  if (!(matchedAt instanceof Date) || Number.isNaN(matchedAt.getTime())) return null;
+  return Math.floor(matchedAt.getTime() / 1000);
+}
+
 function schedule(expression, task, options) {
   const opts = { recoverMissedExecutions: true, ...options };
   const nowInZone = wallClock(opts.timezone);
+  let lastSecond = null;
   return nodeCron.schedule(
     expression,
     (...args) => {
+      const second = matchedSecond(args[0]);
+      if (second !== null && second === lastSecond) return undefined; // node-cron repeat of a tick that ran
       const stale = staleReplay(args[0], nowInZone());
       if (stale) {
         logger.warn(`[scheduled-cron] '${expression}' tick skipped: ${stale} (event loop blocked)`);
         return undefined;
       }
+      if (second !== null) lastSecond = second;
       return tickContext.run({ scheduled: true }, () => task(...args));
     },
     opts,

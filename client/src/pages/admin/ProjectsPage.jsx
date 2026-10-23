@@ -464,6 +464,29 @@ function meaningfulApplicationRows(findings) {
   );
 }
 
+// Mirrors the server's staff-send checks (admin-projects.js
+// pretreatStaffSendChecks): Rule 5E-14.105(3) warranty choice and the FBC
+// 105.10 time of treatment, both hard.
+function pretreatStaffSendChecks(findings, typeCfg) {
+  const warrantyOptions =
+    (typeCfg?.findingsFields || []).find((item) => item.key === "warranty_type")?.options || [];
+  return [
+    {
+      label:
+        'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)',
+      ok: warrantyOptions.includes(String(findings?.warranty_type || "").trim()),
+      hard: true,
+    },
+    { label: "Time of treatment", ok: isClockTime(findings?.treatment_time), hard: true },
+  ];
+}
+
+// Mirrors server/services/final-exterior-screen.js isClockTime ("HH:MM").
+function isClockTime(value) {
+  const match = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(String(value ?? "").trim());
+  return Boolean(match) && Number(match[1]) < 24 && Number(match[2]) < 60;
+}
+
 function evaluateProjectReadiness({
   project,
   typeCfg,
@@ -580,6 +603,7 @@ function evaluateProjectReadiness({
         label: "Applicator attestation",
         ok: hasMeaningfulValue(findings?.applicator_attestation),
       },
+      ...pretreatStaffSendChecks(findings, typeCfg),
     );
   }
 

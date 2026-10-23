@@ -1163,9 +1163,11 @@ const PROJECT_TYPES = {
       },
       // Sticker blank "Date of Final Ext. Treatment" (owner 2026-10-22). The
       // final exterior is a later visit after grading, so these stay optional
-      // and never gate the send; the office fills them on the sent
-      // certificate when that visit is done.
+      // and never gate the send; they fill the notice's reference blank, and
+      // that visit's full FBC 105.10 record is its own certificate.
       { key: 'final_exterior_date', label: 'Date of final exterior treatment', type: 'date', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
+      // FBC 105.10 lists the time of each treatment.
+      { key: 'final_exterior_time', label: 'Time of final exterior treatment', type: 'time', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
       // Plain text, not product_search: the product picker writes the chosen
       // product's chemistry into application 1's epa_registration and
       // active_ingredient, which would overwrite the slab-day record.
@@ -1181,7 +1183,7 @@ const PROJECT_TYPES = {
       // FDACS ID + treatment date is the standard pattern for portal-
       // generated certificates accepted by Florida building departments.
       { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', section: 'Applicator certification', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1 / R318.1 / FDACS Rule 5E-14.106).'] },
-      { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', section: 'Warranty & notes', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'No warranty'] },
+      { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', section: 'Warranty & notes', options: ['Builder 1-year, renewable yearly to year 5', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'Addition to an existing building (no warranty required)'] },
       { key: 'renewal_due', label: 'Renewal due by', type: 'text', section: 'Warranty & notes', placeholder: 'YYYY-MM-DD', disableDictation: true },
       { key: 'comments', label: 'Additional notes', type: 'textarea', section: 'Warranty & notes', placeholder: 'Pre-pour conditions, weather, retreatment triggers, etc.' },
     ],
