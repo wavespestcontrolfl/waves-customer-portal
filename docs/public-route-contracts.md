@@ -3343,6 +3343,38 @@ of these overall numbers, so they can still move when only the light did:
   (`report-assistant.js` `answerTrend`): current scores only, no comparison;
 - the staff and technician screens (Intelligence Bar, `LawnVisitReview`).
 
+`GATE_TS_LIGHTING` (dark, owner 2026-10-23, "add to tree and shrub"; read at call
+time by `tsLightingLive()` in `server/config/feature-gates.js`, through
+`lightingLive()` in `server/services/tree-shrub-lighting.js`; off leaves every
+prompt, preview response, stored row and payload key unchanged, key for key) is the
+`GATE_LAWN_LIGHTING` rule for tree/shrub photos, with the same light words and the
+same compatibility table (`lawn-lighting.js`, reused as is): full sun with sun and
+shadows, overcast with open shade; sun never with overcast or open shade; low
+light, mixed light and unknown never compatible. Every photo counts toward the
+visit's light (tree/shrub has no shot list), and a visit assessed before the gate
+is unknown. It adds NO payload key to `GET /api/reports/:token/data`; the only
+public effect is a removal:
+1. Read: `/api/admin/dispatch/:serviceId/tree-shrub/assess-preview` (staff route)
+   also asks each photo's `lighting` and `hard_shadows`; a missing or invalid answer
+   is `unknown` and never fails the read. The preview response adds `photoLights`
+   and `lightSignature` (an HMAC bound to the visit and the exact photo set; the
+   existing `signature` is unchanged). Completion stores the light in
+   `tree_shrub_assessments.composite_scores` (`light`, `photo_lights`) only when
+   `lightSignature` verifies; an older client or a forged or stale light stores
+   nothing, so that visit is unknown. No migration.
+2. Report: on the tree/shrub `reportV2` (`buildTreeShrubAssessmentReportData` →
+   `buildTreeShrubReportV2`, every render mode), the "Leaf Color & Vigor" trend
+   `reportV2.trends.color` (rendered by `TreeShrubTrends`) is OMITTED unless the
+   latest two visits that carry a color score (same-month points collapsed as the
+   chart draws them) are in known, compatible light. The series is whole or
+   absent, never rebuilt. The overall, foliage, pest and water trends stay. The PDF
+   (`mode=pdf`, `ServiceReportDocument`) never prints tree/shrub trends, so PDF
+   content and its cache key are unchanged. `/api/reports/:token/ask` reads the same
+   payload, so it sees the same omission. EFFECT AT GATE-ON: every existing tree/shrub
+   report loses the color trend until two consecutive visits are read under the gate
+   in compatible light.
+No token, eligibility, privacy, rate-limit or header change; no new route.
+
 `GATE_LAWN_RAINFAST_WATCH` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
 live; off
 leaves the lawn payload and render unchanged, key for key, with no weather read
