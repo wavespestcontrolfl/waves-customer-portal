@@ -132,4 +132,15 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
     const closedKeys = closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys);
     expect(closedKeys).toEqual(expect.arrayContaining([alertKey(id, '2027-10-01'), alertKey(leap, '2028-02-29')]));
   });
+
+  test('an anniversary that falls today is kept, and a warranty cancelled after its date still closes its reminder', async () => {
+    const today = await warranty(await customer(), { renewalDate: '2027-10-01' });
+    const ended = await warranty(await customer(), { status: 'cancelled', renewalDate: '2027-10-01' });
+    const result = await runWarrantyRenewalReminder({ conn: trx, today: '2029-10-01' });
+    expect((await read(today)).day).toBe('2029-10-01');
+    expect((await read(ended)).day).toBe('2027-10-01');
+    expect(result.raised).toBe(1);
+    const closedKeys = closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys);
+    expect(closedKeys).toEqual(expect.arrayContaining([alertKey(today, '2027-10-01'), alertKey(ended, '2027-10-01')]));
+  });
 });

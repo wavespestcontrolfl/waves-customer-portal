@@ -72,7 +72,11 @@ async function rollPastRenewals(conn, today) {
     .select('id', conn.raw("to_char(renewal_date, 'YYYY-MM-DD') as day"));
   if (!rows.length) return 0;
   await conn('customer_contracts').whereIn('id', rows.map((row) => row.id)).update({
-    renewal_date: conn.raw("(renewal_date + make_interval(years => date_part('year', age(?::date, renewal_date))::int + 1))::date", [today]),
+    // Whole years since the date, plus one only when that anniversary is
+    // still before today: an anniversary that falls today is kept.
+    renewal_date: conn.raw(`(renewal_date + make_interval(years => date_part('year', age(?::date, renewal_date))::int
+      + CASE WHEN (renewal_date + make_interval(years => date_part('year', age(?::date, renewal_date))::int))::date >= ?::date THEN 0 ELSE 1 END))::date`,
+    [today, today, today]),
     auto_renewal_notice_sent_at: null,
     updated_at: conn.fn.now(),
   });
@@ -120,13 +124,16 @@ async function raiseDueReminders(conn, today) {
   return raised;
 }
 
-// Notice marked sent, or the warranty cancelled or voided: its reminder closes.
+// Notice marked sent (this renewal), or the warranty cancelled or voided (any
+// date: an ended warranty is never rolled forward): its reminder closes.
 async function closeSentReminders(conn, today) {
   const rows = await conn('customer_contracts')
     .where({ document_template_key: NEW_CONSTRUCTION_WARRANTY_KEY })
     .whereNotNull('renewal_date')
-    .where((builder) => builder.whereNotNull('auto_renewal_notice_sent_at').orWhereNot('status', 'signed'))
-    .whereRaw('renewal_date between ?::date and ?::date + ?::int', [today, today, NOTICE_LEAD_DAYS])
+    .where((builder) => builder
+      .whereNot('status', 'signed')
+      .orWhere((sent) => sent.whereNotNull('auto_renewal_notice_sent_at')
+        .whereRaw('renewal_date between ?::date and ?::date + ?::int', [today, today, NOTICE_LEAD_DAYS])))
     .select('id', 'status', conn.raw("to_char(renewal_date, 'YYYY-MM-DD') as day"));
   if (!rows.length) return 0;
   return closeAdminAlertKeys(conn, rows.map((row) => alertKey(row.id, row.day)), 'renewal_notice_sent', {
