@@ -3151,6 +3151,22 @@ export function PlanSummaryCard({ data, mode }) {
 // True when the plan card or the upcoming visits card (live view only) prints
 // the visit `next` names (default: data.nextSameServiceAppointment): the same date and
 // service in its visits list, or as the plan card's "Your next … visit" line.
+// The narrative a termite or cockroach status card prints under its status
+// line. A written report prints in full. The typed template (summarySource
+// 'typed_narrative') is built from the same form as the card's status line
+// and result rows, so only its next step adds a fact: the termite card said
+// "we inspected 22 stations, no activity" three times and the cockroach card
+// repeated its status line word for word (owner 2026-10-22: say a thing once).
+export function dashboardNarrative(data, dashboard) {
+  const body = dashboard?.aiSummary?.body;
+  if (typeof body !== 'string' || !body.trim()) return null;
+  if (dashboard.source === 'primary' && data?.summarySource === 'typed_narrative') {
+    const next = data.typedReport?.todaysResult?.nextStep;
+    return typeof next === 'string' && next.trim() ? cleanVisitSummary(next) : null;
+  }
+  return cleanVisitSummary(body);
+}
+
 export function nextVisitShownInPlanCard(data, mode, next = data?.nextSameServiceAppointment) {
   if (mode !== 'live' || !next?.scheduledDate) return false;
   // Date, service AND window: two same-day visits of one service (two
@@ -10135,7 +10151,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                  top-level nextAppointment may be ANY service line. */
               nextVisitLabel={termiteSectionsShown || nextVisitShownInPlanCard(data, mode, data.termiteReportV2.nextVisit) ? null : formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
               reportNextVisitLabel={termiteSectionsShown ? nextSameServiceLabel : null}
-              narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
+              narrative={dashboardNarrative(data, data.termiteReportV2)}
               reportSections={reportSections}
               /* Cross-visit trend from the activity gauge payload OF THE
                  REPORT ENTRY THAT OWNS THE DASHBOARD — the primary's gauge
@@ -10166,7 +10182,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                  next ROACH-FAMILY appointment (live view only). */
               nextVisitLabel={cockroachSectionsShown || nextVisitShownInPlanCard(data, mode, data.cockroachReportV2.nextVisit) ? null : formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
               reportNextVisitLabel={cockroachSectionsShown ? nextSameServiceLabel : null}
-              narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
+              narrative={dashboardNarrative(data, data.cockroachReportV2)}
               reportSections={reportSections}
               /* the gauge trend describes the frozen select; when the status
                  was reconciled away from it the trend is stale (codex P2 #3613 r1) */

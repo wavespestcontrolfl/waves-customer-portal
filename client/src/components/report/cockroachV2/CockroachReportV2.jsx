@@ -8,7 +8,6 @@ import { COLORS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import Icon from '../../Icon';
 import ReportText from '../ReportSections';
-import { withoutRepeatedSentences, statusCardWords } from '../repeatedSentences';
 
 const TEXT = 'var(--text)';
 const MUTED = 'var(--muted)';
@@ -67,9 +66,6 @@ export function activityTrendLine(activity) {
 // ── 1. Today's result ─────────────────────────────────────────────────────────
 export function CockroachStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, program = null, reportSections = null, reportNextVisitLabel = null }) {
   if (!status) return null;
-  // Narrative sentences the status line or the result rows already say are
-  // left out (repeatedSentences.js).
-  const shownNarrative = withoutRepeatedSentences(narrative, statusCardWords({ status, statusSummary, metrics }), reportSections);
   const t = tone(status.tone);
   // The headline already carries the comparison on a trend visit
   // (improving / worsening / stable) — the sentence stays for the baseline
@@ -85,9 +81,9 @@ export function CockroachStatusHero({ status, statusSummary, metrics, narrative 
       {statusSummary ? (
         <p className="sr-v2-body" style={{ margin: '10px 0 0', fontSize: 16, lineHeight: 1.5, color: TEXT }}>{statusSummary}</p>
       ) : null}
-      {shownNarrative ? (
+      {narrative && narrative !== statusSummary ? (
         <ReportText
-          text={shownNarrative}
+          text={narrative}
           sections={reportSections}
           nextVisitLabel={reportNextVisitLabel}
           className="ai-summary-body sr-v2-body"

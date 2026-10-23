@@ -18,7 +18,6 @@ import { useState } from 'react';
 import { COLORS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import ReportText from '../ReportSections';
-import { withoutRepeatedSentences, statusCardWords } from '../repeatedSentences';
 
 // ── Surface tokens (shared with the pest / mosquito V2 surface) ─────────────────
 const TEXT = 'var(--text)';
@@ -88,9 +87,6 @@ export function TermiteStatusHero({ status, statusSummary, metrics, narrative = 
   if (!status) return null;
   const t = tone(status.tone);
   const trendLine = activityTrendLine(activityTrend);
-  // Narrative sentences the status line or the result rows already say are
-  // left out (repeatedSentences.js).
-  const shownNarrative = withoutRepeatedSentences(narrative, statusCardWords({ status, statusSummary, metrics }), reportSections);
   return (
     <section data-glass="card" style={{ ...card, borderColor: t.border, background: `linear-gradient(180deg, ${t.wash}, ${CARD} 60%)` }}>
       <div style={eyebrow}>
@@ -101,9 +97,9 @@ export function TermiteStatusHero({ status, statusSummary, metrics, narrative = 
       {statusSummary ? (
         <p className="sr-v2-body" style={{ margin: '10px 0 0', fontSize: 16, lineHeight: 1.5, color: TEXT }}>{statusSummary}</p>
       ) : null}
-      {shownNarrative ? (
+      {narrative ? (
         <ReportText
-          text={shownNarrative}
+          text={narrative}
           sections={reportSections}
           nextVisitLabel={reportNextVisitLabel}
           className="ai-summary-body sr-v2-body"
