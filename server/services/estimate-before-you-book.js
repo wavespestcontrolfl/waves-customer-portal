@@ -4,11 +4,15 @@
 // estimate-before-you-book.js — the "Before you book" page on the estimate PDF
 // (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK, owner answer book 2026-10-21/23).
 //
-// ONE plain page, appended after the last page of the pdfkit estimate PDF.
-// It holds only the answers that apply to THIS estimate: "Scheduling and
-// paying" always, then "Pest visits", "Lawn", "Termite" and "Rodents" only when
-// the estimate quotes that service. Copy is the owner's answer book, nothing
-// else: no prices, no product brand names, no fixed dry or re-entry times.
+// ONE plain page, appended after the last page of the estimate PDF. Every
+// section prints; each service section is worded for "if your estimate
+// includes ..." so the page never has to guess what an estimate quotes from
+// its many stored shapes (Codex #6504 r1-r3 kept finding shapes a local reader
+// missed). Only two lines depend on THIS estimate, and both read the canonical
+// verdicts: the no-contract line (known residential + proposalCarriesPlanTerms)
+// and the 90-day prepay refund line (the /data payload's own prepay verdict).
+// Copy is the owner's answer book: no prices, no product brand names, no fixed
+// dry or re-entry times.
 //
 // Pure copy + selection. The PDF measures the lines and draws them; when the
 // page would overflow it drops lines by RANK (see trimToFit in estimate-pdf.js).
@@ -22,139 +26,74 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const TITLE = 'Before you book';
 
-// Service signals. Keys come from the estimate's own recurring rows
-// (estimate-public recurringServiceKey); the text pattern also reads the
-// quoted line descriptions, so one-time work and synthesized proposals count.
-const PEST_TEXT = /\bpest\b|cockroach|\broach|\bwasp|\bant\b|\bants\b|\bflea|\bspider|silverfish/i;
-const LAWN_TEXT = /\blawn\b|\bturf\b/i;
-const TERMITE_TEXT = /termite|\bwdo\b|wood[ -]destroying|pre[ -]?slab|drywood/i;
-// a WDO INSPECTION / report only: "Wood-Destroying Organism Treatment" quotes no report (Codex #6504 r2)
-const WDO_TEXT = /(?:\bwdo\b|wood[ -]destroying[a-z ]*?)[^|]*?\b(?:inspection|report|letter)\b|termite inspection/i;
-const RODENT_TEXT = /rodent|\brats?\b|\bmouse\b|\bmice\b/i;
-const TRAPPING_TEXT = /\btrap/i; // trapping only: an exclusion-only job promises no trap checks
-const ROACH_TEXT = /cockroach|\broach/i;
-const NOT_PEST_TEXT = /\blawn\b|\bturf\b|tree|shrub|ornamental|mosquito|termite|rodent/i;
-const COMMERCIAL_TEXT = /commercial/i;
-
-// What the estimate quotes. `rows` = recurring rows (with `.key` already
-// resolved by the caller), `items` = the description / name of every quoted
-// line (one string each), `commercial` = a multi-building or commercial
-// proposal. `residential` = the estimate is KNOWN to be residential (see isKnownResidential): anything
-// else is treated as maybe-commercial and gets the neutral agreement line, never a no-contract claim. Text matching is per line, so a lawn line that mentions "pest" in
-// passing does not turn on the pest section.
-function detectServices({ rows = [], items = [], commercial = false, residential = false, planTerms = false } = {}) {
-  const keys = new Set(rows.map((r) => String(r.key || '')));
-  const hasKey = (test) => [...keys].some(test);
-  const anyItem = (test) => items.some((t) => test.test(String(t || '')));
-  const all = items.join(' | ');
-  const isCommercial = commercial === true || COMMERCIAL_TEXT.test(all) || hasKey((k) => k.startsWith('commercial'));
-  const recurringPest = keys.has('pest_control');
-  const recurringLawn = keys.has('lawn_care');
-  const termiteRecurring = hasKey((k) => k.startsWith('termite'));
-  const rodentBait = keys.has('rodent_bait') || keys.has('commercial_rodent_bait');
-  const rodent = keys.has('rodent') || rodentBait || anyItem(RODENT_TEXT);
-  return {
-    commercial: isCommercial,
-    residential: residential === true && !isCommercial,
-    // The estimate-wide plan terms (no long-term contract) apply: known residential AND the proposal's own terms-scope verdict.
-    planTerms: planTerms === true && residential === true && !isCommercial,
-    recurring: rows.length > 0,
-    recurringPest,
-    recurringLawn,
-    pest: recurringPest || items.some((t) => PEST_TEXT.test(t) && !NOT_PEST_TEXT.test(t)),
-    lawn: recurringLawn || anyItem(LAWN_TEXT),
-    termite: termiteRecurring || keys.has('pre_slab_termiticide') || anyItem(TERMITE_TEXT),
-    termiteRecurring,
-    wdo: anyItem(WDO_TEXT),
-    rodent,
-    // Trapping is a different job from a bait-station program: the trap-check line needs explicit trapping in a
-    // quoted line, never just a rodent key (a commercial bait-station plan has no trap checks - pre-push P1).
-    rodentTrapping: rodent && anyItem(TRAPPING_TEXT),
-    roach: anyItem(ROACH_TEXT),
-  };
-}
-
 // Sections in print order. Each line: { rank, text }. `when(s, opts)` decides
 // whether the line applies to this estimate. Rank 1 = keep longest.
 const SECTIONS = [
   {
     key: 'scheduling',
     heading: 'Scheduling and paying',
-    always: true,
     lines: [
       { rank: 1, text: 'Your technician arrives during a two-hour window that starts on the hour.' },
       { rank: 1, text: 'There is no deposit.' },
-      { rank: 2, when: (s) => s.recurring, text: 'If you are a new recurring customer paying by card for each visit, you save your card when you book and we charge it after your first visit.' },
+      { rank: 2, text: 'If you are a new recurring customer paying by card for each visit, you save your card when you book and we charge it after your first visit.' },
       { rank: 2, text: 'At the visit, your technician can take a card, a check or cash. You can also pay with the card or bank account we have on file, or send a check or cash through our office.' },
-      { rank: 2, when: (s) => s.planTerms && (s.recurringPest || s.recurringLawn), text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
-      // The neutral line: printed whenever the plan terms do not apply (not known residential, or a mix the proposal's own terms-scope check keeps terms-neutral), so such an estimate never reads as month-to-month.
-      { rank: 3, when: (s) => s.termiteRecurring || !s.planTerms, text: 'Termite plans and commercial accounts follow the agreement you sign.' },
-      { rank: 2, when: (s, o) => o.prepayRefundOffered === true && (s.recurringPest || s.recurringLawn), text: 'If you prepay for the year and cancel within 90 days, we refund the visits we have not done yet. After 90 days there is no refund, and your paid visits stay on your schedule through the end of the prepaid term.' },
+      { rank: 2, when: (s) => s.planTerms, text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
+      // The neutral line whenever the plan terms do not apply, so such an estimate never reads as month-to-month.
+      { rank: 3, when: (s) => !s.planTerms, text: 'Termite plans and commercial accounts follow the agreement you sign.' },
+      { rank: 2, when: (s, o) => o.prepayRefundOffered === true, text: 'If you prepay for the year and cancel within 90 days, we refund the visits we have not done yet. After 90 days there is no refund, and your paid visits stay on your schedule through the end of the prepaid term.' },
       { rank: 4, text: 'Mail checks to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.' },
     ],
   },
   {
     key: 'pest',
-    heading: 'Pest visits',
-    when: (s) => s.pest,
+    heading: 'If your estimate includes pest control',
     lines: [
       { rank: 1, text: 'You do not need to be home for the outside treatment. For the inside, someone needs to be home or leave us access.' },
       { rank: 1, text: 'It is normal to see some activity for up to two weeks after a treatment, as pests are flushed out. It fades as the products keep working. If it has not slowed after two weeks, tell us.' },
-      { rank: 2, when: (s) => s.residential && s.recurringPest, text: 'If your plan includes inside service, your first visit includes an inside spray. After that, the inside is up to you: we treat it whenever you ask.' },
-      { rank: 2, when: (s) => s.recurringPest, text: 'Regular pest visits include the lanai and the pool cage, and wasp, mud dauber and hornet nests on the house.' },
+      { rank: 2, when: (s) => s.planTerms, text: 'On a residential plan with inside service, your first visit includes an inside spray. After that, the inside is up to you: we treat it whenever you ask.' },
+      { rank: 2, text: 'Regular pest visits include the lanai and the pool cage, and small paper wasp and mud dauber nests on the house. Larger or hard-to-reach nests are quoted separately.' },
       { rank: 2, text: 'Please keep people and pets off treated areas until they are dry.' },
       { rank: 3, text: 'A treatment needs to dry and bond to surfaces. After that, it holds up to weather.' },
-      { rank: 4, when: (s) => s.roach && !s.recurringPest, text: 'A standalone cockroach treatment is two visits for one price. A German roach cleanout can take more visits, depending on how heavy it is.' },
-      { rank: 5, text: 'We treat honeybees too, and we book the soonest available time.' },
     ],
   },
   {
     key: 'lawn',
-    heading: 'Lawn',
-    when: (s) => s.lawn,
+    heading: 'If your estimate includes a lawn plan',
     lines: [
-      // Program lines only for a recurring lawn plan: a one-time lawn treatment is one application (pre-push P1).
-      { rank: 1, when: (s) => s.recurringLawn, text: 'Your lawn program covers fertilizer, weed control and insect control, on a seasonal rotation. It does not include mowing. Check your visit card for when to mow.' },
-      { rank: 2, when: (s) => s.recurringLawn, text: 'Weed control takes about 10 to 14 days to show, and some weeds need a second round.' },
+      { rank: 1, text: 'Your lawn plan covers fertilizer, weed control and insect control, on a seasonal rotation. It does not include mowing. Check your visit card for when to mow.' },
+      { rank: 2, text: 'Weed control takes about 10 to 14 days to show, and some weeds need a second round.' },
       { rank: 2, text: "Please water on your county's watering days, early in the morning, deeply and less often." },
-      { rank: 3, when: (s) => s.recurringLawn, text: 'Lawn insects such as chinch bugs are part of the program. Your technician checks at the next visit and treats where we confirm them and the label allows.' },
+      { rank: 3, text: 'Lawn insects such as chinch bugs are part of the plan. Your technician checks at the next visit and treats where we confirm them and the label allows.' },
     ],
   },
   {
     key: 'termite',
-    heading: 'Termite',
-    when: (s) => s.termite,
+    heading: 'If your estimate includes termite work',
     lines: [
       { rank: 1, text: 'We do not tent. For drywood termites in wood we can reach, we treat the infested wood directly. If the activity is widespread or the wood is out of reach, we refer you to a fumigation company.' },
-      { rank: 2, when: (s) => s.wdo, text: 'We email your WDO (termite) inspection report after the licensed inspector signs it, normally the same business day.' },
+      { rank: 2, text: 'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day.' },
     ],
   },
   {
     key: 'rodent',
-    heading: 'Rodents',
-    when: (s) => s.rodent,
+    heading: 'If your estimate includes rodent trapping',
     lines: [
-      { rank: 1, when: (s) => s.rodentTrapping, text: 'Rodent trapping includes the setup visit and at least one trap check. If you want more trap checks, our office will confirm what your job includes.' },
-      { rank: 2, text: 'For wildlife, we do rodent trapping only. Snakes, raccoons, squirrels and other wildlife go to a wildlife company.' },
+      { rank: 1, text: 'Rodent trapping includes the setup visit and one trap check. Any trap checks after that are billed separately.' },
     ],
   },
 ];
 
 const CLOSING = { rank: 3, text: (phone) => `Questions before you book? Call us at ${phone} and we will help.` };
 
-// The page for one estimate: { title, sections: [{ key, heading, lines: [{ rank, text }] }] }.
-// `signals` = detectServices() output; `opts.prepayRefundOffered` = the estimate
-// offers an annual prepay AND the 90-day refund rule is live; `opts.phone` = the
-// support number the document already prints.
-function buildBeforeYouBook(signals, opts = {}) {
-  const sections = [];
-  for (const section of SECTIONS) {
-    if (!section.always && !(section.when && section.when(signals, opts))) continue;
-    const lines = section.lines
+// The page: { title, sections: [{ key, heading, lines: [{ rank, text }] }], closing }.
+// `signals.planTerms` = the estimate-wide plan terms apply; `opts.prepayRefundOffered` = the estimate
+// offers an annual prepay AND the 90-day refund rule is live; `opts.phone` = the support number.
+function buildBeforeYouBook(signals = {}, opts = {}) {
+  const sections = SECTIONS
+    .map((section) => ({ key: section.key, heading: section.heading, lines: section.lines
       .filter((line) => !line.when || line.when(signals, opts))
-      .map(({ rank, text }) => ({ rank, text }));
-    if (lines.length) sections.push({ key: section.key, heading: section.heading, lines });
-  }
+      .map(({ rank, text }) => ({ rank, text })) }))
+    .filter((section) => section.lines.length);
   const closing = opts.phone ? { rank: CLOSING.rank, text: CLOSING.text(opts.phone), closing: true } : null;
   return { title: TITLE, sections, closing };
 }
@@ -183,19 +122,6 @@ function estimateIsOpen(estimate) {
   return !(expiry && !Number.isNaN(expiry.getTime()) && expiry < new Date());
 }
 
-// Every printed proposal row (building lines, programs, corrective work) as { recurring, text }: the
-// structured `service` first, because a program labelled "Grounds maintenance" is still a lawn program.
-// Programs are recurring, corrective work is one-time, building lines follow their own frequency.
-function proposalLines(proposal) {
-  const list = (value) => (Array.isArray(value) ? value : []);
-  const line = (row, recurring) => ({ recurring, service: row.service || '', text: `${row.service || ''} ${row.description || row.label || ''}`.trim() });
-  return [
-    ...list(proposal.buildings).flatMap((b) => list(b.lineItems)).map((row) => line(row, row.frequency !== 'one_time')),
-    ...list(proposal.programs).map((row) => line(row, true)),
-    ...list(proposal.correctiveWork).map((row) => line(row, false)),
-  ];
-}
-
 // The estimate-wide plan terms apply (no long-term contract): KNOWN residential and the proposal's OWN
 // terms-scope verdict (estimate-proposal-billing proposalCarriesPlanTerms, the one the PDF, page and
 // accept read), which keeps termite, rodent and mixed-with-neutral documents terms-neutral.
@@ -208,37 +134,25 @@ function planTermsApply(estimate, proposal) {
   }
 }
 
-// What THIS estimate quotes, read the way the lawn limits block reads it (estimate-public's
-// recurring reader), plus the proposal's own rows. A read that fails returns no signals, so only the
-// neutral always-section prints: never a guess. `annualPrepayOffered`: the /data payload's own verdict
-// when the caller has it; otherwise the same two checks that verdict is made from.
+// The two estimate-dependent verdicts. `annualPrepayOffered`: the /data payload's own verdict (top-level or
+// any selectable frequency) when the caller has it; otherwise the same two checks that verdict is made from.
+// A failed read is "no": never a guess.
 function estimateSignals(estimate, proposal, { annualPrepayOffered } = {}) {
-  const base = { planTerms: planTermsApply(estimate, proposal), residential: isKnownResidential(estimate, proposal), commercial: (proposal.buildings || []).length > 1 };
-  try {
-    const pub = require('../routes/estimate-public');
-    const estData = pub.parseEstimateDataSafe(estimate);
-    // The authoritative container (a quote-wizard / agent-draft row may carry a sparse `result` beside the
-    // priced `engineResult`): the same pick the pricing audit uses (Codex #6504 r2).
-    const estResult = require('./estimate-result-container').storedEstimateContainer(estData, { pricingAuthority: estimate?.pricing_authority }) || estData || {};
-    const services = pub.recurringServicesWithSupplements(estResult);
-    const oneTime = [...(estResult.oneTime?.items || []), ...(estResult.oneTime?.specItems || []), ...(estResult.specItems || [])]
-      .filter((item) => item && typeof item === 'object');
-    const lines = proposalLines(proposal);
-    const keys = [...services, ...lines.filter((l) => l.recurring).map((l) => ({ service: l.service !== 'other' ? l.service : '', name: l.text }))]
-      .map((svc) => pub.recurringServiceKey(svc));
-    const prepayOffered = annualPrepayOffered ?? (pub.annualPrepayEligibleForEstimateData(estData) && pub.annualPrepayHasSellableIncentive(estimate, estData, {}));
-    return {
-      signals: detectServices({
-        ...base,
-        rows: [...new Set(keys)].map((key) => ({ key })),
-        items: [...services.map((svc) => svc.name || svc.service || ''), ...oneTime.map((item) => item.name || item.service || item.label || ''), ...lines.map((l) => l.text)],
-      }),
-      prepayOffered: featureGates.prepayRefund90DayLive?.() === true && prepayOffered === true,
-    };
-  } catch (err) {
-    logger.warn?.(`[estimate-before-you-book] service read failed: ${err.message}`);
-    return { signals: detectServices({ ...base, planTerms: false }), prepayOffered: false };
+  let prepayOffered = annualPrepayOffered;
+  if (prepayOffered === undefined) {
+    try {
+      const pub = require('../routes/estimate-public');
+      const estData = pub.parseEstimateDataSafe(estimate);
+      prepayOffered = pub.annualPrepayEligibleForEstimateData(estData) && pub.annualPrepayHasSellableIncentive(estimate, estData, {});
+    } catch (err) {
+      logger.warn?.(`[estimate-before-you-book] prepay read failed: ${err.message}`);
+      prepayOffered = false;
+    }
   }
+  return {
+    signals: { planTerms: planTermsApply(estimate, proposal) },
+    prepayOffered: featureGates.prepayRefund90DayLive?.() === true && prepayOffered === true,
+  };
 }
 
 // The page for one estimate, untrimmed. `proposal` = normalizeProposal(estimate).
@@ -306,4 +220,4 @@ function beforeYouBookBlock(estimate, { open = estimateIsOpen(estimate), annualP
   }
 }
 
-module.exports = { TITLE, SECTIONS, estimateIsOpen, isKnownResidential, detectServices, buildBeforeYouBook, beforeYouBookForEstimate, trimByRank, beforeYouBookBlock };
+module.exports = { TITLE, SECTIONS, estimateIsOpen, isKnownResidential, buildBeforeYouBook, beforeYouBookForEstimate, trimByRank, beforeYouBookBlock };

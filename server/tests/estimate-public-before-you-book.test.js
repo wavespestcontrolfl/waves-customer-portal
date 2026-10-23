@@ -126,12 +126,12 @@ describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)
     });
   });
 
-  test('gate on: the always-section plus pest and lawn, as plain strings with no prices', async () => {
+  test('gate on: every section, as plain strings with no prices', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     await withServer(async (baseUrl) => {
       const body = await getData(baseUrl);
       expect(body.beforeYouBook.title).toBe('Before you book');
-      expect(keysOf(body)).toEqual(['scheduling', 'pest', 'lawn']);
+      expect(keysOf(body)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
       for (const section of body.beforeYouBook.sections) {
         expect(typeof section.heading).toBe('string');
         for (const line of section.lines) expect(typeof line).toBe('string');
@@ -187,11 +187,13 @@ describe('GET /:token/data - before you book (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK)
     });
   });
 
-  test('gate on, pest-only estimate: no lawn section', async () => {
+  test('gate on, pest-only estimate: the same sections (service sections are worded "if your estimate includes")', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     dbRows = { ...dbRows, estimates: estimateRow({ services: ['pest_control'] }) };
     await withServer(async (baseUrl) => {
-      expect(keysOf(await getData(baseUrl))).toEqual(['scheduling', 'pest']);
+      const body = await getData(baseUrl);
+      expect(keysOf(body)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
+      expect(body.beforeYouBook.sections[2].heading).toBe('If your estimate includes a lawn plan');
     });
   });
 });

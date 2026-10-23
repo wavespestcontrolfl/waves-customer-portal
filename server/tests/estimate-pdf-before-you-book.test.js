@@ -8,7 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 
 const { buildEstimateProposalPDFBuffer } = require('../services/pdf/estimate-pdf');
-const { detectServices, buildBeforeYouBook, SECTIONS } = require('../services/estimate-before-you-book');
+const { buildBeforeYouBook, SECTIONS } = require('../services/estimate-before-you-book');
 
 function extractPdfText(buffer) {
   const raw = buffer.toString('latin1');
@@ -62,8 +62,8 @@ const render = (estimate) => buildEstimateProposalPDFBuffer(estimate, { billsPer
 const HEAD = 'BEFORE YOU BOOK';
 const PHRASE = {
   scheduling: 'SCHEDULING AND PAYING',
-  pest: 'PEST VISITS',
-  lawn: 'Your lawn program covers fertilizer',
+  pest: 'IF YOUR ESTIMATE INCLUDES PEST CONTROL',
+  lawn: 'Your lawn plan covers fertilizer',
   termite: 'We do not tent',
   rodent: 'Rodent trapping includes the setup visit',
   contract: 'no long-term contract',
@@ -105,28 +105,6 @@ describe('estimate PDF Before you book page', () => {
     expect(onText).toContain('Before you book');
   });
 
-  test('sections appear only for the services the estimate quotes', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
-    const lawnOnly = extractPdfText(await render(fixture('byb-lawn', [lawn])));
-    expect(lawnOnly).toContain(PHRASE.lawn);
-    expect(lawnOnly).not.toContain(PHRASE.pest);
-    expect(lawnOnly).not.toContain(PHRASE.termite);
-    expect(lawnOnly).not.toContain(PHRASE.rodent);
-
-    const pestOnly = extractPdfText(await render(fixture('byb-pest', [pest])));
-    expect(pestOnly).toContain(PHRASE.pest);
-    expect(pestOnly).not.toContain(PHRASE.lawn);
-
-    const termiteOnly = extractPdfText(await render(fixture('byb-termite', [termiteBond])));
-    expect(termiteOnly).toContain(PHRASE.termite);
-    expect(termiteOnly).not.toContain(PHRASE.pest);
-
-    const rodentOnly = extractPdfText(await render(fixture('byb-rodent', [], [{ name: 'Rodent Trapping' }])));
-    expect(rodentOnly).toContain(PHRASE.rodent);
-    expect(rodentOnly).not.toContain(PHRASE.lawn);
-    expect(rodentOnly).toContain(PHRASE.scheduling);
-  });
-
   test('the no-contract line needs a residential pest or lawn plan', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     expect(extractPdfText(await render(fixture('byb-c1', [pest])))).toContain(PHRASE.contract);
@@ -158,13 +136,6 @@ describe('estimate PDF Before you book page', () => {
     expect(residentialText).not.toContain(NEUTRAL);
   });
 
-  test('a proposal itemized only as corrective work still gets its service answers (pre-push P1)', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
-    const est = fixture('byb-cw', []);
-    est.estimate_data.proposal = { enabled: true, buildings: [], correctiveWork: [{ label: 'WDO inspection', amount: 150, includes: [] }] };
-    expect(extractPdfText(await render(est))).toContain('inspection report');
-  });
-
   test('the page is only for an estimate still being decided', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const open = await render(fixture('byb-open', [pest]));
@@ -190,12 +161,6 @@ describe('estimate PDF Before you book page', () => {
     expect(extractPdfText(await render(fixture('byb-p2', [], [{ name: 'One-Time Pest Control' }])))).not.toContain(PHRASE.prepay);
     // A termite bond rider cannot prepay.
     expect(extractPdfText(await render(fixture('byb-p3', [pest, termiteBond])))).not.toContain(PHRASE.prepay);
-  });
-
-  test('the WDO line needs a WDO inspection on the estimate', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
-    expect(extractPdfText(await render(fixture('byb-w1', [], [{ name: 'WDO Inspection' }])))).toContain(PHRASE.wdo);
-    expect(extractPdfText(await render(fixture('byb-w2', [termiteBond])))).not.toContain(PHRASE.wdo);
   });
 
   test('an estimate with every service type still adds exactly one page, scheduling first', async () => {
@@ -255,11 +220,7 @@ describe('estimate PDF Before you book page', () => {
 });
 
 describe('Before you book copy', () => {
-  const everything = detectServices({
-    rows: [{ key: 'pest_control' }, { key: 'lawn_care' }, { key: 'termite_bond_1' }, { key: 'rodent' }],
-    items: ['Pest Control', 'Lawn Care', 'Termite Bond', 'Rodent Trapping', 'WDO Inspection', 'German Roach Cleanout'],
-  });
-  const page = buildBeforeYouBook(everything, { prepayRefundOffered: true, phone: '(941) 555-0100' });
+  const page = buildBeforeYouBook({ planTerms: true }, { prepayRefundOffered: true, phone: '(941) 555-0100' });
   const allLines = [...SECTIONS.flatMap((s) => s.lines.map((l) => l.text)), ...page.sections.flatMap((s) => s.lines.map((l) => l.text)), page.closing.text];
 
   test('every line follows the answer book rules', () => {
@@ -288,15 +249,19 @@ describe('Before you book copy', () => {
     expect(hasBannedCustomerCopy('The treatment is safe for pets.')).toBe(true);
   });
 
-  test('sections and ranks: scheduling always, others by service', () => {
-    expect(buildBeforeYouBook(detectServices({}), {}).sections.map((s) => s.key)).toEqual(['scheduling']);
+  test('every section prints, each service section worded as "if your estimate includes" (Codex #6504 r3)', () => {
+    expect(buildBeforeYouBook({}, {}).sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
     expect(page.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
+    for (const section of page.sections.slice(1)) expect(section.heading).toMatch(/^If your estimate includes /);
+    // no package-specific visit counts and no nest promise beyond the small ones
+    expect(JSON.stringify(page)).not.toMatch(/two visits for one price|hornet nests on the house are included/);
+    // the no-contract line and the plan-only inside line follow the terms verdict; neutral line otherwise
+    const neutral = JSON.stringify(buildBeforeYouBook({ planTerms: false }, {}));
+    expect(neutral).not.toMatch(/no long-term contract|first visit includes an inside spray/);
+    expect(neutral).toMatch(/follow the agreement you sign/);
     for (const section of SECTIONS) for (const line of section.lines) expect([1, 2, 3, 4, 5]).toContain(line.rank);
   });
 
-  test('a lawn line that mentions pest in passing does not turn on the pest section', () => {
-    expect(detectServices({ rows: [], items: ['Lawn Pest and Weed Control'] }).pest).toBe(false);
-  });
 });
 
 describe('Before you book: terms scope, prepay verdict, structured service keys, partial gate mocks', () => {
@@ -329,22 +294,6 @@ describe('Before you book: terms scope, prepay verdict, structured service keys,
     const lines = (opts) => (beforeYouBookBlock(recurring, { open: true, ...opts }).beforeYouBook?.sections || []).flatMap((x) => x.lines).join(' ');
     expect(lines({ annualPrepayOffered: true })).toContain(PHRASE.prepay);
     expect(lines({ annualPrepayOffered: false })).not.toContain(PHRASE.prepay);
-  });
-
-  test('a program or corrective-work row is classified by its structured service, not its label', async () => {
-    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
-    const program = { service: 'lawn', label: 'Grounds maintenance', frequencyPerYear: 9, pricePerApplication: 55 };
-    const est = { ...fixture('byb-struct', []), estimate_data: { proposal: { enabled: false, buildings: [], programs: [program] } } };
-    const text = extractPdfText(await render(est));
-    expect(text).toContain(PHRASE.lawn);
-    expect(text).toContain(PHRASE.contract);
-    const corrective = { ...fixture('byb-struct2', []), estimate_data: { proposal: { enabled: false, buildings: [], correctiveWork: [{ service: 'termite', label: 'Wood service', amount: 200, includes: [] }] } } };
-    const correctiveText = extractPdfText(await render(corrective));
-    expect(correctiveText).toContain(PHRASE.termite);
-    expect(correctiveText).not.toContain(PHRASE.lawn);
-    // Corrective work is one-time: a lawn-keyed one never claims the recurring lawn program.
-    const oneTimeLawn = { ...fixture('byb-struct3', []), estimate_data: { proposal: { enabled: false, buildings: [], correctiveWork: [{ service: 'lawn', label: 'Grounds fix', amount: 200, includes: [] }] } } };
-    expect(extractPdfText(await render(oneTimeLawn))).not.toContain(PHRASE.lawn);
   });
 
   test('a feature-gates mock without the reader never breaks the page or the document (CI regression)', () => {
@@ -391,46 +340,7 @@ describe('Before you book trim and payload block', () => {
     expect(beforeYouBookBlock(est)).toEqual({});
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const block = beforeYouBookBlock(est).beforeYouBook;
-    expect(block.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn']);
+    expect(block.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
     expect(block.sections.every((s) => s.lines.every((l) => typeof l === 'string'))).toBe(true);
-  });
-});
-
-describe('rodent trap checks need explicit trapping (pre-push P1)', () => {
-  test('a commercial or residential bait-station plan promises no trap check; a quoted trapping line does', () => {
-    for (const key of ['commercial_rodent_bait', 'rodent_bait']) {
-      const s = detectServices({ rows: [{ key }], items: ['Rodent Bait Stations'] });
-      expect(s.rodent).toBe(true);
-      expect(s.rodentTrapping).toBe(false);
-    }
-    expect(detectServices({ rows: [{ key: 'rodent' }], items: ['Rodent Control'] }).rodentTrapping).toBe(false);
-    expect(detectServices({ items: ['Rodent Trapping & Exclusion'] }).rodentTrapping).toBe(true);
-    expect(detectServices({ items: ['Rodent Exclusion'] }).rodentTrapping).toBe(false);
-  });
-});
-
-describe('one-time lawn work gets no program promises (pre-push P1)', () => {
-  test('a one-time lawn line keeps only the watering advice', () => {
-    const page = buildBeforeYouBook(detectServices({ items: ['One-Time Lawn Treatment'] }), {});
-    const lawn = page.sections.find((x) => x.key === 'lawn');
-    expect(lawn).toBeTruthy();
-    const text = JSON.stringify(lawn);
-    expect(text).toContain('watering days');
-    expect(text).not.toMatch(/seasonal rotation|second round|next visit/);
-    const recurring = JSON.stringify(buildBeforeYouBook(detectServices({ rows: [{ key: 'lawn_care' }], items: ['Lawn Care'] }), {}).sections.find((x) => x.key === 'lawn'));
-    expect(recurring).toContain('seasonal rotation');
-  });
-});
-
-describe('Codex #6504 r2', () => {
-  test('a WDO treatment line promises no inspection report; an inspection line does', () => {
-    expect(detectServices({ items: ['Wood-Destroying Organism Treatment'] }).wdo).toBe(false);
-    expect(detectServices({ items: ['Wood-Destroying Organism Treatment'] }).termite).toBe(true);
-    expect(detectServices({ items: ['WDO Inspection'] }).wdo).toBe(true);
-    expect(detectServices({ items: ['Termite Inspection'] }).wdo).toBe(true);
-  });
-  test('the card-after-first-visit line is about paying per visit, never annual prepay timing', () => {
-    const line = SECTIONS.flatMap((x) => x.lines).find((l) => /after your first visit/.test(l.text));
-    expect(line.text).toMatch(/for each visit/);
   });
 });
