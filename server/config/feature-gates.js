@@ -5392,6 +5392,13 @@ function estimateLawnLimitsLive() {
   return process.env.GATE_ESTIMATE_LAWN_LIMITS === 'true';
 }
 
+// GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK read at CALL time, strict `=== 'true'`, dark by default (owner
+// answer book 2026-10-22). services/pdf/estimate-pdf.js appends one plain "Before you book" page.
+// Copy only, no prices, sends nothing. Off = the estimate PDF is byte-identical to before.
+function estimateBeforeYouBookLive() {
+  return process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -7366,3 +7373,5 @@ module.exports.billToNoVisitInvoicesLive = billToNoVisitInvoicesLive;
 module.exports.prepayRefund90DayLive = prepayRefund90DayLive;
 // GATE_ESTIMATE_LAWN_LIMITS reader, on its own line so gate PRs never conflict.
 module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
+// GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK reader, on its own line so gate PRs never conflict.
+module.exports.estimateBeforeYouBookLive = estimateBeforeYouBookLive;

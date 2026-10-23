@@ -28,6 +28,9 @@ const {
 } = require('../estimate-proposal-billing');
 const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims.cjs');
 const { lawnLimitsForEstimate } = require('../estimate-lawn-limits');
+const featureGates = require('../../config/feature-gates');
+const { detectServices, buildBeforeYouBook } = require('../estimate-before-you-book');
+const logger = require('../logger');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -484,6 +487,111 @@ function lawnLimitsBlock(ctx, lawnLimits, y) {
   return y + 6;
 }
 
+// "Before you book" (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK): one plain page after the last page, from
+// the owner's answer book (services/estimate-before-you-book.js). Which sections print comes from what
+// THIS estimate quotes: the recurring rows the lawn limits block reads (estimate-public), plus the
+// quoted line descriptions. A read that fails prints only the always-section, never a guess.
+const BYB_BODY_SIZE = 10.5;
+const BYB_LINE_GAP = 2;
+const BYB_TOP = 104;
+
+function beforeYouBookFor(estimate, proposal) {
+  const rows = [];
+  const items = [];
+  let prepayOffered = false;
+  try {
+    const pub = require('../../routes/estimate-public');
+    const estData = pub.parseEstimateDataSafe(estimate);
+    const estResult = estData?.result || estData?.engineResult || estData || {};
+    const services = pub.recurringServicesWithSupplements(estResult);
+    const oneTime = [
+      ...(Array.isArray(estResult.oneTime?.items) ? estResult.oneTime.items : []),
+      ...(Array.isArray(estResult.oneTime?.specItems) ? estResult.oneTime.specItems : []),
+      ...(Array.isArray(estResult.specItems) ? estResult.specItems : []),
+    ].filter((item) => item && typeof item === 'object');
+    const seen = new Set();
+    for (const svc of services) {
+      const key = pub.recurringServiceKey(svc);
+      seen.add(key);
+      rows.push({ key });
+      items.push(svc.name || svc.service || '');
+    }
+    for (const item of oneTime) items.push(item.name || item.service || item.label || '');
+    // Synthesized proposals carry their lines only in the proposal: read the recurring ones the same way.
+    for (const building of proposal.buildings || []) {
+      for (const line of building.lineItems || []) {
+        items.push(line.description || '');
+        if (line.frequency === 'one_time') continue;
+        const key = pub.recurringServiceKey({ name: line.description });
+        if (!seen.has(key)) { seen.add(key); rows.push({ key }); }
+      }
+    }
+    for (const program of proposal.programs || []) items.push(program.label || '');
+    // The refund rule is stated only when the estimate offers an annual prepay AND the 90-day rule is live.
+    prepayOffered = featureGates.prepayRefund90DayLive() === true && pub.isAnnualPrepayEligibleServiceMix(services, oneTime) === true;
+  } catch (err) {
+    logger.warn?.(`[estimate-pdf] before-you-book service read failed: ${err.message}`);
+    rows.length = 0;
+    items.length = 0;
+  }
+  const signals = detectServices({ rows, items, commercial: (proposal.buildings || []).length > 1 });
+  return buildBeforeYouBook(signals, { prepayRefundOffered: prepayOffered, phone: WAVES_SUPPORT_PHONE_DISPLAY });
+}
+
+// Keep the page to ONE page. Priority order: every line has a rank (1 keeps longest, 5 goes first);
+// while the page is too tall, drop the highest-rank line, and inside a rank the one printed last.
+// A section left with no lines loses its heading too.
+function trimBeforeYouBook(doc, page, available) {
+  const textWidth = W - 12;
+  const heightOf = (text) => {
+    doc.fontSize(BYB_BODY_SIZE).font('Helvetica');
+    return doc.heightOfString(`• ${text}`, { width: textWidth, lineGap: BYB_LINE_GAP }) + 5;
+  };
+  const sections = page.sections.map((section) => ({ ...section, lines: section.lines.slice() }));
+  const closing = page.closing ? [{ ...page.closing }] : [];
+  const total = () => sections.reduce((sum, section) => (section.lines.length
+    ? sum + 22 + section.lines.reduce((h, line) => h + heightOf(line.text), 0) : sum), 0)
+    + closing.reduce((sum, line) => sum + 8 + heightOf(line.text), 0);
+  while (total() > available) {
+    let worst = null;
+    sections.forEach((section, si) => section.lines.forEach((line, li) => {
+      if (!worst || line.rank > worst.rank || (line.rank === worst.rank && (si > worst.si || (si === worst.si && li > worst.li)))) {
+        worst = { rank: line.rank, si, li };
+      }
+    }));
+    // The closing line is printed last, so it goes before a same-rank line above it.
+    if (closing.length && (!worst || closing[0].rank >= worst.rank)) { closing.pop(); continue; }
+    if (!worst) break;
+    sections[worst.si].lines.splice(worst.li, 1);
+  }
+  return { ...page, sections: sections.filter((section) => section.lines.length), closing: closing[0] || null };
+}
+
+function beforeYouBookPage(ctx, page) {
+  const { doc } = ctx;
+  footerBar(doc, ctx.tagline);
+  doc.addPage();
+  continuationHeader(doc, ctx.title);
+  doc.fontSize(20).font('Helvetica').fillColor(NAVY).text(page.title, L, 58, { width: W });
+  const fitted = trimBeforeYouBook(doc, page, CONTENT_BOTTOM - BYB_TOP);
+  let y = BYB_TOP;
+  const drawLine = (text) => {
+    doc.fontSize(BYB_BODY_SIZE).font('Helvetica').fillColor(BODY);
+    const h = doc.heightOfString(`• ${text}`, { width: W - 12, lineGap: BYB_LINE_GAP });
+    doc.text(`• ${text}`, L + 6, y, { width: W - 12, lineGap: BYB_LINE_GAP });
+    y += h + 5;
+  };
+  for (const section of fitted.sections) {
+    y = sectionLabel(doc, section.heading, L, y) + 8;
+    for (const line of section.lines) drawLine(line.text);
+    y += 8;
+  }
+  if (fitted.closing) {
+    y += 8;
+    drawLine(fitted.closing.text);
+  }
+}
+
 function termsBlock(ctx, proposal, totals, y) {
   const { doc } = ctx;
   const lines = [];
@@ -648,6 +756,9 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   y = lawnLimitsBlock(ctx, lawnLimitsOf(billing), y);
   y = termsBlock(ctx, proposal, totals, y + 8);
   acceptanceBlock(ctx, billing?.acceptance || null, y + 8);
+
+  // GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK: one more page after the last one. Gate off prints nothing here.
+  if (featureGates.estimateBeforeYouBookLive()) beforeYouBookPage(ctx, beforeYouBookFor(estimate, proposal));
 
   footerBar(doc, ctx.tagline);
   doc.end();
