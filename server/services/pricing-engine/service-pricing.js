@@ -4987,7 +4987,7 @@ function priceTermiteStationRental(installPrice) {
 
 // Mosquito misting SYSTEM (scope ~/mosquito-misting-scope-20260924.md 4.3).
 // Install (tier price + nozzle/riser overage) is a one-time charge; the plan
-// is a fixed monthly fee; refills bill per fill at each visit and are NOT in
+// is a fixed fee per monthly application; refills bill per refill application and are NOT in
 // `annual` (refill.annualEstimate is informational). DRAFT constants, dealer
 // cost unknown: the estimate engine only calls this behind GATE_MOSQUITO_MISTING.
 // `risers` is the number of risers requested; the first includedRisers are free.
@@ -5015,8 +5015,8 @@ function priceMosquitoMisting(property, options = {}) {
     nozzles = tierCfg.includedNozzles;
   }
   nozzles = Math.round(nozzles);
-  const oversize = nozzles > M.maxNozzles;
-  if (oversize) reasons.push('mosquito_misting_oversize');
+  const nozzlesOversize = nozzles > M.maxNozzles;
+  if (nozzlesOversize) reasons.push('mosquito_misting_oversize');
 
   let risers = options.risers == null ? 0 : Number(options.risers);
   if (!Number.isFinite(risers) || risers < 0) {
@@ -5024,9 +5024,11 @@ function priceMosquitoMisting(property, options = {}) {
     risers = 0;
   }
   risers = Math.round(risers);
+  const risersOversize = risers > M.maxRisers;
+  if (risersOversize) reasons.push('mosquito_misting_oversize_risers');
 
   let refillsPerYear = options.refillsPerYear == null ? M.defaultRefillsPerYear : Number(options.refillsPerYear);
-  if (!Number.isFinite(refillsPerYear) || refillsPerYear < 0) {
+  if (!Number.isFinite(refillsPerYear) || refillsPerYear < 0 || refillsPerYear > M.maxRefillsPerYear) {
     reasons.push('mosquito_misting_invalid_refills');
     refillsPerYear = M.defaultRefillsPerYear;
   }
@@ -5058,6 +5060,8 @@ function priceMosquitoMisting(property, options = {}) {
     laborRate: GLOBAL.LABOR_RATE,
     minNozzles: M.minNozzles,
     maxNozzles: M.maxNozzles,
+    maxRisers: M.maxRisers,
+    maxRefillsPerYear: M.maxRefillsPerYear,
     planMonthly: M.plan.monthly,
     planVisitsPerYear: M.plan.visitsPerYear,
     laborMinutesPerVisit: M.plan.laborMinutesPerVisit,
@@ -5080,13 +5084,13 @@ function priceMosquitoMisting(property, options = {}) {
     extraNozzles,
     extraRisers,
     refill,
-    refillsBilledPerVisit: true,
+    refillsBilledPerApplication: true,
     visitsPerYear: M.plan.visitsPerYear,
     requiresMeasurement: false,
     pricingKnobs,
   };
 
-  if (oversize) {
+  if (nozzlesOversize || risersOversize) {
     // Above the largest standard layout: manual quote, nothing priced.
     return {
       ...base,
@@ -5112,6 +5116,9 @@ function priceMosquitoMisting(property, options = {}) {
     ...base,
     annual,
     monthly: M.plan.monthly,
+    // The plan is 12 monthly applications: customer surfaces read "per application".
+    perApp: M.plan.monthly,
+    perVisit: M.plan.monthly,
     installation: {
       price,
       retailValue: price,

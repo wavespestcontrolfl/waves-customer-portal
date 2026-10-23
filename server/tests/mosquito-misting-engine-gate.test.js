@@ -108,22 +108,35 @@ describe('gate on', () => {
     expect(mapped.quoteRequired).toBe(true);
   });
 
+  test('an oversize layout beside pest keeps the solo pest setup fee and year 1 (the unpriced row is not a second plan)', () => {
+    const solo = mapV1ToLegacyShape(generateEstimate(without()));
+    expect(solo.oneTime.membershipFee).toBeGreaterThan(0);
+    for (const oversize of [{ nozzles: 120 }, { risers: 200 }]) {
+      const mapped = mapV1ToLegacyShape(generateEstimate(withMisting({ mosquitoMisting: oversize })));
+      expect(mapped.recurring.services.find((s) => s.service === 'mosquito_misting')).toMatchObject({ quoteRequired: true });
+      expect(mapped.oneTime.membershipFee).toBe(solo.oneTime.membershipFee);
+      expect(mapped.totals.year1).toBe(solo.totals.year1);
+    }
+  });
+
   test('mapper emits the plan line and the one-time install item', () => {
     const mapped = mapV1ToLegacyShape(generateEstimate(withMisting()));
     const plan = mapped.recurring.services.find((s) => s.service === 'mosquito_misting');
     expect(plan).toMatchObject({
       name: 'Mosquito Misting Service Plan',
       monthly: 59,
+      perTreatment: 59,
       visitsPerYear: 12,
       discountable: false,
       countsTowardWaveGuardTier: false,
     });
+    expect(plan.detail).toBe('40 nozzles · 12 applications/yr · $59 per application · Natural (botanical) refill $219 per refill application');
     const item = mapped.oneTime.items.find((i) => i.service === 'mosquito_misting_installation');
     expect(item).toMatchObject({
       name: 'Essential system (drum) Installation',
       price: install,
     });
-    expect(item.detail).toBe('40 nozzles · 12 risers · Natural (botanical) refills $219 per fill, billed per visit');
+    expect(item.detail).toBe('40 nozzles · 12 risers · Natural (botanical) refill $219 per refill application');
     // Year 1 = the pest year + the plan + the install. The solo pest $99 setup
     // fee drops because pest + misting is a multi-service mix (the existing
     // bundle rule in estimate-converter, unchanged by this lane).
@@ -145,7 +158,9 @@ describe('gate on', () => {
     // essential 20 nozzles (below included, no credit) to smart 50 nozzles.
     expect(inst.low).toBe(3795);
     expect(inst.high).toBe(4595 + 15 * 75);
-    expect(plan.name).toBe('Mosquito Misting Service Plan');
+    expect(plan.name).toBe('Mosquito Misting Service Plan (monthly application)');
+    expect(plan.unit).toBe('per application');
+    expect(`${plan.notes} ${inst.notes}`).not.toMatch(/per month|per visit|\/mo/i);
     expect(plan.low).toBe(59);
     expect(plan.high).toBe(59);
   });

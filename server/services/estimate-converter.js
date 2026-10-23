@@ -2547,8 +2547,11 @@ function isTermiteBaitOneTimeItem(item = {}) {
 // existing-customer waiver on top for the actual setup invoice.
 const MEMBERSHIP_FEE_SOLO_KEYS = new Set(['pest_control', 'mosquito']);
 function recurringMixHasMembershipFeeService(recurringServices = []) {
+  // An unpriced manual-quote row (e.g. an oversize misting layout) is not a second plan:
+  // it must not waive the solo pest/mosquito setup fee.
   const keys = Array.from(new Set(
     (Array.isArray(recurringServices) ? recurringServices : [])
+      .filter((item) => !(item && (item.quoteRequired === true || item.requiresCustomQuote === true)))
       .map(recurringServiceKey)
       .filter(Boolean),
   ));

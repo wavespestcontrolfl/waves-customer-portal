@@ -4833,7 +4833,7 @@ Mosquito misting rows (2026-10-22, dark): with `GATE_MOSQUITO_MISTING`
 set (`1`/`true`/`on`, read at call time through the gated-row map in
 `server/services/pricing-engine/public-ranges.js`) the payload gains two
 rows, `mosquito_misting_install` (per installation) and
-`mosquito_misting_plan` (per month), swept from `priceMosquitoMisting`
+`mosquito_misting_plan` (per application, monthly), swept from `priceMosquitoMisting`
 over both system tiers at 20, 35 and 50 nozzles. The numbers are the DRAFT
 price list in ~/mosquito-misting-scope-20260924.md §4.3 (dealer cost
 unknown); the gate stays off until the owner launches the service, so the

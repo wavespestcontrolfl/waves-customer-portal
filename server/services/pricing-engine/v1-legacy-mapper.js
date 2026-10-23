@@ -961,7 +961,7 @@ function mapV1ToLegacyShape(v1Result) {
     svcAdd('Mosquito Misting Service Plan', mmLI, {
       service: 'mosquito_misting',
       annual: Number(mmLI.annual) || null,
-      detail: `${mmLI.nozzles} nozzles · ${mmLI.visitsPerYear} service visits/yr · ${mmLI.refill?.label || ''} refills $${mmLI.refill?.perFill ?? ''} per fill, billed per visit`,
+      detail: `${mmLI.nozzles} nozzles · ${mmLI.visitsPerYear} applications/yr · $${mmLI.perApp} per application · ${mmLI.refill?.label || ''} refill $${mmLI.refill?.perFill ?? ''} per refill application`,
       discountable: false,
       discountEligible: false,
       waveGuardDiscountEligible: false,
@@ -1284,7 +1284,7 @@ function mapV1ToLegacyShape(v1Result) {
     svcAdd('Mosquito Misting Service Plan', mmAnyLI, {
       service: 'mosquito_misting',
       annual: null,
-      detail: `${mmAnyLI.nozzles} nozzles · manual quote (above the standard layout)`,
+      detail: `${mmAnyLI.nozzles} nozzles · ${mmAnyLI.risers} risers · manual quote (above the standard layout)`,
       quoteRequired: true,
       requiresManualReview: !!mmAnyLI.requiresManualReview,
       manualReviewReasons: mmAnyLI.manualReviewReasons || [],
@@ -1300,7 +1300,7 @@ function mapV1ToLegacyShape(v1Result) {
       service: 'mosquito_misting_installation',
       name: `${mmLI.tierLabel || 'Mosquito Misting System'} Installation`,
       price: mmLI.installation.price,
-      detail: `${mmLI.nozzles} nozzles · ${mmLI.risers} risers · ${mmLI.refill?.label || ''} refills $${mmLI.refill?.perFill ?? ''} per fill, billed per visit`,
+      detail: `${mmLI.nozzles} nozzles · ${mmLI.risers} risers · ${mmLI.refill?.label || ''} refill $${mmLI.refill?.perFill ?? ''} per refill application`,
       discountable: false,
       tierDiscountable: false,
     });

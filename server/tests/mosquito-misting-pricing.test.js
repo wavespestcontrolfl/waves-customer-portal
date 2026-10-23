@@ -27,7 +27,7 @@ describe('priceMosquitoMisting install price', () => {
       requiresManualReview: false,
       requiresMeasurement: false,
       manualReviewReasons: [],
-      refillsBilledPerVisit: true,
+      refillsBilledPerApplication: true,
       visitsPerYear: 12,
     });
     expect(r.installation.price).toBe(4595);
@@ -70,6 +70,10 @@ describe('priceMosquitoMisting plan and refills', () => {
   test('plan is $59 a month, 12 visits, annual = monthly x 12', () => {
     const r = priceMosquitoMisting(PROPERTY);
     expect(r.monthly).toBe(59);
+    // The customer reads the plan per application (12 monthly applications), never as a monthly total.
+    expect(r.perApp).toBe(59);
+    expect(r.perVisit).toBe(59);
+    expect(r).not.toHaveProperty('refillsBilledPerVisit');
     expect(r.annual).toBe(708);
     expect(r.visitsPerYear).toBe(12);
   });
@@ -107,6 +111,31 @@ describe('priceMosquitoMisting guards', () => {
     expect(r.installation.price).toBeNull();
     expect(r.manualReviewReasons).toContain('mosquito_misting_oversize');
     expect(r.annual).toBeNull();
+  });
+
+  test('more risers than the maximum is a manual quote; a huge number never yields a non-finite figure', () => {
+    for (const risers of [81, 1e308]) {
+      const r = priceMosquitoMisting(PROPERTY, { risers });
+      expect(r.quoteRequired).toBe(true);
+      expect(r.installation.price).toBeNull();
+      expect(r.manualReviewReasons).toContain('mosquito_misting_oversize_risers');
+      expect(r.annual).toBeNull();
+      expect(JSON.parse(JSON.stringify(r))).toEqual(expect.objectContaining({ risers: r.risers }));
+      const numbers = JSON.stringify(r, (k, v) => (typeof v === 'number' && !Number.isFinite(v) ? '__NONFINITE__' : v));
+      expect(numbers).not.toContain('__NONFINITE__');
+    }
+    expect(priceMosquitoMisting(PROPERTY, { risers: 80 }).quoteRequired).toBe(false);
+    expect(priceMosquitoMisting(PROPERTY, { nozzles: 1e308 }).quoteRequired).toBe(true);
+  });
+
+  test('refills per year above the maximum fall back to the default with a reason', () => {
+    for (const refillsPerYear of [25, 1e308, Infinity]) {
+      const r = priceMosquitoMisting(PROPERTY, { refillsPerYear });
+      expect(r.refill.refillsPerYear).toBe(4);
+      expect(r.refill.annualEstimate).toBe(129 * 4);
+      expect(r.manualReviewReasons).toContain('mosquito_misting_invalid_refills');
+    }
+    expect(priceMosquitoMisting(PROPERTY, { refillsPerYear: 24 }).manualReviewReasons).toEqual([]);
   });
 
   test('the maximum itself still prices', () => {
@@ -156,6 +185,8 @@ describe('priceMosquitoMisting pricingKnobs and policy', () => {
       laborRate: GLOBAL.LABOR_RATE,
       minNozzles: 10,
       maxNozzles: 80,
+      maxRisers: 80,
+      maxRefillsPerYear: 24,
       planMonthly: 59,
       planVisitsPerYear: 12,
       laborMinutesPerVisit: 25,

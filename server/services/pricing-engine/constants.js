@@ -2522,6 +2522,8 @@ const MOSQUITO_MISTING = {
   install: { techs: 2, hours: 10 }, // labor cost = techs x hours x GLOBAL.LABOR_RATE
   minNozzles: 10,
   maxNozzles: 80, // above this the system is a manual quote
+  maxRisers: 80, // above this the system is a manual quote
+  maxRefillsPerYear: 24, // above this the request falls back to defaultRefillsPerYear
   plan: {
     monthly: 59,
     visitsPerYear: 12,
@@ -2539,6 +2541,36 @@ const MOSQUITO_MISTING = {
   defaultRefillsPerYear: 4,
   serviceCallNoPlan: 149,
 };
+
+// The DB-editable prices of MOSQUITO_MISTING (pricing_config row `mosquito_misting_pricing`, mosquito-misting-config.js), frozen
+// as written above: production prices are DB-authoritative and these are the fresh-environment defaults and the migration seed.
+// Labels, the nozzle/riser/refill bounds and the default tier/solution/refill count stay in code and are not in the row.
+// Exported through a function, never as an object: db-bridge snapshots and restores every object export in place.
+const MOSQUITO_MISTING_PRICING_DEFAULTS = Object.freeze({
+  tiers: Object.freeze(Object.fromEntries(Object.entries(MOSQUITO_MISTING.tiers).map(([key, t]) => [key, Object.freeze({
+    price: t.price, hardwareCost: t.hardwareCost, includedNozzles: t.includedNozzles,
+  })]))),
+  extraNozzlePrice: MOSQUITO_MISTING.extraNozzlePrice,
+  extraNozzleCost: MOSQUITO_MISTING.extraNozzleCost,
+  includedRisers: MOSQUITO_MISTING.includedRisers,
+  extraRiserPrice: MOSQUITO_MISTING.extraRiserPrice,
+  extraRiserCost: MOSQUITO_MISTING.extraRiserCost,
+  install: Object.freeze({ techs: MOSQUITO_MISTING.install.techs, hours: MOSQUITO_MISTING.install.hours }),
+  plan: Object.freeze({
+    monthly: MOSQUITO_MISTING.plan.monthly,
+    visitsPerYear: MOSQUITO_MISTING.plan.visitsPerYear,
+    laborMinutesPerVisit: MOSQUITO_MISTING.plan.laborMinutesPerVisit,
+    partsReservePerMonth: MOSQUITO_MISTING.plan.partsReservePerMonth,
+  }),
+  refills: Object.freeze(Object.fromEntries(Object.entries(MOSQUITO_MISTING.refills).map(([key, r]) => [key, Object.freeze({
+    price: r.price, productCost: r.productCost,
+  })]))),
+  serviceCallNoPlan: MOSQUITO_MISTING.serviceCallNoPlan,
+});
+
+function mosquitoMistingPricingDefaults() {
+  return MOSQUITO_MISTING_PRICING_DEFAULTS;
+}
 
 // ============================================================
 // WAVEGUARD BUNDLE
@@ -2679,7 +2711,7 @@ module.exports = {
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
-  COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, MOSQUITO_MISTING, TERMITE, RODENT,
+  COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, MOSQUITO_MISTING, mosquitoMistingPricingDefaults, TERMITE, RODENT,
   ONE_TIME, AREA_ADDONS, areaAddOnConfig, isAreaAddOnCatalogKey, areaAddOnPricingDefaults, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,
