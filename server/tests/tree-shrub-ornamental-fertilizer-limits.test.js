@@ -72,10 +72,25 @@ describe('the rate cap (7.5 lb per 1,000 sq ft = 0.75 lb per 100 sq ft = 0.98 lb
     expect(limits.rateFindings([row({ application_rate: 7.5, rate_unit: 'lb' })])).toEqual([]);
   });
 
-  test('a total with no treated area cannot be checked: the tech is told, the office is not rung', async () => {
+  test('a total with no treated area cannot be checked: flagged to the tech AND sent to the office', async () => {
     const { out, notify } = await flag({ rows: [row({ total_amount: 9, amount_unit: 'lb' })] });
-    expect(out.blocks).toEqual([expect.objectContaining({ code: 'ornamental_fertilizer_rate_unchecked', message: expect.stringMatching(/enter the amount in lb and the treated square feet/) })]);
-    expect(notify).not.toHaveBeenCalled();
+    expect(out.blocks).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productId: 'orn', message: expect.stringMatching(/13-0-13 .*recorded with no treated sq ft; county cap not checked/) })]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ findings: [expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'ornamental_fertilizer_rate_unchecked', reason: 'area_missing', max: 7.5 })] }));
+    expect(notify.mock.calls[0][0].findings[0].advisoryOnly).toBeUndefined();
+  });
+
+  test('a row with no amount and no rate at all is sent to the office too, with its own reason', async () => {
+    const { out, notify } = await flag({ rows: [row()] });
+    expect(out.blocks[0].message).toMatch(/recorded with no usable amount or rate; county cap not checked/);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ findings: [expect.objectContaining({ limitType: 'ornamental_fertilizer_rate_unchecked', reason: 'rate_missing' })] }));
+  });
+
+  test('a row whose cap can be read (rate, or total over area) never rings the unchecked finding', async () => {
+    for (const ok of [row({ application_rate: 7.5, rate_unit: 'lb' }), row({ total_amount: 9, amount_unit: 'lb', area_value: 1200, area_unit: 'sqft' })]) {
+      const { notify } = await flag({ rows: [ok] });
+      expect(notify).not.toHaveBeenCalled();
+    }
   });
 });
 

@@ -2104,6 +2104,7 @@ const limitFigure = (finding) => {
   if (finding.limitType === 'annual_max_rate') return `${finding.current}% of the yearly label amount used`;
   if (finding.limitType === tsOrnamental.RATE_LIMIT_TYPE) return `${finding.current} lb per 1,000 sq ft, county limit ${finding.max}`;
   if (finding.limitType === tsOrnamental.HISTORY_LIMIT_TYPE) return finding.reason;
+  if (finding.limitType === tsOrnamental.UNCHECKED_LIMIT_TYPE) return tsOrnamental.uncheckedClause(finding.reason);
   return `${finding.current} of ${finding.max} already used`;
 };
 
@@ -2119,6 +2120,7 @@ const FINDING_WHY = {
   annual_max_apps: (name, f) => `${name} is over its yearly limit: ${f.current} of ${f.max} already used.`,
   [tsOrnamental.RATE_LIMIT_TYPE]: (name, f) => `${name} was applied at ${f.current} lb per 1,000 sq ft, over the ${f.max} county limit.`,
   [tsOrnamental.HISTORY_LIMIT_TYPE]: (name, f) => `${name}: ${f.reason}`,
+  [tsOrnamental.UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
@@ -2129,6 +2131,7 @@ const FINDING_DETAIL = {
 FINDING_DETAIL[areaAddOnLimits.YEARLY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'visit'} visit for an area add-on and is over the add-on's yearly limit. ${f.detail} Review it and report it if needed.`;
 FINDING_DETAIL[tsOrnamental.RATE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'tree & shrub'} visit at ${f.current} lb per 1,000 sq ft. The county limit is ${f.max} lb per 1,000 sq ft (0.75 lb per 100 sq ft, 1 lb of nitrogen per 1,000 sq ft). Review it and report it if needed.`;
 FINDING_DETAIL[tsOrnamental.HISTORY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'tree & shrub'} visit, and ${f.reason.charAt(0).toLowerCase()}${f.reason.slice(1)} The program allows 2 in 12 months, at least 5 months apart, none June 1 to Sept. 30. Review it and report it if needed.`;
+FINDING_DETAIL[tsOrnamental.UNCHECKED_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was ${tsOrnamental.uncheckedClause(f.reason)} on a ${svc.service_type || 'tree & shrub'} visit. The county limit is ${f.max} lb per 1,000 sq ft (0.75 lb per 100 sq ft), so the rate could not be held to it. Check the amount and treated area on the application record and report it if needed.`;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -2151,7 +2154,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: finding.limitType === tsOrnamental.UNCHECKED_LIMIT_TYPE ? `review ${name} limit not checked` : over ? `review ${name} over its limit` : 'review product limits not checked',
         why,
         severity: 'needs-you',
         who: 'person',

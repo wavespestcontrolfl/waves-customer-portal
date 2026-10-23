@@ -26,6 +26,7 @@ const {
 const CAP_LB_PER_1000 = 7.5;
 const RATE_LIMIT_TYPE = 'ornamental_fertilizer_rate';
 const HISTORY_LIMIT_TYPE = 'ornamental_fertilizer_history';
+const UNCHECKED_LIMIT_TYPE = 'ornamental_fertilizer_rate_unchecked';
 
 const LB_PER_1000_UNITS = new Set(['lb', 'lbs', 'lb/1000sf', 'lb/1000sqft', 'lb/1000ft2']);
 // The sheet's weight units for a dry product are g, oz and lb; the total is judged in pounds.
@@ -53,14 +54,25 @@ function ratePer1000(row) {
 
 const round2 = (value) => Math.round(value * 100) / 100;
 
+/** Why the cap could not be read for a row: 'area_missing' (an amount but no treated sq ft) or 'rate_missing' (no usable amount or rate). */
+const uncheckedReason = (row) => (totalLb(row) !== null ? 'area_missing' : 'rate_missing');
+/** The one sentence the tech and the office read for a 13-0-13 row whose county cap could not be checked (no leading name). */
+const uncheckedClause = (reason) => (reason === 'area_missing'
+  ? 'recorded with no treated sq ft; county cap not checked'
+  : 'recorded with no usable amount or rate; county cap not checked');
+
 /** The findings for the 13-0-13 rows of one closeout. Pure. `rows` are the record's service_products rows. */
 function rateFindings(rows) {
   const out = [];
   for (const row of rows) {
     const rate = ratePer1000(row);
     if (rate === null) {
-      out.push({ code: 'ornamental_fertilizer_rate_unchecked', productId: row.product_id, productName: row.product_name, advisoryOnly: true,
-        message: `${row.product_name || '13-0-13'}: enter the amount in lb and the treated square feet so the 0.75 lb per 100 sq ft county limit can be checked.` });
+      // Not advisoryOnly: a 13-0-13 row the cap cannot be read for (an old cached client, a direct API call) was physically applied
+      // with no way to hold it to the county limit, so the office is rung, once per record and product, like an over-cap row.
+      const reason = uncheckedReason(row);
+      out.push({ code: 'application_limit_exceeded', limitType: UNCHECKED_LIMIT_TYPE, productId: row.product_id, productName: row.product_name,
+        reason, current: null, max: CAP_LB_PER_1000,
+        message: `Recorded. The office will review: ${row.product_name || '13-0-13'} ${uncheckedClause(reason)}. Enter the amount in lb and the treated sq ft.` });
     } else if (round2(rate) > CAP_LB_PER_1000) {
       out.push({ code: 'application_limit_exceeded', limitType: RATE_LIMIT_TYPE, productId: row.product_id, productName: row.product_name,
         current: round2(rate), max: CAP_LB_PER_1000,
@@ -124,5 +136,5 @@ async function flagOrnamentalFertilizer({ svc, record, database, advisory, notif
 }
 
 module.exports = {
-  CAP_LB_PER_1000, RATE_LIMIT_TYPE, HISTORY_LIMIT_TYPE, ratePer1000, rateFindings, historyFinding, recordedOrnamentalRows, flagOrnamentalFertilizer,
+  CAP_LB_PER_1000, RATE_LIMIT_TYPE, HISTORY_LIMIT_TYPE, UNCHECKED_LIMIT_TYPE, uncheckedClause, ratePer1000, rateFindings, historyFinding, recordedOrnamentalRows, flagOrnamentalFertilizer,
 };

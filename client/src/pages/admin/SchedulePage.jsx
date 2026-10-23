@@ -10257,6 +10257,19 @@ export function isBedFeedRow(product, serviceType = "") {
   return serviceLineFromType(serviceType) === "tree_shrub" && BED_FEED_NAME.test(String(product?.name || ""));
 }
 
+// The pre-submit line for a Tree & Shrub row entered above its rate ceiling. The 13-0-13 ceiling is the COUNTY limit (0.75 lb per
+// 100 sq ft = 7.5 lb per 1,000 sq ft), not a label maximum, so the line says so. Other rows keep the label-max wording of the
+// WaveGuard approval message. Advisory only: it never holds the completion.
+export function treeShrubHighRateAdvisory(product, serviceType = "") {
+  if (serviceLineFromType(serviceType) !== "tree_shrub") return null;
+  const name = product?.name || "Selected product";
+  const suffix = isPerBasisUnit(product?.catalogRateUnit) ? "" : "/1k";
+  if (isBedFeedRow(product, serviceType)) {
+    return `${name} rate ${product.rate} ${product.rateUnit || ""}${suffix} is over the county limit of ${product.maxLabelRatePer1000} ${product.catalogRateUnit || ""}${suffix} (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`;
+  }
+  return `${name} rate ${product.rate} ${product.rateUnit || ""}${suffix} exceeds label max ${product.maxLabelRatePer1000} ${product.catalogRateUnit || ""}${suffix}.`;
+}
+
 function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false, includeServiceArea = false, product = null) {
   if (isBedFeedRow(product, serviceType)) {
     return { unit: "sqft", label: "Treated sq ft", alertLabel: "the treated square feet" };
@@ -14450,6 +14463,13 @@ export function CompletionPanel({
       : []),
     ...(managerApprovalRequired && managerApprovalHelpText
       ? [softenApprovalWording(managerApprovalHelpText)]
+      : []),
+    // Tree & Shrub has no WaveGuard approval step (managerApprovalRequired is lawn only), so a row over its ceiling
+    // would otherwise reach Complete unseen. A quiet line, never a block.
+    ...(!managerApprovalRequired && !isIncompleteVisit && serviceLineForCloseout === "tree_shrub"
+      ? highRateSelectedProducts
+          .map((product) => treeShrubHighRateAdvisory(product, "Tree & Shrub Care"))
+          .filter(Boolean)
       : []),
     ...(calibrationRequired && !isIncompleteVisit
       ? treatmentPlanCalibrationBlocks

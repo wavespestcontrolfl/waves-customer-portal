@@ -316,7 +316,8 @@ describe('13-0-13 and Sequestar card lines (labels read 2026-10-22, owner approv
       if (!line) continue;
       expect(line).toMatch(/^Sequestar 6% Fe EDDHA: only for iron chlorosis \(yellow new leaves with green veins;/);
       expect(line).toMatch(/2 oz per small shrub, up to 2 oz per inch of trunk diameter on large shrubs and trees, or up to 2 oz per 100 sq ft of bed/);
-      expect(line).toMatch(/dissolve in water, pour at the root zone and water in; once a year per plant, in spring before new growth or when symptoms appear; never tank-mix with oil/);
+      expect(line).toMatch(/dissolve in water, pour at the root zone and water in; label timing: spring before new growth, or when symptoms appear; never tank-mix with oil/);
+      expect(line).not.toMatch(/once a year|once per year|annually/i);
     }
   });
 

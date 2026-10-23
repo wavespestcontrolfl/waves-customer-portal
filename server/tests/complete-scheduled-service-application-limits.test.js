@@ -427,6 +427,22 @@ describe('the office notification for a finding (raised through the admin alert 
     expect(notify.mock.calls[0][3].detail).toContain("is over the add-on's yearly limit. Snapshot 2.5TG was applied or booked 1 time");
   });
 
+  test('a 13-0-13 row whose county cap could not be checked rings a needs-you alert with a clear reason, deduped per record and product', async () => {
+    const notify = notifyFor();
+    const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const finding = { code: 'application_limit_exceeded', productId: 'p-orn', productName: name, limitType: 'ornamental_fertilizer_rate_unchecked', reason: 'area_missing', current: null, max: 7.5 };
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Tree & Shrub Care' }, record, findings: [finding] });
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [, headline, why, opts] = notify.mock.calls[0];
+    expect(headline).toBe('Schedule — review LESCO 13-0-13 60%… limit not checked');
+    expect(why).toBe('LESCO 13-0-13 60%… recorded with no treated sq ft; county cap not checked.');
+    expect(why.length).toBeLessThanOrEqual(110);
+    expect(headline.length).toBeLessThanOrEqual(60);
+    expect(opts.detail).toContain('county limit is 7.5 lb per 1,000 sq ft (0.75 lb per 100 sq ft)');
+    expect(opts.detail).toContain('recorded with no treated sq ft; county cap not checked');
+    expect(opts.metadata.dedupeKey).toBe('application-limit-finding:record-1:application_limit_exceeded:p-orn:ornamental_fertilizer_rate_unchecked');
+  });
+
   test('the 13-0-13 rate and history findings obey the notification rule and name the county limit and the reason', async () => {
     const notify = notifyFor();
     const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
