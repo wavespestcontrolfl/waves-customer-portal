@@ -393,9 +393,9 @@ describe('13-0-13 and Sequestar guide entries (labels read 2026-10-22)', () => {
       'Large shrubs and trees: up to 2 oz / inch of trunk diameter',
       'Beds and groundcovers: up to 2 oz / 100 sq ft',
     ]);
-    expect(iron.limits.join('\n')).toMatch(/Label timing: spring before the flush of growth, or when symptoms appear/);
-    // The label gives timing, not a yearly cap: no "once a year" rule anywhere in the entry.
-    expect(JSON.stringify(iron)).not.toMatch(/once a year|once per year|per year|annually/i);
+    expect(iron.limits.join('\n')).toMatch(/Label direction for shrubs and trees: apply annually in the spring before the flush of growth, or when deficiency symptoms appear/);
+    // The label's own direction is quoted; the entry states no "once a year per plant" cap of its own.
+    expect(JSON.stringify(iron)).not.toMatch(/once a year|once per year|per year|per plant per/i);
     expect(iron.limits.join('\n')).toMatch(/Never tank-mix with oil/);
     expect(iron.program).toMatch(/only when iron chlorosis shows/);
   });
