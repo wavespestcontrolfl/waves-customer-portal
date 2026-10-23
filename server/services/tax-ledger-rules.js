@@ -335,10 +335,12 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
       if (pattern && !writes) continue;
       const stale = !writes && !pattern && force && !!sug.rule && !matcherTransfer;
       const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
-      // an owner rule writing over the matcher's flag keeps that flag: it is
-      // the matcher's (its rescan would only put it back) and it is the row's
-      // examination evidence; the owner's category rides alongside it
+      // an owner rule writing over the matcher's flag keeps that flag (it is
+      // the matcher's; its rescan would only put it back) and records the
+      // examination evidence explicitly, because an ignore flag that now
+      // sits next to a rule key no longer counts as the matcher's
       const removeKeys = (writes || stale) ? CLASSIFICATION_KEYS.filter((k) => !(writes && matcherFlag && (k === 'ignore' || k === 'reason'))) : [];
+      if (writes && matcherFlag) patch.examined = true;
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL)
         .update({ suggestion: bankImport.suggestionMerge(patch, removeKeys), updated_at: new Date() });
       if (stale) counts.cleared += 1;

@@ -342,7 +342,9 @@ describe('applyRules (suggestion-only)', () => {
     expect(state.updates[0].patch.suggestion.removed).not.toContain('ignore');
     expect(state.updates[0].patch.suggestion.removed).not.toContain('reason');
     expect(state.updates[0].patch.suggestion.removed).toContain('categoryId');
-    expect(state.updates[0].patch.suggestion.merged.examined).toBeUndefined();
+    // the evidence is recorded explicitly: ignore next to a rule key would not count any more
+    expect(state.updates[0].patch.suggestion.merged.examined).toBe(true);
+    expect(svc.matcherExamined({ suggestion: { ignore: true, rule: { id: 'r-owner', kind: 'transfer' }, examined: true } })).toBe(true);
     // the same rule as a seed does not
     state.rules[0].source = 'seed'; state.updates = [];
     expect((await svc.applyRules({ force: true })).suggested).toBe(0);
