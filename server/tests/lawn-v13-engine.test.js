@@ -13,7 +13,7 @@
 const protocolsJson = require('../config/protocols.json');
 const v13 = require('../config/lawn-protocol-v13.json');
 const featureGates = require('../config/feature-gates');
-const { lawnProtocols, LAWN_V13_VERSION, isServingProtocol } = require('../services/lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, isServingProtocol, visitForCadence } = require('../services/lawn-program');
 const { matchesLawnCompletionProtocol } = require('../services/lawn-completion-defaults');
 const auditScript = require('../scripts/audit-waveguard-protocol-material-costs');
 const engine = require('../services/waveguard-plan-engine');
@@ -23,6 +23,7 @@ const protocolReader = require('../services/protocol-reader');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
+const aprilPolymerMigration = require('../models/migrations/20261022194000_lawn_v13_april_polymer_n_v2');
 
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 // The v13 recipe has no bahia track (owner 2026-10-06); protocols.json (gate off) still does.
@@ -268,7 +269,9 @@ const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_ma
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 // December's whole-lawn bag is the LESCO 10-0-22 row (20261008130000 swaps it in for the staged 24-0-11 line).
 const F10_22 = decemberMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
+// April's 12x whole-lawn bag is the LESCO 44-0-0 polymer row (20261022194000 swaps it in for the staged 24-0-11 line).
+const F44_0_0 = aprilPolymerMigration.NEW_NAME;
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -454,7 +457,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     1: [migration.NAMES.STW, migration.NAMES.NT],
     2: [migration.NAMES.F24],
     3: [migration.NAMES.DIM, migration.NAMES.NT],
-    4: [migration.NAMES.F24],
+    4: [F44_0_0],
     5: [migration.NAMES.TET],
     6: [migration.NAMES.NT, migration.NAMES.DIM],
     7: [],
@@ -482,9 +485,13 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const decSwapped = (spec) => (spec[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW
       ? [F10_22, spec[1], spec[2], spec[3], spec[4], spec[5], spec[6], { ...spec[7], ...decemberMigration.NEW_GATES }]
       : spec);
+    // 20261022194000 swaps April's 24-0-11 row for the 44-0-0 polymer bag (still a lb_n row; the target is 1.0 lb N).
+    const aprSwapped = (spec) => (spec[0] === aprilPolymerMigration.OLD_NAME && windowKey === aprilPolymerMigration.APRIL_WINDOW
+      ? [F44_0_0, spec[1], spec[2], spec[3], spec[4], spec[5], spec[6], { ...spec[7], ...aprilPolymerMigration.NEW_GATES }]
+      : spec);
     // 20261007180000 adds its rows (its July 0-0-50 row is deleted by 20261007189000) and turns the April Artavia row into Headway (Arena keeps its name: 20261007181000).
     const matrixName = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
-    const staged = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => decSwapped(swapped(s))).map((s) => ({
+    const staged = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => aprSwapped(decSwapped(swapped(s)))).map((s) => ({
       productId: idOf(matrixName(s[0])), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
     }));
     // 20261009100000 retires the Advion add-on rows and inserts the fire ant granule rows in their place.
@@ -746,21 +753,27 @@ describe('the material-cost audit reads the gate-aware program', () => {
     expect(JSON.stringify(on)).not.toBe(JSON.stringify(off));
   });
 
-  test('the cadence report prices April by the plan: Dimension 18-0-10 at the 9x row, the 24-0-11 at 12x and 6x', () => {
+  test('the cadence report prices April by the plan: Dimension 18-0-10 at the 9x row, the 44-0-0 polymer bag at 12x and 6x', () => {
     const DIM = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
     const catalog = [
       { id: 'f24', name: migration.NAMES.F24, aliases: [], default_rate_per_1000: 4.2, rate_unit: 'lb', analysis_n: 24, analysis_k: 11, cost_per_unit: 1, cost_unit: 'lb', needs_pricing: false },
       { id: 'dim', name: DIM, aliases: [], default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_k: 10, cost_per_unit: 2, cost_unit: 'lb', needs_pricing: false },
+      // The polymer bag has no price yet (available by request): the audit still plans it, and its line has no cost.
+      { id: 'f44', name: F44_0_0, aliases: [], default_rate_per_1000: 2.27, rate_unit: 'lb', analysis_n: 44, analysis_p: 0, analysis_k: 0, needs_pricing: true },
     ];
-    const aprilRows = new Map([['f24', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }], ['dim', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }]]);
+    const aprilRows = new Map([['f24', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }], ['dim', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }], ['f44', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }]]);
     const v13Rows = new Map([['st_augustine|Apr', aprilRows]]);
     const report = withGate('true', () => auditScript.buildCadenceReport(catalog, lawnProtocols(), v13Rows));
     const april = (tier) => report.rows.find((r) => r.track === 'st_augustine' && r.tier === tier).visits.find((v) => v.month === 'Apr');
     const selected = (result) => result.items.filter((i) => i.selected && i.product).map((i) => i.product.name);
     expect(selected(april('enhanced'))).toEqual([DIM]);
     expect(april('enhanced').items.find((i) => i.product?.name === DIM).mix.ratePer1000).toBeCloseTo(2.7778, 3);
-    expect(selected(april('premium'))).toEqual([migration.NAMES.F24]);
-    expect(selected(april('standard'))).toEqual([migration.NAMES.F24]);
+    expect(selected(april('premium'))).toEqual([F44_0_0]);
+    expect(selected(april('standard'))).toEqual([F44_0_0]);
+    // 1.0 lb N from the 44-0-0 bag is 2.2727 lb per 1,000 sq ft; the 9x row keeps its 0.5 lb N.
+    expect(april('premium').items.find((i) => i.product?.name === F44_0_0).mix).toMatchObject({ rateSource: 'target_n_analysis', targetNPer1000: 1, materialCost: null });
+    expect(april('premium').items.find((i) => i.product?.name === F44_0_0).mix.ratePer1000).toBeCloseTo(2.2727, 3);
+    expect(april('enhanced').items.find((i) => i.product?.name === DIM).mix.targetNPer1000).toBe(0.5);
   });
 
   test('analyzeVisit resolves a v13 line by its exact catalog name', () => {
@@ -835,10 +848,25 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
     product, lawnSqft: 1000, areaFactor: 1, ...engine.parseVisitNutrientTargets(visitFor(month).notes), ...engine.v13RateOptions(row),
   });
 
-  test.each([[2, 3.125], [4, 2.083], [11, 3.125]])('24-0-11 in month %i is %f lb per 1,000 sq ft', (month, lb) => {
+  test.each([[2, 3.125], [11, 3.125]])('24-0-11 in month %i is %f lb per 1,000 sq ft', (month, lb) => {
     const result = amountFor(f24, month, rowFor(month, migration.NAMES.F24));
     expect(result).toMatchObject({ rateSource: 'target_n_analysis', rateUnit: 'lb' });
     expect(result.amount).toBeCloseTo(lb, 3);
+  });
+
+  test('April LESCO 44-0-0 polymer bag derives 2.2727 lb per 1,000 sq ft from the 1.0 lb N target; the 9x Dimension stays 2.78 lb from 0.5 lb N', () => {
+    const f44 = { id: 'f44', name: F44_0_0, analysis_n: 44, analysis_p: 0, analysis_k: 0, slow_release_n_pct: 100, default_rate_per_1000: 2.27, rate_unit: 'lb' };
+    const row = rowFor(4, migration.NAMES.F24); // the staged lb_n row: the swap changes its name and target, not its rate shape
+    expect(row).toEqual({ ratePer1000: null, rateUnit: 'lb_n' });
+    const result = amountFor(f44, 4, row);
+    expect(result).toMatchObject({ rateSource: 'target_n_analysis', rateUnit: 'lb', targetNPer1000: 1 });
+    expect(result.amount).toBeCloseTo(2.2727, 3);
+    // The stated 2.27 lb is the same bag to the second decimal: 2.27 x 0.44 = 0.9988 lb N.
+    expect(2.27 * 0.44).toBeCloseTo(1, 2);
+    // The 9x plan reads its variant's own notes (0.5 lb N): Dimension 18-0-10 at 2.78 lb.
+    const nine = visitForCadence(visitFor(4), 9).visit;
+    const dim = engine.calculateProductAmount({ product: dim18, lawnSqft: 1000, areaFactor: 1, ...engine.parseVisitNutrientTargets(nine.notes), ...engine.v13RateOptions(row) });
+    expect(dim.amount).toBeCloseTo(2.7778, 3);
   });
 
   test('December LESCO 10-0-22 derives 4.5 lb per 1,000 sq ft from the 0.45 lb N target (0.99 lb K2O, 50% slow-release N)', () => {
