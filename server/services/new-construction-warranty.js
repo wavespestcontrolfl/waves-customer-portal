@@ -409,7 +409,9 @@ function soilLiquid(treatment) {
 // labels, so a legacy one is read as the plan it names.
 function sentCertificate(project, customer) {
   const sentCopy = parseFindings(project.pretreat_sent_snapshot);
-  if (!(project.sent_at || project.status === 'sent') || !sentCopy.findings) {
+  // A migrated historical delivery ('legacy_sent') has no sent_at but was sent.
+  const wasSent = Boolean(project.sent_at) || project.status === 'sent' || project.delivery_status === 'legacy_sent';
+  if (!wasSent || !sentCopy.findings) {
     throw bad('Send the pre-treat certificate first, then issue its warranty.', 409);
   }
   const findings = parseFindings(sentCopy.findings);

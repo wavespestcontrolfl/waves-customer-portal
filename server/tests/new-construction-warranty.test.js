@@ -268,6 +268,8 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(v.treatment.gallons).toBe('180');
     expect(v.project.address).toBe('12 Test Lane, Bradenton, FL 34202');
     expect(mockReadiness.mock.calls.at(-1)[0].project.findings.gallons_applied).toBe('180');
+    const legacy = { ...project, sent_at: null, status: 'closed', delivery_status: 'legacy_sent' };
+    await expect(issue({ projectId: project.id, values: office }, customer, legacy)).resolves.toBeTruthy();
     const noCopy = { ...project, pretreat_sent_snapshot: null };
     await expect(issue({ projectId: project.id, values: office }, customer, noCopy)).rejects.toMatchObject({ status: 409 });
   });

@@ -11,6 +11,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const { randomUUID } = require('node:crypto');
 const migration = require('../models/migrations/20261024010000_projects_pretreat_sent_snapshot');
+const legacyBackfill = require('../models/migrations/20261024020000_projects_pretreat_sent_snapshot_legacy');
 
 describe('pretreatSentSnapshot (pure)', () => {
   const { pretreatSentSnapshot } = require('../routes/admin-projects')._private;
@@ -64,7 +65,7 @@ postgres('pretreat sent snapshot backfill (PostgreSQL)', () => {
   afterEach(async () => { await trx.rollback(); });
   afterAll(async () => { await database?.destroy(); });
 
-  const certificate = async ({ sent, findings }) => {
+  const certificate = async ({ sent, findings, status, deliveryStatus }) => {
     const [tech] = await trx('technicians').insert({ name: 'Sample Tech' }).returning(['id']);
     const customerId = randomUUID();
     await trx('customers').insert({ id: customerId, first_name: 'Sample', last_name: 'Owner', phone: '+19415550142' });
@@ -73,7 +74,8 @@ postgres('pretreat sent snapshot backfill (PostgreSQL)', () => {
       created_by_tech_id: tech.id,
       project_type: 'pre_treatment_termite_certificate',
       title: 'Pre-treat',
-      status: sent ? 'sent' : 'draft',
+      status: status || (sent ? 'sent' : 'draft'),
+      ...(deliveryStatus ? { delivery_status: deliveryStatus } : {}),
       project_date: '2026-10-01',
       sent_at: sent ? new Date('2026-10-02T15:00:00Z') : null,
       findings,
@@ -98,5 +100,15 @@ postgres('pretreat sent snapshot backfill (PostgreSQL)', () => {
     await trx('projects').where({ id: sent }).update({ pretreat_sent_snapshot: JSON.stringify({ findings: { gallons_applied: '200' }, project_date: '2026-10-01' }) });
     await migration.up(trx);
     expect((await copyOf(sent)).findings.gallons_applied).toBe('200');
+  });
+
+  test('a legacy delivery with no sent_at gets its copy from the second backfill', async () => {
+    const legacy = await certificate({ sent: false, status: 'closed', deliveryStatus: 'legacy_sent', findings: JSON.stringify({ gallons_applied: '75' }) });
+    const draft = await certificate({ sent: false, findings: JSON.stringify({ gallons_applied: '5' }) });
+    await migration.up(trx);
+    expect(await copyOf(legacy)).toBeNull();
+    await legacyBackfill.up(trx);
+    expect(await copyOf(legacy)).toMatchObject({ findings: { gallons_applied: '75' }, sent_at: null, backfilled: true });
+    expect(await copyOf(draft)).toBeNull();
   });
 });
