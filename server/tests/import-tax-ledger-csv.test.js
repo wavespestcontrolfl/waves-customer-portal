@@ -44,8 +44,9 @@ describe('parseLedgerCsv header validation', () => {
     expect(() => parseLedgerCsv(`${swapped}\n`)).toThrow(/header must be exactly/);
   });
 
-  test('rejects an empty file', () => {
+  test('rejects an empty file, and a header with no rows, with one-line messages', () => {
     expect(() => parseLedgerCsv('')).toThrow(/empty/);
+    expect(() => parseLedgerCsv(`${HEADER_LINE}\n`)).toThrow(/header but no rows/);
   });
 
   test.each([
@@ -707,6 +708,14 @@ describe('--skip-existing and expenses', () => {
     // row 1 (the 16th, within the window) holds against exp-l and takes pl-1 with it; row 2 (same day,
     // amount and account as pl-1 under other text) finds no row left and loads
     expect(out3.counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 0, held: 1, unsure: 0, handExpenses: 0 });
+    // a linked expense carries its bank row's ACCOUNT: the same amount on another card is a distinct purchase
+    const db4 = makeFakeDb();
+    db4.tables().expenses.push({ id: 'exp-l', expense_date: '2025-03-14', amount: '100.00', vendor_name: 'Acme Supply', description: 'supplies' });
+    db4.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h1', source: 'plaid', account_label: 'card 9731', txn_date: '2025-03-15', description: 'ACME SUPPLY 4471', amount: '100.00', direction: 'debit', status: 'matched_expense', matched_expense_id: 'exp-l' });
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '100.00', date: '2025-03-14', source: '3098' })));
+    const out4 = await run({ file, db: db4, skipExisting: true });
+    expect(out4.counts).toEqual({ read: 1, inserted: 1, duplicates: 0, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
+    expect(db4.tables().expenses).toHaveLength(2);
   });
 
   test('a hand-entered expense a refund reduced is compared at its gross amount (applied or released refund), as the matcher does', async () => {

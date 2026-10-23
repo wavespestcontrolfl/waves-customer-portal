@@ -136,6 +136,7 @@ function parseLedgerCsv(text) {
   if (header.length !== HEADER.length || header.some((h, i) => h !== HEADER[i])) {
     throw fail(`header must be exactly: ${HEADER.join(',')}`);
   }
+  if (records.length === 1) throw fail('CSV has a header but no rows: nothing to import');
   const rows = [];
   records.slice(1).forEach((rec, i) => {
     const line = i + 2;
@@ -451,12 +452,16 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   // guesswork (text varies); a ledger expense of the same gross amount
   // within the window is held for the owner, and the report lists them all
   // to check once.
-  const linkedExpenseIds = new Set(existingBank.map(f => f.matched_expense_id).filter(Boolean));
   // the file's range widened by the matcher window: a receipt dated days
   // before the first posting (or after the last) can still be a ledger row
   const handRange = [shiftDays(range[0], -EXPENSE_DATE_WINDOW_DAYS), shiftDays(range[1], EXPENSE_DATE_WINDOW_DAYS)];
   const inRange = rows.length ? (await db('expenses').whereBetween('expense_date', handRange)
     .select('id', 'expense_date', 'amount', 'vendor_name', 'description')).filter(e => !ledgerMade.has(e.id)) : [];
+  // the bank rows these expenses are linked to, whatever their posting date:
+  // they carry the expense's account identity
+  const linkedRows = inRange.length ? await db('bank_transactions').whereIn('matched_expense_id', inRange.map(e => e.id)).whereNot('source', SOURCE_TAG)
+    .select('id', 'status', 'account_label', 'matched_expense_id', 'txn_date', 'description', 'amount', 'direction') : [];
+  const linkedExpenseIds = new Set(linkedRows.map(f => f.matched_expense_id));
   const handExpenses = inRange.filter(e => !linkedExpenseIds.has(e.id));
   const coveredExpenses = inRange.filter(e => linkedExpenseIds.has(e.id));
   // compared at the gross amount (one small query per expense: a one-off run
@@ -467,11 +472,11 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   }
   const masks = new Map((await db('plaid_accounts').select('account_label', 'mask')).map(a => [String(a.account_label), String(a.mask || '')]));
   const categories = await db('expense_categories').select('id', 'name');
-  return { existing, existingBank, handExpenses, coveredExpenses, masks, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+  return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
 }
 
 // Pools of the portal's rows, consumed one-for-one as ledger rows match them.
-function buildPools({ existingBank, handExpenses, coveredExpenses = [] }) {
+function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRows = [], masks = new Map() }) {
   const bankLeft = new Map();
   existingBank.forEach(f => { const k = tupleKey(f); if (!bankLeft.has(k)) bankLeft.set(k, []); bankLeft.get(k).push(f); });
   // A feed writes its own text for a transaction ("Wawa" against the
@@ -496,8 +501,11 @@ function buildPools({ existingBank, handExpenses, coveredExpenses = [] }) {
   // row still shows what was paid.
   // An expense linked to a bank row and that row are ONE transaction: taking
   // either removes the other from its pool (one-for-one across both pools).
+  // linkedRows carries every linked row (any posting date, for the account
+  // identity); only the rows in the file's range sit in the pools above.
   const rowsOfExpense = new Map();
-  existingBank.forEach(f => { if (f.matched_expense_id) { if (!rowsOfExpense.has(f.matched_expense_id)) rowsOfExpense.set(f.matched_expense_id, []); rowsOfExpense.get(f.matched_expense_id).push(f); } });
+  linkedRows.forEach(f => { if (!rowsOfExpense.has(f.matched_expense_id)) rowsOfExpense.set(f.matched_expense_id, []); rowsOfExpense.get(f.matched_expense_id).push(f); });
+  const pooledById = new Map(existingBank.map(f => [f.id, f]));
   const handByAmount = new Map();
   [...handExpenses, ...coveredExpenses].forEach(e => { const k = Number(e.gross != null ? e.gross : e.amount).toFixed(2); if (!handByAmount.has(k)) handByAmount.set(k, []); handByAmount.get(k).push(e); });
   const dropExact = (row) => {
@@ -512,17 +520,27 @@ function buildPools({ existingBank, handExpenses, coveredExpenses = [] }) {
       if (j !== -1) { list.splice(j, 1); return; }
     }
   };
-  const takeHand = (date, amount) => {
+  // A linked expense carries its bank row's account: it is the same
+  // transaction only for a ledger row of that account (a $100 purchase on
+  // one card never holds a distinct $100 purchase on another). A
+  // hand-entered expense has no account identity and is compared on amount
+  // and date alone.
+  const sameAccountAsLinked = (e, source) => {
+    const linked = rowsOfExpense.get(e.id);
+    return !linked || linked.some(f => sameAccount(source, f.account_label, masks));
+  };
+  const takeHand = (date, amount, source) => {
     const list = handByAmount.get(Number(amount).toFixed(2)) || [];
     let best = -1;
     list.forEach((e, j) => {
+      if (!sameAccountAsLinked(e, source)) return;
       const gap = Math.abs(dayNumber(ymdOf(e.expense_date)) - dayNumber(date));
       if (gap > EXPENSE_DATE_WINDOW_DAYS) return;
       if (best === -1 || gap < Math.abs(dayNumber(ymdOf(list[best].expense_date)) - dayNumber(date))) best = j;
     });
     if (best === -1) return null;
     const [e] = list.splice(best, 1);
-    (rowsOfExpense.get(e.id) || []).forEach(f => { dropExact(f); dropLoose(f); });
+    (rowsOfExpense.get(e.id) || []).forEach(f => { const pooled = pooledById.get(f.id); if (pooled) { dropExact(pooled); dropLoose(pooled); } });
     return { expense: e, days: dayNumber(ymdOf(e.expense_date)) - dayNumber(date), covered: rowsOfExpense.has(e.id) };
   };
   return { bankLeft, looseKey, looseLeft, dropLoose, dropExact, dropExpense, takeHand };
@@ -589,7 +607,7 @@ function reconcileRows(mapped, rows, portal) {
   mapped.forEach((m, i) => {
     if (settled.has(i)) return;
     if (m.expense) {
-      const hand = pools.takeHand(rows[i].date, m.bank.amount);
+      const hand = pools.takeHand(rows[i].date, m.bank.amount, rows[i].source);
       if (hand) {
         const gross = hand.expense.gross != null && Number(hand.expense.gross) !== Number(hand.expense.amount) ? ` (${Number(hand.expense.amount).toFixed(2)} after refunds)` : '';
         const kind = hand.covered ? 'an expense linked to a bank row' : 'a hand-entered expense';
