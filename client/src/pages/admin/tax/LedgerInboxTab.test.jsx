@@ -394,6 +394,21 @@ it('a money-out row offers no Income button', async () => {
   expect(within(card).getByRole('button', { name: 'Business' })).toBeInTheDocument();
 });
 
+it('a row the bank corrected after it was decided shows the notice and holds every action until the change is resolved in Bank Import', async () => {
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    if (String(url).includes('/ledger/inbox')) return json({ rows: [{ ...row, id: 'row-3', suggestion: { ...row.suggestion, later: true, decision: 'later', plaidModified: { amount: 43.5 } } }], total: 1 });
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  const card = await screen.findByTestId('ledger-row-row-3');
+  expect(within(card).getByText(/The bank corrected this transaction after it was decided: apply or dismiss the bank change in Bank Import first\./)).toBeInTheDocument();
+  const buttons = within(card).getAllByRole('button');
+  expect(buttons.map((b) => b.textContent)).toEqual(expect.arrayContaining(['Business', 'Personal', 'Transfer', 'Later']));
+  for (const b of buttons) expect(b).toBeDisabled();
+  expect(within(card).getByRole('checkbox', { name: /Always treat this payee/ })).toBeDisabled();
+});
+
 it('a money-in row offers no Business button', async () => {
   const base = fetch;
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {

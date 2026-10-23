@@ -142,8 +142,25 @@ function ShelfActions({ row, view, always, busy, onAct }) {
   );
 }
 
+// A bank correction or withdrawal parked on a shelved row (the Plaid sync
+// never rewrites a decided row): the server refuses every decision until it
+// is applied or dismissed in Bank Import, so the row says that instead.
+function hasBankChange(sug) {
+  return !!(sug?.plaidModified || sug?.plaidRemoved);
+}
+
+function BankChangeNotice({ sug }) {
+  if (!hasBankChange(sug)) return null;
+  return (
+    <div className="text-sm text-ink-secondary">
+      The bank {sug.plaidRemoved ? "withdrew" : "corrected"} this transaction after it was decided: apply or dismiss the bank change in Bank Import first.
+    </div>
+  );
+}
+
 function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
   const sug = row.suggestion || null;
+  const held = busy || hasBankChange(sug);
   const suggestedCategoryId = sug?.categoryId || "";
   const [categoryId, setCategoryId] = useState(suggestedCategoryId);
   const [touched, setTouched] = useState(false);
@@ -161,22 +178,23 @@ function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
     <Card data-testid={`ledger-row-${row.id}`}>
       <CardBody className="flex flex-col gap-2 min-w-0">
         <RowHeader row={row} />
+        <BankChangeNotice sug={sug} />
         {row.direction !== "credit" && (
           <BusinessAction
             row={row}
             categories={categories}
             categoryId={categoryId}
             onCategory={(v) => { setTouched(true); setCategoryId(v); }}
-            busy={busy}
+            busy={held}
             onAct={act}
           />
         )}
-        <ShelfActions row={row} view={view} always={always} busy={busy} onAct={act} />
+        <ShelfActions row={row} view={view} always={always} busy={held} onAct={act} />
         <Checkbox
           id={`always-${row.id}`}
           label="Always treat this payee this way (not for Later or Recorded)"
           checked={always}
-          disabled={busy}
+          disabled={held}
           onChange={(e) => setAlways(e.target.checked)}
         />
         {error && <ActionFeedback error>{error}</ActionFeedback>}

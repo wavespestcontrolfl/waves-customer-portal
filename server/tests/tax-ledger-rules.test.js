@@ -449,6 +449,15 @@ describe('applyRules (suggestion-only)', () => {
     expect((await svc.applyRules({ limit: 500 })).more).toBe(false);
   });
 
+  test('hasOpenDecision: a Later or Income decision shelves an open row (the Plaid sync then parks changes on it); anything else does not', () => {
+    expect(svc.hasOpenDecision({ later: true, decision: 'later' })).toBe(true);
+    expect(svc.hasOpenDecision({ income: true, decision: 'income' })).toBe(true);
+    expect(svc.hasOpenDecision({ income: true })).toBe(false); // an income rule's pre-fill is not a decision
+    expect(svc.hasOpenDecision({ decision: 'recorded' })).toBe(false); // recorded, personal, transfer: the row is ignored, not open
+    expect(svc.hasOpenDecision(null)).toBe(false);
+    expect(svc.hasOpenDecision({})).toBe(false);
+  });
+
   test('passes are serialized: PASS_CONCURRENCY run, PASS_QUEUE wait, the rest are a 429 at once; the slot is handed on', async () => {
     const burst = svc.PASS_CONCURRENCY + svc.PASS_QUEUE;
     const passes = [];

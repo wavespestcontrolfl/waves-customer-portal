@@ -603,8 +603,12 @@ async function applyChanges(trx, accountsById, changes) {
   const toInsert = [];
   // a correction that makes a STAGED transaction unstageable (zeroed out,
   // non-USD, malformed) must not leave the old values live — it is handled
-  // like a withdrawal: unmatched rows go, reviewed rows get flagged
+  // like a withdrawal: open rows go, reviewed rows get flagged
   const withdrawnByCorrection = [];
+  // reviewed = linked or ignored, or still open but shelved from the ledger
+  // Inbox (a Later or Income decision): the owner judged the row, so the
+  // bank's change parks on it instead of replacing or deleting it
+  const reviewedRow = (r) => r.status !== 'unmatched' || taxLedgerRules.hasOpenDecision(r.suggestion);
   for (const txn of changes.upserts) {
     const existing = existingById.get(txn.transaction_id);
     const m = mapTransaction(txn, accountsById.get(txn.account_id), { correction: !!existing });
@@ -624,7 +628,7 @@ async function applyChanges(trx, accountsById, changes) {
       if (bankImport.hasUnresolvedBankChange(existing)) await clearParkedChange(trx, [existing.id]);
       continue;
     }
-    if (existing.status === 'unmatched') {
+    if (!reviewedRow(existing)) {
       // the bank's newest values win (superseding any correction parked
       // while the row was reviewed) — by REPLACING the row, never editing
       // its money fields in place; see supersedeUnmatchedRow
@@ -662,12 +666,12 @@ async function applyChanges(trx, accountsById, changes) {
       .whereIn('plaid_transaction_id', removedIds.slice(i, i + 500))
       .forUpdate()
       .select('id', 'status', 'suggestion');
-    const unmatched = locked.filter(r => r.status === 'unmatched').map(r => r.id);
+    const unmatched = locked.filter(r => !reviewedRow(r)).map(r => r.id);
     // a withdrawal the operator already dismissed is not raised again, and a
     // correction parked since it is obsolete (the bank's latest = withdrawn)
     const dismissedGone = (r) => !!(r.suggestion && r.suggestion.plaidDismissed && r.suggestion.plaidDismissed.removed);
-    const reviewed = locked.filter(r => r.status !== 'unmatched' && !dismissedGone(r)).map(r => r.id);
-    const obsolete = locked.filter(r => r.status !== 'unmatched' && dismissedGone(r) && bankImport.hasUnresolvedBankChange(r)).map(r => r.id);
+    const reviewed = locked.filter(r => reviewedRow(r) && !dismissedGone(r)).map(r => r.id);
+    const obsolete = locked.filter(r => reviewedRow(r) && dismissedGone(r) && bankImport.hasUnresolvedBankChange(r)).map(r => r.id);
     if (unmatched.length) counts.deleted += await trx('bank_transactions').whereIn('id', unmatched).del();
     if (obsolete.length) await clearParkedChange(trx, obsolete);
     if (reviewed.length) {

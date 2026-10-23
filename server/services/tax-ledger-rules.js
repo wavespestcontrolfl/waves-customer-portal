@@ -116,6 +116,13 @@ const DECIDABLE_SQL = `${bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT} and ${ELIGIB
 // the Income shelf: an income rule's pre-fill or an Income decision
 const ON_INCOME_SHELF_SQL = "coalesce(suggestion->>'income','') = 'true'";
 function onIncomeShelf(sug) { return !!sug && String(sug.income) === 'true'; }
+// An open row the owner shelved: Later and Income keep status 'unmatched'
+// (nothing is booked yet), but the row has been reviewed. The Plaid sync
+// treats it like a linked row: a bank correction or withdrawal parks on it
+// for the owner (Bank Import's bank-change card) instead of replacing or
+// deleting the row, and the decision with it.
+const OPEN_DECISIONS = ['later', 'income'];
+function hasOpenDecision(sug) { return !!sug && OPEN_DECISIONS.includes(sug.decision); }
 const VIEW_SQL = {
   open: `coalesce(suggestion->>'later','') <> 'true' and not ${ON_INCOME_SHELF_SQL} and ${ELIGIBLE_SQL}`,
   later: `coalesce(suggestion->>'later','') = 'true' and ${ELIGIBLE_SQL}`,
@@ -906,7 +913,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 
 module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON, MAX_ENABLED_RULES, PASS_TIME_BUDGET_MS, LOOP_TIME_BUDGET_MS, PASS_CONCURRENCY, PASS_QUEUE,
-  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, assertPatternFast, probeStrings, PROBE_CONCURRENCY, PROBE_QUEUE, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
+  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, hasOpenDecision, assertPatternFast, probeStrings, PROBE_CONCURRENCY, PROBE_QUEUE, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };
