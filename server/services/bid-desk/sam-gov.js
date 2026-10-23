@@ -10,15 +10,16 @@
  *
  * A notice is filed when it is a solicitation, combined synopsis, presolicitation or sources sought, still active, its
  * response deadline (if any) is in the future, and its place of performance is a Florida ZIP in SERVICE_ZIP3. Each
- * notice id is filed once (unique source + external_id). The deadline is the API's own field, stored unconfirmed with
- * the raw value as its source line: reminders still need the operator to confirm it. One admin notification per new
- * bid, delivered after the insert commits and retried by the next run if it fails. No AI call; nothing is sent to an
+ * notice id is filed once (unique source + external_id); a republished notice refreshes its bid (refreshPatch). The
+ * deadline is the API's own field, stored unconfirmed with the raw value as its source line: reminders still need the
+ * operator to confirm it. One admin notification per new bid, and one when a republished notice changes the deadline,
+ * owed on the bid and delivered by the Bid Desk's shared owed-bell sweep (deliverOwedAlerts). No AI call; nothing is sent to an
  * agency, a contractor or a customer. The API key is never logged (errors carry the HTTP status only).
  */
 const db = require('../../models/db');
-const logger = require('../logger');
 const { bidDeskSamLive } = require('../../config/feature-gates');
-const alerts = require('./alerts');
+const { deliverOwedAlerts } = require('./index');
+const { OPEN_STATUSES } = require('./rules');
 
 const LOG = '[bid-desk-sam]';
 const API_URL = 'https://api.sam.gov/opportunities/v2/search';
@@ -34,9 +35,8 @@ const CURSOR_OVERLAP_DAYS = 1;
 const PAGE_LIMIT = 1000;
 const MAX_PAGES = 5;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
-const RING_LIMIT = 20;
-
-const BID_COLUMNS = ['id', 'source', 'gc_or_agency', 'project_title', 'solicitation_number', 'due_at', 'due_confirmed', 'status', 'historical', 'external_url'];
+// The API's longest posted-date range is one year.
+const MAX_WINDOW_DAYS = 364;
 
 // ---------- pure helpers ----------
 
@@ -193,33 +193,55 @@ async function writeCursor(from) {
 
 // ---------- filing and notifications ----------
 
-// Inserts the bid unless that notice is already filed. Returns the new row, or null.
-// The unique index on (source, external_id) is partial, which knex's onConflict cannot name, so the conflict target
-// is written out. DO NOTHING (not a caught unique violation) keeps a surrounding transaction usable.
-async function fileNotice(row, conn = db) {
-  const { sql, bindings } = conn('bid_opportunities').insert(row).toSQL();
-  const returning = BID_COLUMNS.map((column) => `"${column}"`).join(', ');
-  const result = await conn.raw(`${sql} ON CONFLICT (source, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING ${returning}`, bindings);
-  return result.rows?.[0] || null;
+// Columns a republished notice refreshes: SAM.gov is their only source and the operator never edits them.
+const REFRESH_FIELDS = ['gc_or_agency', 'project_title', 'solicitation_number', 'location', 'external_url'];
+const sameInstant = (a, b) => (a == null ? null : new Date(a).getTime()) === (b == null ? null : new Date(b).getTime());
+
+/**
+ * What a republished notice changes on its bid. SAM.gov keeps the notice id and serves only the latest version, so
+ * a new deadline replaces an UNCONFIRMED date (still unconfirmed); a date the operator confirmed is never
+ * overwritten. Either way a different deadline flags the bid for confirmation (which pauses its reminders) and owes
+ * one addendum bell for that deadline. A notice that drops its deadline changes no date.
+ */
+function refreshPatch(bid, row) {
+  const patch = {};
+  for (const field of REFRESH_FIELDS) {
+    if (row[field] != null && row[field] !== bid[field]) patch[field] = row[field];
+  }
+  if (row.due_at && !sameInstant(bid.due_at, row.due_at)) {
+    patch.due_source_line = row.due_source_line;
+    if (!bid.due_confirmed) patch.due_at = row.due_at;
+    patch.needs_date_confirmation = true;
+    const open = OPEN_STATUSES.includes(bid.status) && !bid.historical;
+    // A new-bid bell still owed rings with the current date; it is not replaced by an addendum bell.
+    if (open && bid.owed_alert_kind !== 'new') {
+      patch.owed_alert_kind = 'addendum';
+      patch.owed_alert_key = `bid-desk:addendum:${bid.id}:sam:${new Date(row.due_at).toISOString()}`;
+    }
+  }
+  return patch;
 }
 
-// Rings the new-bid notification for one SAM.gov bid at most once (the dedupe key is the bid; notified_at records it).
-// A bid the operator already decided, or one filed as history, is skipped.
-async function ringNewBid(bidId) {
+// Files one notice: a new bid (with its new-bid bell owed), a refresh of the bid already filed for it, or nothing.
+// The partial unique index on (source, external_id) cannot be named by knex's onConflict, so the conflict target is
+// written out; DO NOTHING keeps the transaction usable, and the existing row is then re-read under a row lock.
+async function upsertNotice(row) {
   return db.transaction(async (trx) => {
-    const bid = await trx('bid_opportunities').where({ id: bidId, source: 'sam_gov' }).forUpdate().first();
-    if (!bid || bid.notified_at || bid.historical || bid.status !== 'new') return false;
-    await alerts.raise(alerts.newBidSpec(bid, null), `bid-desk:new:${bid.id}`, trx);
-    await trx('bid_opportunities').where({ id: bid.id }).update({ notified_at: trx.fn.now() });
-    return true;
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
+    const { sql, bindings } = trx('bid_opportunities').insert({ ...row, owed_alert_kind: 'new' }).toSQL();
+    const inserted = await trx.raw(`${sql} ON CONFLICT (source, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING id`, bindings);
+    const id = inserted.rows?.[0]?.id;
+    if (id) {
+      await trx('bid_opportunities').where({ id }).update({ owed_alert_key: `bid-desk:new:${id}` });
+      return { outcome: 'filed' };
+    }
+    const bid = await trx('bid_opportunities').where({ source: 'sam_gov', external_id: row.external_id }).forUpdate().first();
+    const patch = bid ? refreshPatch(bid, row) : {};
+    if (!Object.keys(patch).length) return { outcome: 'already_filed' };
+    // clock_timestamp(), not now(): the version the page fences a date save on must move.
+    await trx('bid_opportunities').where({ id: bid.id }).update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
+    return { outcome: 'refreshed' };
   });
-}
-
-// SAM.gov bids still owed a notification (a bell outage on an earlier run).
-async function owedBidIds(limit) {
-  const rows = await db('bid_opportunities').where({ source: 'sam_gov', status: 'new', historical: false })
-    .whereNull('notified_at').orderBy('created_at').limit(limit).select('id');
-  return rows.map((r) => r.id);
 }
 
 function safeError(err) {
@@ -242,28 +264,14 @@ async function collectNotices({ apiKey, postedFrom, postedTo, fetchImpl }) {
 }
 
 async function fileNotices(notices, now) {
-  const skippedByReason = {};
-  const count = (reason) => { skippedByReason[reason] = (skippedByReason[reason] || 0) + 1; };
-  let filed = 0;
+  const counts = { filed: 0, refreshed: 0, skippedByReason: {} };
   for (const notice of notices) {
     const mapped = mapOpportunity(notice, now);
-    if (mapped.skip) count(mapped.skip);
-    else if (await fileNotice(mapped.row)) filed += 1;
-    else count('already_filed');
+    const outcome = mapped.skip || (await upsertNotice(mapped.row)).outcome;
+    if (outcome === 'filed' || outcome === 'refreshed') counts[outcome] += 1;
+    else counts.skippedByReason[outcome] = (counts.skippedByReason[outcome] || 0) + 1;
   }
-  return { filed, skippedByReason };
-}
-
-async function ringOwedBids() {
-  let rung = 0;
-  for (const id of await owedBidIds(RING_LIMIT)) {
-    try {
-      if (await ringNewBid(id)) rung += 1;
-    } catch (err) {
-      logger.error(`${LOG} bell for bid ${id} failed; the next run retries it: ${safeError(err)}`);
-    }
-  }
-  return rung;
+  return counts;
 }
 
 /**
@@ -276,15 +284,20 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
   if (!key) return { skipped: 'no_api_key' };
 
   const today = etYmd(now);
-  const from = (await readCursor()) || addDays(today, -FIRST_RUN_LOOKBACK_DAYS);
-  const notices = await collectNotices({ apiKey: key, postedFrom: apiDate(from > today ? today : from), postedTo: apiDate(today), fetchImpl });
-  const { filed, skippedByReason } = await fileNotices(notices, now);
+  // The API refuses a posted-date range longer than a year, so an old cursor (the job off for a long time) is clamped.
+  const oldest = addDays(today, -MAX_WINDOW_DAYS);
+  const stored = (await readCursor()) || addDays(today, -FIRST_RUN_LOOKBACK_DAYS);
+  let from = stored < oldest ? oldest : stored;
+  if (from > today) from = today;
+  const notices = await collectNotices({ apiKey: key, postedFrom: apiDate(from), postedTo: apiDate(today), fetchImpl });
+  const counts = await fileNotices(notices, now);
   await writeCursor(addDays(today, -CURSOR_OVERLAP_DAYS));
-  const rung = await ringOwedBids();
-  return { read: notices.length, filed, rung, skippedByReason };
+  // The bells go out through the Bid Desk's one owed-bell sweep (also run every 15 minutes, so a failure retries there).
+  const rung = await deliverOwedAlerts();
+  return { read: notices.length, ...counts, rung };
 }
 
 module.exports = {
-  runSamGovPoll, mapOpportunity, fetchPage, fetchAll, safeError, SamApiError, etYmd, apiDate, addDays,
+  runSamGovPoll, mapOpportunity, refreshPatch, fetchPage, fetchAll, safeError, SamApiError, etYmd, apiDate, addDays,
   CURSOR_KEY, NAICS_CODES, SERVICE_ZIP3, LOG, PAGE_LIMIT, MAX_PAGES,
 };

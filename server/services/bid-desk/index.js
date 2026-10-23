@@ -224,13 +224,42 @@ async function deliverOwedAlert(linkId) {
   });
 }
 
+/**
+ * Rings the notification owed on a bid that has no email (a SAM.gov notice: owed_alert_kind / owed_alert_key on the
+ * bid), at most once, by the same moot rules as an email's owed bell.
+ */
+async function deliverOwedBidAlert(bidId) {
+  return db.transaction(async (trx) => {
+    const bid = await trx('bid_opportunities').where({ id: bidId }).forUpdate().first();
+    if (!bid || !bid.owed_alert_kind) return false;
+    const moot = bid.historical || !OPEN_STATUSES.includes(bid.status)
+      || (bid.owed_alert_kind === 'new' && bid.status !== 'new')
+      || (bid.owed_alert_kind === 'addendum' && !bid.needs_date_confirmation);
+    if (!moot && bid.owed_alert_kind === 'new') {
+      await alerts.raise(alerts.newBidSpec(bid, null), bid.owed_alert_key, trx);
+      await trx('bid_opportunities').where({ id: bid.id }).update({ notified_at: trx.fn.now() });
+    } else if (!moot) {
+      await alerts.raise(alerts.addendumSpec(bid, null), bid.owed_alert_key, trx);
+    }
+    await trx('bid_opportunities').where({ id: bid.id }).update({ owed_alert_kind: null, owed_alert_key: null });
+    return !moot;
+  });
+}
+
+// Every owed bell, email-linked and bid-level, retried by each 15-minute tick.
 async function deliverOwedAlerts({ limit = REMINDER_LIMIT } = {}) {
-  const owed = await db('bid_opportunity_emails').whereNotNull('alert_kind').whereNull('alerted_at')
+  const owedLinks = await db('bid_opportunity_emails').whereNotNull('alert_kind').whereNull('alerted_at')
     .orderBy('created_at').limit(limit).select('id');
+  const owedBids = await db('bid_opportunities').whereNotNull('owed_alert_kind')
+    .orderBy('updated_at').limit(limit).select('id');
+  const deliveries = [
+    ...owedLinks.map(({ id }) => ({ id, deliver: deliverOwedAlert })),
+    ...owedBids.map(({ id }) => ({ id, deliver: deliverOwedBidAlert })),
+  ];
   let rung = 0;
-  for (const { id } of owed) {
+  for (const { id, deliver } of deliveries) {
     try {
-      if (await deliverOwedAlert(id)) rung += 1;
+      if (await deliver(id)) rung += 1;
     } catch (err) {
       logger.error(`${LOG} owed bell ${id} still failing: ${safeError(err)}`);
     }
@@ -457,5 +486,5 @@ async function markEmailAsBid(emailId) {
 }
 
 module.exports = {
-  ingestEmail, runBidDeskTick, sendDueReminders, deliverOwedAlerts, runBackfill, markEmailAsBid, BID_COLUMNS, EMAIL_COLUMNS, WATERMARK_KEY,
+  ingestEmail, runBidDeskTick, sendDueReminders, deliverOwedAlerts, deliverOwedBidAlert, runBackfill, markEmailAsBid, BID_COLUMNS, EMAIL_COLUMNS, WATERMARK_KEY,
 };

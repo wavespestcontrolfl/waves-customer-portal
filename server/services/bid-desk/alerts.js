@@ -69,14 +69,14 @@ function addendumSpec(bid, email) {
     spec: {
       area: AREA,
       action: fitAction(AREA, title, [(n) => `addendum on ${n}: confirm the due date`, (n) => `addendum on ${n}`, (n) => `addendum, ${n}`]),
-      why: cutAtWord(`A new email may change the date, so confirm it; the bid reads ${dueWords(bid)}.`, MAX_WHY_CHARS),
+      why: cutAtWord(`${email || bid.source !== 'sam_gov' ? 'A new email may change the date' : 'SAM.gov posted a different deadline'}, so confirm it; the bid reads ${dueWords(bid)}.`, MAX_WHY_CHARS),
       severity: 'needs-you',
       link: linkFor(bid),
       subject: subjectFor(bid),
       doneWhen: 'due_date_confirmed',
       who: 'person',
     },
-    detail: `Addendum on ${title}: confirm the due date`,
+    detail: email || bid.source !== 'sam_gov' ? `Addendum on ${title}: confirm the due date` : `SAM.gov changed the deadline on ${title}: confirm the due date`,
   };
 }
 

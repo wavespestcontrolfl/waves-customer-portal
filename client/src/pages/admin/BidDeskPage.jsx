@@ -203,7 +203,9 @@ function BidDetail({ bidId, onChanged, onClose }) {
           <div><span className="text-ink-secondary">Due: </span>{dueText(bid.due_at)} {bid.due_at && (bid.due_confirmed ? <Badge tone="strong">Confirmed</Badge> : <Badge tone="warn">Unconfirmed</Badge>)}</div>
           <SourceLines bid={bid} />
           {bid.needs_date_confirmation && (
-            <div className="text-warn-fg">A later email may have changed the date. Check the emails below, then type or confirm the date.</div>
+            <div className="text-warn-fg">{bid.source === "sam_gov"
+              ? "SAM.gov posted a different deadline (shown above). Check the notice, then type or confirm the date."
+              : "A later email may have changed the date. Check the emails below, then type or confirm the date."}</div>
           )}
           {bid.job_walk_at && <div><span className="text-ink-secondary">Job walk: </span>{dueText(bid.job_walk_at)}</div>}
         </div>
