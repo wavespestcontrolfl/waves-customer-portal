@@ -63,24 +63,52 @@ describe('gate and loader', () => {
 
   test('gate off hands every reader protocols.json lawn itself; on hands v13', () => {
     expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
-    // Gate on, bermuda removal gate off: v13 without the per-visit addOns blocks.
-    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, ...visit }) => visit) }]));
+    // Gate on, bermuda removal gate off and the December swap gate off: v13 without the per-visit addOns and swaps blocks.
+    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, swaps, ...visit }) => visit) }]));
     expect(withGate('true', () => lawnProtocols())).toEqual(stripped);
     expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+    expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('"swaps":');
   });
 
   test('the bermuda removal addOns reach the shared reader only while GATE_LAWN_BERMUDA_REMOVAL is on', () => {
     const saved = process.env.GATE_LAWN_BERMUDA_REMOVAL;
     try {
       process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
-      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      // (the December swap gate is off, so the swaps blocks are still left out)
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('addOns');
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('"swaps":');
       // The removal gate cannot surface the add-on while v13 itself is off.
       expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
       delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
     } finally {
       if (saved === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = saved;
+    }
+  });
+
+  test('the December swaps block reaches the shared reader only while GATE_LAWN_DEC_LARGE_PATCH_K (and the trouble-area gates it needs) is on; both blocks on gives v13 itself', () => {
+    const names = ['GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    try {
+      for (const name of names) process.env[name] = 'true';
+      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('largePatchPotassium');
+      // The swap gate off, or one gate it needs off: no swaps, and the bermuda add-ons are unaffected.
+      for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET']) {
+        process.env[name] = 'true';
+        delete process.env[name];
+        const view = JSON.stringify(withGate('true', () => lawnProtocols()));
+        expect(view).not.toContain('"swaps":');
+        expect(view).toContain('addOns');
+        process.env[name] = 'true';
+      }
+      // The visits without the blocks keep their own objects (identity).
+      for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K']) delete process.env[name];
+      const view = withGate('true', () => lawnProtocols());
+      expect(view.zoysia.visits[0]).toBe(v13.zoysia.visits[0]);
+      expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
+    } finally {
+      for (const name of names) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
     }
   });
 
@@ -156,7 +184,7 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
-      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, ...visit }) => visit) });
+      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, swaps, ...visit }) => visit) });
     });
   });
 
@@ -267,11 +295,13 @@ const BLINDSIDE = 'Blindside Herbicide';
 const DIMENSION_18 = octoberMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
+// June and July mole cricket nymph spots: the Advion Insect Granule catalog row (20261023140000).
+const advionMigration = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
 // December's whole-lawn bag is the LESCO 10-0-22 row (20261008130000 swaps it in for the staged 24-0-11 line).
 const F10_22 = decemberMigration.NEW_NAME;
 // April's 12x whole-lawn bag is the LESCO 44-0-0 polymer row (20261022195000 swaps it in for the staged 24-0-11 line).
 const F44_0_0 = aprilPolymerMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -313,9 +343,9 @@ describe('every v13 line resolves to its intended catalog row', () => {
     const [line] = engine.parseProtocolLines(raw, 'base', { exactName: true });
     expect(engine.matchCatalogProduct(line, withoutTetrino)).toBeNull();
     expect(engine.resolveProtocolItems([line], withoutTetrino, {}, {})[0].product).toBeNull();
-    // Without the flag the old loose match still picks something (the behavior the flag exists to stop).
+    // The loose match no longer stands in either: the shared word "Insecticide" names a kind, not a product.
     const [loose] = engine.parseProtocolLines(raw, 'base');
-    expect(engine.matchCatalogProduct(loose, withoutTetrino)).not.toBeNull();
+    expect(engine.matchCatalogProduct(loose, withoutTetrino)).toBeNull();
   });
 
   test('Dylox 6.2 G never resolves to Dylox 420 SL, and the reverse', () => {
@@ -326,13 +356,13 @@ describe('every v13 line resolves to its intended catalog row', () => {
     expect(engine.matchCatalogProduct(other, catalog).name).toBe('Dylox 420 SL T&O Insecticide');
   });
 
-  test('without the exact-name rule a price swing picks the wrong Insecticide (why the flag exists)', () => {
-    // Tetrino is new and unpriced; Acelepryn is priced. Both share the word "Insecticide".
+  test('a price swing never picks the wrong Insecticide, with or without the exact-name rule', () => {
+    // Tetrino is new and unpriced; Acelepryn is priced. Both share the word "Insecticide", which names a kind only.
     const catalog = buildCatalog((name) => (name === 'Tetrino Insecticide'
       ? { cost_per_unit: 0, needs_pricing: true } : { cost_per_unit: 9, needs_pricing: false }));
     const raw = rows.find(([label]) => label.includes('Tetrino'))[1];
     const [plain] = engine.parseProtocolLines(raw, 'base');
-    expect(engine.matchCatalogProduct(plain, catalog).name).not.toBe('Tetrino Insecticide');
+    expect(engine.matchCatalogProduct(plain, catalog).name).toBe('Tetrino Insecticide');
     const [exact] = engine.parseProtocolLines(raw, 'base', { exactName: true });
     expect(engine.matchCatalogProduct(exact, catalog).name).toBe('Tetrino Insecticide');
   });
@@ -965,16 +995,42 @@ describe('chinch bug trigger wording (owner 2026-10-08: the edge of a damaged pa
   test('no chinch line in the recipe states a count per square foot; the staged trigger key keeps its name', () => {
     expect(JSON.stringify(v13)).not.toMatch(/20 to 25|20-25/);
     for (const grass of V13_GRASSES) {
-      expect(v13[grass].notes.join('\n')).toMatch(/Chinch bugs \(found at the edge of a damaged patch, float test only if unsure, 4 gal per 1,000 sq ft into the thatch\)/);
+      expect(v13[grass].notes.join('\n')).toMatch(/Where chinch bugs are found at the edge of a damaged patch \(4 gal per 1,000 sq ft into the thatch\): Tetrino in May/);
+      expect(v13[grass].notes.join('\n')).not.toMatch(/float test/);
     }
     const chinch = ['Apr', 'May', 'Jun'].map((m) => lines(v13.st_augustine.visits.find((v) => v.month === m).secondary).find((l) => l.startsWith('Arena 50 WDG')));
-    const tail = ', 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later (SiteOne: Arena S.E., Florida only)';
+    const tail = ', 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch, recheck at 5 and 12 days; a second application no sooner than 8 weeks later (SiteOne: Arena S.E., Florida only)';
     expect(chinch).toEqual([
-      `Arena 50 WDG — chinch bugs found at the edge of a damaged patch (float test only if unsure)${tail}`,
-      `Arena 50 WDG — chinch bugs outside the sunny turf, found at the edge of a damaged patch (float test only if unsure)${tail}`,
-      `Arena 50 WDG — chinch bugs found at the edge of a damaged patch (float test only if unsure)${tail}`,
+      `Arena 50 WDG — chinch bugs found at the edge of a damaged patch (count first)${tail}`,
+      `Arena 50 WDG — chinch bugs outside the sunny turf, found at the edge of a damaged patch (count first)${tail}`,
+      `Arena 50 WDG — chinch bugs found at the edge of a damaged patch (count first)${tail}`,
     ]);
     expect(JSON.stringify(migration.PRODUCTS)).toContain('chinch_20_to_25_per_sqft');
+  });
+});
+
+describe('chinch count line and sugarcane mosaic virus line (owner 2026-10-22)', () => {
+  const COUNT = require('../config/lawn-chinch-count').chinchCountNote();
+  const LITERAL_COUNT = 'Chinch bugs: always count before treating. Push a bottomless can 3 in into the soil at 4 spots on the edge of the damage, fill with water, count for 5 minutes, and write the count in the visit notes. Big-eyed bugs (wide head, bulging eyes) are predators: do not count them. Recheck a treated area at 5 and 12 days.';
+  const VIRUS = 'Sugarcane mosaic virus (lethal viral necrosis) is confirmed in Sarasota, Manatee and Charlotte. Yellow streaks between the veins on Floratam or ProVista, mostly September to January, with no chinch bugs and healthy roots: photo, note and call the office; Waves sends a sample to the UF Plant Diagnostic Center at its own cost. Do not sell a fungicide or insecticide for it (UF: pesticides do not work). Mow or walk suspect lawns last. For new sod, recommend Palmetto or CitraBlue, never Floratam or ProVista.';
+  test('the shared constant builds the owner\'s count line word for word, and the Fast Complete card text from the same facts', () => {
+    expect(COUNT).toBe(LITERAL_COUNT);
+    expect(require('../config/lawn-chinch-count').chinchCardCheck()).toBe('Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.');
+  });
+
+  test.each(V13_GRASSES)('%s: the chinch note opens with the count line, keeps the Arena and 2(ee) text, and the virus line is its own note once', (grass) => {
+    const notes = v13[grass].notes;
+    const chinch = notes.filter((n) => n.startsWith('Chinch bugs'));
+    expect(chinch).toHaveLength(1);
+    expect(chinch[0].startsWith(`${COUNT} Where chinch bugs are found`)).toBe(true);
+    expect(chinch[0]).toContain('Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre');
+    // The recheck sits on the Arena chinch lines the way the caterpillar line carries "recheck in 7 days".
+    const arenaLines = v13[grass].visits.flatMap((visit) => lines(visit.secondary)).filter((l) => l.startsWith('Arena 50 WDG \u2014 chinch'));
+    expect(arenaLines).toHaveLength(3);
+    for (const line of arenaLines) expect(line).toContain('into the thatch, recheck at 5 and 12 days; a second application');
+    expect(chinch[0]).toContain('Florida 2(ee) recommendation for southern chinch bug');
+    expect(notes.filter((n) => n === VIRUS)).toHaveLength(1);
+    expect(notes.indexOf(VIRUS)).toBe(notes.indexOf(chinch[0]) + 1);
   });
 });
 
@@ -982,7 +1038,7 @@ describe('Arena at the label\'s low turf rate (owner 2026-10-08)', () => {
   test('every Arena line states 0.147 oz (6.4 oz per acre) and the 8-week repeat; the program note says so once, cites the label and names the current Florida 2(ee) sheet', () => {
     const arena = Array.from(new Set([4, 5, 6].flatMap((m) => lines(visitFor(m).secondary).filter((l) => l.startsWith('Arena 50 WDG')))));
     expect(arena).toHaveLength(2);
-    for (const line of arena) expect(line).toMatch(/0\.147 oz per 1,000 sq ft \(6\.4 oz per acre\) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later/);
+    for (const line of arena) expect(line).toMatch(/0\.147 oz per 1,000 sq ft \(6\.4 oz per acre\) in 4 gal per 1,000 sq ft into the thatch, recheck at 5 and 12 days; a second application no sooner than 8 weeks later/);
     for (const grass of V13_GRASSES) {
       const note = v13[grass].notes.find((n) => n.startsWith('Chinch bugs'));
       expect(note).toContain('Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label\'s turf range; about 1.4 level teaspoons)');

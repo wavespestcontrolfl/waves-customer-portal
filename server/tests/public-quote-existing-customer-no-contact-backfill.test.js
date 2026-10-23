@@ -96,8 +96,10 @@ describe('buildExistingCustomerPublicQuoteUpdates', () => {
     for (const f of CONTACT_FIELDS) expect(updates).not.toHaveProperty(f);
   });
 
-  test('still fills attribution, interest, size and last-contact fields', () => {
+  test('still fills attribution, interest, lot size and last-contact fields — never property_sqft (the lawn mirror) from the home size', () => {
     const updates = buildExistingCustomerPublicQuoteUpdates(args(blankCustomer()));
+    // The quote's `sqft` is the HOUSE; customers.property_sqft is treated lawn area (owner 2026-10-23).
+    expect(updates).not.toHaveProperty('property_sqft');
     expect(updates).toMatchObject({
       last_contact_type: 'website_quote',
       lead_service_interest: 'Pest Control',
@@ -105,7 +107,6 @@ describe('buildExistingCustomerPublicQuoteUpdates', () => {
       lead_source_detail: 'quote_wizard',
       lead_source_channel: 'organic',
       lead_source_area: 'Sarasota',
-      property_sqft: 2000,
       lot_sqft: 9000,
       landing_page_url: 'https://example.test/quote',
       utm_data: { utm_source: 'x' },

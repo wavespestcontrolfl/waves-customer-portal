@@ -947,6 +947,8 @@ app.use('/api/rate', require('./routes/review-gate'));
 app.use('/api/admin/tax', require('./routes/admin-tax'));
 app.use('/api/admin/pricing', require('./routes/admin-pricing-strategy'));
 app.use('/api/admin/lawn-assessment', require('./routes/admin-lawn-assessment'));
+// Read-only preview of a not-yet-completed visit's customer report (admin only; sends/writes nothing).
+app.use('/api/admin/report-preview', require('./routes/admin-report-preview'));
 // Photo-assessment lead magnets (lawn + pest) — admin list/detail/send surface.
 app.use('/api/admin/photo-assessments', require('./routes/admin-photo-assessments'));
 // Recruiting queue — job applications from the public careers funnel.

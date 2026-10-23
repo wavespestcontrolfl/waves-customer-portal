@@ -1,4 +1,4 @@
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false), lawnReclaimedHalfNLive: jest.fn(() => false) }));
 /**
  * POST /admin/customers/:id/properties — the admin "Add service address"
  * path. customer_properties.state is varchar(2): a full state name must be

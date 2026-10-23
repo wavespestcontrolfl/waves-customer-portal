@@ -111,6 +111,8 @@ const PRODUCT_CLASS_ENTRIES = [
   ['LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', FAMILY.GRANULAR_N],
   // April feeding on the 12x plan (v13): a 100% polymer-coated slow-release nitrogen bag; the same expectation line the 24-0-11 gave there.
   ['LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', FAMILY.GRANULAR_N],
+  // December feeding on a lawn with a mapped large patch (v13, GATE_LAWN_DEC_LARGE_PATCH_K): a granular potassium bag with no nitrogen.
+  ['LESCO Black Out 0-0-24 AM Spar-TECH', FAMILY.POTASSIUM],
   ['LESCO 24-2-11', FAMILY.GRANULAR_N],
   ['LESCO 24-2-11 50% NOS Plus BIO 6% Fe', FAMILY.GRANULAR_N],
 
@@ -176,6 +178,9 @@ const PRODUCT_CLASS_ENTRIES = [
   // Acelepryn is a preventive grub/caterpillar product: never curative.
   ['Acelepryn Xtra', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
   ['Acelepryn Insecticide', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
+  // Advion Insect Granule (indoxacarb mole cricket bait, lawn v13 June and July nymph spots, owner 2026-10-23): applied only on
+  // tunnel areas once mole crickets are seen, so it is locked curative like Dylox 6.2 G.
+  ['Advion Insect Granule', FAMILY.INSECTICIDE, { modeLock: 'curative' }],
 
   // Explicit "no line" decisions. Each is a decision, not an omission.
   // Adjuvants and wetting agents: no result to describe.

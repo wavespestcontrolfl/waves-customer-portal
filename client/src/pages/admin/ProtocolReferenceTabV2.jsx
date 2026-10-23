@@ -1529,7 +1529,18 @@ export default function ProtocolReferenceTabV2() {
                             {parseProductLines(v.secondary, productDescriptionsFor(trackData)).map((p, pi) => (
                               <CalendarLine key={pi} line={p} muted />
                             ))}
-                            {!v.secondary && "\u2014"}
+                            {/* A conditional swap of the visit's whole-lawn bag (the December potassium bag for a mapped large
+                                patch, GATE_LAWN_DEC_LARGE_PATCH_K): the API sends the block only while its gate is live, so
+                                this renders nothing otherwise. Shown as an IF line with the recipe's own words for the condition. */}
+                            {Object.entries(v.swaps || {}).map(([key, swap]) => (
+                              <div key={`swap-${key}`} data-testid="protocol-swap-line" className="mt-1">
+                                {parseProductLines(swap.primary, productDescriptionsFor(trackData)).map((p, pi) => (
+                                  <CalendarLine key={pi} line={{ ...p, conditional: true }} muted />
+                                ))}
+                                {swap.summary && <div className="text-12 text-ink-tertiary">{swap.summary}</div>}
+                              </div>
+                            ))}
+                            {!v.secondary && !Object.keys(v.swaps || {}).length && "\u2014"}
                           </td>
                           {!pricingRestricted && (<>
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">

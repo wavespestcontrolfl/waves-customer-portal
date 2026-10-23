@@ -15,18 +15,6 @@ export function recordedLawnArea(area) {
   return area.reviewedAt || (area.source === 'recorded' && Number(area.sqft) > 0) ? area.sqft : undefined;
 }
 
-export function previousLawnAssessment(history, service) {
-  const day = String(service.scheduledDate || service.scheduled_date || service.date || '').slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
-  const visitDay = (row) => String(row.service_id ? row.appointment_date || '' : row.service_date || '').slice(0, 10);
-  return (history || [])
-    .filter((row) => row.confirmed_by_tech === true
-      && (!row.service_id || String(row.service_id) !== String(service.id))
-      && /^\d{4}-\d{2}-\d{2}$/.test(visitDay(row)) && visitDay(row) < day)
-    .sort((a, b) => visitDay(b).localeCompare(visitDay(a))
-      || (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))[0] || null;
-}
-
 const PLAN_FIELDS = ['rate', 'rateUnit', 'amountUnit', 'areaValue', 'areaUnit', 'totalAmount', 'applicationMethod'];
 // A chosen amount unit is not a calculation input: the derived total is
 // withdrawn while that unit differs from the plan's (below), but an untouched

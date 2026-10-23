@@ -63,7 +63,7 @@ const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
-const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
+const { normalizeProposal, computeProposalTotals, isCommercialProposalData, carryMistingIdentity } = require('../services/estimate-proposal');
 const { programRevenueIssue } = require('../../shared/proposal-bid.cjs');
 const { proposalExpiry, groupLinkViewableThrough, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
 const { publishedGroupLinks, publishedOfferExpiry, extendPublishedGroupLinks } = require('../services/estimate-group-navigation');
@@ -636,7 +636,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   // is LIVE: the send path serves stored rows without re-entering the pricer, so a
   // save-then-gate-off sequence would otherwise publish a disabled add-on (codex #3272 r2).
   // Same fail-closed rail as pricing.
-  const gatedAddOn = gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, 'sending', { pricingAuthority: estimate.pricing_authority });
+  const gatedAddOn = gatedAddOnStaffRefusal(estimate.estimate_data || estimate.estimateData, 'sending', { pricingAuthority: estimate.pricing_authority, allowAcceptPending: true });
   if (gatedAddOn) {
     const err = new Error(gatedAddOn.message);
     err.statusCode = 409;
@@ -4664,9 +4664,12 @@ router.put('/:id/proposal', async (req, res, next) => {
     // Normalize through the shared model so what we store matches what the
     // PDF and totals read. Force enabled:true — an explicit PUT means the
     // operator is authoring a real proposal (not the synthesized fallback).
+    // The misting system's identity (GATE_MOSQUITO_MISTING) rides the stored lines / programs: carry it from the saved proposal by
+    // line id, so an editor that omits it cannot launder a priced misting row past the gated and acceptance-pending refusals.
+    const incomingWithIdentity = savedProposal.enabled ? carryMistingIdentity(incoming, savedProposal) : incoming;
     const normalized = normalizeProposal({
       ...estimate,
-      estimate_data: { proposal: { ...incoming, enabled: true } },
+      estimate_data: { proposal: { ...incomingWithIdentity, enabled: true } },
     });
     normalized.enabled = true;
     normalized.synthesized = false;

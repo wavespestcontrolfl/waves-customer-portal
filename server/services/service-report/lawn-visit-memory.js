@@ -293,6 +293,9 @@ async function freezeLawnVisitMemory(serviceRecordId, entry, knex) {
 async function resolveVisitMemoryForRender({
   structuredNotes, serviceRecordId, customerId, reportV2, assessmentId, serviceDate, priorVisit, knex, degraded = false,
   onCreated = null,
+  // Admin report preview (an open visit, no record): the entry is built and its
+  // sinceLast served, but never frozen and onCreated never hears of it.
+  preview = false,
 } = {}) {
   const stored = storedVisitMemoryFor(structuredNotes, assessmentId);
   if (stored) return { sinceLast: canonical(stored.sinceLast || null), unfrozen: false };
@@ -318,6 +321,7 @@ async function resolveVisitMemoryForRender({
   // wins: a degraded entry could never be repaired). The prior's frozen block
   // does not depend on this visit's inputs, so it is still served, read-only.
   if (degraded) return { sinceLast: canonical(sinceLast), unfrozen: true };
+  if (preview) return { sinceLast: canonical(sinceLast), unfrozen: false };
   const entry = { ...memory, sinceLast };
   const frozen = await freezeLawnVisitMemory(serviceRecordId, entry, knex);
   if (!frozen) return { sinceLast: canonical(sinceLast), unfrozen: true };

@@ -75,6 +75,30 @@ function storedAreaAddOnRows(estimateData, options = {}) {
   return areaAddOnRowsIn(storedEstimateContainer(data, options) || data);
 }
 
+// The stored rows of the mosquito misting system (GATE_MOSQUITO_MISTING): the mapped recurring plan row, its one-time
+// install item, the quote-required copy and the raw engine line, from the same authoritative container.
+// A commercial misting request is a manual-quote row of the commercial family that keeps the misting identity only in
+// originalRequestedService (pre-push audit P1): it counts as a stored misting row (unpriced, quoteRequired).
+const isMistingRow = (row) => isRecord(row) && (row.service === 'mosquito_misting' || row.service === 'mosquito_misting_installation'
+  || row.originalRequestedService === 'mosquito_misting');
+function mistingRowsIn(container) {
+  const nested = container.results && container.results.oneTime;
+  const recurring = [container.recurring && container.recurring.services, container.results && container.results.recurring && container.results.recurring.services];
+  return [
+    ...recurring,
+    container.oneTime && container.oneTime.items, container.oneTime && container.oneTime.specItems,
+    nested && nested.items, nested && nested.specItems,
+    container.specItems, container.quoteRequiredItems, container.lineItems,
+  ].filter(Array.isArray).flat().filter(isMistingRow);
+}
+function storedMistingRows(estimateData, options = {}) {
+  const data = parseStoredData(estimateData);
+  if (!data) return [];
+  const containers = [data.result, data.engineResult].filter(isRecord);
+  if (containers.length && !containers.some((container) => mistingRowsIn(container).length)) return [];
+  return mistingRowsIn(storedEstimateContainer(data, options) || data);
+}
+
 // The commercial engine ids and their residential label-mapped twins are the SAME charge in two
 // spellings: canonicalized for the duplicate key only (each line keeps its own serviceKey).
 const DEDUPE_FAMILY = {
@@ -188,5 +212,5 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
 const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
 
 module.exports = {
-  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows,
+  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedMistingRows,
 };

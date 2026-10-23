@@ -26,8 +26,8 @@ const TOPCHOICE_ROW = {
 };
 
 describe('the recipe: the fire ant granule in April and October of every track', () => {
-  test('the old Advion text is gone from the recipe, and nothing else is named in its place', () => {
-    expect(JSON.stringify(v13)).not.toMatch(/Advion|fire ant bait|Maxforce/i);
+  test('the old Advion fire ant bait text is gone from the recipe, and nothing else is named in its place (Advion Insect Granule, the mole cricket bait, is a different product, owner 2026-10-23)', () => {
+    expect(JSON.stringify(v13)).not.toMatch(/Advion Fire Ant|fire ant bait|Maxforce/i);
   });
 
   test.each(TRACKS)('%s: one secondary line in April and in October, none in any other month, never in a primary line', (track) => {

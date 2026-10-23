@@ -378,18 +378,62 @@ const NO_LAWN_GUIDANCE = Object.freeze({
   held_products: [],
 });
 
-// GATE_LAWN_NOV_LARGE_PATCH_N: the brief states a nitrogen bag's stored target (gates.targetN, "0.75 lb N/1000"); for a visit where the
-// plan cuts it (waveguard-plan-engine fungusNitrogenCut, the plan's own decision) the brief states the cut and why, so the pocket
-// reference agrees with the plan and the Fast Complete sheet. Gate off, not v13 or no cut: the entries are left as they are (no read).
-// STRICT like the brief's other reads: the sweep stores the brief, so a failed area read aborts the generation (the prior brief
+// GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N: the brief states a nitrogen bag's stored target (gates.targetN, "0.75 lb N/1000");
+// for a visit where the plan cuts it (waveguard-plan-engine nitrogenDecision, the plan's own decision) the brief states the cut and why, so
+// the pocket reference agrees with the plan and the Fast Complete sheet. Gate off, not v13 or no cut: the entries are left as they are (no read).
+// STRICT like the brief's other reads: the sweep stores the brief, so a failed read aborts the generation (the prior brief
 // survives) instead of storing the normal target the live plan would not use once the database is back.
-async function projectFungusNitrogenCut(dbh, svc, entries, summary) {
-  const { fungusNitrogenCut } = require('./waveguard-plan-engine');
+async function projectNitrogenCut(dbh, svc, entries, summary) {
+  const { nitrogenDecision } = require('./waveguard-plan-engine');
   const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
   for (const entry of entries) {
     const stated = String(entry.gates.targetN || '').match(/^\s*(\d+(?:\.\d+)?)\s*lb N\/1000/i);
-    const cut = stated ? await fungusNitrogenCut(dbh, svc, { targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, strict: true }) : null;
-    if (cut != null) entry.gates = { ...entry.gates, targetN: `${cut} lb N/1000 (active fungus mapped; normal ${stated[1]} lb N/1000)` };
+    const decision = stated ? await nitrogenDecision(dbh, svc, {
+      targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, strict: true,
+      keep: /\bPre-?Emergent Plus Fertilizer\b/i.test(entry.shapedEntry?.name || '') ? 'pre_emergent'
+        : (Number(String(entry.gates.targetK2O || '').match(/^\s*(\d+(?:\.\d+)?)/)?.[1]) > 0 ? 'potash' : null),
+    }) : null;
+    if (decision?.cut != null) {
+      const engine = require('./waveguard-plan-engine');
+      entry.gates = { ...entry.gates, targetN: `${decision.cut} lb N/1000 (${engine.nitrogenCutWhy(decision, engine.CUT_WHY_NOTE)}; normal ${stated[1]} lb N/1000)` };
+    }
+  }
+}
+
+// GATE_LAWN_DEC_LARGE_PATCH_K: for a visit where the plan swaps the whole-lawn bag (waveguard-plan-engine troubleProductSwap, the plan's
+// own decision) the brief says the swapped product replaces the normal bag, so the pocket reference agrees with the plan. Gate off, not
+// v13 or no swap: the entries are left as they are (no read). Strict, like projectFungusNitrogenCut.
+async function projectProductSwap(dbh, svc, entries, summary) {
+  const { troubleProductSwap } = require('./waveguard-plan-engine');
+  const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
+  const { V13_TROUBLE_PRODUCT_SWAPS } = require('../config/lawn-v13-trouble-product-swaps');
+  const month = Number(summary.window?.month);
+  if (!v13Active || !V13_TROUBLE_PRODUCT_SWAPS.some((rule) => rule.month === month)) return;
+  const names = entries.map((entry) => entry.shapedEntry.name);
+  const candidates = V13_TROUBLE_PRODUCT_SWAPS.filter((rule) => rule.month === month && names.includes(rule.from));
+  for (const rule of candidates) {
+    const normalBag = entries.find((entry) => entry.shapedEntry.name === rule.from);
+    const visit = { primary: `${rule.from} \u2014 brief` };
+    const swap = await troubleProductSwap(dbh, svc, { visit, monthNumber: month, v13Active, strict: true });
+    if (swap) normalBag.gates = { ...normalBag.gates, swappedForActiveLargePatch: `use ${swap.to} instead while a large patch is mapped (${swap.targetN} lb N)` };
+  }
+}
+
+// GATE_LAWN_CHINCH_TETRINO_RATE: the brief states the May Tetrino line's stored rate (0.367 fl oz per 1,000 sq ft); for a chinch-mapped lawn
+// the plan raises it (waveguard-plan-engine chinchTetrinoRate, the plan's own decision), so the brief states the raised rate and why and the
+// pocket reference agrees with the plan and the Fast Complete sheet. Gate off, not v13, not May or no raise: the entries are left as they are.
+// STRICT like the brief's other reads (see projectNitrogenCut).
+async function projectChinchTetrinoRate(dbh, svc, entries, summary) {
+  const { chinchTetrinoRate } = require('./waveguard-plan-engine');
+  const { V13_CHINCH_TETRINO } = require('../config/lawn-v13-chinch-rate');
+  const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
+  const rate = await chinchTetrinoRate(dbh, svc, { monthNumber: Number(summary.window?.month), v13Active, strict: true });
+  if (rate == null) return;
+  for (const entry of entries) {
+    const stated = Number(entry.shapedEntry.ratePer1000);
+    if (entry.shapedEntry.name !== V13_CHINCH_TETRINO.productName || !(stated > 0 && stated < rate)) continue;
+    entry.shapedEntry = { ...entry.shapedEntry, ratePer1000: rate };
+    entry.gates = { ...entry.gates, chinchRate: `${rate} fl oz/1000 (chinch bugs mapped; normal ${stated} fl oz/1000)` };
   }
 }
 
@@ -494,8 +538,13 @@ async function loadLawnWindowGuidance(dbh, svc) {
       hold: true,
       message: cleanText(v13HoldWarnings([{ selectionReason: 'north_port_product_window', product: { id: p.productId, name: p.productName || p.protocolProductName } }])[0].message, 300),
     }));
+    // A staged row that only a swap rule brings in (GATE_LAWN_DEC_LARGE_PATCH_K: the December 0-0-24, a non-default row) is not guidance
+    // until that rule's gate is live: with it off the brief lists exactly the products it listed before the row existed.
+    const { swapOnlyRule } = require('../config/lawn-v13-trouble-product-swaps');
+    const swapGates = require('../config/feature-gates');
+    const swapOnly = (p) => { const rule = swapOnlyRule(p); return !!rule && swapGates[rule.gate]?.() !== true; };
     const shaped = (summary.products || [])
-      .filter((p) => !heldRows.includes(p))
+      .filter((p) => !heldRows.includes(p) && !swapOnly(p))
       .map((p) => ({
         shapedEntry: shapeWindowProduct(p),
         productId: p.productId || null,
@@ -507,7 +556,9 @@ async function loadLawnWindowGuidance(dbh, svc) {
         gates: (p.gates && typeof p.gates === 'object') ? p.gates : {},
       }))
       .filter((p) => p.shapedEntry.name);
-    await projectFungusNitrogenCut(dbh, svc, shaped, summary);
+    await projectNitrogenCut(dbh, svc, shaped, summary);
+    await projectProductSwap(dbh, svc, shaped, summary);
+    await projectChinchTetrinoRate(dbh, svc, shaped, summary);
 
     // Customer-specific application limits (annual max apps, cumulative
     // rate, minimum interval, MOA rotation — application-limits.js, the

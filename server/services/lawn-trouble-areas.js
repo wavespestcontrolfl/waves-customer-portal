@@ -116,14 +116,109 @@ async function loadActive(knex, propertyId) {
     .where({ property_id: propertyId, status: 'active' })
     .orderByRaw('last_treated_on DESC NULLS LAST, created_at DESC')
     .select('id', 'place', 'type', 'last_treated_on', 'last_seen_on');
-  return rows.map((row) => ({
-    id: row.id,
-    place: row.place,
-    placeLabel: placeLabel(row.place),
-    type: row.type,
-    typeLabel: TYPE_LABELS[row.type] || row.type,
-    lastTreatedOn: dayOf(row.last_treated_on || row.last_seen_on),
-  }));
+  return rows.map(areaView);
+}
+
+const areaView = (row) => ({
+  id: row.id,
+  place: row.place,
+  placeLabel: placeLabel(row.place),
+  type: row.type,
+  typeLabel: TYPE_LABELS[row.type] || row.type,
+  lastTreatedOn: dayOf(row.last_treated_on || row.last_seen_on),
+});
+
+/**
+ * The property's trouble areas AS THEY STOOD on a day (`asOf`, YYYY-MM-DD, a visit's scheduled day), in loadActive's shape. The table keeps
+ * no status history: a row holds only its CURRENT status, and a reactivation erases cleared_at and cleared_by, so what it can prove about a
+ * past day is limited. The read therefore fails closed. An area counts for `asOf` only when
+ *   - it existed: first_seen_on <= asOf; and
+ *   - nothing has happened to it after that day: last_seen_on <= asOf and last_treated_on <= asOf (a later treatment is what reactivates a
+ *     cleared area, and the lost history could hide a clear and reactivate around the visit, so an area with later activity is not shown to
+ *     have been active on that day); and
+ *   - it was active then: its status is active now, or it was cleared AFTER that day (cleared_at, ET day, later than asOf; cleared on or
+ *     before the day is not active on it).
+ * So an area cleared after a visit still counts for that visit, and one reactivated later does not retroactively qualify for an earlier one.
+ * The cost is deliberate: an area treated again after a past visit no longer reads as active on that earlier day. Without `asOf` this is
+ * loadActive (the current state). A read failure throws.
+ */
+async function loadActiveAsOf(knex, propertyId, asOf) {
+  if (!asOf) return module.exports.loadActive(knex, propertyId);
+  if (!propertyId || !UUID_RE.test(String(propertyId))) return [];
+  const rows = await knex('lawn_trouble_areas')
+    .where({ property_id: propertyId })
+    .where('first_seen_on', '<=', asOf)
+    .where('last_seen_on', '<=', asOf)
+    .where((q) => q.whereNull('last_treated_on').orWhere('last_treated_on', '<=', asOf))
+    .where((q) => q.where('status', 'active').orWhere((cleared) => cleared.where('status', 'cleared')
+      .whereRaw("(cleared_at AT TIME ZONE 'America/New_York')::date > ?::date", [asOf])))
+    .orderByRaw('last_treated_on DESC NULLS LAST, created_at DESC')
+    .select('id', 'place', 'type', 'last_treated_on', 'last_seen_on');
+  return rows.map(areaView);
+}
+
+// ── large patch evidence ────────────────────────────────────────────────────
+
+// An area of type 'fungus' stands for ANY fungicide spot treatment (large patch, gray leaf spot, Pythium, dollar spot, fairy ring, rust):
+// the store records no disease. The disease is on the APPLICATION: the sheet's target (service_products.targets, written by the
+// completion into the ledger as property_application_history.target_pest, GATE_LAWN_SPOT_TARGET) names it. A rule that must be sure the
+// area is a large patch (the November nitrogen cut, the December potassium bag) asks for the target to read large patch, brown patch or
+// Rhizoctonia (the same disease; lawn-visit-customer-copy and the diagnostic read all three as one).
+const LARGE_PATCH_TARGET = /\b(large[\s_-]*patch|brown[\s_-]*patch|rhizoctonia)\b/i;
+const isLargePatchTarget = (value) => LARGE_PATCH_TARGET.test(String(value || ''));
+
+/**
+ * The property's ACTIVE fungus areas that are known to be a LARGE PATCH, as loadActive shows them. The evidence is the newest
+ * application day at the area's place (the ledger, fungicides, retractions left out), whatever it recorded: the area is a large patch only
+ * when EVERY fungicide row of that day names large patch (several fungicides in one completion share the day and the timestamp, so a mix of
+ * targets, or a blank one, is ambiguous and fails closed). An area with no application, whose newest application names no target (it
+ * outranks an older large patch one: the disease is unknown again), or whose newest target is another disease (gray leaf spot, Pythium,
+ * dollar spot, fairy ring, rust) is NOT returned: the answer fails closed when the disease is unknown.
+ *
+ * `asOf` (a YYYY-MM-DD day, the visit's scheduled day) dates the evidence: only applications on or before that day are read, so an
+ * application recorded AFTER a visit never decides that visit (a later large patch row does not swap an older visit; a later
+ * other-disease row does not hide the evidence that stood on the day). Without `asOf` every application counts (an undated read).
+ * The AREA is dated the same way (loadActiveAsOf), so a visit sees the areas as they stood on its day. A read failure throws, like loadActive.
+ */
+async function loadActiveLargePatch(knex, propertyId, { asOf = null } = {}) {
+  const areas = (await module.exports.loadActiveAsOf(knex, propertyId, asOf)).filter((area) => area.type === 'fungus');
+  if (!areas.length) return [];
+  const query = knex('property_application_history')
+    .where({ property_id: propertyId })
+    .whereNull('retracted_at')
+    .whereIn('treated_place', [...new Set(areas.map((area) => area.place))])
+    .whereRaw("lower(category) = 'fungicide'");
+  if (asOf) query.where('application_date', '<=', asOf);
+  const rows = await query.orderByRaw('application_date DESC').select('treated_place', 'target_pest', 'application_date');
+  // The newest application DAY at a place decides, and it must be unambiguous: one completion can record several fungicides at one place on
+  // the same day with the same timestamp, so there is no "newest row" among them. The area is a large patch only when EVERY fungicide row of
+  // that day names large patch; a mix of targets (or a blank one) is ambiguous evidence and fails closed.
+  const newestDay = new Map();
+  const targets = new Map();
+  for (const row of rows) {
+    const day = dayOf(row.application_date);
+    if (!newestDay.has(row.treated_place)) { newestDay.set(row.treated_place, day); targets.set(row.treated_place, []); }
+    if (day === newestDay.get(row.treated_place)) targets.get(row.treated_place).push(row.target_pest);
+  }
+  return areas.filter((area) => {
+    const list = targets.get(area.place);
+    return !!list && list.length > 0 && list.every(isLargePatchTarget);
+  });
+}
+
+/**
+ * Does the property have a trouble area of this type that is ACTIVE, or that was cleared within the last `withinDays` days
+ * (GATE_LAWN_CHINCH_TETRINO_RATE reads chinch)? A cleared area with no cleared_at counts from its last update. A read failure
+ * throws; the caller decides what a failed read means.
+ */
+async function hasAreaOfType(knex, propertyId, type, { withinDays = 365 } = {}) {
+  if (!propertyId || !UUID_RE.test(String(propertyId))) return false;
+  const row = await knex('lawn_trouble_areas')
+    .where({ property_id: propertyId, type })
+    .where((q) => q.where('status', 'active').orWhere((cleared) => cleared.where('status', 'cleared')
+      .whereRaw("COALESCE(cleared_at, updated_at) >= now() - (?::int * interval '1 day')", [Number(withinDays)])))
+    .first('id');
+  return !!row;
 }
 
 /**
@@ -542,6 +637,10 @@ module.exports = {
   placeChoices,
   troubleTypeFor,
   loadActive,
+  loadActiveAsOf,
+  loadActiveLargePatch,
+  isLargePatchTarget,
+  hasAreaOfType,
   recordFromCompletion,
   clearArea,
   areaRowsOf,

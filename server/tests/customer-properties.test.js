@@ -186,6 +186,51 @@ describe('syncPrimaryAddress explicit line 2 intent', () => {
   });
 });
 
+describe('syncPrimaryAddress and the reclaimed-water answer (GATE_LAWN_RECLAIMED_HALF_N)', () => {
+  const RECLAIMED = { reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_checked_at: new Date('2026-10-20T12:00:00Z') };
+  const CLEARED = { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null };
+  const primary = (extra = {}) => ({
+    id: 'prop-1', customer_id: 'cust-1', is_primary: true, active: true,
+    address_line1: '10 Main St', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236',
+    address_key: addressKey({ address_line1: '10 Main St', city: 'Sarasota', zip: '34236' }), ...extra,
+  });
+  async function edit(row, change) {
+    let written = null;
+    const conn = () => {
+      const query = { where: () => query, first: async () => row, update: async (patch) => { written = patch; return 1; } };
+      return query;
+    };
+    await syncPrimaryAddress({ ...row, id: 'cust-1', ...change }, conn);
+    return written;
+  }
+
+  test.each([
+    ['a new house number', { address_line1: '12 Main St' }],
+    ['a new street', { address_line1: '10 Oak Ave' }],
+    ['a new city', { city: 'Bradenton' }],
+    ['a new ZIP', { zip: '34202' }],
+  ])('%s: the answer for the old home is dropped, whoever gave it', async (_label, change) => {
+    for (const source of ['office', 'customer', 'county_meter']) {
+      expect(await edit(primary({ ...RECLAIMED, reclaimed_water_source: source }), change)).toMatchObject(CLEARED);
+    }
+  });
+
+  test.each([
+    ['a spelling of the same street (Street to St, ZIP+4)', { address_line1: '10 Main Street', zip: '34236-1234' }],
+    ['a unit added', { address_line2: 'Unit 4' }],
+  ])('%s: a formatting-only edit keeps the answer', async (_label, change) => {
+    const written = await edit(primary(RECLAIMED), change);
+    expect(written).not.toHaveProperty('reclaimed_water');
+    expect(written).not.toHaveProperty('reclaimed_water_source');
+    expect(written).not.toHaveProperty('reclaimed_water_checked_at');
+  });
+
+  test('a property with no answer is not written to, so a database without the columns is untouched', async () => {
+    const written = await edit(primary(), { address_line1: '12 Main St' });
+    expect(written).not.toHaveProperty('reclaimed_water');
+  });
+});
+
 describe('defaultOccupancyForContactRole (lazy primary backfill default)', () => {
   test('owner / unset → owner_occupied (residential majority)', () => {
     expect(defaultOccupancyForContactRole('owner')).toBe('owner_occupied');

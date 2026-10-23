@@ -294,7 +294,7 @@ describe('buildLawnFastContext', () => {
   test('GATE_LAWN_NOV_LARGE_PATCH_N: a planned nitrogen line keeps the plan\'s reduced amount and its fungus note on the sheet; no other planned row gains a note', async () => {
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
-    const NOTE = 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
+    const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
     buildPlanForService.mockResolvedValue({
       completionDefaults: {
         items: [
@@ -311,6 +311,63 @@ describe('buildLawnFastContext', () => {
     const [feed, spray] = ctx.plannedProducts.items;
     expect(feed).toMatchObject({ productId: P_GRAN, amount: 20.833, amountUnit: 'lb', ratePer1000: 2.0833, rateUnit: 'lb', treatedSqft: 10000, gateNotes: [NOTE] });
     expect(spray).not.toHaveProperty('gateNotes');
+  });
+
+  test('GATE_LAWN_RECLAIMED_HALF_N: the half-nitrogen note and the pre-emergent bag note ride the planned line onto the sheet, as the only notes carried', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const HALF = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
+    const KEPT = 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.';
+    const lineWith = (note) => ({
+      product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast',
+      mix: { amount: 15.625, amountUnit: 'lb', ratePer1000: 1.5625, rateUnit: 'lb', treatedSqft: 10000 },
+      gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, note],
+    });
+    for (const text of [HALF, KEPT]) {
+      buildPlanForService.mockResolvedValue({ completionDefaults: { items: [lineWith({ key: 'reclaimedNitrogen', severity: 'note', text })] } });
+      const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+      expect(ctx.plannedProducts.items[0]).toMatchObject({ productId: P_GRAN, gateNotes: [text] });
+    }
+  });
+
+  test('the reclaimed lawn with active fungus: BOTH the half-nitrogen note and the fungus spreader instruction ride the planned line onto the sheet', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const HALF = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
+    const FUNGUS = 'Active fungus mapped. Close the spreader over the patch and 6 ft around it.';
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [{
+          product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast',
+          mix: { amount: 15.625, amountUnit: 'lb', ratePer1000: 1.5625, rateUnit: 'lb', treatedSqft: 10000 },
+          gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, { key: 'reclaimedNitrogen', severity: 'note', text: HALF }, { key: 'activeFungusNitrogen', severity: 'note', text: FUNGUS }],
+        }],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    expect(ctx.plannedProducts.items[0].gateNotes).toEqual([HALF, FUNGUS]);
+  });
+
+  test('GATE_LAWN_CHINCH_TETRINO_RATE: a Tetrino line the plan sized at the raised rate keeps its chinch note and amount on the sheet; no other planned row gains a note', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const NOTE = "Chinch bugs mapped here: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.";
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [
+          {
+            product: { id: P_HERB, name: 'Tetrino Insecticide' }, applicationMethod: 'broadcast_spray',
+            mix: { amount: 3.675, amountUnit: 'fl oz', ratePer1000: 0.735, rateUnit: 'fl oz', treatedSqft: 5000 },
+            gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, { key: 'chinchTetrinoRate', severity: 'note', text: NOTE }],
+          },
+          { product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' }, gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }] },
+        ],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    const [tetrino, feed] = ctx.plannedProducts.items;
+    expect(tetrino).toMatchObject({ productId: P_HERB, amount: 3.675, amountUnit: 'fl oz', ratePer1000: 0.735, rateUnit: 'fl oz', treatedSqft: 5000, gateNotes: [NOTE] });
+    expect(feed).not.toHaveProperty('gateNotes');
   });
 
   describe('a visit that OFFERS the bermuda removal mix takes the full form, whatever the completion defaults or the visit type say', () => {
@@ -807,6 +864,44 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect((await context(tablesFor())).plannedProducts.weedMix).toMatchObject({ mode: 'unavailable', note: 'The limits could not be checked. Use Search products for what you applied; the office will review it.' });
     });
 
+    // Group 11 stacking (owner 2026-10-23): October to December, a lawn with take-all mapped or unknown does not get the large patch Artavia
+    // row offered (Artavia in September, Headway in October: no more than 2 in a row). The context names the row on its own, so neither the
+    // guide gate nor the chinch read can leave it listed or searchable.
+    describe('the held Group 11 row in the context', () => {
+      const OCT = () => tablesFor({ scheduled_services: visit({ scheduled_date: '2026-10-05' }) });
+      const stageLargePatch = (trigger = 'mapped_large_patch_with_velista') => v13ProtocolRows.mockReturnValue(new Map([...PROGRAM, [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger } }]]));
+
+      test('the guide gate is OFF: the row is still named as held (October, take-all unknown because the places gate is off)', async () => {
+        process.env.GATE_LAWN_V13 = 'true';
+        stageLargePatch();
+        const ctx = await context(OCT());
+        expect(ctx.treatmentGuide).toBeUndefined();
+        expect('guidedProductIds' in ctx.plannedProducts).toBe(false);
+        expect(ctx.plannedProducts.group11HeldProductIds).toEqual([P_ART]);
+      });
+
+      test('the chinch read fails (the guide is dropped for the visit): the row is still named as held', async () => {
+        live();
+        stageLargePatch();
+        const ctx = await context({ ...OCT(), 'lawn_protocol_products as lpp': new Error('rows down') });
+        expect(ctx.readFailures).toContain('treatment_guide');
+        expect('guidedProductIds' in ctx.plannedProducts).toBe(false);
+        expect(ctx.plannedProducts.group11HeldProductIds).toEqual([P_ART]);
+      });
+
+      test('with the guide live and healthy it rides beside the guide\'s own ids; a non-October visit or another trigger holds nothing', async () => {
+        live();
+        stageLargePatch();
+        const healthy = await context(OCT());
+        expect(healthy.plannedProducts.group11HeldProductIds).toEqual([P_ART]);
+        expect(healthy.plannedProducts.takeAllProductIds).toEqual([P_ART]);
+        expect(healthy.plannedProducts.guidedProductIds).not.toContain(P_ART);
+        expect('group11HeldProductIds' in (await context(tablesFor())).plannedProducts).toBe(false);
+        stageLargePatch('mapped_take_all_fall_1');
+        expect('group11HeldProductIds' in (await context(OCT())).plannedProducts).toBe(false);
+      });
+    });
+
     test('the add-ons a card may own are named, so the sheet holds their taps until the fresh guide answers', async () => {
       live();
       expect((await context(tablesFor())).plannedProducts.guidedProductIds).toEqual([P_ART, P_ACE, P_DISP]);
@@ -1260,7 +1355,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const byKind = Object.fromEntries(result.cards.map((card) => [card.kind, card]));
       expect(byKind.weeds).toMatchObject({ finding: 'Photos show weeds on about 30% of the lawn.', productIds: [P_LEAD, P_CERT], detail: 'Test Lead WG, Test Cert Herbicide' });
       expect(byKind.fungus).toMatchObject({ productIds: [P_ART], detail: 'Test Artavia — mapped large patch', items: [expect.objectContaining({ productId: P_ART })] });
-      expect(byKind.chinch).toMatchObject({ productIds: [P_ARENA], check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.', actionLabel: 'Found at the edge. Add it' });
+      expect(byKind.chinch).toMatchObject({ productIds: [P_ARENA], check: 'Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.', actionLabel: 'Found at the edge. Add it' });
       expect(byKind.caterpillars).toMatchObject({ productIds: [P_ACE] });
       expect(byKind.dry_spots).toMatchObject({ productIds: [P_DISP] });
     });

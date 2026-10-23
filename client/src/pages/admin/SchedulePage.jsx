@@ -1,6 +1,5 @@
-import LawnAssessmentCompletionBlock, { LAWN_ASSESSMENT_METRICS } from "../../components/lawn/LawnAssessmentCompletionBlock";
+import LawnAssessmentCompletionBlock from "../../components/lawn/LawnAssessmentCompletionBlock";
 import PropertyServiceAreas from "../../components/tech/PropertyServiceAreas";
-import lawnScores from '@lawn-scores';
 import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
 import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 // client/src/pages/admin/SchedulePage.jsx
@@ -133,7 +132,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, recordedLawnArea, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, recordedLawnArea, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -10113,43 +10112,6 @@ export function TypedFindingsSection({
   );
 }
 
-function LawnPreviousVisitCard({ service }) {
-  const [state, setState] = useState({ loading: true, row: null, error: false });
-  const customerId = service.customerId || service.customer_id;
-  const day = service.scheduledDate || service.scheduled_date || service.date;
-  useEffect(() => {
-    let live = true;
-    setState({ loading: true, row: null, error: false });
-    if (!customerId) { setState({ loading: false, row: null, error: false }); return undefined; }
-    adminFetch(`/admin/lawn-assessment/history/${customerId}`)
-      .then((data) => { if (live) setState({ loading: false, row: previousLawnAssessment(data.history, { id: service.id, date: day }), error: false }); })
-      .catch(() => { if (live) setState({ loading: false, row: null, error: true }); });
-    return () => { live = false; };
-  }, [customerId, day, service.id]);
-  const row = state.row && {
-    ...state.row,
-    overall_score: lawnScores.calculateLawnOverallScore(state.row),
-    stress_damage: lawnScores.resolveStressDamage(state.row),
-  };
-  const display = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : `${Math.round(Number(value))}/100`;
-  return (
-    <section aria-label="Previous lawn visit" style={{ margin: "16px 0", padding: 14, background: D.white, border: `1px solid ${D.border}`, borderRadius: 12, color: D.heading }}>
-      <div style={{ fontSize: 16, fontWeight: 500 }}>Last Visit</div>
-      {state.loading ? <p style={{ fontSize: 14 }}>Loading previous scores…</p>
-        : state.error ? <p style={{ fontSize: 14 }} role="status">Previous scores could not be loaded.</p>
-        : !row ? <p style={{ fontSize: 14 }}>No earlier confirmed assessment. Today’s assessment will establish a baseline.</p>
-        : <>
-          <p style={{ fontSize: 14 }}>Overall score <strong>{display(row.overall_score)}</strong></p>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-            {LAWN_ASSESSMENT_METRICS.map((metric) => <div key={metric.key} style={{ fontSize: 14, padding: 10, border: `1px solid ${D.border}`, borderRadius: 8 }}>
-              <div>{metric.label}</div><strong>{display(row[metric.key])}</strong>
-            </div>)}
-          </div>
-        </>}
-    </section>
-  );
-}
-
 function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onReload, loading, error, disabled, hideArea = false }) {
   const history = defaults.history;
   const score = (row) => row?.overall_score == null ? "—" : `${Math.round(Number(row.overall_score))}/100`;
@@ -18484,6 +18446,10 @@ export function CompletionPanel({
                 scoredCount: treeShrubReview.scoredCount,
                 // Server HMAC proving these scores came from /assess-preview (anti-tamper).
                 signature: treeShrubReview.signature,
+                // GATE_TS_LIGHTING: the signed light read, echoed back as received (absent while dark).
+                ...(treeShrubReview.photoLights && treeShrubReview.lightSignature
+                  ? { photoLights: treeShrubReview.photoLights, lightSignature: treeShrubReview.lightSignature }
+                  : {}),
                 decisions: (treeShrubReview.findings || []).map((f) => ({ key: f.key, action: f.defaultAction || "monitor", detail: f.detail })),
               }
             : undefined,
@@ -19377,7 +19343,7 @@ export function CompletionPanel({
         hideArea={!!currentPropertyAreas} areaValue={lawnVisitArea} loading={treatmentPlanLoading} error={treatmentPlanError} disabled={submitting || generating}
         onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); setLawnAreaOverrideFor(propertyAreasIdentity); }}
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
-        : <LawnPreviousVisitCard service={service} />
+        : null
   );
   if (isMobile) {
     const M = {
@@ -19978,6 +19944,7 @@ export function CompletionPanel({
             {isLawn && !quickComplete && (
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
+                  showReportPreview
                   request={adminFetch}
                   service={service}
                   disabled={isIncompleteVisit || submitting || generating}
@@ -22385,6 +22352,7 @@ export function CompletionPanel({
               {" "}
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
+                  showReportPreview
                   request={adminFetch}
                 service={service}
                 disabled={isIncompleteVisit || submitting || generating}
@@ -25332,6 +25300,8 @@ const PRODUCT_DESCRIPTIONS_V13 = {
     "slow-release fertilizer with extra potassium for winter hardiness",
   "lesco 44-0-0":
     "slow-release nitrogen fertilizer that feeds the lawn for 3 to 4 months",
+  "lesco black out 0-0-24":
+    "potassium fertilizer with no nitrogen for winter hardiness",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

@@ -21,6 +21,7 @@ import { Button, Input, Select, UiSurface } from "../ui";
 const PILL = "!rounded-full !uppercase !tracking-[0.3px]";
 const PILL_OUTLINE = `${PILL} !border !border-[#111111]`;
 const FIELD = "!rounded-[12px] !border !border-[#E5E5E5]";
+import LawnLastVisitScores from "./LawnLastVisitScores";
 import CloseUpPrompt, { BLADE_CROWN, closeUpBlocked, useCloseUpPrompt } from "./CloseUpPrompt";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, dropStalePicks, pickOptions, pickedKey, setLabelPick, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
@@ -180,6 +181,10 @@ function LawnAssessmentCompletionBlock({
   // Height measurement stays optional; separate lawn-length photo capture is retired.
   showGaugeReading = false,
   gaugeHeightIn = null,
+  // Admin hosts only (SchedulePage): once confirmed, a link to the customer
+  // report preview for this open visit (/admin/report-preview/:serviceId,
+  // read-only, sends nothing). The tech sheet leaves it off.
+  showReportPreview = false,
   onGaugeHeight,
   // The tech's free-text visit notes (owned by CompletionPanel) — passed through
   // so the AI photo analysis can factor them in alongside the images.
@@ -219,6 +224,8 @@ function LawnAssessmentCompletionBlock({
   const [shotList, setShotList] = useState(false);
   // GATE_LAWN_PHOTO_LABEL_PICK: the same lookup says whether to show the customer-label chooser (off by default).
   const [labelPick, setLabelPickOn] = useState(false);
+  // The last confirmed visit's scores, from the same lookup (undefined until it answers; see LawnLastVisitScores).
+  const [lastVisit, setLastVisit] = useState(undefined);
   // False until the lookup below has answered (or failed): the mode decides the
   // photo cap, so capture waits for it rather than truncating at 3 photos and
   // then switching to 8.
@@ -251,6 +258,7 @@ function LawnAssessmentCompletionBlock({
     setPhotos([]);
     setShotList(false);
     setLabelPickOn(false);
+    setLastVisit(undefined);
     setModeKnown(false);
     pendingShotRef.current = null;
     setReadingShots([]);
@@ -273,6 +281,7 @@ function LawnAssessmentCompletionBlock({
       .then((data) => {
         if (!cancelled && data?.shotListEnabled === true) setShotList(true);
         if (!cancelled) setLabelPickOn(data?.labelPickEnabled === true);
+        if (!cancelled && data && Object.prototype.hasOwnProperty.call(data, "lastVisit")) setLastVisit(data.lastVisit ?? null);
         if (cancelled || !data?.assessment) return;
         const assessment = data.assessment;
         const scores = parseAssessmentScores(assessment);
@@ -579,6 +588,7 @@ function LawnAssessmentCompletionBlock({
 
   return (
     <UiSurface density="comfortable" className="flex flex-col gap-3 text-zinc-900">
+      <LawnLastVisitScores lastVisit={lastVisit} />
       {loading && (
         <div className="text-14 text-zinc-500">Checking existing assessment...</div>
       )}
@@ -817,7 +827,18 @@ function LawnAssessmentCompletionBlock({
                 <span aria-hidden="true">{"\u2713"}</span>
                 Assessment confirmed
               </div>
-            ) : (
+            ) : null}
+            {confirmed && showReportPreview && service?.id ? (
+              <a
+                className={`${PILL_OUTLINE} inline-flex items-center justify-center`}
+                href={`/admin/report-preview/${encodeURIComponent(service.id)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Preview report
+              </a>
+            ) : null}
+            {confirmed ? null : (
               <Button
                 className={`flex-1 ${PILL}`}
                 onClick={confirm}

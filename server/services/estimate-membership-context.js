@@ -30,6 +30,7 @@
 // ============================================================
 
 const logger = require('./logger');
+const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { isEnabled } = require('../config/feature-gates');
 const { sameStreetAddress } = require('./estimator-engine/address-compare');
 const {
@@ -186,6 +187,9 @@ function accountServiceKey(raw) {
   // the prefix in the duplicate check yields exactly the requested key
   // (turf → lawn_care, monitoring → termite_bait, stations → rodent_bait).
   const s = String(raw || '').toLowerCase();
+  // The misting SYSTEM is one identity whether the row was booked under a residential or a commercial name (Codex #6503
+  // r7): resolve it before the commercial / residential split so scheduled rows and paid invoices file under one key.
+  if (isMistingSystemIdentity(s)) return 'mosquito_misting';
   if (s.includes('commercial')) {
     if (s.includes('pest') && !isRodentLedName(s)) return 'commercial_pest_control';
     if (s.includes('lawn') || s.includes('turf')) return 'commercial_lawn_care';
@@ -214,7 +218,11 @@ function accountServiceKeys(raw) {
   if (text.includes('pest') && !rodentService) add('pest_control');
   if (text.includes('lawn') || text.includes('turf')) add('lawn_care');
   if (!palmService && (text.includes('tree') || text.includes('shrub'))) add('tree_shrub');
-  if (text.includes('mosquito')) add('mosquito');
+  // The misting system is not the barrier program and not a WaveGuard qualifier. It is ONE canonical key whatever the
+  // row's name says (never the commercial_ prefix), so a paid invoice files where accountServiceKey groups the rows
+  // (Codex #6503 r8).
+  if (isMistingSystemIdentity(text)) keys.add('mosquito_misting');
+  else if (text.includes('mosquito')) add('mosquito');
   if (text.includes('termite')) add('termite_bait');
   if (rodentService) add('rodent_bait');
   if (palmService) add('palm_injection');
@@ -1908,3 +1916,7 @@ module.exports = {
   loadCurrentServiceSpendContext,
   publicMembershipView,
 };
+
+// Exported for tests (Codex #6503 r7): the one account-key resolver the membership panel groups rows by.
+module.exports.accountServiceKey = accountServiceKey;
+module.exports.accountServiceKeys = accountServiceKeys;

@@ -1947,6 +1947,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // RECLAIMED WATER METERS — daily 3:47am ET (GATE_LAWN_RECLAIMED_HALF_N, owner 2026-10-23). Downloads Manatee County's public
+  // reclaimed-meter layer about weekly (the tick does it only when the stored copy is older than six days) and marks the properties
+  // at a meter, locally: no property data is sent to the county. Minute 47 is free in the 3am hour. Gate off = the tick does nothing.
+  // =========================================================================
+  cron.schedule('47 3 * * *', async () => {
+    if (!require('../config/feature-gates').lawnReclaimedHalfNLive()) return;
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('reclaimed-water-meters', async () => {
+        const result = await require('./reclaimed-water-meters').runDailyTick();
+        logger.info(`[reclaimed-water] cron run: ${JSON.stringify(result)}`);
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('reclaimed-water-meters', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`reclaimed water tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Reclaimed water meters failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
   // Each is exception-based (a quiet day sends nothing), carries its own
   // env kill switch, and dedupes via ops_email_send_state. Cron minutes are

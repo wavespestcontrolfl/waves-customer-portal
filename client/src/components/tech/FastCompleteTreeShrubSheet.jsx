@@ -504,6 +504,8 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
         observations: result.observations || '',
         scoredCount: result.scoredCount,
         signature: result.signature,
+        // GATE_TS_LIGHTING: the signed light read, echoed back as received (absent while dark).
+        ...(result.photoLights && result.lightSignature ? { photoLights: result.photoLights, lightSignature: result.lightSignature } : {}),
         decisions: (result.findings || []).map((finding) => ({
           key: finding.key,
           action: preview.rejected.has(finding.key) ? 'hidden' : decisionAction(finding.defaultAction),

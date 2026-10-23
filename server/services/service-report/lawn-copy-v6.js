@@ -355,10 +355,13 @@ async function freezeLawnCopyV6(serviceRecordId, entry, knex) {
  */
 async function resolveLawnCopyV6ForRender({
   structuredNotes, serviceRecordId, assessmentId, reportV2, ctx = {}, degraded = false, knex, deps = {},
+  // Admin report preview (an open visit, no record): the fields are built and
+  // served as a healthy first render would, but never frozen.
+  preview = false,
 } = {}) {
   const stored = storedLawnCopyV6For(structuredNotes, assessmentId);
   if (stored) return { copy: replayFields(stored, ctx), unfrozen: false };
-  if (!assessmentId || !serviceRecordId || !knex) return { copy: null, unfrozen: true };
+  if (!assessmentId || (!serviceRecordId && !preview) || !knex) return { copy: null, unfrozen: true };
   // A freeze may only be CREATED from a complete, healthy read (first writer
   // wins: a degraded entry could never be repaired).
   if (degraded) return { copy: null, unfrozen: true };
@@ -376,6 +379,7 @@ async function resolveLawnCopyV6ForRender({
     ...(built.stage1Expect ? { stage1Expect: true } : {}),
     nextVisitIso: ctx.nextVisitIso || null,
   };
+  if (preview) return { copy: replayFields(entry, ctx), unfrozen: false };
   const frozen = await freezeLawnCopyV6(serviceRecordId, entry, knex);
   if (!frozen) return { copy: replayFields(entry, ctx), unfrozen: true };
   return { copy: replayFields(frozen, ctx), unfrozen: false };
