@@ -167,11 +167,13 @@ function warrantyEligible(findings) {
 }
 
 // The treated site from the certificate only: the customer's own address may
-// be a builder's office, so it never stands in for the property.
+// be a builder's office, so it never stands in for the property. Without a
+// street the lot/block must be there (the send gate's rule); a subdivision
+// alone names no property.
 function propertyAddress(findings, lot) {
   const street = oneLine(findings.treatment_address);
   if (street) return street;
-  if (!lot) throw bad('The certificate has no treatment address or lot.', 409);
+  if (!oneLine(findings.lot_block)) throw bad('The certificate has no treatment address or lot/block.', 409);
   const permit = oneLine(findings.permit_number);
   return [lot, permit && `permit ${permit}`].filter(Boolean).join(', ');
 }
@@ -185,9 +187,22 @@ function contractBasis(basis, builder, initial) {
     : `Issued under the master agreement with ${builder || 'the builder'} dated ${us(date)}.`;
 }
 
+// Rule 5E-14.105(2)(i) wants an exact price and renewal fee: a dollar
+// amount, printed as $1,250.00. The plan price may instead be included in
+// the treatment price.
+const PLAN_PRICE_INCLUDED = 'Included in the treatment price';
+function money(value, label) {
+  const amount = /^\$?\s*(\d{1,3}(,\d{3})*|\d+)(\.\d{1,2})?$/.test(value) ? Number(value.replace(/[$,\s]/g, '')) : NaN;
+  if (!Number.isFinite(amount)) throw bad(`Enter the ${label} as a dollar amount, like $1,250.00.`);
+  return `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function officeFields(body, initial) {
   const warranty = body?.values?.warranty || {};
   const out = Object.fromEntries(OFFICE_FIELDS.map((field) => [field, oneLine(warranty[field])]));
+  out.treatment_price = money(out.treatment_price, 'treatment price');
+  out.renewal_fee = money(out.renewal_fee, 'annual renewal fee');
+  if (out.plan_price !== PLAN_PRICE_INCLUDED) out.plan_price = money(out.plan_price, 'plan price');
   const notice = parseUs(out.consumer_notice_date);
   if (!notice || key(notice) > key(initial)) throw bad('The FDACS-13692 date must be a real date on or before the treatment date.');
   out.consumer_notice_date = us(notice);
@@ -211,12 +226,13 @@ function certificateValues(project, findings) {
   // findings.treatment_date must agree with it, never override it.
   const initial = parseIso(project.project_date);
   if (!initial) throw bad('The certificate has no treatment date.');
+  const today = parseIso(etDateString());
+  if (key(initial) > key(today)) throw bad('The treatment date on the certificate is in the future.', 409);
   const legacyDate = certificateDate(findings, 'treatment_date', 'The treatment date');
   if (legacyDate && key(legacyDate) !== key(initial)) throw bad('The certificate has two different treatment dates. Fix the certificate first.', 409);
   const termEnd = us(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)]));
   const lot = [oneLine(findings.lot_block), oneLine(findings.subdivision)].filter(Boolean).join(', ');
   const finalDate = certificateDate(findings, 'final_exterior_date', 'The final exterior date');
-  const today = parseIso(etDateString());
   if (finalDate && (key(finalDate) < key(initial) || key(finalDate) > key(today))) {
     throw bad('The final exterior date on the certificate must be between the treatment date and today.', 409);
   }

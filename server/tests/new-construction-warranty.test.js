@@ -75,7 +75,7 @@ describe('templateIssueValues (server-built warranty)', () => {
   const office = {
     warranty: {
       structures: 'The new home', notice_location: 'beside the electric panel', payer: 'Owner Test', treatment_price: '$1,250.00',
-      plan_price: 'Included', renewal_fee: '$99.00', consumer_notice_date: '09/01/2026',
+      plan_price: 'Included in the treatment price', renewal_fee: '99', consumer_notice_date: '09/01/2026',
       term_end: '01/01/2099', product: 'FORGED', issue_date: '01/01/2000',
     },
     basis: { kind: 'master', date: '09/01/2026' },
@@ -111,6 +111,10 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(v.project.address).toBe('Lot 4, permit BP-1');
     const noSite = { ...project, findings: { ...findings, treatment_address: '' } };
     await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(noSite))).rejects.toMatchObject({ status: 409 });
+    const subdivisionOnly = { ...project, findings: { ...findings, treatment_address: '', lot_block: '', subdivision: 'Test Grove' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(subdivisionOnly))).rejects.toMatchObject({ status: 409 });
+    const future = { ...project, project_date: '2099-01-01', findings: { ...findings, treatment_date: '' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(future))).rejects.toMatchObject({ status: 409 });
     for (const bad of [{ treatment_date: '2026-02-30' }, { treatment_date: '2026-10-01junk' }, { renewal_due: '2027-13-01' }, { renewal_due: 'next fall' }]) {
       const row = { ...project, findings: { ...findings, ...bad } };
       await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(row))).rejects.toMatchObject({ status: 409 });
@@ -153,6 +157,18 @@ describe('templateIssueValues (server-built warranty)', () => {
     const unitized = { ...project, findings: { ...findings, concentration_pct: '0.060%', gallons_applied: '180 gallons', square_footage: '1800 sq ft', linear_feet: '220 LF' } };
     const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(unitized));
     expect(v.treatment).toMatchObject({ concentration: '0.060', gallons: '180', sq_ft: '1800', linear_ft: '220' });
+  });
+
+  test('prices are exact dollar amounts, printed as $1,250.00; the plan price may be included', async () => {
+    const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(project));
+    expect(v.warranty).toMatchObject({ treatment_price: '$1,250.00', renewal_fee: '$99.00', plan_price: 'Included in the treatment price' });
+    const prepaid = { ...office, warranty: { ...office.warranty, plan_price: '2400.5' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: prepaid }, customer, conn(project)))
+      .resolves.toMatchObject({ warranty: { plan_price: '$2,400.50' } });
+    for (const [field, value] of [['treatment_price', 'TBD'], ['treatment_price', '$100-$150'], ['renewal_fee', ''], ['plan_price', 'Included']]) {
+      const values = { ...office, warranty: { ...office.warranty, [field]: value } };
+      await expect(templateIssueValues(KEY, { projectId: project.id, values }, customer, conn(project))).rejects.toMatchObject({ status: 400 });
+    }
   });
 
   test('takes a legacy "Other" soil-barrier method and a linear-feet-only job; the payer is the office entry', async () => {

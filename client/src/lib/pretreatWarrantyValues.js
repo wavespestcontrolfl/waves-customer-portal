@@ -85,12 +85,12 @@ export function warrantyEligible(findings = {}) {
 // The certificate's own values; '' where the certificate has nothing, so the
 // issue route reports the field as unfilled instead of printing a guess.
 // Street address on the certificate; else the lot (a lot-only certificate is
-// valid before the street exists); else blank. The customer's address may be
+// valid before the street exists; a subdivision alone is not); else blank. The customer's address may be
 // a builder's office, so it never stands in for the site (the server refuses).
 function propertyAddress(findings, lot) {
   const street = text(findings.treatment_address);
   if (street) return street;
-  if (lot) return [lot, text(findings.permit_number) && `permit ${text(findings.permit_number)}`].filter(Boolean).join(', ');
+  if (text(findings.lot_block)) return [lot, text(findings.permit_number) && `permit ${text(findings.permit_number)}`].filter(Boolean).join(', ');
   return '';
 }
 
