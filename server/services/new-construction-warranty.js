@@ -2,6 +2,7 @@
 // per pre-treat job. The warranty number (NCW-…, from the project id) names
 // the job in every issued snapshot.
 const db = require('../models/db');
+const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
@@ -219,6 +220,19 @@ function certificateValues(project, findings) {
   };
 }
 
+// Every value prints on the customer's signable contract, so each one runs
+// the full customer copy screen (AGENTS.md): no access codes, no "safe" or
+// other banned claims. The refusal names the fields to fix.
+function screenValues(values) {
+  const failing = Object.entries(values).flatMap(([group, fields]) => Object.entries(fields)
+    .filter(([, value]) => customerCopyViolations(value).length > 0)
+    .map(([field]) => `${group}.${field}`));
+  if (failing.length) {
+    throw bad(`Remove the access code or banned wording from: ${failing.join(', ')}.`);
+  }
+  return values;
+}
+
 // Values for one issue of the warranty, built server-side from the project
 // named in the request. The issue route calls it again inside its
 // transaction with `trx`, which locks the certificate row, so the snapshot is
@@ -237,7 +251,7 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
   const { initial, values } = certificateValues(project, findings);
   const issuer = body?.values?.issuer || {};
-  return {
+  return screenValues({
     ...values,
     warranty: {
       ...values.warranty,
@@ -246,7 +260,7 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
       issue_date: us(parseIso(etDateString())),
     },
     issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title) },
-  };
+  });
 }
 
 module.exports = {

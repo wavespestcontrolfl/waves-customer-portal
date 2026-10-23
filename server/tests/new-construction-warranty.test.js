@@ -118,6 +118,15 @@ describe('templateIssueValues (server-built warranty)', () => {
       .resolves.toMatchObject({ warranty: { renewal_due: '09/15/2027' } });
   });
 
+  test('screens every printed value: an access code or a "safe" claim is refused by field name', async () => {
+    const coded = { ...office, warranty: { ...office.warranty, notice_location: 'garage panel, gate code 1234' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: coded }, customer, conn(project)))
+      .rejects.toMatchObject({ status: 400, message: expect.stringContaining('warranty.notice_location') });
+    const claim = { ...project, findings: { ...findings, product_name: 'Termidor SC, pet-safe' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(claim)))
+      .rejects.toMatchObject({ status: 400, message: expect.stringContaining('treatment.product') });
+  });
+
   test('takes a legacy "Other" soil-barrier method and a linear-feet-only job; the payer is the office entry', async () => {
     const legacy = { ...project, findings: { ...findings, treatment_method: 'Other', treatment_method_other: 'Soil barrier (chemical)', square_footage: '', linear_feet: '220' } };
     const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(legacy));
