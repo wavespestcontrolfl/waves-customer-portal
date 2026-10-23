@@ -10,6 +10,7 @@
 
 const {
   applyTypedReportNarrative,
+  isTypedNarrativeFallback,
   _test,
 } = require('../services/service-report/rodent-report-narrative');
 
@@ -716,4 +717,15 @@ test('clean model copy is accepted; a withheld pesticide echo falls back', async
   });
   expect(echoed).toContain('Cockroach activity was high today.');
   expect(echoed).not.toContain('Gentrol');
+});
+
+// Owner 2026-10-22 (say a thing once): the status cards leave out the fixed
+// fallback, never model prose.
+test('isTypedNarrativeFallback: true for the fixed fallback, false for model prose', async () => {
+  const input = roachInput();
+  const fallback = await applyTypedReportNarrative(input, { callModel: jest.fn().mockResolvedValue({ ok: false, reason: 'timeout' }) });
+  expect(isTypedNarrativeFallback(input, fallback)).toBe(true);
+  const prose = 'We found German cockroaches in the kitchen, the bathrooms and under the sink, and we treated the cracks and crevices there with a flush-out treatment.';
+  expect(isTypedNarrativeFallback(input, prose)).toBe(false);
+  expect(isTypedNarrativeFallback({}, 'Anything.')).toBe(false);
 });
