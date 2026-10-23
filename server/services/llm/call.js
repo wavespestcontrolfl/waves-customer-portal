@@ -769,7 +769,7 @@ function anthropicSchema(schema) {
   return JSON.parse(JSON.stringify(schema, (key, value) => {
     if (ANTHROPIC_UNSUPPORTED_KEYWORDS.has(key)) return undefined;
     if (value && typeof value === 'object' && !Array.isArray(value) && Array.isArray(value.type) && Array.isArray(value.enum)) {
-      const { type, ...rest } = value;
+      const { type: _type, ...rest } = value;
       return rest;
     }
     return value;
