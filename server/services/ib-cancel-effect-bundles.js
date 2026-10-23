@@ -40,8 +40,8 @@
  *
  * The sweep acts only while the visit is still cancelled with no later restoration; a row past the 24 hour hard stop
  * (or out of attempts) is NOT acted on and is reported to the office. That report is made only by the sweep that
- * CLAIMED the row (same SKIP LOCKED token pattern as the recovery claim), and the request's liveFinish cannot complete a
- * row while a report claim is live, so a cancel that is finishing is never reported as exhausted.
+ * CLAIMED the row (same SKIP LOCKED token pattern as the recovery claim), and the request's liveNotice/liveFinish write nothing
+ * while any sweep holds a live lease on the row, so a cancel that is finishing is never reported as exhausted.
  *
  * THE RECEIPT. liveFinish marks the row complete BEFORE the route saves the result on the pending action (the card's
  * receipt). A crash between the two would leave a complete row, an empty receipt and the money/linked warnings lost. The
@@ -163,15 +163,53 @@ function classifyNoticeOutcome(outcome) {
   return { state: 'not_sent', error: scrub(outcome.notificationError) };
 }
 
+// The row's lease is not held by a sweep: either nobody holds it, the request does, or the holder's lease ran out. While a
+// sweep holds a live lease the request writes NO bookkeeping (not its text outcome, not 'complete'): the sweep owns the row's
+// outcome, and a request that woke up after its own lease ran out must not overwrite or discard what the sweep records.
+function notHeldBySweep() {
+  this.whereNull('lease_owner').orWhere('lease_owner', REQUEST_LEASE).orWhere('lease_until', '<', db.fn.now());
+}
+
+// A request whose approved send reads "not sent" because ANOTHER sender holds the text (the sweep stamped it just before
+// the provider handoff, after the request read the reminder as ready) has not failed: the other sender may deliver it. The
+// reminder is re-read, and the outcome the request reports (and its receipt) says delivered / partial / uncertain, never
+// "send it by hand". Any other not-sent reason (no reminder, consent, a failed send) stays not sent.
+async function settleRequestNotice(row, outcome, classified) {
+  if (classified.state !== 'not_sent' || !row || !Array.isArray(row.approved_notice) || !row.approved_notice.length) return classified;
+  const status = await require('./appointment-reminders').approvedCancellationNoticeStatus(row.scheduled_service_id, {
+    recipientKeys: row.approved_notice.map((entry) => entry.recipient_key),
+  });
+  if (status === 'delivered') {
+    Object.assign(outcome, { notificationSent: true, notificationError: null });
+    return { state: 'sent', note: NOTICE_TERMINAL_BY_STATUS.delivered.note };
+  }
+  if (status === 'partial') {
+    Object.assign(outcome, { notificationSent: true, notificationPartial: true });
+    return { ...NOTICE_TERMINAL_BY_STATUS.partial };
+  }
+  if (status === 'uncertain') {
+    Object.assign(outcome, { notificationSent: false, notificationUncertain: true });
+    return { ...NOTICE_TERMINAL_BY_STATUS.uncertain };
+  }
+  return classified;
+}
+
 // The text step ended inside the request: record it so the sweep never sends it again. A not-sent result is the
 // operator's to send by hand (the receipt says so); the sweep must not send it behind their back.
 function liveNotice(req, outcome) {
   const id = req && req.ibCancelBundleId;
   const classified = classifyNoticeOutcome(outcome);
   if (!id || !classified) return Promise.resolve(null);
-  return guarded('notice outcome', () => db(TABLE)
-    .where({ id, status: 'pending' })
-    .update({ notice_outcome: JSON.stringify({ ...classified, by: 'request' }), updated_at: db.fn.now() }));
+  return guarded('notice outcome', async () => {
+    const row = classified.state === 'not_sent'
+      ? await db(TABLE).where({ id }).first('scheduled_service_id', 'approved_notice')
+      : null;
+    const settled = await settleRequestNotice(row, outcome, classified);
+    return db(TABLE)
+      .where({ id, status: 'pending' })
+      .where(notHeldBySweep)
+      .update({ notice_outcome: JSON.stringify({ ...settled, by: 'request' }), updated_at: db.fn.now() });
+  });
 }
 
 // The follow-through returned: the request finished its work.
@@ -184,11 +222,9 @@ function liveFinish(req) {
   };
   return guarded('complete', () => db(TABLE)
     .where({ id, status: 'pending' })
-    // A row a sweep claimed to REPORT as exhausted is not completed under it (the report is then the record); a normal
-    // recovery claim is not blocked: the request finishing first is the case the recovery's LeaseLost handles.
-    .where(function notClaimedForReport() {
-      this.whereNull('lease_owner').orWhere('lease_owner', 'not like', `${REPORT_PREFIX}%`).orWhere('lease_until', '<', db.fn.now());
-    })
+    // Not completed under a live sweep lease (see notHeldBySweep): the sweep then finishes the row itself, idempotently,
+    // and records its own result; a normal recovery that the request beat to it still ends in the sweep's LeaseLost.
+    .where(notHeldBySweep)
     .update({
       status: 'complete',
       followthrough_done_at: db.fn.now(),

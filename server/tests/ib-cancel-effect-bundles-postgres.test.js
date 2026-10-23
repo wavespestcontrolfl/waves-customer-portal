@@ -487,7 +487,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(await app(TABLE).where({ id: held }).first()).toMatchObject({ status: 'pending', attempts: 5, lease_owner: 'request' });
     });
 
-    test('while a report claim is live the request cannot complete the row; an expired one or a recovery token does not block it', async () => {
+    test('while any sweep holds a live lease the request cannot complete the row or record a text outcome; an expired lease does not block it', async () => {
       const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
       const report = { ibCancelBundleId: id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } };
       await app(TABLE).where({ id }).update({ lease_owner: 'report:abc', lease_until: app.raw("now() + interval '5 minutes'") });
@@ -498,8 +498,13 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'complete', finish_note: 'request', lease_owner: null });
       const other = await app.transaction((trx) => svc.insertBundle(trx, pins()));
       await app(TABLE).where({ id: other }).update({ lease_owner: 'sweep-token', lease_until: app.raw("now() + interval '5 minutes'") });
+      await svc.liveNotice({ ibCancelBundleId: other }, { notificationSent: true });
       await svc.liveFinish({ ...report, ibCancelBundleId: other });
-      expect((await app(TABLE).where({ id: other }).first()).status).toBe('complete');
+      expect(await app(TABLE).where({ id: other }).first()).toMatchObject({ status: 'pending', notice_outcome: null });
+      await app(TABLE).where({ id: other }).update({ lease_until: app.raw("now() - interval '1 minute'") });
+      await svc.liveNotice({ ibCancelBundleId: other }, { notificationSent: true });
+      await svc.liveFinish({ ...report, ibCancelBundleId: other });
+      expect(await app(TABLE).where({ id: other }).first()).toMatchObject({ status: 'complete', notice_outcome: { state: 'sent', by: 'request' } });
     });
 
     const completeWithoutReceipt = async (extra = {}) => {

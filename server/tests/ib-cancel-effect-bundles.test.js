@@ -319,6 +319,48 @@ describe('the request marks its bundle complete', () => {
     expect(row.followthrough_outcome).toEqual({ money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'x' }], linked_skipped: [] });
   });
 
+  test('a request that wakes up under a live sweep lease writes no text outcome and does not complete the row', async () => {
+    const row = seedBundle({ lease_owner: 'sweep-token', lease_until: new Date(mockNow.getTime() + 5 * MIN) });
+    await svc.liveNotice({ ibCancelBundleId: row.id }, { notificationSent: false, notificationError: 'x' });
+    await svc.liveFinish({ ibCancelBundleId: row.id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } });
+    expect(row).toMatchObject({ status: 'pending', lease_owner: 'sweep-token', notice_outcome: null });
+    // Once that lease has run out the request may record again.
+    row.lease_until = new Date(mockNow.getTime() - 1 * MIN);
+    await svc.liveFinish({ ibCancelBundleId: row.id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } });
+    expect(row.status).toBe('complete');
+  });
+
+  describe('a request send that lost the text to another sender', () => {
+    const unclaimed = () => ({ notificationSent: false, notificationError: 'A cancellation notice is already being handled for this visit' });
+
+    test('stamped by the recovery but not yet audited: reported uncertain, never "send it by hand"', async () => {
+      const row = seedBundle();
+      mockNoticeStatus.mockResolvedValueOnce('uncertain');
+      const outcome = unclaimed();
+      await svc.liveNotice({ ibCancelBundleId: row.id }, outcome);
+      expect(row.notice_outcome).toMatchObject({ state: 'uncertain', by: 'request' });
+      expect(outcome).toMatchObject({ notificationSent: false, notificationUncertain: true });
+    });
+
+    test('already delivered by the other sender: recorded sent, and the request outcome says sent', async () => {
+      const row = seedBundle();
+      mockNoticeStatus.mockResolvedValueOnce('delivered');
+      const outcome = unclaimed();
+      await svc.liveNotice({ ibCancelBundleId: row.id }, outcome);
+      expect(row.notice_outcome).toMatchObject({ state: 'sent' });
+      expect(outcome.notificationSent).toBe(true);
+    });
+
+    test('a real failure (the approved send was blocked) stays not sent', async () => {
+      const row = seedBundle();
+      mockNoticeStatus.mockResolvedValueOnce('suppressed');
+      const outcome = unclaimed();
+      await svc.liveNotice({ ibCancelBundleId: row.id }, outcome);
+      expect(row.notice_outcome).toMatchObject({ state: 'not_sent' });
+      expect(outcome.notificationUncertain).toBeUndefined();
+    });
+  });
+
   test('a dispatch cancel with no bundle (no id on the request) touches nothing', async () => {
     seedBundle();
     await svc.liveStart({});
