@@ -176,6 +176,9 @@ const PRODUCT_CLASS_ENTRIES = [
   // Acelepryn is a preventive grub/caterpillar product: never curative.
   ['Acelepryn Xtra', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
   ['Acelepryn Insecticide', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
+  // Advion Insect Granule (indoxacarb mole cricket bait, lawn v13 June and July nymph spots, owner 2026-10-23): applied only on
+  // tunnel areas once mole crickets are seen, so it is locked curative like Dylox 6.2 G.
+  ['Advion Insect Granule', FAMILY.INSECTICIDE, { modeLock: 'curative' }],
 
   // Explicit "no line" decisions. Each is a decision, not an omission.
   // Adjuvants and wetting agents: no result to describe.

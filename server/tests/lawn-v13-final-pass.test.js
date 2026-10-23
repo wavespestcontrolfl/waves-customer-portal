@@ -69,7 +69,7 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
   test('V13_COUNT_CAPS keeps exactly the four names that pushed migrations 20261007175000 and 20261007177000 read when they run', () => {
     expect(caps.V13_COUNT_CAPS.map((e) => e.name)).toEqual(['Celsius WG', 'Arena 50 WDG', 'Certainty Turf Herbicide', 'Blindside Herbicide']);
     expect(caps.V13_COUNT_CAPS.every((e) => e.cap === 2)).toBe(true);
-    expect(caps.V13_LIMITS.map((e) => e.name)).toEqual([...caps.V13_COUNT_CAPS.map((e) => e.name), 'Velista', 'Artavia 2 SC (Azoxy)']);
+    expect(caps.V13_LIMITS.map((e) => e.name)).toEqual([...caps.V13_COUNT_CAPS.map((e) => e.name), 'Velista', 'Artavia 2 SC (Azoxy)', 'Tetrino Insecticide', 'Advion Insect Granule']);
     expect(Object.isFrozen(caps.V13_COUNT_CAPS) && Object.isFrozen(caps.V13_MORE_LIMITS) && Object.isFrozen(caps.V13_LIMITS)).toBe(true);
   });
 

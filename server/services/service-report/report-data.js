@@ -2772,7 +2772,9 @@ class PinnedAssessmentUnavailable extends Error {
 // p10: the lawn PDF no longer prints the "Hold irrigation until" product-advisory
 // line or a clean-visit "No lawn issues" row beside a finding, and the v6 "What
 // to expect" block drops repeated sentences. Cached lawn PDFs must re-key.
-const LAWN_RENDER_STRATEGY = 'p10-lawn-field-rules-20261007';
+// p11 (owner 2026-10-23): the April program line says "a slow-release feeding" (the 12x April bag is the polymer-coated 44-0-0), not "a light
+// feeding". Cached April lawn PDFs and renders must re-key.
+const LAWN_RENDER_STRATEGY = 'p11-lawn-slow-release-20261023';
 
 // ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a

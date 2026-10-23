@@ -2471,8 +2471,8 @@ describe('suggested from this lawn', () => {
       detail: 'Art Fungicide — mapped large patch', productIds: [P_ART], items: [ADD_ONS[2]], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
     }),
     chinch: (item = ARENA_ITEM, note = null) => card('chinch', {
-      title: 'Insects: check for chinch bugs', finding: 'Photos show moderate insect damage.', check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.',
-      detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment.`, note, productIds: [item.productId], items: [item], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
+      title: 'Insects: check for chinch bugs', finding: 'Photos show moderate insect damage.', check: 'Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.',
+      detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment, recheck at 5 and 12 days.`, note, productIds: [item.productId], items: [item], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
     }),
     takeAll: () => card('fungus', {
       title: 'Fungus', finding: 'Photos show moderate fungus activity.', check: 'Check first: look at the blades and the edge of the patch.',
@@ -2599,7 +2599,7 @@ describe('suggested from this lawn', () => {
     await open();
     await analyze();
     const group = await suggested();
-    expect(within(group).getByText('Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment.')).toBeTruthy();
+    expect(within(group).getByText('Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment, recheck at 5 and 12 days.')).toBeTruthy();
     fireEvent.click(within(group).getByRole('button', { name: 'Found at the edge. Add it' }));
     const arena = editorFor('Arena 50 WDG');
     expect(within(arena).getByText(/from the protocol/)).toBeTruthy();
@@ -3629,6 +3629,56 @@ describe('suggested from this lawn', () => {
         expect(await inSearch()).toBe(expected.search);
       });
     }
+
+    // Group 11 stacking: October's large patch Artavia row on a take-all lawn is passed over. The context names it (takeAllProductIds, held, and
+    // group11HeldProductIds, blocked), so it is out of the list AND the search from the start, even when the guide request fails.
+    describe('a Group 11 row the plan passed over (blocked from the start)', () => {
+      const group11Context = (extra = {}) => guideContext({
+        plannedProducts: {
+          ...taContext(10, MONTHS[3][1], false).plannedProducts, guidedProductIds: [P_ACE, P_DISP], takeAllProductIds: [P_HEAD], group11HeldProductIds: [P_HEAD], ...extra,
+        },
+      });
+      const openG11 = (extra) => openSheet({ request: makeRequest({ ctx: group11Context(extra) }), props: { catalog: TA_CATALOG } });
+      const G11_CASES = [
+        ['before the guide has decided', () => { guideAnswer = () => new Promise(() => {}); }],
+        ['the guide request failed', () => { guideAnswer = refusal(500, 'boom', 'Internal error'); }],
+        ['the guide answered with the row blocked', () => { answer([], WEED_MIX, { takeAllProductIds: [P_HEAD], blockedProductIds: [P_HEAD] }); }],
+      ];
+      test.each(G11_CASES)('%s: not in the protocol list and not found by the search', async (name, arrange) => {
+        arrange();
+        await openG11();
+        await analyze();
+        await waitFor(() => expect(document.querySelector('.tech-protocol-addons')).toBeTruthy());
+        if (name !== 'before the guide has decided') await waitFor(() => expect(guideCalls()).toHaveLength(1));
+        expect(inList(10)).toBe(false);
+        expect(await inSearch()).toBe(false);
+      });
+
+      test('the guide is OFF: the held row is still out of the protocol list and the search (a plain add-on without the hold)', async () => {
+        const planned = { source: 'plan', items: [PLANNED[0]], addOns: [...ADD_ONS, addOn(P_HEAD, 'Head Fungicide', MONTHS[3][1])], month: 10, weedMix: WEED_MIX };
+        await openSheet({ request: makeRequest({ ctx: guideContext({ treatmentGuide: false, plannedProducts: { ...planned, group11HeldProductIds: [P_HEAD] } }) }), props: { catalog: TA_CATALOG } });
+        await analyze();
+        expect(inList(10)).toBe(false);
+        expect(await inSearch()).toBe(false);
+      });
+
+      test('the guide is OFF and nothing is held: the row stays a plain add-on and searchable', async () => {
+        const planned = { source: 'plan', items: [PLANNED[0]], addOns: [...ADD_ONS, addOn(P_HEAD, 'Head Fungicide', MONTHS[3][1])], month: 10, weedMix: WEED_MIX };
+        await openSheet({ request: makeRequest({ ctx: guideContext({ treatmentGuide: false, plannedProducts: planned }) }), props: { catalog: TA_CATALOG } });
+        await analyze();
+        expect(inList(10)).toBe(true);
+        expect(await inSearch()).toBe(true);
+      });
+
+      test('contrast: the same take-all row with no Group 11 hold stays reachable by the search when the guide request fails', async () => {
+        guideAnswer = refusal(500, 'boom', 'Internal error');
+        await openG11({ group11HeldProductIds: [] });
+        await analyze();
+        await waitFor(() => expect(guideCalls()).toHaveLength(1));
+        expect(inList(10)).toBe(false);
+        expect(await inSearch()).toBe(true);
+      });
+    });
 
     test('guide off: Head Fungicide is a plain add-on and searchable, as before', async () => {
       await openSheet({ request: makeRequest({ ctx: guideContext({ treatmentGuide: false, plannedProducts: { source: 'plan', items: [PLANNED[0]], addOns: [...ADD_ONS, addOn(P_HEAD, 'Head Fungicide', MONTHS[3][1])], month: 10, weedMix: WEED_MIX } }) }), props: { catalog: TA_CATALOG } });

@@ -24,6 +24,23 @@ describe('LawnAssessmentCompletionBlock', () => {
     expect(request).toHaveBeenCalledWith('/admin/lawn-assessment/service/svc-1');
   });
 
+  it('the lawn sheet (compact) shows the last visit\'s four scores and overall score, read-only, from the same lookup', async () => {
+    const request = vi.fn(async () => ({ assessment: null, lastVisit: { date: '2026-09-20', overall: 74, scores: { turf_density: 70, weed_suppression: null, color_health: 78, stress_damage: 72 } } }));
+    mount({ compact: true, request });
+    const card = await screen.findByLabelText('Last visit scores');
+    expect(card.textContent).toContain('Sep 20, 2026');
+    expect(screen.getByTestId('lawn-last-visit-overall').textContent).toBe('74/100');
+    expect(screen.getByTestId('lawn-last-visit-weed_suppression').textContent).toBe('Weed control—');
+    expect(card.querySelectorAll('input, button')).toHaveLength(0);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows no last-visit row when the lookup leaves it out (read failed)', async () => {
+    mount();
+    await screen.findByLabelText('Add turf photos');
+    expect(screen.queryByLabelText('Last visit scores')).toBeNull();
+  });
+
   it('sets no text under 14px (portal brand rule), with or without the gauge reading', async () => {
     mount();
     await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());

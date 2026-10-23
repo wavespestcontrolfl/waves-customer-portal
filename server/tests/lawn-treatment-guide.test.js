@@ -154,8 +154,8 @@ describe('buildCards: the rule table', () => {
     if (shown) {
       expect(cards[0]).toMatchObject({
         title: 'Insects: check for chinch bugs',
-        check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.',
-        detail: 'Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment.', productIds: [P_ARENA], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
+        check: 'Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.',
+        detail: 'Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment, recheck at 5 and 12 days.', productIds: [P_ARENA], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
       });
       expect(cards[1]).toMatchObject({
         title: 'Insects: check for caterpillars', check: 'Check first: soap flush to bring them to the surface.', productIds: [P_ACE], actionLabel: 'Found them. Add it',
@@ -174,7 +174,7 @@ describe('buildCards: the rule table', () => {
     expect(kinds(run({ insect: 'severe' }, { offers: { ...OFFERS, chinch: null } }))).toEqual(['caterpillars']);
     const fallback = { item: item(P_TALAK, 'Atticus Talak 7.9 F'), note: 'Arena yearly limit reached; Atticus is used in its place.' };
     const cards = run({ insect: 'severe' }, { offers: { ...OFFERS, chinch: fallback } });
-    expect(cards[0]).toMatchObject({ kind: 'chinch', productIds: [P_TALAK], note: fallback.note, detail: 'Chinch bugs at the edge of the damage: Atticus Talak 7.9 F, spot treatment.' });
+    expect(cards[0]).toMatchObject({ kind: 'chinch', productIds: [P_TALAK], note: fallback.note, detail: 'Chinch bugs at the edge of the damage: Atticus Talak 7.9 F, spot treatment, recheck at 5 and 12 days.' });
   });
 
   test('caterpillars: no Acelepryn add-on this month, no card', () => {
@@ -255,6 +255,21 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
     expect(offers.fungus.item.productId).toBe(P_ART);
     expect(offers.caterpillars.item.productId).toBe(P_ACE);
     expect(offers.dry_spots.item.productId).toBe(P_DISP);
+  });
+
+  test('Group 11 stacking (take-all mapped): the large patch Artavia row is passed over for Velista and returned blocked, so no list or search offers it', async () => {
+    const rows = new Map([
+      [P_ART, { productName: 'Artavia 2 SC (Azoxy)', role: 'fungicide_spot', gates: { trigger: 'active_large_patch' } }],
+      [P_VEL, { productName: 'Velista', role: 'fungicide_spot', gates: { trigger: 'active_large_patch_take_all_mapped' } }],
+    ]);
+    const candidates = [candidate(P_VEL, 'Velista'), candidate(P_ART, 'Artavia 2 SC (Azoxy)')];
+    const mapped = await addOnOffers({ candidates, rows, svc, knex: {}, takeAllMapped: true });
+    expect(mapped.fungus.item.productId).toBe(P_VEL);
+    expect(mapped.blocked).toContain(P_ART);
+    const unmapped = await addOnOffers({ candidates, rows, svc, knex: {}, takeAllMapped: false });
+    expect(unmapped.blocked).not.toContain(P_ART);
+    // Only the Velista row is read for limits; the passed-over row needs no read.
+    expect(engine.v13VisitLimits.mock.calls[0][2].map((line) => line.product.id)).toEqual([P_VEL]);
   });
 
   test('the plan\'s own judge is asked about the products it may suggest, as selected lines', async () => {

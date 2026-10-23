@@ -36,6 +36,8 @@
  * entry asks for.
  *   Velista                       yearly amount 2.2 oz per 1,000 sq ft (label EPA 100-1534).
  *   Artavia 2 SC (Azoxy)          yearly amount 7.1 fl oz per 1,000 sq ft (label: 9.6 quarts per acre per year).
+ *   Tetrino Insecticide           yearly amount 1.47 fl oz per 1,000 sq ft (label: 64 fl oz per acre; at most 2 maximum-rate passes of
+ *                                 0.735) and 28 days between applications (label: 4 weeks). Owner 2026-10-22.
  *
  * V13_COUNT_CAPS keeps its four entries and nothing else: migrations 20261007175000 and 20261007177000
  * (pushed, frozen) read its names when they RUN, and a fifth name would make them stamp annualMaxApps 2 on
@@ -52,6 +54,7 @@
  */
 const LABEL = 'owner 2026-10-06';
 const FINAL_PASS = 'v13 final pass 2026-10-09';
+const CHINCH_PASS = 'owner 2026-10-22';
 
 const V13_COUNT_CAPS = Object.freeze([
   { name: 'Celsius WG', cap: 2, yearWindow: 'rolling365', description: `Celsius WG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` }, // label: 0.17 oz per 1,000 sq ft "per year (365 days)"
@@ -124,6 +127,41 @@ const V13_MORE_LIMITS = Object.freeze([
       description: `Artavia 2 SC (Azoxy): no more than 7.1 fl oz per 1,000 sq ft (9.6 quarts per acre) a year under the v13 lawn program, all applications on the lawn added up (label). An earlier application with no readable rate counts as 0.77 fl oz. ${FINAL_PASS}.`,
     },
   },
+  {
+    name: 'Tetrino Insecticide',
+    // Tetrino label (EPA 432-1591), chinch bugs: 16 to 32 fl oz per acre a pass (0.367 to 0.735 fl oz per 1,000 sq ft), "no more than 2
+    // applications at the maximum rate a year", at least 4 weeks (28 days) between applications, and 64 fl oz per acre a year. The label's
+    // 0.735 per 1,000 is its own conversion of 32 fl oz per acre, so two maximum-rate passes (1.47) must fit: the yearly amount is 1.47,
+    // the same conversion of 64 fl oz per acre (1.469 would block the second label-rate pass by 0.001). The yearly amount also holds the
+    // maximum-rate count: a third 0.735 pass is 2.205, and the program rate 0.367 four times (1.468) fits. v13 owner 2026-10-22
+    // (GATE_LAWN_CHINCH_TETRINO_RATE raises the May rate to 0.735). This entry limits Tetrino whether or not that gate is on, because it
+    // enforces the label for every Tetrino application the lawn records, planned, manual or added by search.
+    // An earlier application the ledger cannot size counts at the maximum rate, 0.735.
+    minIntervalDays: 28,
+    intervalDescription: `Tetrino Insecticide: at least 28 days (4 weeks) between applications on a lawn under the v13 lawn program (label EPA 432-1591; ${CHINCH_PASS}).`,
+    annualAmount: {
+      cap: 1.47,
+      unit: 'fl oz/1000sf/year',
+      fallbackRate: 0.735,
+      description: `Tetrino Insecticide: no more than 1.47 fl oz per 1,000 sq ft (64 fl oz per acre) a year under the v13 lawn program, all applications on the lawn added up (label EPA 432-1591; at most 2 applications at the maximum rate 0.735 fl oz per 1,000 sq ft). An earlier application with no readable rate counts as 0.735 fl oz. ${CHINCH_PASS}.`,
+    },
+  },
+  {
+    name: 'Advion Insect Granule',
+    // Advion Insect Granule label (EPA 100-1483): "DO NOT exceed 4.6 pounds of Advion Insect Granular Bait per 1000 sq ft per year". The v13 spot rate is
+    // 3 lb, once per spot per year, so a second 3 lb pass on the same spot is blocked and a new tunnel area is judged on its own (owner 2026-10-23). An application the ledger cannot size counts at
+    // the 3 lb program rate.
+    annualAmount: {
+      cap: 4.6,
+      unit: 'lb/1000sf/year',
+      fallbackRate: 3,
+      // The pest-control catalog row "Advion WDG Granular" is the same granule (EPA 100-1483) under another product id, and the label's yearly
+      // maximum is the product's, not a row's. History under ANY catalog row with this EPA number counts against this cap, as the shared
+      // active-ingredient caps count prodiamine across formulations (owner 2026-10-23).
+      sharedEpaRegNumber: '100-1483',
+      description: 'Advion Insect Granule: no more than 4.6 lb per 1,000 sq ft a year under the v13 lawn program, all applications at one spot added up, so one 3 lb pass per spot a year (label EPA 100-1483). An earlier application with no readable rate counts as 3 lb, the program rate.',
+    },
+  },
 ]);
 const V13_LIMITS = Object.freeze([...V13_COUNT_CAPS, ...V13_MORE_LIMITS]);
 
@@ -169,6 +207,12 @@ async function resolveCapIds(database) {
   for (const row of [...catalog].sort((a, b) => Number(b.active !== false) - Number(a.active !== false))) add(row.id, row.name);
   const aliases = await read(database, (k) => k('product_aliases').whereIn('alias_name', V13_LIMITS.map((entry) => entry.name)).select('product_id', 'alias_name'));
   for (const row of aliases) add(row.product_id, row.alias_name);
+  // (4) a cap whose label maximum is shared by every catalog row of one registered product (Advion Insect Granule and the pest-control
+  // Advion WDG Granular: EPA 100-1483): each row resolves to the entry, so the shared yearly amount is judged whichever row is applied next.
+  for (const entry of V13_LIMITS.filter((item) => item.annualAmount && item.annualAmount.sharedEpaRegNumber)) {
+    const shared = await read(database, (k) => k('products_catalog').where({ epa_reg_number: entry.annualAmount.sharedEpaRegNumber }).select('id'));
+    for (const row of shared) if (!ids.has(String(row.id))) ids.set(String(row.id), entry);
+  }
   return ids;
 }
 
@@ -279,6 +323,7 @@ function syntheticAmountLimit(entry, productId = null) {
     severity: 'hard_block',
     description: amount.description,
     fallback_rate: amount.fallbackRate,
+    ...(amount.sharedEpaRegNumber ? { history_epa_reg_number: amount.sharedEpaRegNumber } : {}),
     synthetic: true,
   };
 }

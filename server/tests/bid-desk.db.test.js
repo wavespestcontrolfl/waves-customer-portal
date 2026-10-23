@@ -30,6 +30,7 @@ const express = require('express');
 const { randomUUID } = require('crypto');
 const migration = require('../models/migrations/20261022090000_bid_desk');
 const retryMigration = require('../models/migrations/20261022100000_bid_desk_alert_retry_and_cursor_index');
+const checklistMigration = require('../models/migrations/20261023130000_bid_desk_checklist');
 const service = require('../services/bid-desk');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
 const { raiseAdminAlertWithReopen } = require('../services/admin-alert-episodes');
@@ -111,12 +112,15 @@ describeDb('Bid Desk (PostgreSQL)', () => {
   };
 
   test('the migrations are reversible', async () => {
+    // The checklist table (GATE_BID_CHECKLIST) references bid_opportunities, so it goes first and comes back last.
+    await checklistMigration.down(mockPg);
     await retryMigration.down(mockPg);
     expect(await mockPg.schema.hasColumn('bid_opportunity_emails', 'alert_kind')).toBe(false);
     await migration.down(mockPg);
     expect(await mockPg.schema.hasTable('bid_opportunities')).toBe(false);
     await migration.up(mockPg);
     await retryMigration.up(mockPg);
+    await checklistMigration.up(mockPg);
     expect(await mockPg.schema.hasTable('bid_opportunities')).toBe(true);
     expect(await mockPg.schema.hasColumn('bid_opportunity_emails', 'alert_kind')).toBe(true);
     await expect(mockPg('bid_opportunities').insert({ source: 'carrier_pigeon' })).rejects.toThrow(/source_check/);
