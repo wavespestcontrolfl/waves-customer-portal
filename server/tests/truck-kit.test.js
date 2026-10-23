@@ -457,6 +457,8 @@ describe('tool gaps by kit key', () => {
     db.__state.scheduled_services = [{ id: 'v1', technician_id: TECH, scheduled_date: today, status: 'confirmed', service_type: 'Lawn Assessment', service_id: 'svc-lawn-insp' }];
     // By name alone "Lawn Assessment" reads as a consultation; the live key says lawn_inspection.
     expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Lawn Assessment', missing: ['Soil probe (thatch)'] }]);
+    // The catalog's own fire ant service is the same spreader job, never the pest kit.
+    expect(truckKit.requirementsFor('Fire Ant Treatment', { serviceKey: 'fire_ant', serviceCategory: 'pest_control' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']) } });
     // The fire ant yard add-on is a spreader job, never the probe.
     expect(truckKit.requirementsFor('Fire Ant Yard Treatment', { serviceKey: 'area_addon_fire_ant_yard', serviceCategory: 'lawn_care' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']) } });
   });

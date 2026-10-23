@@ -107,6 +107,15 @@ test('Lost resolves the alert, marks the item lost and closes the truck bell', a
   // The outcome is on the record and in the audit log.
   expect(res.body.alert).toEqual(expect.objectContaining({ status: 'resolved', resolved_by: 'admin: lost' }));
   expect(require('../services/audit-log').recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'tool_alert_resolved', resource_id: 'a-missing', metadata: expect.objectContaining({ outcome: 'lost', equipment_id: TOOL, item_status: 'lost' }), trx: db }));
+  // A signed-in admin is the attribution, whatever the client sent as resolved_by.
+  jest.clearAllMocks();
+  db.__state.alerts['a-damaged'] = { id: 'a-damaged', equipment_id: TOOL, alert_type: 'tool_damaged', status: 'new' };
+  const layer = layerFor('put', '/alerts/:id');
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  const res2 = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await handler({ params: { id: 'a-damaged' }, body: { status: 'resolved', outcome: 'repaired', resolved_by: 'someone else' }, techRole: 'admin', technicianId: 'tech-7' }, res2, (err) => { throw err; });
+  expect(res2.body.alert.resolved_by).toBe('admin tech-7: repaired');
+  expect(require('../services/audit-log').recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ actor_id: 'tech-7' }));
   expect(db.__state.equipment[TOOL].status).toBe('lost');
   // All three writes ride one transaction, under the truck's lock, and the bell close runs on it.
   expect(db.transaction).toHaveBeenCalledTimes(1);
@@ -157,6 +166,14 @@ test('the legacy retire holds the item\'s truck lock around the probe and the wr
   expect(truckKit.lockTruck).toHaveBeenCalledWith(db, TRUCK);
   expect(db.transaction).toHaveBeenCalled();
   expect(db.__state.equipment[TOOL].status).toBe('retired');
+  // A tool that moved trucks while the retire waited for the lock is refused.
+  jest.clearAllMocks();
+  let reads = 0;
+  db.__state.equipment['e-moving'] = { id: 'e-moving', status: 'active', category: 'tool', get assigned_vehicle_id() { return reads++ === 0 ? TRUCK : 'e-other-truck'; } };
+  const res3 = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await handler({ params: { id: 'e-moving' }, body: {}, techRole: 'admin' }, res3, (err) => { throw err; });
+  expect(res3.statusCode).toBe(409);
+  expect(db.__state.equipment['e-moving'].status).toBe('active');
   // Retiring the truck itself locks the truck.
   jest.clearAllMocks();
   const res2 = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };

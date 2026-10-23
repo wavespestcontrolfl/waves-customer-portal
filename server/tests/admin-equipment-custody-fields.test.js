@@ -263,6 +263,19 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     expect(db.__state.updated).toBeNull();
   });
 
+  test('a target truck retired while the save waited for its lock is refused', async () => {
+    // vehicleTarget saw OTHER as a live vehicle; under the lock it is gone.
+    db.__state.vehicles[OTHER] = { id: OTHER };
+    const vehicles = db.__state.vehicles;
+    let reads = 0;
+    Object.defineProperty(db.__state, 'vehicles', { get: () => (reads++ === 0 ? vehicles : { [VEHICLE]: vehicles[VEHICLE] }), configurable: true });
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: OTHER } });
+    Object.defineProperty(db.__state, 'vehicles', { value: vehicles, writable: true, configurable: true });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/no longer a live vehicle/);
+    expect(db.__state.updated).toBeNull();
+  });
+
   test('moving a tool to another truck locks both trucks and re-judges the old one, in the update transaction', async () => {
     db.__state.vehicles[OTHER] = { id: OTHER };
     const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: OTHER } });

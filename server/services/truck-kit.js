@@ -136,7 +136,9 @@ const FOCUSED_KITS = [
   { line: 'tree_shrub', keys: ['backpack_sprayer'], key: /lawn_insect_spot/i, name: /\blawn\s*insect\s*spot\b/i },
   { line: 'tree_shrub', keys: ['hand_spreader'], key: /bed_pre_emergent/i, name: /\bbed\s*pre-?emergent\b/i },
   { line: 'lawn', keys: ['push_spreader'], key: /lawn_insect_preventive/i, name: /\blawn\s*insect\s*preventive\b/i },
-  { line: 'lawn', keys: ['push_spreader'], key: /fire_ant_yard/i, name: /\bfire\s*ant\s*yard\b/i },
+  // Fire ant work (the catalog's fire_ant service and the yard add-on) is
+  // broadcast bait plus a mound drench: the spreader, not the pest kit.
+  { line: 'lawn', keys: ['push_spreader'], key: /^fire_ant$|fire_ant_yard/i, name: /\bfire\s*ant\b/i },
   // The lawn assessment (catalog lawn_inspection: pH, thatch, moisture, pest
   // pressure, density) is a diagnostic: the instruments, never the spreader.
   { line: 'lawn', keys: ['soil_probe', 'soil_thermometer'], key: /^lawn_inspection$/i, name: /\blawn\s*(health\s*)?(assessment|inspection)\b/i },

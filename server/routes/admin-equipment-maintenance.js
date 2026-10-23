@@ -257,9 +257,14 @@ router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => 
     const record = await db.transaction(async (trx) => {
       const item = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category');
       // A tool locks its truck; a truck locks itself (a check in flight on
-      // it must finish or fail ownership before the truck retires).
-      const truckId = item?.category === 'vehicle' ? req.params.id : item?.assigned_vehicle_id;
+      // it must finish or fail ownership before the truck retires). The
+      // assignment is read again under the lock: a tool that moved trucks
+      // meanwhile is not retired on a truck nobody locked.
+      const itemTruck = item?.assigned_vehicle_id || null;
+      const truckId = item?.category === 'vehicle' ? req.params.id : itemTruck;
       if (truckId) await truckKit.lockTruck(trx, truckId);
+      const again = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category');
+      if (item && (!again || (again.assigned_vehicle_id || null) !== itemTruck)) return 'moved';
       if (await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
       const [row] = await trx('equipment')
         .where({ id: req.params.id })
@@ -267,6 +272,7 @@ router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => 
         .returning('*');
       return row || null;
     });
+    if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload and try again.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it with an outcome first.' });
 
     if (!record) return res.status(404).json({ error: 'Equipment not found' });
@@ -756,7 +762,9 @@ router.put('/alerts/:id', async (req, res, next) => {
       updates.resolved_at = db.fn.now();
       // The outcome is part of the record: "admin: lost" says what happened
       // to the tool even after the item's status changes again.
-      updates.resolved_by = outcome ? `${resolved_by || 'admin'}: ${outcome}` : (resolved_by || 'admin');
+      // Attribution is the signed-in admin, never client text.
+      const actor = req.technicianId ? `admin ${req.technicianId}` : (resolved_by || 'admin');
+      updates.resolved_by = outcome ? `${actor}: ${outcome}` : actor;
     }
 
     // The alert, the item's status and the bell close commit together, under
@@ -785,7 +793,7 @@ router.put('/alerts/:id', async (req, res, next) => {
         // back, instead of leaving the transaction aborted behind a swallowed
         // error.
         await require('../services/audit-log').recordAuditEvent({
-          actor_type: 'admin', action: 'tool_alert_resolved', resource_type: 'maintenance_alerts', resource_id: row.id,
+          actor_type: 'admin', actor_id: req.technicianId || null, action: 'tool_alert_resolved', resource_type: 'maintenance_alerts', resource_id: row.id,
           metadata: { outcome, equipment_id: row.equipment_id, alert_type: row.alert_type, item_status: nextStatus }, critical: true, trx,
         });
         if (item?.assigned_vehicle_id) await truckKit.closeTruckBellIfClear(item.assigned_vehicle_id, new Date(), trx);

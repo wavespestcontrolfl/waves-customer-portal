@@ -287,6 +287,12 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       for (const truckId of [...new Set(touches(first))].sort()) await truckKit.lockTruck(trx, truckId);
       const before = await trx('equipment').where({ id: req.params.id }).first(...columns);
       if (!before || before.assigned_vehicle_id !== first.assigned_vehicle_id) return 'moved';
+      // The target truck is re-validated under its lock too: a writer that
+      // retired or recategorized it while this save waited loses the race.
+      if (updates.assigned_vehicle_id) {
+        const target = await trx('equipment').where({ id: updates.assigned_vehicle_id, category: 'vehicle' }).whereNotIn('status', DEAD_ITEM_STATUSES).first('id');
+        if (!target) return 'target-gone';
+      }
       const oldTruck = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id ? (before.assigned_vehicle_id || null) : null;
       // An unresolved tool alert belongs to the truck it was found on and
       // closes only through the office's outcome (Found / Lost, Repaired /
@@ -307,6 +313,7 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     });
 
     if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload and try again.' });
+    if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
     if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });
     if (!record) return res.status(404).json({ error: 'Equipment not found' });
