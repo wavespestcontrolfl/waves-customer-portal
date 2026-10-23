@@ -1351,6 +1351,26 @@ describe('cancel with a cancelFence (the cancel recovery sweep)', () => {
     expect(clearTechCurrentJob).toHaveBeenCalledWith({ tech_id: 'tech-1', current_job_id: 'job-1', status: 'idle', conn: trx, noWait: true });
   });
 
+  // The recovery read a live tracker, another writer (the dead request) flipped it first and died before clearing tech_status.
+  test('a lost tracker race whose winner left the tech bound: the fenced cleanup still runs (and a bare cancel still does not clean)', async () => {
+    const svcWithTech = { ...svc, technician_id: 'tech-1', status: 'confirmed', track_state: 'scheduled' };
+    const fresh = { ...svcWithTech, status: 'cancelled', track_state: 'cancelled', cancelled_at: new Date('2026-07-01T15:00:00Z') };
+    const trx = jest.fn(() => query(0));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    db.mockReturnValueOnce(query(svcWithTech)).mockReturnValueOnce(query(fresh));
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result.ok).toBe(true);
+    expect(clearTechCurrentJob).toHaveBeenCalledTimes(1);
+    expect(clearTechCurrentJob).toHaveBeenCalledWith(expect.objectContaining({ tech_id: 'tech-1', current_job_id: 'job-1', noWait: true }));
+    // Unchanged for every other caller: no fence, no cleanup after a lost race.
+    clearTechCurrentJob.mockClear();
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(0))));
+    db.mockReturnValueOnce(query(svcWithTech)).mockReturnValueOnce(query(fresh));
+    await trackTransitions.cancel('job-1', { reason: 'x' });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  });
+
   test('a restore that lands after the tracker commit stops the tech cleanup, the cascade and the stale cancelled refresh', async () => {
     const svcWithTech = { ...svc, technician_id: 'tech-1' };
     const trx = jest.fn(() => query(1));

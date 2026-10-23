@@ -1711,8 +1711,10 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
   }
 
   if (svc.track_state === 'cancelled') {
-    // The tracker was already cancelled by the racing writer: no technician cleanup here (unchanged behavior).
-    const refused = await finishTrackCancellation(svc, { ...finishCtx, cleanTech: false, emitAt: svc.cancelled_at || new Date() });
+    // The tracker was already cancelled by the racing writer. Without a fence the technician cleanup is that writer's (unchanged
+    // behavior). The recovery sweep cleans it under the fence like the direct already-cancelled retry: the writer may have
+    // died after its tracker commit and before clearing tech_status.
+    const refused = await finishTrackCancellation(svc, { ...finishCtx, cleanTech: !!cancelFence, emitAt: svc.cancelled_at || new Date() });
     return refused || { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
   const refused = await finishTrackCancellation(svc, { ...finishCtx, cleanTech: true, emitAt: now });
