@@ -2317,8 +2317,12 @@ router.post('/bank-import/suggest', async (req, res, next) => {
     const noCategory = ledgerOn
       ? "(suggestion is null or (suggestion->>'categoryId') is null)"
       : "(suggestion is null or (suggestion->>'categoryId') is null or (suggestion->>'categorySource') = 'rule')";
+    // A debit a personal rule classified is not an expense to categorize
+    // either (an AI category on top of it would read "personal · category");
+    // the owner overrides the rule first. With the gate off that key is
+    // hidden too, so it does not count there.
     const notIgnored = ledgerOn
-      ? "coalesce(suggestion->>'ignore','') <> 'true'"
+      ? "coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true'"
       : "(coalesce(suggestion->>'ignore','') <> 'true' or ((suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null))";
     let q = db('bank_transactions')
       .where({ status: 'unmatched', direction: 'debit' })
@@ -2770,12 +2774,21 @@ router.post('/bank-import/:id/unignore', async (req, res, next) => {
     if (row.suggestion?.releasedRefundOf) {
       return res.status(409).json({ error: 'this credit was released after a manual refund reconciliation — it stays accounted for and cannot re-enter review' });
     }
+    // An Inbox Personal or Transfer decision wrote this ignore together with
+    // its decision keys; reopening the row drops them in the same write, or
+    // the row would read as decided (the rule passes skip it) and a Transfer
+    // would still render as an internal transfer. The matcher's own flag
+    // (no decision) stays: it is the matcher's reading, not a decision.
+    const patch = { status: 'unmatched', updated_at: new Date() };
+    if (['personal', 'transfer'].includes(row.suggestion?.decision)) {
+      patch.suggestion = bankImport.suggestionMerge({}, ['decision', 'decidedAt', 'personal', 'ignore', 'reason']);
+    }
     const changed = await db('bank_transactions')
       .where({ id: req.params.id, status: 'ignored' })
       // the CAS re-checks the released marker — a concurrent Release must
       // not be reopened by a stale unignore
       .whereRaw("suggestion->>'releasedRefundOf' is null")
-      .update({ status: 'unmatched', updated_at: new Date() });
+      .update(patch);
     if (!changed) return res.status(409).json({ error: 'row is not ignored' });
     res.json({ success: true });
   } catch (err) { next(err); }

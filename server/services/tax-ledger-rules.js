@@ -354,11 +354,15 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
   return { skip: false, writes, stale, rule, patch, removeKeys: (writes || stale) ? CLASSIFICATION_KEYS : [], guardMatcherFlag: !matcherFlag };
 }
 
-// Writes one row's outcome and books it in the counts and the hit map.
+// Writes one row's outcome and books it in the counts and the hit map —
+// only when the guarded UPDATE landed: a row that changed after the page was
+// read (a decision, a matcher flag, a link) updates nothing and counts
+// nothing, so the pass result and the rule hits report what is stored.
 async function applyClassification(row, c, counts, hits) {
   let w = db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL);
   if (c.guardMatcherFlag) w = w.whereRaw(NO_MATCHER_FLAG_SQL);
-  await w.update({ suggestion: bankImport.suggestionMerge(c.patch, c.removeKeys), updated_at: new Date() });
+  const landed = await w.update({ suggestion: bankImport.suggestionMerge(c.patch, c.removeKeys), updated_at: new Date() });
+  if (!landed) return;
   if (c.stale) counts.cleared += 1;
   if (!c.writes) return;
   counts.suggested += 1;

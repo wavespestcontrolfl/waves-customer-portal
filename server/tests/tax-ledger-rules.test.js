@@ -308,6 +308,14 @@ describe('applyRules (suggestion-only)', () => {
     ];
   });
 
+  test('counts and rule hits book only the classifications whose guarded UPDATE landed', async () => {
+    state.casResult = 0; // every row changed after the page was read (a decision, a matcher flag, a link)
+    const out = await svc.applyRules({ limit: 500 });
+    expect(out).toEqual({ examined: 9, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null });
+    expect(state.updates).toHaveLength(6); // the guarded writes were attempted
+    expect(state.ruleUpdates).toHaveLength(0); // no hit for a classification that is not stored
+  });
+
   test('merges a suggestion on each matching open row after clearing the old classification, stamps every examined row, never touches status, skips a matcher-flagged transfer, counts hits', async () => {
     const out = await svc.applyRules({ limit: 500 });
     expect(out).toEqual({ examined: 9, suggested: 3, cleared: 0, byKind: { expense: 2, income: 1 }, more: false, cursor: null });

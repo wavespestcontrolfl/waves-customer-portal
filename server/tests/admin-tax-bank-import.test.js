@@ -965,6 +965,21 @@ describe('apply-refund (gate on)', () => {
     expect(sugOf(claim).releasedRefundOf).toBe('exp-9'); // durable double-apply guard
   });
 
+  test('unignore drops an Inbox Personal/Transfer decision with the status, and leaves a matcher flag alone', async () => {
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { noMatch: true, ignore: true, reason: 'transfer per the owner', decision: 'transfer', decidedAt: '2026-09-01T00:00:00Z' } };
+    state.bankUpdates = [];
+    expect((await post('/admin/tax/bank-import/bt-1/unignore', {})).status).toBe(200);
+    expect(state.bankUpdates).toHaveLength(1);
+    expect(state.bankUpdates[0].patch.status).toBe('unmatched');
+    const write = JSON.stringify(state.bankUpdates[0].patch.suggestion);
+    for (const key of ['decision', 'decidedAt', 'personal', 'ignore', 'reason']) expect(write).toContain(key);
+    // the matcher's own flag is a reading, not a decision: the row reopens with it
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { ignore: true, reason: 'looks like an internal transfer' } };
+    state.bankUpdates = [];
+    expect((await post('/admin/tax/bank-import/bt-1/unignore', {})).status).toBe(200);
+    expect(state.bankUpdates[0].patch).toEqual({ status: 'unmatched', updated_at: expect.any(Date) });
+  });
+
   test('a RELEASED refund cannot be unignored — the terminal state is genuinely terminal', async () => {
     state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { releasedRefundOf: 'exp-9', refundUndone: { releasedWithoutRestore: true } } };
     const res = await post('/admin/tax/bank-import/bt-1/unignore', {});
@@ -1277,6 +1292,11 @@ describe('AI suggest eligibility follows the ledger kill switch', () => {
     expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
     const raws = scopeRaws();
     expect(raws).toContainEqual("(suggestion is null or (suggestion->>'categoryId') is null)");
-    expect(raws).toContainEqual("coalesce(suggestion->>'ignore','') <> 'true'");
+    expect(raws).toContainEqual("coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true'");
+  });
+  test('gate off: the hidden personal key does not take the row out of the AI pass', async () => {
+    delete process.env.GATE_TAX_LEDGER; mockDb.mockClear();
+    expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
+    expect(scopeRaws().join(' ')).not.toContain("'personal'");
   });
 });
