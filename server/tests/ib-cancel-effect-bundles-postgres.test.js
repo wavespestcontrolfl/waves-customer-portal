@@ -61,6 +61,13 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     await app.schema.createTable('job_status_history', (t) => {
       t.increments('id'); t.uuid('job_id'); t.text('from_status'); t.text('to_status'); t.timestamp('transitioned_at', { useTz: true });
     });
+    await app.schema.createTable('appointment_reminders', (t) => {
+      t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()'));
+      t.uuid('scheduled_service_id');
+      t.timestamp('cancellation_notice_at', { useTz: true });
+      t.text('cancellation_notice_state');
+      t.timestamp('updated_at', { useTz: true });
+    });
     await migration.up(app);
     svc = require('../services/ib-cancel-effect-bundles');
   });
@@ -78,6 +85,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     await app(TABLE).del();
     await app('job_status_history').del();
     await app('scheduled_services').del();
+    await app('appointment_reminders').del();
     await app('customers').del();
     await app('customers').insert({ id: customer, first_name: 'Synthia', last_name: 'Tester' });
     await app('scheduled_services').insert({ id: visit, customer_id: customer, status: 'cancelled', service_type: 'Pest Control', scheduled_date: '2099-01-15' });
@@ -282,6 +290,52 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
       expect((await app(TABLE).where({ id }).first()).restorations_seen).toBe(1);
       await app.transaction((trx) => assertCancelGeneration(trx, fenceFor(1)));
+    });
+  });
+
+  // The recovered text's claim (AppointmentReminders.claimApprovedNoticeForGeneration): the visit is share-locked and the
+  // generation proven BEFORE the reminder's approved marker is claimed, in one transaction. A single UPDATE with generation
+  // subqueries could not promise this: after a lock wait PostgreSQL re-checks only the updated tuple, so a marker replaced by
+  // a restore + re-cancel passed an older snapshot.
+  describe('recovered text claim', () => {
+    const { claimApprovedNoticeForGeneration } = jest.requireActual('../services/appointment-reminders');
+    const marker = (extra = {}) => app('appointment_reminders').insert({ scheduled_service_id: visit, cancellation_notice_state: 'pending_approved', cancellation_notice_at: app.raw("now() - interval '30 minutes'"), ...extra }).returning('*');
+    const fence = (restorations = 0) => ({ visitId: visit, restorations, hits: [] });
+
+    test('a standing cancel claims the untouched approved marker and mints a fresh token', async () => {
+      const [row] = await marker();
+      const out = await claimApprovedNoticeForGeneration(row, fence());
+      expect(out.claimed).toBe(1);
+      const after = await app('appointment_reminders').where({ id: row.id }).first();
+      expect(after.cancellation_notice_state).toBe('pending_approved');
+      expect(new Date(after.cancellation_notice_at).getTime()).toBe(new Date(out.noticeToken).getTime());
+    });
+
+    test('any other marker is not claimed', async () => {
+      const [row] = await marker({ cancellation_notice_state: 'sent' });
+      expect((await claimApprovedNoticeForGeneration(row, fence())).claimed).toBe(0);
+      expect((await app('appointment_reminders').where({ id: row.id }).first()).cancellation_notice_state).toBe('sent');
+    });
+
+    test('a restore + re-cancel that REPLACES the marker while it is in flight makes the claim fail at once and touch nothing; after it commits the old generation is refused', async () => {
+      const [row] = await marker();
+      const replaced = new Date(Date.now() - 1000);
+      const trxR = await app.transaction();
+      await trxR('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      await trxR('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed' });
+      await trxR('scheduled_services').where({ id: visit }).update({ status: 'cancelled' });
+      await trxR('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled' });
+      await trxR('appointment_reminders').where({ id: row.id }).update({ cancellation_notice_at: replaced, cancellation_notice_state: 'pending_approved' });
+      const old = fence();
+      await expect(claimApprovedNoticeForGeneration(row, old)).rejects.toMatchObject({ fenceReason: 'visit_busy' });
+      await trxR.commit();
+      const stillNew = await app('appointment_reminders').where({ id: row.id }).first();
+      expect(new Date(stillNew.cancellation_notice_at).getTime()).toBe(replaced.getTime());
+      // The new cancellation's marker is in place and the old bundle's claim is refused on the count.
+      await expect(claimApprovedNoticeForGeneration(row, fence(0))).rejects.toMatchObject({ fenceReason: 'visit_restored_since' });
+      expect(new Date((await app('appointment_reminders').where({ id: row.id }).first()).cancellation_notice_at).getTime()).toBe(replaced.getTime());
+      // The new generation's own claim goes through.
+      expect((await claimApprovedNoticeForGeneration(row, fence(1))).claimed).toBe(1);
     });
   });
 

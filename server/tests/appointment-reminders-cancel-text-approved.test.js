@@ -32,9 +32,12 @@ jest.mock('../models/db', () => {
   const qb = (table) => chain(table);
   qb.raw = (sql) => ({ __raw: String(sql) });
   qb.fn = { now: () => new Date() };
+  qb.transaction = jest.fn(async (fn) => fn(qb));
   return qb;
 });
 
+const mockFence = jest.fn(async () => {});
+jest.mock('../services/cancel-generation-fence', () => ({ assertCancelGeneration: (...a) => mockFence(...a) }));
 const mockGetTemplate = jest.fn();
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: (...a) => mockGetTemplate(...a) }));
 const mockSelectVariant = jest.fn();
@@ -64,6 +67,8 @@ beforeEach(() => {
   mockState.prefs = null;
   mockState.claim = 1;
   mockState.updates = [];
+  mockFence.mockReset();
+  mockFence.mockResolvedValue(undefined);
   mockState.audit = null;
   mockState.auditRows = [];
   mockState.wheres = [];
@@ -391,35 +396,44 @@ describe('approvedCancellationNoticeStatus', () => {
   });
 });
 
-// The recovery sweep sends with cancelGeneration: the claim itself is one statement that adopts only the untouched approved
-// marker while the visit is still the cancelled one the bundle was written for (no transition to another status since).
+// The recovery sweep sends with cancelGeneration (a cancel-generation fence). Its claim is its own small transaction: the
+// fence takes a share lock on the visit and proves the pinned generation, THEN the approved marker is claimed, so a
+// restore + re-cancel cannot replace the reminder between the proof and the claim (a single UPDATE with subqueries could
+// not promise that: PostgreSQL re-checks only the updated tuple after a lock wait).
 describe('handleCancellation with cancelGeneration (the cancel recovery sweep)', () => {
-  const RESTORATIONS = 2;
+  const FENCE = { visitId: 'svc-1', restorations: 2, hits: [] };
   const approvedNotice = [{ recipient_key: 'any', body: 'x' }];
+  const run = (outcome = {}) => AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: FENCE, outcome });
 
-  test('the tokenless claim is bound to the original cancellation generation', async () => {
-    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { restorations: RESTORATIONS }, outcome: {} });
-    expect(mockState.wheres).toContainEqual(['appointment_reminders', 'cancellation_notice_state', 'pending_approved']);
-    const raw = mockState.raws.find(([, sql]) => /FROM job_status_history h/.test(sql));
-    expect(raw).toBeTruthy();
-    // A count of restorations, never a time comparison.
-    expect(raw[1]).toMatch(/h\.from_status = 'cancelled' AND h\.to_status <> 'cancelled'\) = \?/);
-    expect(raw[1]).not.toMatch(/transitioned_at/);
-    expect(raw[2]).toEqual([RESTORATIONS]);
-    expect(mockState.raws.some(([, sql]) => /ss\.status = 'cancelled'/.test(sql))).toBe(true);
+  test('the fence is proven inside a transaction, before the marker is claimed, and only the approved marker is claimed', async () => {
+    const order = [];
+    mockFence.mockImplementationOnce(async (trx, fence) => { order.push(['fence', fence, mockState.updates.filter((u) => 'cancellation_notice_state' in u).length]); });
+    await run();
+    expect(order).toEqual([['fence', FENCE, 0]]);
+    expect(require('../models/db').transaction).toHaveBeenCalled();
+    expect(mockState.wheres).toContainEqual(['appointment_reminders', { id: 'rem-1', cancellation_notice_state: 'pending_approved' }]);
+    expect(mockState.updates.find((u) => 'cancellation_notice_state' in u)).toMatchObject({ cancellation_notice_state: 'pending_approved' });
   });
 
-  test('a claim that matches no row (the visit changed) sends nothing', async () => {
-    mockState.claim = 0;
+  test('a refused fence claims and sends nothing, and says so', async () => {
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_busy'), { code: 'CANCEL_FENCE' }));
     const outcome = {};
-    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { restorations: RESTORATIONS }, outcome });
+    await run(outcome);
+    expect(mockState.updates.filter((u) => 'cancellation_notice_state' in u)).toEqual([]);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(outcome.notificationSent).toBe(false);
   });
 
-  test('without cancelGeneration the claim carries no generation condition (the request and Dispatch are unchanged)', async () => {
+  test('a claim that matches no row (the marker is gone) sends nothing', async () => {
+    mockState.claim = 0;
+    const outcome = {};
+    await run(outcome);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(outcome.notificationSent).toBe(false);
+  });
+
+  test('without cancelGeneration the fence is never consulted (the request and Dispatch are unchanged)', async () => {
     await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, outcome: {} });
-    expect(mockState.raws.some(([, sql]) => /h\.from_status = 'cancelled' AND h\.to_status <> 'cancelled'/.test(sql))).toBe(false);
-    expect(mockState.wheres).not.toContainEqual(['appointment_reminders', 'cancellation_notice_state', 'pending_approved']);
+    expect(mockFence).not.toHaveBeenCalled();
   });
 });

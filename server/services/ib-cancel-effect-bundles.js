@@ -322,13 +322,21 @@ async function sendApprovedNotice(bundle, svc) {
   if (!isWithinSendWindowET(new Date())) return { done: false };
   const AppointmentReminders = require('./appointment-reminders');
   const reported = {};
+  const fence = { visitId: bundle.scheduled_service_id, restorations: bundle.restorations_seen, hits: [] };
   await AppointmentReminders.handleCancellation(bundle.scheduled_service_id, {
     sendNotification: true,
     outcome: reported,
     approvedNotice: bundle.approved_notice,
-    // Binds the claim itself (one statement) to THIS cancellation: see bindClaimToCancelGeneration.
-    cancelGeneration: { restorations: bundle.restorations_seen },
+    // The claim proves THIS cancellation under a share lock on the visit, in its own transaction: see
+    // AppointmentReminders.claimApprovedNoticeForGeneration.
+    cancelGeneration: fence,
   });
+  // The claim was refused by the fence: nothing was claimed or sent. Changed visit: abandon. Only busy: retry next pass.
+  if (fence.hits.length) {
+    const standing = await cancelStillStands(bundle);
+    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
+    throw new Error(`the visit was busy (${fence.hits.join(', ')}); the text will retry`);
+  }
   const classified = classifyNoticeOutcome(reported)
     || { state: 'uncertain', error: 'no result was reported' };
   // Nothing went out and the claim was refused: the visit may have changed between the check and the claim. Say so

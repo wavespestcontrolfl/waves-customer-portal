@@ -2550,6 +2550,9 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
           });
       })
       .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'suppressed', updated_at: noticeToken });
+  } else if (options.cancelGeneration) {
+    // The recovery sweep's approved text: claimed under the visit's cancel generation (see the helper).
+    return claimApprovedNoticeForGeneration(record, options.cancelGeneration);
   } else {
     noticeToken = require('./job-status').nextClaimTs();
     // Tokenless claims (routes) take NULL rows AND adopt any 'pending'
@@ -2559,7 +2562,8 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
     // recheck at the handoff + token-conditional finalize + the
     // accepted-audit pre-send check) keep a stolen lease from
     // double-texting.
-    claimed = await bindClaimToCancelGeneration(db('appointment_reminders').where({ id: record.id }), options.cancelGeneration)
+    claimed = await db('appointment_reminders')
+      .where({ id: record.id })
       .where(function claimable() {
         this.whereNull('cancellation_notice_at')
           .orWhere(function freshSingleton() {
@@ -2609,22 +2613,25 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
 }
 
 // The Intelligence Bar cancel recovery sweep (services/ib-cancel-effect-bundles.js) sends a dead request's approved text
-// with `cancelGeneration: { restorations }`. The claim is then ONE statement that adopts only the untouched approved marker
-// and only while the visit is still cancelled and its restoration count (job_status_history rows leaving 'cancelled') equals
-// the count the cancel transaction pinned. A visit restored and cancelled again has a higher count (and a fresh marker), so
-// the old approved text can never be adopted by a newer cancellation. No times are compared (a history row's
-// transitioned_at is its transaction's START, which can precede the bundle). A restore in flight clears this marker in its
-// own transaction, so the claim waits for it and then finds no marker. Every later step (pre-dispatch stamp, finalize) is
-// fenced by the token this claim mints.
-function bindClaimToCancelGeneration(query, cancelGeneration) {
-  if (!cancelGeneration) return query;
-  return query
-    .where('cancellation_notice_state', 'pending_approved')
-    .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
-    .whereRaw(
-      "(SELECT count(*) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.from_status = 'cancelled' AND h.to_status <> 'cancelled') = ?",
-      [Number(cancelGeneration.restorations)],
-    );
+// with `cancelGeneration` (a cancel-generation fence: { visitId, restorations, hits }). Its claim is its own small
+// transaction: it takes FOR SHARE NOWAIT on the VISIT row first and proves the visit is still cancelled with the pinned
+// restoration count (services/cancel-generation-fence.js), and only then claims the reminder's untouched approved marker,
+// all before the transaction ends. While the share lock is held no restore can change the visit's status, so no new
+// cancellation (which needs a restore first) can replace this reminder's marker between the proof and the claim; a restore
+// or re-cancel already in flight holds the visit lock and makes the claim fail at once (visit_busy). A single UPDATE with
+// generation subqueries was NOT enough: PostgreSQL re-checks only the updated tuple after a lock wait, so a replaced marker
+// passed an older statement snapshot. No times are compared. Every later step (pre-dispatch stamp, finalize) is fenced by
+// the token this claim mints. Returns { noticeToken, claimed } like claimCancellationNotice; a refused fence rethrows.
+async function claimApprovedNoticeForGeneration(record, cancelGeneration) {
+  const { assertCancelGeneration } = require('./cancel-generation-fence');
+  const noticeToken = require('./job-status').nextClaimTs();
+  const claimed = await db.transaction(async (trx) => {
+    await assertCancelGeneration(trx, cancelGeneration);
+    return trx('appointment_reminders')
+      .where({ id: record.id, cancellation_notice_state: 'pending_approved' })
+      .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending_approved', updated_at: noticeToken });
+  });
+  return { noticeToken, claimed };
 }
 
 // A sendNotification:false cancel that already owns a claim finalizes it as terminal 'suppressed'.
@@ -5054,6 +5061,9 @@ const AppointmentReminders = {
   },
 
   // Read-only: where the card-approved cancellation text of a visit stands (approvedNoticeStatus, above).
+  // Exposed for the real-PostgreSQL race test of the recovery claim.
+  claimApprovedNoticeForGeneration,
+
   async approvedCancellationNoticeStatus(scheduledServiceId, options = {}) {
     return approvedNoticeStatus(scheduledServiceId, options);
   },

@@ -339,7 +339,7 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
     expect(mockHandleCancellation.mock.calls[0][0]).toBe(SERVICE);
     expect(mockHandleCancellation.mock.calls[0][1]).toMatchObject({ sendNotification: true, approvedNotice: NOTICE });
     // The claim itself is bound to this cancellation (one statement), and the delivery proof counts every approved recipient.
-    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toEqual({ restorations: 0 });
+    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toEqual({ visitId: SERVICE, restorations: 0, hits: [] });
     expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, { recipients: 1 });
     expect(mockStore.bundles[0]).toMatchObject({ status: 'recovered', finish_note: 'sweep', lease_owner: null });
     expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'sent', by: 'sweep' });
@@ -504,6 +504,30 @@ describe('the text claim is bound to the original cancellation', () => {
     await svc.sweepIbCancelBundles();
     expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'not_sent' });
     expect(mockStore.bundles[0].status).toBe('recovered');
+  });
+});
+
+describe('a text claim the fence refused', () => {
+  test('only busy: nothing is saved or sent, and the text retries on the next pass', async () => {
+    seedBundle();
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      opts.cancelGeneration.hits.push('visit_busy');
+      Object.assign(opts.outcome, { notificationSent: false, notificationError: 'cancellation fence: visit_busy' });
+    });
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ failed: 1, recovered: 0 });
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'pending', notice_outcome: null });
+    expect(mockStore.bundles[0].followthrough_done_at).toBeTruthy();
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ recovered: 1 });
+    expect(mockFollowThrough).toHaveBeenCalledTimes(1);
+  });
+
+  test('a changed visit abandons the bundle', async () => {
+    seedBundle();
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      opts.cancelGeneration.hits.push('visit_is_confirmed');
+      mockStore.visits[0].status = 'confirmed';
+    });
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ abandoned: 1 });
   });
 });
 
