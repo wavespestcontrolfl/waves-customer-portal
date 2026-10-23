@@ -236,7 +236,10 @@ describe('GET /equipment', () => {
 
 // PR 2: the kit key rides with the custody columns and the dialog's
 // suggestions come from the truck kit's vocabulary.
-jest.mock('../services/truck-kit', () => ({ kitKeyVocabulary: jest.fn(async () => [{ kit_key: 'moisture_meter', label: 'Moisture meter' }]) }));
+jest.mock('../services/truck-kit', () => ({
+  truckKitEnabled: jest.fn(() => true),
+  kitKeyVocabulary: jest.fn(async () => [{ kit_key: 'moisture_meter', label: 'Moisture meter' }]),
+}));
 
 describe('kit key', () => {
   test('is normalized to snake_case, cleared when blank, refused when not a key', async () => {
@@ -251,8 +254,12 @@ describe('kit key', () => {
     expect(db.__state.inserted).toBeNull();
   });
 
-  test('GET /kit-keys answers the vocabulary', async () => {
+  test('GET /kit-keys answers the vocabulary with the gate on, 404 enabled:false with it off', async () => {
     const res = await run('get', '/kit-keys');
-    expect(res.body).toEqual({ keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });
+    expect(res.body).toEqual({ enabled: true, keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });
+    require('../services/truck-kit').truckKitEnabled.mockReturnValueOnce(false);
+    const dark = await run('get', '/kit-keys');
+    expect(dark.statusCode).toBe(404);
+    expect(dark.body).toEqual({ enabled: false });
   });
 });

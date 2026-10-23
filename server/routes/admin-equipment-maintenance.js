@@ -710,14 +710,26 @@ router.put('/alerts/:id', async (req, res, next) => {
       }
       if (status !== 'resolved') return res.status(400).json({ error: 'an outcome resolves the alert' });
     }
+    // A tool alert never closes without saying what happened to the tool:
+    // a plain resolve would count the item as back on the truck.
+    if (toolAlert && status === 'resolved' && outcome === undefined) {
+      return res.status(400).json({ error: 'resolving a truck check alert needs an outcome: found, repaired, replaced, lost or retired' });
+    }
     const updates = { status, updated_at: db.fn.now() };
     if (status === 'resolved') {
       updates.resolved_at = db.fn.now();
       updates.resolved_by = resolved_by || 'admin';
     }
 
-    // The alert, the item's status and the bell close commit together.
+    // The alert, the item's status and the bell close commit together, under
+    // the truck's lock so a running truck check and this resolve never
+    // interleave (the check would re-ring a bell no open alert could clear).
     const record = await db.transaction(async (trx) => {
+      let item = null;
+      if (toolAlert) {
+        item = await trx('equipment').where('id', existing.equipment_id).first('assigned_vehicle_id');
+        if (item?.assigned_vehicle_id) await truckKit.lockTruck(trx, item.assigned_vehicle_id);
+      }
       const [row] = await trx('maintenance_alerts')
         .where('id', req.params.id)
         .update(updates)
@@ -726,7 +738,6 @@ router.put('/alerts/:id', async (req, res, next) => {
       if (status === 'resolved' && toolAlert) {
         const nextStatus = outcome ? TOOL_OUTCOME_STATUS[outcome] : null;
         if (nextStatus) await trx('equipment').where('id', row.equipment_id).update({ status: nextStatus, updated_at: db.fn.now() });
-        const item = await trx('equipment').where('id', row.equipment_id).first('assigned_vehicle_id');
         if (item?.assigned_vehicle_id) await truckKit.closeTruckBellIfClear(item.assigned_vehicle_id, new Date(), trx);
       }
       return row;

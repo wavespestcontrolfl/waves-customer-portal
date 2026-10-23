@@ -12,6 +12,7 @@ jest.mock('../services/equipment-maintenance', () => ({}));
 jest.mock('../services/truck-kit', () => ({
   TOOL_ALERT_TYPES: ['tool_missing', 'tool_damaged'],
   closeTruckBellIfClear: jest.fn(async () => true),
+  lockTruck: jest.fn(async () => ({ rows: [] })),
 }));
 jest.mock('../models/db', () => {
   const state = { alerts: {}, equipment: {}, updates: [] };
@@ -77,9 +78,23 @@ test('Lost resolves the alert, marks the item lost and closes the truck bell', a
   expect(res.statusCode).toBe(200);
   expect(res.body.alert).toEqual(expect.objectContaining({ status: 'resolved', resolved_by: 'admin' }));
   expect(db.__state.equipment[TOOL].status).toBe('lost');
-  // All three writes ride one transaction, and the bell close runs on it.
+  // All three writes ride one transaction, under the truck's lock, and the bell close runs on it.
   expect(db.transaction).toHaveBeenCalledTimes(1);
+  expect(truckKit.lockTruck).toHaveBeenCalledWith(db, TRUCK);
   expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(TRUCK, expect.any(Date), db);
+  const lockAt = truckKit.lockTruck.mock.invocationCallOrder[0];
+  const updateAt = db.mock.invocationCallOrder.find((n) => n > lockAt);
+  expect(updateAt).toBeGreaterThan(lockAt);
+});
+
+test('a tool alert never resolves without an outcome', async () => {
+  const res = await put('a-missing', { status: 'resolved' });
+  expect(res.statusCode).toBe(400);
+  expect(res.body.error).toMatch(/outcome/);
+  expect(db.__state.alerts['a-missing'].status).toBe('new');
+  expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
+  // Acknowledging it (not resolving) still needs no outcome.
+  expect((await put('a-missing', { status: 'acknowledged' })).statusCode).toBe(200);
 });
 
 test('Found resolves the alert, leaves the item alone and still checks the bell', async () => {

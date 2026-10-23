@@ -159,6 +159,7 @@ const OVERRIDABLE_CATEGORIES = [
   'typed_decisions',
   'llm_cost',
   'review_low_rating',
+  'truck_kit',
 ];
 const OVERRIDABLE_CATEGORY_SET = new Set(OVERRIDABLE_CATEGORIES);
 

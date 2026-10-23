@@ -50,8 +50,34 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 
 const CATEGORY = 'truck_kit';
 const LINK = '/admin/equipment?tab=maintenance';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A combined job ("Quarterly Pest + Termite Bait Station") reads as ONE line
+// for the report layout (detectServiceLine) but needs every named line's
+// tools. A companion line is any checklist line the service name mentions.
+const COMPANION_LINES = [
+  ['termite', /\b(termite|wdo)\b/],
+  ['rodent', /\b(rodent|rat|rats|mouse|mice)\b/],
+  ['mosquito', /\bmosquito\b/],
+  ['pest', /\bpest\b/],
+  ['lawn', /\b(lawn|turf)\b/],
+  ['tree_shrub', /\b(tree|shrub|ornamental)\b/],
+];
 
 const bellKey = (vehicleId) => `truck-kit:${vehicleId}`;
+// One advisory lock per truck: a check and an office resolve on the same
+// truck never interleave (both take it inside their transaction).
+const lockTruck = (conn, vehicleId) => conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [bellKey(vehicleId)]);
+
+// The checklist lines a visit's tools come from: the primary line plus every
+// companion line its service name mentions, in that order, once each.
+function serviceLinesFor(serviceType) {
+  const lines = [];
+  if (!String(serviceType || '').trim()) return lines;
+  const primary = detectServiceLine(serviceType);
+  if (primary) lines.push(primary);
+  const text = String(serviceType || '').toLowerCase();
+  for (const [line, re] of COMPANION_LINES) if (re.test(text) && !lines.includes(line)) lines.push(line);
+  return lines;
+}
 
 function truckKitEnabled() {
   return truckKitLive();
@@ -117,10 +143,17 @@ const parseGroups = (value) => {
 // The tools a service line's checklists require, by kit key (PR 2). An item
 // without a key, or marked optional, is display-only and never a gap.
 async function requiredToolsForLine(serviceLine, conn = db) {
-  if (!serviceLine) return [];
-  const rows = await conn('equipment_checklists').where({ service_line: serviceLine }).select('checklist_items');
+  return requiredToolsForLines([serviceLine], conn);
+}
+
+// The same across several lines (a combined job), once per key.
+async function requiredToolsForLines(serviceLines, conn = db) {
+  const lines = [...new Set((Array.isArray(serviceLines) ? serviceLines : [serviceLines]).filter(Boolean))];
+  if (!lines.length) return [];
+  const rows = await conn('equipment_checklists').whereIn('service_line', lines).select('service_line', 'checklist_items');
   const byKey = new Map();
-  for (const row of rows) {
+  // Primary line's tools first, then each companion's, whatever the table order.
+  for (const row of lines.flatMap((line) => rows.filter((r) => r.service_line === line))) {
     for (const group of parseGroups(row.checklist_items)) {
       for (const item of Array.isArray(group?.items) ? group.items : []) {
         const key = normalizeKitKey(item?.kit_key);
@@ -155,12 +188,13 @@ async function kitKeyVocabulary(conn = db) {
 // tool alert (reported missing or damaged on the last check).
 const keysOnTruck = (kit) => new Set(kit.filter((item) => item.kit_key && !item.open_issue).map((item) => normalizeKitKey(item.kit_key)));
 
-// What a truck lacks for a service line. Empty when the truck has no keyed row
-// at all (keys are not set up for it) or the line requires nothing keyed.
-async function toolGapsForTruck(vehicleId, serviceLine, conn = db) {
+// What a truck lacks for a service line (or several, for a combined job).
+// Empty when the truck has no keyed row at all (keys are not set up for it)
+// or the lines require nothing keyed.
+async function toolGapsForTruck(vehicleId, serviceLines, conn = db) {
   const kit = await kitForTruck(vehicleId, conn);
   if (!kit.some((item) => item.kit_key)) return [];
-  const required = await requiredToolsForLine(serviceLine, conn);
+  const required = await requiredToolsForLines(serviceLines, conn);
   if (!required.length) return [];
   const onTruck = keysOnTruck(kit);
   return required.filter((tool) => !onTruck.has(tool.kit_key));
@@ -176,11 +210,14 @@ function toolGapLabel(gaps) {
 // The Schedule readiness strip's exception for one visit (job-card.js
 // dispatchReadiness), or null: a required tool the assigned truck lacks is a
 // hold like company stock or weather.
-async function toolGapIssue({ technicianId, serviceLine }, conn = db) {
-  if (!truckKitLive() || !technicianId || !serviceLine) return null;
+// serviceType, when given, adds the companion lines of a combined job.
+async function toolGapIssue({ technicianId, serviceLine, serviceType }, conn = db) {
+  if (!truckKitLive() || !technicianId) return null;
+  const lines = serviceType ? serviceLinesFor(serviceType) : [serviceLine].filter(Boolean);
+  if (!lines.length) return null;
   const truck = await truckForTechnician(technicianId, conn);
   if (!truck) return null;
-  const gaps = await toolGapsForTruck(truck.id, serviceLine, conn);
+  const gaps = await toolGapsForTruck(truck.id, lines, conn);
   if (!gaps.length) return null;
   return { kind: 'tools', status: 'hold', label: toolGapLabel(gaps), tools: gaps.map((gap) => gap.kit_key) };
 }
@@ -196,12 +233,13 @@ async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = 
   const kit = await kitForTruck(truck.id, conn);
   if (!kit.some((item) => item.kit_key)) return [];
   const onTruck = keysOnTruck(kit);
-  const requiredByLine = new Map();
+  const requiredByLines = new Map();
   const out = [];
   for (const visit of visits) {
-    const line = detectServiceLine(visit.service_type);
-    if (!requiredByLine.has(line)) requiredByLine.set(line, await requiredToolsForLine(line, conn));
-    const missing = requiredByLine.get(line).filter((tool) => !onTruck.has(tool.kit_key));
+    const lines = serviceLinesFor(visit.service_type);
+    const key = lines.join('+');
+    if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn));
+    const missing = requiredByLines.get(key).filter((tool) => !onTruck.has(tool.kit_key));
     if (missing.length) out.push({ serviceId: visit.id, serviceType: visit.service_type, missing: missing.map((tool) => tool.label) });
   }
   return out;
@@ -286,7 +324,9 @@ async function openToolAlert({ line, technician, now, conn }) {
     .whereIn('status', OPEN_ALERT_STATUSES)
     .update({ status: 'resolved', resolved_at: now, resolved_by: `truck check by ${who}: now ${line.state}`, updated_at: now });
   if (open) {
-    await conn('maintenance_alerts').where({ id: open.id }).update({ description, updated_at: now });
+    // A repeat report with no new note keeps the earlier description: the
+    // first report may say where the tool was last seen.
+    await conn('maintenance_alerts').where({ id: open.id }).update(line.note ? { description, updated_at: now } : { updated_at: now });
     return open.id;
   }
   const alert = await reportEquipmentIssue({
@@ -326,7 +366,9 @@ async function raiseTruckBell({ truck, technician, missing, damaged, check, trx 
     dedupeOpenOnly: true,
     refreshOnDedupe: true,
     bumpOnRefresh: true,
-    bell: true,
+    // Rings by default; the owner can silence the truck_kit category in
+    // Settings (bellDefault sits below the saved category override).
+    bellDefault: true,
     trx,
     detail,
     metadata: { vehicleId: truck.id, checkId: check.id, missing: missing.length, damaged: damaged.length },
@@ -357,7 +399,7 @@ async function recordTruckCheck({ technicianId, results, now = new Date() }) {
   return db.transaction(async (trx) => {
     const truck = await truckForTechnician(technicianId, trx);
     if (!truck) throw new TruckCheckError('no_truck', 'No truck is assigned to you');
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`truck-kit:${truck.id}`]);
+    await lockTruck(trx, truck.id);
     const kit = await kitForTruck(truck.id, trx);
     const kitIds = new Set(kit.map((item) => item.id));
     if (wanted.size !== kit.length || [...wanted.keys()].some((id) => !kitIds.has(id))) {
@@ -406,6 +448,9 @@ module.exports = {
   closeTruckBellIfClear,
   bellSpec,
   requiredToolsForLine,
+  requiredToolsForLines,
+  serviceLinesFor,
+  lockTruck,
   kitKeyVocabulary,
   toolGapsForTruck,
   toolGapIssue,

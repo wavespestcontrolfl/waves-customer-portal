@@ -314,7 +314,10 @@ function EquipmentTab({
   const [technicians, setTechnicians] = useState([]);
   // Kit key suggestions: the keyed checklist items and the keys already in use
   // (admin only, with the dialog). A failed read leaves plain typing.
-  const [kitKeys, setKitKeys] = useState([]);
+  // Kit keys exist only while GATE_TRUCK_KIT is on: the server says so on
+  // the vocabulary read (404 { enabled: false } when off), and the field
+  // stays away until it does (fail closed).
+  const [kitKeys, setKitKeys] = useState({ enabled: false, keys: [] });
   // "" = every row, a vehicle id = that truck's roster, "none" = on no truck.
   const [vehicleFilter, setVehicleFilter] = useState("");
   const loadSeq = useRef(0);
@@ -346,9 +349,9 @@ function EquipmentTab({
       if (!cancelled) setTechnicians([]);
     });
     adminFetch("/admin/equipment/kit-keys").then(d => {
-      if (!cancelled) setKitKeys(d.keys || []);
+      if (!cancelled) setKitKeys(d?.enabled === true ? { enabled: true, keys: d.keys || [] } : { enabled: false, keys: [] });
     }).catch(() => {
-      if (!cancelled) setKitKeys([]);
+      if (!cancelled) setKitKeys({ enabled: false, keys: [] });
     });
     return () => {
       cancelled = true;
@@ -375,6 +378,8 @@ function EquipmentTab({
           if (payload[k] === "" || payload[k] == null) payload[k] = null;
         });
         if (!payload.purchase_date) payload.purchase_date = null;
+        // No Kit key field without the gate: never send the column back.
+        if (!kitKeys.enabled) delete payload.kit_key;
         if (editing.id) {
           await adminFetch(`/admin/equipment/equipment/${editing.id}`, {
             method: "PUT",
@@ -551,7 +556,7 @@ function EquipmentEditModal({
   equipment: e,
   vehicles = [],
   technicians = [],
-  kitKeys = [],
+  kitKeys = { enabled: false, keys: [] },
   onChange,
   onClose,
   onSave,
@@ -635,7 +640,7 @@ function EquipmentEditModal({
           {field("asset_tag", "Asset tag")}
           {field("status", "Status", "text", STATUSES)}
           {e.category !== "vehicle" && choice("assigned_vehicle_id", "Truck", truckOptions)}
-          {e.category !== "vehicle" && <Field label="Kit key" help="What this tool is, matching the checklist item it satisfies" className="min-w-0">
+          {kitKeys.enabled && e.category !== "vehicle" && <Field label="Kit key" help="What this tool is, matching the checklist item it satisfies" className="min-w-0">
               <Input list="equipment-kit-keys" value={e.kit_key ?? ""} onChange={ev => onChange({
           ...e,
           kit_key: ev.target.value
@@ -653,7 +658,7 @@ function EquipmentEditModal({
         </div>
         <div className="mt-3">{field("notes", "Notes", "textarea")}</div>
         <datalist id="equipment-kit-keys">
-          {kitKeys.map(k => <option key={k.kit_key} value={k.kit_key}>
+          {kitKeys.keys.map(k => <option key={k.kit_key} value={k.kit_key}>
               {k.label}
             </option>)}
         </datalist>

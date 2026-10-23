@@ -15,9 +15,15 @@
 > to that state on the next check, so a tap on "Everything's here" can never
 > quietly find it. PR 3 (receipt link, Intelligence Bar reads, the tax de
 > minimis threshold) is NOT built: decision 7 is still the owner's and the
-> accountant's. No database was available to the build session; the two
+> accountant's. No database was available to the build session; the
 > migrations were exercised against stub builders only, so the first preview
-> deploy is the migration proof.
+> deploy is the migration proof. Codex round 1 (#6496 / #6497, 2026-10-23):
+> asset create and edit are admin-only; a vehicle is never cargo; the Kit key
+> field needs the gate; a tool alert resolves only with an outcome, under the
+> truck's lock; a repeat check keeps the earlier note; the bell is
+> owner-silenceable; a combined job reads every line its name mentions; the
+> termite flashlight-and-probe item is split into two keys
+> (`20261023000030`).
 
 Scope proposal, 2026-10-22. It proposes; it decides nothing. Section 8 lists the
 owner decisions. Every "exists" claim below was read from the portal checkout at

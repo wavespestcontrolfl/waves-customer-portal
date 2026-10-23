@@ -259,7 +259,10 @@ describe('recordTruckCheck', () => {
     expect(composed.headline).toBe('Inventory — find or replace 2 tools on VEH-001');
     expect(composed.why).toBe('Synthetic found missing Moisture meter and damaged B&G 1 gal sprayer on the truck check');
     expect(composed.metadata).toEqual(expect.objectContaining({ subject: { type: 'equipment', id: TRUCK }, doneWhen: 'tool_alerts_resolved', who: 'person' }));
-    expect(opts).toEqual(expect.objectContaining({ dedupeKey: `truck-kit:${TRUCK}`, dedupeOpenOnly: true, refreshOnDedupe: true, bell: true, trx: expect.anything() }));
+    // bellDefault, not bell: the owner can silence the truck_kit category in Settings.
+    expect(opts).toEqual(expect.objectContaining({ dedupeKey: `truck-kit:${TRUCK}`, dedupeOpenOnly: true, refreshOnDedupe: true, bellDefault: true, trx: expect.anything() }));
+    expect(opts.bell).toBeUndefined();
+    expect(require('../services/notification-bell-policy').OVERRIDABLE_CATEGORIES).toContain('truck_kit');
     expect(reportEquipmentIssue.mock.calls.every(([args]) => args.conn)).toBe(true);
     expect(opts.detail).toBe('Missing: Moisture meter (T-002)\nDamaged: B&G 1 gal. sprayer (T-001) · Pump leaks');
     expect(closeAdminAlertKeys).not.toHaveBeenCalled();
@@ -273,6 +276,10 @@ describe('recordTruckCheck', () => {
     expect(db.__state.maintenance_alerts).toHaveLength(1);
     expect(db.__state.maintenance_alerts[0]).toEqual(expect.objectContaining({ status: 'new', description: expect.stringContaining('Still gone'), updated_at: NOW }));
     expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
+    // A repeat with no note keeps the earlier description (where it was last seen).
+    await truckKit.recordTruckCheck({ technicianId: TECH, results: results('missing', 'present'), now: NOW });
+    expect(db.__state.maintenance_alerts).toHaveLength(1);
+    expect(db.__state.maintenance_alerts[0].description).toContain('Still gone');
 
     await truckKit.recordTruckCheck({ technicianId: TECH, results: results('present', 'present'), now: NOW });
     expect(db.__state.maintenance_alerts[0]).toEqual(expect.objectContaining({ status: 'resolved', resolved_at: NOW, resolved_by: 'truck check by Synthetic Tech' }));
@@ -338,6 +345,26 @@ describe('tool gaps by kit key', () => {
   };
   beforeEach(seedKeys);
 
+  test('a combined job reads every line its name mentions, once each', () => {
+    expect(truckKit.serviceLinesFor('Quarterly Pest + Termite Bait Station')).toEqual(['pest', 'termite']);
+    expect(truckKit.serviceLinesFor('Pest & Rodent Control')).toEqual(['pest', 'rodent']);
+    expect(truckKit.serviceLinesFor('Termite Inspection')).toEqual(['termite']);
+    expect(truckKit.serviceLinesFor('Lawn Pest Treatment')).toEqual(['lawn', 'pest']);
+    expect(truckKit.serviceLinesFor('')).toEqual([]);
+  });
+
+  test('a combined visit holds for the companion line\'s tools', async () => {
+    db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
+    db.__state.equipment.push({ id: '66666666-2222-4333-8444-555555555555', name: 'Flashlight', category: 'tool', status: 'active', assigned_vehicle_id: TRUCK, kit_key: 'flashlight' });
+    // By line alone the pest checklist is satisfied; by service type the termite meter is a gap.
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'pest' })).toBeNull();
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'pest', serviceType: 'Quarterly Pest + Termite Bait Station' }))
+      .toEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });
+    expect(await truckKit.requiredToolsForLines(['pest', 'termite'])).toEqual([
+      { kit_key: 'bg_sprayer', label: 'B&G 1 gal sprayer (interior)' }, { kit_key: 'flashlight', label: 'Flashlight' }, { kit_key: 'moisture_meter', label: 'Moisture meter' },
+    ]);
+  });
+
   test('requiredToolsForLine keeps only keyed, required items, once per key', async () => {
     expect(await truckKit.requiredToolsForLine('termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
     expect(await truckKit.requiredToolsForLine('lawn')).toEqual([]);
@@ -381,11 +408,13 @@ describe('tool gaps by kit key', () => {
       { id: 'v3', technician_id: TECH, scheduled_date: '2000-01-01', status: 'confirmed', service_type: 'Termite Inspection' },
       { id: 'v4', technician_id: 'someone-else', scheduled_date: today, status: 'confirmed', service_type: 'Termite Inspection' },
       { id: 'v5', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Quarterly Pest Control' },
+      { id: 'v6', technician_id: TECH, scheduled_date: today, status: 'pending', service_type: 'Quarterly Pest + Termite Bait Station' },
     ];
     const status = await truckKit.truckKitStatus(TECH, { now: NOW });
     expect(status.gaps).toEqual([
       { serviceId: 'v1', serviceType: 'Termite Inspection', missing: ['Moisture meter'] },
       { serviceId: 'v5', serviceType: 'Quarterly Pest Control', missing: ['Flashlight'] },
+      { serviceId: 'v6', serviceType: 'Quarterly Pest + Termite Bait Station', missing: ['Flashlight', 'Moisture meter'] },
     ]);
   });
 

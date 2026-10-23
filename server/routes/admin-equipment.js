@@ -155,9 +155,13 @@ router.get('/equipment', async (req, res, next) => {
 
 // GET /kit-keys — every kit key in use (checklist items and equipment rows),
 // for the Assets dialog's suggestions (docs/tool-inventory-tracker-scope.md PR 2).
+// The gate's answer is the dialog's capability: off = 404 { enabled: false }
+// and the Kit key field stays away (fail closed, like the tech route).
 router.get('/kit-keys', async (req, res, next) => {
   try {
-    res.json({ keys: await require('../services/truck-kit').kitKeyVocabulary() });
+    const truckKit = require('../services/truck-kit');
+    if (!truckKit.truckKitEnabled()) return res.status(404).json({ enabled: false });
+    res.json({ enabled: true, keys: await truckKit.kitKeyVocabulary() });
   } catch (err) {
     next(err);
   }

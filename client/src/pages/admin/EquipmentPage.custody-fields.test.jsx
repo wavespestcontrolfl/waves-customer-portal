@@ -144,7 +144,7 @@ describe('kit key', () => {
   it('offers the checklist keys as suggestions and saves the typed key', async () => {
     const stub = fetch.getMockImplementation();
     fetch.mockImplementation(async (url, options = {}) => {
-      if (String(url).includes('/admin/equipment/kit-keys')) return ok({ keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });
+      if (String(url).includes('/admin/equipment/kit-keys')) return ok({ enabled: true, keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });
       return stub(url, options);
     });
     mountAssets();
@@ -160,7 +160,29 @@ describe('kit key', () => {
     expect(puts[0]).toEqual(expect.objectContaining({ kit_key: 'moisture_meter' }));
   });
 
+  it('with GATE_TRUCK_KIT off the dialog has no Kit key field and sends no kit_key', async () => {
+    const stub = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => {
+      if (String(url).includes('/admin/equipment/kit-keys')) return { ok: false, status: 404, json: async () => ({ enabled: false }) };
+      return stub(url, options);
+    });
+    mountAssets();
+    await screen.findByText(TOOL.name);
+    fireEvent.click(within(cardOf(TOOL.name)).getByRole('button', { name: 'Edit' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    expect(dialog.getByLabelText('Asset tag')).toBeInTheDocument();
+    expect(dialog.queryByLabelText('Kit key')).not.toBeInTheDocument();
+    fireEvent.click(dialog.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0]).not.toHaveProperty('kit_key');
+  });
+
   it('a vehicle row has no kit key', async () => {
+    const stub = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => {
+      if (String(url).includes('/admin/equipment/kit-keys')) return ok({ enabled: true, keys: [] });
+      return stub(url, options);
+    });
     mountAssets();
     await screen.findByText(TRUCK.name);
     fireEvent.click(within(cardOf(TRUCK.name)).getByRole('button', { name: 'Edit' }));
