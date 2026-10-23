@@ -63,7 +63,7 @@ function isSpam(email) {
 const BID_COLUMNS = [
   'id', 'source', 'buyer_name', 'buyer_email', 'gc_or_agency', 'project_title', 'package_name', 'solicitation_number', 'location',
   'due_at', 'due_source_line', 'due_confirmed', 'job_walk_at', 'questions_due_at', 'status', 'decision_note',
-  'historical', 'needs_date_confirmation', 'first_email_id', 'gmail_thread_id', 'created_at', 'updated_at',
+  'historical', 'needs_date_confirmation', 'first_email_id', 'gmail_thread_id', 'external_url', 'source_active', 'created_at', 'updated_at',
 ];
 
 // ---------- one email ----------
@@ -224,13 +224,46 @@ async function deliverOwedAlert(linkId) {
   });
 }
 
+/**
+ * Rings the notification owed on a bid that has no email (a SAM.gov notice: owed_alert_kind / owed_alert_key on the
+ * bid), at most once, by the same moot rules as an email's owed bell.
+ */
+async function deliverOwedBidAlert(bidId) {
+  return db.transaction(async (trx) => {
+    const bid = await trx('bid_opportunities').where({ id: bidId }).forUpdate().first();
+    if (!bid || !bid.owed_alert_kind) return false;
+    // A closed SAM.gov notice's bell asks for a decision, so a confirmed date does not make it moot.
+    const closedNotice = bid.source === 'sam_gov' && bid.source_active === false;
+    const moot = bid.historical || !OPEN_STATUSES.includes(bid.status)
+      || (bid.owed_alert_kind === 'new' && bid.status !== 'new')
+      || (bid.owed_alert_kind === 'addendum' && !bid.needs_date_confirmation && !closedNotice);
+    if (!moot && bid.owed_alert_kind === 'new') {
+      await alerts.raise(alerts.newBidSpec(bid, null), bid.owed_alert_key, trx);
+      await trx('bid_opportunities').where({ id: bid.id }).update({ notified_at: trx.fn.now() });
+    } else if (!moot) {
+      // The key carries the deadline, and SAM.gov can move a date away and back (B, C, B): an earlier episode the
+      // operator's confirmation closed must ring again, so this goes through the reopening path.
+      await alerts.raiseReopening(alerts.addendumSpec(bid, null), bid.owed_alert_key, trx);
+    }
+    await trx('bid_opportunities').where({ id: bid.id }).update({ owed_alert_kind: null, owed_alert_key: null });
+    return !moot;
+  });
+}
+
+// Every owed bell, email-linked and bid-level, retried by each 15-minute tick.
 async function deliverOwedAlerts({ limit = REMINDER_LIMIT } = {}) {
-  const owed = await db('bid_opportunity_emails').whereNotNull('alert_kind').whereNull('alerted_at')
+  const owedLinks = await db('bid_opportunity_emails').whereNotNull('alert_kind').whereNull('alerted_at')
     .orderBy('created_at').limit(limit).select('id');
+  const owedBids = await db('bid_opportunities').whereNotNull('owed_alert_kind')
+    .orderBy('updated_at').limit(limit).select('id');
+  const deliveries = [
+    ...owedLinks.map(({ id }) => ({ id, deliver: deliverOwedAlert })),
+    ...owedBids.map(({ id }) => ({ id, deliver: deliverOwedBidAlert })),
+  ];
   let rung = 0;
-  for (const { id } of owed) {
+  for (const { id, deliver } of deliveries) {
     try {
-      if (await deliverOwedAlert(id)) rung += 1;
+      if (await deliver(id)) rung += 1;
     } catch (err) {
       logger.error(`${LOG} owed bell ${id} still failing: ${safeError(err)}`);
     }
@@ -350,6 +383,8 @@ async function sendDueReminders({ now = new Date() } = {}) {
   const candidates = await db('bid_opportunities')
     // A date waiting on an addendum check is not reminded until it is confirmed again.
     .where({ due_confirmed: true, historical: false, needs_date_confirmation: false })
+    // A notice closed on SAM.gov never reminds (email bids have no source_active, NULL).
+    .whereRaw('source_active IS DISTINCT FROM false')
     .whereIn('status', ['new', 'bid'])
     .where('due_at', '>', now).where('due_at', '<=', horizon)
     // Only bids still owed a window, so already-reminded rows cannot fill the limit and starve later ones.
@@ -457,5 +492,5 @@ async function markEmailAsBid(emailId) {
 }
 
 module.exports = {
-  ingestEmail, runBidDeskTick, sendDueReminders, deliverOwedAlerts, runBackfill, markEmailAsBid, BID_COLUMNS, EMAIL_COLUMNS, WATERMARK_KEY,
+  ingestEmail, runBidDeskTick, sendDueReminders, deliverOwedAlerts, deliverOwedBidAlert, runBackfill, markEmailAsBid, BID_COLUMNS, EMAIL_COLUMNS, WATERMARK_KEY,
 };

@@ -157,3 +157,34 @@ it("marks an email as a bid by id and opens the bid", async () => {
   expect(post.mock.calls[0][0].body).toEqual({ email_id: "11111111-2222-4333-8444-555555555555" });
   expect(await screen.findByText("Marked Plaza")).toBeInTheDocument();
 });
+
+it("a SAM.gov bid shows its source, solicitation and notice link, and no email list", async () => {
+  const samBid = bid({
+    id: "s1", source: "sam_gov", project_title: "Pest Control Services, Sample Cemetery", gc_or_agency: "Sample Agency",
+    buyer_name: null, buyer_email: null, solicitation_number: "SOL-0001", external_url: "https://sam.gov/opp/abc/view",
+    due_source_line: "SAM.gov response deadline: 2026-11-05T14:00:00-05:00",
+  });
+  route({ "GET /admin/bid-desk/": () => reply({ bids: [samBid] }), "GET /admin/bid-desk/s1": () => reply({ bid: samBid, emails: [] }) });
+  renderPage("/?bid=s1");
+  expect(await screen.findByText("Solicitation:")).toBeInTheDocument();
+  expect(screen.getByText("SOL-0001")).toBeInTheDocument();
+  expect(screen.getByText("Read from SAM.gov:")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open the notice on SAM.gov" })).toHaveAttribute("href", "https://sam.gov/opp/abc/view");
+  expect(screen.queryByText("Emails on this bid")).toBeNull();
+});
+
+it("a flagged SAM.gov bid says the source line names what changed, not that a new deadline was posted", async () => {
+  const samBid = bid({ id: "s3", source: "sam_gov", needs_date_confirmation: true, due_source_line: "SAM.gov no longer lists this notice as active" });
+  route({ "GET /admin/bid-desk/": () => reply({ bids: [samBid] }), "GET /admin/bid-desk/s3": () => reply({ bid: samBid, emails: [] }) });
+  renderPage("/?bid=s3");
+  expect(await screen.findByText(/SAM\.gov changed this notice: the line above says what changed/)).toBeInTheDocument();
+  expect(screen.getByText(/SAM\.gov no longer lists this notice as active/)).toBeInTheDocument();
+});
+
+it("a notice link off sam.gov is not shown", async () => {
+  const samBid = bid({ id: "s2", source: "sam_gov", external_url: "https://evil.example/opp" });
+  route({ "GET /admin/bid-desk/": () => reply({ bids: [samBid] }), "GET /admin/bid-desk/s2": () => reply({ bid: samBid, emails: [] }) });
+  renderPage("/?bid=s2");
+  expect(await screen.findByText("Read from SAM.gov:")).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Open the notice on SAM.gov" })).toBeNull();
+});

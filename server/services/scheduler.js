@@ -2139,6 +2139,34 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (GATE_BID_DESK_SAM, dark; needs GATE_BID_DESK and SAM_GOV_API_KEY):
+  // files federal pest control and grounds notices from the official SAM.gov Opportunities API as bid opportunities
+  // and rings one admin notification per new bid. Two API calls a day. No AI call; it sends nothing to an agency,
+  // contractor or customer. The gate is read per run, so a flip or an unset needs no restart.
+  cron.schedule('0 25 7 * * *', async () => {
+    if (!require('../config/feature-gates').bidDeskSamLive()) return;
+    try {
+      const lockRes = await runExclusive('bid-desk-sam', async () => {
+        const result = await require('./bid-desk/sam-gov').runSamGovPoll();
+        // Both gates on with no key imports nothing: a failed run in job health, not a quiet success.
+        if (result.skipped === 'no_api_key') throw new Error('SAM_GOV_API_KEY is not set');
+        if (result.filed > 0) logger.info(`[bid-desk-sam] ${result.filed} new federal bid(s)`);
+        // Discovery was filed; a re-read that stopped on a SAM.gov error is still a failed run (HTTP status only).
+        if (result.refreshFailed) throw new (require('./bid-desk/sam-gov').SamApiError)(result.refreshFailed);
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`bid-desk-sam run skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('bid-desk-sam').catch(() => {});
+        await recordJobEnd('bid-desk-sam', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[bid-desk-sam] run failed: ${require('./bid-desk/sam-gov').safeError(err)}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;

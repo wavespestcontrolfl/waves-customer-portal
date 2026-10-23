@@ -450,6 +450,7 @@ export default function EstimateProposalDocument({ data, token }) {
           .estimate-document-v1 .doc-page { padding: 0; max-width: none; }
           .estimate-document-v1 .doc-keep { break-inside: avoid; page-break-inside: avoid; }
           .estimate-document-v1 .doc-keep-with-next { break-after: avoid-page; page-break-after: avoid; }
+          .estimate-document-v1 .doc-byb { break-before: page; page-break-before: always; }
         }
       `}</style>
       <div className="doc-page">
@@ -832,6 +833,30 @@ export default function EstimateProposalDocument({ data, token }) {
               <div><strong style={{ color: INK }}>Accepted electronically</strong> · {formatAcceptedAt(data.acceptance.acceptedAt)}</div>
               <div>Terms {data.acceptance.termsVersion}{data.acceptance.device ? ` · ${data.acceptance.device}` : ''}{data.acceptance.ipMasked ? ` · IP ${data.acceptance.ipMasked}` : ''} · Record {data.acceptance.recordId}</div>
             </div>
+          </div>
+        ) : null}
+
+        {/* GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK: one last page of answers that apply to this estimate (server copy,
+            /data `beforeYouBook`, already chosen and trimmed to fit one page; absent with the gate off). Only this
+            document prints it: the interactive estimate page never reads the key. */}
+        {Array.isArray(data?.beforeYouBook?.sections) && data.beforeYouBook.sections.length > 0 ? (
+          <div className="doc-byb" data-testid="doc-before-you-book">
+            <SectionHeader>{data.beforeYouBook.title || 'Before you book'}</SectionHeader>
+            {data.beforeYouBook.sections.map((section) => (
+              <div className="doc-keep" key={section.key} style={{ marginTop: 8 }}>
+                {/* 14px: the customer readability floor (waves-design); the server trims the page for this size. */}
+                <div style={{ fontSize: 14, fontWeight: 700, color: NAVY }}>{section.heading}</div>
+                {(section.lines || []).map((line) => (
+                  <div key={line} style={{ display: 'flex', gap: 7, padding: '2px 0', fontSize: 14, lineHeight: 1.45, color: INK }}>
+                    <span aria-hidden="true" style={{ color: MUTED }}>&bull;</span>
+                    <span>{line}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+            {data.beforeYouBook.closing ? (
+              <p style={{ margin: '10px 0 0', fontSize: 14, lineHeight: 1.5, color: INK }}>{data.beforeYouBook.closing}</p>
+            ) : null}
           </div>
         ) : null}
 
