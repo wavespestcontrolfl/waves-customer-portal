@@ -313,9 +313,9 @@ describe('every v13 line resolves to its intended catalog row', () => {
     const [line] = engine.parseProtocolLines(raw, 'base', { exactName: true });
     expect(engine.matchCatalogProduct(line, withoutTetrino)).toBeNull();
     expect(engine.resolveProtocolItems([line], withoutTetrino, {}, {})[0].product).toBeNull();
-    // Without the flag the old loose match still picks something (the behavior the flag exists to stop).
+    // The loose match no longer stands in either: the shared word "Insecticide" names a kind, not a product.
     const [loose] = engine.parseProtocolLines(raw, 'base');
-    expect(engine.matchCatalogProduct(loose, withoutTetrino)).not.toBeNull();
+    expect(engine.matchCatalogProduct(loose, withoutTetrino)).toBeNull();
   });
 
   test('Dylox 6.2 G never resolves to Dylox 420 SL, and the reverse', () => {
@@ -326,13 +326,13 @@ describe('every v13 line resolves to its intended catalog row', () => {
     expect(engine.matchCatalogProduct(other, catalog).name).toBe('Dylox 420 SL T&O Insecticide');
   });
 
-  test('without the exact-name rule a price swing picks the wrong Insecticide (why the flag exists)', () => {
-    // Tetrino is new and unpriced; Acelepryn is priced. Both share the word "Insecticide".
+  test('a price swing never picks the wrong Insecticide, with or without the exact-name rule', () => {
+    // Tetrino is new and unpriced; Acelepryn is priced. Both share the word "Insecticide", which names a kind only.
     const catalog = buildCatalog((name) => (name === 'Tetrino Insecticide'
       ? { cost_per_unit: 0, needs_pricing: true } : { cost_per_unit: 9, needs_pricing: false }));
     const raw = rows.find(([label]) => label.includes('Tetrino'))[1];
     const [plain] = engine.parseProtocolLines(raw, 'base');
-    expect(engine.matchCatalogProduct(plain, catalog).name).not.toBe('Tetrino Insecticide');
+    expect(engine.matchCatalogProduct(plain, catalog).name).toBe('Tetrino Insecticide');
     const [exact] = engine.parseProtocolLines(raw, 'base', { exactName: true });
     expect(engine.matchCatalogProduct(exact, catalog).name).toBe('Tetrino Insecticide');
   });
