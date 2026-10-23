@@ -40,6 +40,7 @@ describe('recipe text', () => {
     const wait = 'delay watering (irrigation) or mowing for 24 hours after application';
     expect(track.notes.find((line) => line.startsWith('Caterpillars:'))).toContain(wait);
     const acelepryn = track.visits.flatMap((v) => lines(v.secondary)).filter((line) => line.startsWith('Acelepryn'));
+    // Three lines (July, August, September), all the caterpillar use: Acelepryn is not a mole cricket product (owner 2026-10-23).
     expect(acelepryn).toHaveLength(3);
     for (const line of acelepryn) expect(line).toContain(wait);
   });
@@ -273,9 +274,9 @@ describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
 });
 
 describe('the April customer line', () => {
-  test('keeps the main wording: North Port April still gets a feeding-type pass (Nutra-TECH)', () => {
+  test('says a slow-release feeding (owner 2026-10-23, the April bag is the polymer-coated 44-0-0); North Port April still gets a feeding-type pass (Nutra-TECH)', () => {
     const { PROGRAM_LINES_V13 } = require('../services/service-report/lawn-program-line');
-    expect(PROGRAM_LINES_V13[4].line).toBe('In April the program focuses on a light feeding, plus spot treatment for root disease and chinch bugs where needed.');
-    expect(PROGRAM_LINES_V13[4].claims.feed).toBe('a light feeding');
+    expect(PROGRAM_LINES_V13[4].line).toBe('In April the program focuses on a slow-release feeding, plus spot treatment for root disease and chinch bugs where needed.');
+    expect(PROGRAM_LINES_V13[4].claims.feed).toBe('a slow-release feeding');
   });
 });
