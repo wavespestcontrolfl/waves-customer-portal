@@ -300,6 +300,14 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       // a manual quote rather than auto-pricing off the synthetic 8,000 default
       // (harmless for residential, which ignores it).
       lotSizeMeasured: !!lotSqFt,
+      // The lead webhook has no server-side property lookup: homeSqFt and
+      // stories arrive on an unauthenticated body, so the Tree & Shrub
+      // open-parcel bed basis has NO trusted footprint here. The pricer
+      // parks a lot-inferred T&S line under
+      // open_parcel_basis_unconfirmed_footprint instead of auto-sending a
+      // bed shrunk by an inflated homeSqFt (Codex #6398 security r15; same
+      // contract as the public quote).
+      treeShrubFootprintTrusted: false,
       stories: numberOrNull(body.stories, customer.stories) || 1,
       propertyType: resolvedPropertyType || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family'),
       category: body.category || null,

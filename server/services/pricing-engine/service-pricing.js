@@ -16,6 +16,7 @@ const { resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule } 
 const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
+  treeShrubBedBasisSqFt,
 } = require('./property-calculator');
 const {
   resolveTreeShrubDensityMultiplier,
@@ -2618,7 +2619,7 @@ function hasKnownTreeShrubPressure(property = {}) {
   return ['high', 'very_high', 'severe'].includes(overallPressure);
 }
 
-function estimateTreeShrubBedAreaFromLot(property = {}) {
+function estimateTreeShrubBedAreaFromLot(property = {}, knobs = null) {
   const lotSqFt = Number(property.lotSqFt) || 0;
   if (lotSqFt <= 0) return null;
 
@@ -2628,10 +2629,23 @@ function estimateTreeShrubBedAreaFromLot(property = {}) {
   let pct = density.basePct;
   if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
 
-  const rawBedArea = Math.max(0, Math.round(lotSqFt * pct));
+  // Open-area basis (owner audit 2026-10-21): lot − footprint − hardscape
+  // when the property carries them (the calculatePropertyProfile shape);
+  // a bare { lotSqFt } caller still prices on the gross lot. See
+  // property-calculator.js#treeShrubBedBasisSqFt. A replayed pre-audit
+  // quote (knobs.lotBedBasis 'gross_lot') keeps the gross-lot basis it was
+  // sent with (Codex #6398 r2).
+  const basisSqFt = knobs && knobs.lotBedBasis === 'gross_lot'
+    ? lotSqFt
+    : treeShrubBedBasisSqFt(
+      lotSqFt,
+      treeShrubFootprintOf(property),
+      property.hardscape,
+    );
+  const rawBedArea = Math.max(0, Math.round(basisSqFt * pct));
   // Owner ruling 2026-08-10: never clamped — the pricer routes large areas
   // (>= BED_AREA_REVIEW_SQFT) to manual review instead.
-  return { bedArea: rawBedArea, rawBedArea };
+  return { bedArea: rawBedArea, rawBedArea, basisSqFt };
 }
 
 // Quote-time T&S knob reader: a finite number inside [min, max], else null.
@@ -2648,6 +2662,63 @@ function treeShrubFallbackBedSqFt(knobs) {
   if (stamped !== null) return stamped;
   const live = treeShrubKnobNumber(TREE_SHRUB.fallbackBedSqFt, 100, 20000);
   return live !== null ? live : TREE_SHRUB_FALLBACK_BED_SQFT;
+}
+
+// The treeDensity→count backstop a quote prices with: a stamped table replays
+// verbatim (each key a non-negative whole number ≤ 50), else the live table.
+function treeShrubDensityCountsFor(knobs) {
+  const stamped = knobs && knobs.treeDensityCounts;
+  if (stamped && typeof stamped === 'object') {
+    const out = {};
+    let valid = true;
+    for (const key of ['none', 'light', 'moderate', 'heavy']) {
+      const n = Number(stamped[key]);
+      if (!Number.isInteger(n) || n < 0 || n > 50) { valid = false; break; }
+      out[key] = n;
+    }
+    if (valid) return out;
+  }
+  return { ...(TREE_SHRUB.treeDensityCounts || {}) };
+}
+
+// The footprint the T&S open-parcel basis prices on: the caller-vouched one
+// when the profile carries it (public quote: server-measured), else the
+// profile's own footprint.
+function treeShrubFootprintOf(property = {}) {
+  return property.treeShrubFootprintSqFt ?? property.footprint ?? property.footprintSqFt;
+}
+
+// Open-parcel coverage guard shared by the residential and commercial T&S
+// pricers (Codex #6398 security P2 / r3): the public quote takes homeSqFt
+// from an unauthenticated body, so an inflated footprint shrinks a lot-based
+// bed and the price. Footprint + hardscape above half the lot is implausible
+// for a parcel — the caller prices what the inputs say but parks the line.
+function openParcelCoverageOverHalfLot(property = {}) {
+  const lot = Number(property.lotSqFt) || 0;
+  const fp = Number(treeShrubFootprintOf(property));
+  const hs = Number(property.hardscape);
+  const covered = (Number.isFinite(fp) && fp > 0 ? fp : 0) + (Number.isFinite(hs) && hs > 0 ? hs : 0);
+  return lot > 0 && covered > lot * 0.5 ? { lot, covered } : null;
+}
+const OPEN_PARCEL_COVERAGE_REASON = 'open_parcel_basis_footprint_over_half_lot';
+// The caller said it has NO trusted footprint for the open-parcel basis
+// (public quote with no server-measured building): the bed was inferred
+// from a footprint nobody vouched for, so the line parks for review rather
+// than publishing (Codex #6398 security r11).
+const OPEN_PARCEL_UNTRUSTED_FOOTPRINT_REASON = 'open_parcel_basis_unconfirmed_footprint';
+const OPEN_PARCEL_UNTRUSTED_FOOTPRINT_WARNING = 'The lot-based bed area was priced on an unconfirmed building footprint — confirm the home size before sending.';
+function openParcelReviewFor(property, lotBedBasis) {
+  if (lotBedBasis === 'gross_lot') return { reasons: [], warnings: [] };
+  const reasons = []; const warnings = [];
+  const coverage = openParcelCoverageOverHalfLot(property);
+  if (coverage) { reasons.push(OPEN_PARCEL_COVERAGE_REASON); warnings.push(openParcelCoverageWarning(coverage)); }
+  if (property.treeShrubFootprintTrusted === false) { reasons.push(OPEN_PARCEL_UNTRUSTED_FOOTPRINT_REASON); warnings.push(OPEN_PARCEL_UNTRUSTED_FOOTPRINT_WARNING); }
+  return { reasons, warnings };
+}
+function openParcelCoverageWarning({ lot, covered }) {
+  const sq = (v) => `${Math.round(Number(v)).toLocaleString()} sq ft`;
+  return `Building footprint + hardscape (${sq(covered)}) cover more than half the ${sq(lot)} lot;`
+    + ' the lot-based bed area was priced on the remaining open parcel — confirm the home and lot sizes.';
 }
 
 function treeShrubFallbackWarning(sqft) {
@@ -2699,7 +2770,7 @@ function resolveTreeShrubBedArea(property = {}, warnings = [], knobs = null) {
     };
   }
 
-  const lotEstimate = estimateTreeShrubBedAreaFromLot(property);
+  const lotEstimate = estimateTreeShrubBedAreaFromLot(property, knobs);
   if (lotEstimate) {
     return {
       bedArea: lotEstimate.bedArea,
@@ -2809,7 +2880,10 @@ function priceTreeShrub(property, options = {}) {
     const treeDensity = normalizeTreeShrubEnum(
       property.treeDensity || property.features?.trees || property.features?.treeDensity, ''
     );
-    const densityCount = TREE_SHRUB.treeDensityCounts?.[treeDensity];
+    // A replayed quote keeps the density→count table it was sent with
+    // (stamped pricingKnobs.treeDensityCounts; the 2026-10-21 audit moved the
+    // live table from 3/6/10 to 2/4/6 — Codex #6398 r2).
+    const densityCount = treeShrubDensityCountsFor(options.knobs)[treeDensity];
     if (densityCount !== undefined && densityCount > 0) {
       treeCount = densityCount;
       treeCountSource = 'density_estimate';
@@ -3000,7 +3074,13 @@ function priceTreeShrub(property, options = {}) {
   const annualDirectCost = materialCost + laborAnnual + callbackReserveAnnual;
   // Admin-INCLUSIVE margin target (v4.6): price = (direct + admin) / (1 - target).
   // The displayed margin below equals marginTarget exactly when no floor binds.
-  const marginTarget = TREE_SHRUB.marginTarget ?? GLOBAL.MARGIN_TARGET_TS ?? 0.45;
+  // A replayed quote keeps the target it was SENT at (options.knobs — the
+  // 2026-10-21 move from 0.45 to 0.40 must not reprice a sent estimate on
+  // view/accept; Codex #6398); fresh quotes read the live config.
+  const snapshotMarginTarget = knobNumber(knobs.marginTarget, 0.05, 0.95);
+  const marginTarget = snapshotMarginTarget !== null
+    ? snapshotMarginTarget
+    : (TREE_SHRUB.marginTarget ?? GLOBAL.MARGIN_TARGET_TS ?? 0.40);
   const baseAnnualPrice = (annualDirectCost + GLOBAL.ADMIN_ANNUAL) / (1 - marginTarget);
   const monthlyCalc = baseAnnualPrice / 12;
   // Monthly floor is a PRE-DISCOUNT list-price floor — discounts may take the
@@ -3031,6 +3111,19 @@ function priceTreeShrub(property, options = {}) {
       `Tree & Shrub bed area of ${bedSqFtText(bedArea)} is at or above the ${bedSqFtText(BED_AREA_REVIEW_SQFT)} review threshold.`
       + ' It was priced IN FULL — confirm the measurement.',
     );
+  }
+  // Open-parcel basis guard (Codex security P2 on #6398): the public quote
+  // takes homeSqFt from an unauthenticated body, so an inflated footprint
+  // shrinks the lot-based bed and the price. A footprint + hardscape above
+  // half the lot is implausible for a residential parcel — price it as
+  // entered but park the line for review so it never auto-sends. Only when
+  // the open parcel IS the basis: a pre-change quote replayed on its stamped
+  // gross-lot basis was not priced on the open parcel, so the guard must not
+  // change the review state of an already-issued quote (Codex #6398 r6).
+  if (bedAreaInfo.bedAreaSource === 'lot_based') {
+    const review = openParcelReviewFor(property, knobs.lotBedBasis === 'gross_lot' ? 'gross_lot' : 'open_parcel');
+    for (const reason of review.reasons) manualReviewReasonsSet.add(reason);
+    warnings.push(...review.warnings);
   }
   // Plant-count review gate. Unarmed: trees plus SERVICE-LINE palms only —
   // exactly what the pre-split classification counted (property palms never
@@ -3112,6 +3205,15 @@ function priceTreeShrub(property, options = {}) {
       // 2,000 before). Stamped so a replay of a sent fallback quote keeps
       // its original size.
       fallbackBedSqFt: treeShrubFallbackBedSqFt(knobs),
+      // The admin-inclusive margin the quote priced at (0.40 since the
+      // 2026-10-21 owner audit; 0.45 before). Stamped so a sent quote
+      // replays its own target, never the live one.
+      marginTarget,
+      // The two inferred-input rules the same audit changed, stamped for the
+      // same reason: a lot-based bed on the open parcel (gross lot before)
+      // and the treeDensity→count backstop (3/6/10 before).
+      lotBedBasis: (knobs.lotBedBasis === 'gross_lot') ? 'gross_lot' : 'open_parcel',
+      treeDensityCounts: treeShrubDensityCountsFor(knobs),
     },
     access,
     onSiteMin,
@@ -3988,7 +4090,10 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     const treeDensity = normalizeTreeShrubEnum(
       property.treeDensity || property.features?.trees || property.features?.treeDensity, ''
     );
-    const densityCount = TREE_SHRUB.treeDensityCounts?.[treeDensity];
+    // Commercial keeps its own backstop counts (COMMERCIAL_TREE_SHRUB): the
+    // 2026-10-21 residential audit lowered TREE_SHRUB.treeDensityCounts and
+    // did not reprice the commercial ornamental program.
+    const densityCount = (COMMERCIAL_TREE_SHRUB.treeDensityCounts || TREE_SHRUB.treeDensityCounts)?.[treeDensity];
     treeCount = (densityCount !== undefined && densityCount > 0) ? densityCount : 0;
   }
   treeCount = Math.max(0, Number(treeCount) || 0);
@@ -4034,6 +4139,13 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
   const pricingConfidence = (bedArea > cfg.lowConfidenceBedSf || estimated) ? 'LOW' : 'MEDIUM';
+  // Same implausible-coverage guard as the residential pricer (Codex #6398
+  // r3): a lot-based bed on a parcel whose footprint + hardscape exceed half
+  // the lot prices as entered but parks for review instead of auto-publishing.
+  // Only on the open-parcel basis — a replayed pre-change quote keeps its
+  // stamped gross-lot basis and its review state (Codex #6398 r6).
+  const lotBedBasis = options.lotBedBasis === 'gross_lot' ? 'gross_lot' : 'open_parcel';
+  const openParcelReview = bedBasis === 'lot_based' ? openParcelReviewFor(property, lotBedBasis) : { reasons: [], warnings: [] };
 
   return {
     service: 'commercial_tree_shrub',
@@ -4050,13 +4162,19 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
     discountable: false,
     excludeFromPctDiscount: true,
     quoteRequired: false,
-    requiresManualReview: false,
+    requiresManualReview: openParcelReview.reasons.length > 0,
+    ...(openParcelReview.reasons.length ? { manualReviewReasons: openParcelReview.reasons, warnings: openParcelReview.warnings } : {}),
     detail: 'Commercial ornamental program (shrub/tree fertilization + insect + bed weed control). Estimated from property data — final price confirmed on site.',
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     bedArea,
     bedAreaUsed: bedArea,
     bedAreaSource: bedBasis,
     bedAreaEstimated: estimated,
+    // Quote-time stamp of the one inferred-input rule the 2026-10-21 audit
+    // changed for commercial too (the lot-based bed basis; the 3/6/10 tree
+    // table is unchanged here). treeShrubKnobSignalForReplay reads it back
+    // so a sent lot-inferred commercial quote replays its own basis.
+    pricingKnobs: { lotBedBasis },
     treeCount,
     treeShrubDensityMultiplier: densityMult,
     frequency: visits,

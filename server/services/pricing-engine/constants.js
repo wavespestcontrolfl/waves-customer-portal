@@ -22,7 +22,7 @@ const GLOBAL = {
   DRIVE_TIME: 20,             // minutes per visit
   ADMIN_ANNUAL: 51,           // $/service/yr (billing, scheduling, CRM)
   MARGIN_FLOOR: 0.35,         // 35% minimum contribution margin. TODO(v4.4): document rationale for 35% threshold (vs 30%/40%) — the single most load-bearing policy value in the engine.
-  MARGIN_TARGET_TS: 0.45,     // Tree & Shrub target margin (admin-INCLUSIVE): price = (direct + ADMIN_ANNUAL) / (1 - target).
+  MARGIN_TARGET_TS: 0.40,     // Tree & Shrub target margin (admin-INCLUSIVE): price = (direct + ADMIN_ANNUAL) / (1 - target). Owner audit 2026-10-21: 0.45 → 0.40.
   CONDITIONAL_CEILING: 60,    // $/property/yr max conditional material before reprice
 };
 
@@ -623,8 +623,9 @@ const SHADE_RULES = {
 //     The pre-v4.6 flat materialRate (0.110 $/sqft) had no bottom-up basis
 //     and over-modeled protocol cost by 36-66%, growing with bed size —
 //     see pricing_changelog entry tree_shrub_reprice_45_margin.
-//   - marginTarget (0.45) is an admin-INCLUSIVE margin: price =
-//     (directCost + ADMIN_ANNUAL) / (1 - 0.45). This replaces the v4.x
+//   - marginTarget (0.40; 0.45 until the 2026-10-21 owner audit) is an
+//     admin-INCLUSIVE margin: price =
+//     (directCost + ADMIN_ANNUAL) / (1 - marginTarget). This replaces the v4.x
 //     directCostRatioTarget (0.43) divisor, which produced ~57% pre-admin
 //     margins on top of the inflated material rate.
 //   - monthlyFloor is a PRE-DISCOUNT list-price floor and a BACKSTOP, not
@@ -693,7 +694,13 @@ const TREE_SHRUB = {
     lightFactor: 0.75,
     enhancedFactor: 1.25,
   },
-  treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
+  // Trees priced when NO count was given, from the aerial treeDensity enum.
+  // Owner audit 2026-10-21: lowered from 3/6/10 — the aerial density read
+  // describes woody plants generally (mature oaks, pines, canopy), but the
+  // program only treats ORNAMENTAL trees; the old counts billed shade trees
+  // as sprayed plants (1.5 min/visit + $4/yr each). A stated count always
+  // wins; this is only the no-count backstop.
+  treeDensityCounts: { none: 0, light: 2, moderate: 4, heavy: 6 },
   // Shrub-density multiplier on the MEASURED-bed terms (per-sqft material +
   // the bedArea-derived labor minutes). Until v4.7, shrub density only
   // shaped the lot-based bed ESTIMATE and died the moment a real bed area
@@ -724,7 +731,11 @@ const TREE_SHRUB = {
   // recorded callbacks (Phase-1 audit) so this ships 0 — a knob with no
   // opinion, priced in only when real callback data earns a value.
   callbackReservePerVisit: 0,
-  marginTarget: 0.45,
+  // Owner audit 2026-10-21: 0.45 → 0.40. T&S was the only recurring program
+  // priced above the 35% floor by this much; lawn/pest price to the floor.
+  // The post-discount guard is report-only, so belowMarginFloor flags more
+  // WaveGuard-discounted T&S lines (Silver ~33%, Gold ~29%, Platinum ~25%).
+  marginTarget: 0.40,
   marginFloor: 0.35,
 };
 
@@ -759,6 +770,10 @@ const COMMERCIAL_LAWN = {
   taxCategory: 'lawn_spraying_or_treatment',
 };
 const COMMERCIAL_TREE_SHRUB = {
+  // No-count tree backstop from the aerial treeDensity enum. Commercial keeps
+  // the original 3/6/10 (the 2026-10-21 residential audit lowered
+  // TREE_SHRUB.treeDensityCounts to 2/4/6 and did not reprice commercial).
+  treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
   programVisits: 6,           // ornamental fert (2) + shrub insect (2) + bed weed control trips
   materialFixedAnnual: 40,    // base commercial ornamental program material/yr
   materialPerSqFtAnnual: 0.12, // $/bed sqft/yr — premium ornamental fert + Snapshot/Ranger Pro bed weed control

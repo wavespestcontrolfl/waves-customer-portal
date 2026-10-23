@@ -332,6 +332,42 @@ function isInjectionProduct(productRef = {}) {
   return methods.includes('trunk_injection') || INJECTION_LABEL_UNIT.test(unit);
 }
 
+// Finished spray mix exists only when something was sprayed or drenched.
+// The fast-complete sheet hides the gallons field for a granular-only visit;
+// the full SchedulePage form has no such gate, so the server enforces the
+// same condition before the value reaches the typed snapshot that
+// estimate-actuals reads as spray-volume calibration (Codex #6398 r15).
+// Every spray / drench method the completion forms offer; granular, bait,
+// station and trunk-injection work records no finished mix (Codex r17: a
+// liquid fertilizer defaults to broadcast_spray on the full form).
+const LIQUID_APPLICATION_METHODS = new Set(['foliar_spray', 'soil_drench', 'broadcast_spray', 'perimeter_spray', 'spot_treatment', 'fog_ulv', 'pin_stream']);
+function productIsLiquidApplication(productRef = {}) {
+  const catalog = productRef.catalog || productRef;
+  const input = productRef.input || productRef;
+  // The method the tech recorded on this visit wins; the catalog default
+  // stands in when the input carries none (same precedence as the stored
+  // report method).
+  const recorded = text(input.applicationMethod ?? input.application_method).toLowerCase();
+  const method = recorded || text(catalog.application_method ?? catalog.applicationMethod).toLowerCase();
+  return LIQUID_APPLICATION_METHODS.has(method);
+}
+function hasLiquidApplication(products = [], productRows = []) {
+  return buildProductRefs(products, productRows).some(productIsLiquidApplication);
+}
+// Mutates the typed values in place (the snapshot is built from the same
+// reference): a visit with no liquid application records no spray mix.
+// `attributable: false` — the values came from a tree_shrub COMPANION section
+// of a combined visit, whose completion payload has ONE shared products list
+// with no per-line attribution: a liquid LAWN product cannot vouch for a T&S
+// spray, so the gallons are dropped outright rather than stored as T&S
+// calibration actuals (Codex #6398 r24).
+function dropSprayGallonsWithoutLiquidApplication(values, products = [], productRows = [], { attributable = true } = {}) {
+  if (!values || typeof values !== 'object') return values;
+  if (values.spray_mix_gallons === undefined) return values;
+  if (!attributable || !hasLiquidApplication(products, productRows)) delete values.spray_mix_gallons;
+  return values;
+}
+
 function isInsectLikeProduct(productRef = {}) {
   const textValue = productText(productRef);
   // bifen\w* (Bifen XTS/IT trade names + bifenazate), \w*thrin (the whole
@@ -798,4 +834,6 @@ module.exports = {
   validateTreeShrubCloseout,
   validateTreeShrubTypedCompliance,
   deriveTreeShrubTreatments,
+  hasLiquidApplication,
+  dropSprayGallonsWithoutLiquidApplication,
 };

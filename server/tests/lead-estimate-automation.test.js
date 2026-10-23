@@ -517,6 +517,31 @@ describe('keyed leads (C2): the draft prices the canonical product, never a labe
     expect(draft.automation).toMatchObject({ status: 'generated', generated: true });
     expect(draft.estimateData.services).toEqual({ mosquito: { tier: 'seasonal9' } });
   });
+  test('tree_shrub_program: a lot-inferred bed parks — the webhook body footprint is never trusted for the open-parcel basis (Codex #6398 security r15)', async () => {
+    const readiness = { ...readinessFor('Tree & Shrub Care'), serviceKey: 'tree_shrub_program', serviceKeyInstant: true };
+    const draftFor = (homeSqFt) => buildAutomatedLeadDraftEstimate({
+      readiness,
+      intake: { serviceInterest: 'Tree & Shrub Care', fullAddress: '123 Main St, Venice, FL 34285' },
+      // 30,000 sf lot: beds stay under the 8,000 sf review gate and a 12,000
+      // sf claim stays under the half-lot coverage guard, so the ONLY reason
+      // either draft can park is the untrusted footprint.
+      body: { homeSqFt, lotSqFt: 30000, stories: 1, shrubDensity: 'moderate', treeDensity: 'light' },
+    });
+    const honest = await draftFor(2000);
+    const inflated = await draftFor(12000);
+    const tsLine = (d) => d.estimateData.engineResult.lineItems.find((l) => l.service === 'tree_shrub');
+    for (const draft of [honest, inflated]) {
+      // The draft keeps the legacy-mapped line shape: quoteRequired + the
+      // first review reason.
+      expect(tsLine(draft)).toMatchObject({ quoteRequired: true, reason: 'open_parcel_basis_unconfirmed_footprint' });
+      expect(draft.quoteRequired).toBe(true);
+      expect(draft.automation.status).toBe('manual_review_required');
+      expect(draft.automation.quoteRequiredReason).toBe('open_parcel_basis_unconfirmed_footprint');
+    }
+    // Priced as entered (the inflated body still shrinks the bed) — but
+    // neither draft can auto-send.
+    expect(tsLine(inflated).bedArea).toBeLessThan(tsLine(honest).bedArea);
+  });
   test('flea_tick drafts the two-visit package — the only flea offer (owner ruling 2026-09-03)', async () => {
     const readiness = { ...readinessFor('Flea Control Service'), serviceKey: 'flea_tick', serviceKeyInstant: true };
     const draft = await buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Flea Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });

@@ -315,3 +315,47 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
     }
   });
 });
+
+describe('hedge / bed linear feet (owner 2026-10-21, spray-volume groundwork)', () => {
+  test('operator value wins, aerial estimate backstops, and it persists on the engine property without touching price', () => {
+    const typed = translateV2CallToV1Input(baseProfile({ hedgeLinearFt: '180', estimatedHedgeLinearFt: 240 }), ['TREE_SHRUB'], {});
+    const aerial = translateV2CallToV1Input(baseProfile({ estimatedHedgeLinearFt: 240 }), ['TREE_SHRUB'], {});
+    const none = translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], {});
+    expect(typed).toMatchObject({ hedgeLinearFt: 180, hedgeLinearFtSource: 'manual' });
+    expect(aerial).toMatchObject({ hedgeLinearFt: 240, hedgeLinearFtSource: 'estimated' });
+    expect(none.hedgeLinearFt).toBeUndefined();
+    // Never on the service line — the pricer must not see it yet.
+    expect(typed.services.treeShrub).not.toHaveProperty('hedgeLinearFt');
+
+    const withFt = generateEstimate(typed);
+    const without = generateEstimate(none);
+    expect(withFt.property.hedgeLinearFt).toBe(180);
+    expect(withFt.property.hedgeLinearFtSource).toBe('manual');
+    expect(without.property.hedgeLinearFt).toBeNull();
+    expect(treeShrubLine(typed).monthly).toBe(treeShrubLine(none).monthly);
+  });
+
+  test('the lookup profile keeps a null or blank aerial hedge read ABSENT, never a zero (Codex #6398 r6)', () => {
+    const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+    const rc = { squareFootage: 2000, lotSize: 9000, propertyType: 'Single Family', yearBuilt: 2010 };
+    const read = (hedge) => buildEnrichedProfile(rc, { estimatedHedgeLinearFt: hedge }, 27.5, -82.45).estimatedHedgeLinearFt;
+    expect(read(null)).toBeUndefined();
+    expect(read(undefined)).toBeUndefined();
+    expect(read('')).toBeUndefined();
+    expect(read('n/a')).toBeUndefined();
+    expect(read(-4)).toBeUndefined();
+    expect(read(0)).toBe(0); // an explicit zero IS a read
+    expect(read('240')).toBe(240);
+  });
+
+  test('a garbage, negative, null or blank value is absent (and unsourced), not a 400 or a zero', () => {
+    // Number(null) is 0 — a null aerial read must not persist as an "estimated" zero (Codex #6398 r8).
+    for (const extra of [{ hedgeLinearFt: 'lots' }, { hedgeLinearFt: -5 }, { estimatedHedgeLinearFt: 'n/a' }, { estimatedHedgeLinearFt: null }, { estimatedHedgeLinearFt: '' }, { hedgeLinearFt: null, estimatedHedgeLinearFt: null }]) {
+      const input = translateV2CallToV1Input(baseProfile(extra), ['TREE_SHRUB'], {});
+      expect(input.hedgeLinearFt).toBeUndefined();
+      expect(input.hedgeLinearFtSource).toBeUndefined();
+    }
+    // An explicit aerial zero IS a read.
+    expect(translateV2CallToV1Input(baseProfile({ estimatedHedgeLinearFt: 0 }), ['TREE_SHRUB'], {})).toMatchObject({ hedgeLinearFt: 0, hedgeLinearFtSource: 'estimated' });
+  });
+});

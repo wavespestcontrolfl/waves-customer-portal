@@ -149,6 +149,52 @@ function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {})
   return null;
 }
 
+// The building footprint the Tree & Shrub open-parcel bed basis may use on
+// the public quote: read from the SERVER-SIDE lookup row only (Codex #6398
+// security r11). The body's homeSqFt is unauthenticated and the half-lot
+// coverage heuristic alone does not catch an inflated footprint on a large
+// lot, so the basis never reads it; with no server-measured building the
+// line is marked untrusted and the pricer parks it for review.
+// The lookup's own `footprint` (buildEnrichedProfile) is read first; its
+// `footprintUnknown` suppression (an aggregate parcel whose story count is
+// unknown keeps the summed homeSqFt but no footprint) yields NO trusted
+// footprint rather than a reconstruction from that sum (Codex r13 P1).
+// Every lookup footprint is living area ÷ stories, so the story count must
+// itself be trusted: 'default' means nobody knew and the lookup fell back to
+// 1, which would pass a whole multi-story home off as its footprint (Codex
+// security r13). The body's story count is never consulted.
+// 'ai' covers both a public-record search hit and the Claude stories
+// fallback; the latter stamps `_storiesEvidence` on the property record and
+// only a direct, attributable, non-low-confidence answer counts
+// (draft-builder#storiesSourceForPricing, the same grader the estimator and
+// customer pricing apply) — an inferred one-story answer on a three-story
+// home would otherwise pass the whole living area off as its footprint
+// (Codex #6398 security r24).
+const TRUSTED_STORIES_SOURCES = new Set(['ai', 'permit', 'verified', 'manual']);
+// The lookup's own verify flags outrank the provenance label: a HIGH
+// fieldVerifyFlags entry on squareFootage or stories (conflicting evidence)
+// — or the global address flag — means "verify before pricing", and a
+// footprint derived from either is not trusted (Codex #6398 r24 P1).
+function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) {
+  const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
+  if (t.footprintUnknown === true) return null;
+  if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource)) return null;
+  if (!lookupDimensionIsTrustworthy(t, 'homeSqFt') || !lookupDimensionIsTrustworthy(t, 'stories')) return null;
+  if (t.storiesSource === 'ai') {
+    const { storiesSourceForPricing } = require('../services/estimator-engine/draft-builder');
+    const graded = storiesSourceForPricing({ stories: t.stories, storiesEvidence: propertyRecord?._storiesEvidence || null });
+    if (graded !== 'lookup') return null;
+  }
+  const stories = Math.max(1, Math.min(3, Number(t.stories) || 1));
+  const perStory = (v) => Math.max(1, Math.round(Number(v) / stories));
+  if (Number(t.footprint) > 0) return Number(t.footprint);
+  if (Number(t.footprintSqFt) > 0) return Number(t.footprintSqFt);
+  if (Number(t.buildingSqFt) > 0) return Number(t.buildingSqFt);
+  if (Number(t.homeSqFt) > 0) return perStory(t.homeSqFt);
+  if (Number(t.livingAreaSqFt) > 0) return perStory(t.livingAreaSqFt);
+  return null;
+}
+
 function isPublicCommercialQuote(body = {}, enriched = {}) {
   const enrichedCommercial = isCommercialProperty({
     propertyType: enriched.propertyType,
@@ -1008,6 +1054,26 @@ const RESIDENTIAL_VERIFICATION_REASONS = new Set([
   'unknown_grass_type_priced_st_augustine',
   'lawn_v13_bahia_no_program',
 ]);
+// The RESIDENTIAL Tree & Shrub open-parcel holds (Codex #6398 r22): a
+// lot-inferred bed with no server-trusted footprint, or a footprint over
+// half the lot, parks the line via manualReviewReasons. Without this leg the
+// 202 told the homeowner "Commercial properties require a manual quote" and
+// the office bell filed the lead as commercial. The commercial program
+// raises the same reason strings and keeps the commercial copy, so the
+// classification reads the parked line's service, not the reason alone.
+const OPEN_PARCEL_BASIS_REASONS = new Set([
+  'open_parcel_basis_unconfirmed_footprint',
+  'open_parcel_basis_footprint_over_half_lot',
+]);
+// The pricer appends bed_area_at_or_above_8000 BEFORE the open-parcel
+// reasons, and quoteRequiredReason reads only manualReviewReasons[0], so the
+// classification scans the parked line's whole reason list (Codex #6398 r23).
+function isResidentialVerificationHold(reason, manualQuoteLine) {
+  if (RESIDENTIAL_VERIFICATION_REASONS.has(reason)) return true;
+  if (String(manualQuoteLine?.service || '').startsWith('commercial_')) return false;
+  const reasons = Array.isArray(manualQuoteLine?.manualReviewReasons) ? manualQuoteLine.manualReviewReasons : [];
+  return OPEN_PARCEL_BASIS_REASONS.has(reason) || reasons.some((r) => OPEN_PARCEL_BASIS_REASONS.has(r));
+}
 
 const PUBLIC_QUOTE_SERVICE_KEYS = [
   'pest', 'oneTimePest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
@@ -1212,6 +1278,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       })
       : (normalizedAddress.fullAddress || String(address || '').trim());
     let trustedTurf = {};
+    let trustedRecord = null;
     let trustedProfileFound = false;
     // When the cached profile was saved (property_lookup_cache): a cache-only
     // re-read obtains no NEW evidence, so its county audit is only as fresh
@@ -1225,6 +1292,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const serverLookup = await performPropertyLookup(parcelLookupAddress, lookupOptionsFor('public_quote', { cacheOnly: true, persist: false }));
         if (serverLookup?.enriched) {
           trustedTurf = serverLookup.enriched;
+          trustedRecord = serverLookup.propertyRecord || null;
           trustedProfileFound = true;
           trustedProfileCachedAt = auditEvidenceAt(serverLookup);
         }
@@ -1550,8 +1618,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
+    const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf, trustedRecord);
     let engineInput = {
       homeSqFt: sqft,
+      // Tree & Shrub open-parcel basis: the server-measured footprint, never
+      // the body's homeSqFt; absent → the pricer parks the lot-based line.
+      ...(treeShrubFootprintSqFt != null ? { treeShrubFootprintSqFt } : {}),
+      treeShrubFootprintTrusted: treeShrubFootprintSqFt != null,
       // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint
       // reads footprintSqFt BEFORE homeSqFt, so the synthetic confirm default can't
       // win and there's no double ÷-stories). Residential is unchanged.
@@ -3055,8 +3128,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
                 palmCount: item.palmCount,
                 palmCountSource: item.palmCountSource ?? null,
                 palmReserveActive: item.palmReserveActive ?? null,
-                pricingKnobs: item.pricingKnobs ?? null,
               }
+              : {}),
+            // The T&S knob stamp (margin target, bed basis, density table)
+            // rides on BOTH programs — the commercial line prices the same
+            // lot-based bed and replays its own lotBedBasis — and does not
+            // depend on a palm count being present (Codex #6398 r21).
+            ...((item.service === 'tree_shrub' || item.service === 'commercial_tree_shrub') && item.pricingKnobs
+              ? { pricingKnobs: item.pricingKnobs }
               : {}),
             // Mosquito rows name their program via selectedProgram/tier and
             // carry station/dunk addOns — both feed the audit's COGS
@@ -3478,7 +3557,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         `${quoteRequired
           ? (quoteRequiredReason === 'quote_on_request'
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
-            : RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason)
+            : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
           : isOneTimeOnly
@@ -4097,6 +4176,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
+          : (!RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason) && isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine))
+          ? 'Tree & shrub pricing depends on your planting-bed area, and we could not confirm your home\'s footprint from records alone — the Waves team will confirm it and send your exact price shortly.'
           // A stale single-visit flea request (retired offer key) prices the
           // two-visit package but parks for review — say so, never the
           // commercial fallback (GH codex #3845 r5 P2).
@@ -4333,6 +4414,8 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._internals = {
+  isResidentialVerificationHold,
+  trustedTreeShrubFootprintSqFt,
   deriveAddressUnverified,
   findPriorOpenWizardLeadId,
   duplicateOfFromExtracted,

@@ -613,6 +613,97 @@ describe('customer pricing AI helpers', () => {
     }
   });
 
+  test('a seeded homeSqFt is trusted for the T&S open-parcel basis only as far as the source estimate stamped it (Codex #6398 security r19)', async () => {
+    // Lookup miss, no stored dimensions: the seed fills homeSqFt and lotSqFt.
+    // A public-quote seed (stamped false) and an unstamped seed both park the
+    // lot-inferred T&S line; a trusted stamp prices it, and the seeded
+    // server-measured footprint (not the body homeSqFt) drives the bed.
+    const run = (seed) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => null,
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-seed-trust', property_sqft: null, lot_sqft: null }),
+      propertySeed: { lotSqFt: 30000, stories: 1, storiesSource: 'lookup', ...seed },
+    });
+    const review = (r) => r.options?.[0]?.manualReview;
+    const stampedFalse = await run({ homeSqFt: 12000, treeShrubFootprintTrusted: false });
+    const unstamped = await run({ homeSqFt: 12000 });
+    const trusted = await run({ homeSqFt: 12000, treeShrubFootprintTrusted: true, treeShrubFootprintSqFt: 2000 });
+    const honest = await run({ homeSqFt: 2000, treeShrubFootprintTrusted: true, treeShrubFootprintSqFt: 2000 });
+    expect(review(stampedFalse)).toBe(true);
+    expect(review(unstamped)).toBe(true);
+    expect(review(trusted)).toBe(false);
+    expect(review(honest)).toBe(false);
+    // The trusted footprint, not the inflated body size, is the basis: the
+    // inflated-but-trusted quote prices the same bed as the honest one.
+    expect(trusted.options?.[0]?.perVisit).toBe(honest.options?.[0]?.perVisit);
+    expect(trusted.options?.[0]?.perVisit).toBeGreaterThan(0);
+  });
+
+  test("a lookup's footprintUnknown aggregate home size is an untrusted T&S footprint (Codex #6398 r20 P1)", async () => {
+    // An association aggregate with an unknown story count: the lookup keeps
+    // the summed living area but suppresses the footprint. Adopting the home
+    // size must carry that suppression, or the engine rebuilds a one-story
+    // footprint from the sum and the open-parcel bed shrinks with no review.
+    const run = (footprintUnknown) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 12000, lotSqFt: 30000, stories: 1, storiesSource: 'verified', ...(footprintUnknown ? { footprint: 0, footprintUnknown: true } : { footprint: 2000 }) },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-agg', property_sqft: null, lot_sqft: null }),
+      propertySeed: null,
+    });
+    const review = (r) => r.options?.[0]?.manualReview;
+    expect(review(await run(true))).toBe(true);
+    expect(review(await run(false))).toBe(false);
+  });
+
+  test("a lookup home size whose story count is absent, flagged, defaulted or estimated is an untrusted T&S footprint (Codex #6398 r23 P1)", async () => {
+    // A 12,000 sf multi-story home on a 30,000 sf lot: with stories unknown
+    // the engine would rebuild a 12,000 sf one-story footprint, shrink the
+    // open-parcel bed and publish with no review reason.
+    const run = (enrichedStories) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 12000, lotSqFt: 30000, footprint: 2000, ...enrichedStories },
+        propertyRecord: {},
+      }),
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-stories', property_sqft: null, lot_sqft: null }),
+      propertySeed: null,
+    });
+    const review = (r) => r.options?.[0]?.manualReview;
+    // Absent stories → resolver defaults to 1 → untrusted.
+    expect(review(await run({}))).toBe(true);
+    // Verify-flagged stories read is discarded → 'default' → untrusted.
+    expect(review(await run({ stories: 2, fieldVerifyFlags: [{ field: 'stories', reason: 'conflicting evidence', priority: 'HIGH' }] }))).toBe(true);
+    // The lookup itself defaulted the count → untrusted even though adopted.
+    expect(review(await run({ stories: 1, storiesSource: 'default' }))).toBe(true);
+    // A vouched count prices the lot-inferred bed as before.
+    expect(review(await run({ stories: 2, storiesSource: 'verified' }))).toBe(false);
+    expect(review(await run({ stories: 2 }))).toBe(false);
+  });
+
+  test('with no building footprint at all (lookup failed or carried none), a lot-inferred T&S line parks (Codex #6398 r24 P1)', async () => {
+    // missingPropertyFor lets T&S price from the lot alone; a zero footprint
+    // would infer beds from nearly the whole lot and publish unreviewed.
+    const run = (propertyLookup) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup,
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-nofoot', property_sqft: null, lot_sqft: 30000 }),
+      propertySeed: null,
+    });
+    const review = (r) => r.options?.[0]?.manualReview;
+    expect(review(await run(null))).toBe(true);
+    expect(review(await run(async () => { throw new Error('lookup down'); }))).toBe(true);
+    expect(review(await run(async () => ({ enriched: { lotSqFt: 30000, stories: 1, storiesSource: 'verified' }, propertyRecord: {} })))).toBe(true);
+    // A vouched building prices as before.
+    expect(review(await run(async () => ({ enriched: { homeSqFt: 2400, lotSqFt: 30000, footprint: 2400, stories: 1, storiesSource: 'verified' }, propertyRecord: {} })))).toBe(false);
+  });
+
   test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
     // The vision schema permits 'POSSIBLE' for pool and poolCage, and the
     // adoption rule maps only 'YES' to true. So an observed-but-undecided

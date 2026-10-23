@@ -221,7 +221,7 @@ describe('buildActualsRow', () => {
       bedSqFt: 2000, bedAreaSource: 'lot_based', bedAreaEstimated: true, treeCount: 3, access: 'easy', tier: 'standard', onSiteMin: 27,
     });
     expect(JSON.parse(row.actual).treeShrub).toEqual({
-      bedSqFt: 2400, palmCount: 8, treeCount: null, shrubDensity: 'heavy', access: 'easy', bedSqFtDeltaPct: 20,
+      bedSqFt: 2400, sprayMixGallons: null, hedgeLinearFt: null, palmCount: 8, treeCount: null, shrubDensity: 'heavy', access: 'easy', bedSqFtDeltaPct: 20,
     });
     // The scalar columns stay lawn/pest-shaped — the bed delta lives only
     // inside the block (this estimate carries no turf profile at all).
@@ -366,7 +366,7 @@ describe('extractTreeShrubActuals', () => {
         },
       },
     };
-    const expected = { bedSqFt: 2400, palmCount: 12, treeCount: 2, shrubDensity: 'moderate', access: 'difficult' };
+    const expected = { bedSqFt: 2400, sprayMixGallons: null, hedgeLinearFt: null, palmCount: 12, treeCount: 2, shrubDensity: 'moderate', access: 'difficult' };
     expect(extractTreeShrubActuals(data)).toEqual(expected);
     expect(extractTreeShrubActuals(JSON.stringify(data))).toEqual(expected);
   });
@@ -377,16 +377,16 @@ describe('extractTreeShrubActuals', () => {
       companionReportSnapshots: [
         { type: 'tree_shrub', values: { palms_serviced: '6', shrub_density: 'Light' } },
       ],
-    })).toEqual({ bedSqFt: null, palmCount: 6, treeCount: null, shrubDensity: 'light', access: null });
+    })).toEqual({ bedSqFt: null, sprayMixGallons: null, hedgeLinearFt: null, palmCount: 6, treeCount: null, shrubDensity: 'light', access: null });
   });
 
   it('recorded zeros and comma-grouped measurements survive (pre-push P1s)', () => {
     expect(extractTreeShrubActuals({
       typedReportSnapshot: {
         type: 'tree_shrub',
-        values: { bed_sqft_serviced: '12,400', palm_count_total: '0', tree_count_total: 0 },
+        values: { bed_sqft_serviced: '12,400', palm_count_total: '0', tree_count_total: 0, spray_mix_gallons: '7.5', hedge_linear_ft_serviced: '1,250' },
       },
-    })).toEqual({ bedSqFt: 12400, palmCount: 0, treeCount: 0, shrubDensity: null, access: null });
+    })).toEqual({ bedSqFt: 12400, sprayMixGallons: 7.5, hedgeLinearFt: 1250, palmCount: 0, treeCount: 0, shrubDensity: null, access: null });
   });
 
   it('null when there is no T&S section or nothing was recorded', () => {

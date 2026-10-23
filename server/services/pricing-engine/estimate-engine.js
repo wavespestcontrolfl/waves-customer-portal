@@ -602,7 +602,18 @@ function generateEstimate(input) {
     stories: input.stories,
     storiesSource: input.storiesSource,
     lotSqFt: input.lotSqFt,
+    // A replayed T&S quote keeps the lot-based bed basis it was sent with
+    // (stamped knob; 'gross_lot' before the 2026-10-21 audit) — the profile
+    // computes the lot-based bed, so the knob has to reach it here too.
+    lotBedBasis: input.treeShrubPricingKnobs && typeof input.treeShrubPricingKnobs === 'object'
+      ? input.treeShrubPricingKnobs.lotBedBasis
+      : undefined,
     footprintSqFt: input.footprintSqFt ?? input.footprint,
+    // The footprint the T&S open-parcel basis may use when the caller does
+    // not trust its own homeSqFt (public quote: server-measured only), and
+    // whether such a footprint exists at all (Codex #6398 security r11).
+    treeShrubFootprintSqFt: input.treeShrubFootprintSqFt,
+    treeShrubFootprintTrusted: input.treeShrubFootprintTrusted,
     footprintUnknown: input.footprintUnknown === true,
     unitScoped: input.unitScoped === true,
     perimeterLF: input.perimeterLF ?? input.perimeterLf ?? input.perimeter,
@@ -625,6 +636,10 @@ function generateEstimate(input) {
     estimatedBedAreaPercent: input.estimatedBedAreaPercent,
     bedArea: input.bedArea,
     bedAreaSource: input.bedAreaSource,
+    // Hedge / bed linear feet: persisted on the profile for the spray-volume
+    // material model (owner 2026-10-21); no pricer reads it yet.
+    hedgeLinearFt: input.hedgeLinearFt,
+    hedgeLinearFtSource: input.hedgeLinearFtSource,
     palmCount: input.palmCount,
     palmInventory: input.palmInventory,
     propertyType: propertyTypeForProfile,
@@ -969,6 +984,11 @@ function generateEstimate(input) {
         // Rep-set plant-density multiplier (very_high → manual); admin-set.
         treeShrubDensity: input.treeShrubDensity,
         floorsArmed: commercialFloorArmedFor('commercial_tree_shrub'),
+        // Replayed lot-based bed basis (see the residential `knobs` below and
+        // calculatePropertyProfile above, which computed the bed on it).
+        lotBedBasis: input.treeShrubPricingKnobs && typeof input.treeShrubPricingKnobs === 'object'
+          ? input.treeShrubPricingKnobs.lotBedBasis
+          : undefined,
       });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);

@@ -344,6 +344,46 @@ describe('compliance taps', () => {
     expect(body.structuredFindings.values).not.toHaveProperty('irac_frac_logged');
   });
 
+  test('spray gallons ride the findings only while a product is on the visit (owner 2026-10-21)', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    // No product: the gallons box is not offered at all.
+    expect(screen.queryByLabelText('Spray mix used (gallons, office only)')).toBeNull();
+    fireEvent.click(tile('Chelated Iron Plus'));
+    fireEvent.change(screen.getByLabelText('Spray mix used (gallons, office only)'), { target: { value: '4.5' } });
+    // Deselecting the last product hides the box AND drops the stale value
+    // from the body — spray volume never records against an empty products
+    // array (Codex on #6398).
+    fireEvent.click(tile('Chelated Iron Plus'));
+    expect(screen.queryByLabelText('Spray mix used (gallons, office only)')).toBeNull();
+    const empty = await completeBody(request);
+    expect(empty.products).toEqual([]);
+    expect(empty.structuredFindings.values).not.toHaveProperty('spray_mix_gallons');
+  });
+
+  test('spray gallons are sent as entered when a product is on the visit', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(tile('Chelated Iron Plus'));
+    fireEvent.change(screen.getByLabelText('Spray mix used (gallons, office only)'), { target: { value: '4.5' } });
+    const body = await completeBody(request);
+    expect(body.products).toHaveLength(1);
+    expect(body.structuredFindings.values.spray_mix_gallons).toBe('4.5');
+  });
+
+  test('spray gallons are offered and sent only for a LIQUID application — a granular-only visit has no mix (Codex #6398 r11)', async () => {
+    // The month lists the iron as a granular broadcast: no finished mix exists.
+    const context = { ...CONTEXT, monthProducts: CONTEXT.monthProducts.map((mp) => (mp.productId === 'iron' ? { ...mp, method: 'granular_broadcast' } : mp)) };
+    const request = makeRequest({ context });
+    await readyVisit(request);
+    fireEvent.click(tile('Chelated Iron Plus'));
+    expect(screen.queryByLabelText('Spray mix used (gallons, office only)')).toBeNull();
+    const body = await completeBody(request);
+    expect(body.products).toHaveLength(1);
+    expect(body.products[0].applicationMethod).toBe('granular_broadcast');
+    expect(body.structuredFindings.values).not.toHaveProperty('spray_mix_gallons');
+  });
+
   test('IRAC / FRAC is sent as Yes when the app ran the rotation check, with no tap asked', async () => {
     const request = makeRequest();
     await readyVisit(request);

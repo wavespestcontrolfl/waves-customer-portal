@@ -2,6 +2,12 @@ const pricingEngine = require('./pricing-engine');
 const logger = require('./logger');
 const { loadExistingQualifyingServiceKeys, loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
 const { storiesSourceForPricing } = require('./estimator-engine/draft-builder');
+// Story provenances under which a lookup living area may stand in for the
+// building footprint on the Tree & Shrub open-parcel basis — the resolver's
+// own grade ('lookup' = direct county/permit evidence) or a lookup stamp with
+// real provenance; never 'default' / 'estimated' (same set the public quote
+// route applies to its server-side lookup; Codex #6398 r23 P1).
+const TRUSTED_FOOTPRINT_STORIES_SOURCES = new Set(['lookup', 'ai', 'permit', 'verified', 'manual']);
 
 const RECURRING_SERVICE_ORDER = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub'];
 const TIER_MIN_SERVICE_COUNT = {
@@ -493,6 +499,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // the seed path consults this — a rejected dimension with no seed already
   // fails closed to the pricer's own missing-property handling.
   const lookupRejectedFields = new Set();
+  let lookupFootprintUnknown = false;
+  let lookupHomeSqFtAdopted = false;
+  let lookupStoriesSource = null;
 
   // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
   // whose row carried both was NEVER looked up — and therefore priced
@@ -555,7 +564,20 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       // number the lookup itself said to verify first. Stored profile
       // values still win ahead of the fill either way.
       if (lookupDimensionIsTrustworthy(p, 'homeSqFt')) {
+        const before = homeSqFt;
         homeSqFt = positiveNumber(homeSqFt, p.homeSqFt, record.squareFootage);
+        // An aggregate parcel whose story count is unknown keeps its SUMMED
+        // living area but no footprint (buildEnrichedProfile footprintUnknown).
+        // Adopting that home size without the suppression would let the
+        // engine rebuild a one-story footprint from it for the T&S open-parcel
+        // basis (Codex #6398 r20 P1); the public route refuses the same way.
+        // positiveNumber yields 0 when the lookup carried no home size: that
+        // is no adoption (and no footprint) — Codex #6398 r24 P1.
+        if (homeSqFt !== before && Number(homeSqFt) > 0) {
+          lookupHomeSqFtAdopted = true;
+          lookupStoriesSource = typeof p.storiesSource === 'string' ? p.storiesSource : null;
+          if (p.footprintUnknown === true) lookupFootprintUnknown = true;
+        }
       }
       if (lookupDimensionIsTrustworthy(p, 'lotSqFt')) {
         lotSqFt = positiveNumber(lotSqFt, p.lotSqFt, record.lotSize);
@@ -846,6 +868,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   // 'estimated', which correctly keeps the stories_estimated review marker
   // for estimates that guessed).
   let storiesFromSeed = false;
+  let homeSqFtFromSeed = false;
   if (propertySeed) {
     // A field the lookup REJECTED is not a gap the seed may fill (codex
     // #3367 PR r14) — the lookup said to verify that measurement (or the
@@ -854,7 +877,10 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     // an exact figure with the caveat stripped off. Left unfilled, the
     // pricer's own missing-property handling applies and the offer demotes.
     const seedMayFill = (field) => !lookupRejectedFields.has(field);
-    if (seedMayFill('homeSqFt') && !homeSqFt && propertySeed.homeSqFt > 0) homeSqFt = propertySeed.homeSqFt;
+    if (seedMayFill('homeSqFt') && !homeSqFt && propertySeed.homeSqFt > 0) {
+      homeSqFt = propertySeed.homeSqFt;
+      homeSqFtFromSeed = true;
+    }
     if (seedMayFill('lotSqFt') && !lotSqFt && propertySeed.lotSqFt > 0) lotSqFt = propertySeed.lotSqFt;
     if (seedMayFill('lawnSqFt') && !lawnKnownZero && !(lawnSqFt > 0) && propertySeed.lawnSqFt > 0) {
       lawnSqFt = propertySeed.lawnSqFt;
@@ -912,6 +938,23 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);
 
+  // Provenance rides with the count: a defaulted story count (no lookup,
+  // or a verify-flagged read discarded above) must say so, or the
+  // story-sensitive pricers (pest per-story minutes, termite bait
+  // footprint→perimeter) price a guessed one-story home with no
+  // stories_estimated review marker on the quote. An adopted count is
+  // graded through the SAME evidence rule the agent path uses
+  // (draft-builder#storiesSourceForPricing): the AI stories-fallback
+  // carries provenance without any verify flag, and a non-direct or
+  // low-confidence inference must price as 'estimated', not 'lookup'.
+  const resolvedStoriesSource = stories
+    ? (storiesFromSeed
+      ? (propertySeed?.storiesSource || 'estimated')
+      : storiesSourceForPricing({ stories, storiesEvidence }))
+    : 'default';
+  const lookupFootprintTrusted = lookupHomeSqFtAdopted && !lookupFootprintUnknown
+    && TRUSTED_FOOTPRINT_STORIES_SOURCES.has(resolvedStoriesSource)
+    && !(lookupStoriesSource && !TRUSTED_FOOTPRINT_STORIES_SOURCES.has(lookupStoriesSource));
   const propertyInput = {
     homeSqFt,
     lotSqFt,
@@ -920,24 +963,37 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     // a lawn the profile measured as absent.
     lawnSqFt: lawnKnownZero ? 0 : (lawnSqFt || undefined),
     stories: stories || 1,
-    // Provenance rides with the count: a defaulted story count (no lookup,
-    // or a verify-flagged read discarded above) must say so, or the
-    // story-sensitive pricers (pest per-story minutes, termite bait
-    // footprint→perimeter) price a guessed one-story home with no
-    // stories_estimated review marker on the quote. An adopted count is
-    // graded through the SAME evidence rule the agent path uses
-    // (draft-builder#storiesSourceForPricing): the AI stories-fallback
-    // carries provenance without any verify flag, and a non-direct or
-    // low-confidence inference must price as 'estimated', not 'lookup'.
-    storiesSource: stories
-      ? (storiesFromSeed
-        ? (propertySeed?.storiesSource || 'estimated')
-        : storiesSourceForPricing({ stories, storiesEvidence }))
-      : 'default',
+    storiesSource: resolvedStoriesSource,
     propertyType,
     features,
     bedArea: bedArea || undefined,
     bedAreaSource: bedArea ? bedAreaSource : undefined,
+    // A seeded homeSqFt is only as trusted for the Tree & Shrub open-parcel
+    // basis as the source estimate stamped it (Codex #6398 security r19): a
+    // public quote stamps false (body-controlled), and an unstamped seed has
+    // unknown provenance, so both mark the footprint untrusted and the
+    // pricer parks a lot-inferred T&S line instead of publishing a bed shrunk
+    // by an inflated home size. Only an explicitly trusted stamp (and the
+    // server-measured footprint it came with) passes through. A homeSqFt
+    // from the stored profile or the lookup is the resolver's own: no verdict.
+    ...(homeSqFtFromSeed
+      ? {
+        treeShrubFootprintTrusted: propertySeed.treeShrubFootprintTrusted === true,
+        ...(propertySeed.treeShrubFootprintTrusted === true && propertySeed.treeShrubFootprintSqFt > 0
+          ? { treeShrubFootprintSqFt: propertySeed.treeShrubFootprintSqFt } : {}),
+      }
+      : {}),
+    // Without a seed, the ONLY trusted footprint this lane can hold is a
+    // lookup home size whose story count is vouched for: the lookup's own
+    // footprint suppression travels with its home size (an aggregate living
+    // area is NOT a footprint; Codex #6398 r20 P1), a story count that is
+    // absent, flagged, defaulted by the lookup or graded 'estimated' would
+    // let the engine rebuild a one-story footprint from the full living area
+    // of a possibly multi-story home (r23 P1), and a failed lookup or one
+    // with no building at all leaves a zero footprint that infers beds from
+    // nearly the whole lot (r24 P1). Every one of those marks the footprint
+    // untrusted so a lot-inferred T&S line parks instead of publishing.
+    ...(!homeSqFtFromSeed && !lookupFootprintTrusted ? { treeShrubFootprintTrusted: false } : {}),
     yearBuilt,
     constructionMaterial,
     foundationType,

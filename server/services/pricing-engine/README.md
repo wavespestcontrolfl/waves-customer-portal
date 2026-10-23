@@ -18,7 +18,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | `DRIVE_TIME` | 20 min | Per-visit drive allowance baked into labor cost |
 | `ADMIN_ANNUAL` | $51 | Per-service/yr admin overhead (billing, scheduling, CRM) |
 | `MARGIN_FLOOR` | 35% | Margin REPORTING threshold for recurring lines (enforcement removed 2026-07-17 — owner ruling "forget all floors") |
-| `MARGIN_TARGET_TS` | 45% | Tree & Shrub admin-inclusive margin target; `(annualDirectCost + ADMIN_ANNUAL) / (1 − target)` |
+| `MARGIN_TARGET_TS` | 40% | Tree & Shrub admin-inclusive margin target (45% until the 2026-10-21 owner audit; DB-authoritative via `global_margin_target_ts`); `(annualDirectCost + ADMIN_ANNUAL) / (1 − target)` |
 | `CONDITIONAL_CEILING` | $60 | Max conditional material/yr before reprice |
 | `PROCESSING_ADJUSTMENT` | 1.00 | Retained no-op wrapper; checkout uses `computeChargeAmount` to add 2.90% only for confirmed credit funding |
 
@@ -147,8 +147,8 @@ residential recurring lawn care only. Off, everything above is unchanged. On:
 `annualPrice = (annualDirectCost + ADMIN_ANNUAL) / (1 − marginTarget)`, subject
 to the tier's existing monthly list-price floor.
 
-The code-default `marginTarget` is 45%, measured after the annual admin
-allocation and before final discounts. Database pricing config can tune it.
+The code-default `marginTarget` is 40% (45% until the owner audit of 2026-10-21; lawn and pest price to the 35% floor and T&S was the outlier), measured after the annual admin
+allocation and before final discounts. Database pricing config (`global_margin_target_ts`) can tune it. The post-discount guard is report-only, so the cut reaches bundled customers in full; `belowMarginFloor` now flags more WaveGuard-discounted T&S lines (Silver collects ~33%, Gold ~29%, Platinum ~25%).
 
 | Tier (sold) | Freq | Floor (monthly, pre-discount) |
 |---|---|---|
@@ -165,7 +165,10 @@ The 6-visit Standard program is the mandated default and the pre-selected/auto-r
 
 **Bed area confidence:**
 - `explicit` → high confidence, auto-price.
-- `estimated` → medium confidence, generated from estimate fields or `lotSqFt × basePct + complexAdd` (heavy 25%, moderate 18%, light 10%).
+- `estimated` → medium confidence, from the estimate / aerial fields.
+- `lot_based` → medium confidence, `openArea × basePct + complexAdd` (heavy 25%, moderate 18%, light 10%) where openArea = lot − building footprint − hardscape (pool/cage included) via `property-calculator.js#treeShrubBedBasisSqFt` (owner audit 2026-10-21; the percentage used to run on the GROSS lot and billed beds under the house, drive and cage). A bare `{ lotSqFt }` caller with no footprint still prices on the gross lot.
+
+**Tree count when none is given:** `treeDensityCounts` maps the aerial `treeDensity` enum to light 2 / moderate 4 / heavy 6 ornamental trees (owner audit 2026-10-21; was 3/6/10, which billed shade canopy as sprayed plants). The aerial prompt now asks for ORNAMENTAL trees only (palms separate, mature oaks/pines excluded) and defines bed area as the planted bed footprint (no turf, hardscape, or cage interior).
 - `fallback` → low confidence, uses 1,200 sqft (owner ruling 2026-10-05; 2,000 sqft before) and requires manual review. The size is DB-authoritative (`pricing_config` `ts_material_rates.fallback_bed_sqft`, 100-20000, in-code default 1,200) and is stamped as `pricingKnobs.fallbackBedSqFt`, so a replayed quote keeps the size it was sent with (an unstamped or pre-change line replays 2,000).
 
 Estimated bed area is priced in full. Manual review is required for fallback

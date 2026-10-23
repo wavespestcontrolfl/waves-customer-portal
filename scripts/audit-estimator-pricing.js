@@ -518,7 +518,7 @@ function expectOneTimePest({ homeSqFt, stories = 1, features = {}, propertyType 
   return { quarterlyBase: q.basePrice, multiplied, preUrgency, urgencyMult: mult, perkRate, price, visitOne, clamped };
 }
 
-// TREE & SHRUB — cost buildup ÷ (1 − 0.45), monthly floor, annual = round2(monthly×12)
+// TREE & SHRUB — cost buildup ÷ (1 − TREE_SHRUB.marginTarget; 0.40 since the 2026-10-21 owner audit), monthly floor, annual = round2(monthly×12)
 function expectTreeShrub({ bedArea, treeCount = 0, palmCount = 0, access = 'easy', tier = 'standard', shrubDensity = 'moderate' }) {
   const TS = constants.TREE_SHRUB;
   const G = constants.GLOBAL;

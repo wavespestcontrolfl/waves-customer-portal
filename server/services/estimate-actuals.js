@@ -244,6 +244,11 @@ function extractTreeShrubActuals(serviceData) {
 
   const actuals = {
     bedSqFt: lenientMeasurement(pick('bed_sqft_serviced')),
+    // Spray-volume groundwork (owner 2026-10-21): gallons of finished mix and
+    // the shrub line sprayed, so the material model can be re-derived from
+    // label carrier volume once enough visits carry them.
+    sprayMixGallons: lenientMeasurement(pick('spray_mix_gallons')),
+    hedgeLinearFt: lenientMeasurement(pick('hedge_linear_ft_serviced')),
     palmCount: nonnegativeCount(pick('palm_count_total')) ?? nonnegativeCount(pick('palms_serviced')),
     treeCount: nonnegativeCount(pick('tree_count_total')),
     shrubDensity: normalizedEnum(pick('shrub_density')),

@@ -749,7 +749,7 @@ const CONTACT_FIELDS = new Set([
 const PROPERTY_FORM_FIELDS = [
   "homeSqFt", "lotSqFt", "stories", "unitCount", "propertyType", "isCommercial",
   "commercialSubtype", "commercialRiskType", "hasPool", "hasPoolCage", "poolCageSize",
-  "shrubDensity", "treeDensity", "landscapeComplexity", "nearWater", "bedArea",
+  "shrubDensity", "treeDensity", "landscapeComplexity", "nearWater", "bedArea", "hedgeLinearFt",
   "palmCount", "largePalmCount", "palmTreatmentCount", "palmDbhInches", "treeCount", "measuredTurfSf",
   "termiteFootprintSqFt", "termitePerimeterLF", "trenchingPerimeterLF",
   "trenchingConcreteLF", "trenchingDirtLF", "boracareSqft", "boracareSurfaceLinearFt",
@@ -1478,6 +1478,7 @@ export default function EstimateToolViewV2({
     isAfterHours: "NO",
     isRecurringCustomer: "NO",
     bedArea: "",
+    hedgeLinearFt: "",
     palmCount: "",
     largePalmCount: "",
     palmTreatmentCount: "",
@@ -3624,6 +3625,9 @@ export default function EstimateToolViewV2({
           // Parcel-wide canopy count from the earlier bare-building lookup
           // (pre-push codex P1 r4); palms clear through palmPrefillAllowed.
           treeCount: "",
+          // The whole building's hedge line would otherwise persist as the
+          // unit's manual measurement (Codex #6398 r5).
+          hedgeLinearFt: "",
         });
       }
       // Only a DECIDED pool prefills. POSSIBLE is satellite seeing a pool
@@ -4346,6 +4350,14 @@ export default function EstimateToolViewV2({
       const largePalmCount = parsePositiveInteger(form.largePalmCount);
       if (largePalmCount) profile.largePalmCount = largePalmCount;
       else delete profile.largePalmCount;
+      // Hedge / bed linear feet (owner 2026-10-21): stored on the profile for
+      // the spray-volume material model; the pricer does not read it yet. A
+      // blank field clears a revision's saved value; the aerial estimate
+      // (profile.estimatedHedgeLinearFt) still rides along from the lookup.
+      const hedgeRaw = String(form.hedgeLinearFt ?? "").trim();
+      const hedgeLinearFt = hedgeRaw === "" ? undefined : Number(hedgeRaw);
+      if (hedgeLinearFt !== undefined && Number.isFinite(hedgeLinearFt) && hedgeLinearFt >= 0) profile.hedgeLinearFt = hedgeLinearFt;
+      else delete profile.hedgeLinearFt;
       if (treeCount !== undefined) {
         profile.estimatedTreeCount = treeCount;
         profile.treeCount = treeCount;
@@ -6117,6 +6129,11 @@ export default function EstimateToolViewV2({
                   {form.svcTs && (
                     <Field label="Tree Count" id="estimate-treeCount" className="mb-4">
                       <InputV2 k="treeCount" type="number" placeholder="Auto" />
+                    </Field>
+                  )}{" "}
+                  {form.svcTs && !commercialDetected && (
+                    <Field label="Shrub / hedge line (linear ft)" id="estimate-hedgeLinearFt" className="mb-4">
+                      <InputV2 k="hedgeLinearFt" type="number" placeholder="Aerial estimate" />
                     </Field>
                   )}{" "}
                   {form.svcTs && !commercialDetected && (
