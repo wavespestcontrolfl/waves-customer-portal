@@ -18484,6 +18484,10 @@ export function CompletionPanel({
                 scoredCount: treeShrubReview.scoredCount,
                 // Server HMAC proving these scores came from /assess-preview (anti-tamper).
                 signature: treeShrubReview.signature,
+                // GATE_TS_LIGHTING: the signed light read, echoed back as received (absent while dark).
+                ...(treeShrubReview.photoLights && treeShrubReview.lightSignature
+                  ? { photoLights: treeShrubReview.photoLights, lightSignature: treeShrubReview.lightSignature }
+                  : {}),
                 decisions: (treeShrubReview.findings || []).map((f) => ({ key: f.key, action: f.defaultAction || "monitor", detail: f.detail })),
               }
             : undefined,
