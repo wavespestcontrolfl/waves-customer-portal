@@ -511,6 +511,9 @@ function decideWeeklyEmail({
       systemType: scheduleUnconfirmed ? null : irrigationSystemType,
       explicitInchesPerWeek: scheduleUnconfirmed ? null : prefsInches,
       rates: ratesForTable(table),
+      // The same reading of drip as `derived` above (line ~452, no ignoreDrip): a turf head beside drip zones is a
+      // mixed system HERE, so the setup ask and the sentence agree (default basis), codex r8 P2.
+      ignoreDrip: false,
     });
   };
 

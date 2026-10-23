@@ -63,10 +63,15 @@ function roundGallons(gallons) {
  *                                                        the email tells them to skip, which may differ from their normal
  *                                                        schedule (a restriction-limited plan prescribes fewer, longer runs)
  * @param {number|null}        input.planEvents          that plan's event count
+ * @param {boolean}            input.ignoreDrip          how the caller's own derivation reads drip zones: the plan engine
+ *                                                        leaves drip out (one turf head + drip is one head), the email's
+ *                                                        ask paths count it (mixed heads → the setup ask), so each caller
+ *                                                        passes its own reading and the sentence never contradicts the
+ *                                                        template beside it (codex #6498 r7, r8)
  * @returns {{ v: 1, basis: 'plan'|'schedule'|'default', lawnSqft: number, depthInches: number, runsPerWeek: number,
  *             gallonsPerRun: number, gallonsPerWeek: number } | null}
  */
-function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = null, systemType = null, explicitInchesPerWeek = null, rates, planDepthInches = null, planEvents = null } = {}) {
+function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = null, systemType = null, explicitInchesPerWeek = null, rates, planDepthInches = null, planEvents = null, ignoreDrip = true } = {}) {
   const sqft = positiveLawnSqft(lawnSqft);
   if (!sqft) return null;
 
@@ -75,9 +80,7 @@ function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = nul
   let basis = 'default';
   const explicit = Number(explicitInchesPerWeek);
   const days = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType }).wateringDays;
-  // Drip waters beds, not turf: one turf head beside drip zones is still one head, as the plan engine reads it
-  // (codex #6498 r7).
-  const derived = deriveIrrigationInchesPerWeek({ runMinutes, wateringDays, systemType }, { rates, ignoreDrip: true });
+  const derived = deriveIrrigationInchesPerWeek({ runMinutes, wateringDays, systemType }, { rates, ignoreDrip });
   const planDepth = Number(planDepthInches);
   if (Number.isFinite(planDepth) && planDepth > 0) {
     // The run the plan prescribes IS the run the sentence sits beside (codex #6498 r7).

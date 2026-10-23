@@ -245,6 +245,13 @@ describe('end to end — sweep inputs, the email note, replay and the app card',
     // (Nothing on file to be unconfirmed, so no moved preface; the former home's area is still withheld.)
     const movedAsk = decideFor({ ...noSchedule, irrigation_home_changed_at: '2026-09-01T00:00:00Z', irrigation_confirmed_fields: '[]' }).payload.schedule_ask;
     expect(movedAsk).toBe(off.payload.schedule_ask);
+    // One turf head beside drip zones: the ask says the heads are mixed, so the sentence keeps the default basis
+    // (never "from the sprinkler schedule in your portal") — codex r8 P2.
+    const rotorDrip = decideFor({ ...noSchedule, irrigation_run_minutes: 40, watering_days: ['Mon', 'Thu'], irrigation_system_type: ['rotor', 'drip'] });
+    expect(rotorDrip.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(rotorDrip.payload.schedule_ask).toMatch(/very different rates/);
+    expect(rotorDrip.payload.schedule_ask).toContain('a typical 20-minute run is about 1,550 gallons');
+    expect(rotorDrip.payload.schedule_ask).not.toMatch(/From the sprinkler schedule in your portal/);
     // No sprinkler system known: nothing to skip, no sentence (setup_system carries no ask at all).
     const noSystem = decideFor({ ...noSchedule, irrigation_system: false, turf_irrigation_type: 'none' });
     expect(noSystem.templateKey).toBe(TEMPLATE_SETUP_SYSTEM);
