@@ -368,7 +368,7 @@ function makeFakeDb({ categories } = {}) {
   }
 
   const db = table => builderFor(tables, table);
-  db.raw = sql => ({ sql });
+  db.raw = (sql, bindings) => ({ sql, bindings });
   db.transaction = async fn => {
     log.transactions += 1;
     const staged = Object.fromEntries(Object.entries(tables).map(([k, v]) => [k, v.slice()]));
@@ -467,6 +467,27 @@ describe('run', () => {
     expect(report).toMatch(/\[loaded by an earlier run as expense \(Dues & education, line 27a\); the file now reads it differently .*; the ledger says expense \(Advertising & Marketing\)\]/);
     expect(db.tables().expenses).toHaveLength(4); // nothing re-booked or deleted by guesswork
     expect(db.tables().bank_transactions).toHaveLength(8);
+    // each held row carries the conflict as a review note Bank Import shows, merged onto the stored suggestion (status untouched)
+    const noted = db.tables().bank_transactions.filter(b => b.suggestion && b.suggestion.bindings);
+    expect(noted).toHaveLength(3);
+    const acmeRow = db.tables().bank_transactions.find(b => b.description === 'ACME SUPPLY 4471');
+    expect(acmeRow.status).toBe('created_expense');
+    expect(acmeRow.suggestion.sql).toMatch(/coalesce\(suggestion, '\{\}'::jsonb\) \|\| \?::jsonb/);
+    const merged = JSON.parse(acmeRow.suggestion.bindings[0]);
+    expect(merged).toMatchObject({ review: true, note: expect.stringMatching(/^the ledger file now reads this row as personal \(Personal\); it was loaded as expense \(Supplies \(chemicals, equipment, hardware\), line 22\): unlink, re-link or change it here$/), ledgerConflict: expect.objectContaining({ loadedAs: expect.stringMatching(/^expense/), fileSays: 'personal (Personal)', line: expect.any(Number) }) });
+  });
+
+  test('a dry run lists the holds but writes no note', async () => {
+    const db = makeFakeDb();
+    await run({ file, db });
+    const rows = parseLedgerCsv(fs.readFileSync(file, 'utf8'));
+    const edited = rows.map((r) => ({ ...r }));
+    const acme = edited.find((r) => r.description === 'ACME SUPPLY 4471'); acme.class = 'personal'; acme.category = 'Personal'; acme.sched_c_line = '';
+    fs.writeFileSync(file, csv(...edited.map((r) => row({ source: r.source, date: r.date, description: r.description, amount: String(r.amount.toFixed(2)), direction: r.direction, class: r.class, category: r.category, sched_c_line: r.sched_c_line, flag: r.flag }))));
+    const writes = db.log.writes;
+    const { counts } = await run({ file, db, dryRun: true });
+    expect(counts).toMatchObject({ held: 1, duplicates: 7, inserted: 0 });
+    expect(db.log.writes).toBe(writes);
   });
 
   test('a rerun holds a row an earlier run loaded whose expense was deleted since, instead of skipping it as a duplicate', async () => {
@@ -481,6 +502,7 @@ describe('run', () => {
     expect(counts).toMatchObject({ inserted: 0, held: 1, duplicates: 7 });
     expect(report).toMatch(/loaded by an earlier run but its expense was deleted since; the ledger says expense \(Supplies\)/);
     expect(db.tables().expenses.find(e => e.vendor_name === 'ACME SUPPLY 4471')).toBeUndefined(); // nothing re-booked by guesswork
+    expect(JSON.parse(loaded.suggestion.bindings[0]).note).toMatch(/but its expense was deleted since: create the expense here, or ignore the row$/);
   });
 
   test('second run inserts nothing and creates no duplicate expense', async () => {
@@ -615,13 +637,19 @@ describe('shared helpers', () => {
     expect(() => parseArgs(['--file', 'x.csv', '--skip-existing'])).toThrow(/unknown argument: --skip-existing/);
   });
 
-  test('only a Stripe fee is parked (the P&L adds synced Stripe fees itself); any other processor or bank fee, marked or not, books as the expense it is', () => {
+  test('only a Stripe processing FEE is parked (the P&L adds synced Stripe fees itself); a purchase that mentions Stripe, and any other processor or bank fee, marked or not, books as the expense it is', () => {
     const stripe = mapRow(parsedRow({ sched_c_line: '10', description: 'STRIPE FEE 0042', category: 'Commissions and fees' }), 0, 'l.csv');
     expect(stripe.expense).toBeNull();
     expect(stripe.bank.status).toBe('unmatched');
     expect(stripe.bank.suggestion).toMatchObject({ review: true, manualLink: true, note: expect.stringMatching(/^Stripe fee: the P&L adds synced Stripe fees on its own/) });
     const byCategory = mapRow(parsedRow({ sched_c_line: '27a', description: 'PAYMENT 0042', category: 'Stripe processing fees' }), 0, 'l.csv');
     expect(byCategory.expense).toBeNull();
+    // a Stripe-processed vendor charge or a Stripe subscription is a purchase, not a fee in the sync: it books on its own line
+    const vendor = mapRow(parsedRow({ sched_c_line: '22', description: 'STRIPE *ACME SUPPLY', category: 'Supplies' }), 0, 'l.csv');
+    expect(vendor.expense).not.toBeNull();
+    const software = mapRow(parsedRow({ sched_c_line: '27a', description: 'STRIPE PAYMENTS', category: 'Stripe software subscription' }), 0, 'l.csv');
+    expect(software.expense).not.toBeNull();
+    expect(software.categoryName).toBe('Software & Technology');
     // a Square-era fee, a bank's merchant fee, a row the ledger matched to a processor record: none of these is in the Stripe sync
     for (const over of [
       { sched_c_line: '10', description: 'SQ *FEE 0042', category: 'Commissions and fees', processor_match: 'Y' },

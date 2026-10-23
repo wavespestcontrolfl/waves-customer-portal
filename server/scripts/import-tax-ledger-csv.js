@@ -227,25 +227,29 @@ const SOFTWARE_27A = /software|subscription|saas|\bapp\b|hosting|domain|cloud|\b
 // A processor fee on line 10 is not booked: the P&L adds every synced Stripe
 // fee on its own (pnl-report) and a manual expense for it would count it
 // twice. Such a row is parked with that note; other line 10 items book.
-// Only a STRIPE fee is parked: the P&L adds every synced Stripe fee on its
-// own (pnl-report), so a manual expense for one would count it twice. Any
-// other processor's fee (the Square years), a bank's merchant fee or a
-// generic "processing fee" is in no sync and books as the expense it is.
-// The processor_match column (the row matched a processor record, Square or
-// Stripe) is part of the reading a rerun compares, not a reason to park.
+// Only a STRIPE processing FEE is parked: the P&L adds every synced Stripe
+// fee on its own (pnl-report), so a manual expense for one would count it
+// twice. A purchase that merely mentions Stripe (a Stripe-processed vendor
+// charge, a subscription) is not in that total and books as the expense it
+// is; so does any other processor's fee (the Square years), a bank's
+// merchant fee or a generic "processing fee". The processor_match column
+// (the row matched a processor record, Square or Stripe) is part of the
+// reading a rerun compares, not a reason to park.
 const STRIPE_RE = /\bstripe\b/i;
+const FEE_RE = /\bfees?\b|processing|commission/i;
 const PROCESSOR_NOTE = 'Stripe fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced';
 function processorMarked(row) {
   return /^(y|yes|true|1)$/i.test(String(row.processor_match || '').trim());
 }
-function processorFee(row) {
-  return STRIPE_RE.test(String(row.description || '')) || STRIPE_RE.test(String(row.category || ''));
+function processorFee(row, line) {
+  const text = `${row.description || ''} ${row.category || ''}`;
+  return STRIPE_RE.test(text) && (String(line) === '10' || FEE_RE.test(text));
 }
 // The note a parked business row carries: why it is not booked here. Bank
 // Import shows it under the row and on its Create expense button, so the
 // category the importer refused is never picked unknowingly.
 function parkNote(row, line) {
-  if (processorFee(row)) return { note: PROCESSOR_NOTE };
+  if (processorFee(row, line)) return { note: PROCESSOR_NOTE };
   return { note: `no category in the portal for line ${line || '(none)'}; the ledger says ${row.class}: "${row.category}". Pick the category knowingly, or leave it for the return` };
 }
 function categoryNameForLine(line, category) {
@@ -336,7 +340,7 @@ function mapRow(row, ordinal, basename) {
 
   if (BUSINESS_CLASSES.has(row.class)) {
     const line = row.sched_c_line || CLASS_DEFAULT_LINE[row.class] || '';
-    const categoryName = processorFee(row) ? null : categoryNameForLine(line, row.category);
+    const categoryName = processorFee(row, line) ? null : categoryNameForLine(line, row.category);
     if (!categoryName) {
       bank.status = 'unmatched';
       bank.suggestion = reviewSuggestion(row, { manualLink: true, ...parkNote(row, line) });
@@ -449,7 +453,7 @@ function formatReport({ dryRun, file, read, inserted, duplicates, held = [], par
     `rows read:                 ${read}`,
     `${dryRun ? 'would insert:              ' : 'inserted:                  '}${inserted}`,
     `skipped as duplicate:      ${duplicates} (loaded by an earlier run, unchanged)`,
-    `held in the portal:        ${held.length} (loaded before; the file now reads it differently, or its expense is gone: decide each in Bank Import)`,
+    `held in the portal:        ${held.length} (loaded before; the file now reads it differently, or its expense is gone: each row now carries the note in Bank Import, decide it there)`,
     ...held.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
     `parked for review:         ${parked.length} (loaded as open rows, no expense: an expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days is already in the portal; link or create it in Bank Import)`,
     ...parked.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
@@ -564,15 +568,25 @@ function describeReading(sug) {
 }
 // A row an earlier run loaded (same hash) is done, unless the file now reads
 // it differently, or the expense that run made is gone. Neither is rewritten
-// by a re-import: the row is held, and the owner decides it in Bank Import,
-// where every later decision on it (an ignore, a link, a refund) already
-// stands and is not second-guessed here.
+// by a re-import: the row is held, listed, and NOTED on the stored row (a
+// review note Bank Import shows under it, with the action), so the owner
+// decides it there, where every later decision on it (an ignore, a link, a
+// refund) already stands and is not second-guessed here.
 function reloadReason(prior, m) {
+  const was = describeReading(prior.suggestion);
+  const now = describeReading(m.bank.suggestion);
   if (readingOf(prior.suggestion) !== readingOf(m.bank.suggestion)) {
-    return `loaded by an earlier run as ${describeReading(prior.suggestion)}; the file now reads it differently (change it in Bank Import, not by re-import)`;
+    return {
+      why: `loaded by an earlier run as ${was}; the file now reads it differently (change it in Bank Import, not by re-import)`,
+      portalNote: `the ledger file now reads this row as ${now}; it was loaded as ${was}: unlink, re-link or change it here`,
+    };
   }
   if (m.expense && expenseGone(prior)) {
-    return prior.status === 'unmatched' ? 'loaded by an earlier run and open in the portal without its expense' : 'loaded by an earlier run but its expense was deleted since';
+    const open = prior.status === 'unmatched';
+    return {
+      why: open ? 'loaded by an earlier run and open in the portal without its expense' : 'loaded by an earlier run but its expense was deleted since',
+      portalNote: `loaded from the ledger as ${now}${open ? ' and still open without its expense' : ', but its expense was deleted since'}: create the expense here, or ignore the row`,
+    };
   }
   return null;
 }
@@ -622,8 +636,8 @@ function reconcileRows(mapped, rows, portal) {
   mapped.forEach((m, i) => {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
-      const why = reloadReason(prior, m);
-      if (why) held.push(note(i, `${why}; ${reading(m, i)}`));
+      const reason = reloadReason(prior, m);
+      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, portalNote: reason.portalNote, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion) });
       else duplicates += 1;
       return;
     }
@@ -648,6 +662,18 @@ function reconcileRows(mapped, rows, portal) {
     fresh.push(m);
   });
   return { fresh, duplicates, held, parked };
+}
+
+// A held row gets its note on the stored row: review + note (Bank Import
+// shows them under the row and on its Create expense button) and the
+// conflict itself, with the same atomic jsonb merge the matcher uses
+// (bank-import suggestionMerge): a concurrent writer can only append.
+async function noteHeldRows(db, held) {
+  for (const h of held) {
+    const patch = { review: true, note: h.portalNote, ledgerConflict: { at: new Date().toISOString(), loadedAs: h.loadedAs, fileSays: h.fileSays, line: h.line } };
+    await db('bank_transactions').where({ id: h.rowId })
+      .update({ suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]), updated_at: new Date() });
+  }
 }
 
 // Writes the fresh rows: non-expense rows in bulk (row_hash conflicts
@@ -712,6 +738,7 @@ async function run({ file, dryRun = false, db, log = () => {} } = {}) {
   const portal = await loadPortalState(db, mapped, rows);
   const r = reconcileRows(mapped, rows, portal);
   const written = dryRun ? { inserted: r.fresh.length, duplicates: 0 } : await writeRows(db, r.fresh, portal.categoryIds);
+  if (!dryRun) await noteHeldRows(db, r.held);
   // Rows lost to an insert-time conflict are not in the report's tallies.
   const landed = dryRun ? r.fresh : r.fresh.filter(m => !m.skipped);
   const landedHashes = new Set(landed.map(m => m.bank.row_hash));
