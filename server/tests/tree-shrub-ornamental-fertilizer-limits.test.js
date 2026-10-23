@@ -138,10 +138,12 @@ describe('the history rules judge the hand-added row as the suggestion is judged
     }
   });
 
-  test('an unreadable history is flagged to the tech as unchecked and never throws', async () => {
+  test('an unreadable history is flagged as unchecked, rings the office (Codex #6516 r2) and never throws', async () => {
     const { out, notify } = await flag({ rows: [row({ application_rate: 7.5, rate_unit: 'lb' })], failHistory: true });
-    expect(out.blocks).toEqual([expect.objectContaining({ code: 'application_limit_check_unavailable' })]);
-    expect(notify).not.toHaveBeenCalled();
+    expect(out.blocks).toEqual([expect.objectContaining({ code: 'application_limit_exceeded',
+      message: expect.stringContaining('history could not be read; 2-a-year and 5-month rules not checked') })]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0].findings).toEqual([expect.objectContaining({ limitType: limits.UNCHECKED_LIMIT_TYPE, reason: 'history_unavailable' })]);
   });
 });
 

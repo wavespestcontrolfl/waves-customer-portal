@@ -9,7 +9,7 @@
 // unconditionally, typed or not, so seeding must not be typed-gated).
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { CompletionPanel, treeShrubHighRateAdvisory } from './SchedulePage';
+import { CompletionPanel, treeShrubHighRateAdvisory, bedFeedRatePer1000 } from './SchedulePage';
 
 // Minimal typed 'cockroach' schema — same shape lawn-closeout's own typed
 // fixture uses (a real findingsSchema needs no more to render).
@@ -150,6 +150,16 @@ it('the Tree & Shrub high-rate line says county limit for 13-0-13, label max for
   expect(treeShrubHighRateAdvisory(orn, 'Tree & Shrub Care')).toMatch(/is over the county limit of 7\.5 lb\/1k \(0\.75 lb per 100 sq ft\)/);
   expect(treeShrubHighRateAdvisory({ ...orn, name: 'Snapshot 2.5TG', maxLabelRatePer1000: 4.6 }, 'Tree & Shrub Care')).toMatch(/exceeds label max 4\.6 lb\/1k/);
   expect(treeShrubHighRateAdvisory(orn, 'Lawn Care')).toBeNull();
+});
+
+it('the 13-0-13 line reads the rate from total over treated area when no rate is entered (Codex #6516 r2)', () => {
+  const base = { name: TS_ORN, rate: '', rateUnit: 'lb', catalogRateUnit: 'lb', maxLabelRatePer1000: 7.5, areaUnit: 'sqft' };
+  expect(bedFeedRatePer1000({ ...base, totalAmount: '12', amountUnit: 'lb', areaValue: 1200 })).toBe(10);
+  expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '12', amountUnit: 'lb', areaValue: 1200 }, 'Tree & Shrub Care'))
+    .toMatch(/rate 10 lb\/1k is over the county limit of 7\.5 lb\/1k/);
+  expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '9', amountUnit: 'lb', areaValue: 1200 }, 'Tree & Shrub Care')).toBeNull();
+  expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '192', amountUnit: 'oz', areaValue: 1200 }, 'Tree & Shrub Care')).toMatch(/rate 10 lb/);
+  expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '12', amountUnit: 'lb', areaValue: '' }, 'Tree & Shrub Care')).toBeNull();
 });
 
 it('seeds Alpine WSG + Gentrol IGR + Advion Cockroach Gel Bait on a completed, typed cockroach visit', async () => {

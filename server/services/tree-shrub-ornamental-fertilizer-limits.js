@@ -57,9 +57,12 @@ const round2 = (value) => Math.round(value * 100) / 100;
 /** Why the cap could not be read for a row: 'area_missing' (an amount but no treated sq ft) or 'rate_missing' (no usable amount or rate). */
 const uncheckedReason = (row) => (totalLb(row) !== null ? 'area_missing' : 'rate_missing');
 /** The one sentence the tech and the office read for a 13-0-13 row whose county cap could not be checked (no leading name). */
-const uncheckedClause = (reason) => (reason === 'area_missing'
-  ? 'recorded with no treated sq ft; county cap not checked'
-  : 'recorded with no usable amount or rate; county cap not checked');
+const uncheckedClause = (reason) => {
+  if (reason === 'history_unavailable') return 'recorded but its history could not be read; 2-a-year and 5-month rules not checked';
+  return reason === 'area_missing'
+    ? 'recorded with no treated sq ft; county cap not checked'
+    : 'recorded with no usable amount or rate; county cap not checked';
+};
 
 /** The findings for the 13-0-13 rows of one closeout. Pure. `rows` are the record's service_products rows. */
 function rateFindings(rows) {
@@ -122,8 +125,10 @@ async function flagOrnamentalFertilizer({ svc, record, database, advisory, notif
       if (found) findings.push(found);
     } catch (err) {
       logger.warn(`[ts-ornamental-fertilizer] history read failed for record ${record.id}: ${err?.message}`);
-      findings.push({ code: 'application_limit_check_unavailable', productId: rows[0].product_id, advisoryOnly: true,
-        message: 'Recorded. The office will review: 13-0-13 history could not be checked for this visit.' });
+      // Not advisoryOnly: the application was recorded and the 2-a-year / 5-month rules could not be held, so the office is rung.
+      findings.push({ code: 'application_limit_exceeded', limitType: UNCHECKED_LIMIT_TYPE, productId: rows[0].product_id,
+        productName: rows[0].product_name, reason: 'history_unavailable', current: null, max: CAP_LB_PER_1000,
+        message: `Recorded. The office will review: ${rows[0].product_name || '13-0-13'} ${uncheckedClause('history_unavailable')}.` });
     }
     if (!findings.length) return advisory;
     const toOffice = findings.filter((finding) => !finding.advisoryOnly);
