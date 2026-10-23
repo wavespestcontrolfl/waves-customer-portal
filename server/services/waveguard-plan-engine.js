@@ -5,6 +5,7 @@ const { lawnProhibitedProductBlock, treatedPropertyType } = require('./lawn-proh
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
 const { V13_TROUBLE_N_TARGETS, FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
+const { V13_CHINCH_TETRINO, CHINCH_TETRINO_NOTE_KEY, CHINCH_TETRINO_NOTE } = require('../config/lawn-v13-chinch-rate');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
@@ -784,15 +785,107 @@ async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Activ
   return rule.targetNPer1000;
 }
 
+// GATE_LAWN_CHINCH_TETRINO_RATE: does the visit's property have a chinch trouble area that is ACTIVE or was resolved within the last
+// 365 days? Same failure rules as hasActiveTroubleArea: off or no property is "no"; a failed read is "no" with its code logged, UNLESS
+// `strict` (the previsit brief): then it THROWS. The property resolution and the read share ONE savepoint.
+async function hasChinchMapped(knex, service, { strict = false } = {}) {
+  const areas = require('./lawn-trouble-areas');
+  try {
+    return await savepointRead(knex, async (k) => {
+      const propertyId = await areas.propertyOf(k, service, { strict });
+      return propertyId ? areas.hasAreaOfType(k, propertyId, V13_CHINCH_TETRINO.troubleType, { withinDays: V13_CHINCH_TETRINO.resolvedWithinDays }) : false;
+    });
+  } catch (err) {
+    logger.warn(`[plan] chinch areas unreadable for ${service?.id}: ${err?.code || err?.name || 'Error'}`);
+    if (strict) throw err;
+    return false;
+  }
+}
+
+// Would a Tetrino application at the raised rate fit the label limits the v13 cap entry holds (lawn-v13-count-caps.js: 1.47 fl oz per
+// 1,000 sq ft a year, 28 days between applications), over the lawn's recorded applications and this visit's date? The same limit reader the
+// plan uses (application-limits checkLimits, the visit's own ledger rows left out). A hard block = the raise does not fit, and the visit
+// plans the normal rate (which the plan then judges by the same reader: if even that is blocked, the line is held with the limit's
+// message). The Tetrino product is found by the cap entry's identity; one that cannot be found leaves the raise to the plan's own limit
+// read. `strict`: a failed read throws; otherwise it keeps the normal rate.
+async function chinchRaiseFits(knex, service, { strict = false } = {}) {
+  const { capIdMap } = require('../config/lawn-v13-count-caps');
+  const limits = require('./application-limits');
+  try {
+    const ids = [...(await capIdMap(knex))].filter(([, entry]) => entry.name === V13_CHINCH_TETRINO.productName).map(([id]) => id);
+    for (const id of ids) {
+      const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, id, toServiceDate(service.scheduled_date), k, {
+        proposed: { ratePer1000: V13_CHINCH_TETRINO.ratePer1000, unit: V13_CHINCH_TETRINO.rateUnit }, proposal: true,
+        excludeScheduledServiceId: service.id, propertyId: service.property_id || null,
+      }));
+      if (result?.blocks?.length) return false;
+    }
+    return true;
+  } catch (err) {
+    logger.warn(`[plan] chinch Tetrino limits unreadable for ${service?.id}: ${err?.code || err?.name || 'Error'}`);
+    if (strict) throw err;
+    return false;
+  }
+}
+
+// The ONE decision whether the May Tetrino rate at one property is raised, for every reader that states it (the plan, the tank sheet,
+// the previsit brief): the raised rate (config/lawn-v13-chinch-rate.js), else null. Gate first: with GATE_LAWN_CHINCH_TETRINO_RATE off
+// (or not a v13 program) nothing is read. Only May; `normalRate` is the visit's stated rate, and a rate already at or above the raised
+// one is never touched. The raise needs a mapped chinch area AND room under the label limits (chinchRaiseFits). `strict`: a failed read
+// throws (see hasChinchMapped).
+async function chinchTetrinoRate(knex, service, { monthNumber, statedRate = V13_CHINCH_TETRINO.normalRate, v13Active, strict = false }) {
+  if (!v13Active || !featureGates.lawnChinchTetrinoRateLive()) return null;
+  if (monthNumber !== V13_CHINCH_TETRINO.month || !(Number(statedRate) < V13_CHINCH_TETRINO.ratePer1000)) return null;
+  if (!(await hasChinchMapped(knex, service, { strict }))) return null;
+  return (await chinchRaiseFits(knex, service, { strict })) ? V13_CHINCH_TETRINO.ratePer1000 : null;
+}
+
+const isChinchTetrinoRow = (row) => !!row && [row.productName, row.protocolProductName].some((name) => String(name || '').trim() === V13_CHINCH_TETRINO.productName);
+
+// The staged rows with the May Tetrino row's stated rate raised to `rate`, so the plan amount, the tank sheet, the limit reader's
+// proposed application and the completion defaults all read the same number. The same Map back for no raise (byte-identical), else a
+// copy; only the Tetrino row changes, and only a row that states a lower rate.
+function chinchRateRows(rows, rate) {
+  if (rate == null || !(rows instanceof Map)) return rows;
+  const raised = new Map(rows);
+  for (const [key, row] of rows) {
+    if (isChinchTetrinoRow(row) && !bermudaRemoval.isStepRow(row) && Number(row.ratePer1000) > 0 && Number(row.ratePer1000) < rate) raised.set(key, { ...row, ratePer1000: rate });
+  }
+  return raised;
+}
+
+// The recipe text of a May visit whose Tetrino rate was raised, so what staff read (the line's `raw`, the visit's primary) agrees with
+// the amount the plan computes. Rewrites only the shape the v13 recipe uses; a line the pattern does not match stays as written (the
+// raise and the line note still apply: the amount and the note never depend on this text).
+const TETRINO_LINE = new RegExp(`^(${V13_CHINCH_TETRINO.productName} \u2014 )(\\d+(?:\\.\\d+)?)( fl oz per 1,000 sq ft)`);
+function chinchAdjustedVisit(visit, rate) {
+  if (typeof visit?.primary !== 'string') return visit;
+  const primary = visit.primary.split('\n').map((line) => {
+    const found = line.match(TETRINO_LINE);
+    if (!found || !(Number(found[2]) < rate)) return line;
+    return `${line.replace(TETRINO_LINE, `$1${rate}$3`)}, chinch bugs mapped`;
+  }).join('\n');
+  return { ...visit, primary };
+}
+
 // A visit's nutrient targets, for the plan and the tank sheet alike, so the plan amount, the mix sheet, the completion defaults, the
 // yearly limit check and the Fast Complete planned amount all read the same number. Returns the visit the lines are parsed from (an
-// adjusted copy when the nitrogen target was cut: fungusNitrogenCut; else the visit itself), its targets, and `nitrogenCut` (the
-// reduced N target, else null). Call it BEFORE the visit's lines are parsed.
+// adjusted copy when the nitrogen target was cut: fungusNitrogenCut, or the May Tetrino rate was raised: chinchTetrinoRate; else the
+// visit itself), its targets, `nitrogenCut` (the reduced N target, else null) and, only when raised, `chinchRate` (the raised Tetrino
+// rate). Call it BEFORE the visit's lines are parsed.
 async function visitNutrientTargets(knex, service, { visit, month, v13Active, strict = false }) {
   const targets = parseVisitNutrientTargets(visit?.notes);
-  const cut = visit ? await fungusNitrogenCut(knex, service, { targetN: targets.targetNPer1000, monthNumber: MONTH_ABBR.indexOf(month) + 1, v13Active, strict }) : null;
-  if (cut == null) return { visit, targets, nitrogenCut: null };
-  return { visit: fungusAdjustedVisit(visit, cut), targets: { ...targets, targetNPer1000: cut }, nitrogenCut: cut };
+  const monthNumber = MONTH_ABBR.indexOf(month) + 1;
+  const cut = visit ? await fungusNitrogenCut(knex, service, { targetN: targets.targetNPer1000, monthNumber, v13Active, strict }) : null;
+  const chinchRate = visit ? await chinchTetrinoRate(knex, service, { monthNumber, v13Active, strict }) : null;
+  if (cut == null && chinchRate == null) return { visit, targets, nitrogenCut: null };
+  const nitrogenAdjusted = cut == null ? visit : fungusAdjustedVisit(visit, cut);
+  return {
+    visit: chinchRate == null ? nitrogenAdjusted : chinchAdjustedVisit(nitrogenAdjusted, chinchRate),
+    targets: cut == null ? targets : { ...targets, targetNPer1000: cut },
+    nitrogenCut: cut,
+    ...(chinchRate == null ? {} : { chinchRate }),
+  };
 }
 
 // The line note for a nitrogen bag sized for the reduced target (in the line's gateNotes, the way the Fast Complete sheet and the
@@ -804,6 +897,12 @@ function fungusNitrogenNotes(mix, nitrogenCut) {
     severity: 'note',
     text: `Active fungus mapped: nitrogen reduced to ${nitrogenCut} lb N (${Number(mix.ratePer1000).toFixed(1)} lb per 1,000). Close the spreader over the patch and 6 ft around it.`,
   }];
+}
+
+// The line note for a Tetrino line planned at the raised chinch rate. [] for any line the raise did not size.
+function chinchTetrinoNotes(row, mix, chinchRate) {
+  if (chinchRate == null || !isChinchTetrinoRow(row) || mix?.rateSource !== 'protocol_rate' || mix.ratePer1000 !== chinchRate) return [];
+  return [{ key: CHINCH_TETRINO_NOTE_KEY, severity: 'note', text: CHINCH_TETRINO_NOTE }];
 }
 
 function derivedNutrientRate(product, nutrient, targetPer1000) {
@@ -1877,7 +1976,7 @@ async function visitOnV13Protocol(knex, visit, { trackKey }) {
 // visit is pinned to (under the completion defaults, as selectProtocolVisit does) or else the month of the service date, so the cut
 // applies only to a visit that is on v13 and either unpinned or asked for in the month the plan reads.
 async function sheetReadsPlansStep(knex, visit, { trackKey, month }) {
-  if (featureGates.lawnV13Live?.() !== true || !featureGates.lawnNovLargePatchNLive()) return false;
+  if (featureGates.lawnV13Live?.() !== true || !(featureGates.lawnNovLargePatchNLive() || featureGates.lawnChinchTetrinoRateLive())) return false;
   const { onV13, windowMonth } = await visitOnV13Protocol(knex, visit, { trackKey });
   if (!onV13) return false;
   if (windowMonth == null) return true;
@@ -2126,7 +2225,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
   // The visit the lines are parsed from: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N) its copy with the cut nitrogen stated.
-  const { visit, targets: nutrientTargets, nitrogenCut } = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
+  const { visit, targets: nutrientTargets, nitrogenCut, chinchRate } = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
@@ -2134,7 +2233,8 @@ async function buildPlanForService(serviceId, options = {}) {
   ];
   // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
   // own protocol row supplies its rate, its sunny-turf limit and its gates.
-  const v13Rows = v13ProtocolRows(structuredProtocol);
+  // GATE_LAWN_CHINCH_TETRINO_RATE: the May Tetrino row states the raised rate for a chinch-mapped lawn (same Map back otherwise).
+  const v13Rows = chinchRateRows(v13ProtocolRows(structuredProtocol), chinchRate ?? null);
   const resolvedItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
     service,
@@ -2202,7 +2302,7 @@ async function buildPlanForService(serviceId, options = {}) {
     return {
       ...planLineFields(item),
       // Gate off: no v13 field at all, the payload is the old one.
-      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, fungusNitrogenNotes(mix, nitrogenCut)) : {}),
+      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, [...fungusNitrogenNotes(mix, nitrogenCut), ...chinchTetrinoNotes(line?.row, mix, chinchRate)]) : {}),
       matched: !!plannedProduct,
       product: planProductSnapshot(plannedProduct, mix),
       substitution: planSubstitutionSnapshot(substitution),
@@ -2221,7 +2321,7 @@ async function buildPlanForService(serviceId, options = {}) {
     productOf: (id) => products.find((product) => String(product.id) === String(id)) || null,
   });
   planItems = bermudaProjection.items;
-  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut == null ? null : { from: parseVisitNutrientTargets(recipeStep?.notes).targetNPer1000, to: nitrogenCut });
+  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut == null ? null : { from: parseVisitNutrientTargets(recipeStep?.notes).targetNPer1000, to: nitrogenCut }, chinchRate == null ? null : { from: V13_CHINCH_TETRINO.normalRate, to: chinchRate, productName: V13_CHINCH_TETRINO.productName });
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
   const v13PlanBlock = lawnV13PlanBlock({ trackKey, service, structuredProtocol });
@@ -2525,6 +2625,9 @@ module.exports = {
   fungusNitrogenCut,
   sheetReadsPlansStep,
   fungusNitrogenNotes,
+  chinchTetrinoRate,
+  chinchRateRows,
+  chinchTetrinoNotes,
   summarizeMaterialCost,
   effectiveAreaFactor,
   v13ProtocolRows,

@@ -393,6 +393,24 @@ async function projectFungusNitrogenCut(dbh, svc, entries, summary) {
   }
 }
 
+// GATE_LAWN_CHINCH_TETRINO_RATE: the brief states the May Tetrino line's stored rate (0.367 fl oz per 1,000 sq ft); for a chinch-mapped lawn
+// the plan raises it (waveguard-plan-engine chinchTetrinoRate, the plan's own decision), so the brief states the raised rate and why and the
+// pocket reference agrees with the plan and the Fast Complete sheet. Gate off, not v13, not May or no raise: the entries are left as they are.
+// STRICT like the brief's other reads (see projectFungusNitrogenCut).
+async function projectChinchTetrinoRate(dbh, svc, entries, summary) {
+  const { chinchTetrinoRate } = require('./waveguard-plan-engine');
+  const { V13_CHINCH_TETRINO } = require('../config/lawn-v13-chinch-rate');
+  const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
+  const rate = await chinchTetrinoRate(dbh, svc, { monthNumber: Number(summary.window?.month), v13Active, strict: true });
+  if (rate == null) return;
+  for (const entry of entries) {
+    const stated = Number(entry.shapedEntry.ratePer1000);
+    if (entry.shapedEntry.name !== V13_CHINCH_TETRINO.productName || !(stated > 0 && stated < rate)) continue;
+    entry.shapedEntry = { ...entry.shapedEntry, ratePer1000: rate };
+    entry.gates = { ...entry.gates, chinchRate: `${rate} fl oz/1000 (chinch bugs mapped; normal ${stated} fl oz/1000)` };
+  }
+}
+
 // Lawn visits: ONLY the products active for the visit's protocol window —
 // the owner's bounded-product constraint. Window resolution order:
 //   1. the visit's ASSIGNED window (scheduled_services.lawn_protocol_
@@ -508,6 +526,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
       }))
       .filter((p) => p.shapedEntry.name);
     await projectFungusNitrogenCut(dbh, svc, shaped, summary);
+    await projectChinchTetrinoRate(dbh, svc, shaped, summary);
 
     // Customer-specific application limits (annual max apps, cumulative
     // rate, minimum interval, MOA rotation — application-limits.js, the

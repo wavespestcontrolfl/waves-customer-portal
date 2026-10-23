@@ -380,7 +380,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect.objectContaining({ synthetic: true, limit_value: 2, severity: 'hard_block', product_id: null }),
       ]);
       expect(withEntryCaps(null, [row(3)])).toEqual([row(3)]);
-      expect(v13CountCapFor('Tetrino Insecticide')).toBeNull();
+      expect(v13CountCapFor('Dylox 6.2 G')).toBeNull();
     });
 
     describe('with the stored row at the legacy 3', () => {
@@ -1404,9 +1404,9 @@ describeDb('v13 count caps through PostgreSQL', () => {
         await knex('product_limits').where({ product_id: catalog[ARENA].id, limit_type: 'min_interval_days' }).del();
       });
 
-      test('only Arena (56 days) and Certainty (28 days, v13 final pass) carry an interval: Celsius and Blindside get none', async () => {
+      test('only Arena (56 days), Certainty (28 days, v13 final pass) and Tetrino (28 days, owner 2026-10-22) carry an interval: Celsius and Blindside get none', async () => {
         const { V13_LIMITS } = require('../config/lawn-v13-count-caps');
-        expect(V13_LIMITS.filter((entry) => entry.minIntervalDays).map((entry) => [entry.name, entry.minIntervalDays])).toEqual([[ARENA, 56], [CERTAINTY, 28]]);
+        expect(V13_LIMITS.filter((entry) => entry.minIntervalDays).map((entry) => [entry.name, entry.minIntervalDays])).toEqual([[ARENA, 56], [CERTAINTY, 28], ['Tetrino Insecticide', 28]]);
       });
     });
 
@@ -1593,9 +1593,9 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(limitBlocks(off)).toEqual([]);
       });
 
-      test('the amount caps are Arena, Blindside, Velista and Artavia, and the synthetic row is a hard block in the product\'s own unit', async () => {
+      test('the amount caps are Arena, Blindside, Velista, Artavia and Tetrino, and the synthetic row is a hard block in the product\'s own unit', async () => {
         const { V13_LIMITS, applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
-        expect(V13_LIMITS.filter((entry) => entry.annualAmount).map((entry) => entry.name)).toEqual([ARENA, BLINDSIDE, 'Velista', 'Artavia 2 SC (Azoxy)']);
+        expect(V13_LIMITS.filter((entry) => entry.annualAmount).map((entry) => entry.name)).toEqual([ARENA, BLINDSIDE, 'Velista', 'Artavia 2 SC (Azoxy)', 'Tetrino Insecticide']);
         process.env.GATE_LAWN_V13 = 'true';
         const rows = await applyV13CountCaps(knex, { id: catalog[ARENA].id, name: ARENA }, [], catalog[ARENA].id);
         expect(rows.filter((r) => r.match_type === V13_AMOUNT).map((r) => [r.limit_type, Number(r.limit_value), r.limit_unit, r.severity])).toEqual([['annual_max_rate', 0.294, 'oz/1000sf/year', 'hard_block']]);
