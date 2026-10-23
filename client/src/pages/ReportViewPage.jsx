@@ -9676,6 +9676,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            grey, size and line height as every other card. */
         html[data-glass-theme] .service-report-v1 .sr-v2-body,
         html[data-glass-theme] .service-report-v1 .sr-v2-body p { color: #3F4A65 !important; font-size: 16px !important; line-height: 1.5 !important; }
+        /* Button text at 600, the estimate's button weight (owner 2026-10-22,
+           "use the estimate as the default"). The glass sheet already sets
+           600 on anchor buttons (Download PDF, Portal Login, Reschedule);
+           these are the <button>s that still drew at 700. Size stays 14px
+           (report type scale, owner 2026-10-05). */
+        html[data-glass-theme] .service-report-v1 .report-action-buttons > button,
+        html[data-glass-theme] .service-report-v1 .cross-sell-card .cross-sell-cta,
+        html[data-glass-theme] .service-report-v1 .review-request-card .review-cta { font-weight: 600 !important; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
