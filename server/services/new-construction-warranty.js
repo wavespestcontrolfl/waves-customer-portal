@@ -145,10 +145,24 @@ function treatmentMethod(findings) {
   return method === 'Other' ? oneLine(findings.treatment_method_other) : method;
 }
 
-// Same rule as the admin button: one soil-barrier application with a plan.
+// The warranty covers subterranean termites only, so the certificate's
+// target must name them (it is a multi-select, stored as a list).
+const SUBTERRANEAN_TARGETS = ['Subterranean termites', 'Formosan subterranean termites'];
+function targetsSubterranean(value) {
+  let targets = value;
+  if (typeof targets === 'string') {
+    try { targets = JSON.parse(targets); } catch { targets = [targets]; }
+  }
+  if (!Array.isArray(targets)) targets = [targets];
+  return targets.some((target) => SUBTERRANEAN_TARGETS.includes(oneLine(target)));
+}
+
+// Same rule as the admin button: one soil-barrier application with a plan,
+// aimed at subterranean termites.
 function warrantyEligible(findings) {
   return Boolean(PLAN_YEARS[oneLine(findings.warranty_type)])
     && treatmentMethod(findings) === 'Soil barrier (chemical)'
+    && targetsSubterranean(findings.wdo_target)
     && extraApplications(findings.additional_applications).length === 0;
 }
 
@@ -180,6 +194,18 @@ function officeFields(body, initial) {
   return out;
 }
 
+// The template prints its own unit after each amount; a certificate value
+// that already carries one ("0.060%", "180 gallons") would print it twice.
+const UNIT_SUFFIX = {
+  concentration: /\s*%$/,
+  gallons: /\s*\b(gal|gals|gallons?)\.?$/i,
+  sq_ft: /\s*\b(sq\.?\s*ft|square\s*feet|sf)\.?$/i,
+  linear_ft: /\s*\b(linear\s*(ft|feet)|lineal\s*(ft|feet)|lin\.?\s*ft|lf)\.?$/i,
+};
+function withoutUnit(value, unit) {
+  return oneLine(value).replace(UNIT_SUFFIX[unit], '');
+}
+
 function certificateValues(project, findings) {
   // project_date is the certificate's treatment date; a legacy
   // findings.treatment_date must agree with it, never override it.
@@ -190,6 +216,10 @@ function certificateValues(project, findings) {
   const termEnd = us(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)]));
   const lot = [oneLine(findings.lot_block), oneLine(findings.subdivision)].filter(Boolean).join(', ');
   const finalDate = certificateDate(findings, 'final_exterior_date', 'The final exterior date');
+  const today = parseIso(etDateString());
+  if (finalDate && (key(finalDate) < key(initial) || key(finalDate) > key(today))) {
+    throw bad('The final exterior date on the certificate must be between the treatment date and today.', 409);
+  }
   const recordedRenewal = certificateDate(findings, 'renewal_due', 'Renewal due by');
   // Renewal is due when the guaranteed term ends; a recorded date that
   // differs would end coverage early, so it stops the issue.
@@ -206,10 +236,10 @@ function certificateValues(project, findings) {
       treatment: {
         product,
         active_ingredient: oneLine(findings.active_ingredient),
-        concentration: oneLine(findings.concentration_pct),
-        gallons: oneLine(findings.gallons_applied),
-        sq_ft: oneLine(findings.square_footage) || 'N/A',
-        linear_ft: oneLine(findings.linear_feet) || 'N/A',
+        concentration: withoutUnit(findings.concentration_pct, 'concentration'),
+        gallons: withoutUnit(findings.gallons_applied, 'gallons'),
+        sq_ft: withoutUnit(findings.square_footage, 'sq_ft') || 'N/A',
+        linear_ft: withoutUnit(findings.linear_feet, 'linear_ft') || 'N/A',
         initial_date: us(initial),
         final_exterior_line: finalDate ? `Final exterior treatment date: ${us(finalDate)}.` : FINAL_EXTERIOR_NOT_RECORDED,
         applicator: oneLine(findings.applicator_name),
@@ -248,6 +278,9 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   if (body?.allowUnresolved === true) throw bad('The new construction warranty cannot be issued with blank fields.');
   const projectId = body?.projectId;
   if (!projectId) throw bad('Issue the new construction warranty from its pre-treat certificate.');
+  // Customer row before the certificate row: the order the issue route and
+  // a customer merge both take, so the two cannot deadlock.
+  await conn('customers').where({ id: customer.id }).forUpdate().first('id');
   const project = await conn('projects').where({ id: projectId }).forUpdate().first();
   if (!project || project.project_type !== 'pre_treatment_termite_certificate' || project.customer_id !== customer.id) {
     throw bad('Pre-treat certificate not found for this customer.', 404);
@@ -262,6 +295,7 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
       ...values.warranty,
       ...officeFields(body, initial),
       contract_basis: contractBasis(body?.values?.basis, values.project.builder, initial),
+      // The day Waves signs it (the signature line); delivery keeps its own time.
       issue_date: us(parseIso(etDateString())),
     },
     issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title) },

@@ -21,6 +21,7 @@ const findings = {
   applicator_name: 'Sam Tester',
   applicator_fdacs_id: 'JF000000',
   warranty_type: 'Builder 1-year, renewable yearly to year 5',
+  wdo_target: ['Subterranean termites'],
 };
 
 function fillOfficeFields() {

@@ -236,8 +236,11 @@ function generateContractPDF(contract, customer, sink, opts = {}) {
     doc.text(bodyText, MARGIN_X, y, bodyOptions);
   } else {
     doc.text('', MARGIN_X, y, bodyOptions);
+    // Size and color every line: a page break draws the small pale footer
+    // and leaves that style set for the next line.
     for (const line of bodyLines) {
-      doc.font(line.bold ? 'Helvetica-Bold' : 'Helvetica').text(line.text || ' ', MARGIN_X, doc.y, bodyOptions);
+      doc.fontSize(10.5).fillColor(BODY).font(line.bold ? 'Helvetica-Bold' : 'Helvetica')
+        .text(line.text || ' ', MARGIN_X, doc.y, bodyOptions);
     }
     doc.font('Helvetica');
   }

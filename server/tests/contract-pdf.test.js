@@ -60,6 +60,24 @@ describe('contract-pdf', () => {
     await isPdf(buf);
   });
 
+  test('a bold body keeps the 10.5pt body size on every line after a page break', async () => {
+    const PDFDocument = require('pdfkit');
+    const sizes = new Map();
+    const original = PDFDocument.prototype.text;
+    PDFDocument.prototype.text = function text(...args) {
+      if (typeof args[0] === 'string' && args[0].startsWith('Clause ')) sizes.set(args[0], this._fontSize);
+      return original.apply(this, args);
+    };
+    try {
+      const body = ['**HEADING**', ...Array.from({ length: 300 }, (_, i) => `Clause ${i}.`)].join('\n');
+      await isPdf(await buildContractPDFBuffer({ ...baseContract, contract_text_snapshot: body }, customer, { signed: false }));
+    } finally {
+      PDFDocument.prototype.text = original;
+    }
+    expect(sizes.size).toBe(300);
+    expect([...new Set(sizes.values())]).toEqual([10.5]);
+  });
+
   test('does not throw on a long body that spans multiple pages', async () => {
     const long = { ...baseContract, contract_text_snapshot: 'Section.\n\n'.repeat(400) };
     const buf = await buildContractPDFBuffer(long, customer, { signed: false });

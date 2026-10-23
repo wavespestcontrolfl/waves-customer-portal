@@ -65,9 +65,20 @@ function treatmentMethod(findings) {
   return method === 'Other' ? text(findings.treatment_method_other) : method;
 }
 
+// The warranty covers subterranean termites only (the server checks the same).
+const SUBTERRANEAN_TARGETS = ['Subterranean termites', 'Formosan subterranean termites'];
+function targetsSubterranean(value) {
+  let targets = value;
+  if (typeof targets === 'string') {
+    try { targets = JSON.parse(targets); } catch { targets = [targets]; }
+  }
+  return (Array.isArray(targets) ? targets : [targets]).some((target) => SUBTERRANEAN_TARGETS.includes(text(target)));
+}
+
 export function warrantyEligible(findings = {}) {
   return Boolean(warrantyPlanYears(findings.warranty_type))
     && treatmentMethod(findings) === 'Soil barrier (chemical)'
+    && targetsSubterranean(findings.wdo_target)
     && additionalApplications(findings.additional_applications).length === 0;
 }
 

@@ -4,6 +4,7 @@
 const { TEMPLATE } = require('../models/migrations/20261023120000_seed_new_construction_termite_warranty');
 const { BODY_V2 } = require('../models/migrations/20261023140000_new_construction_termite_warranty_v2');
 const { BODY_V3 } = require('../models/migrations/20261023160000_new_construction_termite_warranty_v3');
+const { BODY_V4 } = require('../models/migrations/20261023180000_new_construction_termite_warranty_v4');
 const { renderDocumentTemplate } = require('../services/document-template-library');
 
 const bodyVars = [...new Set([...TEMPLATE.body.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
@@ -51,9 +52,17 @@ describe('new construction termite warranty template', () => {
     expect(v2Vars).toEqual([...TEMPLATE.variables].sort());
   });
 
-  test('version 3 (the active text) labels the lot field once, so "Lot 12, Block C" never prints as "Lot Lot"', () => {
+  test('version 3 labels the lot field once, so "Lot 12, Block C" never prints as "Lot Lot"', () => {
     expect(BODY_V3).toContain('Lot and subdivision: {{project.lot}}');
     expect(BODY_V3).not.toContain('Lot {{project.lot}}');
     expect(BODY_V3.replace('Lot and subdivision: {{project.lot}}', 'Lot {{project.lot}}')).toBe(BODY_V2);
+  });
+
+  test('version 4 (the active text) drops "Issued on" and dates only Waves\' own signature', () => {
+    expect(BODY_V4).not.toContain('Issued on');
+    expect(BODY_V4).toContain('{{issuer.title}}, on {{warranty.issue_date}}.');
+    expect(BODY_V4).toContain('This warranty runs from the initial treatment date, {{treatment.initial_date}}.');
+    const v4Vars = [...new Set([...BODY_V4.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
+    expect(v4Vars).toEqual([...TEMPLATE.variables].sort());
   });
 });

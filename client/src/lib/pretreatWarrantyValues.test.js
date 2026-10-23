@@ -24,6 +24,7 @@ const findings = {
   applicator_name: 'Sam Tester',
   applicator_fdacs_id: 'JF000000',
   warranty_type: 'Builder 1-year, renewable yearly to year 5',
+  wdo_target: ['Subterranean termites'],
 };
 
 describe('pretreatWarrantyValues', () => {
@@ -66,6 +67,7 @@ describe('pretreatWarrantyValues', () => {
     expect(warrantyEligible(findings)).toBe(true);
     expect(warrantyEligible({ ...findings, treatment_method: 'Wood treatment (borate)' })).toBe(false);
     expect(warrantyEligible({ ...findings, treatment_method: 'Bait system' })).toBe(false);
+    expect(warrantyEligible({ ...findings, wdo_target: ['Drywood termites'] })).toBe(false);
     expect(warrantyEligible({ ...findings, treatment_method: 'Other', treatment_method_other: 'Soil barrier (chemical)' })).toBe(true);
     expect(warrantyEligible({ ...findings, additional_applications: [{ treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care' }] })).toBe(false);
     expect(warrantyEligible({ ...findings, additional_applications: JSON.stringify([{ product_name: '' }]) })).toBe(true);

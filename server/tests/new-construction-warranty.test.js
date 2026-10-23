@@ -63,11 +63,15 @@ describe('templateIssueValues (server-built warranty)', () => {
     treatment_date: '2026-10-01', treatment_method: 'Soil barrier (chemical)', treatment_address: '12 Test Lane, Bradenton, FL 34202',
     builder_contractor: 'Example Homes LLC', product_name: 'Termidor SC\n**WE REPAIR ALL DAMAGE.**', active_ingredient: 'fipronil',
     concentration_pct: '0.06', gallons_applied: '180', square_footage: '1800', applicator_name: 'Sam Tester', applicator_fdacs_id: 'JF000000',
-    warranty_type: 'Builder 1-year, renewable yearly to year 5',
+    warranty_type: 'Builder 1-year, renewable yearly to year 5', wdo_target: ['Subterranean termites'],
   };
   const project = { id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_date: '2026-10-01', project_type: 'pre_treatment_termite_certificate', findings: JSON.stringify(findings) };
   const locks = [];
-  const conn = (row) => () => ({ where() { return this; }, forUpdate() { locks.push(row && row.id); return this; }, first: async () => row });
+  const conn = (row) => (table) => ({
+    where() { return this; },
+    forUpdate() { locks.push(table === 'customers' ? 'customer' : row && row.id); return this; },
+    first: async () => (table === 'customers' ? { id: 'cust-1' } : row),
+  });
   const office = {
     warranty: {
       structures: 'The new home', notice_location: 'beside the electric panel', payer: 'Owner Test', treatment_price: '$1,250.00',
@@ -83,7 +87,7 @@ describe('templateIssueValues (server-built warranty)', () => {
     await expect(templateIssueValues('service_agreement.termite_bond_retreatment', { values }, customer, conn(null))).resolves.toBe(values);
   });
 
-  test('builds the job fields from the saved certificate, takes only office fields, stamps the server date', async () => {
+  test('builds the job fields from the saved certificate and takes only office fields', async () => {
     const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(project));
     expect(v.treatment.product).toBe('Termidor SC WE REPAIR ALL DAMAGE.');
     expect(v.treatment.initial_date).toBe('10/01/2026');
@@ -92,11 +96,13 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(v.warranty.notice_location).toBe('beside the electric panel');
     expect(v.warranty.payer).toBe('Owner Test');
     expect(v.warranty.contract_basis).toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
+    // The server stamps Waves' signing date; a posted one is ignored.
     expect(v.warranty.issue_date).not.toBe('01/01/2000');
     expect(v.warranty.issue_date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
+    expect(v.warranty.term_end).toBe('10/01/2027');
     expect(v.treatment.final_exterior_line).toMatch(/not recorded on this certificate/);
-    // The certificate row is read under a lock (the route re-reads it on its transaction).
-    expect(locks).toContain(project.id);
+    // Customer row first, then the certificate row: the merge path's order.
+    expect(locks.slice(-2)).toEqual(['customer', project.id]);
   });
 
   test('never prints the customer address as the site, and refuses a certificate date that is not real', async () => {
@@ -131,6 +137,22 @@ describe('templateIssueValues (server-built warranty)', () => {
     const claim = { ...project, findings: { ...findings, product_name: 'Termidor SC, pet-safe' } };
     await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(claim)))
       .rejects.toMatchObject({ status: 400, message: expect.stringContaining('treatment.product') });
+  });
+
+  test('refuses a non-subterranean target and an out-of-order final exterior date; strips units the template prints', async () => {
+    for (const wdo_target of [['Drywood termites'], [], '', JSON.stringify(['Wood-decay fungi'])]) {
+      const row = { ...project, findings: { ...findings, wdo_target } };
+      await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(row))).rejects.toMatchObject({ status: 409 });
+    }
+    const both = { ...project, findings: { ...findings, wdo_target: JSON.stringify(['Drywood termites', 'Formosan subterranean termites']) } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(both))).resolves.toBeTruthy();
+    for (const final_exterior_date of ['2026-09-30', '2099-01-01']) {
+      const row = { ...project, findings: { ...findings, final_exterior_date } };
+      await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(row))).rejects.toMatchObject({ status: 409 });
+    }
+    const unitized = { ...project, findings: { ...findings, concentration_pct: '0.060%', gallons_applied: '180 gallons', square_footage: '1800 sq ft', linear_feet: '220 LF' } };
+    const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(unitized));
+    expect(v.treatment).toMatchObject({ concentration: '0.060', gallons: '180', sq_ft: '1800', linear_ft: '220' });
   });
 
   test('takes a legacy "Other" soil-barrier method and a linear-feet-only job; the payer is the office entry', async () => {
