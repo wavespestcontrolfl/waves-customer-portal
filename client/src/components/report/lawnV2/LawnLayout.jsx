@@ -263,7 +263,7 @@ function WhenToCall({ treated }) {
       <div data-testid="lawn-when-to-call">
         <CardTitle>{LAYOUT_COPY.whenToCallTitle}</CardTitle>
         {whenToCallLines({ treated }).map((line) => (
-          <p key={line} style={{ margin: '0 0 8px', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{line}</p>
+          <p key={line} className="sr-v2-body" style={{ margin: '0 0 8px', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{line}</p>
         ))}
         {treated ? null : (
           <p style={{ margin: 0, fontSize: 16, lineHeight: 1.5 }}>

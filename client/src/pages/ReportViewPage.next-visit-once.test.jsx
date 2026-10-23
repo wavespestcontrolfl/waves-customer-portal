@@ -27,3 +27,13 @@ describe('nextVisitShownInPlanCard', () => {
     expect(nextVisitShownInPlanCard({ ...data, nextAppointment: { ...NEXT, serviceType: 'Lawn Care' } }, 'live')).toBe(false);
   });
 });
+
+describe('nextVisitShownInPlanCard with another visit (status card, dashboards)', () => {
+  it('checks the visit it is given instead of nextSameServiceAppointment', () => {
+    const other = { ...NEXT, scheduledDate: '2099-03-01' };
+    const data = { nextSameServiceAppointment: NEXT, upcomingVisitsCard: { visits: [{ ...other }] } };
+    expect(nextVisitShownInPlanCard(data, 'live', other)).toBe(true);
+    expect(nextVisitShownInPlanCard(data, 'live', { ...other, scheduledDate: '2099-04-01' })).toBe(false);
+    expect(nextVisitShownInPlanCard(data, 'live', null)).toBe(false);
+  });
+});
