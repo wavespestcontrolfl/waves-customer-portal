@@ -135,6 +135,15 @@ describe('a vehicle is never cargo', () => {
     expect(db.__state.updated).toBeNull();
   });
 
+  test('a truck with riders cannot be retired, sold or lost either', async () => {
+    for (const status of ['retired', 'sold', 'lost']) {
+      const res = await run('put', '/equipment/:id', { params: { id: VEHICLE }, body: { status } });
+      expect(res.statusCode).toBe(409);
+      expect(res.body.error).toMatch(/still ride/);
+    }
+    expect(db.__state.updated).toBeNull();
+  });
+
   test('an empty truck may be recategorized', async () => {
     const res = await run('put', '/equipment/:id', { params: { id: OTHER }, body: { category: 'other' } });
     expect(res.statusCode).toBe(200);

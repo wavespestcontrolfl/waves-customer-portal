@@ -265,6 +265,8 @@ router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => 
       if (truckId) await truckKit.lockTruck(trx, truckId);
       const again = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category');
       if (item && (!again || (again.assigned_vehicle_id || null) !== itemTruck)) return 'moved';
+      // A truck with tools still on it is not retired from here either.
+      if (item?.category === 'vehicle' && await trx('equipment').where({ assigned_vehicle_id: req.params.id }).first('id')) return 'riders';
       if (await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
       const [row] = await trx('equipment')
         .where({ id: req.params.id })
@@ -273,6 +275,7 @@ router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => 
       return row || null;
     });
     if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload and try again.' });
+    if (record === 'riders') return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it with an outcome first.' });
 
     if (!record) return res.status(404).json({ error: 'Equipment not found' });

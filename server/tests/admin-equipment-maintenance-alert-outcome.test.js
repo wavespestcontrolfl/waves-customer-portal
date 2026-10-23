@@ -20,9 +20,12 @@ jest.mock('../models/db', () => {
   const state = { alerts: {}, equipment: {}, updates: [] };
   const chain = (table) => {
     const c = { table, id: null, patch: null };
-    c.where = (...args) => { c.id = args.length === 2 ? args[1] : args[0]?.id; return c; };
+    c.where = (...args) => { c.id = args.length === 2 ? args[1] : args[0]?.id; c.riderOf = args.length === 1 ? args[0]?.assigned_vehicle_id : undefined; return c; };
     c.whereIn = (col, vals) => { c.statuses = vals; return c; };
-    c.first = async () => (table === 'maintenance_alerts' ? state.alerts[c.id] : state.equipment[c.id]) || null;
+    c.first = async () => {
+      if (table === 'equipment' && c.riderOf) return Object.values(state.equipment).find((e) => e.assigned_vehicle_id === c.riderOf) || null;
+      return (table === 'maintenance_alerts' ? state.alerts[c.id] : state.equipment[c.id]) || null;
+    };
     c.update = (patch) => { c.patch = patch; state.updates.push([table, c.id, patch]); return c; };
     c.returning = async () => {
       const row = (table === 'maintenance_alerts' ? state.alerts : state.equipment)[c.id];
@@ -175,7 +178,14 @@ test('the legacy retire holds the item\'s truck lock around the probe and the wr
   await handler({ params: { id: 'e-moving' }, body: {}, techRole: 'admin' }, res3, (err) => { throw err; });
   expect(res3.statusCode).toBe(409);
   expect(db.__state.equipment['e-moving'].status).toBe('active');
-  // Retiring the truck itself locks the truck.
+  // A truck with a tool on it is not retired from here: 409, nothing written.
+  jest.clearAllMocks();
+  const resR = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await handler({ params: { id: TRUCK }, body: {}, techRole: 'admin' }, resR, (err) => { throw err; });
+  expect(resR.statusCode).toBe(409);
+  expect(db.__state.equipment[TRUCK].status).toBe('active');
+  db.__state.equipment[TOOL].assigned_vehicle_id = null;
+  // Retiring the (now empty) truck itself locks the truck.
   jest.clearAllMocks();
   const res2 = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
   await handler({ params: { id: TRUCK }, body: {}, techRole: 'admin' }, res2, (err) => { throw err; });

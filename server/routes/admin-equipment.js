@@ -285,7 +285,11 @@ async function writeRefusal(trx, id, updates, before) {
   // A truck with tools still riding on it cannot stop being a vehicle (the
   // riders would point at a non-vehicle): checked under the vehicle's own
   // lock, so a rider assigned meanwhile is seen.
-  if (updates.category !== undefined && updates.category !== 'vehicle' && before.category === 'vehicle') {
+  // ...nor retire, sell or lose a truck with tools still on it: the tools
+  // would vanish from the technician's check and readiness while Assets
+  // still shows them riding.
+  const stopsBeingTruck = (updates.category !== undefined && updates.category !== 'vehicle') || DEAD_ITEM_STATUSES.includes(updates.status);
+  if (before.category === 'vehicle' && stopsBeingTruck) {
     const rider = await trx('equipment').where({ assigned_vehicle_id: id }).first('id');
     if (rider) return 'riders';
   }
