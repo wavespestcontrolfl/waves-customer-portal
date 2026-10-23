@@ -38,6 +38,11 @@ function makeBuilder(table) {
     const wheres = b.where.mock.calls.map(c => c[0]);
     if (!wheres.some(w => w && typeof w === 'object' && 'id' in w)) return Promise.resolve(0);
     const u = { table, where: wheres, patch, raws: b.whereRaw.mock.calls.map(c => String(c[0])) };
+    if (state.beforeUpdate) state.beforeUpdate(u); // a concurrent writer, just before this UPDATE lands
+    // the claim's manualLink predicate: a row marked for the owner's own link meanwhile is not claimed
+    const target = wheres.find(w => w && typeof w === 'object' && 'id' in w);
+    const stored = table === 'bank_transactions' ? state.bankRows.find(r => r.id === target.id) : null;
+    if (stored && stored.suggestion && stored.suggestion.manualLink && u.raws.some(r => r.includes("coalesce(suggestion->>'manualLink','') <> 'true'"))) return Promise.resolve(0);
     state.updates.push(u);
     if (state.onUpdate) state.onUpdate(u); // concurrency hooks for race tests
     return Promise.resolve(1);
@@ -454,6 +459,27 @@ describe('runDeterministicMatching', () => {
     expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
   });
 
+  test('a credit marked manualLink (a ledger row held or parked for the owner) is offered its one exact payout, never linked to it; a marker set after the read makes the claim land nothing', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: { review: true, manualLink: true } }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
+    let summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
+    expect(sugOf(state.updates.find(u => sugOf(u))).payoutCandidates).toHaveLength(1); // offered, for the owner to link
+    // the marker arriving between the read and the claim
+    state.updates = [];
+    state.bankRows[0].suggestion = { review: true };
+    state.beforeUpdate = (u) => { if (u.patch.status === 'matched_payout') state.bankRows[0].suggestion = { review: true, manualLink: true }; };
+    try {
+      summary = await runDeterministicMatching();
+      expect(summary.payoutsLinked).toBe(0);
+      expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
+    } finally {
+      state.beforeUpdate = null;
+    }
+  });
+
   test('a credit with exactly one payout candidate links through a status CAS and echoes reconciliation', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
@@ -465,6 +491,8 @@ describe('runDeterministicMatching', () => {
     expect(link.where).toContainEqual({ id: 'bt-1', status: 'unmatched' });
     // …and re-checks there is no unresolved Plaid bank change on the row
     expect(link.raws.some(r => r.includes("(suggestion->'plaidModified') is null"))).toBe(true);
+    // …and that the row was not marked for the owner's own link meanwhile
+    expect(link.raws.some(r => r.includes("coalesce(suggestion->>'manualLink','') <> 'true'"))).toBe(true);
     // reconciliation INTENT rides in the claim itself (crash-safe)…
     expect(sugOf(link).reconcilePending).toBe(true);
     // …the echo goes through the existing mechanism with a row-specific
@@ -516,6 +544,7 @@ describe('runDeterministicMatching', () => {
     expect(summary.expensesLinked).toBe(1);
     expect(state.updates.find(u => u.patch.status === 'matched_expense').patch.matched_expense_id).toBe('exp-1');
     expect(state.updates.find(u => u.patch.status === 'matched_expense').raws.some(r => r.includes("(suggestion->'plaidModified') is null"))).toBe(true);
+    expect(state.updates.find(u => u.patch.status === 'matched_expense').raws.some(r => r.includes("coalesce(suggestion->>'manualLink','') <> 'true'"))).toBe(true); // manualLink re-checked at the claim
     // the claim locked the candidate expense and revalidated it
     expect(state.builders.some(x => x.table === 'expenses' && x.b.forUpdate.mock.calls.length > 0)).toBe(true);
 
@@ -542,6 +571,34 @@ describe('runDeterministicMatching', () => {
     expect(summary.ambiguous).toBe(1);
     expect(state.updates.find(u => u.patch.status)).toBeUndefined();
     expect(sugOf(state.updates.find(u => sugOf(u))).candidates).toHaveLength(1);
+  });
+
+  test('a row marked manualLink (the ledger import: this may already be an expense) parks its one strong candidate instead of auto-linking', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: { review: true, manualLink: true } },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+    expect(sugOf(state.updates.find(u => sugOf(u))).candidates).toHaveLength(1); // offered, for the owner to link
+  });
+
+  test('a manualLink marker set after the pass read the row (a ledger rerun holding it) makes the claim land nothing: the row is left for the next pass, and the pass does not report done', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: { review: true } },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }];
+    state.beforeUpdate = (u) => { if (u.patch.status === 'matched_expense') state.bankRows[0].suggestion = { ...state.bankRows[0].suggestion, manualLink: true }; };
+    try {
+      const summary = await runDeterministicMatching();
+      expect(summary.expensesLinked).toBe(0);
+      expect(summary.moreRemaining).toBe(true);
+      expect(state.updates.find(u => u.patch.status === 'matched_expense')).toBeUndefined();
+    } finally {
+      state.beforeUpdate = null;
+    }
   });
 
   test('a second strong candidate anywhere in the set blocks auto-link (no cap can hide it)', async () => {
@@ -747,6 +804,17 @@ describe('runDeterministicMatching', () => {
     state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'check' }];
     const second = await runDeterministicMatching();
     expect(second.expensesLinked).toBe(1);
+  });
+
+  test('a bank credit the ledger import classified as a merchant refund (refundCredit) never auto-links to a payout — it parks refund candidates instead', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA 5211 REFUND', amount: 58.12, direction: 'credit', account_type: 'bank', account_label: 'ledger-3098', suggestion: { refundCredit: true, reason: 'refund credit from the ledger' } }];
+    state.payouts = [{ id: 'po-1', amount: '58.12', arrival_date: '2026-08-11', status: 'paid', destination_last4: '3098' }];
+    state.expenses = [{ id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates);
+    expect(sugOf(parked).refundCandidates[0].id).toBe('exp-1');
   });
 
   test('a transfer-flagged CREDIT still parks refund candidates — Ignore is never the only action', async () => {

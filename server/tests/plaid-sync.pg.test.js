@@ -604,6 +604,33 @@ async function activate(itemId, overrides = {}) {
     await plaidSync.disconnectItem(itemId);
   });
 
+  test('the ledger import\'s rows for a bank account (ledger-<last four>) block a feed that would start inside their days', async () => {
+    await mockPg('bank_transactions').insert({
+      account_label: 'ledger-1234', account_type: 'card', txn_date: '2025-12-31', source: 'ledger-csv',
+      description: 'LEDGER ROW', amount: 5, direction: 'debit', row_hash: 'l'.repeat(64),
+    });
+    const itemId = await connect();
+    // the Spark card's mask is 1234: the feed must start after the ledger's last day for that account
+    await expect(activate(itemId, { 'acc-card': { accountLabel: 'spark-card', syncFrom: '2025-12-31' } }))
+      .rejects.toThrow(/the ledger import through 2025-12-31 — start the feed on 2026-01-01/);
+    await activate(itemId, { 'acc-card': { accountLabel: 'spark-card', syncFrom: '2026-01-01' } });
+    await plaidSync.disconnectItem(itemId);
+  });
+
+  test('the ledger import\'s named amex source (ledger-amex) blocks a feed of an American Express account the same way', async () => {
+    await mockPg('bank_transactions').insert({
+      account_label: 'ledger-amex', account_type: 'card', txn_date: '2025-12-31', source: 'ledger-csv',
+      description: 'LEDGER ROW', amount: 5, direction: 'debit', row_hash: 'a'.repeat(64),
+    });
+    plaid.exchangePublicToken.mockResolvedValueOnce({ accessToken: 'access-sandbox-secret', itemId: `item-amex-${Date.now()}` });
+    plaid.getAccounts.mockResolvedValueOnce({ accounts: ACCOUNTS.map(x => ({ ...x, account_id: `${x.account_id}-amex` })), institutionId: 'ins_10' });
+    const itemId = await plaidSync.connectItem({ publicToken: 'public-sandbox-x', institutionName: 'American Express' });
+    await expect(activate(itemId, { 'acc-card-amex': { accountLabel: 'amex-blue', syncFrom: '2025-12-31' } }))
+      .rejects.toThrow(/the ledger import through 2025-12-31 — start the feed on 2026-01-01/);
+    await activate(itemId, { 'acc-card-amex': { accountLabel: 'amex-blue', syncFrom: '2026-01-01' } });
+    await plaidSync.disconnectItem(itemId);
+  });
+
   test('CSV and feed never cover the same days for one label', async () => {
     await mockPg('bank_transactions').insert({
       account_label: 'capone-card', account_type: 'card', txn_date: '2026-09-10', source: 'csv',
@@ -725,6 +752,29 @@ async function activate(itemId, overrides = {}) {
     expect(await mockPg('bank_transactions').count('* as n').first()).toEqual({ n: '0' });
   });
 
+  test('feed setup waits for a ledger import that holds the ledger lock, then judges the rows that import wrote', async () => {
+    const itemId = await connect();
+    const holder = knex({ client: 'pg', connection, searchPath: [SCHEMA, 'public'], pool: { min: 1, max: 1 } });
+    try {
+      await holder.raw("select pg_advisory_lock(hashtext('bank-import:ledger'))");
+      let settled = false;
+      const pending = activate(itemId, { 'acc-card': { accountLabel: 'spark-card', syncFrom: '2026-09-01' } }).finally(() => { settled = true; });
+      pending.catch(() => {});
+      await new Promise(r => setTimeout(r, 400));
+      expect(settled).toBe(false); // waiting behind the import
+      await mockPg('bank_transactions').insert({
+        account_label: 'ledger-1234', account_type: 'card', txn_date: '2026-09-05', source: 'ledger-csv',
+        description: 'LEDGER ROW', amount: 5, direction: 'debit', row_hash: 'm'.repeat(64),
+      });
+      await holder.raw("select pg_advisory_unlock(hashtext('bank-import:ledger'))");
+      await expect(pending).rejects.toThrow(/the ledger import through 2026-09-05 — start the feed on 2026-09-06/);
+      await mockPg('bank_transactions').where({ row_hash: 'm'.repeat(64) }).del();
+      await plaidSync.disconnectItem(itemId);
+    } finally {
+      await holder.destroy();
+    }
+  });
+
   test('a replacement connection cannot re-import days an earlier feed of the label already covered', async () => {
     const first = await connect();
     await activate(first);
@@ -734,7 +784,7 @@ async function activate(itemId, overrides = {}) {
 
     const second = await connect('-new');
     await expect(activate(second, { 'acc-card-new': { accountLabel: 'capital-one-card-1234', syncFrom: '2026-09-01' } }))
-      .rejects.toThrow(/earlier feed through 2026-09-08 — start the feed on 2026-09-09/);
+      .rejects.toThrow(/an earlier feed or the ledger import through 2026-09-08 — start the feed on 2026-09-09/);
     await activate(second, { 'acc-card-new': { accountLabel: 'capital-one-card-1234', syncFrom: '2026-09-09' } });
     // the feed's OWN earlier rows never block its own start date
     await mockPg('bank_transactions').where({ plaid_transaction_id: 't-old' }).update({ plaid_account_id: 'acc-card-new' });

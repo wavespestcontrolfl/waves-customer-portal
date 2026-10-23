@@ -285,6 +285,17 @@ describe('upload (gate on)', () => {
     expect(body.skipped[0].reason).toBe('unparseable date');
   });
 
+  test('a statement inside days the ledger import loaded is refused before any write, under the ledger lock', async () => {
+    state.listRows = [{ txn_date: '2026-08-10' }]; // the ledger-row probe for the statement's days finds one
+    const csv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87\n08/12/2026,HD SUPPLY,-10.00';
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv });
+    state.listRows = [];
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/^the ledger import already holds rows between 2026-08-10 and 2026-08-12 \(this statement's days\): those days are the ledger's record/);
+    expect(state.insertedBank).toHaveLength(0);
+    expect(mockDb.raw).toHaveBeenCalledWith('select pg_advisory_xact_lock(hashtext(?))', ['bank-import:ledger']);
+  });
+
   test('a label already imported under the OTHER account type is refused before any write', async () => {
     state.accountTypeRow = { account_type: 'bank' };
     const csv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87';
@@ -362,6 +373,13 @@ describe('create-expense (gate on)', () => {
     state.bankRow.account_type = 'bank';
     await post('/admin/tax/bank-import/bt-1/create-expense', {});
     expect(state.insertedExpenses[0].payment_method).toBe('ach');
+  });
+
+  test('a category the ledger import carried (categorySource ledger) books by default without the AI-verify note', async () => {
+    state.bankRow.suggestion = { ...(state.bankRow.suggestion || {}), categorySource: 'ledger' };
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].category_id).toBe('cat-meals');
+    expect(state.insertedExpenses[0].notes).not.toContain('AI-categorized');
   });
 
   test('an operator-picked category skips the AI-verify note', async () => {

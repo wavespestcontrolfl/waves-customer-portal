@@ -19,6 +19,19 @@ const logger = require('./logger');
 
 const PAYOUT_DATE_WINDOW_DAYS = 3;  // Stripe arrival vs bank posting drift
 const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
+// The ledger import labels its rows ledger-<source>: a card or account's
+// last four, or a NAMED source. Each named source maps to the institution
+// whose Plaid feed carries that account, so the sync and the import can
+// refuse each other's range (plaid-sync assertFeedStartsAfterPriorRows,
+// import-tax-ledger-csv feedsInsideFile).
+const LEDGER_NAMED_SOURCES = [{ label: 'ledger-amex', institution: /american\s*express|\bamex\b/i }];
+// One advisory-lock key coordinates the three writers of bank rows whose
+// rows can never be deduped against each other: the ledger import holds it
+// (session lock) from its first read to its last write; the CSV upload and
+// the Plaid feed setup take it (transaction lock) around their overlap
+// checks and writes. So no writer judges a portal another is still
+// writing to.
+const LEDGER_LOCK_KEY = 'bank-import:ledger';
 const REFUND_LOOKBACK_DAYS = 90;    // refunds lag their purchase by weeks
 // Auto-links require EXACT cent equality; the tolerance only widens the
 // candidate list shown to the operator (a near-miss is a lead, not a match).
@@ -1353,6 +1366,17 @@ function hasUnresolvedBankChange(row) {
   return !!(row && row.suggestion && (row.suggestion.plaidModified || row.suggestion.plaidRemoved));
 }
 
+// A row whose link is the owner's call: the ledger import parks a row that
+// may already be an expense in the portal with suggestion.manualLink. A
+// pass offers its candidates in Bank Import and never claims one, however
+// strong; the manual link and create paths are unchanged.
+function manualLinkOnly(row) {
+  return !!(row && row.suggestion && row.suggestion.manualLink);
+}
+// the same rule at the claim: a marker set after the pass read the row (a
+// ledger rerun holding it for the owner) makes the claim UPDATE land nothing
+const NO_MANUAL_LINK_SQL = "coalesce(suggestion->>'manualLink','') <> 'true'";
+
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const reconciliation = await retryPendingReconciliations();
@@ -1534,8 +1558,11 @@ async function runDeterministicMatching({ limit } = {}) {
       // (a debit-card purchase refunded into checking).
       // Stripe pays out to the BANK account only — card credits skip payout
       // matching entirely. (refundCandidateList/refundPatch are hoisted
-      // above the transfer branch — it parks refund candidates too.)
-      if (row.account_type !== 'bank') {
+      // above the transfer branch — it parks refund candidates too.) A
+      // credit the ledger import classified as a merchant refund
+      // (suggestion.refundCredit) is refund territory on any account: a
+      // same-amount payout in the window must not claim it.
+      if (row.account_type !== 'bank' || (row.suggestion && row.suggestion.refundCredit)) {
         const refunds = await refundCandidateList();
         if (refunds.length) {
           summary.ambiguous++;
@@ -1553,7 +1580,9 @@ async function runDeterministicMatching({ limit } = {}) {
       const surveyPayoutCandidates = () => surveyPayoutCandidatesForRow(row, rejected);
       const { candidates, overflow: surveyOverflow } = await surveyPayoutCandidates();
       const exact = candidates.filter(c => centsEqual(c.effective_amount, row.amount));
-      if (!surveyOverflow && candidates.length === 1 && exact.length === 1 && payoutProvenance(row, exact[0])) {
+      // a row marked for the owner's own link (manualLinkOnly: a ledger
+      // row held or parked for them) is offered its payout, never claimed
+      if (!surveyOverflow && candidates.length === 1 && exact.length === 1 && payoutProvenance(row, exact[0]) && !manualLinkOnly(row)) {
         try {
           // Reconciliation intent is persisted ATOMICALLY with the claim —
           // ALWAYS, not conditioned on a pre-read of `reconciled` (that read
@@ -1567,6 +1596,8 @@ async function runDeterministicMatching({ limit } = {}) {
             // re-checked at the claim: the row may have been linked, got a
             // bank change parked, and been unlinked since this pass read it
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            // ...or been marked for the owner's own link (manualLinkOnly)
+            .whereRaw(NO_MANUAL_LINK_SQL)
             .update({
               status: 'matched_payout',
               matched_payout_id: exact[0].id,
@@ -1735,7 +1766,7 @@ async function runDeterministicMatching({ limit } = {}) {
     // method expenses PARK too — the operator may know the books are
     // mislabeled.
     const strong = candidates.filter(c => strongExpenseMatch(row, c));
-    if (candidates.length === 1 && strong.length === 1) {
+    if (candidates.length === 1 && strong.length === 1 && !manualLinkOnly(row)) {
       let claimedExpense = false;
       let recheckPlural = null;
       try {
@@ -1781,6 +1812,8 @@ async function runDeterministicMatching({ limit } = {}) {
             // re-checked at the claim: the row may have been linked, got a
             // bank change parked, and been unlinked since this pass read it
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            // ...or been marked for the owner's own link (manualLinkOnly)
+            .whereRaw(NO_MANUAL_LINK_SQL)
             .update({
               status: 'matched_expense',
               matched_expense_id: strong[0].id,
@@ -1795,6 +1828,7 @@ async function runDeterministicMatching({ limit } = {}) {
               suggestion: suggestionMerge({ verifyPending: true }),
             });
           if (changed) claimedExpense = true;
+          else summary.moreRemaining = true; // the row changed under the pass: the next pass re-judges it
         });
         if (!claimedExpense && recheckPlural) {
           // the locked recheck turned plural — park the FULL rechecked list
@@ -1951,6 +1985,9 @@ async function ledgerCoverage(year) {
 }
 
 module.exports = {
+  EXPENSE_DATE_WINDOW_DAYS,
+  LEDGER_NAMED_SOURCES,
+  LEDGER_LOCK_KEY,
   parseStatementCsv,
   withRowHashes,
   hashRow,
@@ -1961,6 +1998,7 @@ module.exports = {
   isPlausiblePayoutLink,
   isPlausibleRefundTarget,
   appliedRefundTotal,
+  withinCandidateTolerance,
   refundCandidatesForRow,
   surveyExpenseCandidatesForRow,
   surveyPayoutCandidatesForRow,
