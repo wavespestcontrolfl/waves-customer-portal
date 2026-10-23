@@ -242,6 +242,7 @@ describe('pre-push audit P1s (cadence and zero plan)', () => {
     expect(r.perApp).toBe(59);
     expect(r.visitsPerYear).toBe(6);
     expect(r.annual).toBe(354);
+    expect(r.monthly).toBe(29.5);
   });
 
   test('a $0 plan price is refused and the defaults stand', () => {

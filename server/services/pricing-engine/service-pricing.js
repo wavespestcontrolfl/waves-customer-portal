@@ -5116,8 +5116,9 @@ function priceMosquitoMisting(property, options = {}) {
   const result = {
     ...base,
     annual,
-    monthly: M.plan.monthly,
-    // The plan is 12 monthly applications: customer surfaces read "per application".
+    // The monthly AVERAGE of the configured annual (per application × cadence / 12).
+    monthly: Math.round(annual / 12 * 100) / 100,
+    // The plan is monthly applications: customer surfaces read "per application".
     perApp: M.plan.monthly,
     perVisit: M.plan.monthly,
     installation: {
