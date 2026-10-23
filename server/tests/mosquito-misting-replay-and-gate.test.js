@@ -413,6 +413,93 @@ describe('an authored proposal keeps the misting identity', () => {
   });
 });
 
+describe('the proposal editor cannot launder the misting identity away', () => {
+  const { normalizeBuilding, normalizePrograms, carryMistingIdentity } = require('../services/estimate-proposal');
+  const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
+  const savedProposal = () => ({
+    enabled: true,
+    buildings: [normalizeBuilding({ name: 'Home', lineItems: [
+      { id: 'install', service: 'mosquito_misting_installation', description: 'Essential system (drum) Installation', unitPrice: 4000, frequency: 'one_time' },
+      { id: 'commercial', service: 'commercial_pest', originalRequestedService: 'mosquito_misting', description: 'Commercial misting', unitPrice: 9000, frequency: 'one_time' },
+      { id: 'plain', description: 'Quarterly pest', unitPrice: 120, frequency: 'quarterly' },
+    ] })],
+    programs: normalizePrograms([{ service: 'mosquito', identity: 'mosquito_misting', label: 'Misting plan', frequencyPerYear: 12, pricePerApplication: 59 }]),
+  });
+  // What an older editor PUTs back: every line with its service / identity fields omitted.
+  const stripped = (proposal) => ({
+    ...proposal,
+    buildings: proposal.buildings.map((b) => ({ ...b, lineItems: b.lineItems.map(({ service, originalRequestedService, quoteRequired, ...rest }) => ({ ...rest, description: rest.description === 'Essential system (drum) Installation' ? 'Install' : rest.description })) })),
+    programs: proposal.programs.map(({ identity, ...rest }) => ({ ...rest, label: 'Plan' })),
+  });
+  const persist = (incoming, saved) => {
+    const carried = carryMistingIdentity(incoming, saved);
+    return { buildings: carried.buildings.map((b) => normalizeBuilding(b)), programs: normalizePrograms(carried.programs), enabled: true };
+  };
+
+  test('a PUT with service / identity omitted still persists the identity (by line id; by label or index for programs)', () => {
+    const saved = savedProposal();
+    const next = persist(stripped(saved), saved);
+    const byId = Object.fromEntries(next.buildings[0].lineItems.map((l) => [l.id, l]));
+    expect(byId.install.service).toBe('mosquito_misting_installation');
+    expect(byId.commercial).toMatchObject({ originalRequestedService: 'mosquito_misting' });
+    expect(byId.plain).not.toHaveProperty('service');
+    expect(next.programs[0].identity).toBe('mosquito_misting');
+  });
+
+  test('the refusals still fire after the round trip (gate on: accept-pending; gate off: gated)', () => {
+    const saved = savedProposal();
+    const data = { result: { recurring: { services: [{ service: 'pest_control' }] } }, proposal: persist(stripped(saved), saved) };
+    expect(mapper.gatedAddOnStaffRefusal(data, 'accepting')).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+    delete process.env.GATE_MOSQUITO_MISTING;
+    expect(mapper.gatedAddOnStaffRefusal(data, 'accepting')).toMatchObject({ code: 'MOSQUITO_MISTING_GATED' });
+    // control: without the carry the identity would be lost and the refusal would be null
+    const lost = { ...data, proposal: { enabled: true, buildings: stripped(saved).buildings.map((b) => normalizeBuilding(b)), programs: normalizePrograms(stripped(saved).programs) } };
+    expect(mapper.gatedAddOnStaffRefusal(lost, 'accepting')).toBeNull();
+  });
+
+  test('a new line (no id match) carries nothing, and the incoming object is not mutated', () => {
+    const saved = savedProposal();
+    const incoming = { buildings: [{ name: 'Home', lineItems: [{ id: 'brand-new', description: 'Sprinkler check', unitPrice: 50, frequency: 'one_time' }, { description: 'No id', unitPrice: 10, frequency: 'one_time' }] }] };
+    const before = JSON.stringify(incoming);
+    const carried = carryMistingIdentity(incoming, saved);
+    expect(JSON.stringify(incoming)).toBe(before);
+    for (const line of carried.buildings[0].lineItems) expect(line).not.toHaveProperty('service');
+  });
+
+  test('an incoming line that already names the system is left alone; the design visit key is never carried', () => {
+    const saved = { buildings: [{ lineItems: [{ id: 'd', service: 'mosquito_misting_system' }] }] };
+    const carried = carryMistingIdentity({ buildings: [{ lineItems: [{ id: 'd', description: 'Design visit' }] }] }, saved);
+    expect(carried.buildings[0].lineItems[0]).not.toHaveProperty('service');
+  });
+
+  test('program identity is carried by index when the counts match and the label changed, never onto a non-matching program', () => {
+    const saved = savedProposal();
+    const sameCount = carryMistingIdentity({ programs: [{ service: 'mosquito', label: 'Renamed', frequencyPerYear: 12, pricePerApplication: 59 }] }, saved);
+    expect(sameCount.programs[0].identity).toBe('mosquito_misting');
+    const different = carryMistingIdentity({ programs: [{ service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 100 }, { service: 'lawn', label: 'Lawn', frequencyPerYear: 6, pricePerApplication: 80 }] }, saved);
+    for (const program of different.programs) expect(program).not.toHaveProperty('identity');
+  });
+
+  test('text fallback: the install labels the mapper emits are recognized without any service field', () => {
+    for (const label of ['Essential system (drum) Installation', 'Smart system (tankless + app) Installation']) {
+      expect(mistingProposalIdentity({ description: label })).toBe('mosquito_misting_installation');
+    }
+    const mapped = mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { mosquitoMisting: OPTS } }));
+    const item = mapped.oneTime.items.find((i) => i.service === 'mosquito_misting_installation');
+    expect(mistingProposalIdentity({ description: item.name })).toBe('mosquito_misting_installation');
+    expect(mistingProposalIdentity({ description: 'Quarterly pest control' })).toBeNull();
+    expect(mistingProposalIdentity({ description: 'Mosquito Misting System Service' })).toBeNull();
+  });
+
+  test('the PUT route carries it before normalizing, only from an enabled saved proposal', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-estimates.js'), 'utf8');
+    expect(src).toContain('savedProposal.enabled ? carryMistingIdentity(incoming, savedProposal) : incoming');
+    expect(src).toContain('estimate_data: { proposal: { ...incomingWithIdentity, enabled: true } }');
+  });
+});
+
 describe('bare "misting" stays the barrier mosquito program', () => {
   const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
   const normalizer = require('../utils/service-normalizer');

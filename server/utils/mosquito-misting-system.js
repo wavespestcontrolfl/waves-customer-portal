@@ -97,7 +97,13 @@ function mistingProposalIdentity(raw) {
   const hit = keys.find((k) => MISTING_PROPOSAL_KEY_PATTERN.test(k));
   if (hit) return hit.includes('installation') ? 'mosquito_misting_installation' : 'mosquito_misting';
   const text = [raw.label, raw.name, raw.description].map((v) => String(v == null ? '' : v)).join(' ');
-  return MISTING_PROPOSAL_TEXT_PATTERN.test(text) ? 'mosquito_misting' : null;
+  if (MISTING_PROPOSAL_TEXT_PATTERN.test(text)) return 'mosquito_misting';
+  // The install item the mapper emits is named "<tier label> Installation" (derived from the tier table, never hard-coded), so a
+  // fully rebuilt line is still recognized by its text.
+  const lowered = text.toLowerCase();
+  const { MOSQUITO_MISTING } = require('../services/pricing-engine/constants');
+  const installLabels = Object.values(MOSQUITO_MISTING.tiers).map((tier) => `${tier.label} Installation`.toLowerCase());
+  return installLabels.some((label) => lowered.includes(label)) ? 'mosquito_misting_installation' : null;
 }
 
 function normalizeServiceKey(serviceKey) {

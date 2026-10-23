@@ -202,6 +202,49 @@ function normalizeGeneratedResponsibilities(raw) {
 // canonical list is null (and the PUT route 400s it).
 const { PAYMENT_TERMS: PROPOSAL_PAYMENT_TERMS } = require('./payer');
 
+// Carry the misting SYSTEM identity (GATE_MOSQUITO_MISTING) from the previously persisted proposal onto an incoming one, by line id
+// (programs: by label, else by index when the counts match). The editor can change text and prices, but it can never launder the
+// identity away by omitting the fields, so the gated and acceptance-pending refusals keep seeing the system. A line with no id
+// match (a new line) carries nothing. Returns a new object; the incoming one is not mutated.
+function carryMistingIdentity(incoming = {}, saved = {}) {
+  const identityOf = (line) => ({
+    ...(typeof line?.service === 'string' && /^mosquito_misting(?!_system$)/.test(line.service) ? { service: line.service } : {}),
+    ...(line?.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}),
+  });
+  const savedById = new Map();
+  for (const building of Array.isArray(saved?.buildings) ? saved.buildings : []) {
+    for (const line of Array.isArray(building?.lineItems) ? building.lineItems : []) {
+      const identity = identityOf(line);
+      if (line?.id && Object.keys(identity).length) savedById.set(line.id, identity);
+    }
+  }
+  const carryLine = (line) => {
+    const carried = line && typeof line === 'object' && line.id ? savedById.get(line.id) : null;
+    if (!carried) return line;
+    const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
+    return mistingProposalIdentity(line) ? line : { ...line, ...carried };
+  };
+  const out = { ...incoming };
+  if (Array.isArray(incoming.buildings)) {
+    out.buildings = incoming.buildings.map((building) => {
+      if (!building || typeof building !== 'object') return building;
+      const key = Array.isArray(building.lineItems) ? 'lineItems' : (Array.isArray(building.line_items) ? 'line_items' : null);
+      return key ? { ...building, [key]: building[key].map(carryLine) } : building;
+    });
+  }
+  const savedPrograms = Array.isArray(saved?.programs) ? saved.programs : [];
+  if (Array.isArray(incoming.programs) && savedPrograms.some((program) => program?.identity === 'mosquito_misting')) {
+    const labelOf = (program) => String(program?.label ?? program?.name ?? '').trim().toLowerCase();
+    out.programs = incoming.programs.map((program, index) => {
+      if (!program || typeof program !== 'object' || program.identity === 'mosquito_misting') return program;
+      const byLabel = savedPrograms.find((candidate) => candidate?.identity === 'mosquito_misting' && labelOf(candidate) && labelOf(candidate) === labelOf(program));
+      const byIndex = incoming.programs.length === savedPrograms.length ? savedPrograms[index] : null;
+      return byLabel || byIndex?.identity === 'mosquito_misting' ? { ...program, identity: 'mosquito_misting' } : program;
+    });
+  }
+  return out;
+}
+
 function normalizePaymentTerms(value) {
   const t = String(value ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
   if (!t) return null;
@@ -843,6 +886,7 @@ module.exports = {
   normalizePaymentTerms,
   PROPOSAL_PAYMENT_TERMS,
   normalizeProposal,
+  carryMistingIdentity,
   perApplicationRecurringResolution,
   annualizedAmount,
   computeProposalTotals,

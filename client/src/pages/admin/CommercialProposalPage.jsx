@@ -299,6 +299,10 @@ function CommercialProposalEditor() {
               unitPrice: li.unitPrice ?? 0,
               frequency: li.frequency || 'monthly',
               taxable: li.taxable === true,
+              // Server-owned identity of the mosquito misting system: kept through the editor so a save cannot drop it.
+              ...(li.service ? { service: li.service } : {}),
+              ...(li.originalRequestedService ? { originalRequestedService: li.originalRequestedService } : {}),
+              ...(li.quoteRequired === true ? { quoteRequired: true } : {}),
             })),
           }))
         : [emptyBuilding(0)],
@@ -308,6 +312,7 @@ function CommercialProposalEditor() {
     })));
     setProgramsState((p.programs || []).map((program) => ({
       service: program.service || 'other',
+      ...(program.identity ? { identity: program.identity } : {}),
       label: program.label || '',
       frequencyPerYear: program.frequencyPerYear ?? 4,
       pricePerApplication: program.pricePerApplication ?? 0,
@@ -691,6 +696,7 @@ function CommercialProposalEditor() {
       .filter(programRowIsPriced)
       .map((p) => ({
         service: p.service,
+        ...(p.identity ? { identity: p.identity } : {}),
         label: p.label.trim(),
         // UNROUNDED — a fractional entry (4.5) must reach the server's
         // whole-number validation and 400, never silently round to a
@@ -776,6 +782,9 @@ function CommercialProposalEditor() {
             unitPrice: l.unitPrice,
             frequency: l.frequency,
             taxable: l.taxable === true,
+            ...(l.service ? { service: l.service } : {}),
+            ...(l.originalRequestedService ? { originalRequestedService: l.originalRequestedService } : {}),
+            ...(l.quoteRequired === true ? { quoteRequired: true } : {}),
           })),
       })).filter((b) => b.lineItems.length > 0),
     },
