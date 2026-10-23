@@ -3,11 +3,11 @@
 // Today card follow one status read; gate off or unreadable, neither renders.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ truckKit: { loading: false, data: null, error: '' } }));
+const mocks = vi.hoisted(() => ({ truckKit: { loading: false, data: null, error: '', reload: () => {} } }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
@@ -50,6 +50,15 @@ describe('truck check in the field workspace', () => {
     mount('/admin/today');
     expect(await screen.findByText('Truck check due')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Check truck' })).toHaveAttribute('href', '/admin/today/truck-check');
+  });
+
+  it('a route refresh re-reads the truck kit, so a stop added mid-day gets its tool line', async () => {
+    mocks.truckKit.data = { enabled: true, truck: { id: 'v1', name: 'Van' }, kit: [], lastCheck: null, due: false, intervalDays: 7, gaps: [] };
+    mocks.truckKit.reload = vi.fn();
+    mount('/admin/today');
+    const button = await screen.findByRole('button', { name: 'Refresh route' });
+    fireEvent.click(button);
+    expect(mocks.truckKit.reload).toHaveBeenCalledTimes(1);
   });
 
   it('keeps both away when the gate is off, and the card away when nothing is due', async () => {

@@ -50,5 +50,7 @@ export default function useTruckKit() {
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
-  return { ...state, reload: () => load() };
+  // Stable, so a page can fold it into its own route refresh without churn.
+  const reload = useCallback(() => load(), [load]);
+  return { ...state, reload };
 }

@@ -468,6 +468,9 @@ export default function TechHomePage({ section = 'today' }) {
       if (seq === scheduleSeq.current) { setLoading(false); setRefreshing(false); }
     }
   }, [fetchTechLine]);
+  // A route refresh (the button, or a dispatch job update) re-reads the
+  // truck kit too, so a stop added mid-day shows its missing-tool line.
+  const refreshRoute = useCallback(() => { fetchSchedule(); truckKit.reload(); }, [fetchSchedule, truckKit.reload]);
 
   // Recap clips kept on this device past the draft retention window are
   // abandoned (the visit left the route): sweep them here, since a tech who
@@ -568,7 +571,7 @@ export default function TechHomePage({ section = 'today' }) {
     const socket = origin ? io(origin, opts) : io(opts);
 
     function handleJobUpdate() {
-      fetchSchedule();
+      refreshRoute();
     }
     socket.on('dispatch:job_update', handleJobUpdate);
 
@@ -576,7 +579,7 @@ export default function TechHomePage({ section = 'today' }) {
       socket.off('dispatch:job_update', handleJobUpdate);
       socket.disconnect();
     };
-  }, [fetchSchedule]);
+  }, [refreshRoute]);
 
   // Scope to this tech's own jobs. /api/admin/schedule returns the
   // entire dispatch board, so nextStop, counts, and the Today's
@@ -852,7 +855,7 @@ export default function TechHomePage({ section = 'today' }) {
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
           loading={loading} refreshing={refreshing} error={scheduleError} notice={[routeNotice, saved.readNotice].filter(Boolean).join(' ')} rainChance={rainChance}
-          onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
+          onRetry={refreshRoute} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards />}
           scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
@@ -870,7 +873,7 @@ export default function TechHomePage({ section = 'today' }) {
           visit={selectedVisitKey && section === 'today' ? (
             <TechFieldVisit
               stop={selectedVisit} loading={loading} error={scheduleError}
-              onBack={closeFieldVisit} onRetry={fetchSchedule} busy={navigationBusy}
+              onBack={closeFieldVisit} onRetry={refreshRoute} busy={navigationBusy}
               enRouteState={enRouteState} onSiteState={onSiteState}
               onEnRoute={handleEnRoute} onSite={handleOnSite} onSync={handleSyncStop}
               onMove={setRainOutService}
