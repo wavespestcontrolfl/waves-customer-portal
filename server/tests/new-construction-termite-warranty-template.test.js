@@ -6,6 +6,7 @@ const { BODY_V2 } = require('../models/migrations/20261023140000_new_constructio
 const { BODY_V3 } = require('../models/migrations/20261023160000_new_construction_termite_warranty_v3');
 const { BODY_V4 } = require('../models/migrations/20261023180000_new_construction_termite_warranty_v4');
 const { BODY_V5 } = require('../models/migrations/20261023200000_new_construction_termite_warranty_v5');
+const { BODY_V6, VARIABLES_V6 } = require('../models/migrations/20261023220000_new_construction_termite_warranty_v6');
 const { renderDocumentTemplate } = require('../services/document-template-library');
 
 const bodyVars = [...new Set([...TEMPLATE.body.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
@@ -67,10 +68,18 @@ describe('new construction termite warranty template', () => {
     expect(v4Vars).toEqual([...TEMPLATE.variables].sort());
   });
 
-  test('version 5 (the active text) ties the section 6 renewal promise to the section 4 renewal right', () => {
+  test('version 5 ties the section 6 renewal promise to the section 4 renewal right', () => {
     expect(BODY_V5).not.toContain('Pay the fee by the due date and coverage continues for one more year.');
     expect(BODY_V5).toContain('When you have the right to renew (section 4), paying the fee by the due date continues coverage for one more year.');
     expect(BODY_V5).toContain('When renewal is at our option, the renewal notice says whether we offer it');
     expect(BODY_V5).toContain('{{issuer.title}}, on {{warranty.issue_date}}.');
+  });
+
+  test('version 6 (the active text) prints the configured FDACS license, and declares every variable it uses', () => {
+    expect(BODY_V6).not.toContain('JB351547');
+    expect(BODY_V6).toContain('FDACS License {{issuer.license}}');
+    expect(BODY_V6.replace('{{issuer.license}}', 'JB351547')).toBe(BODY_V5);
+    const v6Vars = [...new Set([...BODY_V6.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
+    expect(v6Vars).toEqual([...VARIABLES_V6].sort());
   });
 });

@@ -4,6 +4,7 @@
 const db = require('../models/db');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
+const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
 
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
@@ -211,14 +212,18 @@ function officeFields(body, initial) {
 
 // The template prints its own unit after each amount; a certificate value
 // that already carries one ("0.060%", "180 gallons") would print it twice.
-const UNIT_SUFFIX = {
-  concentration: /\s*%$/,
-  gallons: /\s*\b(gal|gals|gallons?)\.?$/i,
-  sq_ft: /\s*\b(sq\.?\s*ft|square\s*feet|sf)\.?$/i,
-  linear_ft: /\s*\b(linear\s*(ft|feet)|lineal\s*(ft|feet)|lin\.?\s*ft|lf)\.?$/i,
+// A value that names its unit anywhere ("180 gal applied") prints as its
+// leading number; one with no number stays as written.
+const UNIT_WORD = {
+  concentration: /%/,
+  gallons: /\b(gal|gals|gallons?)\b/i,
+  sq_ft: /\b(sq\.?\s*ft|square\s*feet|sf)\b/i,
+  linear_ft: /\b(linear\s*(ft|feet)|lineal\s*(ft|feet)|lin\.?\s*ft|lf)\b/i,
 };
 function withoutUnit(value, unit) {
-  return oneLine(value).replace(UNIT_SUFFIX[unit], '');
+  const raw = oneLine(value);
+  const number = /^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?/.exec(raw)[0];
+  return UNIT_WORD[unit].test(raw) && number ? number : raw;
 }
 
 function certificateValues(project, findings) {
@@ -301,6 +306,10 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   if (!project || project.project_type !== 'pre_treatment_termite_certificate' || project.customer_id !== customer.id) {
     throw bad('Pre-treat certificate not found for this customer.', 404);
   }
+  // Rule 5E-14.105(2)(a): the owner's or agent's complete address.
+  if (![customer.address_line1, customer.city, customer.zip].every((part) => oneLine(part))) {
+    throw bad("Add the owner's or agent's full mailing address (street, city, ZIP) to the customer first.", 409);
+  }
   const findings = parseFindings(project.findings);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
   const { initial, values } = certificateValues(project, findings);
@@ -314,7 +323,7 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
       // The day Waves signs it (the signature line); delivery keeps its own time.
       issue_date: us(parseIso(etDateString())),
     },
-    issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title) },
+    issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title), license: WAVES_FDACS_LICENSE_NUMBER },
   });
 }
 

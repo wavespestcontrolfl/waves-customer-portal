@@ -157,6 +157,19 @@ describe('templateIssueValues (server-built warranty)', () => {
     const unitized = { ...project, findings: { ...findings, concentration_pct: '0.060%', gallons_applied: '180 gallons', square_footage: '1800 sq ft', linear_feet: '220 LF' } };
     const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(unitized));
     expect(v.treatment).toMatchObject({ concentration: '0.060', gallons: '180', sq_ft: '1800', linear_ft: '220' });
+    const described = { ...project, findings: { ...findings, gallons_applied: '180 gal applied', square_footage: '1,800 sq ft treated', linear_feet: 'about 220 LF' } };
+    const d = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(described));
+    // A leading number wins; text with no leading number stays as written.
+    expect(d.treatment).toMatchObject({ gallons: '180', sq_ft: '1,800', linear_ft: 'about 220 LF' });
+  });
+
+  test('needs the owner\'s full mailing address and prints the configured license', async () => {
+    for (const gap of [{ address_line1: '' }, { city: null }, { zip: '' }]) {
+      await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, { ...customer, ...gap }, conn(project))).rejects.toMatchObject({ status: 409 });
+    }
+    const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(project)))
+      .resolves.toMatchObject({ issuer: { license: WAVES_FDACS_LICENSE_NUMBER } });
   });
 
   test('prices are exact dollar amounts, printed as $1,250.00; the plan price may be included', async () => {
