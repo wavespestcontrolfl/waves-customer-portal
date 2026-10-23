@@ -2590,9 +2590,12 @@ async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, can
       ...(fence && req.ibApprovedCancelNotice ? { cancelGeneration: fence } : {}),
     });
   } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
-  // A refused claim or handoff stamp (lost lease, restored visit, busy): the text is the sweep's now, so record nothing.
-  if (await cancelBundles.liveStandDown(req, fence)) return outcome;
+  // The text outcome is recorded FIRST, under the request's ownership protection (it never overwrites a sweep's): when a restore
+  // or a lost lease stopped the fan-out after some recipients were reached, that delivery evidence (partial, uncertain) must
+  // survive, because the restore clears the reminder's claim token and the sweep could not rebuild it. A fence refusal that
+  // reached nobody records nothing (the marker is untouched: the text stays open for the sweep). Then a refusal stands down.
   await cancelBundles.liveNotice(req, outcome);
+  if (await cancelBundles.liveStandDown(req, fence)) return outcome;
   // The text step may have outlasted the request's lease: the sweep can have taken the bundle (and abandoned it after a restore)
   // meanwhile. Renew the lease, and when ownership is gone run NO money, linked-visit or tracker step.
   if (!req.ibCancelBundleLost) await cancelBundles.liveStart(req);
@@ -2607,7 +2610,9 @@ async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, can
     reason: notes || null,
     source: 'admin-dispatch',
     // Set only by cancelServiceFromBar: the linked visits the card approved (each re-checked under its lock).
-    ...(req.ibApprovedLinkedChildren ? { linkedChildren: req.ibApprovedLinkedChildren, linkedChildReport: req.ibLinkedChildReport } : {}),
+    // With a recovery record the children are the bundle's own copies, each pinned with its restoration count, so the child-lock
+    // recheck also catches a child that was cancelled, restored and offered again (as the sweep's follow-through does).
+    ...(req.ibApprovedLinkedChildren ? { linkedChildren: req.ibPinnedLinkedChildren || req.ibApprovedLinkedChildren, linkedChildReport: req.ibLinkedChildReport } : {}),
     // Set only by cancelServiceFromBar: the money effects the card showed (invoices to void at those amounts and PaymentIntents,
     // credits to reverse, no card rail). The follow-through acts on these only.
     ...(req.ibApprovedMoney ? { pinnedEffects: { [svc.id]: req.ibApprovedMoney }, moneyReport: req.ibMoneyReport } : {}),

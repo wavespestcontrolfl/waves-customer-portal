@@ -61,7 +61,7 @@ jest.mock('../models/db', () => {
       select() { return b; },
       async first() {
         // The recovery record (read by the request's cancel fence): no status, so liveFinish still sees "no open text".
-        if (table === 'ib_cancel_effect_bundles') return { scheduled_service_id: 'svc-bar-1', restorations_seen: 0 };
+        if (table === 'ib_cancel_effect_bundles') return state.bundleRow || { scheduled_service_id: 'svc-bar-1', restorations_seen: 0 };
         const rows = table === 'scheduled_services' ? state.rows : table === 'invoices' ? state.invoices : [];
         const cmp = (a, op, v) => (op === '>=' ? a >= v : op === '>' ? a > v : op === '<=' ? a <= v : op === '<' ? a < v : a === v);
         const found = rows.find((r) => Object.entries(b._where).every(([k, v]) => r[k] === v)
@@ -378,9 +378,8 @@ describe('the recovery bundle rides the cancel transaction', () => {
     ['the visit was busy at the handoff stamp', 'visit_busy', true],
   ])('a fence refusal at the text claim or handoff (%s): no outcome is recorded, no follow-through runs, the sweep owns the text', async (_label, hit, released) => {
     mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      // Nobody was reached and the marker is untouched: no outcome is reported for the sweep to be overridden by.
       opts.cancelGeneration.hits.push(hit);
-      opts.outcome.notificationSent = false;
-      opts.outcome.notificationError = 'cancellation fence';
     });
     const { json } = await run();
     expect(json.success).toBe(true);
@@ -389,6 +388,30 @@ describe('the recovery bundle rides the cancel transaction', () => {
     const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
     expect(updates.some((u) => u.notice_outcome !== undefined || u.status === 'complete')).toBe(false);
     expect(updates.some((u) => u.lease_owner === null && u.lease_until === null)).toBe(released);
+  });
+
+  test('a restore that stops the fan-out after one recipient keeps the partial delivery on the bundle before the request stands down', async () => {
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      opts.cancelGeneration.hits.push('visit_restored_since');
+      Object.assign(opts.outcome, { notificationSent: true, notificationPartial: true, notificationError: 'visit restored' });
+    });
+    const { json } = await run();
+    expect(json.recoveryOwnsOutcome).toBe(true);
+    expect(mockRunFollowThrough).not.toHaveBeenCalled();
+    const updates = bundleWrites().filter((w) => w.op === 'update').map((w) => w.u);
+    const noticeAt = updates.findIndex((u) => u.notice_outcome !== undefined);
+    const releaseAt = updates.findIndex((u) => u.lease_owner === null && u.lease_until === null);
+    expect(JSON.parse(updates[noticeAt].notice_outcome)).toMatchObject({ state: 'partial', by: 'request' });
+    expect(releaseAt).toBeGreaterThan(noticeAt);
+    expect(updates.some((u) => u.status === 'complete')).toBe(false);
+  });
+
+  test('the follow-through gets the bundle\'s own copies of the linked visits, each with its restoration count', async () => {
+    const pinned = [{ id: 'child-1', status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control', restorations_seen: 2 }];
+    const original = db.__state.bundleRow;
+    db.__state.bundleRow = { scheduled_service_id: 'svc-bar-1', restorations_seen: 0, linked_children: pinned };
+    try { await run(); } finally { db.__state.bundleRow = original; }
+    expect(mockRunFollowThrough.mock.calls[0][0].linkedChildren).toEqual(pinned);
   });
 
   test.each([

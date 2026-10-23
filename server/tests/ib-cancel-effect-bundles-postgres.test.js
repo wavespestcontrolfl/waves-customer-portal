@@ -317,6 +317,8 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       await svc.liveStart(req);
       const fence = await svc.liveFence(req);
       expect(fence).toMatchObject({ visitId: visit, bundleId: id, leaseToken: 'request', restorations: 0 });
+      // The bundle's own copies of the linked visits (each pinned with its restoration count) are what the follow-through uses.
+      expect(req.ibPinnedLinkedChildren).toEqual([expect.objectContaining({ restorations_seen: 0 })]);
       await expect(check(fence)).resolves.toBeUndefined();
       // A stall past the request lease with no takeover: refused (the sweep claims the bundle after the lease), then renewed by a heartbeat.
       await app(TABLE).where({ id }).update({ lease_until: app.raw("now() - interval '1 second'") });

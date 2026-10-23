@@ -172,11 +172,14 @@ function liveStart(req) {
 async function liveFence(req) {
   const id = req && req.ibCancelBundleId;
   if (!id) return null;
-  const row = await guarded('fence', () => db(TABLE).where({ id }).first('scheduled_service_id', 'restorations_seen'), req);
+  const row = await guarded('fence', () => db(TABLE).where({ id }).first('scheduled_service_id', 'restorations_seen', 'linked_children'), req);
   if (!row) {
     req.ibCancelBundleLost = true;
     return null;
   }
+  // The bundle's copies of the approved linked visits carry each child's own restoration count (pinChildGenerations): the
+  // follow-through must use these, not the card's bare list.
+  if (Array.isArray(row.linked_children)) req.ibPinnedLinkedChildren = row.linked_children;
   return { visitId: row.scheduled_service_id, restorations: row.restorations_seen, bundleId: id, leaseToken: REQUEST_LEASE, hits: [] };
 }
 
