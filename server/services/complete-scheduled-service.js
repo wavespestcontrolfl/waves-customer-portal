@@ -2104,7 +2104,7 @@ const limitFigure = (finding) => {
   if (finding.limitType === 'annual_max_rate') return `${finding.current}% of the yearly label amount used`;
   if (finding.limitType === tsOrnamental.RATE_LIMIT_TYPE) return `${finding.current} lb per 1,000 sq ft, county limit ${finding.max}`;
   if (finding.limitType === tsOrnamental.HISTORY_LIMIT_TYPE) return finding.reason;
-  if (finding.limitType === tsOrnamental.UNCHECKED_LIMIT_TYPE) return tsOrnamental.uncheckedClause(finding.reason);
+  if (tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType)) return tsOrnamental.uncheckedClause(finding.reason);
   return `${finding.current} of ${finding.max} already used`;
 };
 
@@ -2121,6 +2121,7 @@ const FINDING_WHY = {
   [tsOrnamental.RATE_LIMIT_TYPE]: (name, f) => `${name} was applied at ${f.current} lb per 1,000 sq ft, over the ${f.max} county limit.`,
   [tsOrnamental.HISTORY_LIMIT_TYPE]: (name, f) => `${name}: ${f.reason}`,
   [tsOrnamental.UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
+  [tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
@@ -2131,9 +2132,11 @@ const FINDING_DETAIL = {
 FINDING_DETAIL[areaAddOnLimits.YEARLY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'visit'} visit for an area add-on and is over the add-on's yearly limit. ${f.detail} Review it and report it if needed.`;
 FINDING_DETAIL[tsOrnamental.RATE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'tree & shrub'} visit at ${f.current} lb per 1,000 sq ft. The county limit is ${f.max} lb per 1,000 sq ft (0.75 lb per 100 sq ft, 1 lb of nitrogen per 1,000 sq ft). Review it and report it if needed.`;
 FINDING_DETAIL[tsOrnamental.HISTORY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'tree & shrub'} visit, and ${f.reason.charAt(0).toLowerCase()}${f.reason.slice(1)} The program allows 2 in 12 months, at least 5 months apart, none June 1 to Sept. 30. Review it and report it if needed.`;
-FINDING_DETAIL[tsOrnamental.UNCHECKED_LIMIT_TYPE] = (fullName, f, svc) => (f.reason === 'history_unavailable'
+const tsUncheckedDetail = (fullName, f, svc) => (f.reason === 'history_unavailable'
   ? `${fullName} was ${tsOrnamental.uncheckedClause(f.reason)} on a ${svc.service_type || 'tree & shrub'} visit. The label and county rules allow 2 feedings in 12 months, at least 5 months apart, none June 1 to Sept. 30. Check this property's 13-0-13 history.`
   : `${fullName} was ${tsOrnamental.uncheckedClause(f.reason)} on a ${svc.service_type || 'tree & shrub'} visit. The county limit is ${f.max} lb per 1,000 sq ft (0.75 lb per 100 sq ft), so the rate could not be held to it. Check the amount and treated area on the application record and report it if needed.`);
+FINDING_DETAIL[tsOrnamental.UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
+FINDING_DETAIL[tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -2145,6 +2148,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   for (const finding of findings) {
     try {
       const over = finding.code === 'application_limit_exceeded';
+      const unchecked = tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType);
       const fullName = finding.productName || 'a product';
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
@@ -2156,13 +2160,14 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: finding.limitType === tsOrnamental.UNCHECKED_LIMIT_TYPE ? `review ${name} limit not checked` : over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: unchecked ? `review ${name} ${finding.limitType === tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE ? 'history' : 'limit'} not checked` : over ? `review ${name} over its limit` : 'review product limits not checked',
         why,
         severity: 'needs-you',
         who: 'person',
         link: `/admin/customers?customerId=${svc.customer_id}`,
         subject: { type: 'visit', id: String(svc.id) },
-        doneWhen: over ? 'limit_overage_reviewed' : 'limits_checked',
+        // A limit that could not be checked is done when it is checked, not when an overage is reviewed.
+        doneWhen: over && !unchecked ? 'limit_overage_reviewed' : 'limits_checked',
       }, {
         bell: true,
         dedupeKey,

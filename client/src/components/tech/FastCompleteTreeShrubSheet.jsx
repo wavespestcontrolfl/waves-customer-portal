@@ -48,6 +48,7 @@
 // gate is off: this visit then needs the full form).
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import useIsMobile from '../../hooks/useIsMobile';
+import { bedFeedCountyLimitLine, bedFeedRatePer1000 } from '../../lib/bed-feed-rate';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
@@ -214,18 +215,20 @@ const needsBedArea = (product) => /\b13-0-13\b/.test(String(product?.name || '')
 function productRow(product, { method, last = null, added = false, bedSqft = null }) {
   const flags = flagsOf(product);
   const own = productUnits(product, { method });
-  const lastAmount = Number(last?.totalAmount);
+  // The 13-0-13 amount starts blank (its dose follows the treated square feet, not last time's bag).
+  const seedFrom = needsBedArea(product) ? null : last;
+  const lastAmount = Number(seedFrom?.totalAmount);
   // Read last time's unit in the product's own measure first: a bare "oz" is a
   // fluid ounce for a liquid and a weight ounce for a dry product. Only a unit
   // that belongs to another measure (a "lb" on a liquid row) moves the row.
-  const lastDimension = measureUnit(last?.amountUnit, own.dimension)
+  const lastDimension = measureUnit(seedFrom?.amountUnit, own.dimension)
     ? own.dimension
-    : Object.keys(UNIT_CHOICES).find((name) => measureUnit(last?.amountUnit, name));
+    : Object.keys(UNIT_CHOICES).find((name) => measureUnit(seedFrom?.amountUnit, name));
   let dimension = own.dimension;
   let seeded = { amount: '', unit: own.unit };
   if (lastDimension && lastAmount > 0) {
     dimension = lastDimension;
-    seeded = seededAmount(lastAmount, measureUnit(last.amountUnit, lastDimension));
+    seeded = seededAmount(lastAmount, measureUnit(seedFrom.amountUnit, lastDimension));
   }
   return {
     product,
@@ -244,6 +247,12 @@ function productRow(product, { method, last = null, added = false, bedSqft = nul
 }
 
 const hasBedArea = (row) => !row.needsArea || Number(row.areaValue) > 0;
+
+// The non-blocking county-limit line for an applied 13-0-13 row: the higher of the entered rate (none on this sheet) and the
+// amount over the treated square feet, the same reading the full form and the server use. null when it cannot be read or is fine.
+const bedFeedLine = (row) => (row.needsArea && row.active
+  ? bedFeedCountyLimitLine(row.name, bedFeedRatePer1000({ totalAmount: row.totalAmount, amountUnit: row.amountUnit, areaValue: row.areaValue, areaUnit: 'sqft' }))
+  : null);
 
 // A catalog product's method on this line: foliar spray unless it is a
 // granule or a drench.
@@ -1184,6 +1193,7 @@ function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }
             onChange={(e) => onChange({ areaValue: e.target.value })}
           />
           <p className="tech-visit-muted">County limit: 0.75 lb per 100 sq ft of bed.</p>
+          {bedFeedLine(row) && <p className="tech-visit-muted" role="status">{bedFeedLine(row)}</p>}
         </div>
       )}
       {neonicLine && <p className="tech-visit-muted" role="status">{neonicLine}</p>}

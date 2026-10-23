@@ -143,7 +143,14 @@ describe('the history rules judge the hand-added row as the suggestion is judged
     expect(out.blocks).toEqual([expect.objectContaining({ code: 'application_limit_exceeded',
       message: expect.stringContaining('history could not be read; 2-a-year and 5-month rules not checked') })]);
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify.mock.calls[0][0].findings).toEqual([expect.objectContaining({ limitType: limits.UNCHECKED_LIMIT_TYPE, reason: 'history_unavailable' })]);
+    expect(notify.mock.calls[0][0].findings).toEqual([expect.objectContaining({ limitType: limits.HISTORY_UNCHECKED_LIMIT_TYPE, reason: 'history_unavailable' })]);
+  });
+
+  test('the history-unchecked and rate-unchecked findings of one record are different findings (own limit type)', async () => {
+    const { notify } = await flag({ rows: [row({ total_amount: 9, amount_unit: 'lb' })], failHistory: true });
+    const types = notify.mock.calls[0][0].findings.map((f) => f.limitType);
+    expect(types.sort()).toEqual([limits.HISTORY_UNCHECKED_LIMIT_TYPE, limits.UNCHECKED_LIMIT_TYPE].sort());
+    expect(limits.HISTORY_UNCHECKED_LIMIT_TYPE).not.toBe(limits.UNCHECKED_LIMIT_TYPE);
   });
 });
 

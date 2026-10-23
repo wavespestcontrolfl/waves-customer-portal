@@ -27,6 +27,9 @@ const CAP_LB_PER_1000 = 7.5;
 const RATE_LIMIT_TYPE = 'ornamental_fertilizer_rate';
 const HISTORY_LIMIT_TYPE = 'ornamental_fertilizer_history';
 const UNCHECKED_LIMIT_TYPE = 'ornamental_fertilizer_rate_unchecked';
+// Its own type, so the unreadable-history finding and the rate-unchecked finding of one record never share a dedupe key.
+const HISTORY_UNCHECKED_LIMIT_TYPE = 'ornamental_fertilizer_history_unchecked';
+const UNCHECKED_LIMIT_TYPES = [UNCHECKED_LIMIT_TYPE, HISTORY_UNCHECKED_LIMIT_TYPE];
 
 const LB_PER_1000_UNITS = new Set(['lb', 'lbs', 'lb/1000sf', 'lb/1000sqft', 'lb/1000ft2']);
 // The sheet's weight units for a dry product are g, oz and lb; the total is judged in pounds.
@@ -126,7 +129,7 @@ async function flagOrnamentalFertilizer({ svc, record, database, advisory, notif
     } catch (err) {
       logger.warn(`[ts-ornamental-fertilizer] history read failed for record ${record.id}: ${err?.message}`);
       // Not advisoryOnly: the application was recorded and the 2-a-year / 5-month rules could not be held, so the office is rung.
-      findings.push({ code: 'application_limit_exceeded', limitType: UNCHECKED_LIMIT_TYPE, productId: rows[0].product_id,
+      findings.push({ code: 'application_limit_exceeded', limitType: HISTORY_UNCHECKED_LIMIT_TYPE, productId: rows[0].product_id,
         productName: rows[0].product_name, reason: 'history_unavailable', current: null, max: CAP_LB_PER_1000,
         message: `Recorded. The office will review: ${rows[0].product_name || '13-0-13'} ${uncheckedClause('history_unavailable')}.` });
     }
@@ -141,5 +144,5 @@ async function flagOrnamentalFertilizer({ svc, record, database, advisory, notif
 }
 
 module.exports = {
-  CAP_LB_PER_1000, RATE_LIMIT_TYPE, HISTORY_LIMIT_TYPE, UNCHECKED_LIMIT_TYPE, uncheckedClause, ratePer1000, rateFindings, historyFinding, recordedOrnamentalRows, flagOrnamentalFertilizer,
+  CAP_LB_PER_1000, RATE_LIMIT_TYPE, HISTORY_LIMIT_TYPE, UNCHECKED_LIMIT_TYPE, HISTORY_UNCHECKED_LIMIT_TYPE, UNCHECKED_LIMIT_TYPES, uncheckedClause, ratePer1000, rateFindings, historyFinding, recordedOrnamentalRows, flagOrnamentalFertilizer,
 };

@@ -513,9 +513,13 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   const { entries: dueMonthEntries, holds: monthProductHolds } = await filterDueMonthProducts(
     resolveMonthProducts(svc.scheduled_date, catalog), catalog, svc, knex, serviceId, zone,
   );
+  // The 13-0-13 bed feed never starts from last time's amount: its dose follows this bed's treated square feet (county cap),
+  // so its amount starts blank, like the full form.
+  const catalogById = new Map(catalog.map((row) => [String(row.id), row]));
   const monthProducts = dueMonthEntries.map((entry) => ({
     ...entry,
-    ...(lastAmounts.has(String(entry.productId)) && { lastAmount: lastAmounts.get(String(entry.productId)) }),
+    ...(lastAmounts.has(String(entry.productId)) && dueKeyFor(catalogById.get(String(entry.productId))) !== 'f13013'
+      && { lastAmount: lastAmounts.get(String(entry.productId)) }),
   }));
 
   let warnings = [];

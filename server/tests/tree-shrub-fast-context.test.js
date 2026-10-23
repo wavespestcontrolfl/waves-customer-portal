@@ -386,6 +386,21 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx.products.find((p) => p.id === 'snapshot').tsFlags.npBlackout).toBe(false);
   });
 
+  test('the 13-0-13 month suggestion never carries last time\'s amount (its dose follows the treated sq ft); other products still do', async () => {
+    const records = [{ id: 'rec-1', status: 'completed', service_date: '2026-03-01', typed_values: { plant_groups: 'Hedges' } }];
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records,
+      service_products: [
+        { service_record_id: 'rec-1', product_id: 'orn', product_name: 'LESCO 13-0-13 60% PolyPlus Landscape', total_amount: '9', amount_unit: 'lb' },
+        { service_record_id: 'rec-1', product_id: 'palm', product_name: 'LESCO 8-0-12 Palm', total_amount: '3', amount_unit: 'lb' },
+      ],
+    }));
+    const byId = Object.fromEntries(ctx.monthProducts.map((m) => [m.productId, m]));
+    expect(byId.orn).toBeDefined();
+    expect(byId.orn.lastAmount).toBeUndefined();
+    expect(byId.palm.lastAmount).toMatchObject({ totalAmount: 3, amountUnit: 'lb' });
+  });
+
   test('last visit values and per-product last amounts come from the typed snapshot and service_products', async () => {
     const records = [
       { id: 'rec-2', status: 'completed', service_date: '2026-09-02', typed_values: { plant_groups: 'Palms, Shrubs', areas_treated: 'Front landscape, Foundation beds', landscape_condition: 'Good' } },

@@ -900,6 +900,35 @@ describe('13-0-13 treated square feet (the county cap needs an area)', () => {
     expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ areaValue: 1000, areaUnit: 'sqft' });
   });
 
+  test('an amount over the county limit shows a quiet line near the row and never blocks Complete', async () => {
+    const request = await ready(withOrn(1200));
+    const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const line = () => within(editorFor(orn)).queryByText(/over the county limit/);
+    enterAmount(orn, 9);
+    expect(line()).toBeNull();
+    enterAmount(orn, 12);
+    expect(line().textContent).toBe(`${orn} rate 10 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`);
+    expect(line().textContent).not.toMatch(/label max/);
+    // A smaller treated area raises the rate; a larger one clears it.
+    fireEvent.change(areaField(), { target: { value: '2000' } });
+    expect(line()).toBeNull();
+    fireEvent.change(areaField(), { target: { value: '1000' } });
+    expect(line().textContent).toContain('rate 12 lb/1k');
+    fireEvent.change(areaField(), { target: { value: '1200' } });
+    enterAmount(orn, 12);
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ totalAmount: 12, amountUnit: 'lb', areaValue: 1200 });
+  });
+
+  test('the 13-0-13 amount starts blank even when last time recorded one', async () => {
+    const context = { ...withOrn(1200), lastVisit: { ...CONTEXT.lastVisit, products: [{ productId: 'orn', productName: 'LESCO 13-0-13 60% PolyPlus Landscape', totalAmount: 9, amountUnit: 'lb' }] } };
+    await ready(context);
+    const field = within(editorFor('LESCO 13-0-13 60% PolyPlus Landscape')).getByLabelText('How much?');
+    expect(field.value).toBe('');
+    expect(within(editorFor('LESCO 13-0-13 60% PolyPlus Landscape')).queryByText('last time')).toBeNull();
+  });
+
   test('a 13-0-13 the tech adds by hand gets the same area field, prefilled', async () => {
     const request = makeRequest({ context: { ...CONTEXT, bedSqft: 900 } });
     await openSheet(request);

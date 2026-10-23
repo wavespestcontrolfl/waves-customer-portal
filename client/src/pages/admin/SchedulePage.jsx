@@ -123,6 +123,7 @@ import {
 import {
   protocolCompletionDefaultSelections,
 } from "../../lib/protocol-completion-defaults";
+import { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000, bedFeedCountyLimitLine } from "../../lib/bed-feed-rate";
 import {
   exclusiveProtocolProductConflict,
   exclusiveProtocolSelectionConflict,
@@ -10260,25 +10261,7 @@ export function isBedFeedRow(product, serviceType = "") {
 // The pre-submit line for a Tree & Shrub row entered above its rate ceiling. The 13-0-13 ceiling is the COUNTY limit (0.75 lb per
 // 100 sq ft = 7.5 lb per 1,000 sq ft), not a label maximum, so the line says so. Other rows keep the label-max wording of the
 // WaveGuard approval message. Advisory only: it never holds the completion.
-export const BED_FEED_CAP_LB_PER_1000 = 7.5;
-const LB_PER_UNIT = { lb: 1, lbs: 1, oz: 1 / 16, g: 1 / 453.592, kg: 2.20462 };
-// The 13-0-13 rate in lb per 1,000 sq ft, as the server's county-cap check reads it: the entered lb rate, else the total over the
-// treated area (the protocol row starts with no rate, so a total plus area is the common entry). null when it cannot be read.
-export function bedFeedRatePer1000(product) {
-  const rate = Number(product?.rate);
-  const rateUnit = String(product?.rateUnit || "lb").toLowerCase().replace(/\/.*$/, "");
-  const fromRate = product?.rate !== "" && product?.rate != null && Number.isFinite(rate) && rate > 0 && LB_PER_UNIT[rateUnit]
-    ? rate * LB_PER_UNIT[rateUnit] : null;
-  const total = Number(product?.totalAmount);
-  const area = Number(product?.areaValue);
-  const amountUnit = String(product?.amountUnit || "lb").toLowerCase();
-  const fromTotal = Number.isFinite(total) && total > 0 && Number.isFinite(area) && area > 0 && LB_PER_UNIT[amountUnit]
-    && (!product?.areaUnit || product.areaUnit === "sqft")
-    ? (total * LB_PER_UNIT[amountUnit] * 1000) / area : null;
-  // Both readings, the higher one wins (an overridden total can exceed the entered rate), as the server's ratePer1000 does.
-  if (fromRate === null) return fromTotal;
-  return fromTotal === null ? fromRate : Math.max(fromRate, fromTotal);
-}
+export { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000 };
 
 export function treeShrubHighRateAdvisory(product, serviceType = "") {
   if (serviceLineFromType(serviceType) !== "tree_shrub") return null;
@@ -10286,8 +10269,7 @@ export function treeShrubHighRateAdvisory(product, serviceType = "") {
   const suffix = isPerBasisUnit(product?.catalogRateUnit) ? "" : "/1k";
   if (isBedFeedRow(product, serviceType)) {
     const rate = bedFeedRatePer1000(product);
-    if (rate === null || Math.round(rate * 100) / 100 <= BED_FEED_CAP_LB_PER_1000) return null;
-    return `${name} rate ${Math.round(rate * 100) / 100} lb/1k is over the county limit of ${BED_FEED_CAP_LB_PER_1000} lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`;
+    return bedFeedCountyLimitLine(name, rate);
   }
   return `${name} rate ${product.rate} ${product.rateUnit || ""}${suffix} exceeds label max ${product.maxLabelRatePer1000} ${product.catalogRateUnit || ""}${suffix}.`;
 }

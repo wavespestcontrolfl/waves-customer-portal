@@ -443,6 +443,27 @@ describe('the office notification for a finding (raised through the admin alert 
     expect(opts.metadata.dedupeKey).toBe('application-limit-finding:record-1:application_limit_exceeded:p-orn:ornamental_fertilizer_rate_unchecked');
   });
 
+  test('the unchecked 13-0-13 findings are done when checked (limits_checked), and a rate-unchecked and a history-unchecked finding on one record ring separately', async () => {
+    const notify = notifyFor();
+    const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const base = { code: 'application_limit_exceeded', productId: 'p-orn', productName: name, current: null, max: 7.5 };
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Tree & Shrub Care' }, record, findings: [
+      { ...base, limitType: 'ornamental_fertilizer_rate_unchecked', reason: 'area_missing' },
+      { ...base, limitType: 'ornamental_fertilizer_history_unchecked', reason: 'history_unavailable' },
+      { ...base, limitType: 'ornamental_fertilizer_rate', current: 10 },
+    ] });
+    expect(notify).toHaveBeenCalledTimes(3);
+    const [rateCall, historyCall, overCall] = notify.mock.calls.map((call) => call[3]);
+    expect(rateCall.metadata.doneWhen).toBe('limits_checked');
+    expect(historyCall.metadata.doneWhen).toBe('limits_checked');
+    expect(overCall.metadata.doneWhen).toBe('limit_overage_reviewed');
+    expect(new Set([rateCall, historyCall, overCall].map((opts) => opts.metadata.dedupeKey)).size).toBe(3);
+    expect(historyCall.metadata.dedupeKey).toBe('application-limit-finding:record-1:application_limit_exceeded:p-orn:ornamental_fertilizer_history_unchecked');
+    expect(notify.mock.calls[1][1]).toBe('Schedule — review LESCO 13-0-13 60%… history not checked');
+    expect(notify.mock.calls[1][2]).toBe('LESCO 13-0-13 60%… recorded but its history could not be read; 2-a-year and 5-month rules not checked.');
+    expect(historyCall.detail).toContain('Check this property\'s 13-0-13 history');
+  });
+
   test('the 13-0-13 rate and history findings obey the notification rule and name the county limit and the reason', async () => {
     const notify = notifyFor();
     const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
