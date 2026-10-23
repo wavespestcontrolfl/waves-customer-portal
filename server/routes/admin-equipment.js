@@ -276,7 +276,8 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       const dies = DEAD_ITEM_STATUSES.includes(updates.status);
       // Every truck this write can touch is locked first (in one order), so a
       // truck check in flight on it finishes before the item moves or dies.
-      const trucks = new Set([oldTruck, updates.assigned_vehicle_id, dies ? before.assigned_vehicle_id : null].filter(Boolean));
+      // Any status change can move the item in or out of the live kit.
+      const trucks = new Set([oldTruck, updates.assigned_vehicle_id, updates.status !== undefined ? before.assigned_vehicle_id : null].filter(Boolean));
       for (const truckId of [...trucks].sort()) await truckKit.lockTruck(trx, truckId);
       // An unresolved tool alert belongs to the truck it was found on and
       // closes only through the office's outcome (Found / Lost, Repaired /

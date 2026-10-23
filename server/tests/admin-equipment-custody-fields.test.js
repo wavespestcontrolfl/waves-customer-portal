@@ -281,6 +281,12 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     expect(db.__state.updated).toBeNull();
     // The item's truck is locked before the alert check, so a check in flight finishes first.
     expect(truckKit.lockTruck).toHaveBeenCalledWith(db, VEHICLE);
+    // Re-entering the live kit (maintenance → active) locks the truck too.
+    jest.clearAllMocks();
+    truckKit.openToolAlertFor.mockResolvedValue(null);
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status: 'active' } })).statusCode).toBe(200);
+    expect(truckKit.lockTruck).toHaveBeenCalledWith(db, VEHICLE);
+    truckKit.openToolAlertFor.mockResolvedValue({ id: 'alert-1' });
     // Any other edit of that item still saves.
     expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed', assigned_vehicle_id: VEHICLE } })).statusCode).toBe(200);
     truckKit.openToolAlertFor.mockResolvedValue(null);

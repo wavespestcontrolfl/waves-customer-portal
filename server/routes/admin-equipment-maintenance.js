@@ -252,12 +252,19 @@ router.put('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
 router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
   try {
     // Retiring a tool with an open truck check alert goes through the
-    // alert's outcome (Retired / Lost), never around it.
-    if (await truckKit.openToolAlertFor(req.params.id)) return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it with an outcome first.' });
-    const [record] = await db('equipment')
-      .where({ id: req.params.id })
-      .update({ status: 'retired', updated_at: db.fn.now() })
-      .returning('*');
+    // alert's outcome (Retired / Lost), never around it; the probe and the
+    // write hold the item's truck lock so a check in flight finishes first.
+    const record = await db.transaction(async (trx) => {
+      const item = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id');
+      if (item?.assigned_vehicle_id) await truckKit.lockTruck(trx, item.assigned_vehicle_id);
+      if (await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
+      const [row] = await trx('equipment')
+        .where({ id: req.params.id })
+        .update({ status: 'retired', updated_at: db.fn.now() })
+        .returning('*');
+      return row || null;
+    });
+    if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it with an outcome first.' });
 
     if (!record) return res.status(404).json({ error: 'Equipment not found' });
     logger.info(`Equipment retired: ${record.name} (${record.id})`);
@@ -729,6 +736,11 @@ router.put('/alerts/:id', async (req, res, next) => {
     }
     // A tool alert never closes without saying what happened to the tool:
     // a plain resolve would count the item as back on the truck.
+    // A tool alert knows three states; any other value would drop it out of
+    // the open queries without the outcome lifecycle (and strand the bell).
+    if (toolAlert && !['new', 'acknowledged', 'resolved'].includes(status)) {
+      return res.status(400).json({ error: 'a truck check alert is new, acknowledged or resolved (with an outcome)' });
+    }
     if (toolAlert && status === 'resolved' && outcome === undefined) {
       return res.status(400).json({ error: 'resolving a truck check alert needs an outcome: found, repaired, replaced, lost or retired' });
     }

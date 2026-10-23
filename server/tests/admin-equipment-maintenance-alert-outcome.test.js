@@ -24,7 +24,7 @@ jest.mock('../models/db', () => {
     c.first = async () => (table === 'maintenance_alerts' ? state.alerts[c.id] : state.equipment[c.id]) || null;
     c.update = (patch) => { c.patch = patch; state.updates.push([table, c.id, patch]); return c; };
     c.returning = async () => {
-      const row = state.alerts[c.id];
+      const row = (table === 'maintenance_alerts' ? state.alerts : state.equipment)[c.id];
       if (!row) return [];
       if (c.statuses && !c.statuses.includes(row.status)) return [];
       Object.assign(row, c.patch);
@@ -123,6 +123,25 @@ test('a stale Lost on an alert the truck check already closed is refused and mar
   // A plain maintenance alert keeps its idempotent resolve.
   db.__state.alerts['a-due'].status = 'resolved';
   expect((await put('a-due', { status: 'resolved' })).statusCode).toBe(200);
+});
+
+test('a tool alert accepts only new, acknowledged or resolved', async () => {
+  const res = await put('a-missing', { status: 'dismissed' });
+  expect(res.statusCode).toBe(400);
+  expect(db.__state.alerts['a-missing'].status).toBe('new');
+  // Other alerts keep the old reach.
+  expect((await put('a-due', { status: 'dismissed' })).statusCode).toBe(200);
+});
+
+test('the legacy retire holds the item\'s truck lock around the probe and the write', async () => {
+  const layer = layerFor('delete', '/:id([0-9a-fA-F-]{36})');
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  await handler({ params: { id: TOOL }, body: {}, techRole: 'admin' }, res, (err) => { throw err; });
+  expect(res.statusCode).toBe(200);
+  expect(truckKit.lockTruck).toHaveBeenCalledWith(db, TRUCK);
+  expect(db.transaction).toHaveBeenCalled();
+  expect(db.__state.equipment[TOOL].status).toBe('retired');
 });
 
 test('a tool alert never resolves without an outcome', async () => {
