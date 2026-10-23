@@ -9,7 +9,8 @@ jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mock
 const mockChildMoney = jest.fn();
 jest.mock('../services/appointment-cancel-impact', () => ({ linkedChildMoneyReason: (...a) => mockChildMoney(...a) }));
 const mockFence = jest.fn(async () => {});
-jest.mock('../services/cancel-generation-fence', () => ({ assertCancelGeneration: (...a) => mockFence(...a) }));
+const mockCount = jest.fn(async () => 0);
+jest.mock('../services/cancel-generation-fence', () => ({ assertCancelGeneration: (...a) => mockFence(...a), countRestorations: (...a) => mockCount(...a) }));
 const { transitionJobStatus } = require('../services/job-status');
 const { cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 
@@ -46,6 +47,8 @@ beforeEach(() => {
   transitionJobStatus.mockResolvedValue(undefined);
   mockChildMoney.mockResolvedValue(null);
   mockFence.mockResolvedValue(undefined);
+  mockCount.mockReset();
+  mockCount.mockResolvedValue(0);
 });
 
 const run = ({ children = [CHILD], locked = { 'child-1': { ...CHILD } }, approvedChildren = [APPROVED] } = {}) => {
@@ -235,5 +238,38 @@ describe('cancelCallFollowUpsForParentCancel with parentFence', () => {
   test('without a parentFence the fence is never consulted (the request path and every other caller are unchanged)', async () => {
     await run();
     expect(mockFence).not.toHaveBeenCalled();
+  });
+});
+
+// The cancel recovery sweep pins each child's restoration count with the bundle. A child the dead request already cancelled and an
+// operator then restored matches its card again; the pinned count, compared under the child's own lock, says it was restored.
+describe('approved children with a pinned restoration count', () => {
+  const pinned = (n) => [{ ...APPROVED, restorations_seen: n }];
+  const runPinned = (n, locked = { 'child-1': { ...CHILD } }) => {
+    const { conn, log } = fakeConn({ children: [CHILD], locked });
+    const report = { skipped: [] };
+    return cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent', approvedChildren: pinned(n), report })
+      .then((cancelled) => ({ cancelled, report, log }));
+  };
+
+  test('an unchanged generation is cancelled, with the count read under the child lock', async () => {
+    mockCount.mockResolvedValue(1);
+    const { cancelled, report } = await runPinned(1);
+    expect(cancelled).toBe(1);
+    expect(report.skipped).toEqual([]);
+    expect(mockCount).toHaveBeenCalledWith(expect.anything(), 'child-1');
+  });
+
+  test('a child restored since (higher count) is NOT cancelled a second time and is reported', async () => {
+    mockCount.mockResolvedValue(2);
+    const { cancelled, report } = await runPinned(1);
+    expect(cancelled).toBe(0);
+    expect(report.skipped).toEqual([{ id: 'child-1', reason: 'child_restored_since' }]);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('a card child with no pinned count (the request path) never reads the history', async () => {
+    await run();
+    expect(mockCount).not.toHaveBeenCalled();
   });
 });

@@ -906,6 +906,13 @@ async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want)
   if ((locked.service_type || null) !== (want.service_type || null)) throw changed('service_changed');
   // The child's own tech cancel notice goes to whoever is assigned NOW: a reassigned child is not the one the card showed.
   if (Object.prototype.hasOwnProperty.call(want, 'technician_id') && (locked.technician_id || null) !== (want.technician_id || null)) throw changed('technician_changed');
+  // The cancel recovery sweep pins each child's restoration count with the bundle (services/ib-cancel-effect-bundles.js). A child
+  // the dead request had already cancelled and an operator then RESTORED matches its card again (same status, date, service) and
+  // would be cancelled a second time; a higher count under the child's own lock says it was restored since. No times compared.
+  if (want.restorations_seen !== undefined
+    && (await require('./cancel-generation-fence').countRestorations(trx, childId)) !== Number(want.restorations_seen)) {
+    throw changed('child_restored_since');
+  }
   // The same money-rail checks the card ran on every linked visit (prepaid or coverage, estimate deposit or annual
   // prepay, card request or hold, inspection-credit offer, any invoice), repeated on this child's own transaction and
   // lock. A child that has money now is not cancelled by the bar's replay and never reaches the shared money seam.

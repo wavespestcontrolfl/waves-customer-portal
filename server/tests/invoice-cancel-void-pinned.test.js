@@ -493,11 +493,11 @@ describe('cancelFence (the cancel recovery sweep)', () => {
     const voided = await sweep();
     expect([...voided]).toEqual(['inv-a', 'inv-b']);
     expect(mockFence).toHaveBeenCalledTimes(4);
-    // The first proof of each invoice runs on a manual transaction held across the Stripe triage and released after the
-    // candidate settles (a restore waits for it instead of landing mid-way); the second is inside the void transaction.
-    const holds = mockFence.mock.calls.filter(([conn]) => conn === db.__lockTrx);
-    expect(holds.length).toBeGreaterThanOrEqual(1);
-    expect(db.__lockTrx.rollback).toHaveBeenCalled();
+    // Per invoice: a point-in-time proof before any Stripe call (the pool, no lock held across the network call), then the
+    // NOWAIT proof inside the void transaction under the invoice row lock. No share lock is ever held on a separate connection.
+    // (This suite's transaction mock hands back the pool handle, so the two proofs share a connection here; the lock behaviour
+    // is proven on real PostgreSQL in ib-cancel-effect-bundles-postgres.test.js.)
+    expect(db.transaction.mock.calls.filter(([cb]) => cb === undefined)).toEqual([]); // no manual share-lock transaction held across Stripe
     expect(mockFence).toHaveBeenCalledWith(expect.anything(), FENCE);
     expect(mockReverse).toHaveBeenCalledWith(expect.objectContaining({ pinnedReversalOfferIds: ['offer-1'], cancelFence: FENCE }));
   });

@@ -287,7 +287,8 @@ describe('the recovery bundle rides the cancel transaction', () => {
       notes: 'Cancelled via Intelligence Bar: rain', lease_owner: 'request', restorations_seen: 0,
     });
     expect(JSON.parse(insert.r.approved_notice)).toEqual(approvedNotice);
-    expect(JSON.parse(insert.r.linked_children)).toEqual(linkedChildren);
+    // Each child also pins its own restoration count (none here).
+    expect(JSON.parse(insert.r.linked_children)).toEqual(linkedChildren.map((child) => ({ ...child, restorations_seen: 0 })));
     expect(JSON.parse(insert.r.approved_money)).toEqual(approvedMoney);
     const begin = db.__state.writes.findIndex((w) => w.op === 'begin');
     const commit = db.__state.writes.findIndex((w) => w.op === 'commit');

@@ -297,7 +297,19 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'abandoned', finish_note: 'visit_restored_since' });
     });
 
-    test('restorations from earlier lifecycles are pinned with the new cancel and do not block its recovery', async () => {
+      test('each approved linked visit pins its own restoration count under the children\'s row locks', async () => {
+      const child = randomUUID();
+      await app('scheduled_services').insert({ id: child, customer_id: customer, status: 'confirmed', service_type: 'Pest Control', scheduled_date: '2099-02-01' });
+      await app('job_status_history').insert([
+        { job_id: child, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() },
+        { job_id: child, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: app.fn.now() },
+        { job_id: child, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() },
+      ]);
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins({ linkedChildren: [{ id: child, status: 'confirmed' }] })));
+      expect((await app(TABLE).where({ id }).first()).linked_children).toEqual([{ id: child, status: 'confirmed', restorations_seen: 2 }]);
+    });
+
+  test('restorations from earlier lifecycles are pinned with the new cancel and do not block its recovery', async () => {
       await app('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.raw("now() - interval '3 days'") });
       const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
       expect((await app(TABLE).where({ id }).first()).restorations_seen).toBe(1);

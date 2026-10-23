@@ -259,6 +259,15 @@ describe('the bundle is written in the cancel transaction', () => {
     expect(mockStore.bundles[0].restorations_seen).toBe(2);
   });
 
+  test('each approved linked visit also pins its OWN restoration count', async () => {
+    mockStore.history.push(
+      { id: 40, job_id: CHILD, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 60 * MIN) },
+      { id: 41, job_id: CHILD, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: new Date(mockNow.getTime() - 50 * MIN) },
+    );
+    await db.transaction((trx) => svc.insertBundle(trx, { ...pins, linkedChildren: [{ id: CHILD, status: 'confirmed' }] }));
+    expect(mockStore.bundles[0].linked_children).toEqual([{ id: CHILD, status: 'confirmed', restorations_seen: 1 }]);
+  });
+
   test('the no-text choice is stored as a bundle with no approved notice', async () => {
     await db.transaction((trx) => svc.insertBundle(trx, { ...pins, notifyCustomer: false, approvedNotice: null }));
     expect(mockStore.bundles[0]).toMatchObject({ notify_customer: false, approved_notice: null });
@@ -372,6 +381,12 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
       linked_visits_skipped: [{ id: CHILD, reason: 'date_changed' }],
     });
     expect(mockRecordResult.mock.calls[0][1].warning).toMatch(/skipped|not/i);
+  });
+
+  test('the pinned child generation rides to the cascade untouched, so a child restored since can be recognised there', async () => {
+    seedBundle({ linked_children: [{ id: CHILD, status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control', restorations_seen: 3 }] });
+    await svc.sweepIbCancelBundles();
+    expect(mockFollowThrough.mock.calls[0][0].linkedChildren).toEqual([{ id: CHILD, status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control', restorations_seen: 3 }]);
   });
 
   test('a linked visit the request already cancelled is not asked again and is not reported as changed', async () => {

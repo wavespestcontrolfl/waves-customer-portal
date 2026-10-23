@@ -6191,15 +6191,14 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
   const { scheduledServiceId, refusedSendCleanup, StripeService } = ctx;
   // Pinned path only: the combined-payment lock, held until this candidate is settled.
   let combinedLock = null;
-  // Recovery sweep only: a share lock on the visit, held from before the Stripe triage until this candidate is settled, so a
-  // restore waits instead of landing between the proof and the PaymentIntent cancel (share locks do not conflict with the
-  // void transaction's own share lock on its connection). NOWAIT: a restore already in flight refuses the candidate at once.
-  let fenceHold = null;
   try {
-    if (ctx.cancelFence) {
-      fenceHold = await db.transaction();
-      await require("./cancel-generation-fence").assertCancelGeneration(fenceHold, ctx.cancelFence);
-    }
+    // Recovery sweep only: no Stripe call for a visit that is no longer the cancelled one. A point-in-time check on purpose: a
+    // share lock on the visit held across the Stripe call (on a connection of its own) inverts the lock order against flows that
+    // lock the invoice first and the visit second (customer-credit application), which PostgreSQL cannot detect across the
+    // sweep's two connections. The guard of the void itself is the locked, NOWAIT proof inside its transaction below; a restore
+    // landing in the instant between this check and the PaymentIntent cancel leaves the PaymentIntent cancelled and the
+    // invoice open (the next payment attempt creates a new one).
+    if (ctx.cancelFence) await require("./cancel-generation-fence").assertCancelGeneration(db, ctx.cancelFence);
     const gate = await pinnedCandidateGate(candidate, ctx);
     combinedLock = gate.combinedLock;
     if (gate.skip) return null;
@@ -6254,7 +6253,6 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
     return null;
   } finally {
     await releaseCombinedLock(combinedLock);
-    if (fenceHold) await fenceHold.rollback().catch(() => {});
   }
 }
 

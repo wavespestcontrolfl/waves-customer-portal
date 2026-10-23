@@ -66,6 +66,17 @@ function scrub(text) {
   return String(text || '').replace(/\+?\d[\d\s().-]{5,}\d/g, '[number]').slice(0, 300);
 }
 
+// Each approved linked visit also pins its OWN restoration count (children locked here; the cancel's beforeCommit locked them
+// already). If the dead request cancelled a child and an operator restored it before the sweep ran, the child matches its card
+// again; the pinned count is how the cascade's child-lock recheck knows it was restored since (see assertApprovedChildUnchanged).
+async function pinChildGenerations(trx, children) {
+  if (!children.length) return children;
+  await trx('scheduled_services').whereIn('id', children.map((c) => c.id)).orderBy('id').forUpdate().select('id');
+  const pinned = [];
+  for (const child of children) pinned.push({ ...child, restorations_seen: await countRestorations(trx, child.id) });
+  return pinned;
+}
+
 /**
  * Writes the bundle on the cancel handler's transaction (rolls back with it). Everything here is what the card
  * approved. created_at / lease_until use clock_timestamp() (commit time is close to it), not now() (transaction start); no generation
@@ -77,6 +88,7 @@ async function insertBundle(trx, pins) {
   // handler holds it already; locking again is free), so no restoration can be in flight and the count is exact.
   await trx('scheduled_services').where({ id: pins.scheduledServiceId }).forUpdate().first('id');
   const restorationsSeen = await countRestorations(trx, pins.scheduledServiceId);
+  const linkedChildren = await pinChildGenerations(trx, Array.isArray(pins.linkedChildren) ? pins.linkedChildren : []);
   const inserted = await trx(TABLE).insert({
     restorations_seen: restorationsSeen,
     pending_action_id: pins.pendingActionId || null,
@@ -85,7 +97,7 @@ async function insertBundle(trx, pins) {
     notes: pins.notes || null,
     notify_customer: pins.notifyCustomer === true,
     approved_notice: jsonOrNull(Array.isArray(pins.approvedNotice) ? pins.approvedNotice : null),
-    linked_children: JSON.stringify(Array.isArray(pins.linkedChildren) ? pins.linkedChildren : []),
+    linked_children: JSON.stringify(linkedChildren),
     approved_money: JSON.stringify(pins.approvedMoney || {}),
     lease_owner: REQUEST_LEASE,
     lease_until: trx.raw("clock_timestamp() + (? * interval '1 millisecond')", [LEASE_MS]),
