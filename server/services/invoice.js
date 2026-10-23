@@ -13771,6 +13771,8 @@ const InvoiceService = {
       logger.error(
         `[invoice] Void sweep failed for cancelled service ${scheduledServiceId}: ${e.message}`,
       );
+      // Recovery sweep only: a failed candidate lookup is not a finished step (per-candidate failures record their own hit).
+      if (cancelFence && e && e.code !== "CANCEL_FENCE") cancelFence.hits.push("invoice_void_error");
     } finally {
       // Inspection credit: a cancelled booking must not keep its $75.
       // Reversal lives HERE - in the one helper every cancellation path

@@ -535,6 +535,17 @@ describe('cancelFence (the cancel recovery sweep)', () => {
     expect(refused.hits).not.toContain('invoice_void_error');
   });
 
+  test('a failed candidate lookup (the whole sweep throws) is a retryable hit too', async () => {
+    const hitFence = { ...FENCE, hits: [] };
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    const original = db.mockImplementation;
+    mockInvoiceRows = null; // the candidate query reads rows.map: a null result makes the lookup throw
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned, cancelFence: hitFence });
+    expect([...voided]).toEqual([]);
+    expect(hitFence.hits).toContain('invoice_void_error');
+    expect(original).toBe(db.mockImplementation);
+  });
+
   test('a credit reversal that THROWS is a retryable hit', async () => {
     const hitFence = { ...FENCE, hits: [] };
     mockReverse.mockRejectedValueOnce(new Error('connection terminated'));
