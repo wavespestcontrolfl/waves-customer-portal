@@ -3,11 +3,12 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { CompletionPanel } from './SchedulePage';
+import { CompletionPanel, completionProductRowProblem, isBedFeedRow } from './SchedulePage';
 import { refetchFlags } from '../../hooks/useFeatureFlag';
 const products = [
   { id: 'snapshot', name: 'Snapshot 2.5TG', category: 'herbicide', application_method: 'granular_broadcast', default_rate_per_1000: 2.3, rate_unit: 'lb' },
   { id: 'palm', name: 'LESCO 8-0-12 Palm', category: 'fertilizer', application_method: 'granular_broadcast', default_rate_per_1000: 1.3, rate_unit: 'lb' },
+  { id: 'orn', name: 'LESCO 13-0-13 60% PolyPlus Landscape', category: 'fertilizer', application_method: 'granular_broadcast', rate_unit: 'lb' },
   { id: 'liquid', name: 'Fixture foliar spray', category: 'insecticide', application_method: 'foliar_spray', default_rate_per_1000: 0.8, rate_unit: 'fl_oz/gal' },
 ];
 let measurements;
@@ -379,4 +380,47 @@ it('on a pure lawn visit a bed soil drench never takes the shared lawn area', as
   fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Sequestar' } });
   fireEvent.click(screen.getByText('Sequestar'));
   expect(screen.queryByDisplayValue('4200')).not.toBeInTheDocument();
+});
+
+// ── LESCO 13-0-13 bed fertilizer: the county cap needs a treated area, so the row always requires one ──
+const ORN = 'LESCO 13-0-13 60% PolyPlus Landscape';
+const ornRow = (extra = {}) => ({ productId: 'orn', name: ORN, applicationMethod: 'granular_broadcast', areaValue: '', areaUnit: 'sqft', ...extra });
+
+it('the 13-0-13 rule applies to a Tree & Shrub visit only, and to that product only', () => {
+  expect(isBedFeedRow({ name: ORN }, 'Tree & Shrub Care')).toBe(true);
+  expect(isBedFeedRow({ name: ORN }, 'Lawn Care')).toBe(false);
+  expect(isBedFeedRow({ name: 'LESCO 8-0-12 Palm' }, 'Tree & Shrub Care')).toBe(false);
+  expect(isBedFeedRow(null, 'Tree & Shrub Care')).toBe(false);
+});
+
+it.each([['', 'blank'], [0, 'zero'], ['0', 'zero text'], [null, 'missing']])('a 13-0-13 row with %j treated square feet (%s) holds the completion with the area message', (areaValue) => {
+  const problem = completionProductRowProblem({}, [ornRow({ areaValue })], () => 'Tree & Shrub Care');
+  expect(problem).toBe(`Enter the treated square feet for ${ORN}.`);
+});
+
+it('a 13-0-13 row with an area, in sq ft, is not held; another unit is', () => {
+  expect(completionProductRowProblem({}, [ornRow({ areaValue: 1200 })], () => 'Tree & Shrub Care')).toBeFalsy();
+  expect(completionProductRowProblem({}, [ornRow({ areaValue: 1200, areaUnit: 'linear_ft' })], () => 'Tree & Shrub Care')).toBe(`Enter the treated square feet for ${ORN}.`);
+  // Held whatever the method: a foliar or drench row still needs the area.
+  expect(completionProductRowProblem({}, [ornRow({ applicationMethod: 'soil_drench' })], () => 'Tree & Shrub Care')).toBe(`Enter the treated square feet for ${ORN}.`);
+  // Another product on the same visit, or the same product on another service line, is not held for it.
+  expect(completionProductRowProblem({}, [{ productId: 'palm', name: 'LESCO 8-0-12 Palm', applicationMethod: 'granular_broadcast', areaValue: '', areaUnit: '' }], () => 'Tree & Shrub Care')).toBeFalsy();
+});
+
+it('a 13-0-13 added by hand takes the reviewed bed area as its treated square feet and the tech can edit it', async () => {
+  mount(); await add(ORN);
+  const area = screen.getByPlaceholderText('Treated sq ft');
+  expect(area).toHaveValue(1200);
+  fireEvent.change(area, { target: { value: '900' } });
+  expect(screen.getByPlaceholderText('Treated sq ft')).toHaveValue(900);
+});
+
+it('a 13-0-13 row never borrows the turf area and starts blank, and is required, when no property areas are on file', async () => {
+  measurements = { enabled: false };
+  const alert = vi.fn(); vi.stubGlobal('alert', alert);
+  mount();
+  fireEvent.change(await screen.findByPlaceholderText('Search products...'), { target: { value: ORN } });
+  fireEvent.click(screen.getByText(ORN));
+  expect(screen.getByPlaceholderText('Treated sq ft')).toHaveValue(null);
+  expect(screen.getByPlaceholderText('Treated sq ft').value).toBe('');
 });

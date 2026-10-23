@@ -10250,7 +10250,17 @@ function requiresAreaSqft(method, serviceType = "") {
   );
 }
 
-function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false, includeServiceArea = false) {
+// The LESCO 13-0-13 bed fertilizer on a Tree & Shrub visit is held to the county cap (0.75 lb per 100 sq ft), which the
+// closeout can only judge from the treated area: its row always needs the treated square feet, whatever the method.
+const BED_FEED_NAME = /\b13-0-13\b/;
+export function isBedFeedRow(product, serviceType = "") {
+  return serviceLineFromType(serviceType) === "tree_shrub" && BED_FEED_NAME.test(String(product?.name || ""));
+}
+
+function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false, includeServiceArea = false, product = null) {
+  if (isBedFeedRow(product, serviceType)) {
+    return { unit: "sqft", label: "Treated sq ft", alertLabel: "the treated square feet" };
+  }
   if (requiresLinearFt(method)) {
     return { unit: "linear_ft", label: "Linear ft", alertLabel: "linear feet" };
   }
@@ -10295,8 +10305,8 @@ export function completionGroupMates(group, selectedProducts, protocolActions) {
   };
 }
 
-function completionProductRowProblem(service, rows, typeFor) {
-  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p));
+export function completionProductRowProblem(service, rows, typeFor) {
+  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p), false, false, p);
   const missingArea = rows.find((p) => {
     const requirement = areaOf(p);
     if (!requirement) return false;
@@ -10318,7 +10328,7 @@ function productApplicationMethod(product = {}, serviceType = "") {
 
 function normalizeProductArea(product = {}, serviceType = "") {
   const applicationMethod = productApplicationMethod(product, serviceType);
-  const areaRequirement = requiredApplicationArea(applicationMethod, serviceType);
+  const areaRequirement = requiredApplicationArea(applicationMethod, serviceType, false, false, product);
   return {
     ...product,
     applicationMethod,
@@ -16967,7 +16977,7 @@ export function CompletionPanel({
     const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
-      rowType, false, !!currentPropertyAreas && productUsesServiceArea,
+      rowType, false, !!currentPropertyAreas && productUsesServiceArea, product,
     );
     // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
     // resolver ServiceRecapModal uses, so both completion paths prefill
@@ -16990,8 +17000,10 @@ export function CompletionPanel({
     // Perimeter sprays start from the traced barrier's measured footage
     // (Treatment Zone Mapper) so the tech doesn't retype what the trace
     // already measured. Editable as before.
+    // The 13-0-13 bed row never borrows the turf area: with no property areas loaded it starts blank and is required.
     const sharedArea = currentPropertyAreas ? (productUsesServiceArea ? propertyTreatedArea : "")
-      : lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill;
+      : isBedFeedRow(product, rowType) ? ""
+        : lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill;
     const prefillArea =
       areaRequirement?.unit === "sqft" && sharedArea !== "" && sharedArea != null && Number(sharedArea) >= 0
         ? Number(sharedArea)
@@ -17248,7 +17260,7 @@ export function CompletionPanel({
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
-            typeFor(next), false, next.propertyServiceAreaField,
+            typeFor(next), false, next.propertyServiceAreaField, next,
           );
           if (areaRequirement) {
             if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
@@ -17275,7 +17287,7 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, typeFor(next)),
             typeFor(next),
-            governed || !!next.group, next.propertyServiceAreaField,
+            governed || !!next.group, next.propertyServiceAreaField, next,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -21143,7 +21155,7 @@ export function CompletionPanel({
                         const areaRequirement = requiredApplicationArea(
                           productApplicationMethod(sp, typeFor(sp)),
                           typeFor(sp),
-                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
+                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField, sp,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -23617,7 +23629,7 @@ export function CompletionPanel({
                     const areaRequirement = requiredApplicationArea(
                       productApplicationMethod(sp, typeFor(sp)),
                       typeFor(sp),
-                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
+                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField, sp,
                     );
                     if (!areaRequirement) return null;
                     return (
