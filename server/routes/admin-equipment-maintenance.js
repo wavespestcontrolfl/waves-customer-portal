@@ -749,7 +749,9 @@ router.put('/alerts/:id', async (req, res, next) => {
     const updates = { status, updated_at: db.fn.now() };
     if (status === 'resolved') {
       updates.resolved_at = db.fn.now();
-      updates.resolved_by = resolved_by || 'admin';
+      // The outcome is part of the record: "admin: lost" says what happened
+      // to the tool even after the item's status changes again.
+      updates.resolved_by = outcome ? `${resolved_by || 'admin'}: ${outcome}` : (resolved_by || 'admin');
     }
 
     // The alert, the item's status and the bell close commit together, under
@@ -773,6 +775,11 @@ router.put('/alerts/:id', async (req, res, next) => {
       if (status === 'resolved' && toolAlert) {
         const nextStatus = outcome ? TOOL_OUTCOME_STATUS[outcome] : null;
         if (nextStatus) await trx('equipment').where('id', row.equipment_id).update({ status: nextStatus, updated_at: db.fn.now() });
+        // And an audit row carries the outcome with the alert and the item.
+        await require('../services/audit-log').recordAuditEvent({
+          actor_type: 'admin', action: 'tool_alert_resolved', resource_type: 'maintenance_alerts', resource_id: row.id,
+          metadata: { outcome, equipment_id: row.equipment_id, alert_type: row.alert_type, item_status: nextStatus }, trx,
+        });
         if (item?.assigned_vehicle_id) await truckKit.closeTruckBellIfClear(item.assigned_vehicle_id, new Date(), trx);
       }
       return row;

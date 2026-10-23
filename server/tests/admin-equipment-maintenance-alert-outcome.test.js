@@ -9,6 +9,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/equipment-maintenance', () => ({}));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/truck-kit', () => ({
   TOOL_ALERT_TYPES: ['tool_missing', 'tool_damaged'],
   closeTruckBellIfClear: jest.fn(async () => true),
@@ -103,7 +104,9 @@ test('the older asset writers refuse the guarded columns and a retire with an op
 test('Lost resolves the alert, marks the item lost and closes the truck bell', async () => {
   const res = await put('a-missing', { status: 'resolved', outcome: 'lost' });
   expect(res.statusCode).toBe(200);
-  expect(res.body.alert).toEqual(expect.objectContaining({ status: 'resolved', resolved_by: 'admin' }));
+  // The outcome is on the record and in the audit log.
+  expect(res.body.alert).toEqual(expect.objectContaining({ status: 'resolved', resolved_by: 'admin: lost' }));
+  expect(require('../services/audit-log').recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'tool_alert_resolved', resource_id: 'a-missing', metadata: expect.objectContaining({ outcome: 'lost', equipment_id: TOOL, item_status: 'lost' }), trx: db }));
   expect(db.__state.equipment[TOOL].status).toBe('lost');
   // All three writes ride one transaction, under the truck's lock, and the bell close runs on it.
   expect(db.transaction).toHaveBeenCalledTimes(1);

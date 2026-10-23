@@ -101,8 +101,15 @@ const MECHANICAL_KEYS = new Set(['lawn_aeration', 'dethatching', 'plugging', 'to
 const MECHANICAL_NAME = /\b(dethatch\w*|aerat\w*|plugging|top\s*-?dress\w*)\b/i;
 // A focused job needs ONE tool of its line, not the whole treatment kit: the
 // web sweep is the pest checklist's cobweb duster and nothing else.
+// The specialized area add-ons (migration 20261008200000) are one-tool jobs
+// too: the keys are the checklist items that carry them (tree & shrub's
+// backpack and hand spreader, the lawn push spreader).
 const FOCUSED_KITS = [
   { line: 'pest', keys: ['cobweb_duster'], key: /web_sweep/i, name: /\bweb\s*sweep\b/i },
+  { line: 'tree_shrub', keys: ['backpack_sprayer'], key: /hardscape_weed/i, name: /\b(hardscape\s*weed|paver\s*weed)\b/i },
+  { line: 'tree_shrub', keys: ['backpack_sprayer'], key: /lawn_insect_spot/i, name: /\blawn\s*insect\s*spot\b/i },
+  { line: 'tree_shrub', keys: ['hand_spreader'], key: /bed_pre_emergent/i, name: /\bbed\s*pre-?emergent\b/i },
+  { line: 'lawn', keys: ['push_spreader'], key: /lawn_insect_preventive/i, name: /\blawn\s*insect\s*preventive\b/i },
 ];
 function focusedKitFor(serviceType, serviceKey) {
   return FOCUSED_KITS.find((kit) => (serviceKey && kit.key.test(String(serviceKey))) || kit.name.test(String(serviceType || ''))) || null;
@@ -125,15 +132,18 @@ function linesForService(serviceType, serviceKey, serviceCategory = null) {
 // Treatment-specific kits the generic checklist marks optional: the job's
 // identity promotes them to required (a bait station visit needs the station
 // key, a foam job the drill kit), by service key or by name for legacy rows.
+// Each promotion belongs to ONE line: a service promotes a kit only when it
+// is on that line (a lawn insect spot add-on never asks for the foam kit).
 const PROMOTED_KITS = [
-  { keys: ['bait_station_key'], key: /bait|cartridge|monitoring|station/i, name: /\b(bait\s*station|termite\s*bait|cartridge|monitoring)\b/i },
+  { line: 'termite', keys: ['bait_station_key'], key: /bait|cartridge|monitoring|station/i, name: /\b(bait\s*station|termite\s*bait|cartridge|monitoring)\b/i },
   // termite_spot_treatment resolves through the foam_drill protocol
   // (protocol-matcher.js; engine key termite_foam): same kit.
-  { keys: ['foam_drill_kit'], key: /foam|drill|spot/i, name: /\b(foam|drill|spot\s*treatment)\b/i },
+  { line: 'termite', keys: ['foam_drill_kit'], key: /foam|drill|termite_spot/i, name: /\b(foam|drill|termite\s*spot)\b/i },
 ];
-function promotedKeysFor(serviceType, serviceKey) {
+function promotedKeysFor(serviceType, serviceKey, lines = []) {
   const out = [];
   for (const kit of PROMOTED_KITS) {
+    if (!lines.includes(kit.line)) continue;
     if ((serviceKey && kit.key.test(String(serviceKey))) || kit.name.test(String(serviceType || ''))) out.push(...kit.keys);
   }
   return out;
@@ -148,7 +158,7 @@ function serviceRequirement(svc) {
   const focused = focusedKitFor(svc?.name, svc?.serviceKey);
   const lines = focused ? [focused.line] : linesForService(svc?.name, svc?.serviceKey, svc?.category);
   if (!lines.length) return null;
-  return { lines, promote: promotedKeysFor(svc?.name, svc?.serviceKey), restrict: focused ? focused.keys : null };
+  return { lines, promote: promotedKeysFor(svc?.name, svc?.serviceKey, lines), restrict: focused ? focused.keys : null };
 }
 
 // `restrict` (a Set of keys, or null) narrows the requirement to focused

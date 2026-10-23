@@ -383,6 +383,9 @@ function FleetTab({
   showToast,
   loadFleet
 }) {
+  // Every open alert must be reachable: a truck check can report more than
+  // five tools, and each tool alert closes only from its own buttons.
+  const [showAllAlerts, setShowAllAlerts] = useState(false);
   const isMobile = useIsMobile(768);
   if (loading) return <div style={{
     color: "#71717A",
@@ -407,7 +410,7 @@ function FleetTab({
       }}>
             {alerts.length} Active Alert{alerts.length > 1 ? "s" : ""}
           </div>
-          {alerts.slice(0, 5).map(a => <div key={a.id} style={{
+          {(showAllAlerts ? alerts : alerts.slice(0, 5)).map(a => <div key={a.id} style={{
         display: "flex",
         alignItems: "center",
         gap: 8,
@@ -431,12 +434,12 @@ function FleetTab({
                   {label}
                 </Button>)}{" "}
             </div>)}
-          {alerts.length > 5 && <div style={{
+          {alerts.length > 5 && !showAllAlerts && <div style={{
         fontSize: 14,
         color: "#71717A",
         marginTop: 6
       }}>
-              + {alerts.length - 5} more
+              <Button type="button" variant="secondary" onClick={() => setShowAllAlerts(true)}>Show all {alerts.length} alerts</Button>
             </div>}
         </Card>}
 

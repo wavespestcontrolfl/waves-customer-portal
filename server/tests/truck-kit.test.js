@@ -407,6 +407,8 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.requirementsFor('Drill and Foam Treatment', { serviceKey: 'foam_drill' }).promote).toEqual(new Set(['foam_drill_kit']));
     expect(truckKit.requirementsFor('Termite Spot Treatment Service', { serviceKey: 'termite_spot_treatment' }).promote).toEqual(new Set(['foam_drill_kit']));
     expect(truckKit.requirementsFor('Termite Spot Treatment Service').promote).toEqual(new Set(['foam_drill_kit']));
+    // A promotion stays on its line: a lawn insect spot add-on never asks for the foam kit.
+    expect(truckKit.requirementsFor('Termite Bait Station System', { serviceKey: 'termite_bait', addons: [{ name: 'Lawn Insect Spot Treatment', serviceKey: 'area_addon_lawn_insect_spot', category: 'lawn_care' }] }).promote).toEqual(new Set(['bait_station_key']));
     expect(truckKit.requirementsFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' }).promote).toEqual(new Set());
     db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
     expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'WDO Inspection (Termite Letter)' })).toBeNull();
@@ -458,6 +460,10 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Fire Ant Yard Treatment', serviceKey: 'area_addon_fire_ant_yard', category: 'lawn_care' }] })).toEqual(['pest', 'lawn']);
     expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceKey: 'area_addon_fire_ant_yard', serviceCategory: 'lawn_care' })).toEqual(['lawn']);
     expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceCategory: 'inspection' })).toEqual(['pest']);
+    // Specialized lawn add-ons are one-tool jobs, never the whole lawn kit.
+    expect(truckKit.requirementsFor('Shell, Rock & Paver Weed Control', { serviceKey: 'area_addon_hardscape_weed', serviceCategory: 'lawn_care' })).toEqual({ lines: ['tree_shrub'], promote: new Set(), restrict: new Set(['backpack_sprayer']) });
+    expect(truckKit.requirementsFor('Bed Pre-Emergent Weed Control', { serviceKey: 'area_addon_bed_pre_emergent' }).restrict).toEqual(new Set(['hand_spreader']));
+    expect(truckKit.requirementsFor('Yearly Lawn Insect Preventive', { serviceKey: 'area_addon_lawn_insect_preventive' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: new Set(['push_spreader']) });
     db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
     db.__state.equipment.push({ id: '66666666-2222-4333-8444-555555555555', name: 'Flashlight', category: 'tool', status: 'active', assigned_vehicle_id: TRUCK, kit_key: 'flashlight' });
     // The spot treatment add-on brings the termite line AND promotes the foam kit.
