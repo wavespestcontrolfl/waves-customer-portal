@@ -534,6 +534,19 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
     if (exactUsed.has(i)) return;
     const pool = bankLeft.get(tupleKey(m.bank)) || [];
     if (pool.length) unsure.push({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other: pool[0].account_label || '(no label)' });
+    // an expense of the same day, amount and payee (and account, when its
+    // bank row tells one) is the surer match: it goes before the loose hold,
+    // and takes its linked bank row out of every pool
+    if (m.expense) {
+      const pool2 = expenseLeft.get(expenseKey(rows[i].date, m.bank.amount)) || [];
+      const idx = pool2.findIndex(e => accountFits(rows[i].source, e) && vendorsAgree(e.vendor_name || e.description, m.bank.description));
+      if (idx !== -1) {
+        const [used] = pool2.splice(idx, 1);
+        dropBankLinkedTo(used.id);
+        overlaps += 1;
+        return;
+      }
+    }
     const loose = looseLeft.get(looseKey(m.bank)) || [];
     const sameLoose = loose.findIndex(f => sameAccount(rows[i].source, f.account_label, masks));
     if (sameLoose !== -1) {
@@ -544,16 +557,6 @@ async function run({ file, dryRun = false, skipExisting = false, db, log = () =>
       if (used.matched_expense_id) dropExpense(used.matched_expense_id);
       held.push({ line: rows[i].line, description: rows[i].description, amount: rows[i].amount, date: rows[i].date, other: used.description, account: used.account_label || '(no label)' });
       return;
-    }
-    if (m.expense) {
-      const pool2 = expenseLeft.get(expenseKey(rows[i].date, m.bank.amount)) || [];
-      const idx = pool2.findIndex(e => accountFits(rows[i].source, e) && vendorsAgree(e.vendor_name || e.description, m.bank.description));
-      if (idx !== -1) {
-        const [used] = pool2.splice(idx, 1);
-        dropBankLinkedTo(used.id);
-        overlaps += 1;
-        return;
-      }
     }
     if (m.expense && !categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     fresh.push(m);
