@@ -782,6 +782,18 @@ describe('--skip-existing and expenses', () => {
       expect([status, out.counts.held, out.counts.overlaps]).toEqual([status, expected.held, expected.overlaps]);
       if (expected.held) expect(out.report).toMatch(/the portal booked this row as an expense but the ledger does not/);
     }
+    // both say expense but under different categories: held for the owner to pick; the same
+    // category (or an expense whose category is unknown here) is the same answer
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50' }))); // Supplies (line 22)
+    for (const [categoryName, expected] of [['Advertising & Marketing', { held: 1, overlaps: 0 }], ['Supplies', { held: 0, overlaps: 1 }], [null, { held: 0, overlaps: 1 }]]) {
+      const dbc = makeFakeDb();
+      const cat = dbc.tables().expense_categories.find(c => c.name === categoryName);
+      dbc.tables().expenses.push({ id: 'exp-booked', expense_date: first.date, amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies', category_id: cat ? cat.id : null });
+      dbc.tables().bank_transactions.push({ id: 'up-c', row_hash: 'hc', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-booked' });
+      const out = await run({ file, db: dbc, skipExisting: true });
+      expect([categoryName, out.counts.held, out.counts.overlaps]).toEqual([categoryName, expected.held, expected.overlaps]);
+      if (expected.held) expect(out.report).toMatch(/booked this row under Advertising & Marketing, the ledger says Supplies/);
+    }
     // the ledger says personal too: the portal's ignore is the same answer
     fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'personal', sched_c_line: '', category: 'Personal' })));
     const db2 = makeFakeDb();

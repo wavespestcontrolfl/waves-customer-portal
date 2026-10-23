@@ -501,7 +501,13 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   const masks = new Map(plaidAccounts.map(a => [String(a.account_label), String(a.mask || '')]));
   const accountsById = new Map(plaidAccounts.filter(a => a.account_id).map(a => [String(a.account_id), { mask: String(a.mask || ''), label: String(a.account_label || '') }]));
   const categories = await db('expense_categories').select('id', 'name');
-  return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, accountsById, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+  // the expenses the overlapping portal rows are booked under: their category
+  // is compared with the ledger's (a different business category is a
+  // conflict for the owner, not an answer)
+  const bookedIds = [...new Set(existingBank.map(f => f.matched_expense_id).filter(Boolean))];
+  const bookedExpenses = new Map(bookedIds.length ? (await db('expenses').whereIn('id', bookedIds).select('id', 'category_id')).map(e => [e.id, e]) : []);
+  const categoryNames = new Map(categories.map(c => [c.id, c.name]));
+  return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, accountsById, bookedExpenses, categoryNames, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
 }
 
 // Pools of the portal's rows, consumed one-for-one as ledger rows match them.
@@ -596,7 +602,7 @@ function describeGap(days) {
 // or payout was deleted since (the FK is null; bank-import's
 // resetDanglingLinks reopens such rows on its next pass).
 const LINKED_TO_EXPENSE = new Set(['matched_expense', 'created_expense']);
-function openReason(row, m) {
+function openReason(row, m, portal) {
   if (row.status === 'unmatched') return 'the same row is open in the portal, not booked';
   // the portal said ignore, the ledger books an expense: a conflict for the owner, not an answer
   if (row.status === 'ignored' && m.expense) return 'the portal ignored this row but the ledger books it as an expense (unignore and decide it)';
@@ -609,6 +615,14 @@ function openReason(row, m) {
   // money was personal, a transfer, a reward or an asset
   if (LINKED_TO_EXPENSE.has(row.status) && row.matched_expense_id && m.bank.status === 'ignored') {
     return 'the portal booked this row as an expense but the ledger does not (check which is right; the expense may need deleting)';
+  }
+  // both say expense, under different categories: the owner picks
+  if (LINKED_TO_EXPENSE.has(row.status) && row.matched_expense_id && m.expense && portal) {
+    const booked = portal.bookedExpenses.get(row.matched_expense_id);
+    const ledgerCategoryId = portal.categoryIds.get(m.categoryName);
+    if (booked && ledgerCategoryId && booked.category_id && booked.category_id !== ledgerCategoryId) {
+      return `the portal booked this row under ${portal.categoryNames.get(booked.category_id) || 'another category'}, the ledger says ${m.categoryName} (check which is right)`;
+    }
   }
   if (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) return 'the same row is in the portal but its expense was deleted (the next matching pass reopens it)';
   if (row.status === 'matched_payout' && !row.matched_payout_id) return 'the same row is in the portal but its payout link is gone (the next matching pass reopens it)';
@@ -644,7 +658,7 @@ function reconcileRows(mapped, rows, portal) {
     pools.dropLoose(used);
     pools.dropExpense(used.matched_expense_id);
     settled.add(i);
-    const why = openReason(used, m);
+    const why = openReason(used, m, portal);
     if (why) held.push(note(i, used.description, used.account_label || '(no label)', `${why}; ${reading(m, i)}`));
     else overlaps += 1;
   });
