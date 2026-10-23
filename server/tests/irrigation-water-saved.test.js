@@ -53,7 +53,7 @@ describe('waterSavedForDecision — the gallons block', () => {
 
   test('a positive typed weekly figure over the watering days outranks the table', () => {
     const block = waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: ['Mon', 'Wed', 'Fri', 'Sun'], systemType: ['spray'], explicitInchesPerWeek: 2, rates: HEAD_PRECIP_RATE_IN_PER_HR });
-    expect(block).toMatchObject({ basis: 'schedule', depthInches: 0.5, runsPerWeek: 4, gallonsPerRun: 1550, gallonsPerWeek: 6250 });
+    expect(block).toMatchObject({ basis: 'schedule', depthInches: 0.5, runsPerWeek: 4, gallonsPerRun: 1550, gallonsPerWeek: 6200 });
   });
 
   test('a schedule that derives nothing (mixed heads, drip, no days) falls back to the owner default', () => {
@@ -68,6 +68,13 @@ describe('waterSavedForDecision — the gallons block', () => {
     expect(waterSavedForDecision({ lawnSqft: 40, rates: HEAD_PRECIP_RATE_IN_PER_HR })).toBeNull();
     // Rounded to the nearest 50: 3,000 sq ft × 0.5" × 0.623 = 934.5 → 950.
     expect(waterSavedForDecision({ lawnSqft: 3000, rates: HEAD_PRECIP_RATE_IN_PER_HR }).gallonsPerRun).toBe(950);
+  });
+
+  test('the week total is the DISPLAYED per-run figure × runs, so the two printed numbers add up (codex #6498 r1 P2)', () => {
+    // Raw: 934.5 × 2 = 1,869 → 1,850 on its own; the customer reads "950 a run" and must read "1,900 a week".
+    expect(waterSavedForDecision({ lawnSqft: 3000, rates: HEAD_PRECIP_RATE_IN_PER_HR })).toMatchObject({ gallonsPerRun: 950, gallonsPerWeek: 1900 });
+    const four = waterSavedForDecision({ lawnSqft: 3000, runMinutes: 20, wateringDays: ['Mon', 'Tue', 'Thu', 'Sat'], systemType: ['spray'], rates: HEAD_PRECIP_RATE_IN_PER_HR });
+    expect(four.gallonsPerWeek).toBe(four.gallonsPerRun * 4);
   });
 });
 
@@ -168,11 +175,16 @@ describe('end to end — sweep inputs, the email note, replay and the app card',
     process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2099-12-31', label: 'Synthetic test policy', hoursNote: 'on your assigned days', coverage: 'all' });
   });
 
-  test('the sweep reads tp.lawn_sqft and withholds it after a move until the grass is re-established', () => {
+  test('the sweep reads tp.lawn_sqft and withholds it after a move until a LAWN-SIZE writer re-establishes it (codex #6498 r1 P2)', () => {
     expect(inputsFor(customer).lawnSqft).toBe(5000);
     expect(inputsFor({ ...customer, turf_lawn_sqft: null }).lawnSqft).toBeNull();
-    expect(inputsFor({ ...customer, irrigation_home_changed_at: '2026-09-01T00:00:00Z', irrigation_confirmed_fields: '[]' }).lawnSqft).toBeNull();
-    expect(inputsFor({ ...customer, irrigation_home_changed_at: '2026-09-01T00:00:00Z', irrigation_confirmed_fields: JSON.stringify(['turf_grass']) }).lawnSqft).toBe(5000);
+    const moved = { ...customer, irrigation_home_changed_at: '2026-09-01T00:00:00Z' };
+    expect(inputsFor({ ...moved, irrigation_confirmed_fields: '[]' }).lawnSqft).toBeNull();
+    // A grass-only review says nothing about the former home's size: still withheld.
+    expect(inputsFor({ ...moved, irrigation_confirmed_fields: JSON.stringify(['turf_grass']) }).lawnSqft).toBeNull();
+    // A measured lawn releases the area even while the grass is still the old profile's.
+    expect(inputsFor({ ...moved, irrigation_confirmed_fields: JSON.stringify(['turf_lawn_sqft']) }).lawnSqft).toBe(5000);
+    expect(inputsFor({ ...moved, irrigation_confirmed_fields: JSON.stringify(['turf_lawn_sqft']) }).grassType).toBeNull();
     const sweep = require('fs').readFileSync(require.resolve('../services/irrigation-weekly-email'), 'utf8');
     expect(sweep).toMatch(/'tp\.lawn_sqft as turf_lawn_sqft',/);
   });
@@ -189,6 +201,35 @@ describe('end to end — sweep inputs, the email note, replay and the app card',
     expect(on.decisionInputs.waterSaved).toMatchObject({ basis: 'default', lawnSqft: 5000, gallonsPerRun: 1550, gallonsPerWeek: 3100 });
     expect(on.payload.plan_note).toContain("Each 20-minute run you skip is about 1,550 gallons on your lawn, so skipping both of this week's runs saves about 3,100 gallons.");
     expect(on.payload.plan_note.endsWith("we'll use those instead.")).toBe(true);
+  });
+
+  test('setup-schedule email (system on file, no schedule): the owner default prints in the ask, so the line reaches the customers it was meant for (codex #6498 r1 P1)', () => {
+    const { TEMPLATE_SETUP_SCHEDULE, TEMPLATE_SETUP_SYSTEM } = require('../services/irrigation-weekly-email');
+    const noSchedule = { ...customer, irrigation_inches_per_week: null };
+    const off = decideFor(noSchedule);
+    expect(off.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(off.payload.schedule_ask).not.toMatch(/gallons/);
+    gateOn();
+    const on = decideFor(noSchedule);
+    expect(on.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(on.payload.schedule_ask.startsWith(off.payload.schedule_ask)).toBe(true);
+    expect(on.payload.schedule_ask).toContain(' For a lawn your size, a typical 20-minute run is about 1,550 gallons, so every run you skip after a good rain is real water saved.');
+    expect(on.payload.schedule_ask.endsWith("we'll use your own minutes and days for that figure.")).toBe(true);
+    // The same customer in the legacy (gate-off plan) path gets it too: the setup ask is shared.
+    expect(decideFor(noSchedule, { weekPlanEnabled: false }).payload.schedule_ask).toContain('1,550 gallons');
+    // No lawn area, or an area withheld after a move: the ask is exactly as before.
+    expect(decideFor({ ...noSchedule, turf_lawn_sqft: null }).payload.schedule_ask).toBe(off.payload.schedule_ask);
+    // (Nothing on file to be unconfirmed, so no moved preface; the former home's area is still withheld.)
+    const movedAsk = decideFor({ ...noSchedule, irrigation_home_changed_at: '2026-09-01T00:00:00Z', irrigation_confirmed_fields: '[]' }).payload.schedule_ask;
+    expect(movedAsk).toBe(off.payload.schedule_ask);
+    // No sprinkler system known: nothing to skip, no sentence (setup_system carries no ask at all).
+    const noSystem = decideFor({ ...noSchedule, irrigation_system: false, turf_irrigation_type: 'none' });
+    expect(noSystem.templateKey).toBe(TEMPLATE_SETUP_SYSTEM);
+    expect(noSystem.payload.schedule_ask).toBe('');
+    // A passed block (a replay) is used verbatim; null means none.
+    expect(decideFor(noSchedule, { waterSaved: null }).payload.schedule_ask).toBe(off.payload.schedule_ask);
+    gateOff();
+    expect(decideFor(noSchedule, { waterSaved: { v: 1, basis: 'default', lawnSqft: 3000, depthInches: 0.5, runsPerWeek: 2, gallonsPerRun: 950, gallonsPerWeek: 1900 } }).payload.schedule_ask).toContain('about 950 gallons');
   });
 
   test('replay and the app card read the frozen block: a gate flip or a lawn-size edit after publication changes nothing and withholds nothing', async () => {

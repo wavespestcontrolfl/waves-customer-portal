@@ -42,7 +42,9 @@ const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, 
 const IN_PROGRESS_RETRIES = 3;
 const IN_PROGRESS_RETRY_MS = 2000;
 // Sprinkler settings follow the home — one resolver shared with the report.
-const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
+const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, lawnSqftConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
+const { irrigationWaterSavedLive, waterSavedForDecision, waterSavedSetupSentence } = require('./irrigation-water-saved');
+const { ratesForTable } = require('./irrigation-rates');
 const { resolveRestrictionCounty, currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -518,6 +520,14 @@ function decideWeeklyEmail({
       ? (turfType === 'in_ground' || turfType === 'mixed')
       : irrigationSystem === true;
     const grassLabelSetup = customerGrassLabel(grassType);
+    // "Water you saved" (GATE_IRRIGATION_WATER_SAVINGS) on the setup ask too: a schedule-less customer never reaches
+    // decideWeekPlan, so the owner default (20 minutes, half an inch) is applied HERE, or the line would print for
+    // nobody it was meant for (codex #6498 r1 P1). No plan is stored for this variant, so the gate is read at send
+    // time; a replay passes its frozen block. lawnSqft is already withheld after a move until re-established.
+    const setupBlock = waterSaved !== undefined
+      ? (waterSaved || null)
+      : (irrigationWaterSavedLive() ? waterSavedForDecision({ lawnSqft, rates: ratesForTable(table) }) : null);
+    const setupWaterSaved = hasSystem ? waterSavedSetupSentence(setupBlock) : null;
     const rainSetup = formatInches(rainfallInches7d);
     const targetSetup = formatInches(advice.recommendedInchesPerWeek);
     return {
@@ -534,7 +544,7 @@ function decideWeeklyEmail({
         // setup_schedule's callout ({{schedule_ask}}): what is on file and
         // the one input still missing. setup_system has no such block, and
         // an empty optional variable renders nothing.
-        schedule_ask: hasSystem ? movedPreface + buildScheduleAsk({ derived: askDerived, inputs: askInputs, toggleOff: irrigationSystem === false, explicitInches: askExplicit }) : '',
+        schedule_ask: hasSystem ? [movedPreface + buildScheduleAsk({ derived: askDerived, inputs: askInputs, toggleOff: irrigationSystem === false, explicitInches: askExplicit }), setupWaterSaved].filter(Boolean).join(' ') : '',
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
@@ -1166,8 +1176,9 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     // copy says "your lawn".
     grassType: grassConfirmedAfterMove(customer) ? resolveGrassType(customer) : null,
     // Lawn area is a property of the LAWN too: after a move the turf profile describes the former yard until a
-    // turf writer re-establishes it, so it rides the same ledger entry as the grass (no area ⇒ no gallons sentence).
-    lawnSqft: grassConfirmedAfterMove(customer) ? (customer.turf_lawn_sqft ?? null) : null,
+    // LAWN-SIZE writer re-establishes it. Its own ledger entry: a grass edit says nothing about the size and a size
+    // edit says nothing about the grass (codex #6498 r1 P2). No area ⇒ no gallons sentence.
+    lawnSqft: lawnSqftConfirmedAfterMove(customer) ? (customer.turf_lawn_sqft ?? null) : null,
     weekEnding,
     irrigationInchesPerWeek: customer.irrigation_inches_per_week,
     turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,

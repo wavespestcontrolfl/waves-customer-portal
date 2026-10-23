@@ -37,6 +37,10 @@ const GRASS_CONFIRMED_FIELD = 'turf_grass';
 // The rain-sensor flag describes the former home's controller after a move —
 // confirmed only when the customer re-saves that field itself (gh-r41).
 const RAIN_SENSOR_CONFIRMED_FIELD = 'rain_sensor';
+// Lawn AREA is re-established for the current home only by a lawn-size writer (turf-profile editor, service-area
+// review, an accepted estimate's confirmed size, a primary flip carrying a reviewed lawn). The grass entry says nothing
+// about the size, and a size edit says nothing about the grass, so each has its own entry (codex #6498 r1 P2).
+const LAWN_SQFT_CONFIRMED_FIELD = 'turf_lawn_sqft';
 const RUNTIME_FIELDS = ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'];
 
 function present(v) {
@@ -97,6 +101,12 @@ function countyConfirmedAfterMove(row = {}) {
 function grassConfirmedAfterMove(row = {}) {
   if (!row.irrigation_home_changed_at) return true;
   return parseConfirmed(row.irrigation_confirmed_fields).includes(GRASS_CONFIRMED_FIELD);
+}
+
+/** The lawn area was re-established for the current home by a lawn-size writer (or no move). */
+function lawnSqftConfirmedAfterMove(row = {}) {
+  if (!row.irrigation_home_changed_at) return true;
+  return parseConfirmed(row.irrigation_confirmed_fields).includes(LAWN_SQFT_CONFIRMED_FIELD);
 }
 
 /** The rain-sensor field was re-saved for the current home (or no move). */
@@ -194,4 +204,4 @@ function unconfirmedFieldsRaw(knexLike, fields) {
   );
 }
 
-module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, confirmIrrigationFields, changedSizingFields, unconfirmedFieldsRaw, parseConfirmedFields: parseConfirmed };
+module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, LAWN_SQFT_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, lawnSqftConfirmedAfterMove, confirmIrrigationFields, changedSizingFields, unconfirmedFieldsRaw, parseConfirmedFields: parseConfirmed };

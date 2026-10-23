@@ -95,6 +95,32 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
     expect(rainSensorConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['rain_sensor']) })).toBe(true);
   });
 
+  test('lawn AREA is home-bound with its OWN ledger entry, tied to the lawn-size writers (codex #6498 r1 P2)', () => {
+    const { lawnSqftConfirmedAfterMove, LAWN_SQFT_CONFIRMED_FIELD, grassConfirmedAfterMove } = require('../services/irrigation-schedule-confirmation');
+    expect(LAWN_SQFT_CONFIRMED_FIELD).toBe('turf_lawn_sqft');
+    expect(lawnSqftConfirmedAfterMove({})).toBe(true);
+    const moved = { irrigation_home_changed_at: '2026-08-20T00:00:00Z' };
+    expect(lawnSqftConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: '[]' })).toBe(false);
+    // A grass review releases the grass, never the size; a size write releases the size, never the grass.
+    expect(lawnSqftConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['turf_grass']) })).toBe(false);
+    expect(lawnSqftConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['turf_lawn_sqft']) })).toBe(true);
+    expect(grassConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['turf_lawn_sqft']) })).toBe(false);
+    // Every writer of customer_turf_profiles.lawn_sqft stamps the entry (and only for a positive size).
+    const fs = require('fs');
+    const path = require('path');
+    const src = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+    for (const file of ['routes/admin-customer-turf-profile.js', 'services/property-service-areas.js', 'services/lawn-size-sync.js', 'services/property-role-proposals.js']) {
+      expect(src(file)).toMatch(/confirmIrrigationFields\([^)]*\[LAWN_SQFT_CONFIRMED_FIELD\]\)/);
+    }
+    expect(src('routes/admin-customer-turf-profile.js')).toMatch(/nextLawnSqft > 0 && nextLawnSqft !== \(priorRow\?\.lawn_sqft \?\? null\) && requestFresh/);
+    expect(src('services/lawn-size-sync.js')).toMatch(/if \(Number\(sqft\) > 0\) \{\n\s+const \{ confirmIrrigationFields, LAWN_SQFT_CONFIRMED_FIELD \}/);
+    // The primary-flip writer stamps AFTER the move marker that clears the ledger.
+    const flip = src('services/property-role-proposals.js');
+    expect(flip.indexOf('markSprinklerSettingsMoved(customerId, trx')).toBeLessThan(flip.indexOf('[LAWN_SQFT_CONFIRMED_FIELD]'));
+    // The sweep gates the area on this entry, not the grass's.
+    expect(src('services/irrigation-weekly-email.js')).toMatch(/lawnSqft: lawnSqftConfirmedAfterMove\(customer\)/);
+  });
+
   test('source pins: the confirm writers for grass and rain-sensor (codex gh-r41)', () => {
     const fs = require('fs');
     const path = require('path');

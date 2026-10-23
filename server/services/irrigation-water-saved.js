@@ -93,7 +93,8 @@ function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = nul
     depthInches: Math.round(depth * 100) / 100,
     runsPerWeek: runs,
     gallonsPerRun: perRun,
-    gallonsPerWeek: roundGallons((depth * runs * sqft / 1000) * GALLONS_PER_INCH_PER_1000_SQFT),
+    // From the DISPLAYED per-run figure, so the two printed numbers always add up (codex #6498 r1 P2).
+    gallonsPerWeek: perRun * runs,
   };
 }
 
@@ -119,9 +120,20 @@ function waterSavedSentence(block, plan) {
   return `Each ${DEFAULT_RUN_MINUTES}-minute run you skip is about ${perRun} gallons on your lawn${weekClause}. That assumes a typical half-inch run over your lawn's size on file; enter your zone minutes and watering days under Irrigation in your portal and we'll use those instead.`;
 }
 
+/**
+ * The sentence for the SETUP-SCHEDULE email (a sprinkler system on file, no usable schedule): there is no plan to skip
+ * yet, so it gives the typical-run figure as the reason to enter the schedule. Default basis by definition. Appended to
+ * the schedule ask; null when there is no block.
+ */
+function waterSavedSetupSentence(block) {
+  if (!block) return null;
+  return `For a lawn your size, a typical ${DEFAULT_RUN_MINUTES}-minute run is about ${fmtGallons(block.gallonsPerRun)} gallons, so every run you skip after a good rain is real water saved. Once your schedule is on file we'll use your own minutes and days for that figure.`;
+}
+
 module.exports = {
   irrigationWaterSavedLive,
   waterSavedForDecision,
   waterSavedSentence,
+  waterSavedSetupSentence,
   WATER_SAVED_CONSTANTS: Object.freeze({ GALLONS_PER_INCH_PER_1000_SQFT, DEFAULT_RUN_MINUTES, DEFAULT_RUNS_PER_WEEK, DEFAULT_DEPTH_PER_RUN_INCHES, MAX_LAWN_SQFT, ROUND_GALLONS_TO }),
 };

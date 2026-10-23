@@ -284,6 +284,12 @@ async function writeLawnSqft(trx, customerId, sqft, { onlyIfEmpty = false } = {}
   if (turfChanged) {
     await trx('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: sqft })
       .onConflict('customer_id').merge({ lawn_sqft: sqft, updated_at: trx.fn.now() });
+    // A confirmed size written for the customer's current primary (estimateTargetsPrimary / the owner's set-size)
+    // re-establishes the lawn AREA for the weekly plan after a move: its own ledger entry (codex #6498 r1 P2).
+    if (Number(sqft) > 0) {
+      const { confirmIrrigationFields, LAWN_SQFT_CONFIRMED_FIELD } = require('./irrigation-schedule-confirmation');
+      await confirmIrrigationFields(trx, customerId, [LAWN_SQFT_CONFIRMED_FIELD]);
+    }
   }
   const mirrors = await syncLawnSqftMirrors(trx, customerId, sqft, { customer, primary: mirrorTarget || primary, customerOnlyWithoutPrimary: true });
   return {

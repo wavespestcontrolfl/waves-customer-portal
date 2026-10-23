@@ -24,8 +24,12 @@ not built.
   frozen in its snapshot (`irrigation-rates.js`); nothing here changes that.
 - Lawn area: `customer_turf_profiles.lawn_sqft`. The eligibility query in
   `irrigation-weekly-email.js` already LEFT JOINs the active turf profile, so the
-  column is one select away. Coverage of that column across the lawn book is not
-  verified (no prod DB in this session).
+  column is one select away. Coverage, measured 2026-10-22 against the sweep's own
+  audience (owner ran `~/waves-ops-checkout/_lawn_area_count_read.js`): 41 customers,
+  35 with a lawn area, 6 without (2 have no turf profile at all). Median area 4,241
+  sq ft, average 5,297, range 1,100 to 14,000. Only 6 of the 41 have a full sprinkler
+  schedule (minutes, days, head type) on file and 4 a typed weekly figure, so the
+  owner default carries most of the book.
 
 ## What the email does not know
 
@@ -115,7 +119,10 @@ Sources: [Manatee rates effective June 1, 2026](https://www.mymanatee.org/connec
    minutes, twice a week). The footer small note names which was used and invites
    the customer to enter their own minutes and days. Printed only when `lawn_sqft`
    is on file (open question below). Unconditional `run` plans that carry the
-   ½"-rain skip rule get the same sentence after that rule.
+   ½"-rain skip rule get the same sentence after that rule. A customer with a
+   sprinkler system on file but no usable schedule never reaches the plan (they
+   get the setup ask), so the default-basis sentence is appended to that ask too:
+   that is most of the book (Codex #6498 r1).
 2. **Water-source field, optional, phase 2.** Add `irrigation_water_source`
    (`county` | `reclaimed` | `well` | null) to `property_preferences` and the
    portal Irrigation section. When `county`, append a dollar range from a small
@@ -142,7 +149,10 @@ portal pill row, and the rate table.
 
 1. Ship phase 1 (gallons only) alone, or hold for phase 2?
 2. Lawn area with nothing on file: print nothing, or assume a default (5,000
-   sq ft is the median SWFL irrigated turf figure we use elsewhere)?
+   sq ft is the median SWFL irrigated turf figure we use elsewhere)? Data
+   (2026-10-22): only 6 of 41 lack an area, and the real median is 4,241 sq ft,
+   so a 5,000 default would overstate. Built as "print nothing"; the six get
+   their size entered by hand.
 3. Rounding and wording of the gallons sentence (above is a draft).
 4. Whether to ask customers the water-source question at all. It is one more
    portal field, and the dollar line is only as good as the answer.
