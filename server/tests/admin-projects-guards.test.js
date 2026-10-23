@@ -151,7 +151,7 @@ describe('admin project route guards', () => {
           gallons_applied: '90',
           applicator_name: 'Adam Benetti',
           applicator_fdacs_id: 'JF123456',
-          applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).',
+          applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1 / R318.1 / FDACS Rule 5E-14.106).',
         },
       },
     ];
@@ -178,7 +178,7 @@ describe('admin project route guards', () => {
       treatment_address: '123 Main St, Bradenton, FL 34202',
       applicator_name: 'Adam Benetti',
       applicator_fdacs_id: 'JF123456',
-      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).',
+      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1 / R318.1 / FDACS Rule 5E-14.106).',
     };
     const evaluate = (findings) => evaluateProjectSendReadiness({
       project: {
@@ -317,7 +317,7 @@ describe('admin project route guards', () => {
       gallons_applied: '180',
       applicator_name: 'Adam Benetti',
       applicator_fdacs_id: 'JF123456',
-      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).',
+      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1 / R318.1 / FDACS Rule 5E-14.106).',
     };
     const evaluate = (findings) => evaluateProjectSendReadiness({
       project: {

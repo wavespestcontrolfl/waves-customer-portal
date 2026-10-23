@@ -276,7 +276,7 @@ const FIELD_LABELS = {
   prep_for_customer: 'Customer prep for follow-up',
   host_activity: 'Host / activity notes',
   treatment_areas: 'Treatment areas',
-  // Pre-treatment Certificate of Compliance fields (FBC 1816.1.7)
+  // Pre-treatment Certificate of Compliance fields (FBC 1816.1 / R318.1, 105.10)
   treatment_address: 'Treatment address',
   lot_block: 'Lot / Block',
   subdivision: 'Subdivision / Community',
@@ -983,7 +983,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
             Notice of Termite Protection
           </div>
           <div style={{ fontSize: 14, opacity: 0.85, marginTop: 8, lineHeight: 1.4 }}>
-            FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS Lic. {WAVES_FDACS_LICENSE_NUMBER}
+            Posted per FL Building Code 105.11 • Treatment per FBC 1816.1 / R318.1 • FDACS Lic. {WAVES_FDACS_LICENSE_NUMBER}
           </div>
         </div>
         <img src="/waves-logo.png" alt="Waves" style={{ height: 52, flexShrink: 0 }} />
@@ -1033,12 +1033,12 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
           border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
         }}>
           This property has been treated for the prevention of subterranean termites in accordance with Florida
-          Building Code 1816 and rules established by the Florida Department of Agriculture &amp; Consumer Services
+          Building Code 1816 / R318 and rules established by the Florida Department of Agriculture &amp; Consumer Services
           {renewableContract ? ', placed under a retreatment contract renewable by payment of an annual fee.' : '.'}
           {' '}The owner is hereby advised to have the property inspected annually by Waves Pest Control, LLC.
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
-          It is a violation of Florida Statutes 482.226 for anyone other than the property owner to remove this notice.
+          Florida law (s. 482.226, F.S.) protects wood-destroying organism notices. Only the property owner may remove this notice.
         </div>
       </div>
 
@@ -1078,12 +1078,12 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
 }
 
 /**
- * CertificateOfCompliance — Florida Building Code 1816.1.7 Certificate for
+ * CertificateOfCompliance — Florida Building Code 1816.1 / R318.1 Certificate for
  * pre-construction subterranean termite soil treatment. The layout follows
  * the customer estimate visual language while preserving required certificate
  * fields and statutory language. Stamp ID: WV-002.
  *
- * Required content per FBC 1816.1.7: company name + phone, treatment address
+ * Required content per FBC 1816.1 / R318.1 and 105.10: company name + phone, treatment address
  * or lot/block, method of treatment, the exact compliance statement, and an
  * authorized applicator signature. Additional fields (product/EPA/A.I./
  * concentration, sq ft, gallons, FDACS ID, warranty) satisfy FDACS Rule
@@ -1190,7 +1190,7 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
   ];
   const multiApplication = applications.length > 1;
   const { method, productLine, aiLine, coverageLine } = applications[0];
-  // FBC 1816.1.7's "method of treatment" line lists every method on a
+  // The certificate's "method of treatment" line lists every method on a
   // combined job (e.g. "Soil barrier (chemical) + Wood treatment (borate)");
   // the per-application blocks below carry each product's own record.
   const methodValue = multiApplication
@@ -1284,7 +1284,7 @@ function CertificateHeader({ detailsOnly }) {
             marginTop: 8,
             lineHeight: 1.35,
           }}>
-            Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
+            Required by FL Building Code 1816.1 / R318.1 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
           </div>
         )}
       </div>
@@ -1454,7 +1454,7 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
         </div>
       )}
 
-      {/* FBC required compliance statement (exact wording per 1816.1.7) */}
+      {/* FBC required compliance statement (exact wording per FBC 1816.1 / R318.1) */}
       <div style={{ padding: '16px 24px 4px' }}>
         <div style={{
           fontSize: 16,
@@ -1479,7 +1479,7 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
           marginTop: 12,
           padding: '0 8px',
         }}>
-          This Certificate must be retained in the building permit file as required by FBC 1816.1.7.
+          This Certificate must be retained in the building permit file as required by FBC 105.10.
         </div>
         {f.comments && (
           <div style={{
@@ -1501,7 +1501,7 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
         )}
       </div>
 
-      {/* Electronic signature / attestation block — FBC 1816.1.7 requires
+      {/* Electronic signature / attestation block — the certificate needs
           an authorized applicator signature. The typed attestation + printed
           name + FDACS ID + treatment date together constitute an electronic
           signature accepted by Florida building departments. */}
