@@ -84,6 +84,7 @@ const PAYLOADS = {
       findings: {
         ...base.findings,
         final_exterior_date: '2026-09-14',
+        final_exterior_time: '09:30',
         final_exterior_product: 'Termidor SC',
         final_exterior_active_ingredient: 'Fipronil',
       },

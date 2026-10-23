@@ -267,6 +267,8 @@ const FINDINGS = {
 
 const PRE_TREATMENT_FINDINGS = {
   treatment_address: '456 Palm Dr, Sarasota, FL 34236',
+  treatment_time: '08:40',
+  warranty_type: 'Renewable 5-year retreatment bond',
   treatment_method: 'Soil barrier (chemical)',
   product_name: 'Termidor SC',
   active_ingredient: 'fipronil',
@@ -558,6 +560,32 @@ describe('send-with-invoice hold_report_until_paid', () => {
       expect(buildWdoReportPDFBuffer).not.toHaveBeenCalled();
       expect(mockS3Send).not.toHaveBeenCalled();
       expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(true);
+    });
+  });
+
+  test('an edit that lands before the delivery claim is re-judged after it (pre-treat staff-send checks)', async () => {
+    const project = preTreatmentProject();
+    const { updates } = mockTables({
+      project,
+      // The claim takes the row; an edit committed just before it cleared the time.
+      projectUpdateResult: (payload) => {
+        if (payload.delivery_status === 'sending') project.findings = { ...project.findings, treatment_time: '' };
+        return 1;
+      },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.error).toContain('Time of treatment');
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      // The catch released the delivery claim.
+      expect((updates.projects || []).some((u) => u.delivery_status !== undefined && u.delivery_status !== 'sending')).toBe(true);
+      expect((updates.projects || []).some((u) => u.report_token)).toBe(false);
     });
   });
 

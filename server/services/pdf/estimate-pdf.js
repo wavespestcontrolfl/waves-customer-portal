@@ -28,6 +28,8 @@ const {
 } = require('../estimate-proposal-billing');
 const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims.cjs');
 const { lawnLimitsForEstimate } = require('../estimate-lawn-limits');
+const featureGates = require('../../config/feature-gates');
+const { beforeYouBookForEstimate, estimateIsOpen, trimByRank } = require('../estimate-before-you-book');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -484,6 +486,54 @@ function lawnLimitsBlock(ctx, lawnLimits, y) {
   return y + 6;
 }
 
+// "Before you book" (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK): one plain page after the last page, from
+// the owner's answer book (services/estimate-before-you-book.js, which also picks the sections and
+// drops lines by rank so the page stays one page). This file measures and draws.
+const BYB_BODY_SIZE = 10.5;
+const BYB_LINE_GAP = 2;
+const BYB_TOP = 104;
+
+function trimBeforeYouBook(doc, page, available) {
+  return trimByRank(page, {
+    lineHeight: (text) => {
+      doc.fontSize(BYB_BODY_SIZE).font('Helvetica');
+      return doc.heightOfString(`• ${text}`, { width: W - 12, lineGap: BYB_LINE_GAP }) + 5;
+    },
+    // The page draws a section as label (14) + 8 before the lines + 8 after: budget all 30, and the 8 before the closing line.
+    headingH: 30,
+    closingGap: 8,
+    available,
+  });
+}
+
+function beforeYouBookPage(ctx, estimate, proposal) {
+  // Gate off (or an estimate already decided): nothing is drawn and the document is exactly as before.
+  if (featureGates.estimateBeforeYouBookLive?.() !== true || !estimateIsOpen(estimate)) return;
+  const page = beforeYouBookForEstimate(estimate, proposal);
+  const { doc } = ctx;
+  footerBar(doc, ctx.tagline);
+  doc.addPage();
+  continuationHeader(doc, ctx.title);
+  doc.fontSize(20).font('Helvetica').fillColor(NAVY).text(page.title, L, 58, { width: W });
+  const fitted = trimBeforeYouBook(doc, page, CONTENT_BOTTOM - BYB_TOP);
+  let y = BYB_TOP;
+  const drawLine = (text) => {
+    doc.fontSize(BYB_BODY_SIZE).font('Helvetica').fillColor(BODY);
+    const h = doc.heightOfString(`• ${text}`, { width: W - 12, lineGap: BYB_LINE_GAP });
+    doc.text(`• ${text}`, L + 6, y, { width: W - 12, lineGap: BYB_LINE_GAP });
+    y += h + 5;
+  };
+  for (const section of fitted.sections) {
+    y = sectionLabel(doc, section.heading, L, y) + 8;
+    for (const line of section.lines) drawLine(line.text);
+    y += 8;
+  }
+  if (fitted.closing) {
+    y += 8;
+    drawLine(fitted.closing.text);
+  }
+}
+
 function termsBlock(ctx, proposal, totals, y) {
   const { doc } = ctx;
   const lines = [];
@@ -648,6 +698,9 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   y = lawnLimitsBlock(ctx, lawnLimitsOf(billing), y);
   y = termsBlock(ctx, proposal, totals, y + 8);
   acceptanceBlock(ctx, billing?.acceptance || null, y + 8);
+
+  // GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK: one more page after the last one. Gate off prints nothing here.
+  beforeYouBookPage(ctx, estimate, proposal);
 
   footerBar(doc, ctx.tagline);
   doc.end();

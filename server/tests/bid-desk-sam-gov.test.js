@@ -1,0 +1,217 @@
+// Bid Desk SAM.gov reader (GATE_BID_DESK_SAM, dark). The mapping is pure; the poll is checked for its gate, its key
+// check and its error text with a mocked database and a fake fetch. No network, no real database.
+const mockDb = jest.fn(() => { throw new Error('the database must not be touched'); });
+jest.mock('../models/db', () => {
+  const db = (...args) => mockDb(...args);
+  db.transaction = (...args) => mockDb(...args);
+  db.raw = (...args) => mockDb(...args);
+  db.fn = { now: () => 'now()' };
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const fs = require('fs');
+const path = require('path');
+const sam = require('../services/bid-desk/sam-gov');
+
+const NOW = new Date('2026-10-22T12:00:00Z');
+
+function notice(overrides = {}) {
+  return {
+    noticeId: 'abc123def456',
+    title: 'Pest Control Services, Sarasota National Cemetery',
+    solicitationNumber: '36C24826Q0001',
+    fullParentPathName: 'VETERANS AFFAIRS, DEPARTMENT OF.VETERANS AFFAIRS, DEPARTMENT OF.NATIONAL CEMETERY ADMINISTRATION',
+    type: 'Combined Synopsis/Solicitation',
+    active: 'Yes',
+    responseDeadLine: '2026-11-05T14:00:00-05:00',
+    placeOfPerformance: { city: { name: 'Sarasota' }, state: { code: 'FL' }, zip: '34241' },
+    uiLink: 'https://sam.gov/opp/abc123def456/view',
+    ...overrides,
+  };
+}
+
+const ENV = { ...process.env };
+afterEach(() => {
+  process.env = { ...ENV };
+  mockDb.mockClear();
+});
+
+describe('mapOpportunity', () => {
+  test('a Sarasota combined synopsis becomes an unconfirmed sam_gov bid with its deadline and link', () => {
+    const { row, block } = sam.mapOpportunity(notice(), NOW);
+    expect(block).toBeNull();
+    expect(row).toMatchObject({
+      source: 'sam_gov',
+      external_id: 'abc123def456',
+      external_url: 'https://sam.gov/opp/abc123def456/view',
+      project_title: 'Pest Control Services, Sarasota National Cemetery',
+      solicitation_number: '36C24826Q0001',
+      location: 'Sarasota, FL 34241',
+      due_confirmed: false,
+      historical: false,
+      status: 'new',
+    });
+    expect(row.due_at.toISOString()).toBe('2026-11-05T19:00:00.000Z');
+    expect(row.due_source_line).toBe('SAM.gov response deadline: 2026-11-05T14:00:00-05:00');
+    expect(row.gc_or_agency).toBe('VETERANS AFFAIRS, DEPARTMENT OF · NATIONAL CEMETERY ADMINISTRATION');
+  });
+
+  test.each([
+    ['award notices', { type: 'Award Notice' }, 'type'],
+    ['special notices', { type: 'Special Notice' }, 'type'],
+    ['another state', { placeOfPerformance: { state: { code: 'GA' }, zip: '30301' } }, 'not_florida'],
+    ['north Florida', { placeOfPerformance: { state: { code: 'FL' }, zip: '32202' } }, 'outside_area'],
+    ['no place ZIP', { placeOfPerformance: { state: { code: 'FL' } } }, 'outside_area'],
+    ['inactive notices', { active: 'No' }, 'inactive'],
+    ['a passed deadline', { responseDeadLine: '2026-10-21T14:00:00-04:00' }, 'deadline_passed'],
+  ])('%s create no new bid, but still map a row for a bid already filed', (_label, overrides, reason) => {
+    const mapped = sam.mapOpportunity(notice(overrides), NOW);
+    expect(mapped.block).toBe(reason);
+    expect(mapped.row.external_id).toBe('abc123def456');
+  });
+
+  test('no notice id is skipped outright', () => {
+    expect(sam.mapOpportunity(notice({ noticeId: '' }), NOW)).toEqual({ skip: 'no_notice_id' });
+  });
+
+  test('an award or an archive marks the notice closed on SAM.gov', () => {
+    expect(sam.mapOpportunity(notice({ type: 'Award Notice' }), NOW).row.source_active).toBe(false);
+    expect(sam.mapOpportunity(notice({ active: 'No' }), NOW).row.source_active).toBe(false);
+    expect(sam.mapOpportunity(notice(), NOW).row.source_active).toBe(true);
+  });
+
+  test('keeps a sources sought with no deadline, and Tampa Bay ZIPs are in the area', () => {
+    const { row } = sam.mapOpportunity(notice({ type: 'Sources Sought', responseDeadLine: null, placeOfPerformance: { state: { code: 'FL' }, zip: '33621-5000' } }), NOW);
+    expect(row.due_at).toBeNull();
+    expect(row.due_source_line).toBeNull();
+    expect(row.location).toBe('FL 33621');
+  });
+
+  test('the link is the public notice page built from the id, never the API uiLink', () => {
+    const { row } = sam.mapOpportunity(notice({ uiLink: 'https://sam.gov/opp/abc123def456/view?restricted=1' }), NOW);
+    expect(row.external_url).toBe('https://sam.gov/opp/abc123def456/view');
+    const odd = sam.mapOpportunity(notice({ uiLink: 'javascript:alert(1)', noticeId: 'bad id/../x' }), NOW);
+    expect(odd.row.external_url).toBeNull();
+  });
+});
+
+describe('deadlines', () => {
+  test.each([
+    ['an offset', '2026-11-05T14:00:00-05:00', '2026-11-05T19:00:00.000Z'],
+    ['Z', '2026-11-05T19:00:00Z', '2026-11-05T19:00:00.000Z'],
+    ['Florida wall time with no zone (EST)', '2026-11-05T14:00:00', '2026-11-05T19:00:00.000Z'],
+    ['Florida wall time with no zone (EDT)', '2026-10-30T14:00', '2026-10-30T18:00:00.000Z'],
+    ['a date only (11:59 PM Eastern)', '2026-11-05', '2026-11-06T04:59:00.000Z'],
+  ])('reads %s', (_label, raw, iso) => {
+    expect(sam.parseDeadline(raw).toISOString()).toBe(iso);
+  });
+
+  test.each([['nonsense'], ['2026-02-30'], ['11/05/2026']])('refuses %s', (raw) => {
+    expect(sam.parseDeadline(raw)).toBeNull();
+  });
+
+  test('an unreadable deadline files the bid with no date and no source line', () => {
+    const { row } = sam.mapOpportunity(notice({ responseDeadLine: 'TBD' }), NOW);
+    expect(row.due_at).toBeNull();
+    expect(row.due_source_line).toBeNull();
+  });
+
+  test('API dates are MM/dd/yyyy', () => {
+    expect(sam.apiDate('2026-10-21')).toBe('10/21/2026');
+  });
+});
+
+describe('runSamGovPoll', () => {
+  test('gate off: no request, no database', async () => {
+    process.env.GATE_BID_DESK = 'true';
+    delete process.env.GATE_BID_DESK_SAM;
+    const fetchImpl = jest.fn();
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'k' })).toEqual({ skipped: 'gate_off' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  test('the SAM gate alone is not enough: the Bid Desk gate must be on too', async () => {
+    delete process.env.GATE_BID_DESK;
+    process.env.GATE_BID_DESK_SAM = 'true';
+    const fetchImpl = jest.fn();
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'k' })).toEqual({ skipped: 'gate_off' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('no API key: no request, no database', async () => {
+    process.env.GATE_BID_DESK = 'true';
+    process.env.GATE_BID_DESK_SAM = 'true';
+    const fetchImpl = jest.fn();
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: '  ' })).toEqual({ skipped: 'no_api_key' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchPage', () => {
+  test('sends the key, codes and Florida filter, and an HTTP error names only the status', async () => {
+    const fetchImpl = jest.fn(async () => ({ ok: false, status: 429, json: async () => ({}) }));
+    let caught;
+    try {
+      await sam.fetchPage({ apiKey: 'SECRET-KEY-123', filter: { ncode: '561710', state: 'FL' }, postedFrom: '09/22/2026', postedTo: '10/22/2026', offset: 0, fetchImpl });
+    } catch (err) {
+      caught = err;
+    }
+    const url = new URL(fetchImpl.mock.calls[0][0]);
+    expect(url.origin + url.pathname).toBe('https://api.sam.gov/opportunities/v2/search');
+    expect(url.searchParams.get('api_key')).toBe('SECRET-KEY-123');
+    expect(url.searchParams.get('ncode')).toBe('561710');
+    expect(url.searchParams.get('state')).toBe('FL');
+    expect(url.searchParams.get('postedFrom')).toBe('09/22/2026');
+    expect(caught).toBeInstanceOf(sam.SamApiError);
+    expect(sam.safeError(caught)).toBe('SAM.gov request failed (HTTP 429)');
+    expect(sam.safeError(caught)).not.toContain('SECRET');
+  });
+
+  test('a network failure never carries the request URL', async () => {
+    const fetchImpl = jest.fn(async () => { throw new TypeError('fetch failed for https://api.sam.gov/?api_key=SECRET'); });
+    await expect(sam.fetchPage({ apiKey: 'SECRET', filter: { ncode: '561730' }, postedFrom: 'a', postedTo: 'b', offset: 0, fetchImpl }))
+      .rejects.toThrow('SAM.gov request failed (HTTP network)');
+  });
+
+  test('a body without opportunitiesData is an error, not an empty day', async () => {
+    const fetchImpl = jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ error: 'x' }) }));
+    await expect(sam.fetchPage({ apiKey: 'k', filter: { ncode: '561730' }, postedFrom: 'a', postedTo: 'b', offset: 0, fetchImpl }))
+      .rejects.toThrow('bad_body');
+  });
+});
+
+describe('fetchAll', () => {
+  const page = (n, total) => ({ ok: true, status: 200, json: async () => ({ totalRecords: total, opportunitiesData: Array.from({ length: n }, (_, i) => ({ noticeId: `x${i}` })) }) });
+
+  test('pages by zero-based page index until a short page', async () => {
+    const fetchImpl = jest.fn()
+      .mockResolvedValueOnce(page(sam.PAGE_LIMIT, sam.PAGE_LIMIT + 3))
+      .mockResolvedValueOnce(page(3, sam.PAGE_LIMIT + 3));
+    const notices = await sam.fetchAll({ apiKey: 'k', filter: { ncode: '561710' }, postedFrom: 'a', postedTo: 'b', fetchImpl });
+    expect(notices).toHaveLength(sam.PAGE_LIMIT + 3);
+    expect(fetchImpl.mock.calls.map(([u]) => new URL(u).searchParams.get('offset'))).toEqual(['0', '1']);
+  });
+
+  test('more pages than the cap is an error, so the cursor cannot move past unread notices', async () => {
+    const fetchImpl = jest.fn(async () => page(sam.PAGE_LIMIT, sam.PAGE_LIMIT * (sam.MAX_PAGES + 1)));
+    await expect(sam.fetchAll({ apiKey: 'k', filter: { ncode: '561710' }, postedFrom: 'a', postedTo: 'b', fetchImpl }))
+      .rejects.toThrow('too_many_pages');
+    expect(fetchImpl).toHaveBeenCalledTimes(sam.MAX_PAGES);
+  });
+});
+
+test('the scheduler checks the SAM gate before the cron lock and logs only the safe error', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+  const at = source.indexOf("'0 25 7 * * *'");
+  expect(at).toBeGreaterThan(-1);
+  const block = source.slice(at, at + 1700);
+  expect(block.indexOf('bidDeskSamLive()')).toBeGreaterThan(-1);
+  expect(block.indexOf('bidDeskSamLive()')).toBeLessThan(block.indexOf("runExclusive('bid-desk-sam'"));
+  expect(block).toContain('runSamGovPoll');
+  expect(block).toContain('safeError(err)');
+  // Both gates on with no key is a failed run in job health, not a quiet success.
+  expect(block.indexOf("result.skipped === 'no_api_key'")).toBeGreaterThan(block.indexOf('runSamGovPoll'));
+});

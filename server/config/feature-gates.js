@@ -43,6 +43,7 @@
  *   GATE_STAFF_ONBOARDING_DOCS=true (staff onboarding documents, owner 2026-10-08: a staff document an admin marks "Required at onboarding" is outstanding for every active staff member who can open it until they sign its CURRENT issued version (acknowledgment for a policy, a completed record for a form or procedure). Outstanding is derived on read; nothing is assigned or written. The Today page shows a card "Sign N documents to finish setup" that opens the first outstanding document, and the staff documents page shows each member's signed and outstanding documents. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffOnboardingDocsLive(). Ships DARK; off = no card and the onboarding endpoints answer empty with no query. Sends nothing to a customer.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
  *   GATE_BID_DESK=true (Bid Desk, PR 1: every 15 minutes a job reads new rows of the emails table and files bid invites (BuildingConnected, Procore, bid portals, government RFP/RFQ mail) as bid opportunities with their due dates read from the fixed provider templates only, posts ONE admin notification per new bid, one when an addendum arrives on an open bid, and reminders 7 and 2 days before a due date the operator CONFIRMED; the admin Bid Desk page lists them and lets the operator confirm the date and set bid / no bid / submitted / won / lost. No AI call, no change to leads or the classifier, and it sends nothing to a buyer, contractor or customer. Read at call time via bidDeskLive(), strict 'true', dark by default; off = no job work, the routes answer 404 and the nav entry is hidden.)
+ *   GATE_BID_DESK_SAM=true (Bid Desk, PR 2: once a day at 7:25 AM ET a job reads new federal notices from the official SAM.gov Opportunities API (NAICS 561710 pest control and 561730 landscaping, Florida, solicitations, combined synopses, presolicitations and sources sought) whose place of performance is in the Tampa Bay to Southwest Florida ZIP areas, and files each as a bid opportunity (source sam_gov, one per notice id) with its SAM.gov link and response deadline (never confirmed until the operator confirms it), posting ONE admin notification per new bid. Needs GATE_BID_DESK and SAM_GOV_API_KEY. No AI call; it sends nothing to an agency, contractor or customer. Read at call time via bidDeskSamLive(), strict 'true', dark by default; off = the job returns before any request.)
  *   GATE_CALL_LAST_NAME_LOOKUP=true (a phone caller who gave a first name and no last name gets a last-name SUGGESTION after the call: one admin notification with the answers from the county owner record (homeowner callers only), our own records, the caller's email address and the Twilio caller name; the office saves the name. Never writes a last name. Read at call time via callLastNameLookupLive(), strict 'true', dark by default; off = nothing runs.)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_CONTACT_LOGIN=true (an on-location contact signs into the customer app with their OWN phone number through the same SMS code login, landing on the account they are a contact for as a CONTACT session: view-only schedule, visit history, technician tracking, service-report documents (never for a contact the report rule withholds from) and their own notification choices (GET/PUT /api/notifications/contact-preferences); every other portal route answers 403 ACCOUNT_HOLDER_ONLY — billing, payments, cards, referrals, credits, requests, chat, property, account deletion, the holder's preferences, push subscriptions. The account holder's own number always wins; a contact number is tried only when no holder row matches, and the contact's session dies at its next refresh once the holder removes them. Per-contact notification choices (service_contact_notification_prefs) only NARROW what the account sends: a purpose the holder turned off stays off. Owner rulings 2026-10-20: view only, no confirm or reschedule; the contact's in-app text-consent checkbox counts as the YES for a pending opt-in ask only, never over a STOP. Read at call time via contactLoginLive(), strict 'true', dark by default; off = a contact number never logs in, an existing contact token is refused (401) and the senders ignore the per-contact table, byte-identical to before. Sends nothing to a customer.)
@@ -53,6 +54,7 @@
  *   GATE_IB_ACCEPT_ESTIMATE=true (the Intelligence Bar's accept_estimate marks one sent or viewed estimate accepted from the bar, exactly as the estimate page's Mark accepted does (same handler, same conversion), always behind a confirm card that shows the service lines, the monthly bill before and after, the billing lane and tier, and every customer message; owner ruling 2026-10-07 Q5. Read at call time via ibAcceptEstimateLive(), strict 'true', dark by default; off = the tool is not offered and a forced call refuses, changing nothing.)
  *   GATE_IB_MODEL_FAILURE_NOTICE=true (when the Intelligence Bar's AI model call fails (a provider 4xx/5xx, a timeout, an overload such as the monthly spend limit), /query answers 200 with a plain reply (what failed, whether anything was changed, try again in a few minutes), records one 'ib-model' gap row, and rings one admin bell at most once an hour; never a customer message. Owner request 2026-10-20 after the 2026-10-19 limit outage. Read at call time via ibModelFailureNoticeLive(), strict 'true', dark by default; off = the error goes to the error handler, the task is marked outcome_unknown and nothing else is recorded, as before.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
+ *   GATE_SERIES_MOVE_SKIP_CLOSED_DAYS=true (a staff series move re-dates the later visits of the plan; a re-dated visit that lands on a closed day (owner blackout date, weekly day off, closed holiday) moves forward to the next open day, as the Edit appointment cadence rewrite already does; the date the staffer picked stays as picked; owner 2026-10-22 "fix series edit". Read at call time via seriesMoveSkipClosedDaysLive(), strict 'true', dark by default; off = every projected date is byte-identical to before; customer moves unchanged)
  *   GATE_ONE_TEXT_PER_CUSTOMER_DAY=true (owner 2026-10-12/13: one on-the-way text and one arrived text per customer, service address, technician and ET day, however many services or visits that day has; appointment reminders are NOT changed (the existing same-slot merge owns them); the rule never reads visit_id, service_visits or visit_effects; read at call time via oneTextPerCustomerDayLive(), dark by default; off = every tracker text is byte-identical to before)
  *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
@@ -2159,6 +2161,8 @@ const gates = {
   // Bid Desk intake (PR 1). Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only — the
   // canonical CALL-TIME reader is bidDeskLive() at the end of this file.
   bidDesk: process.env.GATE_BID_DESK === 'true',
+  // GATE_BID_DESK_SAM (Bid Desk SAM.gov reader, dark). Boot-log entry only; the call-time reader is bidDeskSamLive().
+  bidDeskSam: process.env.GATE_BID_DESK_SAM === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -4876,6 +4880,16 @@ function seriesMoveCarriesVisitLive() {
   return process.env.GATE_SERIES_MOVE_CARRIES_VISIT === 'true';
 }
 
+// GATE_SERIES_MOVE_SKIP_CLOSED_DAYS read at CALL time — strict `=== 'true'`.
+// Owner 2026-10-22 ("fix series edit"): a staff move of one plan visit
+// re-anchored the plan to the last Thursday and put the next visit on
+// Thanksgiving, a closed day nobody picked. On, a staff series move and its
+// preview move each re-dated later visit off a closed day (rebooker.js
+// makeSeriesProjector). Unset = projected dates byte-identical to before.
+function seriesMoveSkipClosedDaysLive() {
+  return process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS === 'true';
+}
+
 // GATE_SERIES_MOVE_TEXT_COALESCE read at CALL time — strict `=== 'true'`, dark.
 // Owner ruling 2026-10-06: a customer got two series-move texts a minute
 // apart because staff moved the same series twice. On, a staff board or Edit
@@ -5400,6 +5414,12 @@ function estimateLawnLimitsLive() {
 // Off = the services.mosquitoMisting key is ignored and output is unchanged.
 function mosquitoMistingLive() {
   return gateEnvValue('GATE_MOSQUITO_MISTING');
+}
+// GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK read at CALL time, strict `=== 'true'`, dark by default (owner
+// answer book 2026-10-22). services/pdf/estimate-pdf.js appends one plain "Before you book" page.
+// Copy only, no prices, sends nothing. Off = the estimate PDF is byte-identical to before.
+function estimateBeforeYouBookLive() {
+  return process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK === 'true';
 }
 
 function pestInsiderProofLive() {
@@ -6976,6 +6996,8 @@ module.exports.portalChatSelfServeLive = portalChatSelfServeLive;
 // GATE_SERIES_MOVE_CARRIES_VISIT reader, on its own line mid-block (not the
 // shared list, not the file's last line) so other gate PRs never conflict.
 module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
+// GATE_SERIES_MOVE_SKIP_CLOSED_DAYS reader, on its own line so gate PRs never conflict.
+module.exports.seriesMoveSkipClosedDaysLive = seriesMoveSkipClosedDaysLive;
 // GATE_REPORT_WRITER_RULES reader, exported at the end of the file (after the
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
@@ -7351,6 +7373,12 @@ function bidDeskLive() {
 }
 // GATE_BID_DESK reader, on its own line so gate PRs never conflict.
 module.exports.bidDeskLive = bidDeskLive;
+// GATE_BID_DESK_SAM read at CALL time, strict `=== 'true'`, dark by default. It also needs the Bid Desk itself on.
+function bidDeskSamLive() {
+  return bidDeskLive() && process.env.GATE_BID_DESK_SAM === 'true';
+}
+// GATE_BID_DESK_SAM reader, on its own line so gate PRs never conflict.
+module.exports.bidDeskSamLive = bidDeskSamLive;
 // GATE_CALL_LEAD_LAZY_STRIPE read at CALL time, strict `=== 'true'`, dark in every environment.
 // services/call-recording-processor.js: a customer created from a call no longer gets a Stripe profile at once
 // (every card-save and payment path creates it on demand), so a lead that never pays leaves no empty profile to
@@ -7378,3 +7406,5 @@ module.exports.prepayRefund90DayLive = prepayRefund90DayLive;
 module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
 // GATE_MOSQUITO_MISTING reader, on its own line so gate PRs never conflict.
 module.exports.mosquitoMistingLive = mosquitoMistingLive;
+// GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK reader, on its own line so gate PRs never conflict.
+module.exports.estimateBeforeYouBookLive = estimateBeforeYouBookLive;
