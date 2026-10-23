@@ -203,5 +203,11 @@
     "water_in_inches": 0.25,
     "water_in_by_hours": 24,
     "source": "owner"
+  },
+  "LESCO Black Out 0-0-24 AM Spar-TECH": {
+    "mode": "water_in",
+    "water_in_inches": 0.25,
+    "water_in_by_hours": 24,
+    "source": "owner"
   }
 }
