@@ -211,3 +211,43 @@ describe('Before you book copy', () => {
     expect(detectServices({ rows: [], items: ['Lawn Pest and Weed Control'] }).pest).toBe(false);
   });
 });
+
+describe('Before you book trim and payload block', () => {
+  const { trimByRank, beforeYouBookBlock } = require('../services/estimate-before-you-book');
+  const page = {
+    title: 'Before you book',
+    sections: [
+      { key: 'a', heading: 'A', lines: [{ rank: 1, text: 'a1' }, { rank: 5, text: 'a5' }] },
+      { key: 'b', heading: 'B', lines: [{ rank: 5, text: 'b5' }, { rank: 2, text: 'b2' }] },
+    ],
+    closing: { rank: 3, text: 'close' },
+  };
+  const opts = (available) => ({ lineHeight: () => 10, headingH: 20, closingGap: 5, available });
+
+  test('nothing is dropped when the page fits', () => {
+    const out = trimByRank(page, opts(1000));
+    expect(out.sections.map((s) => s.lines.length)).toEqual([2, 2]);
+    expect(out.closing.text).toBe('close');
+  });
+
+  test('highest rank goes first, the later line inside a rank first, then an empty section loses its heading', () => {
+    // total = 2*20 + 4*10 + 15 = 95
+    // Both rank-5 lines are candidates: the one printed later (b5) goes first.
+    expect(trimByRank(page, opts(90)).sections.map((s) => s.lines.map((l) => l.text))).toEqual([['a1', 'a5'], ['b2']]);
+    // Then a5; then the closing line (rank 3) before the rank-2 line above it.
+    const tight = trimByRank(page, opts(65));
+    expect(tight.closing).toBeNull();
+    expect(tight.sections.map((s) => s.lines.map((l) => l.text))).toEqual([['a1'], ['b2']]);
+    const tighter = trimByRank(page, opts(35));
+    expect(tighter.sections.map((s) => s.lines.map((l) => l.text))).toEqual([['a1']]);
+  });
+
+  test('the payload block is empty with the gate off and fits the estimate with it on', () => {
+    const est = fixture('byb-block', [pest, lawn]);
+    expect(beforeYouBookBlock(est)).toEqual({});
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    const block = beforeYouBookBlock(est).beforeYouBook;
+    expect(block.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn']);
+    expect(block.sections.every((s) => s.lines.every((l) => typeof l === 'string'))).toBe(true);
+  });
+});

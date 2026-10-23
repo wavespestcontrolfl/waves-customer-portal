@@ -16,6 +16,10 @@
 // line goes first.
 // ============================================================
 
+const featureGates = require('../config/feature-gates');
+const logger = require('./logger');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+
 const TITLE = 'Before you book';
 
 // Service signals. Keys come from the estimate's own recurring rows
@@ -147,4 +151,107 @@ function buildBeforeYouBook(signals, opts = {}) {
   return { title: TITLE, sections, closing };
 }
 
-module.exports = { TITLE, SECTIONS, detectServices, buildBeforeYouBook };
+// What THIS estimate quotes, read the way the lawn limits block reads it (estimate-public's
+// recurring reader), plus the quoted line descriptions of the normalized proposal. A read that
+// fails returns no signals, so only the always-section prints: never a guess.
+function estimateSignals(estimate, proposal) {
+  const rows = [];
+  const items = [];
+  let prepayOffered = false;
+  try {
+    const pub = require('../routes/estimate-public');
+    const estData = pub.parseEstimateDataSafe(estimate);
+    const estResult = estData?.result || estData?.engineResult || estData || {};
+    const services = pub.recurringServicesWithSupplements(estResult);
+    const oneTime = [
+      ...(estResult.oneTime?.items || []),
+      ...(estResult.oneTime?.specItems || []),
+      ...(estResult.specItems || []),
+    ].filter((item) => item && typeof item === 'object');
+    const seen = new Set();
+    const addRow = (key) => { if (!seen.has(key)) { seen.add(key); rows.push({ key }); } };
+    for (const svc of services) { addRow(pub.recurringServiceKey(svc)); items.push(svc.name || svc.service || ''); }
+    for (const item of oneTime) items.push(item.name || item.service || item.label || '');
+    // Synthesized proposals carry their lines only in the proposal: read the recurring ones the same way.
+    for (const line of (proposal.buildings || []).flatMap((b) => b.lineItems || [])) {
+      items.push(line.description || '');
+      if (line.frequency !== 'one_time') addRow(pub.recurringServiceKey({ name: line.description }));
+    }
+    for (const program of proposal.programs || []) items.push(program.label || '');
+    // The refund rule is stated only when the estimate offers an annual prepay AND the 90-day rule is live.
+    prepayOffered = featureGates.prepayRefund90DayLive() === true && pub.isAnnualPrepayEligibleServiceMix(services, oneTime) === true;
+  } catch (err) {
+    logger.warn?.(`[estimate-before-you-book] service read failed: ${err.message}`);
+    rows.length = 0;
+    items.length = 0;
+    prepayOffered = false;
+  }
+  return { signals: detectServices({ rows, items, commercial: (proposal.buildings || []).length > 1 }), prepayOffered };
+}
+
+// The page for one estimate, untrimmed. `proposal` = normalizeProposal(estimate).
+function beforeYouBookForEstimate(estimate, proposal) {
+  const { signals, prepayOffered } = estimateSignals(estimate, proposal || {});
+  return buildBeforeYouBook(signals, { prepayRefundOffered: prepayOffered, phone: WAVES_SUPPORT_PHONE_DISPLAY });
+}
+
+// Keep the page to ONE page. Priority order: while the page is taller than `available`, drop the
+// highest-rank line (rank 5 first), and inside a rank the one printed last; the closing line prints
+// last, so it goes before a same-rank line above it. A section left with no lines loses its heading.
+// `lineHeight(text)` and the heading / closing heights are the renderer's own measure.
+function trimByRank(page, { lineHeight, headingH, closingGap, available }) {
+  const sections = page.sections.map((section) => ({ ...section, lines: section.lines.slice() }));
+  let closing = page.closing ? { ...page.closing } : null;
+  const total = () => sections.reduce((sum, section) => (section.lines.length
+    ? sum + headingH + section.lines.reduce((h, line) => h + lineHeight(line.text), 0) : sum), 0)
+    + (closing ? closingGap + lineHeight(closing.text) : 0);
+  while (total() > available) {
+    let worst = null;
+    sections.forEach((section, si) => section.lines.forEach((line, li) => {
+      if (!worst || line.rank >= worst.rank) worst = { rank: line.rank, si, li };
+    }));
+    if (closing && (!worst || closing.rank >= worst.rank)) { closing = null; continue; }
+    if (!worst) break;
+    sections[worst.si].lines.splice(worst.li, 1);
+  }
+  return { ...page, sections: sections.filter((section) => section.lines.length), closing };
+}
+
+// Browser document (estimate-doc-pdf.js renders the client document at 11.5px type on a 7.5 x 10 in
+// page). The server cannot measure text, so it estimates, measured on a rendered sample: about 115
+// characters a line (a bullet's width), 17px a line, 4px between bullets, 30px for a section heading,
+// 40px for the page's own title row. 820px of the 960px page keeps the footer line and a safety margin.
+const DOC_CHARS_PER_LINE = 115;
+const DOC_LINE_PX = 17;
+const DOC_BULLET_GAP_PX = 4;
+const DOC_HEADING_PX = 30;
+const DOC_TITLE_PX = 40;
+const DOC_PAGE_PX = 820;
+
+// The `/data` payload fragment: `{ beforeYouBook: { title, sections: [{ key, heading, lines: [text] }],
+// closing } }`, already chosen and trimmed for this estimate, or nothing, so a gate-off response is
+// byte-identical to before. Copy only: no prices. Never throws: a failure is "no page".
+function beforeYouBookBlock(estimate) {
+  if (!featureGates.estimateBeforeYouBookLive()) return {};
+  try {
+    const { normalizeProposal } = require('./estimate-proposal');
+    const page = trimByRank(beforeYouBookForEstimate(estimate, normalizeProposal(estimate)), {
+      lineHeight: (text) => Math.ceil(text.length / DOC_CHARS_PER_LINE) * DOC_LINE_PX + DOC_BULLET_GAP_PX,
+      headingH: DOC_HEADING_PX,
+      closingGap: DOC_BULLET_GAP_PX,
+      available: DOC_PAGE_PX - DOC_TITLE_PX,
+    });
+    return {
+      beforeYouBook: {
+        title: page.title,
+        sections: page.sections.map((section) => ({ key: section.key, heading: section.heading, lines: section.lines.map((line) => line.text) })),
+        closing: page.closing ? page.closing.text : null,
+      },
+    };
+  } catch (err) {
+    logger.warn?.(`[estimate-before-you-book] payload failed: ${err.message}`);
+    return {};
+  }
+}
+
+module.exports = { TITLE, SECTIONS, detectServices, buildBeforeYouBook, beforeYouBookForEstimate, trimByRank, beforeYouBookBlock };
