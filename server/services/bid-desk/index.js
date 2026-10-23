@@ -63,7 +63,7 @@ function isSpam(email) {
 const BID_COLUMNS = [
   'id', 'source', 'buyer_name', 'buyer_email', 'gc_or_agency', 'project_title', 'package_name', 'solicitation_number', 'location',
   'due_at', 'due_source_line', 'due_confirmed', 'job_walk_at', 'questions_due_at', 'status', 'decision_note',
-  'historical', 'needs_date_confirmation', 'first_email_id', 'gmail_thread_id', 'created_at', 'updated_at',
+  'historical', 'needs_date_confirmation', 'first_email_id', 'gmail_thread_id', 'external_url', 'created_at', 'updated_at',
 ];
 
 // ---------- one email ----------
