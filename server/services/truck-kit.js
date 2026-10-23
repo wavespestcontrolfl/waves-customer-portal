@@ -107,12 +107,21 @@ const CATEGORY_LINE = { lawn_care: 'lawn', pest_control: 'pest', tree_shrub: 'tr
 // injection, compliance projects, sanitation), and the protocol matcher
 // resolves the program and the visit kind (bait monitoring, foam drill).
 const NO_TOOL_LANES = new Set(['billing_rider', 'injection_lane', 'compliance_project_lane', 'sanitation_lane']);
+// Trapping (wildlife, rodent trapping): live traps, monitoring and removal,
+// none of it a keyed item. By key, or by a trapping name for a legacy row.
+const TRAP_KEYS = new Set(['wildlife_trapping', 'rodent_trapping']);
+const TRAP_NAME = /\b(wildlife|trapping)\b/i;
+const isTrapping = (serviceType, serviceKey) =>
+  (serviceKey ? TRAP_KEYS.has(String(serviceKey).toLowerCase()) : false) || TRAP_NAME.test(String(serviceType || ''));
 const PROGRAM_LINE = { lawn: 'lawn', pest: 'pest', cockroach: 'pest', bed_bug: 'pest', mosquito: 'mosquito', rodent: 'rodent', termite: 'termite', tree_shrub: 'tree_shrub' };
 // Programs with no keyed kit: the Arborjet injection gear is not keyed, and
 // bed bug work (chemical, heat or both) has no kit of its own represented.
 const PROGRAM_NO_KIT = new Set(['palm_injection', 'bed_bug']);
 const REASON_PROMOTES = { bait_monitoring: ['bait_station_key'], foam_drill: ['foam_drill_kit'] };
-const laneOf = (serviceType, serviceKey) => resolveTraceEligibility({ serviceKey: serviceKey || null, displayName: serviceType || '' }).reason;
+// The registry lane by catalog KEY only: its keyless name rules classify
+// for trace rendering ("Pest & Rodent Control" reads as a trap lane there)
+// and must not decide tools.
+const laneOf = (serviceType, serviceKey) => (serviceKey ? resolveTraceEligibility({ serviceKey, displayName: serviceType || '' }).reason : null);
 const matchOf = (serviceType, serviceKey) => matchServiceProtocol(PROTOCOLS, serviceType, { serviceKey: serviceKey || null });
 // A rule the matcher claims by catalog KEY names the program outright; a
 // term match or a bare default leaves the line to the category and the name.
@@ -121,7 +130,7 @@ const keyedProgram = (serviceKey) => (serviceKey ? MATCH_RULES.find((rule) => ru
 // registry lane without tools, or a service the matcher gives no program
 // (the misting design visit, an unconfigured misting phase, trunk injection).
 function noToolService(serviceType, serviceKey, resolved) {
-  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey) || isMechanical(serviceType, serviceKey)) return true;
+  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey) || isMechanical(serviceType, serviceKey) || isTrapping(serviceType, serviceKey)) return true;
   if (NO_TOOL_LANES.has(laneOf(serviceType, serviceKey))) return true;
   return !resolved.programKey || PROGRAM_NO_KIT.has(resolved.programKey);
 }

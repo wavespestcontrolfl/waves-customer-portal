@@ -415,6 +415,9 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Waves Pest Control Appointment', { serviceKey: 'general_appointment' })).toEqual([]);
     // The WaveGuard onboarding visit shares that lane but treats: it keeps its tools.
     expect(truckKit.serviceLinesFor('WaveGuard Initial Setup', { serviceKey: 'waveguard_initial_setup', serviceCategory: 'pest_control' })).toEqual(['pest']);
+    // Trapping work (wildlife, rodent trapping) uses traps, not the keyed kit.
+    expect(truckKit.serviceLinesFor('Wildlife Trapping', { serviceKey: 'wildlife_trapping', serviceCategory: 'specialty' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Rodent Trapping', { serviceKey: 'rodent_trapping' })).toEqual([]);
     // Bed bug work has no keyed kit represented: no hold.
     expect(truckKit.serviceLinesFor('Bed Bug Treatment', { serviceKey: 'bed_bug_treatment' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Palm Injection Service', { serviceKey: 'palm_injection' })).toEqual([]);
