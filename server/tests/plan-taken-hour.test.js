@@ -232,6 +232,29 @@ describe('callFollowUpWindow', () => {
     expect(probed.sort()).toEqual(all);
   });
 
+  test('a moved visit 2 keeps its job length: the whole job must fit the shift and be free, and is written that long', async () => {
+    // Other customers' stops as spans; a probe conflicts with any it overlaps.
+    const holdSpans = (spans) => findConflictingVisits.mockImplementation(async ({ windowStart, windowEnd }) => spans
+      .filter(([s, e]) => windowStart < e && s < windowEnd)
+      .map(([s]) => ({ id: `other-${s}`, customer_id: 'c2' })));
+    const threeHours = { ...args, durationMinutes: 180 };
+    // 3 PM is taken. A three-hour job cannot start at 4 PM (it would run past the 6 PM close),
+    // and the stop holds part of 2 PM's and 1 PM's span: noon is the nearest whole job that fits.
+    holdSpans([['15:00', '16:00']]);
+    expect(await planTakenHour.callFollowUpWindow(conn, threeHours, { window_start: '15:00', window_end: '16:00', window_display: '3:00 PM' }))
+      .toEqual({ window_start: '12:00', window_end: '15:00', window_display: '12:00 PM' });
+    expect(findConflictingVisits.mock.calls.map(([a]) => a.windowStart)).not.toContain('16:00');
+    // A stop at noon holds the job's third hour, not its first: the planned 10 AM is taken, and so is 11 AM.
+    holdSpans([['12:00', '13:00']]);
+    expect(await planTakenHour.callFollowUpWindow(conn, threeHours, planned))
+      .toEqual({ window_start: '09:00', window_end: '12:00', window_display: '9:00 AM' });
+    expect(findConflictingVisits.mock.calls[findConflictingVisits.mock.calls.length - 3][0]).toMatchObject({ windowStart: '10:00', windowEnd: '13:00' });
+    // A job shorter than its planned window keeps the window's span.
+    holdSpans([['10:00', '11:00']]);
+    expect(await planTakenHour.callFollowUpWindow(conn, { ...args, durationMinutes: 30 }, planned))
+      .toEqual({ window_start: '11:00', window_end: '12:00', window_display: '11:00 AM' });
+  });
+
   test('the same customer at the same place is one stop, not a reason to move', async () => {
     findConflictingVisits.mockResolvedValue([{ id: 'own', customer_id: 'c1' }]);
     const q = { leftJoin: () => q, whereIn: () => q, select: async () => [{ id: 'own', property_id: 'prop-a' }] };
@@ -293,11 +316,14 @@ describe('callFollowUpWindow wiring in the call pipeline', () => {
     expect(call).toBeLessThan(insert);
     const block = src.slice(call, src.indexOf('packageVisit: packageFollowUp });', call));
     expect(block).toContain('technicianId: followUpTechId,');
+    // The job length the probe uses is the one the insert stores.
+    expect(block).toContain('durationMinutes: fuDurationMin,');
     expect(block).toContain('window_start: fuStart,');
     expect(block).toContain('{ hourStated: fuPlan.hourStated,');
     // The insert writes that window and no other.
     const insertBlock = src.slice(src.indexOf("const [fuRow] = await sp('scheduled_services')", call), insert);
     expect(insertBlock).toContain('...fuWindow,');
+    expect(src.slice(call, insert + 4000)).toContain('estimated_duration_minutes: fuDurationMin,');
     expect(insertBlock).not.toMatch(/window_(start|end|display):/);
   });
 

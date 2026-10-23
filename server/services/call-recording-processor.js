@@ -20177,12 +20177,15 @@ const CallRecordingProcessor = {
                       // the fence above so a concurrent fenced call booking
                       // cannot pick the same hour. A time set on the call and
                       // a package visit 2 keep theirs; the idempotency key
-                      // below stays on the planned hour.
+                      // below stays on the planned hour. A moved visit 2
+                      // keeps its job length (Codex #6495 r1 P1).
+                      const fuDurationMin = callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES;
                       const fuWindow = await require('./scheduling/plan-taken-hour').callFollowUpWindow(sp, {
                         visit1: primaryRow,
                         customerId,
                         technicianId: followUpTechId,
                         date: fuPlan.scheduledDate,
+                        durationMinutes: fuDurationMin,
                       }, {
                         window_start: fuStart,
                         window_end: fuWindowEnd,
@@ -20238,7 +20241,7 @@ const CallRecordingProcessor = {
                           // from owing a third visit.
                           ...callFollowUpBillingShape(packageFollowUp ? 0 : priceInfo.price),
                           followup_source_service_id: primaryRow.id,
-                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                          estimated_duration_minutes: fuDurationMin,
                           // Customer-safe only: once dispatch confirms this row
                           // the portal filter no longer hides it and
                           // GET /api/schedule returns notes verbatim. The
