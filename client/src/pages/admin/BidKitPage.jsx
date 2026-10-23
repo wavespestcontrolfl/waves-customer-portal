@@ -6,7 +6,7 @@ import {
   ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Textarea, UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
-import { formatETDate, formatETDateOnly, formatETTime } from "../../lib/timezone";
+import { etDateString, formatETDate, formatETDateOnly, formatETTime } from "../../lib/timezone";
 import { STATUS_LABEL, SIGN_OFF_REFUSAL, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, PUBLIC_OR_PRIVATE, REFERENCE_DETAIL_KEYS } from "@bid-kit-catalog";
 
 // Bid kit (GATE_BID_KIT, dark, admin only). The papers and facts every government bid asks for. Nothing here is public and
@@ -547,8 +547,18 @@ function useKit() {
     }
   }, []);
   useEffect(() => { load(); }, [load]);
+  // Statuses are the server's for its Eastern day: when the Eastern day turns while the page is open (an expiring paper becomes
+  // expired at midnight), the list is read again.
+  const today = data && data.today;
+  useEffect(() => {
+    if (!today) return undefined;
+    const timer = setInterval(() => { if (etDateString() !== today) load(); }, DAY_CHECK_MS);
+    return () => clearInterval(timer);
+  }, [today, load]);
   return { data, loading, error, load };
 }
+
+const DAY_CHECK_MS = 60 * 1000;
 
 // The page's writes. One mutation at a time (busy), a message that says what happened, and the list read again after it so
 // statuses and the summary always come from the server. A 409 closes every open editor: they hold fields from the old

@@ -201,7 +201,7 @@ describe('bells close when the paper no longer needs renewing', () => {
       episodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(1), ID(2)] }]);
       present(item(ID(2), { expires_on: '2026-11-04' }));
       await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW });
-      expect(episodes.openAdminAlertMetadata).toHaveBeenCalledWith(db, OVERFLOW_KEY);
+      expect(episodes.openAdminAlertMetadata).toHaveBeenCalledWith(trx, OVERFLOW_KEY); // read under the count's lock
       expect(standingRaises()).toHaveLength(1);
       const opts = standingRaises()[0][3];
       expect(opts.metadata).toMatchObject({ count: 1, itemKeys: [ID(2)] });
@@ -272,7 +272,8 @@ describe('the per-item lock and the re-read', () => {
     present(item(ID(1), { expires_on: '2026-11-04' }));
     expect(await syncExpiryBell({ id: ID(1) }, { now: NOW })).toEqual({ closed: 0 });
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-    expect(lockCalls()).toEqual([[LOCK, `bid-kit:expiry-item:${ID(1)}`]]);
+    // The item's lock for its bell, then the standing count's lock for its refresh (always taken, never looked around).
+    expect(lockCalls()).toEqual([[LOCK, `bid-kit:expiry-item:${ID(1)}`], [LOCK, 'bid-kit:expiry-item:bid-kit:expiry-overflow']]);
     // And a handle whose row is gone closes the bell.
     await syncExpiryBell({ id: ID(2) }, { now: NOW });
     expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[keyFor({ id: ID(2) })], 'archived']);
@@ -438,11 +439,10 @@ describe('the daily ring budget (docs/admin-notifications.md rule 3)', () => {
     expect(standingCalls()[0][3].metadata).toMatchObject({ count: 1, itemKeys: [all[4].id] });
   });
 
-  test('a save refresh whose item left the list meanwhile writes nothing', async () => {
-    episodes.openAdminAlertMetadata
-      .mockResolvedValueOnce([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(1)] }]) // the cheap look outside the lock lists it...
-      .mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(2)] }]); // ...but under the lock another refresh removed it
+  test('a save refresh whose item is not on the list under the lock writes nothing', async () => {
+    episodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(2)] }]); // another refresh removed it
     await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW });
+    expect(episodes.openAdminAlertMetadata).toHaveBeenCalledWith(trx, OVERFLOW_KEY);
     expect(standingCalls()).toHaveLength(0);
     expect(episodes.closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys)).not.toContain(OVERFLOW_KEY);
   });

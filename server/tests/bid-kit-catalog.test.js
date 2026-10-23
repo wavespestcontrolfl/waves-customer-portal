@@ -326,6 +326,10 @@ describe('tax IDs are never stored: one detector', () => {
     // Read in one normal form: fullwidth digits, invisible characters between the digits.
     ['\uFF11\uFF12\uFF13\uFF14\uFF15\uFF16\uFF17\uFF18\uFF19', true, 'fullwidth nine digits'],
     ['123\u200B45\u200B6789', true, 'zero-width spaces inside an SSN'], ['12\u00AD3456789', true, 'soft hyphen inside an EIN'],
+    ['1234\u200E56789', true, 'left-to-right mark inside nine digits'], ['1234\u200F56789', true, 'right-to-left mark'],
+    ['\u2066123456789\u2069', true, 'bidi isolates around nine digits'], ['1234\u202A56789', true, 'bidi embedding'],
+    ['1234\u030156789', true, 'a combining mark inside nine digits'], ['1234\u000156789', true, 'a control character inside nine digits'],
+    ['Line 1234\n56789 Example Way', false, 'a line break still separates'],
     ['SSN 123\u201445\u20146789', true, 'SSN with em dashes'], ['EIN 12\u20143456789', true, 'EIN with an em dash'],
     ['2026\u201410\u201423', false, 'date with em dashes'], ['Policy 1234\u20145678', false, 'eight digits with an em dash'],
     // A tax phrase with punctuation between or inside its words.

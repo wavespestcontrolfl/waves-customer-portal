@@ -697,3 +697,22 @@ it("with no references yet, Add a reference opens the form and saving it creates
   await waitFor(() => expect(within(rowFor("Customer reference")).getByText(/Sample District/)).toBeInTheDocument());
   expect(screen.queryByLabelText("Entity")).toBeNull(); // the editor closed after the save
 });
+
+it("reads the list again when the Eastern day turns while the page is open", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-10-24T03:58:00Z")); // Oct 23, 11:58 PM Eastern (the payload's day)
+  let reads = 0;
+  route({ "GET /admin/bid-kit/": () => { reads += 1; return reply(payload()); } });
+  try {
+    renderPage();
+    await screen.findByText("FDACS business license copy");
+    expect(reads).toBe(1);
+    await vi.advanceTimersByTimeAsync(61 * 1000); // still Oct 23 in Eastern time: nothing is read
+    expect(reads).toBe(1);
+    vi.setSystemTime(new Date("2026-10-24T04:01:00Z")); // Oct 24, 12:01 AM Eastern
+    await vi.advanceTimersByTimeAsync(61 * 1000);
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+  } finally {
+    vi.useRealTimers();
+  }
+});

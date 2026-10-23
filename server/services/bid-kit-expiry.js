@@ -118,9 +118,8 @@ async function syncExpiryBell(item, { now = new Date() } = {}) {
 // corrected date shows. The count closes when nothing is left. A failure never fails the save: the daily run rebuilds it.
 async function refreshOverflowFor(itemId, today) {
   try {
-    // A cheap look first, so a save whose item is not listed takes no lock; the list is read again under the lock.
-    const standing = (await episodes.openAdminAlertMetadata(db, OVERFLOW_KEY)).find((meta) => isOverflowKey(meta.dedupeKey));
-    if (!standing || !Array.isArray(standing.itemKeys) || !standing.itemKeys.includes(itemId)) return;
+    // Always under the count's lock (no look outside it): a daily sweep that read this paper as due before the save committed
+    // still holds the lock, so this waits for it, then sees its list and re-reads the paper.
     await syncOverflowRow(null, today, { onlyIfListed: itemId });
   } catch (err) {
     logger.warn(`[bid-kit] refreshing the standing expiry count failed: ${errorTag(err)}`);
