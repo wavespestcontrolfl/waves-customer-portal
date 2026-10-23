@@ -18,7 +18,7 @@
 const IRRIGATION_INPUT_FIELDS = [
   'irrigation_controller_location', 'irrigation_zones', 'irrigation_inches_per_week',
   'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days',
-  'irrigation_system_type', 'rain_sensor', 'irrigation_issues',
+  'irrigation_system_type', 'rain_sensor', 'irrigation_water_source', 'irrigation_issues',
 ];
 const IRRIGATION_SIZING_FIELDS = ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week'];
 // Watering JURISDICTION after a move: the turf profile's county is evidence
@@ -37,6 +37,9 @@ const GRASS_CONFIRMED_FIELD = 'turf_grass';
 // The rain-sensor flag describes the former home's controller after a move —
 // confirmed only when the customer re-saves that field itself (gh-r41).
 const RAIN_SENSOR_CONFIRMED_FIELD = 'rain_sensor';
+// Where the sprinklers' water comes from is a property of the home too (a county meter at the old house says
+// nothing about a well at the new one): re-saved in the portal after a move before the dollar range may print.
+const WATER_SOURCE_CONFIRMED_FIELD = 'irrigation_water_source';
 // Lawn AREA is re-established for the current home only by a lawn-size writer (turf-profile editor, service-area
 // review, an accepted estimate's confirmed size, a primary flip carrying a reviewed lawn). The grass entry says nothing
 // about the size, and a size edit says nothing about the grass, so each has its own entry (codex #6498 r1 P2).
@@ -101,6 +104,12 @@ function countyConfirmedAfterMove(row = {}) {
 function grassConfirmedAfterMove(row = {}) {
   if (!row.irrigation_home_changed_at) return true;
   return parseConfirmed(row.irrigation_confirmed_fields).includes(GRASS_CONFIRMED_FIELD);
+}
+
+/** The water-source answer was re-saved for the current home (or no move). */
+function waterSourceConfirmedAfterMove(row = {}) {
+  if (!row.irrigation_home_changed_at) return true;
+  return parseConfirmed(row.irrigation_confirmed_fields).includes(WATER_SOURCE_CONFIRMED_FIELD);
 }
 
 /** The lawn area was re-established for the current home by a lawn-size writer (or no move). */
@@ -188,7 +197,7 @@ function normalizeForCompare(field, value) {
  * property-preferences route).
  */
 function changedSizingFields(current = {}, updates = {}) {
-  const candidates = [...IRRIGATION_SIZING_FIELDS, RAIN_SENSOR_CONFIRMED_FIELD];
+  const candidates = [...IRRIGATION_SIZING_FIELDS, RAIN_SENSOR_CONFIRMED_FIELD, WATER_SOURCE_CONFIRMED_FIELD];
   return candidates.filter((f) => Object.prototype.hasOwnProperty.call(updates, f)
     && normalizeForCompare(f, current ? current[f] : null) !== normalizeForCompare(f, updates[f]));
 }
@@ -211,4 +220,4 @@ function unconfirmedFieldsRaw(knexLike, fields) {
   );
 }
 
-module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, LAWN_SQFT_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, lawnSqftConfirmedAfterMove, confirmIrrigationFields, changedSizingFields, unconfirmedFieldsRaw, parseConfirmedFields: parseConfirmed };
+module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, LAWN_SQFT_CONFIRMED_FIELD, WATER_SOURCE_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, lawnSqftConfirmedAfterMove, waterSourceConfirmedAfterMove, confirmIrrigationFields, changedSizingFields, unconfirmedFieldsRaw, parseConfirmedFields: parseConfirmed };

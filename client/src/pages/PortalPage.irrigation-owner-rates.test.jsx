@@ -54,3 +54,15 @@ describe('portal derived irrigation line follows the server rate table', () => {
     expect(line).toHaveTextContent('your Weekly Inches entry above is what we\'ll use');
   });
 });
+
+describe('water source (phase 2 of "water you saved")', () => {
+  it('shows the three answers under Irrigation, the saved one pressed, and the summary names it', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS, irrigationWaterSource: 'well' }, hasLawnCare: true });
+    render(<PropertyTab customer={lawnCustomer} />);
+    const well = await screen.findByRole('button', { name: 'Private well' });
+    expect(well).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'County water' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'Reclaimed' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText(/well water/)).toBeInTheDocument();
+  });
+});

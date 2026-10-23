@@ -39,6 +39,51 @@ function irrigationWaterSavedLive() {
   return process.env.GATE_IRRIGATION_WATER_SAVINGS === 'true';
 }
 
+// GATE_IRRIGATION_WATER_DOLLARS (phase 2, owner 2026-10-23 "ok go"): the dollar range beside the gallons, printed only
+// when the customer answered "county water" in the portal (a well lawn saves pump electricity, a reclaimed lawn a
+// dollar or two: a dollar figure there would be wrong by 10x to 100x). Strict `=== 'true'`, read at call time.
+function irrigationWaterDollarsLive() {
+  return process.env.GATE_IRRIGATION_WATER_DOLLARS === 'true';
+}
+
+// Marginal $ per 1,000 gallons by county, from the utilities' published schedules (2026). `low` = a dedicated
+// irrigation meter (water only, lowest tier); `high` = irrigation on the house meter (an upper water tier plus
+// sewer). Which meter a customer has is not on file, so the sentence prints the range.
+//   Manatee: irrigation meter $3.11 (tier 1) … house meter $3.89 tier + $6.89 sewer (rates effective 2026-06-01).
+//   Sarasota: potable tiers $3.70–6.42 (FY2024) + wastewater, raised 6.4% + index for FY2026: about $4 to $13.
+//   Charlotte: water $6.84 (0–5,999 gal) … $9.91 (11,000–15,999) + sewer $6.58 (rates effective 2026-04-01).
+const WATER_RATES_PER_1000_GAL = Object.freeze({
+  Manatee: Object.freeze({ low: 3.11, high: 10.78 }),
+  Sarasota: Object.freeze({ low: 4.0, high: 13.0 }),
+  Charlotte: Object.freeze({ low: 6.84, high: 16.49 }),
+});
+const WATER_SOURCE_COUNTY = 'county';
+
+function dollars(gallons, perThousand) {
+  return Math.round((gallons / 1000) * perThousand);
+}
+
+/**
+ * The dollar block for a county-water customer, or null: not asked / not county water, no county rate on file,
+ * or the gate is off. Figures are whole dollars for the displayed gallons.
+ */
+function waterDollarsForBlock({ gallonsPerRun, gallonsPerWeek }, { waterSource, county } = {}) {
+  if (!irrigationWaterDollarsLive()) return null;
+  if (String(waterSource || '').trim().toLowerCase() !== WATER_SOURCE_COUNTY) return null;
+  const key = String(county || '').trim().replace(/\s+county$/i, '');
+  const rate = WATER_RATES_PER_1000_GAL[key.charAt(0).toUpperCase() + key.slice(1).toLowerCase()];
+  if (!rate) return null;
+  return {
+    county: key.charAt(0).toUpperCase() + key.slice(1).toLowerCase(),
+    perThousandLow: rate.low,
+    perThousandHigh: rate.high,
+    runLow: dollars(gallonsPerRun, rate.low),
+    runHigh: dollars(gallonsPerRun, rate.high),
+    weekLow: dollars(gallonsPerWeek, rate.low),
+    weekHigh: dollars(gallonsPerWeek, rate.high),
+  };
+}
+
 function positiveLawnSqft(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0 || n > MAX_LAWN_SQFT) return null;
@@ -63,6 +108,9 @@ function roundGallons(gallons) {
  *                                                        the email tells them to skip, which may differ from their normal
  *                                                        schedule (a restriction-limited plan prescribes fewer, longer runs)
  * @param {number|null}        input.planEvents          that plan's event count
+ * @param {string|null}        input.waterSource         the portal answer: 'county' | 'reclaimed' | 'well' | null (withheld
+ *                                                        after a move until re-saved); dollars print for 'county' only
+ * @param {string|null}        input.county              the decision's jurisdiction (resolveRestrictionCounty), the rate key
  * @param {boolean}            input.ignoreDrip          how the caller's own derivation reads drip zones: the plan engine
  *                                                        leaves drip out (one turf head + drip is one head), the email's
  *                                                        ask paths count it (mixed heads → the setup ask), so each caller
@@ -71,7 +119,7 @@ function roundGallons(gallons) {
  * @returns {{ v: 1, basis: 'plan'|'schedule'|'default', lawnSqft: number, depthInches: number, runsPerWeek: number,
  *             gallonsPerRun: number, gallonsPerWeek: number } | null}
  */
-function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = null, systemType = null, explicitInchesPerWeek = null, rates, planDepthInches = null, planEvents = null, ignoreDrip = true } = {}) {
+function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = null, systemType = null, explicitInchesPerWeek = null, rates, planDepthInches = null, planEvents = null, ignoreDrip = true, waterSource = null, county = null } = {}) {
   const sqft = positiveLawnSqft(lawnSqft);
   if (!sqft) return null;
 
@@ -101,7 +149,7 @@ function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = nul
 
   const perRun = roundGallons((depth * sqft / 1000) * GALLONS_PER_INCH_PER_1000_SQFT);
   if (perRun < ROUND_GALLONS_TO) return null;
-  return {
+  const block = {
     v: 1,
     basis,
     lawnSqft: sqft,
@@ -111,10 +159,27 @@ function waterSavedForDecision({ lawnSqft, runMinutes = null, wateringDays = nul
     // From the DISPLAYED per-run figure, so the two printed numbers always add up (codex #6498 r1 P2).
     gallonsPerWeek: perRun * runs,
   };
+  // Phase 2: the dollar range, frozen with the block (key absent unless county water + a county rate + the gate).
+  const money = waterDollarsForBlock(block, { waterSource, county });
+  return money ? { ...block, dollars: money } : block;
 }
 
 function fmtGallons(n) {
   return Number(n).toLocaleString('en-US');
+}
+
+function fmtDollars(n) {
+  return `$${Number(n).toLocaleString('en-US')}`;
+}
+
+/** " On Manatee County water that is roughly $7 to $23 for the week." / "… a run." — or '' without a dollar block. */
+function dollarClause(block, { whole } = {}) {
+  const d = block && block.dollars;
+  if (!d) return '';
+  const [lo, hi] = whole ? [d.weekLow, d.weekHigh] : [d.runLow, d.runHigh];
+  if (!(hi > 0)) return '';
+  const range = lo === hi ? `about ${fmtDollars(hi)}` : `roughly ${fmtDollars(lo)} to ${fmtDollars(hi)}`;
+  return ` On ${d.county} County water that is ${range} ${whole ? 'for the week' : 'a run'}.`;
 }
 
 /**
@@ -126,19 +191,22 @@ function waterSavedSentence(block, plan) {
   if (plan.action === 'hold' && Array.isArray(plan.reasons) && plan.reasons.includes('restriction_prohibits')) return null;
   const perRun = fmtGallons(block.gallonsPerRun);
   // Only a hold skips the whole week; a run or conditional plan may still run, so it gets the per-run figure alone.
+  // The dollar clause (phase 2) follows the same split: the week's money on a whole-week hold, a run's money otherwise.
   // A cool-season cadence hold is itself conditional (a customer who did not run last week runs one cycle this week),
   // so it gets the per-run figure alone too (codex #6498 r5 P2).
   const cadenceHold = Array.isArray(plan.reasons) && plan.reasons.includes('cool_season_cadence');
-  const weekClause = plan.action === 'hold' && !cadenceHold && block.runsPerWeek >= 2
+  const wholeWeek = plan.action === 'hold' && !cadenceHold && block.runsPerWeek >= 2;
+  const weekClause = wholeWeek
     ? `, so skipping ${block.runsPerWeek === 2 ? 'both' : `all ${block.runsPerWeek}`} of this week's runs saves about ${fmtGallons(block.gallonsPerWeek)} gallons`
     : '';
+  const money = dollarClause(block, { whole: wholeWeek });
   if (block.basis === 'plan') {
-    return `Each run you skip is about ${perRun} gallons on your lawn, from this week's plan and your lawn's size on file${weekClause}.`;
+    return `Each run you skip is about ${perRun} gallons on your lawn, from this week's plan and your lawn's size on file${weekClause}.${money}`;
   }
   if (block.basis === 'schedule') {
-    return `Each run you skip is about ${perRun} gallons on your lawn, from the sprinkler schedule in your portal and your lawn's size on file${weekClause}.`;
+    return `Each run you skip is about ${perRun} gallons on your lawn, from the sprinkler schedule in your portal and your lawn's size on file${weekClause}.${money}`;
   }
-  return `Each ${DEFAULT_RUN_MINUTES}-minute run you skip is about ${perRun} gallons on your lawn${weekClause}. That assumes a typical half-inch run over your lawn's size on file; enter your zone minutes and watering days under Irrigation in your portal and we'll use those instead.`;
+  return `Each ${DEFAULT_RUN_MINUTES}-minute run you skip is about ${perRun} gallons on your lawn${weekClause}.${money} That assumes a typical half-inch run over your lawn's size on file; enter your zone minutes and watering days under Irrigation in your portal and we'll use those instead.`;
 }
 
 /**
@@ -150,14 +218,18 @@ function waterSavedSentence(block, plan) {
 function waterSavedSetupSentence(block) {
   if (!block) return null;
   const perRun = fmtGallons(block.gallonsPerRun);
+  const money = dollarClause(block, { whole: false });
   if (block.basis === 'schedule') {
-    return `From the sprinkler schedule in your portal and your lawn's size on file, each run is about ${perRun} gallons, so every run you skip after a good rain is real water saved.`;
+    return `From the sprinkler schedule in your portal and your lawn's size on file, each run is about ${perRun} gallons, so every run you skip after a good rain is real water saved.${money}`;
   }
-  return `For a lawn your size, a typical ${DEFAULT_RUN_MINUTES}-minute run is about ${perRun} gallons, so every run you skip after a good rain is real water saved. Once your schedule is on file we'll use your own minutes and days for that figure.`;
+  return `For a lawn your size, a typical ${DEFAULT_RUN_MINUTES}-minute run is about ${perRun} gallons, so every run you skip after a good rain is real water saved.${money} Once your schedule is on file we'll use your own minutes and days for that figure.`;
 }
 
 module.exports = {
   irrigationWaterSavedLive,
+  irrigationWaterDollarsLive,
+  waterDollarsForBlock,
+  WATER_RATES_PER_1000_GAL,
   waterSavedForDecision,
   waterSavedSentence,
   waterSavedSetupSentence,

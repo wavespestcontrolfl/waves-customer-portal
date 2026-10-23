@@ -102,6 +102,8 @@ function decideWeekPlan({
   systemType = null,
   explicitInchesPerWeek = null,
   rainSensor = false,
+  // Phase 2 (GATE_IRRIGATION_WATER_DOLLARS): the portal's water-source answer, withheld after a move until re-saved.
+  waterSource = null,
   county = null,
   // The home the plan is decided for (address + coordinates the sweep used);
   // the report attaches the plan only to a service at THIS address.
@@ -200,6 +202,8 @@ function decideWeekPlan({
         // A run / conditional plan: the prescribed run is what gets skipped; a hold skips the customer's normal run.
         planDepthInches: plan.action !== 'hold' ? (plan.depthInches ?? null) : null,
         planEvents: plan.action !== 'hold' ? (plan.events ?? null) : null,
+        waterSource,
+        county,
       })
       : null);
   // Everything the decision was made from, for the snapshot (the report

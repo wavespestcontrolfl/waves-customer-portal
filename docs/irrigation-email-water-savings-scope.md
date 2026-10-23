@@ -5,10 +5,12 @@ two days a week, about 20 minutes a zone, even in weeks when rain already covere
 the lawn. When the Monday email tells them to skip, how much water and money does
 that skip actually represent, and is it worth putting the number in the email?
 
-Status: phase 1 (gallons only) is BUILT behind `GATE_IRRIGATION_WATER_SAVINGS`, dark by
-default (owner go-ahead 2026-10-22). Contract: `docs/gates-and-env.md`; code in
-`server/services/irrigation-water-saved.js`. Phase 2 (water source + dollars) is
-not built.
+Status: phase 1 (gallons only) MERGED 2026-10-23 (#6498) and `GATE_IRRIGATION_WATER_SAVINGS`
+is ON in production since 2026-10-23. Phase 2 (water source + dollars) is BUILT behind
+`GATE_IRRIGATION_WATER_DOLLARS`, dark (owner "ok go" 2026-10-23): the portal's Irrigation
+section asks Water Source (County water / Reclaimed / Private well), and a County-water
+customer's sentence carries the dollar range from the county table in
+`server/services/irrigation-water-saved.js`. Contract: `docs/gates-and-env.md`.
 
 ## What the email already knows
 

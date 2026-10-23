@@ -176,7 +176,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     // A known move rides into the jurisdiction resolver (stale profile county rejected).
     expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at, movedAt: customer\.irrigation_home_changed_at \|\| null, countyConfirmed: countyConfirmedAfterMove\(customer\) \}\)/);
     expect(sweep).not.toMatch(/turf_updated_at|profileUpdatedAt/); // gh-r32: the row-wide timestamp is not a premise confirmation
-    expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*priorWeekPrescribedInches,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*rateTable: table,\s*lawnSqft,\s*waterSaved,\s*now,/);
+    expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*priorWeekPrescribedInches,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*rateTable: table,\s*lawnSqft,\s*waterSaved,\s*waterSource,\s*now,/);
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
     // Fail closed: only an explicit true renewal dispatches (null = unverifiable ⇒ abort).

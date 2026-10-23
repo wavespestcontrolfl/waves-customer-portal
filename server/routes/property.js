@@ -65,6 +65,7 @@ const CUSTOMER_EMAIL_FIELDS = {
   watering_days: 'Watering days',
   irrigation_system_type: 'Irrigation system type',
   rain_sensor: 'Rain sensor',
+  irrigation_water_source: 'Water source',
   mowing_days: 'Mowing days',
   mowing_time_of_day: 'Mowing time of day',
 };
@@ -134,7 +135,7 @@ router.get('/preferences', async (req, res, next) => {
           irrigationSystem: true, irrigationControllerLocation: '', irrigationZones: null,
           irrigationInchesPerWeek: null, irrigationRunMinutes: null,
           irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: [],
-          rainSensor: false, irrigationIssues: '',
+          rainSensor: false, irrigationWaterSource: null, irrigationIssues: '',
           mowingDays: [], mowingTimeOfDay: '', mowingNotes: '',
           hoaName: '', hoaRestrictions: '', hoaCompany: '', hoaPhone: '', hoaEmail: '',
           hoaLawnHeight: '', hoaSignageRules: '', hoaTimingRestrictions: '',
@@ -240,7 +241,8 @@ router.put('/preferences', async (req, res, next) => {
     // row-wide updated_at confirm nothing (codex #3565 gh-r20/r21).
     // The rain-sensor toggle is home-bound too — re-saving it after a move
     // is the customer's statement about the CURRENT controller (gh-r41).
-    const confirmedNow = [...IRRIGATION_SIZING_FIELDS, 'rain_sensor'].filter((f) => f in updates);
+    // The water source is home-bound the same way (county meter, reclaimed, well): its own ledger entry.
+    const confirmedNow = [...IRRIGATION_SIZING_FIELDS, 'rain_sensor', 'irrigation_water_source'].filter((f) => f in updates);
     // Freshness token (codex gh-r43): confirmations count only when the
     // request was RENDERED against the current home. A pre-move autosave
     // that waited out the advisory lock carries the old stamp (or none) and
