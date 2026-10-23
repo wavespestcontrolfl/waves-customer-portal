@@ -117,6 +117,16 @@ describe('validation: bounds, plain JSON numbers, and no code-owned field', () =
     [{ includedRisers: -1 }, /includedRisers/],
   ])('included counts are whole numbers inside the code-owned limits: %j is refused', (patch, pattern) => bad(edit(patch), pattern));
 
+  test.each([
+    [{ plan: { ...seed().plan, visitsPerYear: 12.5 } }, /plan\.visitsPerYear must be a whole number/],
+    [{ plan: { ...seed().plan, visitsPerYear: 0.5 } }, /plan\.visitsPerYear/],
+    [{ install: { techs: 2.5, hours: 10 } }, /install\.techs must be a whole number/],
+  ])('plan visits and install techs are whole numbers: %j is refused', (patch, pattern) => bad(edit(patch), pattern));
+
+  test('whole-number plan visits and techs are accepted; hours may be fractional', () => {
+    expect(config.normalizeMosquitoMistingPricingConfig(edit({ plan: { ...seed().plan, visitsPerYear: 24 }, install: { techs: 4, hours: 9.5 } }))).toMatchObject({ ok: true });
+  });
+
   test('the edges of the included counts are accepted, and a bad one ignores the whole row on sync', async () => {
     const edges = edit({ includedRisers: 80, tiers: { ...seed().tiers, smart: { ...seed().tiers.smart, includedNozzles: 80 }, essential: { ...seed().tiers.essential, includedNozzles: 10 } } });
     expect(config.normalizeMosquitoMistingPricingConfig(edges)).toMatchObject({ ok: true });

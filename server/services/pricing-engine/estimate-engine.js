@@ -767,6 +767,8 @@ function generateEstimate(input) {
     // silently dropped while the estimate still looks priced.
     const alreadyHasManual = lineItems.some(
       (line) => line.service === result.service && line.quoteRequired === true
+        // A misting manual row shares commercial_pest's shape but is a different request: it neither hides nor is hidden by one.
+        && (line.originalRequestedService === 'mosquito_misting') === (result.originalRequestedService === 'mosquito_misting')
     );
     if (!alreadyHasManual) {
       lineItems.push(result);
@@ -1288,7 +1290,7 @@ function generateEstimate(input) {
   // A commercial property never auto-prices the residential misting plan (no commercial misting program exists):
   // it rides the existing commercial manual-quote rail, like every other residential-only pricer.
   if (mistingService && require('../../config/feature-gates').mosquitoMistingLive()
-    && !useCommercialManualQuote(mistingService, 'mosquito')) {
+    && !useCommercialManualQuote(mistingService, 'mosquito_misting')) {
     // knobs: the quote-time snapshot replayed from a stored estimate (server-derived only, like the termite knobs).
     const result = priceMosquitoMisting(property, { ...serviceOptions(mistingService), knobs: mistingReplayKnobs });
     lineItems.push(result);

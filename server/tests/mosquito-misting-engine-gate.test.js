@@ -178,5 +178,13 @@ describe('gate on: commercial property', () => {
     const manual = JSON.stringify(est);
     expect(manual).toMatch(/commercial/i);
     expect(manual).not.toMatch(/4170/);
+    // The manual row keeps the misting identity (it is not filed as a commercial pest request).
+    const row = est.lineItems.find((l) => l.quoteRequired === true && l.originalRequestedService === 'mosquito_misting');
+    expect(row).toMatchObject({ service: 'commercial_pest', commercialPricingMode: 'manual_quote', label: 'Mosquito Misting System (commercial)' });
+    expect(est.lineItems.some((l) => l.originalRequestedService === 'pest_control')).toBe(false);
+    // Beside a commercial pest manual row, neither hides the other.
+    const both = generateEstimate({ ...PROPERTY, propertyType: 'commercial', isCommercial: true, services: { mosquitoMisting: { tier: 'essential' }, oneTimeMosquito: {} } });
+    const originals = both.lineItems.filter((l) => l.quoteRequired === true).map((l) => l.originalRequestedService);
+    expect(originals).toEqual(expect.arrayContaining(['mosquito_misting']));
   });
 });

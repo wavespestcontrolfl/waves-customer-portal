@@ -2542,6 +2542,12 @@ const MOSQUITO_MISTING = {
   serviceCallNoPlan: 149,
 };
 
+// ACCEPTANCE of a priced misting estimate is blocked until misting PR 2 ships the conversion: the recurring series seeding
+// cadence, the install on the acceptance invoice, per-application refill billing and the catalog rows. Code-owned on purpose
+// (no env var, no pricing_config): flipping it is the PR 2 change, not a toggle. Read at call time by
+// v1-legacy-mapper#estimateMistingAcceptBlocked.
+const MOSQUITO_MISTING_CONVERSION_READY = false;
+
 // The DB-editable prices of MOSQUITO_MISTING (pricing_config row `mosquito_misting_pricing`, mosquito-misting-config.js), frozen
 // as written above: production prices are DB-authoritative and these are the fresh-environment defaults and the migration seed.
 // Labels, the nozzle/riser/refill bounds and the default tier/solution/refill count stay in code and are not in the row.
@@ -2711,7 +2717,7 @@ module.exports = {
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
-  COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, MOSQUITO_MISTING, mosquitoMistingPricingDefaults, TERMITE, RODENT,
+  COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, MOSQUITO_MISTING, MOSQUITO_MISTING_CONVERSION_READY, mosquitoMistingPricingDefaults, TERMITE, RODENT,
   ONE_TIME, AREA_ADDONS, areaAddOnConfig, isAreaAddOnCatalogKey, areaAddOnPricingDefaults, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,

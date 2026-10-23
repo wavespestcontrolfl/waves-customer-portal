@@ -172,11 +172,11 @@ describe('a stored misting estimate is refused while the gate is off', () => {
     expect(mapper.estimateMistingGated({ engineResult: { lineItems: [{ service: 'mosquito_misting', annual: 708 }] } })).toBe(true);
   });
 
-  test('gate on: unchanged (no refusal)', () => {
+  test('gate on: the GATED refusal is off (acceptance is separately pending, see below); the send refusal is clear', () => {
     const data = stored();
-    expect(mapper.gatedAddOnCustomerRefusal(data)).toBeNull();
-    expect(mapper.gatedAddOnStaffRefusal(data, 'accepting')).toBeNull();
     expect(mapper.estimateMistingGated(data)).toBe(false);
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+    expect(mapper.gatedAddOnStaffRefusal(data, 'sending', { allowAcceptPending: true })).toBeNull();
   });
 
   test('an estimate with no misting is never refused, gate on or off', () => {
@@ -205,6 +205,115 @@ describe('a stored misting estimate is refused while the gate is off', () => {
     // the deposit webhook treats it as unrecordable (refund rail) like the other gated add-ons
     const deposits = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-deposits.js'), 'utf8');
     expect(deposits).toContain("reason: 'mosquito_misting_disabled'");
+  });
+});
+
+describe('false misting selections are not selections (the engine\'s own rule)', () => {
+  test.each([[false], [0], [''], [null], [undefined], ['yes'], [[]], [['x']]])('services.mosquitoMisting = %p is not carried', (value) => {
+    delete process.env.GATE_MOSQUITO_MISTING;
+    for (const key of ['mosquitoMisting', 'mosquito_misting']) {
+      const data = { engineInputs: { services: { [key]: value } } };
+      expect(mapper.estimateDataCarriesMosquitoMisting(data)).toBe(false);
+      expect(mapper.estimateMistingGated(data)).toBe(false);
+      expect(mapper.estimateMistingAcceptBlocked(data)).toBe(false);
+      expect(mapper.gatedAddOnCustomerRefusal(data)).toBeNull();
+    }
+  });
+
+  test('true and a plain object (even empty) are selections, like the engine', () => {
+    for (const value of [true, {}, { tier: 'smart' }]) {
+      expect(mapper.estimateDataCarriesMosquitoMisting({ engineInputs: { services: { mosquitoMisting: value } } })).toBe(true);
+    }
+  });
+});
+
+describe('acceptance of a priced misting estimate is pending misting PR 2, even with the gate on', () => {
+  const constants = require('../services/pricing-engine/constants');
+  const priced = () => {
+    const input = { ...PROPERTY, services: { mosquitoMisting: OPTS } };
+    return { result: mapper.mapV1ToLegacyShape(generateEstimate(input)), engineInputs: input };
+  };
+  const oversize = () => {
+    const input = { ...PROPERTY, services: { pest: { frequency: 'quarterly' }, mosquitoMisting: { nozzles: 120 } } };
+    return { result: mapper.mapV1ToLegacyShape(generateEstimate(input)), engineInputs: { ...input, services: { pest: input.services.pest } } };
+  };
+
+  test('the readiness constant is code-owned and false', () => {
+    expect(constants.MOSQUITO_MISTING_CONVERSION_READY).toBe(false);
+  });
+
+  test('gate ON + priced misting: the customer and staff refusals fire with the new code, reason and texts', () => {
+    const data = priced();
+    expect(mapper.estimateMistingAcceptBlocked(data)).toBe(true);
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toEqual({
+      error: mapper.AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: 'MOSQUITO_MISTING_ACCEPT_PENDING', reason: 'mosquito_misting_conversion_pending',
+    });
+    expect(mapper.gatedAddOnStaffRefusal(data, 'accepting')).toEqual({
+      code: 'MOSQUITO_MISTING_ACCEPT_PENDING', reason: 'mosquito_misting_conversion_pending',
+      message: 'This estimate includes a mosquito misting system. Online acceptance and scheduling for misting plans are not built yet (misting PR 2); book the design visit and the install by hand.',
+    });
+    expect(mapper.gatedAddOnCustomerRefusal(JSON.stringify(data))).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+  });
+
+  test('staff SEND stays allowed (allowAcceptPending); the public view never calls the refusal', () => {
+    const data = priced();
+    expect(mapper.gatedAddOnStaffRefusal(data, 'sending', { allowAcceptPending: true })).toBeNull();
+    expect(mapper.gatedAddOnCustomerRefusal(data, { allowAcceptPending: true })).toBeNull();
+    const fs = require('fs');
+    const path = require('path');
+    const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    expect(read('routes/admin-estimates.js')).toContain("'sending', { pricingAuthority: estimate.pricing_authority, allowAcceptPending: true }");
+    // manual acceptance and the booking preflight use the plain staff refusal (blocked)
+    expect(read('services/estimate-manual-acceptance.js')).toMatch(/mapper\.gatedAddOnStaffRefusal\(estimate\.estimate_data \|\| estimate\.estimateData, action, \{ pricingAuthority: estimate\.pricing_authority \}\)/);
+  });
+
+  test('manual acceptance refuses it with the new code', () => {
+    const { persistedAddOnRefusal } = require('../services/estimate-manual-acceptance');
+    if (typeof persistedAddOnRefusal !== 'function') return;
+    expect(persistedAddOnRefusal({ estimate_data: priced() }, { action: 'accepting' })).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+  });
+
+  test('the deposit webhook records nothing for it', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-deposits.js'), 'utf8');
+    expect(src).toContain("reason: 'mosquito_misting_conversion_pending'");
+    expect(src).toContain('estimateMistingAcceptBlocked(estimate.estimate_data');
+  });
+
+  test('gate OFF: the existing gated code wins', () => {
+    const data = priced();
+    delete process.env.GATE_MOSQUITO_MISTING;
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_GATED', reason: 'mosquito_misting_disabled' });
+    expect(mapper.gatedAddOnStaffRefusal(data, 'accepting')).toMatchObject({ code: 'MOSQUITO_MISTING_GATED' });
+  });
+
+  test('no misting: unchanged; an unpriced oversize-only row does not block', () => {
+    const plain = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })), engineInputs: { services: { pest: {} } } };
+    expect(mapper.estimateMistingAcceptBlocked(plain)).toBe(false);
+    expect(mapper.gatedAddOnCustomerRefusal(plain)).toBeNull();
+    expect(mapper.estimateDataCarriesPricedMisting(oversize())).toBe(false);
+    expect(mapper.estimateMistingAcceptBlocked(oversize())).toBe(false);
+    expect(mapper.gatedAddOnCustomerRefusal(oversize())).toBeNull();
+  });
+
+  test('evidence shapes: plan row, install item, raw engine line, selected input; an unpriced row beside nothing else does not count', () => {
+    expect(mapper.estimateDataCarriesPricedMisting({ result: { recurring: { services: [{ service: 'mosquito_misting', mo: 59 }] } } })).toBe(true);
+    expect(mapper.estimateDataCarriesPricedMisting({ result: { oneTime: { items: [{ service: 'mosquito_misting_installation', price: 4000 }] } } })).toBe(true);
+    expect(mapper.estimateDataCarriesPricedMisting({ engineResult: { lineItems: [{ service: 'mosquito_misting', annual: 708 }] } })).toBe(true);
+    expect(mapper.estimateDataCarriesPricedMisting({ engineInputs: { services: { mosquitoMisting: {} } } })).toBe(true);
+    expect(mapper.estimateDataCarriesPricedMisting({ result: { recurring: { services: [{ service: 'mosquito_misting', quoteRequired: true }] } } })).toBe(false);
+    expect(mapper.estimateDataCarriesPricedMisting(null)).toBe(false);
+  });
+
+  test('when conversion is ready the block lifts (the PR 2 switch)', () => {
+    constants.MOSQUITO_MISTING_CONVERSION_READY = true;
+    try {
+      expect(mapper.estimateMistingAcceptBlocked(priced())).toBe(false);
+      expect(mapper.gatedAddOnCustomerRefusal(priced())).toBeNull();
+    } finally {
+      constants.MOSQUITO_MISTING_CONVERSION_READY = false;
+    }
   });
 });
 

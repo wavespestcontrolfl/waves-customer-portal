@@ -51,7 +51,7 @@ const BOUNDS = Object.freeze({
 
 const isPlain = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isNum = (value) => typeof value === 'number' && Number.isFinite(value);
-const WHOLE = new Set(['includedNozzles', 'includedRisers']);
+const WHOLE = new Set(['includedNozzles', 'includedRisers', 'visitsPerYear', 'techs']);
 const inBounds = (field, value) => isNum(value) && (!WHOLE.has(field) || Number.isInteger(value)) && value >= BOUNDS[field][0] && value <= BOUNDS[field][1];
 const range = (field) => `${BOUNDS[field][0]} to ${BOUNDS[field][1]}`;
 const kind = (field) => (WHOLE.has(field) ? 'a whole number' : 'a number');

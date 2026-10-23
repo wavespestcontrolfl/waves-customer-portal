@@ -1711,17 +1711,56 @@ function estimateDataCarriesMosquitoMisting(estimateDataRaw, { pricingAuthority 
   }
   if (!d || typeof d !== 'object') return false;
   if (proposalIsAuthoritative(d) && proposalIsItemized(d.proposal)) return proposalCarriesMisting(d.proposal);
-  const listed = (value) => value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0);
-  const inputShapes = [d.engineInputs, d.engineInput, d.inputs, d.engineRequest?.options];
-  if (inputShapes.some((shape) => shape && typeof shape === 'object'
-    && (listed(shape.services?.mosquitoMisting) || listed(shape.services?.mosquito_misting)))) return true;
+  if (mistingInputSelected(d)) return true;
   return storedMistingRows(d, { pricingAuthority }).length > 0;
+}
+// The engine's own selection test (`if (mistingService && ...)` on services.mosquitoMisting || services.mosquito_misting):
+// `true` or a plain object selects the system; false, 0, '', null, a list or a string do not.
+function mistingSelected(value) {
+  return value === true || (value !== null && typeof value === 'object' && !Array.isArray(value));
+}
+function mistingInputSelected(d) {
+  return [d.engineInputs, d.engineInput, d.inputs, d.engineRequest?.options]
+    .some((shape) => shape && typeof shape === 'object'
+      && (mistingSelected(shape.services?.mosquitoMisting) || mistingSelected(shape.services?.mosquito_misting)));
 }
 const MOSQUITO_MISTING_GATED_CODE = 'MOSQUITO_MISTING_GATED';
 const MOSQUITO_MISTING_GATED_REASON = 'mosquito_misting_disabled';
 function estimateMistingGated(estimateDataRaw, options) {
   return estimateDataCarriesMosquitoMisting(estimateDataRaw, options)
     && !require('../../config/feature-gates').mosquitoMistingLive();
+}
+
+// Does the stored estimate carry a PRICED misting system? The plan row, the install item, the raw engine line or a selected
+// input count; an unpriced quote-required-only row (an oversize layout) does not. When stored rows exist they decide
+// (an input left behind beside an all-unpriced result does not count).
+function estimateDataCarriesPricedMisting(estimateDataRaw, { pricingAuthority = null } = {}) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  if (proposalIsAuthoritative(d) && proposalIsItemized(d.proposal)) {
+    const lines = [
+      ...(d.proposal.buildings || []).flatMap((building) => building?.lineItems || []),
+      ...(d.proposal.programs || []), ...(d.proposal.correctiveWork || []),
+    ];
+    return lines.some((line) => (line?.service === 'mosquito_misting' || line?.service === 'mosquito_misting_installation') && line.quoteRequired !== true);
+  }
+  const rows = storedMistingRows(d, { pricingAuthority });
+  if (rows.length) return rows.some((row) => row.quoteRequired !== true);
+  return mistingInputSelected(d);
+}
+// ACCEPTANCE of a priced misting estimate is blocked, fail closed, even with the gate ON, until misting PR 2 ships the
+// conversion (series seeding cadence, the install on the acceptance invoice, refill billing, catalog rows). View and staff
+// send stay allowed; accept / reserve / slots / card intents / manual acceptance / deposit recording are blocked.
+const MOSQUITO_MISTING_ACCEPT_PENDING_CODE = 'MOSQUITO_MISTING_ACCEPT_PENDING';
+const MOSQUITO_MISTING_ACCEPT_PENDING_REASON = 'mosquito_misting_conversion_pending';
+const MOSQUITO_MISTING_ACCEPT_PENDING_STAFF_MESSAGE = 'This estimate includes a mosquito misting system. Online acceptance and scheduling for misting plans are not built yet (misting PR 2); book the design visit and the install by hand.';
+function estimateMistingAcceptBlocked(estimateDataRaw, options) {
+  if (!estimateDataCarriesPricedMisting(estimateDataRaw, options)) return false;
+  return !require('../../config/feature-gates').mosquitoMistingLive()
+    || !require('./constants').MOSQUITO_MISTING_CONVERSION_READY;
 }
 
 // The persisted-boundary guard for area add-ons, shared by every route and
@@ -1756,6 +1795,13 @@ function gatedAddOnStaffRefusal(estimateDataRaw, action, options) {
       message: `This estimate includes a mosquito misting system, which is currently disabled (GATE_MOSQUITO_MISTING). Re-enable the gate or rebuild the estimate without it before ${action}.`,
     };
   }
+  if (!(options && options.allowAcceptPending) && estimateMistingAcceptBlocked(estimateDataRaw, options)) {
+    return {
+      code: MOSQUITO_MISTING_ACCEPT_PENDING_CODE,
+      reason: MOSQUITO_MISTING_ACCEPT_PENDING_REASON,
+      message: MOSQUITO_MISTING_ACCEPT_PENDING_STAFF_MESSAGE,
+    };
+  }
   return estimateAreaAddOnsGated(estimateDataRaw, options)
     ? { code: AREA_ADDONS_GATED_CODE, message: areaAddOnsGatedStaffMessage(action) } : null;
 }
@@ -1777,6 +1823,9 @@ function gatedAddOnCustomerRefusal(estimateDataRaw, options) {
   }
   if (estimateMistingGated(estimateDataRaw, options)) {
     return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: MOSQUITO_MISTING_GATED_CODE, reason: MOSQUITO_MISTING_GATED_REASON };
+  }
+  if (!(options && options.allowAcceptPending) && estimateMistingAcceptBlocked(estimateDataRaw, options)) {
+    return { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: MOSQUITO_MISTING_ACCEPT_PENDING_CODE, reason: MOSQUITO_MISTING_ACCEPT_PENDING_REASON };
   }
   return estimateAreaAddOnsGated(estimateDataRaw, options)
     ? { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE } : null;
@@ -1801,6 +1850,10 @@ module.exports = {
   estimateAreaAddOnsGated,
   estimateDataCarriesMosquitoMisting,
   estimateMistingGated,
+  estimateMistingAcceptBlocked,
+  estimateDataCarriesPricedMisting,
+  MOSQUITO_MISTING_ACCEPT_PENDING_CODE,
+  MOSQUITO_MISTING_ACCEPT_PENDING_REASON,
   MOSQUITO_MISTING_GATED_CODE,
   MOSQUITO_MISTING_GATED_REASON,
   areaAddOnsGatedStaffMessage,

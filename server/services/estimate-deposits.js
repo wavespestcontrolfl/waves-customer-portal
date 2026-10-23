@@ -794,6 +794,11 @@ async function depositStillRecordable(estimateId) {
     if (require('./pricing-engine/v1-legacy-mapper').estimateMistingGated(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) {
       return { recordable: false, reason: 'mosquito_misting_disabled' };
     }
+    // Acceptance of a priced misting estimate is pending misting PR 2 even with the gate on: a deposit has nothing to
+    // convert into, so it takes the same stale-deposit refund rail.
+    if (require('./pricing-engine/v1-legacy-mapper').estimateMistingAcceptBlocked(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) {
+      return { recordable: false, reason: 'mosquito_misting_conversion_pending' };
+    }
   }
 
   let gates = null;
