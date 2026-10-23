@@ -89,9 +89,23 @@ function oneLine(value) {
   return flattenWarrantyValue(value == null ? '' : String(value));
 }
 
+// An exact, real YYYY-MM-DD (a date-only or midnight timestamp from the
+// database row also passes); anything else is not a date.
 function parseIso(value) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(oneLine(value));
-  return m ? { y: +m[1], m: +m[2], d: +m[3] } : null;
+  const raw = value instanceof Date ? value.toISOString().slice(0, 10) : oneLine(value);
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T00:00:00(?:\.000)?Z)?$/.exec(raw);
+  if (!m) return null;
+  const date = { y: +m[1], m: +m[2], d: +m[3] };
+  const check = new Date(Date.UTC(date.y, date.m - 1, date.d));
+  return check.getUTCMonth() === date.m - 1 && check.getUTCDate() === date.d ? date : null;
+}
+
+// A filled certificate date must be a real date; blank stays blank.
+function certificateDate(findings, field, label) {
+  if (!oneLine(findings[field])) return null;
+  const date = parseIso(findings[field]);
+  if (!date) throw bad(`${label} on the certificate is not a real date (YYYY-MM-DD).`, 409);
+  return date;
 }
 
 function parseUs(value) {
@@ -128,13 +142,14 @@ function warrantyEligible(findings) {
     && extraApplications(findings.additional_applications).length === 0;
 }
 
-function propertyAddress(findings, customer, lot) {
+// The treated site from the certificate only: the customer's own address may
+// be a builder's office, so it never stands in for the property.
+function propertyAddress(findings, lot) {
   const street = oneLine(findings.treatment_address);
   if (street) return street;
+  if (!lot) throw bad('The certificate has no treatment address or lot.', 409);
   const permit = oneLine(findings.permit_number);
-  if (lot) return [lot, permit && `permit ${permit}`].filter(Boolean).join(', ');
-  return [oneLine(customer.address_line1), oneLine(customer.city), [oneLine(customer.state) || 'FL', oneLine(customer.zip)].filter(Boolean).join(' ')]
-    .filter(Boolean).join(', ');
+  return [lot, permit && `permit ${permit}`].filter(Boolean).join(', ');
 }
 
 function contractBasis(basis, builder, initial) {
@@ -155,18 +170,18 @@ function officeFields(body, initial) {
   return out;
 }
 
-function certificateValues(project, findings, customer) {
-  const initial = parseIso(findings.treatment_date) || parseIso(project.project_date);
+function certificateValues(project, findings) {
+  const initial = certificateDate(findings, 'treatment_date', 'The treatment date') || parseIso(project.project_date);
   if (!initial) throw bad('The certificate has no treatment date.');
   const termEnd = us(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)]));
   const lot = [oneLine(findings.lot_block), oneLine(findings.subdivision)].filter(Boolean).join(', ');
-  const finalDate = parseIso(findings.final_exterior_date);
-  const recordedRenewal = parseIso(findings.renewal_due);
+  const finalDate = certificateDate(findings, 'final_exterior_date', 'The final exterior date');
+  const recordedRenewal = certificateDate(findings, 'renewal_due', 'Renewal due by');
   const product = oneLine(findings.product_name) === 'Other' ? oneLine(findings.product_name_other) : oneLine(findings.product_name);
   return {
     initial,
     values: {
-      project: { builder: oneLine(findings.builder_contractor), address: propertyAddress(findings, customer, lot), lot: lot || 'N/A', permit: oneLine(findings.permit_number) || 'N/A' },
+      project: { builder: oneLine(findings.builder_contractor), address: propertyAddress(findings, lot), lot: lot || 'N/A', permit: oneLine(findings.permit_number) || 'N/A' },
       treatment: {
         product,
         active_ingredient: oneLine(findings.active_ingredient),
@@ -191,19 +206,22 @@ function certificateValues(project, findings, customer) {
 }
 
 // Values for one issue of the warranty, built server-side from the project
-// named in the request. Any other template passes its values through.
+// named in the request. The issue route calls it again inside its
+// transaction with `trx`, which locks the certificate row, so the snapshot is
+// the certificate as it stands at insert time. Any other template passes its
+// values through.
 async function templateIssueValues(templateKey, body, customer, conn = db) {
   if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return body?.values || {};
   if (body?.allowUnresolved === true) throw bad('The new construction warranty cannot be issued with blank fields.');
   const projectId = body?.projectId;
   if (!projectId) throw bad('Issue the new construction warranty from its pre-treat certificate.');
-  const project = await conn('projects').where({ id: projectId }).first();
+  const project = await conn('projects').where({ id: projectId }).forUpdate().first();
   if (!project || project.project_type !== 'pre_treatment_termite_certificate' || project.customer_id !== customer.id) {
     throw bad('Pre-treat certificate not found for this customer.', 404);
   }
   const findings = parseFindings(project.findings);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
-  const { initial, values } = certificateValues(project, findings, customer);
+  const { initial, values } = certificateValues(project, findings);
   const issuer = body?.values?.issuer || {};
   return {
     ...values,

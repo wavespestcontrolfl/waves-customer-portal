@@ -83,7 +83,7 @@ describe('pretreatWarrantyValues', () => {
       project: { address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' },
       findings: { ...findings, treatment_address: '', lot_block: '', subdivision: '' },
     });
-    expect(noLot.project.address).toBe('1 Builder Office Rd, Sarasota, FL 34236');
+    expect(noLot.project.address).toBe('');
   });
 
   it('requires a real basis date on or before treatment, and counts days to issue', () => {

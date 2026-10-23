@@ -446,7 +446,10 @@ router.post('/:key/contracts', async (req, res, next) => {
       // carry an inherited identity a merge-undo just restored elsewhere —
       // a bearer document must render the LIVE customer. Explicit request
       // overrides (name/email/phone/propertyAddress) still win.
-      const liveContext = buildCustomerDocumentContext(freshDocCustomer, values);
+      // Rebuilt on the transaction: the warranty re-reads its certificate
+      // under a row lock, so an edit committed before this insert is in it.
+      const liveValues = await templateIssueValues(loaded.template.template_key, req.body, freshDocCustomer, trx);
+      const liveContext = buildCustomerDocumentContext(freshDocCustomer, liveValues);
       if (propertyAddress) liveContext.customer = { ...liveContext.customer, address: propertyAddress };
       const liveRendered = renderDocumentTemplate({
         template: loaded.template,

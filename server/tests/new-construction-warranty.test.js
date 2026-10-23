@@ -66,7 +66,8 @@ describe('templateIssueValues (server-built warranty)', () => {
     warranty_type: 'Builder 1-year, renewable yearly to year 5',
   };
   const project = { id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_type: 'pre_treatment_termite_certificate', findings: JSON.stringify(findings) };
-  const conn = (row) => () => ({ where() { return this; }, first: async () => row });
+  const locks = [];
+  const conn = (row) => () => ({ where() { return this; }, forUpdate() { locks.push(row && row.id); return this; }, first: async () => row });
   const office = {
     warranty: {
       structures: 'The new home', notice_location: 'beside the electric panel', treatment_price: '$1,250.00',
@@ -93,6 +94,23 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(v.warranty.issue_date).not.toBe('01/01/2000');
     expect(v.warranty.issue_date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
     expect(v.treatment.final_exterior_line).toMatch(/not recorded on this certificate/);
+    // The certificate row is read under a lock (the route re-reads it on its transaction).
+    expect(locks).toContain(project.id);
+  });
+
+  test('never prints the customer address as the site, and refuses a certificate date that is not real', async () => {
+    const lotOnly = { ...project, findings: { ...findings, treatment_address: '', lot_block: 'Lot 4', permit_number: 'BP-1' } };
+    const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(lotOnly));
+    expect(v.project.address).toBe('Lot 4, permit BP-1');
+    const noSite = { ...project, findings: { ...findings, treatment_address: '' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(noSite))).rejects.toMatchObject({ status: 409 });
+    for (const bad of [{ treatment_date: '2026-02-30' }, { treatment_date: '2026-10-01junk' }, { renewal_due: '2027-13-01' }, { renewal_due: 'next fall' }]) {
+      const row = { ...project, findings: { ...findings, ...bad } };
+      await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(row))).rejects.toMatchObject({ status: 409 });
+    }
+    const recorded = { ...project, findings: { ...findings, renewal_due: '2027-09-15' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(recorded)))
+      .resolves.toMatchObject({ warranty: { renewal_due: '09/15/2027' } });
   });
 
   test('refuses blank fields, a missing or foreign project, an ineligible job and late basis dates', async () => {

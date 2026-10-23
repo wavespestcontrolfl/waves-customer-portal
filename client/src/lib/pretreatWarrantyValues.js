@@ -69,13 +69,13 @@ export function warrantyEligible(findings = {}) {
 // The certificate's own values; '' where the certificate has nothing, so the
 // issue route reports the field as unfilled instead of printing a guess.
 // Street address on the certificate; else the lot (a lot-only certificate is
-// valid before the street exists); else the customer's address.
-function propertyAddress(project, findings, lot) {
+// valid before the street exists); else blank. The customer's address may be
+// a builder's office, so it never stands in for the site (the server refuses).
+function propertyAddress(findings, lot) {
   const street = text(findings.treatment_address);
   if (street) return street;
   if (lot) return [lot, text(findings.permit_number) && `permit ${text(findings.permit_number)}`].filter(Boolean).join(', ');
-  return [text(project.address_line1), text(project.city), [text(project.state) || 'FL', text(project.zip)].filter(Boolean).join(' ')]
-    .filter(Boolean).join(', ');
+  return '';
 }
 
 // The certificate's own "Renewal due by" wins over the computed term end.
@@ -98,7 +98,7 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
   return {
     project: {
       builder: text(findings.builder_contractor),
-      address: propertyAddress(project, findings, lot),
+      address: propertyAddress(findings, lot),
       lot: lot || 'N/A',
       permit: text(findings.permit_number) || 'N/A',
     },
