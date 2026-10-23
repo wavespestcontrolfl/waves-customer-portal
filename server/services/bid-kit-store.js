@@ -91,6 +91,8 @@ async function replaceFile(id, file, expectedUpdatedAt) {
   } catch (err) {
     throw outcomeOf(err, 'rolled_back');
   }
+  // A rollback with no error rejects this promise by design: nothing waits on it on those paths, so mark it handled.
+  trx.executionPromise.catch(() => {});
   let result;
   try {
     const locked = await trx(TABLE).where({ id }).forUpdate().first('id', 'file_s3_key', 'archived_at', 'updated_at');
@@ -116,8 +118,11 @@ async function replaceFile(id, file, expectedUpdatedAt) {
     await trx.rollback().catch(() => {});
     return result;
   }
+  // Knex reports a failed COMMIT through trx.executionPromise, and trx.commit() itself can still resolve. Both are awaited, so a
+  // commit that did not go through is never mistaken for one that did, and the unknown outcome is reported as such.
   try {
     await trx.commit();
+    await trx.executionPromise;
   } catch (err) {
     throw outcomeOf(err, 'unknown');
   }

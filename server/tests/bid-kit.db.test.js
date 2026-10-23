@@ -345,6 +345,36 @@ describeDb('Bid kit (PostgreSQL)', () => {
         expect(logger.warn.mock.calls.map(([line]) => line)).toContain(`[bid-kit] file replacement outcome unknown for item ${created.id}; the new stored file was kept`);
       });
 
+      test('knex reports a failed COMMIT through executionPromise while commit() resolves: that is an unknown outcome, so nothing is deleted and nothing is reported as saved', async () => {
+        const outer = mockPg;
+        const begin = outer.transaction.bind(outer);
+        let armed = true;
+        const wrapped = async (...args) => {
+          const trx = await begin(...args);
+          if (armed && args.length === 0) {
+            armed = false;
+            // commit() resolves, but the transaction's own promise says the COMMIT failed.
+            const failed = Promise.reject(new Error('commit failed: connection terminated'));
+            failed.catch(() => {});
+            Object.defineProperty(trx, 'executionPromise', { configurable: true, writable: true, value: failed });
+          }
+          return trx;
+        };
+        Object.defineProperty(outer, 'transaction', { configurable: true, writable: true, value: wrapped });
+        let res;
+        try {
+          res = await upload(created.id, 'second.pdf');
+        } finally {
+          delete outer.transaction;
+        }
+        expect(res.status).toBe(500);
+        expect(res.body.item).toBeUndefined(); // never reported as saved
+        expect(deletes()).toEqual([]); // neither the new object nor the previous one
+        expect(logger.warn.mock.calls.map(([line]) => line)).toContain(`[bid-kit] file replacement outcome unknown for item ${created.id}; the new stored file was kept`);
+        const [newKey] = puts();
+        expect(newKey).toMatch(/\.pdf$/);
+      });
+
       test('a statement that fails before any commit is a rollback: the store says so, the row is untouched, and the route deletes the new object', async () => {
         const before = await rowOf(created.id);
         const failure = await store.replaceFile(created.id, { key: 'bid-kit/x/y.pdf', fileName: 'y.pdf', contentType: 'application/pdf', size: 3000000000 }, before.updated_at.toISOString()).catch((err) => err);
