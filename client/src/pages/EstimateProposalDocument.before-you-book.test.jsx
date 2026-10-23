@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// "Before you book" (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK): the estimate PDF document prints the server's
+// "Before you book": the estimate PDF document prints the server's
 // `beforeYouBook` page as one last section, exactly as given, and nothing when the key is absent.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
