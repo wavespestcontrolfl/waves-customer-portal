@@ -302,6 +302,13 @@ function mapRow(row, ordinal, basename) {
     return out;
   }
 
+  return mapNonBusinessRow(row, out, base);
+}
+
+// personal / transfer / processor payout / reward / asset are ignored with
+// the reason; receipt_unmatched, review and unknown stay open for review.
+function mapNonBusinessRow(row, out, base) {
+  const { bank } = out;
   if (IGNORED_CLASSES.has(row.class)) {
     const reason = row.class === 'asset'
       ? 'asset per the ledger (asset: depreciated on Form 4562)'
@@ -310,8 +317,6 @@ function mapRow(row, ordinal, basename) {
     bank.suggestion = { ignore: true, reason, ...base };
     return out;
   }
-
-  // receipt_unmatched, review, unknown
   bank.status = 'unmatched';
   bank.suggestion = reviewSuggestion(row, {});
   out.unmatchedLine = row.sched_c_line || '(none)';
@@ -373,11 +378,11 @@ function formatReport({ dryRun, file, read, inserted, duplicates, overlaps = 0, 
     `skipped as duplicate:      ${duplicates}`,
     `already in the portal:     ${overlaps} (left out: a bank row of the same account, day, amount and direction, or an expense of the same day, amount and payee)`,
     `held, not imported:        ${held.length} (a bank row of the SAME account, or a hand-entered expense, has the same day and amount; decide it in Bank Import)`,
-    ...held.slice(0, 50).map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  (portal: "${h.other}" in ${h.account})`),
+    ...held.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  (portal: "${h.other}" in ${h.account})`),
     `check these:               ${unsure.length} (imported; a bank row of ANOTHER or an unknown account has the same day, amount and direction)`,
-    ...unsure.slice(0, 50).map(u => `  line ${u.line}  ${u.date}  ${u.description}  ${u.amount}  (portal account: ${u.other})`),
+    ...unsure.map(u => `  line ${u.line}  ${u.date}  ${u.description}  ${u.amount}  (portal account: ${u.other})`),
     `hand-entered expenses:     ${handExpenses.length} in this range, not matched by guesswork; check each against the ledger once`,
-    ...handExpenses.slice(0, 50).map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}`),
+    ...handExpenses.map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}`),
     `${dryRun ? 'expenses to create:' : 'expenses created:'}`.padEnd(27) + summary.expensesCreated,
     ...formatTable(summary.byStatus, 'by status'),
     ...formatTable(summary.expensesByCategory, `expenses ${dryRun ? 'to create' : 'created'} by category`),
