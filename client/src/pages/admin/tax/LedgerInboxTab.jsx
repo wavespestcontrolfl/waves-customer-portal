@@ -367,10 +367,15 @@ function InboxNotices({ status, view, notice, loadError, categoryError, onRetryC
   );
 }
 
-// Follows the server's cursor until there is no more; returns the totals.
-async function runRulePass(onProgress) {
+// One click follows the server's cursor for up to this many pages (a
+// safety stop, not a limit: the cursor it stopped at is kept and the next
+// click resumes there, so no row is ever out of reach of Apply rules now).
+const MAX_ROUNDS_PER_CLICK = 400;
+// Follows the server's cursor from startAfter; returns the totals and the
+// cursor to resume from when the per-click stop came first (null = done).
+async function runRulePass(onProgress, startAfter = null) {
   const sum = { examined: 0, suggested: 0, cleared: 0 };
-  let after = null;
+  let after = startAfter;
   let rounds = 0;
   do {
     const d = await post(`${T}/ledger/rules/apply`, after ? { after } : {});
@@ -380,8 +385,8 @@ async function runRulePass(onProgress) {
     after = d.more && d.cursor ? d.cursor : null;
     rounds += 1;
     onProgress(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}${after ? "…" : "."}`);
-  } while (after && rounds < 40);
-  return sum;
+  } while (after && rounds < MAX_ROUNDS_PER_CLICK);
+  return { sum, after };
 }
 
 export default function LedgerInboxTab() {
@@ -403,6 +408,9 @@ export default function LedgerInboxTab() {
   // the view the user is looking at NOW: an action that finishes after a
   // view switch must not reload or edit the old view's rows into the new one
   const viewRef = useRef(view);
+  // where the last Apply rules now stopped (null = it finished): the next
+  // click continues from there instead of starting over
+  const resumeRef = useRef(null);
   useEffect(() => { viewRef.current = view; }, [view]);
 
   const loadStatus = useCallback(() => {
@@ -452,14 +460,22 @@ export default function LedgerInboxTab() {
     setBusyId(row.id);
     setRowErrors((p) => ({ ...p, [row.id]: "" }));
     try {
+      // the server answers propagated:false when the Always rule was saved
+      // but its pass over the payee's other rows stopped short or failed
+      let propagated = true;
       if (decision === "expense") {
         // decide re-checks the row is still the Inbox's to decide (the matcher
         // examined it, no existing expense or payout to link); create-expense
         // checks again inside its claim and writes the Always rule itself
         await post(`${T}/ledger/decide`, { id: row.id, decision, categoryId });
-        await post(`${T}/${row.id}/create-expense`, { categoryId, fromLedger: true, always: !!always });
+        const made = await post(`${T}/${row.id}/create-expense`, { categoryId, fromLedger: true, always: !!always });
+        propagated = made?.propagated !== false;
       } else {
-        await post(`${T}/ledger/decide`, { id: row.id, decision, always: !!always });
+        const decided = await post(`${T}/ledger/decide`, { id: row.id, decision, always: !!always });
+        propagated = decided?.propagated !== false;
+      }
+      if (always && !propagated) {
+        setNotice("Decision saved, but not every open row of this payee was updated yet. Click Apply rules now to finish.");
       }
       // a decision that keeps the row on the current shelf, or an Always
       // decision (the new rule has just re-labelled every other row of that
@@ -484,7 +500,9 @@ export default function LedgerInboxTab() {
     setApplying(true);
     setNotice("");
     try {
-      await runRulePass(setNotice);
+      const { sum, after } = await runRulePass(setNotice, resumeRef.current);
+      resumeRef.current = after;
+      setNotice(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}.${after ? " More rows remain: click Apply rules now again to continue from where this stopped." : ""}`);
       await loadStatus();
       // the view the user is on now, not the one the pass started from
       await loadRows(viewRef.current, 0);

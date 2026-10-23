@@ -305,9 +305,12 @@ async function ensureSeedRules(conn = db) {
         .merge(['kind', 'category_id', 'irs_line', 'note', 'priority', 'enabled'])
         .whereRaw(PRISTINE);
     }
+    // retiring is the code's doing, not the owner's: updated_at stays equal
+    // to created_at, so a seed the code lists again later is re-enabled by
+    // the merge above instead of staying off as an "owner edit"
     await conn('tax_ledger_rules').whereRaw(PRISTINE).where({ enabled: true })
       .whereNotIn('pattern', rows.map((r) => r.pattern))
-      .update({ enabled: false, note: 'retired seed (no longer in the seed list)', updated_at: new Date() });
+      .update({ enabled: false, note: 'retired seed (no longer in the seed list)' });
     return rows.length;
   })().catch((err) => { seedPromise = null; throw err; });
   return seedPromise;
@@ -348,6 +351,10 @@ const NOT_DECIDED_SQL = "(suggestion -> 'decision') is null";
 // a seed-rule write is conditional on it, so a flag the matcher adds between
 // the SELECT and the UPDATE still wins over the seed.
 const NO_MATCHER_FLAG_SQL = `not (jsonb_exists(${SUG}, 'ignore') and not jsonb_exists(${SUG}, 'rule'))`;
+// "the rule on the row is still the one this pass read": a newer owner rule
+// an Always decision propagated between the SELECT and the UPDATE wins over
+// the pass's older result.
+const RULE_SNAPSHOT_SQL = `coalesce(${SUG} -> 'rule' ->> 'id', '') = ?`;
 function ymd(v) {
   if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
   return String(v || '').slice(0, 10);
@@ -394,7 +401,8 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
   // matcher-flagged row: with the rule gone the row returns to the
   // matcher's reading (its next rescan flags it again), not to "unexplained"
   const removeKeys = stale ? [...CLASSIFICATION_KEYS, 'examined'] : (writes ? CLASSIFICATION_KEYS : []);
-  return { skip: false, writes, stale, rule, patch, removeKeys, guardMatcherFlag: !matcherFlag };
+  const ruleRead = sug.rule && sug.rule.id ? String(sug.rule.id) : '';
+  return { skip: false, writes, stale, rule, patch, removeKeys, guardMatcherFlag: !matcherFlag, ruleRead };
 }
 
 // Writes one row's outcome and books it in the counts and the hit map —
@@ -402,7 +410,8 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
 // read (a decision, a matcher flag, a link) updates nothing and counts
 // nothing, so the pass result and the rule hits report what is stored.
 async function applyClassification(row, c, counts, hits) {
-  let w = db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL);
+  let w = db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL)
+    .whereRaw(RULE_SNAPSHOT_SQL, [c.ruleRead]);
   if (c.guardMatcherFlag) w = w.whereRaw(NO_MATCHER_FLAG_SQL);
   const landed = await w.update({ suggestion: bankImport.suggestionMerge(c.patch, c.removeKeys), updated_at: new Date() });
   if (!landed) return;
@@ -428,7 +437,7 @@ async function recordHits(hits) {
 // id} continues past a row budget (the result carries more + cursor).
 async function applyRules({ limit = PAGE, force = false, pattern = null, after: start = null } = {}) {
   const counts = { examined: 0, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null };
-  const compiled = compileRules(await loadRules());
+  let compiled = compileRules(await loadRules());
   // nothing to suggest: only a full forced pass still runs, to clear what
   // rules that are gone now had written
   if (!compiled.length && !(force && !pattern)) return counts;
@@ -438,6 +447,9 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
   let after = start && start.id && start.txn_date ? { txn_date: ymd(start.txn_date), id: String(start.id) } : null;
   let lastPageFull = false;
   while (counts.examined < maxRows) {
+    // the active rule set is re-read for every page after the first: a rule
+    // disabled or added during a long pass applies from the next page on
+    if (counts.examined > 0) compiled = compileRules(await loadRules());
     const pageSize = Math.min(PAGE, maxRows - counts.examined);
     const rows = await rulePassPage({ pageSize, force, after });
     for (const row of rows) {
@@ -490,9 +502,24 @@ function visibleSuggestion(suggestion) {
 
 // Hook for the CSV upload and the Plaid sync: a rule pass right after the
 // matching pass, only when the gate is on, and never a reason the import fails.
-async function applyAfterImport(where) {
+// The pass after a matching run follows its own cursor, so every row that
+// run examined gets its rule pre-fill now, not at the next sync: unstamped
+// rows only, oldest first, up to budget rows (the caller's matching budget;
+// a manual pass examines up to 2,000 rows, the page is 500).
+async function applyAfterImport(where, { budget = 2000 } = {}) {
   if (!isOn()) return null;
-  try { return await applyRules({ limit: PAGE }); } catch (err) {
+  try {
+    const totals = { examined: 0, suggested: 0, cleared: 0 };
+    let after = null;
+    do {
+      const out = await applyRules({ limit: Math.min(PAGE, budget - totals.examined), after });
+      totals.examined += out.examined;
+      totals.suggested += out.suggested;
+      totals.cleared += out.cleared;
+      after = out.more ? out.cursor : null;
+    } while (after && totals.examined < budget);
+    return totals;
+  } catch (err) {
     logger.warn(`[tax-ledger] rule pass after ${where} failed: ${err.message}`);
     return null;
   }
@@ -632,7 +659,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 
 module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON,
-  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
+  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };

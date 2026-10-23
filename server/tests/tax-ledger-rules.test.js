@@ -299,6 +299,9 @@ describe('ensureSeedRules (runtime seed)', () => {
     const retire = seedBuilders[1];
     expect(retire.whereNotIn).toHaveBeenCalledWith('pattern', rows.map((r) => r.pattern));
     expect(retire.update).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
+    // retiring is the code's doing: the row stays pristine (no updated_at move), so a seed the code
+    // lists again later is re-enabled by the merge instead of staying off as an owner edit
+    expect(retire.update).toHaveBeenCalledWith(expect.not.objectContaining({ updated_at: expect.anything() }));
     // second call: memoized, no second write
     mockDb.mockClear();
     expect(await svc.ensureSeedRules()).toBe(seeds.SEED_RULES.length);
@@ -354,6 +357,8 @@ describe('applyRules (suggestion-only)', () => {
       expect(u.wheres).toContain(svc.MATCHER_EXAMINED_SQL);
       // a seed write is conditional on the matcher not having flagged the row since it was read
       if (u.wheres[0].id !== 'b5') expect(u.wheres).toContain(svc.NO_MATCHER_FLAG_SQL);
+      // and on the rule on the row still being the one this pass read (a newer owner rule wins)
+      expect(u.wheres).toContain(svc.RULE_SNAPSHOT_SQL);
       stamps.add(u.patch.suggestion.merged.rulesAt);
     }
     expect(stamps.size).toBe(1);
@@ -478,7 +483,8 @@ describe('applyAfterImport', () => {
   test('runs the pass when both gates are on and swallows a failure with a warning', async () => {
     process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
     state.rules = [{ id: 'r', pattern: 'x', kind: 'personal', priority: 100, enabled: true }];
-    expect(await svc.applyAfterImport('upload')).toEqual({ examined: 0, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null });
+    // the pass follows its cursor through the matching budget and reports the totals
+    expect(await svc.applyAfterImport('upload')).toEqual({ examined: 0, suggested: 0, cleared: 0 });
     mockDb.mockImplementationOnce(() => { throw new Error('db down'); });
     expect(await svc.applyAfterImport('plaid item 1')).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('rule pass after plaid item 1 failed: db down'));

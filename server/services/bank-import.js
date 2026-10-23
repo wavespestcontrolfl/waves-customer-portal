@@ -1365,6 +1365,11 @@ function hasUnresolvedBankChange(row) {
 // ruling made after the read wins too.
 function transferFlagWanted(sug, ledgerOn) { return !sug || (!sug.ignore && !sug.decision && !(ledgerOn && sug.examined)); }
 const NO_DECISION_SQL = "(suggestion is null or (suggestion -> 'decision') is null)";
+// An Income decision from the ledger Inbox holds against the automatic
+// claims too: the row stays open on its shelf, never read by the matcher and
+// never claimed for a payout or an expense (the claim CAS repeats the check).
+// A Later row stays matchable: a link would explain it.
+const NO_INCOME_DECISION_SQL = "coalesce(suggestion ->> 'decision', '') <> 'income'";
 const NO_OWNER_RULING_SQL = "(suggestion is null or ((suggestion -> 'decision') is null and not jsonb_exists(suggestion, 'examined')))";
 function ledgerRulesOn() { return !!(gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_LEDGER')); }
 
@@ -1375,6 +1380,7 @@ async function runDeterministicMatching({ limit } = {}) {
   const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })
     .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+    .whereRaw(NO_INCOME_DECISION_SQL)
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion');
   // Rows the matcher already examined (transfer-flagged, parked candidates)
@@ -1454,6 +1460,7 @@ async function runDeterministicMatching({ limit } = {}) {
         .where({ status: 'unmatched' })
         .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
         .whereRaw(`suggestion is not null and ${EXAMINED_SQL}`)
+        .whereRaw(NO_INCOME_DECISION_SQL)
         .orderBy('updated_at', 'asc')
         .limit(fill + 1)
         .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion');
@@ -1587,6 +1594,7 @@ async function runDeterministicMatching({ limit } = {}) {
             // re-checked at the claim: the row may have been linked, got a
             // bank change parked, and been unlinked since this pass read it
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            .whereRaw(NO_INCOME_DECISION_SQL)
             .update({
               status: 'matched_payout',
               matched_payout_id: exact[0].id,
@@ -1801,6 +1809,7 @@ async function runDeterministicMatching({ limit } = {}) {
             // re-checked at the claim: the row may have been linked, got a
             // bank change parked, and been unlinked since this pass read it
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            .whereRaw(NO_INCOME_DECISION_SQL)
             .update({
               status: 'matched_expense',
               matched_expense_id: strong[0].id,

@@ -808,6 +808,17 @@ describe('runDeterministicMatching', () => {
     expect(flagged.raws).toContainEqual(expect.stringContaining("(suggestion -> 'decision') is null"));
   });
 
+  test('an Income decision is never read by the matcher and never claimed: the selects and both claim writes guard on it', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'ZELLE FROM CUSTOMER', amount: 120, direction: 'credit', account_type: 'bank', account_label: 'capone-checking-3098', suggestion: { noMatch: true, income: true, decision: 'income' } }];
+    state.payouts = [{ id: 'po-1', amount: '120.00', arrival_date: '2026-08-11', status: 'paid', destination_last4: '3098' }];
+    await runDeterministicMatching({ limit: 5 });
+    const selects = state.builders.filter(x => x.table === 'bank_transactions').flatMap(x => x.b.whereRaw.mock.calls.map(c => String(c[0])));
+    expect(selects.filter(r => /decision.*income/.test(r)).length).toBeGreaterThanOrEqual(1);
+    for (const u of state.updates.filter(u => u.patch.status === 'matched_payout' || u.patch.status === 'matched_expense')) {
+      expect(u.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
+    }
+  });
+
   test('a bounded pass serves an examined (owner-overridden) row from the examined pool, not as a fresh row', async () => {
     state.bankRows = [];
     await runDeterministicMatching({ limit: 5 });

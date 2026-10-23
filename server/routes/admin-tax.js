@@ -2290,8 +2290,9 @@ router.get('/bank-import/transactions', async (req, res, next) => {
 router.post('/bank-import/match', async (req, res, next) => {
   try {
     const matching = await bankImport.runDeterministicMatching({ limit: 2000 });
-    // rows this pass examined get their rule pre-fill now, not at the next sync
-    await taxLedgerRules.applyAfterImport('manual match');
+    // every row this pass examined gets its rule pre-fill now, not at the
+    // next sync: the rule pass follows its cursor through the same budget
+    await taxLedgerRules.applyAfterImport('manual match', { budget: 2000 });
     res.json({ success: true, matching });
   } catch (err) { next(err); }
 });
@@ -3108,6 +3109,9 @@ function taxLedgerOn() { return taxLedgerRules.isOn(); }
 router.get('/bank-import/ledger/status', async (req, res, next) => {
   try {
     if (!taxLedgerOn()) return res.json({ enabled: false });
+    // the seeds are written at runtime: the first status after the flip
+    // must count them, not report "0 rules" until the Rules panel opens
+    await taxLedgerRules.ensureSeedRules();
     const rules = await db('tax_ledger_rules').where({ enabled: true }).count('* as n').first();
     const openRows = () => db('bank_transactions').where({ status: 'unmatched' }).whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT);
     const inbox = await openRows().whereRaw(taxLedgerRules.VIEW_SQL.open).count('* as n').first();

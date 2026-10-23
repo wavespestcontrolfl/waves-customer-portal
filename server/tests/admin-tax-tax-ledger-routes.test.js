@@ -64,7 +64,7 @@ jest.mock('../services/bank-import', () => ({
 // and the error mapping. isOn stays real so the gate reads the env.
 jest.mock('../services/tax-ledger-rules', () => ({
   ...jest.requireActual('../services/tax-ledger-rules'),
-  decide: jest.fn(), listRules: jest.fn(), createRule: jest.fn(), updateRule: jest.fn(), applyRules: jest.fn(), applyAfterImport: jest.fn(() => Promise.resolve(null)),
+  decide: jest.fn(), listRules: jest.fn(), createRule: jest.fn(), updateRule: jest.fn(), applyRules: jest.fn(), applyAfterImport: jest.fn(() => Promise.resolve(null)), ensureSeedRules: jest.fn(() => Promise.resolve(0)),
 }));
 const ledger = require('../services/tax-ledger-rules');
 
@@ -123,6 +123,7 @@ describe('gate on', () => {
     state.counts = { tax_ledger_rules: 37, bank_transactions: 12 };
     const res = await get(`${P}/status`);
     expect(await res.json()).toEqual({ enabled: true, rules: 37, inbox: 12, income: 12, bankImport: 12, unexamined: 12 });
+    expect(ledger.ensureSeedRules).toHaveBeenCalled(); // the seeds are counted from the first status on
     const rules = state.queries.find((q) => q.table === 'tax_ledger_rules');
     expect(rules.wheres).toContainEqual({ enabled: true });
     const [open, income, bankImport, unexamined] = state.queries.filter((q) => q.table === 'bank_transactions');
@@ -218,7 +219,7 @@ describe('manual matching', () => {
     process.env.GATE_TAX_LEDGER = 'true';
     const res = await send('POST', '/admin/tax/bank-import/match', {});
     expect(res.status).toBe(200);
-    expect(ledger.applyAfterImport).toHaveBeenCalledWith('manual match');
+    expect(ledger.applyAfterImport).toHaveBeenCalledWith('manual match', { budget: 2000 }); // the same budget as the matcher
     delete process.env.GATE_TAX_LEDGER;
   });
 });

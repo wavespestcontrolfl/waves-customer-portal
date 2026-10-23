@@ -162,6 +162,48 @@ it('Apply rules now follows the continuation cursor until the server has no more
   expect(applies[1].body).toEqual({ after: { txn_date: '2026-03-01', id: '11111111-1111-4111-8111-111111111111' } });
 });
 
+it('Apply rules now stops after its per-click page cap, says more rows remain, and the next click resumes from the kept cursor', async () => {
+  let applyCalls = 0;
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/rules/apply')) {
+      applyCalls += 1;
+      calls.push({ url: u, method: 'POST', body: opts.body ? JSON.parse(opts.body) : undefined });
+      // the server always has more: the cursor advances every page
+      return json({ success: true, examined: 500, suggested: 1, cleared: 0, more: true, cursor: { txn_date: '2026-03-01', id: `00000000-0000-4000-8000-${String(applyCalls).padStart(12, '0')}` } });
+    }
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByText('ACME HARDWARE 123');
+  fireEvent.click(screen.getByRole('button', { name: 'Apply rules now' }));
+  expect(await screen.findByText(/Examined 200000, suggested 400, cleared 0\. More rows remain: click Apply rules now again/)).toBeInTheDocument();
+  expect(calls.filter((c) => c.url.includes('/ledger/rules/apply'))).toHaveLength(400);
+  fireEvent.click(await screen.findByRole('button', { name: 'Apply rules now' }));
+  await waitFor(() => expect(calls.filter((c) => c.url.includes('/ledger/rules/apply')).length).toBeGreaterThan(400));
+  const resumed = calls.filter((c) => c.url.includes('/ledger/rules/apply'))[400];
+  expect(resumed.body).toEqual({ after: { txn_date: '2026-03-01', id: '00000000-0000-4000-8000-000000000400' } });
+});
+
+it('an Always decision whose payee pass stopped short (propagated:false) keeps the decision and tells the operator to run Apply rules now', async () => {
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/decide')) {
+      calls.push({ url: u, method: 'POST', body: JSON.parse(opts.body) });
+      return json({ success: true, action: 'ignored', ruleCreated: true, propagated: false });
+    }
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByText('ACME HARDWARE 123');
+  fireEvent.click(screen.getByLabelText('Always treat this payee this way (not for Later)'));
+  fireEvent.click(screen.getByRole('button', { name: 'Personal' }));
+  expect(await screen.findByText(/Decision saved, but not every open row of this payee was updated yet\. Click Apply rules now to finish\./)).toBeInTheDocument();
+  expect(calls.find((c) => c.url.includes('/ledger/decide')).body).toEqual({ id: 'row-1', decision: 'personal', always: true });
+});
+
 it('a money-out row offers no Income button', async () => {
   render(<LedgerInboxTab />);
   const card = await screen.findByTestId('ledger-row-row-1');
