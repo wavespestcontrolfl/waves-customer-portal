@@ -2970,6 +2970,7 @@ async function settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome) {
 }
 
 // The names the completion payload itself carries for its products (an id-only row has none).
+const payloadProductIds = (products) => (Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean);
 const payloadProductNames = (products) => (Array.isArray(products) ? products : []).map((p) => p?.name || p?.product_name).filter(Boolean);
 
 async function completeScheduledService(completionInput, packetContext = null) {
@@ -9603,7 +9604,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // rows and returns at once when none is a 13-0-13, so a Tree & Shrub companion on a lawn or pest visit is judged too, as is a
     // hand-added row as well as the suggestion.
     if (!issuedInvoiceCloseout) {
-      applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames });
+      applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames, submittedProductIds: payloadProductIds(products) });
     }
 
     // The add-on's OWN yearly limit (maxPerYear / minDaysApart, the place-based history the booking used; the add-ons carry no

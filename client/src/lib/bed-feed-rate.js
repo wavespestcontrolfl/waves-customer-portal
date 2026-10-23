@@ -32,6 +32,7 @@ export function bedFeedRatePer1000(product = {}) {
 
 // The non-blocking pre-submit line, or null when the rate cannot be read or is at or under the county limit.
 export function bedFeedCountyLimitLine(name, rate) {
-  if (rate === null || rate === undefined || Math.round(rate * 100) / 100 <= BED_FEED_CAP_LB_PER_1000) return null;
+  // The RAW rate is compared to the cap; only the displayed figure is rounded.
+  if (rate === null || rate === undefined || rate <= BED_FEED_CAP_LB_PER_1000) return null;
   return `${name || 'Selected product'} rate ${Math.round(rate * 100) / 100} lb/1k is over the county limit of ${BED_FEED_CAP_LB_PER_1000} lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`;
 }

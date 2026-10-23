@@ -505,7 +505,7 @@ describe('the office notification for a finding (raised through the admin alert 
     expect(at).toBeGreaterThan(0);
     // No service-line gate on the line before the call.
     expect(src.slice(at - 120, at)).not.toMatch(/detectServiceLine|tree_shrub/);
-    expect(src).toContain('tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames })');
+    expect(src).toContain('tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames, submittedProductIds: payloadProductIds(products) })');
   });
 
   test('a bell that is not recorded (null) is logged, a failure never throws', async () => {

@@ -14464,8 +14464,10 @@ export function CompletionPanel({
       : []),
     // Tree & Shrub has no WaveGuard approval step (managerApprovalRequired is lawn only), so a row over its ceiling
     // would otherwise reach Complete unseen. A quiet line, never a block.
-    ...(!managerApprovalRequired && !isIncompleteVisit
-      ? treeShrubRateAdvisories({ selectedProducts, highRateSelectedProducts, primaryIsTreeShrub: serviceLineForCloseout === "tree_shrub", treeShrubWork: hasTreeShrubWork })
+    // The 13-0-13 county-limit line is independent of the lawn approval branch (a WaveGuard lawn visit with a Tree & Shrub companion
+    // shows both); only the label-ceiling rows step aside for the approval text, which already lists them.
+    ...(!isIncompleteVisit
+      ? treeShrubRateAdvisories({ selectedProducts, highRateSelectedProducts, primaryIsTreeShrub: serviceLineForCloseout === "tree_shrub" && !managerApprovalRequired, treeShrubWork: hasTreeShrubWork })
       : []),
     ...(calibrationRequired && !isIncompleteVisit
       ? treatmentPlanCalibrationBlocks

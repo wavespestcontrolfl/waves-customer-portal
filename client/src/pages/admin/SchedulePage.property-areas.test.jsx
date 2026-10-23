@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { CompletionPanel, completionProductRowProblem, isBedFeedRow, visitHasTreeShrubWork, treeShrubRateAdvisories } from './SchedulePage';
 import { refetchFlags } from '../../hooks/useFeatureFlag';
+import schedulePageSource from './SchedulePage.jsx?raw';
 const products = [
   { id: 'snapshot', name: 'Snapshot 2.5TG', category: 'herbicide', application_method: 'granular_broadcast', default_rate_per_1000: 2.3, rate_unit: 'lb' },
   { id: 'palm', name: 'LESCO 8-0-12 Palm', category: 'fertilizer', application_method: 'granular_broadcast', default_rate_per_1000: 1.3, rate_unit: 'lb' },
@@ -479,4 +480,17 @@ it('with no reviewed bed area on a lawn visit with a companion the 13-0-13 row s
   fireEvent.click(screen.getByText(ORN));
   expect(screen.getByPlaceholderText('Treated sq ft').value).toBe('');
   expect(screen.queryByDisplayValue('4200')).not.toBeInTheDocument();
+});
+
+it('the 13-0-13 county-limit line does not depend on the lawn approval branch (a WaveGuard lawn visit with a Tree & Shrub companion still shows it)', () => {
+  const orn = { name: ORN, rate: '', rateUnit: 'lb', totalAmount: '12', amountUnit: 'lb', areaValue: 1200, areaUnit: 'sqft', catalogRateUnit: 'lb' };
+  // When manager approval is required the panel passes primaryIsTreeShrub false (the approval text lists the label-ceiling rows): the bed line stays.
+  const lines = treeShrubRateAdvisories({ selectedProducts: [orn], highRateSelectedProducts: [], primaryIsTreeShrub: false, treeShrubWork: true });
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toMatch(/is over the county limit of 7\.5 lb\/1k/);
+  // The panel's call is gated on the visit not being incomplete, never on managerApprovalRequired.
+  const src = schedulePageSource;
+  const at = src.indexOf('treeShrubRateAdvisories({ selectedProducts, highRateSelectedProducts');
+  expect(at).toBeGreaterThan(0);
+  expect(src.slice(at - 160, at)).not.toMatch(/managerApprovalRequired/);
 });

@@ -91,7 +91,8 @@ function rateFindings(rows) {
       out.push({ code: 'application_limit_exceeded', limitType: UNCHECKED_LIMIT_TYPE, productId: row.product_id, productName: row.product_name,
         reason, current: null, max: CAP_LB_PER_1000,
         message: `Recorded. The office will review: ${row.product_name || '13-0-13'} ${uncheckedClause(reason)}. Enter the amount in lb and the treated sq ft.` });
-    } else if (round2(rate) > CAP_LB_PER_1000) {
+    } else if (rate > CAP_LB_PER_1000) {
+      // The RAW rate is compared to the cap; only the displayed figure is rounded.
       out.push({ code: 'application_limit_exceeded', limitType: RATE_LIMIT_TYPE, productId: row.product_id, productName: row.product_name,
         current: round2(rate), max: CAP_LB_PER_1000,
         message: `Recorded. The office will review: ${row.product_name || '13-0-13'} was applied at ${round2(rate)} lb per 1,000 sq ft, over the ${CAP_LB_PER_1000} lb per 1,000 sq ft (0.75 lb per 100 sq ft) county limit.` });
@@ -117,7 +118,7 @@ async function recordedOrnamentalRows(database, recordId) {
     .leftJoin('products_catalog as pc', 'pc.id', 'sp.product_id')
     .where('sp.service_record_id', recordId)
     .select('sp.product_id', 'sp.application_rate', 'sp.rate_unit', 'sp.total_amount', 'sp.amount_unit', 'sp.area_value', 'sp.area_unit',
-      database.raw('COALESCE(pc.name, sp.product_name) as product_name'));
+      database.raw('COALESCE(sp.product_name, pc.name) as product_name'));
   return rows.filter(isOrnamental);
 }
 
@@ -128,6 +129,31 @@ function auditUnavailableFinding(submittedProductNames) {
   if (!name) return null;
   return { code: 'application_limit_exceeded', limitType: AUDIT_UNAVAILABLE_LIMIT_TYPE, productName: name, reason: 'audit_unavailable', current: null, max: CAP_LB_PER_1000,
     message: '13-0-13 limits could not be checked for this visit; the office will review.' };
+}
+
+// The visit-level finding when the record's rows AND the catalog could not be read although products were submitted: nothing says whether a
+// 13-0-13 was among them, so the office is rung conservatively. It is the same finding the hard-limit audit raises when its own read fails
+// (code application_limit_check_unavailable), so the two dedupe into one alert per record.
+const productsUnavailableFinding = () => ({ code: 'application_limit_check_unavailable', productId: null,
+  message: 'Recorded. The office will review: product limits could not be checked for this visit.' });
+
+// The names of the submitted products: the names the completion carried, else the catalog names of the submitted ids (a grouped-visit
+// packet resumes its effects phase with id-only rows). null when the catalog read failed.
+async function submittedNames(database, names, ids) {
+  if (names.length || !ids.length) return names;
+  try {
+    return (await database('products_catalog').whereIn('id', ids).select('name')).map((row) => row.name);
+  } catch (err) {
+    logger.warn(`[ts-ornamental-fertilizer] submitted product names unavailable: ${err?.message}`);
+    return null;
+  }
+}
+
+// The findings when the record's rows could not be read: a 13-0-13 among the submitted products (by name, else by id), or, if even the
+// names cannot be read, any submitted product at all. A visit that submitted no products gets nothing.
+async function unreadableRowsFindings(database, names, ids) {
+  const resolved = await submittedNames(database, names, ids);
+  return (resolved === null ? [productsUnavailableFinding()] : [auditUnavailableFinding(resolved)]).filter(Boolean);
 }
 
 /** The rows of the record, or null when the read failed (logged). */
@@ -144,15 +170,17 @@ async function readRecordedRows(database, recordId) {
  * The completion check: reads the 13-0-13 rows this record saved and flags a rate over the county cap and a breach of the
  * 2-in-12-months, 5-months-apart or June-September history rules. `advisory` is the completion's applicationLimitAdvisory; the
  * merged advisory comes back (the same object when nothing is flagged). `notify` sends the findings to the office
- * (notifyOfficeOfLimitFindings). `submittedProductNames` are the names the completion submitted: when the post-save read of the record's
- * rows fails, a 13-0-13 among them gets an 'audit unavailable' finding (the office is rung); a visit that submitted none gets nothing.
+ * (notifyOfficeOfLimitFindings). `submittedProductNames` / `submittedProductIds` are what the completion submitted: when the post-save read of
+ * the record's rows fails, a 13-0-13 among them (by name, else by id through a separate catalog read) gets an 'audit unavailable' finding
+ * (the office is rung), and if that catalog read fails too, any submitted product gets the visit-level 'product limits could not be
+ * checked' finding; a visit that submitted no products gets nothing.
  * Never throws, never blocks.
  */
-async function flagOrnamentalFertilizer({ svc, record, database, advisory, notify, submittedProductNames = [] }) {
+async function flagOrnamentalFertilizer({ svc, record, database, advisory, notify, submittedProductNames = [], submittedProductIds = [] }) {
   try {
     if (!record?.id) return advisory;
     const rows = await readRecordedRows(database, record.id);
-    if (rows === null) return await reportFindings({ svc, record, advisory, notify, findings: [auditUnavailableFinding(submittedProductNames)].filter(Boolean) });
+    if (rows === null) return await reportFindings({ svc, record, advisory, notify, findings: await unreadableRowsFindings(database, submittedProductNames || [], submittedProductIds || []) });
     if (!rows.length) return advisory;
     const findings = rateFindings(rows);
     const serviceDate = record.service_date || svc.scheduled_date;

@@ -23,3 +23,10 @@ it('the county-limit line shows only over 7.5 lb/1k and never says label max', (
   expect(line).toBe('LESCO 13-0-13 rate 10 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.');
   expect(line).not.toMatch(/label max/);
 });
+
+it('compares the raw rate to the cap and rounds only the shown number: 9.005 lb over 1,200 sq ft is over the cap and shows 7.5', () => {
+  const rate = bedFeedRatePer1000({ totalAmount: 9.005, amountUnit: 'lb', areaValue: 1200 });
+  expect(rate).toBeCloseTo(7.5042, 4);
+  expect(bedFeedCountyLimitLine('LESCO 13-0-13', rate)).toBe('LESCO 13-0-13 rate 7.5 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.');
+  expect(bedFeedCountyLimitLine('LESCO 13-0-13', bedFeedRatePer1000({ totalAmount: 9, amountUnit: 'lb', areaValue: 1200 }))).toBeNull();
+});

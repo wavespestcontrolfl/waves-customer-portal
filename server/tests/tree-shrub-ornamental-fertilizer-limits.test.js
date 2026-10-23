@@ -209,6 +209,73 @@ describe('the post-save read of the record\'s rows fails (Codex #6516 r7)', () =
   });
 });
 
+describe('a packet effects phase resumes with id-only rows (Codex #6516 r8)', () => {
+  // The record's rows cannot be read; the catalog read is served (or fails) as given.
+  const resumeDb = ({ catalog, catalogFails = false }) => {
+    const db = (table) => {
+      if (table === 'products_catalog') {
+        const q = { whereIn() { return q; }, select: async () => { if (catalogFails) throw new Error('catalog down'); return catalog; } };
+        return q;
+      }
+      throw new Error('rows down');
+    };
+    db.raw = (sql) => sql;
+    return db;
+  };
+  const run = (database, ids, names = []) => {
+    const notify = jest.fn(async () => {});
+    return limits.flagOrnamentalFertilizer({ svc, record, database, advisory: null, notify, submittedProductNames: names, submittedProductIds: ids }).then((out) => ({ out, notify }));
+  };
+  test('a failed row read plus a 13-0-13 id resolves the name and rings the named unavailable finding', async () => {
+    const { out, notify } = await run(resumeDb({ catalog: [{ name: 'Celsius WG' }, { name: ORN }] }), ['id-1', 'id-2']);
+    expect(out.blocks).toEqual([expect.objectContaining({ message: '13-0-13 limits could not be checked for this visit; the office will review.' })]);
+    expect(notify.mock.calls[0][0].findings).toEqual([expect.objectContaining({ limitType: limits.AUDIT_UNAVAILABLE_LIMIT_TYPE, productName: ORN })]);
+  });
+  test('ids that resolve to no 13-0-13 ring nothing', async () => {
+    const { out, notify } = await run(resumeDb({ catalog: [{ name: 'Celsius WG' }] }), ['id-1']);
+    expect(out).toBeNull();
+    expect(notify).not.toHaveBeenCalled();
+  });
+  test('if the catalog read fails too, any submitted product rings the visit-level "product limits could not be checked" finding (deduped by its code)', async () => {
+    const { out, notify } = await run(resumeDb({ catalogFails: true }), ['id-1']);
+    expect(out.blocks).toEqual([expect.objectContaining({ code: 'application_limit_check_unavailable', message: 'Recorded. The office will review: product limits could not be checked for this visit.' })]);
+    expect(notify.mock.calls[0][0].findings).toEqual([expect.objectContaining({ code: 'application_limit_check_unavailable', productId: null })]);
+    expect(notify.mock.calls[0][0].findings[0].limitType).toBeUndefined();
+  });
+  test('a visit that submitted no products rings nothing, even when every read fails', async () => {
+    for (const ids of [[], undefined]) {
+      const { out, notify } = await run(resumeDb({ catalogFails: true }), ids);
+      expect(out).toBeNull();
+      expect(notify).not.toHaveBeenCalled();
+    }
+  });
+  test('names the completion carried are used without a catalog read', async () => {
+    const { notify } = await run(resumeDb({ catalogFails: true }), ['id-1'], [ORN]);
+    expect(notify.mock.calls[0][0].findings).toEqual([expect.objectContaining({ limitType: limits.AUDIT_UNAVAILABLE_LIMIT_TYPE })]);
+  });
+});
+
+describe('the raw rate is compared to the cap; only the shown number is rounded (Codex #6516 r8)', () => {
+  test('9.005 lb over 1,200 sq ft (7.504 lb/1k) is over the cap and shows 7.5', async () => {
+    const over = row({ total_amount: 9.005, amount_unit: 'lb', area_value: 1200, area_unit: 'sqft' });
+    const found = limits.rateFindings([over]);
+    expect(found).toEqual([expect.objectContaining({ limitType: 'ornamental_fertilizer_rate', current: 7.5, max: 7.5 })]);
+    const atCap = limits.rateFindings([row({ total_amount: 9, amount_unit: 'lb', area_value: 1200, area_unit: 'sqft' })]);
+    expect(atCap).toEqual([]);
+  });
+});
+
+describe('the frozen product name wins over a renamed catalog row (Codex #6516 r8)', () => {
+  test('the select prefers service_products.product_name and falls back to the catalog name', async () => {
+    const seenRaw = [];
+    const db = fakeDb({ rows: [row({ application_rate: 12, rate_unit: 'lb' })] });
+    const original = db.raw;
+    db.raw = (sql) => { seenRaw.push(sql); return original(sql); };
+    await limits.flagOrnamentalFertilizer({ svc, record, database: db, advisory: null, notify: jest.fn() });
+    expect(seenRaw).toContain('COALESCE(sp.product_name, pc.name) as product_name');
+  });
+});
+
 describe('a 13-0-13 on a lawn-primary visit with a Tree & Shrub companion is judged the same (the row is the trigger)', () => {
   const lawnSvc = { ...svc, service_type: 'Lawn Care', city: 'Sarasota' };
   const run = (opts, extra = {}) => {
