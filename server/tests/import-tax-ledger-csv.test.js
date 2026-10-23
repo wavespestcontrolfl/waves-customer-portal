@@ -718,6 +718,37 @@ describe('--skip-existing and expenses', () => {
     expect(db4.tables().expenses).toHaveLength(2);
   });
 
+  test('a hand-entered expense whose payment method cannot be this account (cash vs a card row, ach vs a card row) does not hold the ledger row', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
+    const file = path.join(dir, 'ledger-2025.csv');
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', source: '9731' }))); // a card row
+    for (const [method, held] of [['cash', 0], ['ach', 0], ['check', 0], ['card', 1], [null, 1]]) {
+      const db = makeFakeDb();
+      db.tables().expenses.push({ id: 'exp-h', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies', payment_method: method });
+      const { counts } = await run({ file, db, skipExisting: true });
+      expect([method, counts.held, counts.inserted]).toEqual([method, held, 1 - held]);
+    }
+    // a bank row: only cash is implausible
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', source: '3098' })));
+    for (const [method, held] of [['cash', 0], ['ach', 1], ['check', 1]]) {
+      const db = makeFakeDb();
+      db.tables().expenses.push({ id: 'exp-h', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies', payment_method: method });
+      expect([method, (await run({ file, db, skipExisting: true })).counts.held]).toEqual([method, held]);
+    }
+  });
+
+  test('an expense an earlier ledger run made just outside the file range (inside the window) is the ledger\'s own: never held against', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
+    const file = path.join(dir, 'ledger-2025.csv');
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-03-14' })));
+    const db = makeFakeDb();
+    // the earlier run loaded a 12.50 charge on the 12th and made its expense
+    db.tables().expenses.push({ id: 'exp-prior', expense_date: '2025-03-12', amount: '12.50', vendor_name: 'ACME SUPPLY 4471', description: 'x' });
+    db.tables().bank_transactions.push({ id: 'led-1', row_hash: 'prior', source: 'ledger-csv', account_label: 'ledger-3098', txn_date: '2025-03-12', description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-prior' });
+    const { counts } = await run({ file, db, skipExisting: true });
+    expect(counts).toEqual({ read: 1, inserted: 1, duplicates: 0, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
+  });
+
   test('a hand-entered expense a refund reduced is compared at its gross amount (applied or released refund), as the matcher does', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
     const file = path.join(dir, 'ledger-2025.csv');

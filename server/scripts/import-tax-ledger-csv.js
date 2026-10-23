@@ -38,7 +38,7 @@ const { categoryDeductibleAmount } = require('../services/expense-categorizer');
 // days off the statement still holds the ledger's expense row) and its
 // refund-aware gross reading (an expense a refund reduced is compared at the
 // amount the bank debited, applied and released refunds included).
-const { EXPENSE_DATE_WINDOW_DAYS, appliedRefundTotal } = require('../services/bank-import');
+const { EXPENSE_DATE_WINDOW_DAYS, appliedRefundTotal, methodIncompatible } = require('../services/bank-import');
 
 const HEADER = ['source', 'date', 'description', 'amount', 'direction', 'class', 'category', 'sched_c_line', 'flag', 'processor_match', 'bank_category'];
 const CLASSES = ['expense', 'vehicle', 'interest', 'personal', 'transfer', 'income_proc', 'receipt_unmatched', 'review', 'reward', 'refund', 'asset', 'unknown'];
@@ -443,7 +443,12 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
     .select('id', 'status', 'account_label', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction') : [];
   // expenses this importer made on an earlier run are the ledger's own, not
   // "already there from elsewhere": they are linked from a ledger bank row
-  const ledgerMade = new Set(rows.length ? (await db('bank_transactions').where({ source: SOURCE_TAG }).whereBetween('txn_date', range).whereNotNull('matched_expense_id')
+  // the file's range widened by the matcher window: a receipt dated days
+  // before the first posting (or after the last) can still be a ledger row,
+  // and an expense an earlier ledger run made just outside the range must
+  // still read as the ledger's own
+  const handRange = [shiftDays(range[0], -EXPENSE_DATE_WINDOW_DAYS), shiftDays(range[1], EXPENSE_DATE_WINDOW_DAYS)];
+  const ledgerMade = new Set(rows.length ? (await db('bank_transactions').where({ source: SOURCE_TAG }).whereBetween('txn_date', handRange).whereNotNull('matched_expense_id')
     .select('matched_expense_id')).map(r => r.matched_expense_id) : []);
   // Expenses linked to a bank row are covered through that row when it
   // overlaps a ledger row; the bank posting can sit a day or more after the
@@ -452,11 +457,8 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   // guesswork (text varies); a ledger expense of the same gross amount
   // within the window is held for the owner, and the report lists them all
   // to check once.
-  // the file's range widened by the matcher window: a receipt dated days
-  // before the first posting (or after the last) can still be a ledger row
-  const handRange = [shiftDays(range[0], -EXPENSE_DATE_WINDOW_DAYS), shiftDays(range[1], EXPENSE_DATE_WINDOW_DAYS)];
   const inRange = rows.length ? (await db('expenses').whereBetween('expense_date', handRange)
-    .select('id', 'expense_date', 'amount', 'vendor_name', 'description')).filter(e => !ledgerMade.has(e.id)) : [];
+    .select('id', 'expense_date', 'amount', 'vendor_name', 'description', 'payment_method')).filter(e => !ledgerMade.has(e.id)) : [];
   // the bank rows these expenses are linked to, whatever their posting date:
   // they carry the expense's account identity
   const linkedRows = inRange.length ? await db('bank_transactions').whereIn('matched_expense_id', inRange.map(e => e.id)).whereNot('source', SOURCE_TAG)
@@ -529,11 +531,14 @@ function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRo
     const linked = rowsOfExpense.get(e.id);
     return !linked || linked.some(f => sameAccount(source, f.account_label, masks));
   };
-  const takeHand = (date, amount, source) => {
+  // The matcher's own plausibility rule: an expense paid by ach, check or
+  // cash is not a card charge, a cash one is not a bank debit.
+  const takeHand = (date, amount, source, accountType) => {
     const list = handByAmount.get(Number(amount).toFixed(2)) || [];
     let best = -1;
     list.forEach((e, j) => {
       if (!sameAccountAsLinked(e, source)) return;
+      if (methodIncompatible(accountType, e.payment_method)) return;
       const gap = Math.abs(dayNumber(ymdOf(e.expense_date)) - dayNumber(date));
       if (gap > EXPENSE_DATE_WINDOW_DAYS) return;
       if (best === -1 || gap < Math.abs(dayNumber(ymdOf(list[best].expense_date)) - dayNumber(date))) best = j;
@@ -607,7 +612,7 @@ function reconcileRows(mapped, rows, portal) {
   mapped.forEach((m, i) => {
     if (settled.has(i)) return;
     if (m.expense) {
-      const hand = pools.takeHand(rows[i].date, m.bank.amount, rows[i].source);
+      const hand = pools.takeHand(rows[i].date, m.bank.amount, rows[i].source, m.bank.account_type);
       if (hand) {
         const gross = hand.expense.gross != null && Number(hand.expense.gross) !== Number(hand.expense.amount) ? ` (${Number(hand.expense.amount).toFixed(2)} after refunds)` : '';
         const kind = hand.covered ? 'an expense linked to a bank row' : 'a hand-entered expense';
