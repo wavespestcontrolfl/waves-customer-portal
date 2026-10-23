@@ -8,6 +8,7 @@ import { adminFetch } from "../../lib/adminFetch";
 import {
   NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY,
   pretreatWarrantyValues,
+  sentCertificate,
   daysSinceTreatment,
   warrantyEligible,
   warrantyIssueReadiness,
@@ -244,16 +245,18 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
 // 5E-14.105(3): a new-building pre-treat gets a written warranty within 30
 // days; an addition to an existing building (no plan years) gets none. Only
 // a single soil-barrier application matches this warranty's wording.
-export function IssueWarrantyAction({ project, findings, allowed, blocked, unsaved, buttonStyle }) {
+// It reads the certificate as sent (the copy the server issues from); before
+// any send it reads the live findings only to show the button, disabled.
+export function IssueWarrantyAction({ project, findings, allowed, blocked, buttonStyle }) {
   const [open, setOpen] = useState(false);
+  const sent = sentCertificate(project);
   const eligible = allowed
     && project?.project_type === "pre_treatment_termite_certificate"
     && Boolean(project?.customer_id)
-    && warrantyEligible(findings || {});
+    && warrantyEligible(sent ? sent.findings : findings || {});
   if (!eligible) return null;
-  // The server issues only from a sent certificate (it passed the send gate).
-  const unsent = !(project.sent_at || project.status === "sent");
-  const disabled = blocked || unsaved || unsent;
+  const unsent = !sent;
+  const disabled = blocked || unsent;
   return (
     <>
       <button
@@ -261,11 +264,11 @@ export function IssueWarrantyAction({ project, findings, allowed, blocked, unsav
         onClick={() => setOpen(true)}
         disabled={disabled}
         style={{ ...buttonStyle, opacity: disabled ? 0.4 : 1 }}
-        title={unsaved ? "Save changes first" : unsent ? "Send the certificate first" : "Create the new construction warranty for signature"}
+        title={unsent ? "Send the certificate first" : "Create the new construction warranty from the certificate as sent"}
       >
         Issue warranty
       </button>
-      {open && <IssueWarrantyDialog open onClose={() => setOpen(false)} project={project} findings={findings} />}
+      {open && <IssueWarrantyDialog open onClose={() => setOpen(false)} project={sent.project} findings={sent.findings} />}
     </>
   );
 }

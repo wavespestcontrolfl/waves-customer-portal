@@ -3399,7 +3399,6 @@ export function ProjectDetail({
           findings={editFindings}
           allowed={canAdminActions}
           blocked={actionsBlocked}
-          unsaved={dirty}
           buttonStyle={btnSecondary}
         />
       </div>{" "}

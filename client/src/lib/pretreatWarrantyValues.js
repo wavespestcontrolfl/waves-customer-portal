@@ -145,6 +145,24 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
   };
 }
 
+function parsedObject(value) {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+  }
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+}
+
+// The certificate as it went out (projects.pretreat_sent_snapshot). The
+// server builds the warranty from this copy, so the button and the dialog
+// read it too, never live edits made after the send. Null = never sent.
+export function sentCertificate(project = {}) {
+  const copy = parsedObject(project?.pretreat_sent_snapshot);
+  const findings = parsedObject(copy?.findings);
+  if (!findings) return null;
+  return { project: { ...project, project_date: copy.project_date }, findings };
+}
+
 // MM/DD/YYYY → { y, m, d }, or null when not a real calendar date.
 export function parseUsDate(value) {
   const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(text(value));
