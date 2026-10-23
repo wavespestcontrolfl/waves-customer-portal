@@ -28,6 +28,7 @@ const {
   TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
   hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord, withholdScores,
 } = require('./service-report/tree-shrub-tech-findings');
+const tsLighting = require('./tree-shrub-lighting');
 const {
   validMonth: validWatchMonth, normalizeWatchSignals, watchListPromptBlock,
 } = require('../config/tree-shrub-watch-list');
@@ -304,6 +305,9 @@ function normalizeTreeShrubScores(parsed) {
   for (const field of SEVERITY_SCORE_FIELDS) {
     if (typeof parsed[field] === 'string') parsed[field] = parsed[field].trim().toLowerCase();
   }
+  // GATE_TS_LIGHTING: the light answer becomes a closed word (a missing or invalid
+  // one is `unknown`) and is never part of the validity check. Gate off: untouched.
+  if (tsLighting.lightingLive()) tsLighting.normalizeLightFields(parsed);
   return parsed;
 }
 
@@ -362,6 +366,11 @@ function suggestLandscapeCondition(overallScore) {
 // writes the observations that reach customer copy, so it depends only on the
 // tech-findings gate. Watch signals come from their own call (readWatchSignals).
 function visionPromptText() {
+  // GATE_TS_LIGHTING: the same prompt plus the light ask; gate off = the text below, unchanged.
+  const prompt = techFindingsPromptText();
+  return tsLighting.lightingLive() ? tsLighting.withLightPrompt(prompt) : prompt;
+}
+function techFindingsPromptText() {
   if (!techFindingsCopyLive()) return VISION_PROMPT;
   const rule = `${PALM_CROWN_PROMPT_RULE} In "observations", never call a palm's crown, spear leaf or newest fronds healthy, fine or normal; if only the crown is in view, say it is not clearly visible.`;
   const marker = 'Return this exact JSON structure';
@@ -558,6 +567,9 @@ function averageScores(claude, gemini) {
   // two results itself (e.g. dual-input unit tests); live scoring no longer
   // averages two models.
   composite.observations = (gemini?.observations || claude?.observations || '').trim();
+  // GATE_TS_LIGHTING: the light read rides with the same winner as the prose (empty
+  // unless a provider answered it, so gate off adds no key).
+  Object.assign(composite, tsLighting.lightFieldsFrom(claude, gemini));
   return { composite, divergenceFlags };
 }
 
@@ -738,6 +750,9 @@ function mergePhotoComposites(composites = []) {
     merged[f] = SEVERITY_REVERSE[worst];
   }
   merged.observations = (list.map((c) => (c.observations || '').trim()).find(Boolean)) || '';
+  // GATE_TS_LIGHTING: `light` (the visit's) and `photo_lights` (each scored photo's,
+  // in order). Absent while the gate is off or when no photo carried a read.
+  Object.assign(merged, tsLighting.lightFromComposites(list));
   return merged;
 }
 
@@ -895,6 +910,17 @@ function applyReviewDecisions(scores = {}, decisions = []) {
   return { scores: s, hasHidden };
 }
 
+// The reviewed path's composite_scores: the AI scores and the tech's decisions.
+// GATE_TS_LIGHTING: `light` is the verified light the signed preview carried
+// (verifiedLightFromReview); absent, the stored object is exactly {ai, reviewed}.
+function reviewedCompositeScores(scores, decisions, light) {
+  return {
+    ai: scores,
+    reviewed: decisions || [],
+    ...(light ? { light: light.light, photo_lights: light.photo_lights } : {}),
+  };
+}
+
 /**
  * Persist a tree_shrub assessment from a TECH-REVIEWED closeout (the AI already
  * scored the photos at the preview step, so this does NOT call vision again). The
@@ -915,6 +941,7 @@ async function storeTreeShrubAssessmentFromReview({
   observations = '',
   knex = db,
   season = null,
+  light,
 } = {}) {
   try {
     if (!service.customer_id) return null;
@@ -936,7 +963,7 @@ async function storeTreeShrubAssessmentFromReview({
       service_record_id: service.id || null,
       service_date: service.service_date || now,
       season: season || null,
-      composite_scores: JSON.stringify({ ai: scores, reviewed: decisions || [] }),
+      composite_scores: JSON.stringify(reviewedCompositeScores(scores, decisions, light)),
       foliage_fullness: num(final.foliageFullness),
       leaf_color_vigor: num(final.leafColorVigor),
       pest_activity: num(final.pestActivity),
@@ -1010,6 +1037,9 @@ async function previewTreeShrubAssessment({
     observations: mergedRaw.observations || '',
     scoredCount: composites.length,
     photoCount: photos.length,
+    // GATE_TS_LIGHTING: each scored photo's light read; the route signs it, the
+    // client hands it back at Generate. Absent while the gate is off.
+    ...(mergedRaw.photo_lights ? { photoLights: mergedRaw.photo_lights } : {}),
     ...buildTreeShrubTechFindings({ scores, observations: mergedRaw.observations }),
     // GATE_TS_WATCH_LIST: the signals any photo showed, in list order. Carried
     // for the sheet only; no score reads it.
@@ -1131,6 +1161,10 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
     return hideFrozenFindingsInScores(formatted, frozenByRecord.get(String(row.service_record_id)));
   };
   const scores = withFrozenHides(assessment, formatAssessmentScores(assessment));
+  // GATE_TS_LIGHTING (read at call time): each history point also carries the
+  // light its visit was read in, and the payload says the color trend must be
+  // judged against it (buildTrends). Gate off: the points and payload are as before.
+  const lightAware = tsLighting.lightingLive();
   const trend = historyRows.map((r) => {
     const s = withFrozenHides(r, formatAssessmentScores(r));
     return {
@@ -1140,6 +1174,7 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
       leafColorVigor: s.leafColorVigor,
       pestActivity: s.pestActivity,
       waterHeatStress: s.waterHeatStress,
+      ...(lightAware ? { light: tsLighting.storedVisitLight(r.composite_scores) } : {}),
     };
   });
 
@@ -1161,6 +1196,7 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
     ...(techFindingsUnavailable ? { techFindingsUnavailable: true } : {}),
     plantGroups,
     trend,
+    ...(lightAware ? { colorTrendLightAware: true } : {}),
     techConfirmedPest: !!assessment.tech_confirmed_pest,
     techConfirmedDisease: !!assessment.tech_confirmed_disease,
   };
