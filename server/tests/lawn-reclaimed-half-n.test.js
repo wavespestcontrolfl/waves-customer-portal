@@ -348,14 +348,17 @@ describe('the recipe text the readers get (lawnProtocols), true with the gate of
   const NEW = 'get half the N at every N visit, except bags that carry the pre-emergent or the winter potassium, which keep their full rate. A line that shows "Reclaimed water: half nitrogen today" is already halved by the app; otherwise the tech logs half.';
   const ON_NOTE = `Reclaimed-water lawns (purple pipes or caps) ${NEW}`;
   const ON_RULE = `N and P blackout Jun 1 - Sep 30 (North Port Apr 1); reclaimed-water lawns ${NEW}`;
+  // The reclaimed lines are found by their text, never by position: other lanes add recipe notes and safety rules.
+  const reclaimedNote = (program) => program.notes.find((line) => /Reclaimed-water lawns \(purple pipes/.test(line));
+  const reclaimedRule = (program) => program.safety_rules.find((line) => /reclaimed-water lawns/.test(line));
   const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_BERMUDA_REMOVAL'];
   const savedGates = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
   afterEach(() => { for (const name of GATES) { if (savedGates[name] === undefined) delete process.env[name]; else process.env[name] = savedGates[name]; } });
 
   test('the recipe file holds the original, gate-off wording in every track (and states no future behavior)', () => {
     for (const track of Object.values(v13)) {
-      expect(track.notes[2]).toContain(OFF_NOTE);
-      expect(track.safety_rules[6]).toBe(OFF_RULE);
+      expect(reclaimedNote(track)).toContain(OFF_NOTE);
+      expect(reclaimedRule(track)).toBe(OFF_RULE);
     }
     expect(JSON.stringify(v13)).not.toMatch(/winter potassium|half nitrogen today/);
   });
@@ -369,12 +372,12 @@ describe('the recipe text the readers get (lawnProtocols), true with the gate of
     const on = programs.lawnProtocols();
     expect(on).not.toBe(off);
     for (const track of Object.keys(v13)) {
-      expect(off[track].notes[2]).toContain(OFF_NOTE);
-      expect(off[track].safety_rules[6]).toBe(OFF_RULE);
-      expect(on[track].notes[2]).toContain(ON_NOTE);
-      expect(on[track].safety_rules[6]).toBe(ON_RULE);
-      expect(on[track].notes[2]).not.toMatch(/does not adjust it yet/);
-      const strip = (program) => ({ ...program[track], notes: program[track].notes.filter((_l, i) => i !== 2), safety_rules: program[track].safety_rules.filter((_l, i) => i !== 6) });
+      expect(reclaimedNote(off[track])).toContain(OFF_NOTE);
+      expect(reclaimedRule(off[track])).toBe(OFF_RULE);
+      expect(reclaimedNote(on[track])).toContain(ON_NOTE);
+      expect(reclaimedRule(on[track])).toBe(ON_RULE);
+      expect(reclaimedNote(on[track])).not.toMatch(/does not adjust it yet/);
+      const strip = (program) => ({ ...program[track], notes: program[track].notes.filter((l) => l !== reclaimedNote(program[track])), safety_rules: program[track].safety_rules.filter((l) => l !== reclaimedRule(program[track])) });
       expect(strip(on)).toEqual(strip(off));
     }
   });
@@ -392,7 +395,7 @@ describe('the recipe text the readers get (lawnProtocols), true with the gate of
     process.env.GATE_LAWN_V13 = 'true';
     for (const value of ['TRUE', '1', 'false', '']) {
       process.env.GATE_LAWN_RECLAIMED_HALF_N = value;
-      expect(programs.lawnProtocols().bermuda.notes[2]).toContain(OFF_NOTE);
+      expect(reclaimedNote(programs.lawnProtocols().bermuda)).toContain(OFF_NOTE);
     }
     process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
     delete process.env.GATE_LAWN_V13;

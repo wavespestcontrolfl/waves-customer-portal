@@ -35,7 +35,7 @@ const v13WithoutAddOns = Object.fromEntries(Object.entries(v13).map(([track, pro
   { ...program, visits: program.visits.map((visit) => (visit.addOns ? (({ addOns, ...rest }) => rest)(visit) : visit)) },
 ]));
 
-// GATE_LAWN_RECLAIMED_HALF_N: the two reclaimed-water sentences of the recipe (every track's notes[2] and safety_rules[6]) say what the TECH does.
+// GATE_LAWN_RECLAIMED_HALF_N: the two reclaimed-water sentences of the recipe (one line in every track's notes and one in its safety_rules) say what the TECH does.
 // The JSON holds the wording that is true with the gate off ("the app does not adjust it yet"); with the gate on, the reader gets the wording
 // that is true when the app halves the N (and names the two bags that keep their full rate). Swapped by exact sentence, so a recipe edit that
 // rewords one of them fails the test that pins the pair instead of silently serving the old text.
