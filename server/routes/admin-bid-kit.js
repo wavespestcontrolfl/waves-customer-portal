@@ -43,7 +43,6 @@ const detailsSchema = Joi.object({
 const fields = {
   label: Joi.string().trim().min(1).max(200),
   value: text(2000),
-  credential_id: Joi.string().uuid().allow(null),
   limits: limitsSchema,
   details: detailsSchema,
   source_document: text(500),
@@ -81,7 +80,6 @@ function toColumns(body, kind) {
     out[key] = body[key] === null || body[key] === '' ? null : body[key].trim();
   }
   if (out.label === null) return { refused: 'label is required' };
-  if (body.credential_id !== undefined) out.credential_id = body.credential_id;
   for (const key of ['checked_on', 'expires_on', 'permission_on']) {
     if (body[key] === undefined) continue;
     if (body[key] === null || body[key] === '') { out[key] = null; continue; }
@@ -107,11 +105,10 @@ const forWrite = (columns) => {
 
 // What the page sees: the row without any file key, the file's name and size, and the computed status.
 function present(row, today) {
-  const { has_file: hasFile, credential_name: credentialName, credential_number: credentialNumber, credential_expires_on: credentialExpiresOn, ...rest } = row;
+  const { has_file: hasFile, ...rest } = row;
   return {
     ...rest,
     file: hasFile ? { name: row.file_name, contentType: row.file_content_type, size: row.file_size } : null,
-    credential: row.credential_id ? { id: row.credential_id, name: credentialName || null, number: credentialNumber || null, expiresOn: credentialExpiresOn || null } : null,
     status: catalog.itemStatus(row, { today }),
   };
 }
@@ -151,18 +148,18 @@ router.get('/facts-sheet', async (req, res, next) => {
     const status = (row) => catalog.itemStatus(row, { today });
     const factOrder = catalog.ITEMS.filter((item) => item.kind === 'fact');
     const factRows = (item) => rows.filter((row) => row.kind === 'fact' && row.item_key === item.key);
-    const toFact = (row, item) => ({ key: item.key, label: row.label || item.label, value: row.value || row.credential_number || null, status: status(row), signedOff: !!row.attested_at, checkedOn: row.checked_on || null });
+    const toFact = (row, item) => ({ key: item.key, label: row.label || item.label, value: row.value || null, status: status(row), signedOff: !!row.attested_at, checkedOn: row.checked_on || null });
     const facts = [
       ...factOrder.flatMap((item) => (factRows(item).length ? factRows(item).map((row) => toFact(row, item)) : [{ key: item.key, label: item.label, value: null, status: catalog.STATUS.MISSING, signedOff: false, checkedOn: null }])),
       ...rows.filter((row) => row.kind === 'fact' && row.item_key === catalog.CUSTOM_KEY).map((row) => toFact(row, { key: catalog.CUSTOM_KEY, label: row.label })),
     ];
     const documents = rows
-      .filter((row) => row.kind === 'document' && (row.value || row.credential_number || row.expires_on || row.credential_expires_on))
+      .filter((row) => row.kind === 'document' && (row.value || row.expires_on))
       .map((row) => ({
         key: row.item_key,
         label: row.label,
-        number: row.value || row.credential_number || null,
-        expiresOn: row.expires_on || row.credential_expires_on || null,
+        number: row.value || null,
+        expiresOn: row.expires_on || null,
         status: status(row),
         signedOff: !!row.attested_at,
       }));
@@ -182,9 +179,6 @@ router.post('/', async (req, res, next) => {
     if (isCustom && !value.label) return res.status(400).json({ error: 'A custom item needs a label' });
     const built = toColumns({ ...value, label: value.label || item.label }, value.kind);
     if (built.refused) return res.status(400).json({ error: built.refused });
-    if (built.columns.credential_id && !(await store.credentialExists(built.columns.credential_id))) {
-      return res.status(400).json({ error: 'That credential does not exist' });
-    }
     const outcome = await store.createItem(
       { kind: value.kind, item_key: value.item_key, ...forWrite(built.columns) },
       { unique: !isCustom && !item.many },
@@ -203,9 +197,6 @@ router.patch('/:id', async (req, res, next) => {
     if (error) return badRequest(res, error);
     const { expected_updated_at: expected, ...rest } = value;
     if (!Object.keys(rest).length) return res.status(400).json({ error: 'Nothing to change' });
-    if (rest.credential_id && !(await store.credentialExists(rest.credential_id))) {
-      return res.status(400).json({ error: 'That credential does not exist' });
-    }
     const outcome = await store.updateItem(req.params.id, (row) => {
       if (!sameInstant(row.updated_at, expected)) return { error: { status: 409, message: CHANGED } };
       const built = toColumns(rest, row.kind);

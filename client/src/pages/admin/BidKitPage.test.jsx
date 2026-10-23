@@ -17,7 +17,7 @@ const TODAY = "2026-10-23";
 const row = (over = {}) => ({
   id: "i1", kind: "document", item_key: "business_license_copy", label: "FDACS business license copy", value: null, file: { name: "license.pdf", contentType: "application/pdf", size: 1200 },
   limits: null, details: null, source_document: "FDACS renewal letter", checked_on: "2026-10-01", expires_on: "2027-06-30", permission_on: null,
-  attested_by: null, attested_at: null, notes: null, archived_at: null, credential: null, status: "unattested", updated_at: "2026-10-02T12:00:00.000Z", ...over,
+  attested_by: null, attested_at: null, notes: null, archived_at: null, status: "unattested", updated_at: "2026-10-02T12:00:00.000Z", ...over,
 });
 const ITEMS = [
   row(),
@@ -33,7 +33,7 @@ const payload = (items = ITEMS) => ({
   today: TODAY,
   catalog: catalogSections(),
   items,
-  summary: summarize(buildChecklist(items.map((item) => ({ ...item, has_file: !!item.file, credential_number: null })), { today: TODAY })),
+  summary: summarize(buildChecklist(items.map((item) => ({ ...item, has_file: !!item.file })), { today: TODAY })),
 });
 
 function route(handlers) {

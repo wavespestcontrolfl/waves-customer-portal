@@ -5,15 +5,15 @@
  * sign-off. Nothing here is public and nothing is sent to anyone.
  *
  * It is a NEW table on purpose. business_credentials feeds the public /api/public/credentials endpoint and the
- * website, and its is_public column defaults to true, so no bid-kit column is added there. credential_id only points
- * at a credentials row so a fact (the FDACS license number) can read its number from there.
+ * website, and its is_public column defaults to true, so no bid-kit column is added there. There is no link to
+ * business_credentials at all: a live join would let a signed-off fact change when someone edits a credential, with the
+ * sign-off still standing. The FDACS license number is a fact the owner types and signs off like any other.
  *
  * bid_kit_items
  *   kind                          document | fact | reference (checked by the database)
  *   item_key                      the catalog key (shared/bid-kit-catalog.cjs) or 'custom'; the catalog lives in code,
  *                                 so there are NO seed rows: a row is created when the owner fills an item
  *   label, value                  what the item is called and its text value (a fact's value, a policy number)
- *   credential_id                 optional link to business_credentials; SET NULL when that row goes
  *   file_s3_key, file_name,
  *   file_content_type, file_size  the private S3 object (never returned by any route, only a short signed link)
  *   limits                        insurance limits in whole dollars, plus workersComp 'statutory' | 'exempt'
@@ -44,7 +44,6 @@ exports.up = async function up(knex) {
     t.string('item_key', 48).notNullable();
     t.text('label').notNullable();
     t.text('value');
-    t.uuid('credential_id').nullable().references('id').inTable('business_credentials').onDelete('SET NULL');
     t.text('file_s3_key');
     t.text('file_name');
     t.text('file_content_type');

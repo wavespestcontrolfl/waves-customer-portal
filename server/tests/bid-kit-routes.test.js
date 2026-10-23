@@ -50,19 +50,17 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({
 jest.mock('../services/bid-kit-store', () => {
   const { randomUUID } = require('crypto');
   const rows = new Map();
-  const credentials = new Map();
   let tick = 0;
   const stamp = () => new Date(Date.UTC(2026, 9, 23, 12, 0, 0, ++tick));
   const parse = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
   const view = (row) => {
     const { file_s3_key: key, ...rest } = row;
-    const credential = row.credential_id ? credentials.get(row.credential_id) : null;
-    return { ...rest, has_file: !!key, credential_name: credential?.display_name || null, credential_number: credential?.credential_number || null, credential_expires_on: credential?.expiration_date || null };
+    return { ...rest, has_file: !!key };
   };
   const activity = [];
   const store = {
-    rows, credentials, activity,
-    reset() { rows.clear(); credentials.clear(); activity.length = 0; tick = 0; },
+    rows, activity,
+    reset() { rows.clear(); activity.length = 0; tick = 0; },
     touch(id, patch) { Object.assign(rows.get(id), patch); },
     keyOf: (id) => rows.get(id).file_s3_key,
     listItems: jest.fn(async ({ all = false } = {}) => [...rows.values()].filter((row) => all || !row.archived_at).map(view)),
@@ -71,12 +69,11 @@ jest.mock('../services/bid-kit-store', () => {
       const row = rows.get(id);
       return row && !row.archived_at ? { key: row.file_s3_key || null, fileName: row.file_name, contentType: row.file_content_type } : null;
     }),
-    credentialExists: jest.fn(async (id) => credentials.has(id)),
     createItem: jest.fn(async (input, { unique = false } = {}) => {
       if (unique && [...rows.values()].some((row) => !row.archived_at && row.kind === input.kind && row.item_key === input.item_key)) return { duplicate: true };
       const id = randomUUID();
       const row = {
-        id, value: null, credential_id: null, file_s3_key: null, file_name: null, file_content_type: null, file_size: null, limits: null, details: null,
+        id, value: null, file_s3_key: null, file_name: null, file_content_type: null, file_size: null, limits: null, details: null,
         source_document: null, checked_on: null, expires_on: null, permission_on: null, attested_by: null, attested_at: null, notes: null, archived_at: null,
         created_at: stamp(), updated_at: stamp(), ...input,
       };
@@ -316,15 +313,6 @@ describe('create and list', () => {
     expect(bad.body.error).toMatch(/tax ID/);
     expect(JSON.stringify(bad.body)).not.toContain('123456789');
   });
-
-  test('a credential link must point at a real credential', async () => {
-    expect((await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'fdacs_license_number', credential_id: '99999999-2222-4333-8444-555555555555' })).status).toBe(400);
-    const credentialId = '88888888-2222-4333-8444-555555555555';
-    store.credentials.set(credentialId, { display_name: 'FDACS pest control license', credential_number: 'JB000000', expiration_date: '2027-06-30' });
-    const fact = await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'fdacs_license_number', credential_id: credentialId });
-    expect(fact.status).toBe(201);
-    expect(fact.body.item).toMatchObject({ status: 'unattested', credential: { id: credentialId, number: 'JB000000', expiresOn: '2027-06-30' } });
-  });
 });
 
 describe('patch', () => {
@@ -389,14 +377,6 @@ describe('patch', () => {
       expect(attested.body.item.status).toBe('ready');
       const res = await call('PATCH', `/api/admin/bid-kit/${reference.body.item.id}`, { details: { entity: 'Sample District', phone: '941-555-0100' }, expected_updated_at: attested.body.item.updated_at });
       expect(res.body.item).toMatchObject({ attested_at: null, attested_by: null, status: 'unattested' });
-    });
-
-    test('a credential relink', async () => {
-      const credentialId = '88888888-2222-4333-8444-555555555555';
-      store.credentials.set(credentialId, { display_name: 'FDACS pest control license', credential_number: 'JB000000', expiration_date: null });
-      const item = await signed({ kind: 'fact', item_key: 'fdacs_license_number' });
-      const res = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { credential_id: credentialId, expected_updated_at: item.updated_at });
-      expect(res.body.item.attested_at).toBeNull();
     });
 
     test('a label, a note or the same values again do not clear it', async () => {
@@ -605,9 +585,7 @@ describe('facts sheet', () => {
     await upload(license.id, { name: 'license.pdf' });
     const retired = await create({ item_key: 'business_tax_receipt', value: 'BTR-ARCHIVED', expires_on: '2999-02-02' });
     await call('DELETE', `/api/admin/bid-kit/${retired.id}`);
-    const credentialId = '88888888-2222-4333-8444-555555555555';
-    store.credentials.set(credentialId, { display_name: 'FDACS pest control license', credential_number: 'JB123456', expiration_date: '2999-03-03' });
-    await create({ kind: 'fact', item_key: 'fdacs_license_number', credential_id: credentialId });
+    await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'JB123456' });
 
     const res = await call('GET', '/api/admin/bid-kit/facts-sheet');
     expect(res.status).toBe(200);
@@ -615,7 +593,7 @@ describe('facts sheet', () => {
     expect(res.body.facts).toHaveLength(15);
     expect(byKey.legal_name).toMatchObject({ value: 'Example Pest Services LLC', signedOff: false });
     expect(byKey.phone).toMatchObject({ value: null, status: 'missing' }); // archived value is gone
-    expect(byKey.fdacs_license_number.value).toBe('JB123456'); // read from the linked credential
+    expect(byKey.fdacs_license_number.value).toBe('JB123456'); // typed by the owner like any other fact
     expect(res.body.documents).toEqual([{ key: 'business_license_copy', label: 'FDACS business license copy', number: 'JB000000', expiresOn: '2999-01-01', status: 'unattested', signedOff: false }]);
     const text = JSON.stringify(res.body);
     expect(text).not.toMatch(/BTR-ARCHIVED|941-555-0199/);
@@ -633,6 +611,33 @@ describe('facts sheet', () => {
       (await call('DELETE', `/api/admin/bid-kit/${item.id}`)).body,
     ];
     for (const body of bodies) expect(JSON.stringify(body)).not.toMatch(/bid-kit\/|file_s3_key|https?:/);
+  });
+});
+
+describe('no link to business_credentials', () => {
+  test('editing a credential changes nothing the kit returns, and the sign-off on the FDACS license number stands', async () => {
+    mockCredentialRows = [{ slug: 'fdacs-license', display_name: 'FDACS pest control license', credential_type: 'license', credential_number: 'JB000000', status: 'active', sort_order: 1, is_public: true }];
+    const fact = await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'JB000000' });
+    const attested = await call('POST', `/api/admin/bid-kit/${fact.id}/attest`, { expected_updated_at: fact.updated_at });
+    expect(attested.body.item.status).toBe('ready');
+    const read = async () => ({ list: (await call('GET', '/api/admin/bid-kit')).body, sheet: (await call('GET', '/api/admin/bid-kit/facts-sheet')).body });
+    const before = await read();
+    mockCredentialRows[0].credential_number = 'JB999999';
+    mockDb.mockClear();
+    const after = await read();
+    expect(after).toEqual(before);
+    expect(JSON.stringify(after)).not.toContain('JB999999');
+    expect(after.sheet.facts.find((entry) => entry.key === 'fdacs_license_number')).toMatchObject({ value: 'JB000000', signedOff: true, status: 'ready' });
+    expect(mockDb).not.toHaveBeenCalled(); // the kit reads no other table
+  });
+
+  test('no kit module names business_credentials, and the row has no credential field', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const file of ['routes/admin-bid-kit.js', 'services/bid-kit-store.js', 'services/bid-kit-expiry.js', 'services/bid-kit-files.js', '../shared/bid-kit-catalog.cjs']) {
+      const code = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      expect(code).not.toMatch(/business_credentials|credential_id|credential_number/);
+    }
   });
 });
 
@@ -661,6 +666,6 @@ describe('the public credentials feed', () => {
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '');
     expect(code).toMatch(/createTable\(TABLE/);
     expect(code).not.toMatch(/alterTable|ALTER TABLE business_credentials|table\('business_credentials'/);
-    expect(code.match(/business_credentials/g)).toHaveLength(1); // only the credential_id reference
+    expect(code).not.toMatch(/business_credentials|credential_id/); // no link to it at all
   });
 });

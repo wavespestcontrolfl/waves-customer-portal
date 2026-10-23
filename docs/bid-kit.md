@@ -19,7 +19,7 @@ Each row keeps: its private file, limits (insurance, whole dollars), source docu
 
 A paper counts as **ready** only after the owner presses Sign off. The sign-off covers the item as the owner saw it:
 
-- Any change to the value, file, limits, details, source document, checked-on date, expiry, permission date or credential link clears the sign-off in the same update. A stale sign-off cannot survive an edit.
+- Any change to the value, file, limits, details, source document, checked-on date, expiry, or permission date clears the sign-off in the same update. A stale sign-off cannot survive an edit.
 - Sign-off is refused while an item is missing, expired, or has no expiry date when its catalog entry says it expires ("Add the expiry date first"), and for a version that changed since the page loaded (reload and look again).
 - Status is computed, never stored, first match wins: missing, expired, needs expiry, needs permission (a reference with no permission date), needs sign-off, expiring (complete and signed off, but expires within 30 days), ready. The summary counts ready and expiring together as ready, and shows the expiring-soon count beside it ("14 of 31 ready · 2 expiring soon").
 

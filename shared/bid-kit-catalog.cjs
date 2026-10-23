@@ -108,8 +108,7 @@ const REFERENCE_DETAIL_KEYS = ['entity', 'contactRole', 'phone', 'email', 'contr
 const PUBLIC_OR_PRIVATE = ['public', 'private'];
 
 // Any change to one of these clears the sign-off in the SAME update.
-// credential_id is on the list too: a fact that reads its number from a linked credentials row says something else after a relink.
-const SUBSTANTIVE_FIELDS = ['value', 'file_s3_key', 'limits', 'details', 'source_document', 'checked_on', 'expires_on', 'permission_on', 'credential_id'];
+const SUBSTANTIVE_FIELDS = ['value', 'file_s3_key', 'limits', 'details', 'source_document', 'checked_on', 'expires_on', 'permission_on'];
 const EXPIRING_DAYS = 30;
 
 // First match wins, in this order. "expiring" means complete and signed off, but expiring within 30 days: it is valid on a bid today.
@@ -166,14 +165,13 @@ const present = (value) => typeof value === 'string' ? value.trim() !== '' : val
 
 // The status of one row. Pure: pass `today` (an Eastern YYYY-MM-DD) or `now`.
 // First match wins, in this order: missing, expired, needs_expiry, needs_permission, unattested, expiring, ready.
-// A row is "there" when it has a file or a value; a reference also counts when it names its entity, and a fact may
-// take its value from the linked credentials row (`credential_number`). A catalog item that expires (expires: true) and has
+// A row is "there" when it has a file or a value; a reference also counts when it names its entity. A catalog item that expires (expires: true) and has
 // no expiry date is needs_expiry; custom rows are not held to that.
 function itemStatus(row, { today, now } = {}) {
   const day = today || etToday(now);
   const r = row || {};
   const hasFile = present(r.file_s3_key) || r.has_file === true;
-  const hasValue = present(r.value) || present(r.credential_number);
+  const hasValue = present(r.value);
   const hasEntity = r.kind === 'reference' && present(r.details && r.details.entity);
   if (!hasFile && !hasValue && !hasEntity) return STATUS.MISSING;
   const expires = dayText(r.expires_on);

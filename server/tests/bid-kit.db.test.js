@@ -105,7 +105,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
     test('creates the table with exactly the planned columns, the kind check and the partial index', async () => {
       const columns = await mockPg('information_schema.columns').where({ table_name: 'bid_kit_items' }).orderBy('ordinal_position').select('column_name', 'data_type', 'is_nullable', 'column_default');
       expect(columns.map((c) => c.column_name)).toEqual([
-        'id', 'kind', 'item_key', 'label', 'value', 'credential_id', 'file_s3_key', 'file_name', 'file_content_type', 'file_size', 'limits', 'details',
+        'id', 'kind', 'item_key', 'label', 'value', 'file_s3_key', 'file_name', 'file_content_type', 'file_size', 'limits', 'details',
         'source_document', 'checked_on', 'expires_on', 'permission_on', 'attested_by', 'attested_at', 'notes', 'archived_at', 'created_at', 'updated_at',
       ]);
       const type = (name) => columns.find((c) => c.column_name === name).data_type;
@@ -139,12 +139,12 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect(after.some((name) => /bid|kit|attest/.test(name))).toBe(false);
     });
 
-    test('a credential link is cleared, not blocked, when the credential goes', async () => {
-      const cred = await credential();
-      const item = await create({ kind: 'fact', item_key: 'fdacs_license_number', credential_id: cred.id });
-      expect((await rowOf(item.id)).credential_id).toBe(cred.id);
-      await mockPg('business_credentials').where({ id: cred.id }).del();
-      expect((await rowOf(item.id)).credential_id).toBeNull();
+    test('has no link to business_credentials: no column, no foreign key', async () => {
+      const links = await mockPg.raw(`
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'bid_kit_items'::regclass AND contype = 'f'`);
+      expect(links.rows).toEqual([]);
+      expect(await mockPg.schema.hasColumn('bid_kit_items', 'credential_id')).toBe(false);
     });
   });
 
@@ -238,9 +238,8 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect((await call('GET', '?all=1')).body.items.filter((item) => item.item_key === 'w9')).toHaveLength(2);
     });
 
-    test('the facts sheet reads a linked credential, leaves archived rows out and carries no key or link', async () => {
-      const cred = await credential({ credential_number: 'FX123456', expiration_date: '2999-03-03' });
-      await create({ kind: 'fact', item_key: 'fdacs_license_number', credential_id: cred.id });
+    test('the facts sheet shows typed values, leaves archived rows out and carries no key or link', async () => {
+      await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'FX123456' });
       await create({ kind: 'fact', item_key: 'legal_name', value: 'Example Pest Services LLC' });
       const gone = await create({ kind: 'fact', item_key: 'phone', value: '941-555-0199' });
       await call('DELETE', `/${gone.id}`);
@@ -249,11 +248,26 @@ describeDb('Bid kit (PostgreSQL)', () => {
       const res = await call('GET', '/facts-sheet');
       expect(res.status).toBe(200);
       const byKey = Object.fromEntries(res.body.facts.map((fact) => [fact.key, fact]));
-      expect(byKey.fdacs_license_number.value).toBe('FX123456');
+      expect(byKey.fdacs_license_number.value).toBe('FX123456'); // typed by the owner
       expect(byKey.legal_name.value).toBe('Example Pest Services LLC');
       expect(byKey.phone.value).toBeNull();
       expect(res.body.documents).toEqual([expect.objectContaining({ key: 'business_license_copy', number: 'JB000000', expiresOn: '2999-01-01' })]);
       expect(JSON.stringify(res.body)).not.toMatch(/941-555-0199|bid-kit\/|s3_key|https?:/);
+    });
+
+    test('editing a business_credentials row changes nothing the kit returns, and a signed-off fact stays signed off', async () => {
+      const cred = await credential({ credential_number: 'FX000000', expiration_date: '2999-03-03' });
+      const fact = await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'FX000000' });
+      expect((await call('POST', `/${fact.id}/attest`, { expected_updated_at: fact.updated_at })).status).toBe(200);
+      const read = async () => ({ list: (await call('GET', '')).body, sheet: (await call('GET', '/facts-sheet')).body });
+      const before = await read();
+      await mockPg('business_credentials').where({ id: cred.id }).update({ credential_number: 'FX999999', expiration_date: '2000-01-01', updated_at: new Date() });
+      await mockPg('business_credentials').where({ id: cred.id }).del();
+      const after = await read();
+      expect(after).toEqual(before);
+      expect(JSON.stringify(after)).not.toContain('FX999999');
+      expect(after.sheet.facts.find((entry) => entry.key === 'fdacs_license_number')).toMatchObject({ value: 'FX000000', signedOff: true, status: 'ready' });
+      expect(await rowOf(fact.id)).toMatchObject({ value: 'FX000000', attested_by: mockAdminId });
     });
 
     test('the activity log records who did what, with field names and no values', async () => {
@@ -305,7 +319,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
       };
       const before = await read();
       expect(before.credentials.some((c) => c.slug === cred.slug)).toBe(true);
-      const item = await create({ kind: 'fact', item_key: 'fdacs_license_number', credential_id: cred.id, value: 'Bid kit only value' });
+      const item = await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'Bid kit only value' });
       await upload((await create({ item_key: 'business_license_copy', value: 'JB000000' })).id);
       await call('POST', `/${item.id}/attest`, { expected_updated_at: item.updated_at });
       const after = await read();

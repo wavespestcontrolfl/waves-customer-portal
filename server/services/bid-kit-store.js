@@ -10,17 +10,14 @@ const TABLE = 'bid_kit_items';
 
 const DAY = (column) => `to_char(i.${column}, 'YYYY-MM-DD') AS ${column}`;
 const SELECT = [
-  'i.id', 'i.kind', 'i.item_key', 'i.label', 'i.value', 'i.credential_id', 'i.file_name', 'i.file_content_type', 'i.file_size',
+  'i.id', 'i.kind', 'i.item_key', 'i.label', 'i.value', 'i.file_name', 'i.file_content_type', 'i.file_size',
   'i.limits', 'i.details', 'i.source_document', 'i.attested_by', 'i.attested_at', 'i.notes', 'i.archived_at', 'i.created_at', 'i.updated_at',
 ];
 function selectRows(conn) {
   return conn(`${TABLE} as i`)
-    .leftJoin('business_credentials as c', 'c.id', 'i.credential_id')
     .select(SELECT)
     .select(conn.raw('(i.file_s3_key IS NOT NULL) AS has_file'))
-    .select(conn.raw(DAY('checked_on')), conn.raw(DAY('expires_on')), conn.raw(DAY('permission_on')))
-    .select('c.display_name as credential_name', 'c.credential_number')
-    .select(conn.raw("to_char(c.expiration_date, 'YYYY-MM-DD') AS credential_expires_on"));
+    .select(conn.raw(DAY('checked_on')), conn.raw(DAY('expires_on')), conn.raw(DAY('permission_on')));
 }
 
 // Items in checklist order: kind, key, then oldest first. Archived rows only when asked.
@@ -39,11 +36,6 @@ async function fileInfo(id) {
   const row = await db(TABLE).where({ id }).whereNull('archived_at').first('file_s3_key', 'file_name', 'file_content_type');
   if (!row) return null;
   return { key: row.file_s3_key, fileName: row.file_name, contentType: row.file_content_type };
-}
-
-async function credentialExists(id) {
-  const row = await db('business_credentials').where({ id }).first('id');
-  return !!row;
 }
 
 // One live row per catalog item unless it takes many (references, custom). The check runs under a lock on the item key,
@@ -115,4 +107,4 @@ async function logActivity(adminUserId, action, description, metadata) {
   }
 }
 
-module.exports = { TABLE, listItems, getItem, fileInfo, credentialExists, createItem, updateItem, replaceFile, archiveItem, logActivity };
+module.exports = { TABLE, listItems, getItem, fileInfo, createItem, updateItem, replaceFile, archiveItem, logActivity };

@@ -67,9 +67,11 @@ describe('status', () => {
     expect(STATUS_ORDER).toEqual(['missing', 'expired', 'needs_expiry', 'needs_permission', 'unattested', 'expiring', 'ready']);
   });
 
-  test('a value alone makes a document present, and a fact may read its value from a linked credential', () => {
+  test('a value alone makes a document present; a fact with no value is missing, whatever else the row carries', () => {
     expect(itemStatus(w9({ has_file: false, value: 'On file' }), { today: TODAY })).toBe(STATUS.UNATTESTED);
-    expect(itemStatus({ kind: 'fact', item_key: 'fdacs_license_number', value: null, credential_number: 'JB000000' }, { today: TODAY })).toBe(STATUS.UNATTESTED);
+    // A fact's value is the one the owner typed. Nothing is read from any other table, so a stray number on the row is ignored.
+    expect(itemStatus({ kind: 'fact', item_key: 'fdacs_license_number', value: null, credential_number: 'JB000000' }, { today: TODAY })).toBe(STATUS.MISSING);
+    expect(itemStatus({ kind: 'fact', item_key: 'fdacs_license_number', value: 'JB000000', attested_at: SIGNED }, { today: TODAY })).toBe(STATUS.READY);
   });
 
   test('an expiry before today is expired, whatever else is true of the item', () => {
@@ -201,7 +203,7 @@ describe('counts', () => {
 describe('what clears a sign-off', () => {
   const row = {
     value: 'POL-0001', file_s3_key: 'x', limits: { glEachOccurrence: 1000000, workersComp: 'statutory' }, details: { entity: 'Sample District' },
-    source_document: 'Certificate dated Sep 1', checked_on: '2026-09-01', expires_on: '2027-09-01', permission_on: '2026-09-02', credential_id: null,
+    source_document: 'Certificate dated Sep 1', checked_on: '2026-09-01', expires_on: '2027-09-01', permission_on: '2026-09-02',
   };
 
   test.each([
@@ -213,7 +215,6 @@ describe('what clears a sign-off', () => {
     ['checked_on', { checked_on: '2026-10-01' }],
     ['expires_on', { expires_on: '2027-10-01' }],
     ['permission_on', { permission_on: '2026-10-03' }],
-    ['credential_id', { credential_id: '11111111-2222-4333-8444-555555555555' }],
   ])('a change to %s counts', (_name, patch) => {
     expect(changesSubstance(row, patch)).toBe(true);
   });
@@ -221,7 +222,7 @@ describe('what clears a sign-off', () => {
   test('saving the same values again, key order aside, changes nothing', () => {
     expect(changesSubstance(row, {
       value: 'POL-0001', limits: { workersComp: 'statutory', glEachOccurrence: 1000000 }, details: { entity: 'Sample District' },
-      source_document: 'Certificate dated Sep 1', checked_on: '2026-09-01', expires_on: new Date('2027-09-01T00:00:00Z'), permission_on: '2026-09-02', credential_id: null,
+      source_document: 'Certificate dated Sep 1', checked_on: '2026-09-01', expires_on: new Date('2027-09-01T00:00:00Z'), permission_on: '2026-09-02',
     })).toBe(false);
     expect(changesSubstance({ value: null, limits: null }, { value: '', limits: null })).toBe(false);
   });
