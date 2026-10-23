@@ -27,6 +27,8 @@ function parsedRow(over = {}) {
   return parseLedgerCsv(csv(row(over)))[0];
 }
 
+const toCentsOf = v => Math.round(Math.abs(parseFloat(v)) * 100);
+
 describe('parseLedgerCsv header validation', () => {
   test('accepts the exact header and a BOM', () => {
     expect(parseLedgerCsv(`﻿${csv(row())}`)).toHaveLength(1);
@@ -270,7 +272,7 @@ function makeFakeDb({ categories } = {}) {
               }
               const withId = { ...r, id: `id-${(seq += 1)}` };
               store[table].push(withId);
-              inserted.push({ id: withId.id });
+              inserted.push({ id: withId.id, row_hash: withId.row_hash });
             }
             return state.wantReturn ? inserted : undefined;
           }
@@ -377,6 +379,30 @@ describe('run', () => {
     expect(db.tables().expenses).toHaveLength(0);
     expect(summary.expensesCreated).toBe(0);
     expect(db.tables().bank_transactions.filter(b => b.status === 'unmatched')).toHaveLength(6);
+  });
+
+  test('a non-expense row another writer inserted after the lookup is skipped and left out of the report totals', async () => {
+    const db = makeFakeDb();
+    const realDb = db;
+    const rows = parseLedgerCsv(fs.readFileSync(file, 'utf8'));
+    // a row that makes no expense (its class is ignored), pre-inserted as if by a concurrent import
+    const idx = rows.findIndex(r => !mapRow(r).expense);
+    const target = rows[idx];
+    const hash = rowHash(target.source, target.date, target.description, target.amount, target.direction, 0);
+    realDb.tables().bank_transactions.push({ id: 'pre', row_hash: hash, status: 'ignored', amount: target.amount, direction: target.direction });
+    const blind = table => {
+      if (table !== 'bank_transactions') return realDb(table);
+      const real = realDb(table);
+      const blindLookup = { select: () => Promise.resolve([]) };
+      return { ...real, insert: (...a) => real.insert(...a), whereIn: () => blindLookup };
+    };
+    blind.transaction = realDb.transaction;
+    const { counts, summary } = await run({ file, db: blind });
+    expect(counts).toEqual({ read: 8, inserted: 7, duplicates: 1 });
+    // the summary covers the seven rows that landed, not the raced one
+    expect(summary.rows).toBe(7);
+    const clean = await run({ file, db: makeFakeDb() });
+    expect(summary.totals.debitCents + summary.totals.creditCents).toBe(clean.summary.totals.debitCents + clean.summary.totals.creditCents - toCentsOf(target.amount));
   });
 
   test('a lost insert race rolls the expense back and counts a duplicate', async () => {

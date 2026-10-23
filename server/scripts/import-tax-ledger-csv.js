@@ -383,15 +383,21 @@ async function run({ file, dryRun = false, db, log = () => {} } = {}) {
   if (dryRun) {
     inserted = fresh.length;
   } else {
-    // Non-expense rows: bulk insert; row_hash conflicts are ignored.
+    // Non-expense rows: bulk insert; row_hash conflicts are ignored. The
+    // rows that landed come back by hash, so a row another writer inserted
+    // after the existence lookup is marked skipped and stays out of the
+    // report's tallies, like a raced expense row.
     for (const part of chunk(plain, INSERT_CHUNK)) {
       const res = await db('bank_transactions')
         .insert(part.map(m => m.bank))
         .onConflict('row_hash')
         .ignore()
-        .returning('id');
-      inserted += res.length;
-      duplicates += part.length - res.length;
+        .returning(['id', 'row_hash']);
+      const landedHashes = new Set(res.map(r => (r && typeof r === 'object' ? r.row_hash : null)).filter(Boolean));
+      for (const m of part) {
+        if (landedHashes.has(m.bank.row_hash)) inserted += 1;
+        else { duplicates += 1; m.skipped = true; }
+      }
     }
     // Expense rows: expense + bank row in one transaction each, so a failure
     // leaves no orphan expense.
