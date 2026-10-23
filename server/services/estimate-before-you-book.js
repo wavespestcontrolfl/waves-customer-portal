@@ -8,9 +8,9 @@
 // section prints; each service section is worded for "if your estimate
 // includes ..." so the page never has to guess what an estimate quotes from
 // its many stored shapes (Codex #6504 r1-r3 kept finding shapes a local reader
-// missed). Only two lines depend on THIS estimate, and both read the canonical
-// verdicts: the no-contract line (known residential + proposalCarriesPlanTerms)
-// and the 90-day prepay refund line (the /data payload's own prepay verdict).
+// missed). Only the no-contract line depends on THIS estimate, and it reads the
+// canonical verdict (known residential + proposalCarriesPlanTerms). The 90-day
+// prepay refund line always prints.
 // Copy is the owner's answer book: no prices, no product brand names, no fixed
 // dry or re-entry times.
 //
@@ -26,7 +26,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const TITLE = 'Before you book';
 
-// Sections in print order. Each line: { rank, text }. `when(s, opts)` decides
+// Sections in print order. Each line: { rank, text }. `when(s)` decides
 // whether the line applies to this estimate. Rank 1 = keep longest.
 const SECTIONS = [
   {
@@ -40,7 +40,7 @@ const SECTIONS = [
       { rank: 2, when: (s) => s.planTerms, text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
       // The neutral line whenever the plan terms do not apply, so such an estimate never reads as month-to-month.
       { rank: 3, when: (s) => !s.planTerms, text: 'Termite plans and commercial accounts follow the agreement you sign.' },
-      { rank: 2, when: (s, o) => o.prepayRefundRule === true, text: 'If your estimate offers a prepaid year and you prepay, you can cancel within 90 days and we refund the visits we have not done yet. After 90 days there is no refund, and your paid visits stay on your schedule through the end of the prepaid term.' },
+      { rank: 2, text: 'If your estimate offers a prepaid year and you prepay, you can cancel within 90 days and we refund the visits we have not done yet. After 90 days there is no refund, and your paid visits stay on your schedule through the end of the prepaid term.' },
       { rank: 4, text: 'Mail checks to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.' },
     ],
   },
@@ -86,12 +86,11 @@ const SECTIONS = [
 const CLOSING = { rank: 3, text: (phone) => `Questions before you book? Call us at ${phone} and we will help.` };
 
 // The page: { title, sections: [{ key, heading, lines: [{ rank, text }] }], closing }.
-// `signals.planTerms` = the estimate-wide plan terms apply; `opts.prepayRefundRule` = the 90-day refund
-// rule is live; `opts.phone` = the support number.
+// `signals.planTerms` = the estimate-wide plan terms apply; `opts.phone` = the support number.
 function buildBeforeYouBook(signals = {}, opts = {}) {
   const sections = SECTIONS
     .map((section) => ({ key: section.key, heading: section.heading, lines: section.lines
-      .filter((line) => !line.when || line.when(signals, opts))
+      .filter((line) => !line.when || line.when(signals))
       .map(({ rank, text }) => ({ rank, text })) }))
     .filter((section) => section.lines.length);
   const closing = opts.phone ? { rank: CLOSING.rank, text: CLOSING.text(opts.phone), closing: true } : null;
@@ -134,17 +133,16 @@ function planTermsApply(estimate, proposal) {
   }
 }
 
-// The one estimate-dependent verdict (the no-contract line), plus the 90-day refund rule's gate. The refund
-// line is worded "if your estimate offers a prepaid year", so it needs no prepay verdict (Codex #6504 r1/r4
-// kept finding prepay shapes a local verdict missed).
+// The one estimate-dependent verdict (the no-contract line). The 90-day refund line is worded "if your
+// estimate offers a prepaid year", so it needs no prepay verdict (Codex #6504 r1/r4 kept finding prepay
+// shapes a local verdict missed).
 function estimateSignals(estimate, proposal) {
-  return { signals: { planTerms: planTermsApply(estimate, proposal) }, prepayRefundRule: featureGates.prepayRefund90DayLive?.() === true };
+  return { planTerms: planTermsApply(estimate, proposal) };
 }
 
 // The page for one estimate, untrimmed. `proposal` = normalizeProposal(estimate).
 function beforeYouBookForEstimate(estimate, proposal) {
-  const { signals, prepayRefundRule } = estimateSignals(estimate, proposal || {});
-  return buildBeforeYouBook(signals, { prepayRefundRule, phone: WAVES_SUPPORT_PHONE_DISPLAY });
+  return buildBeforeYouBook(estimateSignals(estimate, proposal || {}), { phone: WAVES_SUPPORT_PHONE_DISPLAY });
 }
 
 // Keep the page to ONE page. Priority order: while the page is taller than `available`, drop the
