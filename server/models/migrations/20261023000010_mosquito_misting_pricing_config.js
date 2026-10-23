@@ -15,7 +15,6 @@
  * The SEED is built from the code defaults so the migration and the code table cannot drift (a test pins them equal).
  */
 const { isDeepStrictEqual } = require('util');
-const { mosquitoMistingPricingDefaults } = require('../../services/pricing-engine/constants');
 
 const KEY = 'mosquito_misting_pricing';
 const TAG = 'migration:20261023000010_mosquito_misting_pricing_config';
@@ -27,7 +26,53 @@ const CHANGELOG = {
   category: 'rule',
   summary: 'Add mosquito misting system pricing (pricing_config mosquito_misting_pricing).',
 };
-const SEED = JSON.parse(JSON.stringify(mosquitoMistingPricingDefaults()));
+// Inlined literal (a pushed migration is frozen): server/tests/mosquito-misting-pricing-config.test.js asserts it
+// equals mosquitoMistingPricingDefaults() in constants.js, so a later constant change fails the test instead of
+// silently rewriting this seed.
+const SEED = {
+  tiers: {
+    essential: {
+      price: 3795,
+      hardwareCost: 1800,
+      includedNozzles: 35
+    },
+    smart: {
+      price: 4595,
+      hardwareCost: 2600,
+      includedNozzles: 35
+    }
+  },
+  extraNozzlePrice: 75,
+  extraNozzleCost: 22,
+  includedRisers: 10,
+  extraRiserPrice: 45,
+  extraRiserCost: 14,
+  install: {
+    techs: 2,
+    hours: 10
+  },
+  plan: {
+    monthly: 59,
+    visitsPerYear: 12,
+    laborMinutesPerVisit: 25,
+    partsReservePerMonth: 10
+  },
+  refills: {
+    standard: {
+      price: 129,
+      productCost: 45
+    },
+    natural: {
+      price: 219,
+      productCost: 95
+    },
+    premium: {
+      price: 319,
+      productCost: 140
+    }
+  },
+  serviceCallNoPlan: 149
+};
 
 const parse = (data) => {
   if (typeof data !== 'string') return data;
