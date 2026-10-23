@@ -103,6 +103,22 @@ async function custodyFields(body, { selfId = null } = {}) {
 // A technician holds one live truck: a second vehicle assigned to the same
 // person would leave the truck check guessing which roster is theirs.
 const DEAD_ITEM_STATUSES = ['lost', 'retired', 'sold'];
+
+// receipt_line_id (scope PR 3): the purchase line the inventory agent classed
+// as equipment that this save files under the row. Needs GATE_TRUCK_KIT (the
+// bell that carries the id exists only with the gate); off, the field is
+// refused rather than dropped, so a stale tab never saves without its link.
+function receiptLineField(body) {
+  const value = body.receipt_line_id;
+  if (value === undefined || value === null || value === '') return { value: null };
+  if (!require('../services/truck-kit').truckKitEnabled()) return { error: 'receipt_line_id needs GATE_TRUCK_KIT' };
+  if (!require('../services/purchase-receipts/receipt-equipment-link').UUID_RE.test(String(value))) return { error: 'receipt_line_id must be a purchase receipt line id' };
+  return { value: String(value) };
+}
+const RECEIPT_REFUSALS = {
+  'receipt-not-found': 'That receipt line is gone or is not an equipment line. Save without it.',
+  'receipt-already-linked': 'That receipt line is already filed under another item.',
+};
 const SECOND_TRUCK_ERROR = 'That technician already has a truck. Unassign the other vehicle first.';
 async function secondLiveTruck({ category, assigned_to, status }, selfId, conn = db) {
   if (category !== 'vehicle' || !assigned_to || DEAD_ITEM_STATUSES.includes(status)) return null;
@@ -187,52 +203,17 @@ router.get('/kit-keys', async (req, res, next) => {
 // creates or edits an asset, whatever GATE_STAFF_DEFAULT_DENY says.
 router.post('/equipment', requireAdmin, async (req, res, next) => {
   try {
-    const {
-      name, category, make, model, serial_number,
-      purchase_date, purchase_price, current_hours,
-      next_service_hours, next_service_type, assigned_to,
-      status, depreciation_method, depreciation_annual,
-      book_value, specs, notes,
-    } = req.body;
-
-    if (!name) return res.status(400).json({ error: 'Equipment name is required' });
+    if (!req.body.name) return res.status(400).json({ error: 'Equipment name is required' });
     const custody = await custodyFields(req.body);
     if (custody.error) return res.status(400).json({ error: custody.error });
+    const receipt = receiptLineField(req.body);
+    if (receipt.error) return res.status(400).json({ error: receipt.error });
     // A vehicle given to a technician: the one-live-truck check and the
-    // insert serialize on that technician's lock.
-    const record = await db.transaction(async (trx) => {
-      // A new item placed straight onto a truck waits for a check in flight
-      // on that truck (same lock as recordTruckCheck), then the target is
-      // validated AGAIN under the lock: a truck retired meanwhile is refused.
-      if (custody.values.assigned_vehicle_id) {
-        await require('../services/truck-kit').lockTruck(trx, custody.values.assigned_vehicle_id);
-        const target = await trx('equipment').where({ id: custody.values.assigned_vehicle_id, category: 'vehicle' }).whereNotIn('status', DEAD_ITEM_STATUSES).first('id');
-        if (!target) return 'target-gone';
-      }
-      if (category === 'vehicle' && assigned_to) {
-        await require('../services/truck-kit').lockTechnician(trx, assigned_to);
-        if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null, trx)) return 'second-truck';
-      }
-      const [row] = await trx('equipment').insert({
-      ...custody.values,
-      name, category, make, model, serial_number,
-      purchase_date: purchase_date || null,
-      purchase_price: purchase_price || null,
-      current_hours: current_hours || 0,
-      next_service_hours: next_service_hours || null,
-      next_service_type: next_service_type || null,
-      assigned_to: assigned_to || null,
-      status: status || 'active',
-      depreciation_method: depreciation_method || 'section_179',
-      depreciation_annual: depreciation_annual || null,
-      book_value: book_value || purchase_price || null,
-      specs: specs ? JSON.stringify(specs) : null,
-      notes: notes || null,
-    }).returning('*');
-      return row;
-    });
+    // insert serialize on that technician's lock (createAsset).
+    const record = await db.transaction((trx) => createAsset(trx, { body: req.body, custody, receiptLineId: receipt.value }));
     if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });
     if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
+    if (RECEIPT_REFUSALS[record]) return res.status(409).json({ error: RECEIPT_REFUSALS[record] });
 
     logger.info(`Equipment added: ${record.name} (${record.id})`);
     res.status(201).json({ equipment: record });
@@ -241,6 +222,58 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
     next(err);
   }
 });
+
+// The new row's columns from the dialog body (defaults as the table expects).
+function assetInsertRow(body, custody) {
+  const { category, assigned_to, status, purchase_price } = body;
+  return {
+    ...custody.values,
+    name: body.name, category, make: body.make, model: body.model, serial_number: body.serial_number,
+    purchase_date: body.purchase_date || null,
+    purchase_price: purchase_price || null,
+    current_hours: body.current_hours || 0,
+    next_service_hours: body.next_service_hours || null,
+    next_service_type: body.next_service_type || null,
+    assigned_to: assigned_to || null,
+    status: status || 'active',
+    depreciation_method: body.depreciation_method || 'section_179',
+    depreciation_annual: body.depreciation_annual || null,
+    book_value: body.book_value || purchase_price || null,
+    specs: body.specs ? JSON.stringify(body.specs) : null,
+    notes: body.notes || null,
+  };
+}
+
+// The asset insert, inside one transaction. Returns the new row or a refusal
+// word the handler maps to a 409.
+async function createAsset(trx, { body, custody, receiptLineId }) {
+  const truckKit = require('../services/truck-kit');
+  const receiptLink = require('../services/purchase-receipts/receipt-equipment-link');
+  const { category, assigned_to, status } = body;
+  // A new item placed straight onto a truck waits for a check in flight
+  // on that truck (same lock as recordTruckCheck), then the target is
+  // validated AGAIN under the lock: a truck retired meanwhile is refused.
+  if (custody.values.assigned_vehicle_id) {
+    await truckKit.lockTruck(trx, custody.values.assigned_vehicle_id);
+    const target = await trx('equipment').where({ id: custody.values.assigned_vehicle_id, category: 'vehicle' }).whereNotIn('status', DEAD_ITEM_STATUSES).first('id');
+    if (!target) return 'target-gone';
+  }
+  if (category === 'vehicle' && assigned_to) {
+    await truckKit.lockTechnician(trx, assigned_to);
+    if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null, trx)) return 'second-truck';
+  }
+  // The receipt line is claimed (locked, still an equipment line) AFTER the
+  // truck and technician locks, the order applyAssetUpdate uses (item, trucks,
+  // line), so a create and an edit filing the same line never deadlock; and
+  // BEFORE the insert, so a refusal writes nothing.
+  if (receiptLineId) {
+    const refusal = await receiptLink.claimReceiptLine(trx, receiptLineId);
+    if (refusal) return `receipt-${refusal}`;
+  }
+  const [row] = await trx('equipment').insert(assetInsertRow(body, custody)).returning('*');
+  if (receiptLineId && row) await receiptLink.linkReceiptLine(trx, receiptLineId, row.id);
+  return row;
+}
 
 // The asset update, inside one transaction. Returns the updated row, null
 // (not found) or a refusal word the handler maps to a 409.
@@ -265,8 +298,9 @@ function staleForm(expected, before) {
   if (expected.assigned_vehicle_id !== undefined && (expected.assigned_vehicle_id || null) !== (before.assigned_vehicle_id || null)) return true;
   return expected.updated_at !== undefined && expected.updated_at !== null && !sameInstant(expected.updated_at, before.updated_at);
 }
-async function applyAssetUpdate(trx, id, updates, expected = {}) {
+async function applyAssetUpdate(trx, id, updates, expected = {}, receiptLineId = null) {
   const truckKit = require('../services/truck-kit');
+  const receiptLink = require('../services/purchase-receipts/receipt-equipment-link');
   // The item row itself is serialized first (one advisory lock per row), so
   // two saves of the same item never derive their truck locks from the same
   // stale read; then every truck the write can touch, in one order, so a
@@ -284,10 +318,17 @@ async function applyAssetUpdate(trx, id, updates, expected = {}) {
   if (staleForm(expected, before)) return 'stale-status';
   const refusal = await writeRefusal(trx, id, updates, before);
   if (refusal) return refusal;
+  // The receipt line last, after the item and truck locks (same order as
+  // createAsset), before the write.
+  if (receiptLineId) {
+    const receiptRefusal = await receiptLink.claimReceiptLine(trx, receiptLineId, id);
+    if (receiptRefusal) return `receipt-${receiptRefusal}`;
+  }
   const moved = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id;
   const oldTruck = moved ? (before.assigned_vehicle_id || null) : null;
   const [row] = await trx('equipment').where({ id }).update(updates).returning('*');
   if (row && oldTruck) await truckKit.closeTruckBellIfClear(oldTruck, new Date(), trx);
+  if (row && receiptLineId) await receiptLink.linkReceiptLine(trx, receiptLineId, id);
   return row || null;
 }
 // Why the write is refused under the locks, or null.
@@ -353,11 +394,14 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     const custody = await custodyFields(req.body, { selfId: req.params.id });
     if (custody.error) return res.status(400).json({ error: custody.error });
     Object.assign(updates, custody.values);
+    const receipt = receiptLineField(req.body);
+    if (receipt.error) return res.status(400).json({ error: receipt.error });
 
     // A tool that leaves a truck (moved or unassigned) takes its open tool
     // alerts with it, so the old truck's bell must be re-judged: under both
     // trucks' locks, in the same transaction as the move (truck-kit.js).
-    const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates, { status: req.body.expected_status, assigned_vehicle_id: req.body.expected_assigned_vehicle_id, updated_at: req.body.expected_updated_at }));
+    const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates, { status: req.body.expected_status, assigned_vehicle_id: req.body.expected_assigned_vehicle_id, updated_at: req.body.expected_updated_at }, receipt.value));
+    if (RECEIPT_REFUSALS[record]) return res.status(409).json({ error: RECEIPT_REFUSALS[record] });
     if (record === 'moved') return res.status(409).json({ error: 'Another save changed this item (its truck, category or status). Reload and try again.' });
     if (record === 'vehicle-cargo') return res.status(409).json({ error: 'This item is now a vehicle; a vehicle cannot ride on a truck. Reload and try again.' });
     if (record === 'riders') return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });

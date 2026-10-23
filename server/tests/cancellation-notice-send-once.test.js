@@ -15,6 +15,8 @@ jest.mock('../models/db', () => {
     whereIn: () => chain(table),
     whereNotNull: () => chain(table),
     whereRaw: () => chain(table),
+    // handleCancellation picks the visit's lowest-id reminder row (#6493: both senders work on the same row).
+    orderBy: () => chain(table),
     first: async () => (table === 'appointment_reminders' ? mockDbState.reminderRow : null),
     update: async (patch) => {
       mockDbState.updates.push({ table, patch });

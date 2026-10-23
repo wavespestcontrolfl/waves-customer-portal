@@ -120,3 +120,22 @@ describe('ContractSignPage token-change reset (audit P1)', () => {
     expect(input(container, 'signedName')).toBeInTheDocument();
   });
 });
+
+describe('ContractSignPage contract text', () => {
+  it('prints a line wrapped in ** in bold, without the markers (F.S. 482.227 bold statements)', async () => {
+    const contract = {
+      ...CONTRACT_A,
+      contractTextSnapshot: '**RETREATMENT ONLY. THIS WARRANTY DOES NOT COVER DAMAGE REPAIR.**\nPlain clause.',
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ contract })));
+    const { findByText, getByText, queryByText } = render(
+      <MemoryRouter initialEntries={[`/contract/${CONTRACT_A.token}`]}>
+        <Routes><Route path="/contract/:token" element={<ContractSignPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    const bold = await findByText('RETREATMENT ONLY. THIS WARRANTY DOES NOT COVER DAMAGE REPAIR.');
+    expect(bold.style.fontWeight).not.toBe('');
+    expect(getByText('Plain clause.').style.fontWeight).toBe('');
+    expect(queryByText(/\*\*/)).toBeNull();
+  });
+});

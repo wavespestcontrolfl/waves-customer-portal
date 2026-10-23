@@ -6115,6 +6115,9 @@ async function recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, c
       .forUpdate()
       .first();
     if (!locked) return { skipped: "invoice no longer exists" };
+    // Recovery sweep only: under the invoice lock, in this transaction, the visit must still be the cancelled one the
+    // card approved (a restore waits for this transaction or has already committed). NOWAIT: no lock-order deadlock.
+    if (ctx.cancelFence) await require("./cancel-generation-fence").assertCancelGeneration(trx, ctx.cancelFence);
     const stateSkip = ctx.refusedSendCleanup
       ? await refusedSendCleanupSkip(trx, locked, ctx)
       : await lockedCandidateSkip(trx, locked, ctx);
@@ -6187,6 +6190,13 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
   // Pinned path only: the combined-payment lock, held until this candidate is settled.
   let combinedLock = null;
   try {
+    // Recovery sweep only: no Stripe call for a visit that is no longer the cancelled one. A point-in-time check on purpose: a
+    // share lock on the visit held across the Stripe call (on a connection of its own) inverts the lock order against flows that
+    // lock the invoice first and the visit second (customer-credit application), which PostgreSQL cannot detect across the
+    // sweep's two connections. The guard of the void itself is the locked, NOWAIT proof inside its transaction below; a restore
+    // landing in the instant between this check and the PaymentIntent cancel leaves the PaymentIntent cancelled and the
+    // invoice open (the next payment attempt creates a new one).
+    if (ctx.cancelFence) await require("./cancel-generation-fence").assertCancelGeneration(db, ctx.cancelFence);
     const gate = await pinnedCandidateGate(candidate, ctx);
     combinedLock = gate.combinedLock;
     if (gate.skip) return null;
@@ -6238,6 +6248,8 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
     logger.error(
       `[invoice] Failed to void invoice ${candidate.id} for cancelled service ${scheduledServiceId}: ${e.message}`,
     );
+    // Recovery sweep only: an unexpected failure is not a finished step (a fence refusal already recorded its own hit).
+    if (ctx.cancelFence && e && e.code !== "CANCEL_FENCE") ctx.cancelFence.hits.push("invoice_void_error");
     return null;
   } finally {
     await releaseCombinedLock(combinedLock);
@@ -6245,7 +6257,7 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
 }
 
 // Inspection-credit reversal after the sweep (see the call site); sets voided.inspectionCreditReversal. Never throws.
-async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds) {
+async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds, cancelFence = null) {
   try {
     // Surfaced for callers that COUNT reversals (the hourly sweep,
     // which now routes through this seam - Codex #3178 r33 P2): a
@@ -6255,12 +6267,14 @@ async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId
       scheduledServiceId,
       createdBy: 'system:inspection_credit_cancellation_void_hook',
       ...(pinnedCreditReversalOfferIds ? { pinnedReversalOfferIds: pinnedCreditReversalOfferIds } : {}),
+      ...(cancelFence ? { cancelFence } : {}),
     });
     voided.inspectionCreditReversal = rev;
   } catch (revErr) {
     logger.error(
       `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
     );
+    if (cancelFence) cancelFence.hits.push("credit_reversal_error");
   }
 }
 
@@ -13729,7 +13743,7 @@ const InvoiceService = {
    */
   async voidOpenInvoicesForCancelledService(
     scheduledServiceId,
-    { invoiceId = null, refusedClaimToken = null, pinnedInvoices = null, pinnedCreditReversalOfferIds = null } = {},
+    { invoiceId = null, refusedClaimToken = null, pinnedInvoices = null, pinnedCreditReversalOfferIds = null, cancelFence = null } = {},
   ) {
     const voided = [];
     if (!scheduledServiceId) return voided;
@@ -13744,7 +13758,9 @@ const InvoiceService = {
         scheduledServiceId, invoiceId, refusedClaimToken, refusedSendCleanup, pinnedById,
       });
       if (candidates.length === 0) return voided;
-      const ctx = { scheduledServiceId, refusedSendCleanup, refusedClaimToken, pinnedById, pinnedMismatch, StripeService: require("./stripe") };
+      // cancelFence (the Intelligence Bar cancel recovery sweep only): each void re-proves, inside its own transaction,
+      // that the visit is still the cancelled one the card approved (services/cancel-generation-fence.js).
+      const ctx = { scheduledServiceId, refusedSendCleanup, refusedClaimToken, pinnedById, pinnedMismatch, cancelFence, StripeService: require("./stripe") };
       for (const candidate of candidates) {
         const voidedId = await voidOneCancelledServiceCandidate(candidate, ctx);
         if (voidedId) voided.push(voidedId);
@@ -13753,6 +13769,8 @@ const InvoiceService = {
       logger.error(
         `[invoice] Void sweep failed for cancelled service ${scheduledServiceId}: ${e.message}`,
       );
+      // Recovery sweep only: a failed candidate lookup is not a finished step (per-candidate failures record their own hit).
+      if (cancelFence && e && e.code !== "CANCEL_FENCE") cancelFence.hits.push("invoice_void_error");
     } finally {
       // Inspection credit: a cancelled booking must not keep its $75.
       // Reversal lives HERE - in the one helper every cancellation path
@@ -13764,7 +13782,7 @@ const InvoiceService = {
       // early return too - a cancel with nothing to void still reverses.
       // Idempotent and never throws; the hourly sweep stays as recovery.
       if (!refusedSendCleanup || voided.includes(invoiceId)) {
-        await reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds);
+        await reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds, cancelFence);
       }
     }
     return voided;

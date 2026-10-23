@@ -310,6 +310,7 @@ const LEGACY_BARE_WRITES = [
 // operator, the corresponding send/submit tool is the write.
 const READ_ONLY = [
   'get_customer_estimate_context',
+  'get_truck_kit', 'get_tool_issues', 'get_my_truck_kit',
   'search_field_intelligence',
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',

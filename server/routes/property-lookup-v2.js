@@ -1372,6 +1372,24 @@ function countyRollAnswer(result) {
   return 'unknown';
 }
 
+// The parent parcel (address-match PR 6) for the panel: the county parcel
+// the map point sits in when the roll has no record for the typed address
+// (a campus whose buildings share one county address), with its building
+// list when the county publishes one. Context only — the pricing call never
+// reads it. Null when the record carries no parent parcel or the roll
+// vouched for the address itself.
+function campusParcelMeta(record) {
+  const parent = record?._parentParcel;
+  if (!parent?.parcelId || hasCountyEvidence(record)) return null;
+  return {
+    parcelId: parent.parcelId,
+    county: parent.county || null,
+    situsAddress: parent.situsAddress || null,
+    landUseDescription: parent.landUseDescription || null,
+    buildings: parent.buildings || null,
+  };
+}
+
 // ─────────────────────────────────────────────
 // MAIN ROUTE — admin/tech-gated thin wrapper over performPropertyLookup
 // ─────────────────────────────────────────────
@@ -1407,6 +1425,8 @@ router.post('/property-lookup', async (req, res) => {
       // an address Google confirms can still be missing from the roll.
       result.meta.addressStatus = { ...addressStatus, countyRoll: countyRollAnswer(result) };
     }
+    const campusParcel = campusParcelMeta(result.propertyRecord);
+    if (campusParcel) result.meta.campusParcel = campusParcel;
     // A whole-property (association) lookup skips the business check. The
     // tool is told so it can ask for a fresh lookup if the business type
     // later stops being an association. Absent while the gate is off.
@@ -2731,7 +2751,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     && parcelTurfBoundApplies
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
-  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup, commercialProfile });
+  // The campus parcel reaches the flag copy only for an opted-in caller with
+  // the identity gate live: the shared record carries the parent parcel
+  // before the route strips it, and a public profile must not name it.
+  const campusParcel = options.commercialSuiteSizing === true && lookupBusinessIdentityLive() ? campusParcelMeta(rc) : null;
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup, commercialProfile, campusParcel });
   // A cached listing-size stamp reused on this profile keeps its
   // confirm-on-site flag (the fresh path adds it in applyCommercialSuiteSize).
   if (resolvedCommercialSuiteSize?.source === 'listing_verified_text' && Number(resolvedCommercialSuiteSize.value) > 0) {
@@ -4486,7 +4510,7 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false, commercialProfile } = {}) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false, commercialProfile, campusParcel = null } = {}) {
   const flags = [];
 
   // Geocoder snapped the typed house number to a different premise — this
@@ -4520,6 +4544,18 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     flags.push({
       field: 'address',
       reason: `${addressAudit.houseNumber} ${addressAudit.streetLabel} is on the ${addressAudit.county} county roll only in ZIP ${addressAudit.numberInOtherZips.join(', ')}, not the typed ${addressAudit.typedZip}${nearest}. The street name repeats across cities — verify the city/ZIP before pricing`,
+      priority: 'HIGH',
+    });
+  } else if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch && campusParcel?.situsAddress) {
+    // The map point sits well inside a commercial parcel recorded under
+    // another number (a campus whose buildings share one county address):
+    // the typed number is most likely right, and the open question is the
+    // business's own space, not a typo.
+    const campus = campusParcel;
+    const use = campus.landUseDescription ? ` (${campus.landUseDescription.replace(/\s*\(\d+\)\s*$/, '')})` : '';
+    flags.push({
+      field: 'address',
+      reason: `The ${addressAudit.county} county roll has no record of its own for ${addressAudit.houseNumber} ${addressAudit.streetLabel}. The map point is inside the parcel recorded as ${campus.situsAddress}${use}, one county record for several buildings. Confirm the address with the customer, and do not price from that parcel's size.`,
       priority: 'HIGH',
     });
   } else if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
@@ -6631,6 +6667,7 @@ module.exports._private = {
   listingSizeVerifyFlag,
   listingStampNeedsRefresh,
   countyRollAnswer,
+  campusParcelMeta,
   reconcileCommercialSuiteSubtype,
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,

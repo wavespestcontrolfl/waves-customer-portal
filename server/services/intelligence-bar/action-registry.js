@@ -36,6 +36,7 @@ const MODULES = [
   ['procurement-tools', 'PROCUREMENT_TOOLS', 'executeProcurementTool'],
   ['revenue-tools', 'REVENUE_TOOLS', 'executeRevenueTool'],
   ['tech-tools', 'TECH_TOOLS', 'executeTechTool'],
+  ['truck-kit-tools', 'TRUCK_KIT_TOOLS', 'executeTruckKitTool'],
   ['review-tools', 'REVIEW_TOOLS', 'executeReviewTool'],
   ['comms-tools', 'COMMS_TOOLS', 'executeCommsTool'],
   ['tax-tools', 'TAX_TOOLS', 'executeTaxTool'],

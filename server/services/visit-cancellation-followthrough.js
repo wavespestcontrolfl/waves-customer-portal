@@ -86,12 +86,13 @@ function reportLinkedCascadeNotRun(linkedChildren, linkedChildReport) {
 // Close service-invoice collection before starting a Stripe fee call. A failed cleanup skips the fee and alerts, but
 // tracker cleanup and the other cancelled visits still proceed. With a pinned effect set (the Intelligence Bar cancel
 // card) only the approved invoices and credit reversals run, and every approved effect not carried out is reported.
-async function closeVisitInvoices(id, pinned, moneyReport) {
+async function closeVisitInvoices(id, pinned, moneyReport, cancelFence = null) {
   const InvoiceService = require('./invoice');
   if (pinned) {
     const voided = await InvoiceService.voidOpenInvoicesForCancelledService(id, {
       pinnedInvoices: pinned.invoices || [],
       pinnedCreditReversalOfferIds: pinned.creditReversalOfferIds || [],
+      ...(cancelFence ? { cancelFence } : {}),
     });
     await reportUnactedMoney(moneyReport, pinned, voided);
   } else {
@@ -102,7 +103,7 @@ async function closeVisitInvoices(id, pinned, moneyReport) {
   // an unverifiable PI, and still-collectible invoices all need review.
   const unresolvedInvoice = await InvoiceService.unresolvedInvoicesForCancelledService(db, id).first('id');
   if (unresolvedInvoice) {
-    throw new Error('Service invoice still needs money handling; fee requires review');
+    throw Object.assign(new Error('Service invoice still needs money handling; fee requires review'), { code: 'MONEY_REVIEW' });
   }
 }
 
@@ -119,7 +120,7 @@ async function cancellationInstant(id, { now, waiveFee }) {
   }
   const feeTime = new Date(cancelledAt || NaN);
   if (!Number.isFinite(feeTime.getTime())) {
-    throw new Error('Cancellation time unavailable; fee requires review');
+    throw Object.assign(new Error('Cancellation time unavailable; fee requires review'), { code: 'MONEY_REVIEW' });
   }
   return feeTime;
 }
@@ -130,7 +131,7 @@ async function cancellationInstant(id, { now, waiveFee }) {
 async function settlePinnedFee(id, feeTime) {
   const { previewCancelFee, feeRailClear } = require('./appointment-cancel-impact');
   if (!feeRailClear(await previewCancelFee(id, feeTime))) {
-    throw new Error('A card fee agreement appeared since the confirmed card; fee requires review');
+    throw Object.assign(new Error('A card fee agreement appeared since the confirmed card; fee requires review'), { code: 'MONEY_REVIEW' });
   }
   return { released: true, reason: 'pinned_no_card_rail' };
 }
@@ -153,7 +154,7 @@ async function settleCardRails(feeOptions) {
 async function settleVisitMoney(id, ctx) {
   const pinned = ctx.pinnedEffects?.[id] || null;
   try {
-    await closeVisitInvoices(id, pinned, ctx.moneyReport);
+    await closeVisitInvoices(id, pinned, ctx.moneyReport, ctx.cancelFence);
     const CardHolds = require('./estimate-card-holds');
     const feeTime = await cancellationInstant(id, ctx);
     if (pinned) return await settlePinnedFee(id, feeTime);
@@ -166,25 +167,66 @@ async function settleVisitMoney(id, ctx) {
     });
   } catch (e) {
     logger.error(`[${ctx.source}] cancellation money handling failed (target ${id}): ${e.message}`);
+    // Recovery sweep only: an unexpected failure (a database error) is NOT a finished step: it is a hit, so the sweep retries the
+    // bundle. A deliberate review verdict (MONEY_REVIEW) stays a reported skip.
+    if (ctx.cancelFence && e && e.code !== 'MONEY_REVIEW' && e.code !== 'CANCEL_FENCE') ctx.cancelFence.hits.push('money_step_error');
     if (pinned && ctx.moneyReport && Array.isArray(ctx.moneyReport.skipped)) ctx.moneyReport.skipped.push({ kind: 'follow_through', reason: e.message });
     return { released: false, reason: 'fee_step_error' };
   }
 }
 
 // The tracker cancel, which also runs the linked-visit cascade; an approved linked visit it did not get to is reported.
-async function cancelVisitTracker(id, { actorId, reason, source, linkedChildren, linkedChildReport }) {
+// Recovery sweep only: trackTransitions.cancel answered { ok: false } without throwing. A cancelled parent whose tracker already
+// reads 'complete' (cannot_cancel_complete) is a terminal state the sweep must not force: it is a reported skip (the receipt
+// lists it, the office reviews it). Any other refusal (not_found, an unexpected status) is not a finished step: a retryable hit.
+// Returns true when the sweep handled it (no per-retry dispatch alert).
+function noteRejectedTrackerCancel(result, cancelFence, moneyReport) {
+  if (!cancelFence || !result || result.ok !== false) return false;
+  if (result.reason === 'cannot_cancel_complete') {
+    if (moneyReport && Array.isArray(moneyReport.skipped)) moneyReport.skipped.push({ kind: 'tracker', reason: 'tracker_already_complete' });
+    return false; // the dispatch alert still goes out for the office
+  }
+  cancelFence.hits.push('tracker_rejected');
+  return true;
+}
+
+async function cancelVisitTracker(id, { actorId, reason, source, linkedChildren, linkedChildReport, cancelFence, moneyReport }) {
   try {
     const result = await trackTransitions.cancel(id, {
       reason,
       actorId,
+      ...(cancelFence ? { cancelFence } : {}),
       ...(Array.isArray(linkedChildren) ? { linkedChildren, linkedChildReport } : {}),
     });
     if (!result?.ok) reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);
-    await recordTrackTransitionResultFailure({ jobId: id, action: 'cancel', actorId, result });
+    // A fence refusal is not a tracker fault: the recovery sweep reports it (the visit is no longer the approved cancel).
+    if (result?.reason === 'cancel_fence') return;
+    if (noteRejectedTrackerCancel(result, cancelFence, moneyReport)) return;
+    await recordTrackTransitionResultFailure({ jobId: id, action: 'cancel', actorId, result, cancelFence });
   } catch (e) {
     reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);
+    if (e && e.code === 'CANCEL_FENCE') return;
     logger.error(`[${source}] cancel track transition failed for ${id}: ${e.message}`);
-    await recordTrackTransitionFailure({ jobId: id, action: 'cancel', actorId, error: e });
+    // Recovery sweep only: a failed tracker cancel is NOT done. It is recorded as a hit so the sweep retries the bundle
+    // (and reports it if the attempts run out) instead of saving the follow-through as finished. No dispatch alert per
+    // retry. Every other caller keeps the best-effort alert.
+    if (cancelFence) {
+      cancelFence.hits.push('tracker_error');
+      return;
+    }
+    await recordTrackTransitionFailure({ jobId: id, action: 'cancel', actorId, error: e, cancelFence });
+  }
+}
+
+// The recovery sweep's pre-check (a point-in-time read; the guard of each write is inside that write's transaction).
+async function cancelFenceStands(cancelFence) {
+  const { assertCancelGeneration, isCancelFence } = require('./cancel-generation-fence');
+  try {
+    await assertCancelGeneration(db, cancelFence);
+    return true;
+  } catch (err) {
+    if (isCancelFence(err)) return false;
+    throw err;
   }
 }
 
@@ -205,6 +247,9 @@ async function cancelVisitTracker(id, { actorId, reason, source, linkedChildren,
  *   re-checked under its own lock; the rest are listed in opts.linkedChildReport.skipped.
  * @param {object} [opts.moneyReport] Out-param with pinnedEffects: `{ skipped: [] }` collects each approved money
  *   effect that was NOT acted on ({ kind, id?, reason }) because it changed since the card, so the receipt can say so.
+ * @param {object} [opts.cancelFence] Opt-in (the Intelligence Bar cancel recovery sweep): { visitId, since, hits }. Every
+ *   mutation re-proves inside its own transaction that the visit is still the cancelled one the card approved
+ *   (services/cancel-generation-fence.js); refusals are pushed to cancelFence.hits.
  * @param {object} [opts.pinnedEffects] Per-target effects a confirmation
  *   card showed, keyed by target id: `{ invoices, fee,
  *   creditReversalOfferIds }` (from appointment-cancel-impact.js). A pinned
@@ -224,16 +269,26 @@ async function runVisitCancellationFollowThrough({
   linkedChildren = null,
   linkedChildReport = null,
   moneyReport = null,
+  cancelFence = null,
 } = {}) {
   const ids = targetIds.filter(Boolean);
   const ApptCardRequests = require('./appointment-card-request');
-  const ctx = { actorId, waiveFee, reason, source, now, pinnedEffects, linkedChildren, linkedChildReport, moneyReport };
+  const ctx = { actorId, waiveFee, reason, source, now, pinnedEffects, linkedChildren, linkedChildReport, moneyReport, cancelFence };
 
   for (const id of ids) {
+    // Recovery sweep only: a visit that is no longer the cancelled one the card approved gets no money handling and no
+    // tracker cancel at all (each mutation below re-proves it again inside its own transaction).
+    if (cancelFence && !(await cancelFenceStands(cancelFence))) continue;
     const feeOutcome = await settleVisitMoney(id, ctx);
-    // One normalized outcome for BOTH rails and thrown failures. The alert
-    // service ignores clean outcomes, so no duplicate decision tree here.
-    await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: feeOutcome });
+    // A fence refusal during the money step means the visit changed (or is busy): the bundle's own restoration alert or
+    // retry owns it, so no generic fee alert and no tracker cancel on top.
+    if (cancelFence && cancelFence.hits.length) continue;
+    // One normalized outcome for BOTH rails and thrown failures. The alert service ignores clean outcomes, so no duplicate
+    // decision tree here. With a fence the alert row is written in the transaction that proves the generation (a restore
+    // that landed while the money step read raises no "cancellation fee" alert for a live visit); a refusal lands on
+    // cancelFence.hits and no tracker cancel follows it.
+    await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: feeOutcome, ...(cancelFence ? { cancelFence } : {}) });
+    if (cancelFence && cancelFence.hits.length) continue;
     await cancelVisitTracker(id, ctx);
   }
 

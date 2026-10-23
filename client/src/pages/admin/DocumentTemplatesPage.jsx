@@ -16,6 +16,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, ActionFeedback, Badge, Button, Card, CardBody, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 import { adminFetch as rawAdminFetch } from "../../lib/adminFetch";
+import { NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY } from "../../lib/pretreatWarrantyValues";
 
 const CATEGORY_TABS = [
   { key: "all", label: "All" },
@@ -99,6 +100,12 @@ function api(path, options = {}) {
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
     return body;
   });
+}
+
+// Create link needs a saved template and a customer. The new construction
+// warranty issues only from its pre-treat certificate (Projects).
+function createLinkBlocked({ saving, newMode, selectedCustomerId, templateKey }) {
+  return saving || newMode || !selectedCustomerId || templateKey === NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY;
 }
 
 function csvFromArray(value) {
@@ -869,7 +876,12 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                       <div className="ui-label text-ink-secondary">Customer link</div>
                       <div className="mt-1 text-ui-body text-zinc-900">Create customer document</div>
                     </div>
-                    <Button size="sm" onClick={createSigningLink} disabled={saving || newMode || !selectedCustomerId}>
+                    <Button
+                      size="sm"
+                      onClick={createSigningLink}
+                      disabled={createLinkBlocked({ saving, newMode, selectedCustomerId, templateKey: templateDraft.templateKey })}
+                      title={templateDraft.templateKey === NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY ? "Issue this warranty from its pre-treat certificate in Projects" : undefined}
+                    >
                       <Send size={14} className="mr-1.5" />
                       Create link
                     </Button>

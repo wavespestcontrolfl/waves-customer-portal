@@ -298,6 +298,25 @@ const ASSET_DETAIL_CELLS = [{
   show: e => Boolean(e.location),
   value: e => e.location
 }];
+// The row as the edit dialog holds it (blanks for nulls, the loaded truck,
+// status and version for the stale-form checks).
+const editableRow = e => ({
+    ...e,
+    purchase_date: e.purchase_date ? String(e.purchase_date).split("T")[0] : "",
+    purchase_price: e.purchase_price ?? "",
+    current_hours: e.current_hours ?? "",
+    next_service_hours: e.next_service_hours ?? "",
+    book_value: e.book_value ?? "",
+    asset_tag: e.asset_tag ?? "",
+    location: e.location ?? "",
+    assigned_vehicle_id: e.assigned_vehicle_id ?? "",
+    assigned_to: e.assigned_to ?? "",
+    kit_key: e.kit_key ?? "",
+    expected_status: e.status ?? null,
+    expected_assigned_vehicle_id: e.assigned_vehicle_id ?? null,
+    expected_updated_at: e.updated_at ?? null,
+    condition_rating: e.condition_rating ?? ""
+                });
 // Tag, truck and holder on one line; empty when the row carries none.
 const custodyLine = e => [e.asset_tag, e.assigned_vehicle_name && `Truck: ${e.assigned_vehicle_name}`, e.assigned_to && `Holder: ${e.assigned_tech_name}`].filter(Boolean).join(" · ");
 function EquipmentTab({
@@ -362,6 +381,26 @@ function EquipmentTab({
     };
   }, [canEdit]);
   useEffect(() => setActionError(""), [editing?.id, !!editing]);
+  // Receipt link (inventory agent bell, GATE_TRUCK_KIT): ?receipt_line=<id>
+  // with new=1&name=… opens a new-row dialog with the name filled in, or
+  // with edit=<row id> opens that row; the save carries receipt_line_id so
+  // the purchase is filed under the row. Opened once per link, admin only.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const receiptLineId = searchParams.get("receipt_line") || "";
+  const openedReceipt = useRef("");
+  useEffect(() => {
+    if (!canEdit || !receiptLineId || loading || openedReceipt.current === receiptLineId) return;
+    const editId = searchParams.get("edit");
+    const row = editId ? items.find(e => e.id === editId) : null;
+    if (editId && !row) return;
+    openedReceipt.current = receiptLineId;
+    setEditing(row ? { ...editableRow(row), receipt_line_id: receiptLineId } : { ...EMPTY_EQUIP, category: "tool", name: (searchParams.get("name") || "").slice(0, 200), receipt_line_id: receiptLineId });
+  }, [canEdit, receiptLineId, loading, items, searchParams, setEditing]);
+  const clearReceiptLink = () => {
+    const params = new URLSearchParams(searchParams);
+    ["receipt_line", "edit", "new", "name"].forEach(k => params.delete(k));
+    setSearchParams(params, { replace: true });
+  };
   // Only a live truck can carry a kit: a retired, sold or lost vehicle is never offered.
   const vehicles = items.filter(e => e.category === "vehicle" && !["retired", "sold", "lost"].includes(e.status));
   const visibleItems = vehicleFilter === "" ? items : vehicleFilter === "none" ? items.filter(e => !e.assigned_vehicle_id && e.category !== "vehicle") : items.filter(e => e.assigned_vehicle_id === vehicleFilter);
@@ -385,6 +424,7 @@ function EquipmentTab({
         if (!payload.purchase_date) payload.purchase_date = null;
         // No Kit key field without the gate: never send the column back.
         if (!kitKeys.enabled) delete payload.kit_key;
+        if (!payload.receipt_line_id) delete payload.receipt_line_id;
         if (editing.id) {
           await adminFetch(`/admin/equipment/equipment/${editing.id}`, {
             method: "PUT",
@@ -398,6 +438,7 @@ function EquipmentTab({
           });
           showToast("Equipment added");
         }
+        if (editing.receipt_line_id) clearReceiptLink();
         setEditing(null);
         await reload();
       } catch (e) {
@@ -494,23 +535,7 @@ function EquipmentTab({
                 event.currentTarget.focus({
                   preventScroll: true
                 });
-                setEditing({
-                  ...e,
-                  purchase_date: e.purchase_date ? String(e.purchase_date).split("T")[0] : "",
-                  purchase_price: e.purchase_price ?? "",
-                  current_hours: e.current_hours ?? "",
-                  next_service_hours: e.next_service_hours ?? "",
-                  book_value: e.book_value ?? "",
-                  asset_tag: e.asset_tag ?? "",
-                  location: e.location ?? "",
-                  assigned_vehicle_id: e.assigned_vehicle_id ?? "",
-                  assigned_to: e.assigned_to ?? "",
-                  kit_key: e.kit_key ?? "",
-                  expected_status: e.status ?? null,
-                  expected_assigned_vehicle_id: e.assigned_vehicle_id ?? null,
-                  expected_updated_at: e.updated_at ?? null,
-                  condition_rating: e.condition_rating ?? ""
-                });
+                setEditing(editableRow(e));
               }} type="button" variant="secondary" className="min-w-11" disabled={saving}>
                     Edit
                   </Button>}{" "}
@@ -639,6 +664,7 @@ function EquipmentEditModal({
         {error && <ActionFeedback error className="mb-4">
             {error}
           </ActionFeedback>}
+        {e.receipt_line_id && <p className="mb-3 text-sm text-zinc-600">This save files a purchase receipt line under the item.</p>}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {field("name", "Name *")}
           {field("category", "Category", "text", CATEGORIES)}

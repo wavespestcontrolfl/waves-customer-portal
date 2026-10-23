@@ -8,31 +8,39 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockState = {
-  reminder: null, customer: null, prefs: null, claim: 1, cancelled: true, updates: [],
+  reminder: null, customer: null, prefs: null, claim: 1, cancelled: true, updates: [], audit: null, auditRows: [], wheres: [], raws: [],
 };
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const q = {
-      where: () => q, whereNull: () => q, whereIn: () => q, whereNotNull: () => q, whereRaw: () => q, whereNot: () => q,
-      leftJoin: () => q, select: () => q, orderBy: () => q,
+      where: (...a) => { mockState.wheres.push([table, ...a]); return q; }, whereNull: () => q, whereIn: (...a) => { (mockState.wheresIn ||= []).push([table, ...a]); return q; }, whereNotNull: (...a) => { (mockState.notNulls ||= []).push([table, ...a]); return q; },
+      whereRaw: (...a) => { mockState.raws.push([table, ...a]); return q; }, whereNot: () => q,
+      leftJoin: () => q, select: () => q, orderBy: (...a) => { (mockState.orders ||= []).push([table, ...a]); return q; },
       first: async () => {
         if (table === 'appointment_reminders') return mockState.reminder;
         if (table === 'customers') return mockState.customer;
         if (table === 'notification_prefs') return mockState.prefs;
+        if (table === 'messaging_audit_log') return mockState.audit;
         if (table === 'scheduled_services') return { status: mockState.cancelled ? 'cancelled' : 'confirmed', tech_name: null };
         return null;
       },
+      insert: async (row) => { (mockState.inserts ||= []).push([table, row]); return [1]; },
       update: async (patch) => { mockState.updates.push(patch); return mockState.claim; },
-      then: (res, rej) => Promise.resolve([]).then(res, rej),
+      forUpdate: () => q,
+      then: (res, rej) => Promise.resolve(table === 'messaging_audit_log' ? mockState.auditRows
+        : table === 'appointment_reminders' ? (mockState.reminders || (mockState.reminder ? [mockState.reminder] : [])) : []).then(res, rej),
     };
     return q;
   };
   const qb = (table) => chain(table);
   qb.raw = (sql) => ({ __raw: String(sql) });
   qb.fn = { now: () => new Date() };
+  qb.transaction = jest.fn(async (fn) => fn(qb));
   return qb;
 });
 
+const mockFence = jest.fn(async () => {});
+jest.mock('../services/cancel-generation-fence', () => ({ assertCancelGeneration: (...a) => mockFence(...a) }));
 const mockGetTemplate = jest.fn();
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: (...a) => mockGetTemplate(...a) }));
 const mockSelectVariant = jest.fn();
@@ -41,6 +49,7 @@ const mockSendCustomerMessage = jest.fn();
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...a) => mockSendCustomerMessage(...a),
   classifyDeliveryCertainty: () => 'certain',
+  normalizeRecipient: (phone) => (phone ? `+1${String(phone).replace(/\D/g, '').slice(-10)}` : null),
 }));
 jest.mock('../services/messaging/push-channel-routing', () => ({ wantsAppFirst: async () => false }));
 jest.mock('../services/messaging/validators/line-type', () => ({ readCachedLineType: async () => null, cacheLineType: async () => {}, NON_SMS_LINE_TYPES: [] }));
@@ -55,6 +64,7 @@ const render = (body, vars) => body.replace(/\{(\w+)\}/g, (_m, k) => vars[k]);
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockState.reminders = null;
   mockState.reminder = {
     id: 'rem-1', customer_id: 'cust-1', scheduled_service_id: 'svc-1', appointment_time: '2026-11-04T15:00:00Z', service_type: 'Pest Control',
   };
@@ -62,6 +72,12 @@ beforeEach(() => {
   mockState.prefs = null;
   mockState.claim = 1;
   mockState.updates = [];
+  mockFence.mockReset();
+  mockFence.mockResolvedValue(undefined);
+  mockState.audit = null;
+  mockState.auditRows = [];
+  mockState.wheres = [];
+  mockState.raws = [];
   mockSelectVariant.mockResolvedValue(null);
   // Mirrors getTemplate: a pinned snapshot body renders as given, else the base body.
   mockGetTemplate.mockImplementation(async (_key, vars, _ctx, opts = {}) => render(opts.templateBody ?? BASE, vars));
@@ -340,5 +356,509 @@ describe('the approved send owns a pending_approved marker', () => {
     expect(states[states.length - 1]).toBe('suppressed');
     expect(states.slice(1)).not.toContain('pending');
     expect(states.slice(1)).not.toContain('pending_notify');
+  });
+});
+
+// What the cancel recovery sweep (services/ib-cancel-effect-bundles.js) asks before it may send the approved text:
+// only an untouched 'pending_approved' marker is 'ready'; a 'sent' marker with no accepted audit row means the provider
+// handoff may have begun, so it is 'uncertain' and is never sent again.
+describe('approvedCancellationNoticeStatus', () => {
+  const sha = (value) => require('crypto').createHash('sha256').update(value, 'utf8').digest('hex');
+  const KEY = (phone) => require('crypto').createHash('sha256').update(phone.replace(/\D/g, '').slice(-10), 'utf8').digest('hex').slice(0, 16);
+  const statusFor = async (state, auditRows = [], options) => {
+    mockState.reminder = { id: 'rem-1', customer_id: 'cust-1', cancellation_notice_state: state, cancellation_notice_at: new Date('2026-10-23T14:00:00.000Z') };
+    mockState.auditRows = auditRows;
+    return AppointmentReminders.approvedCancellationNoticeStatus('svc-1', options);
+  };
+
+  test.each([
+    ['pending_approved', [], 'ready'],
+    ['sent', [{ to_hash: 'h1' }], 'delivered'],
+    ['sent', [], 'uncertain'],
+    ['suppressed', [], 'suppressed'],
+    ['pending', [], 'other'],
+    ['pending_notify', [], 'other'],
+    [null, [], 'other'],
+  ])('marker %s with audit rows %j is %s (no recipient list: any accepted send)', async (state, rows, expected) => {
+    expect(await statusFor(state, rows)).toBe(expected);
+  });
+
+  // Delivery is proven PER APPROVED RECIPIENT, by that recipient's own phone: a count of destinations proves nothing (an
+  // accepted SMS followed by an email fallback to the same person is two destinations and one person).
+  // A visit can have several reminder rows. The live send may have sent one and died before reporting while a sibling is untouched:
+  // the untouched sibling must never make the text 'ready' (it would be sent a second time).
+  describe('several reminder rows for the visit', () => {
+    const row = (id, state, at = '2026-10-23T14:00:00.000Z') => ({ id, customer_id: 'cust-1', cancellation_notice_state: state, cancellation_notice_at: at ? new Date(at) : null });
+    const status = async (rows, auditRows = [{ to_hash: 'h1' }], options) => {
+      mockState.reminders = rows;
+      mockState.auditRows = auditRows;
+      return AppointmentReminders.approvedCancellationNoticeStatus('svc-1', options);
+    };
+
+    test('every row untouched is ready; a sibling already sent makes it delivered/uncertain, never ready (whatever the row order)', async () => {
+      expect(await status([row('a', 'pending_approved'), row('b', 'pending_approved')])).toBe('ready');
+      expect(await status([row('a', 'sent'), row('b', 'pending_approved')])).toBe('delivered');
+      expect(await status([row('a', 'pending_approved'), row('b', 'sent')])).toBe('delivered');
+      expect(await status([row('a', 'pending_approved'), row('b', 'sent')], [])).toBe('uncertain');
+      expect(await status([row('a', 'pending_approved'), row('b', 'suppressed')])).toBe('suppressed');
+      expect(await status([row('a', 'pending_approved'), row('b', 'pending')])).toBe('other');
+    });
+
+    test('a null-state sibling (never marked) does not block ready; delivery is judged on every sent row\'s token', async () => {
+      expect(await status([row('a', 'pending_approved'), row('b', null, null)])).toBe('ready');
+      const keys = [KEY('+19415550101')];
+      expect(await status([row('a', 'sent'), row('b', 'pending_approved')], [{ to_hash: sha('+19415550101') }], { recipientKeys: keys })).toBe('delivered');
+      const audit = mockState.raws.filter(([table]) => table === 'messaging_audit_log').map(([, sql]) => String(sql));
+      expect(audit.every((sql) => !sql.includes('transitioned_at'))).toBe(true);
+    });
+
+    test('the live send and the sweep pick the SAME reminder row (lowest id), so their claims meet on one row and the token fences the earlier sender', async () => {
+      mockState.orders = [];
+      mockState.reminders = null;
+      await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: [{ recipient_key: 'x', body: 'b' }], cancelGeneration: { visitId: 'svc-1', restorations: 0, hits: [] }, outcome: {} });
+      expect(mockState.orders).toContainEqual(['appointment_reminders', 'id']);
+    });
+
+    test('the approved send selects among the rows that carry a marker, so a never-marked lower-id sibling cannot hide the marked one', async () => {
+      mockState.notNulls = [];
+      mockState.reminders = null;
+      await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: [{ recipient_key: 'x', body: 'b' }], cancelGeneration: { visitId: 'svc-1', restorations: 0, hits: [] }, outcome: {} });
+      expect(mockState.notNulls).toContainEqual(['appointment_reminders', 'cancellation_notice_state']);
+      mockState.notNulls = [];
+      await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, outcome: {} });
+      expect(mockState.notNulls).not.toContainEqual(['appointment_reminders', 'cancellation_notice_state']);
+    });
+
+    test('the fenced claim adopts nothing while a sibling row was touched, and adopts when every row is untouched', async () => {
+      const FENCE2 = { visitId: 'svc-1', restorations: 0, hits: [] };
+      const claim = async (rows) => {
+        mockState.reminders = rows;
+        mockState.updates = [];
+        return AppointmentReminders.claimApprovedNoticeForGeneration({ id: 'a', scheduled_service_id: 'svc-1' }, FENCE2);
+      };
+      expect((await claim([row('a', 'pending_approved'), row('b', 'sent')])).claimed).toBe(0);
+      expect(mockState.updates.some((u) => 'cancellation_notice_at' in u)).toBe(false);
+      expect((await claim([row('a', 'pending_approved'), row('b', 'pending_approved')])).claimed).toBe(1);
+    });
+  });
+
+  // A report about ONE cancellation (an abandonment after restore + re-cancel) is judged on the claim tokens that cancellation's
+  // sends stored, never on the reminder's current marker, which belongs to the newer cancellation.
+  describe('claimTokens: evidence bound to one cancellation', () => {
+    const TOKEN = '2026-10-23T14:55:00.000Z';
+    const keys = () => [KEY('+19415550101')];
+    const bound = async (state, auditRows, claimTokens, recipientKeys = keys()) => {
+      mockState.reminder = { id: 'rem-1', customer_id: 'cust-1', cancellation_notice_state: state, cancellation_notice_at: new Date('2026-10-23T16:00:00.000Z') };
+      mockState.reminders = null;
+      mockState.auditRows = auditRows;
+      mockState.raws.length = 0;
+      return AppointmentReminders.approvedCancellationNoticeStatus('svc-1', { recipientKeys, claimTokens });
+    };
+
+    test('no stored token is unbound whatever the current marker and audit rows say (never ready, never delivered)', async () => {
+      expect(await bound('sent', [{ to_hash: sha('+19415550101') }], [])).toBe('unbound');
+      expect(await bound('pending_approved', [], [])).toBe('unbound');
+    });
+
+    test('accepted audit rows of the stored token prove delivery per recipient, whatever state the current marker is in', async () => {
+      expect(await bound('pending_approved', [{ to_hash: sha('+19415550101') }], [TOKEN])).toBe('delivered');
+      expect(await bound('pending_approved', [{ to_hash: sha('someone@example.test') }], [TOKEN])).toBe('partial');
+    });
+
+    test('a stored token with no accepted audit row is unconfirmed, never ready', async () => {
+      expect(await bound('pending_approved', [], [TOKEN])).toBe('uncertain');
+      expect(await bound('sent', [], [TOKEN])).toBe('uncertain');
+    });
+
+    test('the audit rows are matched by the stored token (equality), not by the current claim token or a cycle window', async () => {
+      await bound('sent', [{ to_hash: sha('+19415550101') }], [TOKEN]);
+      const audit = mockState.raws.filter(([table]) => table === 'messaging_audit_log');
+      const byToken = audit.filter(([, sql]) => String(sql).includes("metadata->>'cancellation_notice_token' = ?"));
+      expect(byToken.length).toBeGreaterThan(0);
+      expect(byToken.every(([, , bindings]) => JSON.stringify(bindings) === JSON.stringify([TOKEN]))).toBe(true);
+      expect(audit.every(([, sql]) => !String(sql).includes('transitioned_at'))).toBe(true);
+    });
+  });
+
+  test('the fenced claim writes its token on the bundle in the same transaction (before any stamp or handoff)', async () => {
+    const dbMock = require('../models/db');
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    const seen = [];
+    mockState.reminders = null;
+    const original = dbMock.transaction.getMockImplementation();
+    dbMock.transaction.mockImplementationOnce(async (fn) => { seen.push('begin'); const out = await fn(dbMock); seen.push('end'); return out; });
+    mockState.updates.length = 0;
+    mockState.wheres.length = 0;
+    const { claimed } = await AppointmentReminders.claimApprovedNoticeForGeneration({ id: 'rem-1', scheduled_service_id: 'svc-1' }, fence);
+    dbMock.transaction.mockImplementation(original);
+    expect(claimed).toBe(1);
+    expect(mockState.wheres).toContainEqual(['ib_cancel_effect_bundles', { id: 'b-1' }]);
+    const written = mockState.updates.find((u) => 'approved_money' in u);
+    expect(written.approved_money.__raw).toMatch(/notice_claim_tokens/);
+    expect(written.approved_money.__raw).toMatch(/\|\| to_jsonb\(\?::text\)/);
+    expect(seen).toEqual(['begin', 'end']);
+    // A fence without a bundle (older callers) writes nothing extra.
+    mockState.updates.length = 0;
+    await AppointmentReminders.claimApprovedNoticeForGeneration({ id: 'rem-1', scheduled_service_id: 'svc-1' }, { visitId: 'svc-1', restorations: 2, hits: [] });
+    expect(mockState.updates.some((u) => 'approved_money' in u)).toBe(false);
+  });
+
+  test('delivered needs an accepted audit row for the phone of EVERY approved recipient', async () => {
+    const primary = '+19415550101';
+    const keys = [KEY(primary)];
+    expect(await statusFor('sent', [{ to_hash: sha(primary) }], { recipientKeys: keys })).toBe('delivered');
+  });
+
+  test('an email-fallback destination or another recipient\'s phone is not proof for this recipient: partial, never delivered', async () => {
+    const keys = [KEY('+19415550101')];
+    expect(await statusFor('sent', [{ to_hash: sha('someone@example.test') }], { recipientKeys: keys })).toBe('partial');
+    expect(await statusFor('sent', [{ to_hash: sha('+19415550199') }], { recipientKeys: keys })).toBe('partial');
+  });
+
+  test('two approved recipients with one of them proven, or one that is no longer a contact, is partial', async () => {
+    const keys = [KEY('+19415550101'), KEY('+19415550177')];
+    expect(await statusFor('sent', [{ to_hash: sha('+19415550101') }], { recipientKeys: keys })).toBe('partial');
+    expect(await statusFor('sent', [{ to_hash: sha('+19415550101') }, { to_hash: sha('+19415550177') }], { recipientKeys: keys })).toBe('partial'); // 0177 is not on the customer
+  });
+
+  test('no accepted audit rows at all is uncertain whatever the recipient list', async () => {
+    expect(await statusFor('sent', [], { recipientKeys: [KEY('+19415550101')] })).toBe('uncertain');
+  });
+
+  test('no reminder row at all', async () => {
+    mockState.reminder = null;
+    expect(await AppointmentReminders.approvedCancellationNoticeStatus('svc-1')).toBe('no_reminder');
+  });
+
+  test('it never sends or claims anything', async () => {
+    await statusFor('pending_approved');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockState.updates).toEqual([]);
+  });
+});
+
+// The recovery sweep sends with cancelGeneration (a cancel-generation fence). Its claim is its own small transaction: the
+// fence takes a share lock on the visit and proves the pinned generation, THEN the approved marker is claimed, so a
+// restore + re-cancel cannot replace the reminder between the proof and the claim (a single UPDATE with subqueries could
+// not promise that: PostgreSQL re-checks only the updated tuple after a lock wait).
+describe('handleCancellation with cancelGeneration (the cancel recovery sweep)', () => {
+  const FENCE = { visitId: 'svc-1', restorations: 2, hits: [] };
+  const approvedNotice = [{ recipient_key: require('crypto').createHash('sha256').update('9415550101', 'utf8').digest('hex').slice(0, 16), body: 'Hi Synthia, your visit is cancelled.' }];
+  const run = (outcome = {}) => AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: FENCE, outcome });
+
+  // One approved recipient is reached before 8 PM and the next crosses the send window: the generic rail would queue it for a
+  // replay that carries no generation or visit-date constraint. The fenced recovery send never queues; it reports the gap.
+  test('a recipient held by the send window is NOT queued for a later replay; it is reported as not reached', async () => {
+    mockState.customer = {
+      ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
+    };
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    const both = preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body }));
+    mockSendCustomerMessage
+      .mockResolvedValueOnce({ sent: true, blocked: false })
+      .mockResolvedValueOnce({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' });
+    mockState.inserts = [];
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: both, cancelGeneration: { ...FENCE, hits: [] }, outcome });
+    expect(mockState.inserts.some(([table]) => table === 'sms_log')).toBe(false);
+    expect(outcome).toMatchObject({ notificationSent: true, notificationPartial: true });
+    expect(outcome.notificationError).toMatch(/Do not resend to those already reached/);
+  });
+
+  // Delivery evidence is matched by the claim token the approved send put on its audit rows, never by a time window.
+  test('the approved send puts its claim token on its audit rows, and the evidence queries match that token (no cycle window)', async () => {
+    mockSendCustomerMessage.mockClear();
+    mockState.raws.length = 0;
+    await run();
+    const meta = mockSendCustomerMessage.mock.calls[0][0].metadata;
+    expect(meta.cancellation_notice_token).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+    // A status read on a 'sent' marker filters the audit by the reminder's own token and never by transitioned_at.
+    mockState.raws.length = 0;
+    mockState.reminder = { ...mockState.reminder, cancellation_notice_state: 'sent', cancellation_notice_at: new Date('2026-10-23T14:00:00.000Z') };
+    await AppointmentReminders.approvedCancellationNoticeStatus('svc-1', { recipientKeys: approvedNotice.map((n) => n.recipient_key) });
+    const audit = mockState.raws.filter(([table]) => table === 'messaging_audit_log').map(([, sql]) => String(sql));
+    expect(audit.some((sql) => sql.includes("metadata->>'cancellation_notice_token'"))).toBe(true);
+    expect(audit.some((sql) => sql.includes('transitioned_at'))).toBe(false);
+    // A 'sent' marker with no claim token is unprovable, not delivered.
+    mockState.reminder = { ...mockState.reminder, cancellation_notice_at: null };
+    expect(await AppointmentReminders.approvedCancellationNoticeStatus('svc-1', {})).toBe('uncertain');
+  });
+
+  // The send window closes before the FIRST recipient: nothing was sent, so the claim is parked, not terminally suppressed.
+  test('a window hold before any recipient keeps the approved marker (stamp reverted) and flags the bundle to park', async () => {
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      await input.preDispatchCheck(); // the pre-dispatch stamp is made, then the provider boundary re-check finds 8 PM passed
+      return { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' };
+    });
+    const fence = { ...FENCE, hits: [] };
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome });
+    expect(fence.windowHeld).toBe(true);
+    const states = mockState.updates.filter((u) => typeof u.cancellation_notice_state === 'string').map((u) => u.cancellation_notice_state);
+    expect(states[states.length - 1]).toBe('pending_approved');
+    expect(states).not.toContain('suppressed');
+    expect(outcome.notificationSent).toBe(false);
+  });
+
+  // The rollback of the stamp is the fence's own transaction: proof (bundle + visit) then the revert, matched to THIS claim's token.
+  const holdAfterStamp = (after = () => {}) => mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+    await input.preDispatchCheck();
+    after();
+    return { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' };
+  });
+  const noticeWrites = () => mockState.updates.filter((u) => 'cancellation_notice_state' in u).map((u) => u.cancellation_notice_state);
+
+  test('the window-held rollback proves the fence and reverts the stamp in ONE transaction, on the row under this claim\'s token', async () => {
+    const dbMock = require('../models/db');
+    const order = [];
+    const original = dbMock.transaction.getMockImplementation();
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    holdAfterStamp(() => {
+      dbMock.transaction.mockImplementationOnce(async (fn) => { order.push('begin'); const out = await fn(dbMock); order.push('end'); return out; });
+      mockFence.mockImplementationOnce(async () => { order.push('proof'); });
+      mockState.wheres.length = 0;
+    });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    dbMock.transaction.mockImplementation(original);
+    expect(order).toEqual(['begin', 'proof', 'end']);
+    expect(fence.windowHeld).toBe(true);
+    expect(mockState.wheres).toContainEqual(['appointment_reminders', { id: 'rem-1' }]);
+    expect(mockState.wheresIn).toContainEqual(['appointment_reminders', 'cancellation_notice_state', ['sent', 'pending_approved']]);
+    expect(noticeWrites().pop()).toBe('pending_approved');
+  });
+
+  // The messaging rail checks the send window BEFORE the pre-dispatch check: an after-hours request can hold with the claim still
+  // untouched (never stamped). That must park too; the generic finalizer would otherwise suppress the approved text for good.
+  test('a window hold that never reaches the pre-dispatch stamp parks the bundle and suppresses nothing', async () => {
+    mockSendCustomerMessage.mockImplementationOnce(async () => (
+      { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' }));
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome });
+    expect(fence.windowHeld).toBe(true);
+    expect(noticeWrites()).not.toContain('sent');
+    expect(noticeWrites()).not.toContain('suppressed');
+    expect(noticeWrites().pop()).toBe('pending_approved');
+    expect(outcome.notificationSent).toBe(false);
+  });
+
+  test.each(['lease_lost', 'visit_restored_since'])('a worker that lost its lease or whose visit changed (%s) before the rollback reverts nothing and parks nothing', async (reason) => {
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    holdAfterStamp(() => { mockFence.mockRejectedValueOnce(Object.assign(new Error(`cancellation fence: ${reason}`), { code: 'CANCEL_FENCE', fenceReason: reason })); });
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome });
+    expect(fence.windowHeld).toBeUndefined();
+    expect(outcome.notificationSent).toBe(false);
+    // The stamp stays as the new owner found it: the only restoring write is the original claim, never a revert after the stamp.
+    const writes = noticeWrites();
+    expect(writes.slice(writes.indexOf('sent') + 1)).not.toContain('pending_approved');
+    expect(fence.retryable === true).toBe(reason === 'lease_lost');
+  });
+
+  test('a busy fence at the rollback is retried; when it clears the marker is restored and the bundle parks', async () => {
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    holdAfterStamp(() => {
+      mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: bundle_busy'), { code: 'CANCEL_FENCE', fenceReason: 'bundle_busy' }));
+    });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    expect(fence.windowHeld).toBe(true);
+    expect(noticeWrites().pop()).toBe('pending_approved');
+  });
+
+  test('a rollback that hits no row (the claim token moved on) does not park the bundle', async () => {
+    const fence = { visitId: 'svc-1', restorations: 2, hits: [] };
+    holdAfterStamp(() => { mockState.claim = 0; });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    expect(fence.windowHeld).toBeUndefined();
+  });
+
+  // The Intelligence Bar request's no-text cancel is a marker write too (terminal suppression): it runs under the same fence.
+  test('a no-text cancel under the fence proves bundle + generation, closes the reminder and suppresses in ONE transaction', async () => {
+    const dbMock = require('../models/db');
+    const order = [];
+    const original = dbMock.transaction.getMockImplementation();
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    dbMock.transaction.mockImplementationOnce(async (fn) => { order.push('begin'); const out = await fn(dbMock); order.push('end'); return out; });
+    mockFence.mockImplementationOnce(async (_trx, f) => { order.push(['proof', f === fence]); });
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: false, cancelGeneration: fence, outcome: {} });
+    dbMock.transaction.mockImplementation(original);
+    expect(order).toEqual(['begin', ['proof', true], 'end']);
+    const writes = mockState.updates;
+    expect(writes.findIndex((u) => u.cancelled === true)).toBeGreaterThanOrEqual(0);
+    expect(writes.findIndex((u) => u.cancelled === true)).toBeLessThan(writes.findIndex((u) => u.cancellation_notice_state === 'suppressed'));
+  });
+
+  test.each(['lease_lost', 'visit_restored_since'])('a delayed no-text cancel refused by the fence (%s) closes and suppresses nothing', async (reason) => {
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    mockFence.mockRejectedValueOnce(Object.assign(new Error(`cancellation fence: ${reason}`), { code: 'CANCEL_FENCE', fenceReason: reason }));
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: false, cancelGeneration: fence, outcome: {} }).catch(() => {});
+    expect(mockState.updates.some((u) => u.cancelled === true || u.cancellation_notice_state === 'suppressed')).toBe(false);
+  });
+
+  test('without a fence the no-text suppression is the single statement it always was', async () => {
+    const dbMock = require('../models/db');
+    dbMock.transaction.mockClear();
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: false, outcome: {} });
+    expect(dbMock.transaction).not.toHaveBeenCalled();
+    expect(mockState.updates.some((u) => u.cancellation_notice_state === 'suppressed')).toBe(true);
+  });
+
+  test('a window hold on the first recipient followed by a blocked second recipient still parks (nobody reached)', async () => {
+    mockState.customer = {
+      ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',
+    };
+    const preview = await AppointmentReminders.previewCancellationText('svc-1');
+    const both = preview.recipients.map(({ recipient_key, body }) => ({ recipient_key, body }));
+    mockSendCustomerMessage
+      .mockImplementationOnce(async (input) => { await input.preDispatchCheck(); return { sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, nextAllowedAt: '2026-11-04T12:00:00Z' }; })
+      .mockResolvedValueOnce({ sent: false, blocked: true, code: 'RECIPIENT_OPTED_OUT' });
+    const fence = { ...FENCE, hits: [] };
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: both, cancelGeneration: fence, outcome: {} });
+    expect(fence.windowHeld).toBe(true);
+    const states = mockState.updates.filter((u) => typeof u.cancellation_notice_state === 'string').map((u) => u.cancellation_notice_state);
+    expect(states).not.toContain('suppressed');
+    expect(states[states.length - 1]).toBe('pending_approved');
+  });
+
+  test('the fence is proven inside a transaction, before the marker is claimed, and only the approved marker is claimed', async () => {
+    const order = [];
+    mockFence.mockImplementationOnce(async (trx, fence) => { order.push(['fence', fence, mockState.updates.filter((u) => 'cancellation_notice_state' in u).length]); });
+    await run();
+    expect(order).toEqual([['fence', FENCE, 0]]);
+    expect(require('../models/db').transaction).toHaveBeenCalled();
+    expect(mockState.wheres).toContainEqual(['appointment_reminders', { id: 'rem-1', cancellation_notice_state: 'pending_approved' }]);
+    expect(mockState.updates.find((u) => 'cancellation_notice_state' in u)).toMatchObject({ cancellation_notice_state: 'pending_approved' });
+  });
+
+  // handleCancellation's own "close the reminder" write (cancelled: true), run on an older snapshot after a concurrent
+  // restore, could re-close the LIVE visit's reminder and suppress its future reminders. For a fenced send it moves inside
+  // the share-locked transaction, after the proof.
+  test('the reminder close is not an unfenced write: it runs in the fenced transaction, after the proof, never before', async () => {
+    const order = [];
+    mockFence.mockImplementationOnce(async () => { order.push(['fence', mockState.updates.filter((u) => u.cancelled === true).length]); });
+    await run();
+    expect(order).toEqual([['fence', 0]]);
+    expect(mockState.updates.filter((u) => u.cancelled === true)).toHaveLength(1);
+  });
+
+  // One more proof right before the stamp that precedes the provider handoff (a point-in-time check: the handoff itself cannot
+  // be un-sent, and the claim's token already fails if a restore cleared the marker).
+  test('the pre-dispatch stamp re-proves the generation and aborts the handoff when the visit was restored', async () => {
+    mockSendCustomerMessage.mockClear();
+    await run();
+    const preDispatch = mockSendCustomerMessage.mock.calls[0][0].preDispatchCheck;
+    expect(typeof preDispatch).toBe('function');
+    mockFence.mockClear();
+    expect(await preDispatch()).toEqual({ ok: true });
+    expect(mockFence).toHaveBeenCalledWith(expect.anything(), FENCE);
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE' }));
+    expect(await preDispatch()).toMatchObject({ ok: false, code: 'appointment_restored' });
+  });
+
+  // A BUSY visit (an edit or a restore in flight) is not a verdict. The check runs before any stamp or handoff, so the finalizer
+  // must leave the approved marker as it is (not terminal suppressed) and the next pass sends the text.
+  test.each(['lease_lost', 'bundle_busy'])('a runner that no longer owns the bundle (%s) at the pre-dispatch stamp stamps nothing, hands nothing off and leaves the approved marker for the new owner', async (reason) => {
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      mockFence.mockRejectedValueOnce(Object.assign(new Error(`cancellation fence: ${reason}`), { code: 'CANCEL_FENCE', fenceReason: reason }));
+      const verdict = await input.preDispatchCheck();
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    expect(fence.retryable).toBe(true);
+    const stateWrites = mockState.updates.filter((u) => 'cancellation_notice_state' in u).map((u) => u.cancellation_notice_state);
+    expect(stateWrites).toEqual(['pending_approved']); // the claim only: never 'sent', never 'suppressed'
+  });
+
+  test('the proof and the pre-dispatch stamp share one transaction (proof first)', async () => {
+    const order = [];
+    const dbMock = require('../models/db');
+    const original = dbMock.transaction.getMockImplementation();
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      dbMock.transaction.mockImplementationOnce(async (fn) => { order.push('begin'); const out = await fn(dbMock); order.push('end'); return out; });
+      mockFence.mockImplementationOnce(async () => { order.push('proof'); });
+      await input.preDispatchCheck();
+      return { sent: true, blocked: false };
+    });
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { visitId: 'svc-1', restorations: 2, hits: [] }, outcome: {} });
+    expect(order).toEqual(['begin', 'proof', 'end']);
+    expect(mockState.updates.some((u) => u.cancellation_notice_state === 'sent')).toBe(true);
+    dbMock.transaction.mockImplementation(original);
+  });
+
+  test('a busy visit at the pre-dispatch proof blocks this attempt but keeps the approved marker for the retry', async () => {
+    const fence = { visitId: 'svc-1', restorations: 2, hits: [] };
+    // The claim transaction's proof passes; the pre-dispatch proof (the pool) reports busy as the send runs.
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_busy'), { code: 'CANCEL_FENCE', fenceReason: 'visit_busy' }));
+      const verdict = await input.preDispatchCheck();
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    mockState.updates.length = 0;
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome });
+    expect(fence.retryable).toBe(true);
+    // No terminal marker was written: the only notice-state write is the fenced claim itself (still pending_approved).
+    const stateWrites = mockState.updates.filter((u) => 'cancellation_notice_state' in u).map((u) => u.cancellation_notice_state);
+    expect(stateWrites).toEqual(['pending_approved']);
+    expect(outcome.notificationSent).toBe(false);
+    // The retry (next sweep pass, a fresh fence, the visit no longer busy) claims the same marker again and the text goes out.
+    const retryOutcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { visitId: 'svc-1', restorations: 2, hits: [] }, outcome: retryOutcome });
+    expect(retryOutcome.notificationSent).toBe(true);
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test('a definitive change at the pre-dispatch proof is not marked retryable', async () => {
+    const fence = { visitId: 'svc-1', restorations: 2, hits: [] };
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE', fenceReason: 'visit_is_confirmed' }));
+      const verdict = await input.preDispatchCheck();
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    expect(fence.retryable).toBeUndefined();
+  });
+
+  test('without cancelGeneration the pre-dispatch check never consults the fence', async () => {
+    mockSendCustomerMessage.mockClear();
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, outcome: {} });
+    mockFence.mockClear();
+    await mockSendCustomerMessage.mock.calls[0][0].preDispatchCheck();
+    expect(mockFence).not.toHaveBeenCalled();
+  });
+
+  test('a refused fence leaves the reminder open (no close at all)', async () => {
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE' }));
+    await run();
+    expect(mockState.updates.filter((u) => u.cancelled === true)).toEqual([]);
+  });
+
+  test('a refused fence claims and sends nothing, and says so', async () => {
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_busy'), { code: 'CANCEL_FENCE' }));
+    const outcome = {};
+    await run(outcome);
+    expect(mockState.updates.filter((u) => 'cancellation_notice_state' in u)).toEqual([]);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(outcome.notificationSent).toBe(false);
+  });
+
+  test('a claim that matches no row (the marker is gone) sends nothing', async () => {
+    mockState.claim = 0;
+    const outcome = {};
+    await run(outcome);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(outcome.notificationSent).toBe(false);
+  });
+
+  test('without cancelGeneration the fence is never consulted and the close is the ordinary guarded write (the request and Dispatch are unchanged)', async () => {
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, outcome: {} });
+    expect(mockFence).not.toHaveBeenCalled();
+    expect(mockState.updates.filter((u) => u.cancelled === true)).toHaveLength(1);
   });
 });

@@ -1,4 +1,12 @@
 {
+  "accept_estimate": {
+    "module": "estimate-accept-tools.js",
+    "domain": "estimate",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "add_customer_property": {
     "module": "property-tools.js",
     "domain": "customers",
@@ -6,6 +14,14 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "add_github_pr_label": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
   },
   "adjust_stock": {
     "module": "procurement-tools.js",
@@ -37,6 +53,22 @@
     "kind": "internal_write",
     "role": "admin",
     "approval": "confirmed_endpoint",
+    "scope": "none"
+  },
+  "archive_invoice": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "assign_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
     "scope": "none"
   },
   "assign_technician": {
@@ -83,6 +115,14 @@
     "module": "tools.js",
     "domain": "customers",
     "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "cancel_payment_plan": {
+    "module": "payment-plan-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
@@ -199,6 +239,22 @@
     "approval": null,
     "scope": "record"
   },
+  "convert_lead": {
+    "module": "lead-convert-tools.js",
+    "domain": "leads",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "correct_invoice_address": {
+    "module": "billing-write-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "create_agent_estimate_draft": {
     "module": "estimate-tools.js",
     "domain": "estimate",
@@ -223,6 +279,30 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "create_customer_link": {
+    "module": "customer-link-tools.js",
+    "domain": "comms",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "create_invoice": {
+    "module": "create-invoice-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "create_payment_plan": {
+    "module": "payment-plan-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "create_pending_estimate": {
     "module": "estimate-tools.js",
     "domain": "estimate",
@@ -238,6 +318,14 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "none"
+  },
+  "delete_duplicate_customer": {
+    "module": "customer-lifecycle-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
   },
   "detect_duplicates": {
     "module": "seo-tools.js",
@@ -279,6 +367,14 @@
     "approval": null,
     "scope": "record"
   },
+  "edit_invoice": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "export_payouts": {
     "module": "banking-tools.js",
     "domain": "banking",
@@ -286,6 +382,22 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "find_admin_edits": {
+    "module": "admin-write-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
+  "find_admin_reads": {
+    "module": "admin-read-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
   },
   "find_available_slots": {
     "module": "schedule-tools.js",
@@ -322,14 +434,6 @@
   "find_schedule_gaps": {
     "module": "schedule-tools.js",
     "domain": "schedule",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "record"
-  },
-  "get_estimate_detail": {
-    "module": "estimate-tools.js",
-    "domain": "estimate",
     "kind": "read",
     "role": "admin",
     "approval": null,
@@ -439,174 +543,6 @@
     "approval": null,
     "scope": "record"
   },
-  "repair_closeout": {
-    "module": "closeout-repair-tools.js",
-    "domain": "closeout",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "reprice_future_visits": {
-    "module": "reprice-visits-tools.js",
-    "domain": "schedule",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "resend_receipt": {
-    "module": "receipt-resend-tools.js",
-    "domain": "customers",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "create_customer_link": {
-    "module": "customer-link-tools.js",
-    "domain": "comms",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "send_autopay_setup_link": {
-    "module": "customer-link-tools.js",
-    "domain": "comms",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "remove_customer_property": {
-    "module": "property-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "record_payment": {
-    "module": "record-payment-tools.js",
-    "domain": "customers",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "send_invoice": {
-    "module": "invoice-action-tools.js",
-    "domain": "customers",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "void_invoice": {
-    "module": "void-invoice-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "pause_invoice_reminders": {
-    "module": "invoice-reminder-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "resume_invoice_reminders": {
-    "module": "invoice-reminder-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "stop_invoice_reminders": {
-    "module": "invoice-reminder-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "send_invoice_reminder_now": {
-    "module": "invoice-reminder-tools.js",
-    "domain": "customers",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "schedule_invoice_send": {
-    "module": "invoice-reminder-tools.js",
-    "domain": "customers",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "create_payment_plan": {
-    "module": "payment-plan-tools.js",
-    "domain": "customers",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "cancel_payment_plan": {
-    "module": "payment-plan-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "create_invoice": {
-    "module": "create-invoice-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "set_customer_bill_to": {
-    "module": "bill-to-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "remove_saved_payment_method": {
-    "module": "billing-write-tools.js",
-    "domain": "customers",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "correct_invoice_address": {
-    "module": "billing-write-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "accept_estimate": {
-    "module": "estimate-accept-tools.js",
-    "domain": "estimate",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
   "get_cloudflare_edge_errors": {
     "module": "cloudflare-ops-tools.js",
     "domain": "cloudflare-ops",
@@ -631,22 +567,6 @@
     "approval": null,
     "scope": "none"
   },
-  "purge_cloudflare_cache": {
-    "module": "cloudflare-ops-tools.js",
-    "domain": "cloudflare-ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
-  "retry_cloudflare_pages_build": {
-    "module": "cloudflare-ops-tools.js",
-    "domain": "cloudflare-ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
   "get_commit_info": {
     "module": "github-ops-tools.js",
     "domain": "github-ops",
@@ -654,30 +574,6 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
-  },
-  "rerun_failed_github_checks": {
-    "module": "github-ops-tools.js",
-    "domain": "github-ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
-  "add_github_pr_label": {
-    "module": "github-ops-tools.js",
-    "domain": "github-ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
-  "request_codex_review": {
-    "module": "github-ops-tools.js",
-    "domain": "github-ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
   },
   "get_content_decay_alerts": {
     "module": "seo-tools.js",
@@ -735,6 +631,22 @@
     "approval": null,
     "scope": "record"
   },
+  "get_customer_estimate_context": {
+    "module": "customer-estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
+  "get_customer_invoices": {
+    "module": "billing-reader-tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
   "get_dataforseo_balance": {
     "module": "dataforseo-ops-tools.js",
     "domain": "dataforseo-ops",
@@ -782,6 +694,14 @@
     "role": "admin",
     "approval": null,
     "scope": "none"
+  },
+  "get_estimate_detail": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
   },
   "get_estimate_funnel": {
     "module": "dashboard-tools.js",
@@ -879,6 +799,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "get_invoice_detail": {
+    "module": "billing-reader-tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
   "get_kpi_snapshot": {
     "module": "dashboard-tools.js",
     "domain": "dashboard",
@@ -958,6 +886,14 @@
     "role": "technician_or_admin",
     "approval": null,
     "scope": "broad"
+  },
+  "get_my_truck_kit": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null,
+    "scope": "none"
   },
   "get_neighborhood_grass_profile": {
     "module": "estimate-tools.js",
@@ -1103,38 +1039,6 @@
     "approval": null,
     "scope": "none"
   },
-  "redeploy_railway_service": {
-    "module": "ops-tools.js",
-    "domain": "ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
-  "restart_railway_service": {
-    "module": "ops-tools.js",
-    "domain": "ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
-  "set_railway_gate": {
-    "module": "ops-tools.js",
-    "domain": "ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
-  "set_growthbook_feature_environment": {
-    "module": "growthbook-tools.js",
-    "domain": "growthbook",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
   "get_recent_completions": {
     "module": "tools.js",
     "domain": "customers",
@@ -1254,30 +1158,6 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
-  },
-  "resolve_sentry_issue": {
-    "module": "sentry-ops-tools.js",
-    "domain": "sentry-ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
-  "ignore_sentry_issue": {
-    "module": "sentry-ops-tools.js",
-    "domain": "sentry-ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
-  },
-  "assign_sentry_issue": {
-    "module": "sentry-ops-tools.js",
-    "domain": "sentry-ops",
-    "kind": "external_action",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "none"
   },
   "get_service_history": {
     "module": "tech-tools.js",
@@ -1415,6 +1295,14 @@
     "approval": null,
     "scope": "none"
   },
+  "get_tool_issues": {
+    "module": "truck-kit-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "get_top_revenue_customers": {
     "module": "revenue-tools.js",
     "domain": "revenue",
@@ -1422,6 +1310,14 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "get_truck_kit": {
+    "module": "truck-kit-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
   },
   "get_truck_status": {
     "module": "bouncie-ops-tools.js",
@@ -1527,6 +1423,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "ignore_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "indexation_report": {
     "module": "seo-tools.js",
     "domain": "seo",
@@ -1574,38 +1478,6 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
-  },
-  "offer_choices": {
-    "module": "choice-tools.js",
-    "domain": "ops",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "none"
-  },
-  "needs_me": {
-    "module": "needs-me-tools.js",
-    "domain": "ops",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "broad"
-  },
-  "get_customer_invoices": {
-    "module": "billing-reader-tools.js",
-    "domain": "customers",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "record"
-  },
-  "get_invoice_detail": {
-    "module": "billing-reader-tools.js",
-    "domain": "customers",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "record"
   },
   "list_open_closeouts": {
     "module": "closeout-tools.js",
@@ -1655,14 +1527,6 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
-  "delete_duplicate_customer": {
-    "module": "customer-lifecycle-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
   "move_stops_to_day": {
     "module": "schedule-tools.js",
     "domain": "schedule",
@@ -1670,6 +1534,22 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "needs_me": {
+    "module": "needs-me-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
+  "offer_choices": {
+    "module": "choice-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
   },
   "optimize_all_routes": {
     "module": "schedule-tools.js",
@@ -1686,6 +1566,30 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "route_wide"
+  },
+  "pause_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "propose_admin_edit": {
+    "module": "admin-write-tools.js",
+    "domain": "ops",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "purge_cloudflare_cache": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
   },
   "query_blog_performance": {
     "module": "seo-tools.js",
@@ -1775,6 +1679,14 @@
     "approval": null,
     "scope": "none"
   },
+  "read_admin_data": {
+    "module": "admin-read-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
   "read_pricing_config": {
     "module": "estimate-tools.js",
     "domain": "estimate",
@@ -1791,6 +1703,46 @@
     "approval": null,
     "scope": "broad"
   },
+  "record_payment": {
+    "module": "record-payment-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "redeploy_railway_service": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "remove_customer_property": {
+    "module": "property-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "remove_saved_payment_method": {
+    "module": "billing-write-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "repair_closeout": {
+    "module": "closeout-repair-tools.js",
+    "domain": "closeout",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "reply_via_sms": {
     "module": "email-tools.js",
     "domain": "email",
@@ -1798,6 +1750,22 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "reprice_future_visits": {
+    "module": "reprice-visits-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "request_codex_review": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
   },
   "request_instant_payout": {
     "module": "banking-tools.js",
@@ -1815,6 +1783,14 @@
     "approval": "confirmed_endpoint",
     "scope": "none"
   },
+  "rerun_failed_github_checks": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "reschedule_appointment": {
     "module": "tools.js",
     "domain": "customers",
@@ -1822,6 +1798,46 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "record"
+  },
+  "resend_receipt": {
+    "module": "receipt-resend-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "resolve_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "restart_railway_service": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "resume_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "retry_cloudflare_pages_build": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
   },
   "run_price_lookup": {
     "module": "procurement-tools.js",
@@ -1847,6 +1863,14 @@
     "approval": "ui_confirm",
     "scope": "none"
   },
+  "save_customer_estimate": {
+    "module": "customer-estimate-tools.js",
+    "domain": "estimate",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "scan_url_issues": {
     "module": "seo-tools.js",
     "domain": "seo",
@@ -1854,6 +1878,14 @@
     "role": "admin",
     "approval": null,
     "scope": "none"
+  },
+  "schedule_invoice_send": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
   },
   "score_page_refresh_priority": {
     "module": "seo-tools.js",
@@ -1919,9 +1951,33 @@
     "approval": null,
     "scope": "broad"
   },
+  "send_autopay_setup_link": {
+    "module": "customer-link-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "send_email_reply": {
     "module": "email-tools.js",
     "domain": "email",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "send_invoice": {
+    "module": "invoice-action-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "send_invoice_reminder_now": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
     "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",
@@ -1951,13 +2007,13 @@
     "approval": null,
     "scope": "none"
   },
-  "submit_gsc_sitemap": {
-    "module": "seo-tools.js",
-    "domain": "seo",
-    "kind": "external_action",
+  "set_customer_bill_to": {
+    "module": "bill-to-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",
-    "scope": "none"
+    "scope": "record"
   },
   "set_estimate_presentation": {
     "module": "estimate-tools.js",
@@ -1967,6 +2023,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "set_growthbook_feature_environment": {
+    "module": "growthbook-tools.js",
+    "domain": "growthbook",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "set_primary_property": {
     "module": "property-tools.js",
     "domain": "customers",
@@ -1975,12 +2039,36 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "set_railway_gate": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "sitemap_validation": {
     "module": "seo-tools.js",
     "domain": "seo",
     "kind": "read",
     "role": "admin",
     "approval": null,
+    "scope": "none"
+  },
+  "stop_invoice_reminders": {
+    "module": "invoice-reminder-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "submit_gsc_sitemap": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
     "scope": "none"
   },
   "submit_review_reply": {
@@ -2031,6 +2119,22 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "unarchive_invoice": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "unvoid_invoice": {
+    "module": "invoice-edit-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "update_customer": {
     "module": "tools.js",
     "domain": "customers",
@@ -2049,14 +2153,6 @@
   },
   "update_lead_contact": {
     "module": "leads-tools.js",
-    "domain": "leads",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "convert_lead": {
-    "module": "lead-convert-tools.js",
     "domain": "leads",
     "kind": "internal_write",
     "role": "admin",
@@ -2087,80 +2183,8 @@
     "approval": "ui_confirm",
     "scope": "none"
   },
-  "get_customer_estimate_context": {
-    "module": "customer-estimate-tools.js",
-    "domain": "estimate",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "record"
-  },
-  "save_customer_estimate": {
-    "module": "customer-estimate-tools.js",
-    "domain": "estimate",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "find_admin_reads": {
-    "module": "admin-read-tools.js",
-    "domain": "ops",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "none"
-  },
-  "read_admin_data": {
-    "module": "admin-read-tools.js",
-    "domain": "ops",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "broad"
-  },
-  "find_admin_edits": {
-    "module": "admin-write-tools.js",
-    "domain": "ops",
-    "kind": "read",
-    "role": "admin",
-    "approval": null,
-    "scope": "none"
-  },
-  "propose_admin_edit": {
-    "module": "admin-write-tools.js",
-    "domain": "ops",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "edit_invoice": {
-    "module": "invoice-edit-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "archive_invoice": {
-    "module": "invoice-edit-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "unarchive_invoice": {
-    "module": "invoice-edit-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
-  "unvoid_invoice": {
-    "module": "invoice-edit-tools.js",
+  "void_invoice": {
+    "module": "void-invoice-tools.js",
     "domain": "customers",
     "kind": "internal_write",
     "role": "admin",

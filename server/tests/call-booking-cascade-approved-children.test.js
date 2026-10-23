@@ -8,6 +8,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mockResolvedValue(undefined) }));
 const mockChildMoney = jest.fn();
 jest.mock('../services/appointment-cancel-impact', () => ({ linkedChildMoneyReason: (...a) => mockChildMoney(...a) }));
+const mockFence = jest.fn(async () => {});
+const mockCount = jest.fn(async () => 0);
+jest.mock('../services/cancel-generation-fence', () => ({ assertCancelGeneration: (...a) => mockFence(...a), countRestorations: (...a) => mockCount(...a) }));
 const { transitionJobStatus } = require('../services/job-status');
 const { cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 
@@ -43,6 +46,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   transitionJobStatus.mockResolvedValue(undefined);
   mockChildMoney.mockResolvedValue(null);
+  mockFence.mockResolvedValue(undefined);
+  mockCount.mockReset();
+  mockCount.mockResolvedValue(0);
 });
 
 const run = ({ children = [CHILD], locked = { 'child-1': { ...CHILD } }, approvedChildren = [APPROVED] } = {}) => {
@@ -193,5 +199,94 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
     expect(cancelled).toBe(1);
     expect(log.forUpdate).toBe(0);
     expect(mockChildMoney).not.toHaveBeenCalled();
+  });
+});
+
+// Recovery sweep only (services/cancel-generation-fence.js): each child's cancel re-proves, in the child's own
+// transaction and after the child's lock, that the PARENT is still the cancelled visit the card approved.
+describe('cancelCallFollowUpsForParentCancel with parentFence', () => {
+  const FENCE = { visitId: 'svc-parent', restorations: 0, hits: [] };
+  const runFenced = ({ children = [CHILD], locked = { 'child-1': { ...CHILD } } } = {}) => {
+    const { conn, log } = fakeConn({ children, locked });
+    const report = { skipped: [] };
+    return cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent', approvedChildren: [APPROVED], report, parentFence: FENCE })
+      .then((cancelled) => ({ cancelled, report, log }));
+  };
+
+  test('the fence runs inside the child transaction, after the child lock, before the child is cancelled', async () => {
+    const order = [];
+    mockFence.mockImplementationOnce(async (trx, fence) => { order.push(['fence', typeof trx, fence]); });
+    transitionJobStatus.mockImplementationOnce(async () => { order.push(['transition']); });
+    const { cancelled, log } = await runFenced();
+    expect(cancelled).toBe(1);
+    expect(log.lockedReads).toEqual([{ childId: 'child-1', forUpdate: true }]);
+    expect(order).toEqual([['fence', 'function', FENCE], ['transition']]);
+  });
+
+  test('a parent that is busy (a restore in flight) or no longer the approved cancel leaves the child active and reported', async () => {
+    for (const fenceReason of ['visit_busy', 'visit_is_confirmed', 'visit_restored_since']) {
+      transitionJobStatus.mockClear();
+      mockFence.mockRejectedValueOnce(Object.assign(new Error(`cancellation fence: ${fenceReason}`), { code: 'CANCEL_FENCE', fenceReason }));
+      const { cancelled, report, log } = await runFenced();
+      expect(cancelled).toBe(0);
+      expect(report.skipped).toEqual([{ id: 'child-1', reason: `parent_${fenceReason}` }]);
+      expect(transitionJobStatus).not.toHaveBeenCalled();
+      expect(log.updates).toEqual([]);
+    }
+  });
+
+  test('without a parentFence the fence is never consulted (the request path and every other caller are unchanged)', async () => {
+    await run();
+    expect(mockFence).not.toHaveBeenCalled();
+  });
+});
+
+// The cancel recovery sweep pins each child's restoration count with the bundle. A child the dead request already cancelled and an
+// operator then restored matches its card again; the pinned count, compared under the child's own lock, says it was restored.
+describe('approved children with a pinned restoration count', () => {
+  const pinned = (n) => [{ ...APPROVED, restorations_seen: n }];
+  const runPinned = (n, locked = { 'child-1': { ...CHILD } }) => {
+    const { conn, log } = fakeConn({ children: [CHILD], locked });
+    const report = { skipped: [] };
+    return cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent', approvedChildren: pinned(n), report })
+      .then((cancelled) => ({ cancelled, report, log }));
+  };
+
+  test('an unchanged generation is cancelled, with the count read under the child lock', async () => {
+    mockCount.mockResolvedValue(1);
+    const { cancelled, report } = await runPinned(1);
+    expect(cancelled).toBe(1);
+    expect(report.skipped).toEqual([]);
+    expect(mockCount).toHaveBeenCalledWith(expect.anything(), 'child-1');
+  });
+
+  test('a child restored since (higher count) is NOT cancelled a second time and is reported', async () => {
+    mockCount.mockResolvedValue(2);
+    const { cancelled, report } = await runPinned(1);
+    expect(cancelled).toBe(0);
+    expect(report.skipped).toEqual([{ id: 'child-1', reason: 'child_restored_since' }]);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('a card child with no pinned count (the request path) never reads the history', async () => {
+    await run();
+    expect(mockCount).not.toHaveBeenCalled();
+  });
+});
+
+describe('a child cancel that fails for a reason other than a refusal (the cancel recovery sweep)', () => {
+  test('with a parentFence it is a retryable hit and still listed as cancel_failed; a deliberate refusal records no such hit', async () => {
+    const { conn } = fakeConn({ children: [{ id: 'child-1', status: 'confirmed' }], locked: { 'child-1': { id: 'child-1', status: 'confirmed' } } });
+    transitionJobStatus.mockRejectedValueOnce(new Error('connection terminated'));
+    const report = { skipped: [] };
+    const fence = { visitId: 'svc-1', restorations: 0, hits: [] };
+    await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-1', approvedChildren: [{ id: 'child-1', status: 'confirmed' }], report, parentFence: fence });
+    expect(fence.hits).toEqual(['child_cancel_error']);
+    expect(report.skipped).toEqual([{ id: 'child-1', reason: 'cancel_failed' }]);
+    // Without a fence the report is the only effect (unchanged).
+    transitionJobStatus.mockRejectedValueOnce(new Error('connection terminated'));
+    const plain = { skipped: [] };
+    await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-1', approvedChildren: [{ id: 'child-1', status: 'confirmed' }], report: plain });
+    expect(plain.skipped).toEqual([{ id: 'child-1', reason: 'cancel_failed' }]);
   });
 });

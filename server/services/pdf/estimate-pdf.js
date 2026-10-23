@@ -28,7 +28,6 @@ const {
 } = require('../estimate-proposal-billing');
 const { RATE_REVIEW_TERMS_LINE } = require('../../../shared/estimate-copy-claims.cjs');
 const { lawnLimitsForEstimate } = require('../estimate-lawn-limits');
-const featureGates = require('../../config/feature-gates');
 const { beforeYouBookForEstimate, estimateIsOpen, trimByRank } = require('../estimate-before-you-book');
 
 // Brand palette — identical to invoice-pdf.js.
@@ -486,7 +485,7 @@ function lawnLimitsBlock(ctx, lawnLimits, y) {
   return y + 6;
 }
 
-// "Before you book" (GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK): one plain page after the last page, from
+// "Before you book": one plain page after the last page, from
 // the owner's answer book (services/estimate-before-you-book.js, which also picks the sections and
 // drops lines by rank so the page stays one page). This file measures and draws.
 const BYB_BODY_SIZE = 10.5;
@@ -507,8 +506,8 @@ function trimBeforeYouBook(doc, page, available) {
 }
 
 function beforeYouBookPage(ctx, estimate, proposal) {
-  // Gate off (or an estimate already decided): nothing is drawn and the document is exactly as before.
-  if (featureGates.estimateBeforeYouBookLive?.() !== true || !estimateIsOpen(estimate)) return;
+  // An estimate already decided (accepted, declined or expired) gets no page.
+  if (!estimateIsOpen(estimate)) return;
   const page = beforeYouBookForEstimate(estimate, proposal);
   const { doc } = ctx;
   footerBar(doc, ctx.tagline);
@@ -699,7 +698,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   y = termsBlock(ctx, proposal, totals, y + 8);
   acceptanceBlock(ctx, billing?.acceptance || null, y + 8);
 
-  // GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK: one more page after the last one. Gate off prints nothing here.
+  // "Before you book": one more page after the last one.
   beforeYouBookPage(ctx, estimate, proposal);
 
   footerBar(doc, ctx.tagline);

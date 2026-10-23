@@ -836,8 +836,8 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
         ) : null}
 
-        {/* GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK: one last page of answers that apply to this estimate (server copy,
-            /data `beforeYouBook`, already chosen and trimmed to fit one page; absent with the gate off). Only this
+        {/* "Before you book": one last page of answers that apply to this estimate (server copy, /data
+            `beforeYouBook`, already chosen and trimmed to fit one page; absent on a decided estimate). Only this
             document prints it: the interactive estimate page never reads the key. */}
         {Array.isArray(data?.beforeYouBook?.sections) && data.beforeYouBook.sections.length > 0 ? (
           <div className="doc-byb" data-testid="doc-before-you-book">

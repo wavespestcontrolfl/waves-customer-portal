@@ -76,6 +76,12 @@ jest.mock('../services/invoice', () => {
   };
 });
 
+const mockFence = jest.fn(async () => {});
+jest.mock('../services/cancel-generation-fence', () => ({
+  assertCancelGeneration: (...a) => mockFence(...a),
+  isCancelFence: (err) => Boolean(err) && err.code === 'CANCEL_FENCE',
+}));
+
 describe('visit-cancellation-followthrough', () => {
   beforeEach(() => { jest.clearAllMocks(); mockCancellationTime = '2030-01-09T18:00:00Z'; });
 
@@ -448,5 +454,148 @@ describe('approved money effects (pinnedEffects + moneyReport)', () => {
     expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenLastCalledWith('svc-1');
     expect(mockHoldCancel).toHaveBeenCalled();
     expect(moneyReport.skipped).toEqual([]);
+  });
+});
+
+// The Intelligence Bar cancel recovery sweep passes a cancelFence (services/cancel-generation-fence.js): a visit that is
+// no longer the cancelled one the card approved gets no money handling and no tracker cancel, and each mutation that does
+// run carries the fence to re-prove it inside its own transaction.
+describe('cancelFence (the cancel recovery sweep)', () => {
+  const FENCE = { visitId: 'svc-1', restorations: 0, hits: [] };
+  const NO_RAIL = { applies: false, amount: null, unresolved: false, rail: 'none', blocked_by_invoice: false };
+  const fenced = (extra = {}) => ({ targetIds: ['svc-1'], cancelFence: FENCE, pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL, creditReversalOfferIds: [] } }, ...extra });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFence.mockReset();
+    mockFence.mockResolvedValue(undefined);
+    mockCancellationTime = new Date(Date.now() - 60 * 1000).toISOString();
+    mockPreviewCancelFee.mockResolvedValue({ ...NO_RAIL });
+  });
+
+  it('hands the fence to the invoice void and to the tracker cancel', async () => {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced());
+    expect(require('../services/invoice').voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('svc-1', {
+      pinnedInvoices: [], pinnedCreditReversalOfferIds: [], cancelFence: FENCE,
+    });
+    expect(require('../services/track-transitions').cancel).toHaveBeenCalledWith('svc-1', expect.objectContaining({ cancelFence: FENCE }));
+  });
+
+  it('a visit that is no longer the approved cancel gets nothing: no void, no fee check, no tracker, no alert', async () => {
+    mockFence.mockRejectedValue(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE', fenceReason: 'visit_is_confirmed' }));
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await expect(runVisitCancellationFollowThrough(fenced())).resolves.toEqual({ settled: 1 });
+    expect(require('../services/invoice').voidOpenInvoicesForCancelledService).not.toHaveBeenCalled();
+    expect(require('../services/track-transitions').cancel).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).not.toHaveBeenCalled();
+  });
+
+  it('a tracker cancel the fence refused is not a tracker fault: no failure alert, the approved children are reported not cascaded', async () => {
+    const tracker = require('../services/track-transitions').cancel;
+    const { recordTrackTransitionResultFailure, recordTrackTransitionFailure } = require('../services/track-transition-alerts');
+    const linkedChildReport = { skipped: [] };
+    tracker.mockResolvedValueOnce({ ok: false, reason: 'cancel_fence' });
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced({ linkedChildren: [{ id: 'child-1' }], linkedChildReport }));
+    expect(linkedChildReport.skipped).toEqual([{ id: 'child-1', reason: 'cascade_not_run' }]);
+    tracker.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_busy'), { code: 'CANCEL_FENCE' }));
+    await runVisitCancellationFollowThrough(fenced());
+    expect(recordTrackTransitionResultFailure).not.toHaveBeenCalled();
+    expect(recordTrackTransitionFailure).not.toHaveBeenCalled();
+  });
+
+  it('a refusal during the money step raises no generic fee alert and cancels no tracker: the bundle\'s restoration alert owns it', async () => {
+    const invoice = require('../services/invoice');
+    // The void sweep is refused by the fence (it records the hit and swallows the error, as the real helper does) and the
+    // invoice stays open, which would normally end as a fee_step_error and a generic unresolved-fee alert.
+    invoice.voidOpenInvoicesForCancelledService.mockImplementationOnce(async (_id, opts) => { opts.cancelFence.hits.push('visit_busy'); });
+    mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
+    const hitFence = { ...FENCE, hits: [] };
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: hitFence }));
+    expect(hitFence.hits).toEqual(['visit_busy']);
+    expect(mockAlertUnresolved).not.toHaveBeenCalled();
+    expect(require('../services/track-transitions').cancel).not.toHaveBeenCalled();
+  });
+
+  it('an unexpected failure in the money step is a retryable hit (no fee alert, no tracker); a deliberate review verdict stays a reported skip', async () => {
+    const invoice = require('../services/invoice');
+    const tracker = require('../services/track-transitions').cancel;
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    invoice.voidOpenInvoicesForCancelledService.mockRejectedValueOnce(new Error('connection terminated'));
+    const hitFence = { ...FENCE, hits: [] };
+    const moneyReport = { skipped: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: hitFence, moneyReport }));
+    expect(hitFence.hits).toEqual(['money_step_error']);
+    expect(mockAlertUnresolved).not.toHaveBeenCalled();
+    expect(tracker).not.toHaveBeenCalled();
+    // The review verdict (an invoice that still needs money handling) is a deliberate outcome, not a failure.
+    mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
+    const reviewFence = { ...FENCE, hits: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: reviewFence }));
+    expect(reviewFence.hits).toEqual([]);
+    expect(mockAlertUnresolved).toHaveBeenCalledTimes(1);
+  });
+
+  it('a tracker cancel REJECTED without throwing: complete is a reported skip (alert kept), any other reason is a retryable hit; unfenced is unchanged', async () => {
+    const tracker = require('../services/track-transitions').cancel;
+    const alerts = require('../services/track-transition-alerts');
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    tracker.mockResolvedValueOnce({ ok: false, reason: 'cannot_cancel_complete' });
+    const doneFence = { ...FENCE, hits: [] };
+    const moneyReport = { skipped: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: doneFence, moneyReport }));
+    expect(doneFence.hits).toEqual([]);
+    expect(moneyReport.skipped).toContainEqual({ kind: 'tracker', reason: 'tracker_already_complete' });
+    expect(alerts.recordTrackTransitionResultFailure).toHaveBeenCalledTimes(1);
+    alerts.recordTrackTransitionResultFailure.mockClear();
+    tracker.mockResolvedValueOnce({ ok: false, reason: 'not_found' });
+    const goneFence = { ...FENCE, hits: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: goneFence }));
+    expect(goneFence.hits).toEqual(['tracker_rejected']);
+    expect(alerts.recordTrackTransitionResultFailure).not.toHaveBeenCalled();
+    tracker.mockResolvedValueOnce({ ok: false, reason: 'not_found' });
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL, creditReversalOfferIds: [] } } });
+    expect(alerts.recordTrackTransitionResultFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('a tracker cancel that THROWS (not a fence refusal) is a retryable hit for the sweep, with no per-retry dispatch alert; unfenced keeps the alert', async () => {
+    const tracker = require('../services/track-transitions').cancel;
+    const alerts = require('../services/track-transition-alerts');
+    tracker.mockRejectedValueOnce(new Error('connection terminated'));
+    const hitFence = { ...FENCE, hits: [] };
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: hitFence }));
+    expect(hitFence.hits).toEqual(['tracker_error']);
+    expect(alerts.recordTrackTransitionFailure).not.toHaveBeenCalled();
+    tracker.mockRejectedValueOnce(new Error('connection terminated'));
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL, creditReversalOfferIds: [] } } });
+    expect(alerts.recordTrackTransitionFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('with no refusal the same unresolved invoice still raises the fee alert (the suppression is only for fence hits)', async () => {
+    mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    const noHits = { ...FENCE, hits: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: noHits }));
+    // The fence rides into the alert so it is proven in the alert's own transaction.
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' }, cancelFence: noHits });
+  });
+
+  it('an alert the fence refused (a hit recorded by its own transaction) cancels no tracker on top', async () => {
+    mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
+    const hitFence = { ...FENCE, hits: [] };
+    mockAlertUnresolved.mockImplementationOnce(async ({ cancelFence }) => { cancelFence.hits.push('visit_restored_since'); });
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: hitFence }));
+    expect(require('../services/track-transitions').cancel).not.toHaveBeenCalled();
+  });
+
+  it('without a fence the calls carry no cancelFence key (unchanged for every other caller)', async () => {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL } } });
+    expect(mockFence).not.toHaveBeenCalled();
+    expect(Object.keys(require('../services/invoice').voidOpenInvoicesForCancelledService.mock.calls[0][1])).not.toContain('cancelFence');
+    expect(Object.keys(require('../services/track-transitions').cancel.mock.calls[0][1])).not.toContain('cancelFence');
   });
 });

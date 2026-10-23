@@ -129,6 +129,7 @@ const ROUTE_CONTEXT_MAP = {
   "/admin/ppc": "seo",
   "/admin/social-media": "seo",
   "/admin/inventory": "procurement",
+  "/admin/equipment": "procurement", // truck kit reads ride with procurement
   "/admin/revenue": "revenue",
   "/admin/invoices": "revenue",
   "/admin/tax": "tax",

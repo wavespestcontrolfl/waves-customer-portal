@@ -1,4 +1,4 @@
-const { buildContractPDFBuffer } = require('../services/pdf/contract-pdf');
+const { buildContractPDFBuffer, splitBoldLines } = require('../services/pdf/contract-pdf');
 
 describe('contract-pdf', () => {
   const baseContract = {
@@ -23,6 +23,24 @@ describe('contract-pdf', () => {
     expect(buf.slice(0, 5).toString('latin1')).toBe('%PDF-');
   }
 
+  test('a line wrapped in ** is a bold line (F.S. 482.227 bold statements); others stay as written', () => {
+    expect(splitBoldLines('**RETREATMENT ONLY.**\nPlain line\n\n  **EXCLUSIONS**  ')).toEqual([
+      { text: 'RETREATMENT ONLY.', bold: true },
+      { text: 'Plain line', bold: false },
+      { text: '', bold: false },
+      { text: 'EXCLUSIONS', bold: true },
+    ]);
+    expect(splitBoldLines('a ** b ** c')).toEqual([{ text: 'a ** b ** c', bold: false }]);
+  });
+
+  test('builds a PDF for a body with bold lines', async () => {
+    const buf = await buildContractPDFBuffer({
+      ...baseContract,
+      contract_text_snapshot: '**RETREATMENT ONLY. THIS WARRANTY DOES NOT COVER DAMAGE REPAIR.**\n\nPlain clause.\n**EXCLUSIONS**\n- Drywood termites.',
+    }, customer, { signed: false });
+    await isPdf(buf);
+  });
+
   test('builds a review-copy PDF for an unsigned contract', async () => {
     const buf = await buildContractPDFBuffer(baseContract, customer, { signed: false });
     await isPdf(buf);
@@ -40,6 +58,41 @@ describe('contract-pdf', () => {
     };
     const buf = await buildContractPDFBuffer(signed, customer, { signed: true });
     await isPdf(buf);
+  });
+
+  test('a bold body keeps the 10.5pt body size on every line after a page break', async () => {
+    const PDFDocument = require('pdfkit');
+    const sizes = new Map();
+    const original = PDFDocument.prototype.text;
+    PDFDocument.prototype.text = function text(...args) {
+      if (typeof args[0] === 'string' && args[0].startsWith('Clause ')) sizes.set(args[0], this._fontSize);
+      return original.apply(this, args);
+    };
+    try {
+      const body = ['**HEADING**', ...Array.from({ length: 300 }, (_, i) => `Clause ${i}.`)].join('\n');
+      await isPdf(await buildContractPDFBuffer({ ...baseContract, contract_text_snapshot: body }, customer, { signed: false }));
+    } finally {
+      PDFDocument.prototype.text = original;
+    }
+    expect(sizes.size).toBe(300);
+    expect([...new Set(sizes.values())]).toEqual([10.5]);
+  });
+
+  test('a wrapped line that crosses a page break keeps the body size', async () => {
+    const PDFDocument = require('pdfkit');
+    const sizes = new Set();
+    const original = PDFDocument.prototype._fragment;
+    PDFDocument.prototype._fragment = function fragment(text, ...rest) {
+      if (/wordy/.test(text)) sizes.add(this._fontSize);
+      return original.call(this, text, ...rest);
+    };
+    try {
+      const body = ['**HEADING**', 'wordy '.repeat(6000)].join('\n');
+      await isPdf(await buildContractPDFBuffer({ ...baseContract, contract_text_snapshot: body }, customer, { signed: false }));
+    } finally {
+      PDFDocument.prototype._fragment = original;
+    }
+    expect([...sizes]).toEqual([10.5]);
   });
 
   test('does not throw on a long body that spans multiple pages', async () => {

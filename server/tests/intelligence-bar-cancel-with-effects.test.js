@@ -186,6 +186,22 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(mockReseed).not.toHaveBeenCalled();
   });
 
+  test('the pending action id rides to the handler so the approved effects are saved under it (recovery bundle)', async () => {
+    await executeTool('cancel_appointment', input(), { ...ADMIN, operationId: 'pending-action-1' });
+    expect(mockCancelFromBar.mock.calls[0][0].recovery).toEqual({ pendingActionId: 'pending-action-1' });
+    // A caller with no operation id still gets a bundle (no pending action id), never a silent no-record cancel.
+    mockCancelFromBar.mockClear();
+    await executeTool('cancel_appointment', input(), ADMIN);
+    expect(mockCancelFromBar.mock.calls[0][0].recovery).toEqual({ pendingActionId: null });
+  });
+
+  test('a step-after-commit warning says the saved steps are finished automatically', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, postCommitFailure: 'connection terminated' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.warning).toMatch(/within about 15 minutes the system finishes any invoice, credit or linked-visit step that is left/);
+    expect(result.warning).toMatch(/approved text, only if it was never started/);
+  });
+
   test('"cancel without a text" is carried as notifyCustomer false, and nothing is reported sent', async () => {
     const silent = { ...FROZEN, notify_customer: false, customer_text: { would_send: false, body: null, template_body: null, recipients: [], reason: 'cancelled_without_text' } };
     mockComputeImpact.mockResolvedValue(silent);
@@ -196,6 +212,53 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(mockCancelFromBar.mock.calls[0][0].approvedNotice).toBeNull();
     expect(result.customer_text_sent).toBe(false);
     expect(result.warning).toBeUndefined();
+  });
+
+  test('a cancel the recovery sweep took over is flagged so the route saves the receipt only if none exists', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true, recoveryOwnsOutcome: true } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.recovery_owns_outcome).toBe(true);
+    expect(result.warning).toMatch(/took over the follow-up steps/);
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true } });
+    const normal = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(normal.recovery_owns_outcome).toBeUndefined();
+  });
+
+  test('a not-sent report whose bookkeeping failed, with the text still open for the system: the retry advice wins, never "send it by hand"', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationError: 'connection terminated', textRetryScheduled: true } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.warning).toMatch(/system retries it within about 15 minutes/);
+    expect(result.warning).not.toMatch(/send it by hand\.|will not be retried automatically/);
+    // Bookkeeping failed and the bundle's outcome is unknown (recoveryOwnsOutcome): no manual-send advice either.
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationError: 'x', recoveryOwnsOutcome: true } });
+    const owned = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(owned.recovery_owns_outcome).toBe(true);
+    expect(owned.warning).not.toMatch(/did not go out \(x\)|send it by hand\.$/);
+    expect(owned.warning).toMatch(/Do not send it by hand unless/);
+    // A delivery-uncertain report keeps its own advice (the system never resends it).
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationUncertain: true, textRetryScheduled: true } });
+    expect((await executeTool('cancel_appointment', input(), ADMIN)).warning).toMatch(/may have gone out/);
+  });
+
+  test('a step that failed after the commit leaves the bundle pending, so its receipt is provisional (the sweep\'s final receipt replaces it)', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, postCommitFailure: 'connection terminated' } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.recovery_owns_outcome).toBe(true);
+    expect(result.text_retry_pending).toBeUndefined();
+    expect(result.warning).toMatch(/a step after the cancel did not finish/);
+  });
+
+  test('an approved text the system is still sending says so, and never advises sending it by hand', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, textRetryScheduled: true } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.customer_text_sent).toBe(false);
+    expect(result.warning).toMatch(/has not gone out yet\. The system retries it within about 15 minutes/);
+    expect(result.warning).not.toMatch(/will not be retried automatically/);
+    // Provisional: the route saves it only if the action has none, and the sweep's final receipt may replace it.
+    expect(result).toMatchObject({ recovery_owns_outcome: true, text_retry_pending: true });
   });
 
   test('a text that the handler could not send is reported as a warning, not hidden', async () => {
