@@ -9,7 +9,7 @@
  *   mapOpportunity()    PURE: one API notice -> the bid row we would file, or { skip } with the reason
  *
  * A notice is filed when it is a solicitation, combined synopsis, presolicitation or sources sought, still active, its
- * response deadline (if any) is in the future, and its place of performance is a Florida ZIP in SERVICE_ZIP3. Each
+ * response deadline (if any) is in the future (a passed one still updates a bid already filed), and its place of performance is a Florida ZIP in SERVICE_ZIP3. Each
  * notice id is filed once (unique source + external_id); a republished notice refreshes its bid (refreshPatch). The
  * deadline is the API's own field, stored unconfirmed with the raw value as its source line: reminders still need the
  * operator to confirm it. One admin notification per new bid, and one when a republished notice changes the deadline,
@@ -87,7 +87,8 @@ function publicUrl(notice) {
 }
 
 /**
- * One API notice -> { row } to file, or { skip: reason }. `now` decides whether the deadline has passed.
+ * One API notice -> { row, expired } to file, or { skip: reason }. `expired` (the deadline has passed at `now`) files no
+ * new bid but still refreshes one already filed.
  */
 function mapOpportunity(notice, now = new Date()) {
   const id = text(notice?.noticeId);
@@ -103,11 +104,12 @@ function mapOpportunity(notice, now = new Date()) {
   if (rawDeadline) {
     const parsed = new Date(rawDeadline);
     if (!Number.isNaN(parsed.getTime())) {
-      if (parsed.getTime() <= now.getTime()) return { skip: 'deadline_passed' };
       dueAt = parsed;
     }
   }
+  // A passed deadline files no NEW bid, but still updates a bid already filed (SAM.gov moved the date earlier).
   return {
+    expired: dueAt != null && dueAt.getTime() <= now.getTime(),
     row: {
       source: 'sam_gov',
       external_id: id,
@@ -117,6 +119,7 @@ function mapOpportunity(notice, now = new Date()) {
       solicitation_number: text(notice.solicitationNumber),
       location: locationWords(place),
       due_at: dueAt,
+      source_due_at: dueAt,
       due_source_line: rawDeadline ? `SAM.gov response deadline: ${rawDeadline}` : null,
       due_confirmed: false,
       status: 'new',
@@ -208,7 +211,9 @@ function refreshPatch(bid, row) {
   for (const field of REFRESH_FIELDS) {
     if (row[field] != null && row[field] !== bid[field]) patch[field] = row[field];
   }
-  if (row.due_at && !sameInstant(bid.due_at, row.due_at)) {
+  // Compared with the deadline SAM.gov last showed, not with due_at: a date the operator typed is not a source change.
+  if (row.due_at && !sameInstant(bid.source_due_at ?? bid.due_at, row.due_at)) {
+    patch.source_due_at = row.due_at;
     patch.due_source_line = row.due_source_line;
     if (!bid.due_confirmed) patch.due_at = row.due_at;
     patch.needs_date_confirmation = true;
@@ -225,18 +230,21 @@ function refreshPatch(bid, row) {
 // Files one notice: a new bid (with its new-bid bell owed), a refresh of the bid already filed for it, or nothing.
 // The partial unique index on (source, external_id) cannot be named by knex's onConflict, so the conflict target is
 // written out; DO NOTHING keeps the transaction usable, and the existing row is then re-read under a row lock.
-async function upsertNotice(row) {
+async function upsertNotice(row, { expired = false } = {}) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
-    const { sql, bindings } = trx('bid_opportunities').insert({ ...row, owed_alert_kind: 'new' }).toSQL();
-    const inserted = await trx.raw(`${sql} ON CONFLICT (source, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING id`, bindings);
-    const id = inserted.rows?.[0]?.id;
-    if (id) {
-      await trx('bid_opportunities').where({ id }).update({ owed_alert_key: `bid-desk:new:${id}` });
-      return { outcome: 'filed' };
+    if (!expired) {
+      const { sql, bindings } = trx('bid_opportunities').insert({ ...row, owed_alert_kind: 'new' }).toSQL();
+      const inserted = await trx.raw(`${sql} ON CONFLICT (source, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING id`, bindings);
+      const id = inserted.rows?.[0]?.id;
+      if (id) {
+        await trx('bid_opportunities').where({ id }).update({ owed_alert_key: `bid-desk:new:${id}` });
+        return { outcome: 'filed' };
+      }
     }
     const bid = await trx('bid_opportunities').where({ source: 'sam_gov', external_id: row.external_id }).forUpdate().first();
-    const patch = bid ? refreshPatch(bid, row) : {};
+    if (!bid) return { outcome: 'deadline_passed' };
+    const patch = refreshPatch(bid, row);
     if (!Object.keys(patch).length) return { outcome: 'already_filed' };
     // clock_timestamp(), not now(): the version the page fences a date save on must move.
     await trx('bid_opportunities').where({ id: bid.id }).update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
@@ -267,7 +275,7 @@ async function fileNotices(notices, now) {
   const counts = { filed: 0, refreshed: 0, skippedByReason: {} };
   for (const notice of notices) {
     const mapped = mapOpportunity(notice, now);
-    const outcome = mapped.skip || (await upsertNotice(mapped.row)).outcome;
+    const outcome = mapped.skip || (await upsertNotice(mapped.row, { expired: mapped.expired })).outcome;
     if (outcome === 'filed' || outcome === 'refreshed') counts[outcome] += 1;
     else counts.skippedByReason[outcome] = (counts.skippedByReason[outcome] || 0) + 1;
   }

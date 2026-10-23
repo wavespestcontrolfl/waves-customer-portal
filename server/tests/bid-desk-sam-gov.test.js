@@ -64,10 +64,16 @@ describe('mapOpportunity', () => {
     ['another state', { placeOfPerformance: { state: { code: 'GA' }, zip: '30301' } }, 'not_florida'],
     ['north Florida', { placeOfPerformance: { state: { code: 'FL' }, zip: '32202' } }, 'outside_area'],
     ['no place ZIP', { placeOfPerformance: { state: { code: 'FL' } } }, 'outside_area'],
-    ['a passed deadline', { responseDeadLine: '2026-10-21T14:00:00-04:00' }, 'deadline_passed'],
     ['no notice id', { noticeId: '' }, 'no_notice_id'],
   ])('skips %s', (_label, overrides, reason) => {
     expect(sam.mapOpportunity(notice(overrides), NOW)).toEqual({ skip: reason });
+  });
+
+  test('a passed deadline is mapped as expired (it files no new bid but can update one already filed)', () => {
+    const mapped = sam.mapOpportunity(notice({ responseDeadLine: '2026-10-21T14:00:00-04:00' }), NOW);
+    expect(mapped.expired).toBe(true);
+    expect(mapped.row.source_due_at.toISOString()).toBe('2026-10-21T18:00:00.000Z');
+    expect(sam.mapOpportunity(notice(), NOW).expired).toBe(false);
   });
 
   test('keeps a sources sought with no deadline, and Tampa Bay ZIPs are in the area', () => {

@@ -19,6 +19,7 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 const migration = require('../models/migrations/20261022190000_bid_desk_sam_gov');
 const owedMigration = require('../models/migrations/20261023010000_bid_desk_bid_owed_alerts');
+const sourceDueMigration = require('../models/migrations/20261023020000_bid_desk_source_due_at');
 const service = require('../services/bid-desk');
 const sam = require('../services/bid-desk/sam-gov');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
@@ -77,6 +78,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
   const cursor = async () => JSON.parse((await mockPg('system_settings').where({ key: sam.CURSOR_KEY }).first('value')).value).from;
 
   test('the migrations are reversible and the old sources still pass the check', async () => {
+    await sourceDueMigration.down(mockPg);
     await owedMigration.down(mockPg);
     expect(await mockPg.schema.hasColumn('bid_opportunities', 'owed_alert_kind')).toBe(false);
     await migration.down(mockPg);
@@ -84,6 +86,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     await expect(mockPg.transaction((t) => t('bid_opportunities').insert({ source: 'sam_gov' }))).rejects.toThrow(/source_check/);
     await migration.up(mockPg);
     await owedMigration.up(mockPg);
+    await sourceDueMigration.up(mockPg);
     expect(await mockPg.schema.hasColumn('bid_opportunities', 'external_url')).toBe(true);
     expect(await mockPg.schema.hasColumn('bid_opportunities', 'owed_alert_kind')).toBe(true);
     await mockPg('bid_opportunities').insert({ source: 'gov_email' });
@@ -160,6 +163,32 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(bid.due_confirmed).toBe(true);
     expect(bid.needs_date_confirmation).toBe(true);
     expect(bid.due_source_line).toBe('SAM.gov response deadline: 2026-11-20T14:00:00-05:00');
+  });
+
+  test('an unchanged notice never re-flags a date the operator typed', async () => {
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-8')]), apiKey: 'test-key' });
+    const [filed] = await samBids();
+    await mockPg('bid_opportunities').where({ id: filed.id })
+      .update({ due_at: new Date('2026-11-04T16:00:00Z'), due_confirmed: true, due_source_line: null });
+    raiseAdminAlert.mockClear();
+    const again = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-8')]), apiKey: 'test-key' });
+    expect(again).toMatchObject({ refreshed: 0, rung: 0 });
+    const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
+    expect(bid.needs_date_confirmation).toBe(false);
+    expect(new Date(bid.due_at).toISOString()).toBe('2026-11-04T16:00:00.000Z');
+  });
+
+  test('a deadline SAM.gov moved into the past still flags the bid already filed; a new expired notice is not filed', async () => {
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-9')]), apiKey: 'test-key' });
+    const [filed] = await samBids();
+    await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid' });
+    const past = '2026-10-21T14:00:00-04:00';
+    const result = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-9', { responseDeadLine: past }), notice('n-10', { responseDeadLine: past })]), apiKey: 'test-key' });
+    expect(result).toMatchObject({ filed: 0, refreshed: 1, skippedByReason: { deadline_passed: 1 } });
+    const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
+    expect(bid.needs_date_confirmation).toBe(true);
+    expect(bid.due_source_line).toBe(`SAM.gov response deadline: ${past}`);
+    expect(await samBids()).toHaveLength(1);
   });
 
   test('a cursor older than a year is clamped to the API window', async () => {
