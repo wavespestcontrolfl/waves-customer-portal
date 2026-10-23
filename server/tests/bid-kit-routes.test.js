@@ -346,7 +346,8 @@ describe('create and list', () => {
     ['reference details', { details: { entity: '123-45-6789' } }],
   ])('%s is refused without repeating it', async (_name, over) => {
     const kind = over.details ? 'reference' : 'document';
-    const res = await call('POST', '/api/admin/bid-kit', { kind, item_key: kind === 'reference' ? 'reference' : 'custom', label: 'Letter', ...over });
+    // A catalog reference takes its catalog name (no label is sent); a custom document takes a label.
+    const res = await call('POST', '/api/admin/bid-kit', { kind, item_key: kind === 'reference' ? 'reference' : 'custom', ...(kind === 'reference' ? {} : { label: 'Letter' }), ...over });
     expect(res.status).toBe(400);
     expect(JSON.stringify(res.body)).not.toMatch(/\d{2}-\d{7}|\d{3}-\d{2}-\d{4}|\d{9}/);
     expect(res.body.error).toMatch(/tax ID/);
@@ -534,6 +535,18 @@ describe('a custom item\'s label is part of what a sign-off covers', () => {
     const renamed = await call('PATCH', `/api/admin/bid-kit/${custom.id}`, { label: 'County vendor letter (2027)', expected_updated_at: same.body.item.updated_at });
     expect(renamed.status).toBe(200);
     expect(renamed.body.item).toMatchObject({ attested_at: null, attested_by: null, status: 'unattested' });
+  });
+
+  test('a catalog item is created under its catalog name only: another label is refused, none or the same is fine', async () => {
+    const wrong = await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'legal_name', label: 'Phone', value: 'Example Pest Services LLC' });
+    expect(wrong).toMatchObject({ status: 400, body: { error: 'A catalog item keeps its catalog name' } });
+    expect([...store.rows.values()].filter((row) => row.item_key === 'legal_name')).toHaveLength(0);
+    const none = await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'legal_name', value: 'Example Pest Services LLC' });
+    expect(none.status).toBe(201);
+    const catalogLabel = require('../../shared/bid-kit-catalog.cjs').catalogItem('legal_name').label;
+    expect(none.body.item.label).toBe(catalogLabel);
+    const same = await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'phone', label: require('../../shared/bid-kit-catalog.cjs').catalogItem('phone').label, value: '941-555-0100' });
+    expect(same.status).toBe(201);
   });
 
   test('a catalog item keeps its catalog name: a relabel is refused and the signed row is left alone', async () => {

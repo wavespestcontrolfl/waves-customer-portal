@@ -199,7 +199,9 @@ router.post('/', async (req, res, next) => {
     const item = catalog.catalogItem(value.item_key);
     if (!isCustom && (!item || item.kind !== value.kind)) return res.status(400).json({ error: 'Invalid item_key' });
     if (isCustom && !value.label) return res.status(400).json({ error: 'A custom item needs a label' });
-    const built = toColumns({ ...value, label: value.label || item.label }, value.kind);
+    // A catalog item is stored under its catalog name, never one the caller sends (the same rule as an edit).
+    if (!isCustom && value.label && value.label !== item.label) return res.status(400).json({ error: 'A catalog item keeps its catalog name' });
+    const built = toColumns({ ...value, label: isCustom ? value.label : item.label }, value.kind);
     if (built.refused) return res.status(400).json({ error: built.refused });
     const outcome = await store.createItem(
       { kind: value.kind, item_key: value.item_key, ...forWrite(built.columns) },
