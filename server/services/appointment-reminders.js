@@ -2764,6 +2764,9 @@ async function reportUnclaimedCancellationNotice({ record, scheduledServiceId, a
 // (then it finalizes as 'sent' so a retry cannot double-text them). An approved send is never left for the sweep.
 function makeCancellationFinalizer({ record, scheduledServiceId, options, noticeToken, claimToken, claimStates, claimStatesWithSent, preStampState, acceptedCancellationAudit }) {
   return async (sentOk, { retryable = false, uncertain = false } = {}) => {
+    // The recovery sweep's pre-dispatch proof found the visit only busy (before any stamp or handoff): leave the approved
+    // marker (and this claim) exactly as it is, so the next pass sends the text; it is not a failed send.
+    if (!sentOk && !uncertain && options.cancelGeneration && options.cancelGeneration.retryable === true) return false;
     try {
       let accepted = Boolean(sentOk);
       // Dispatch-uncertain (r16): the provider may have accepted but
@@ -2882,7 +2885,12 @@ function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimSta
       try {
         await require('./cancel-generation-fence').assertCancelGeneration(db, cancelGeneration);
       } catch (err) {
-        if (err && err.code === 'CANCEL_FENCE') return { ok: false, code: 'appointment_restored', reason: err.message };
+        if (err && err.code === 'CANCEL_FENCE') {
+          // A visit that is only BUSY (a restore or an edit in flight) is not a verdict: nothing was stamped or handed off yet, so
+          // the finalizer leaves the approved marker untouched and the sweep retries the text on its next pass.
+          if (err.fenceReason === 'visit_busy') cancelGeneration.retryable = true;
+          return { ok: false, code: 'appointment_restored', reason: err.message };
+        }
         throw err;
       }
     }

@@ -459,6 +459,42 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
     expect(await preDispatch()).toMatchObject({ ok: false, code: 'appointment_restored' });
   });
 
+  // A BUSY visit (an edit or a restore in flight) is not a verdict. The check runs before any stamp or handoff, so the finalizer
+  // must leave the approved marker as it is (not terminal suppressed) and the next pass sends the text.
+  test('a busy visit at the pre-dispatch proof blocks this attempt but keeps the approved marker for the retry', async () => {
+    const fence = { visitId: 'svc-1', restorations: 2, hits: [] };
+    // The claim transaction's proof passes; the pre-dispatch proof (the pool) reports busy as the send runs.
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_busy'), { code: 'CANCEL_FENCE', fenceReason: 'visit_busy' }));
+      const verdict = await input.preDispatchCheck();
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    mockState.updates.length = 0;
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome });
+    expect(fence.retryable).toBe(true);
+    // No terminal marker was written: the only notice-state write is the fenced claim itself (still pending_approved).
+    const stateWrites = mockState.updates.filter((u) => 'cancellation_notice_state' in u).map((u) => u.cancellation_notice_state);
+    expect(stateWrites).toEqual(['pending_approved']);
+    expect(outcome.notificationSent).toBe(false);
+    // The retry (next sweep pass, a fresh fence, the visit no longer busy) claims the same marker again and the text goes out.
+    const retryOutcome = {};
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { visitId: 'svc-1', restorations: 2, hits: [] }, outcome: retryOutcome });
+    expect(retryOutcome.notificationSent).toBe(true);
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test('a definitive change at the pre-dispatch proof is not marked retryable', async () => {
+    const fence = { visitId: 'svc-1', restorations: 2, hits: [] };
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE', fenceReason: 'visit_is_confirmed' }));
+      const verdict = await input.preDispatchCheck();
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    expect(fence.retryable).toBeUndefined();
+  });
+
   test('without cancelGeneration the pre-dispatch check never consults the fence', async () => {
     mockSendCustomerMessage.mockClear();
     await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, outcome: {} });
