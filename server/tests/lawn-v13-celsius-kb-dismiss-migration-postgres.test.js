@@ -14,13 +14,17 @@ const first = require('../models/migrations/20261007173000_lawn_v13_celsius_kb_a
 const SLUG = migration._KB_SLUG;
 const { old: OLD, next: NEXT } = migration._DISMISS;
 const blindsideOneAYear = require('../models/migrations/20261009152000_lawn_v13_celsius_kb_blindside_one_a_year');
+const catalogCleanup = require('../models/migrations/20261023120000_lawn_catalog_report_approvals_and_identity');
 const seedScript = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'seed-knowledge-base.js'), 'utf8');
 
 function seedArticle() {
   const start = seedScript.indexOf(`slug: '${SLUG}'`);
   const open = seedScript.indexOf('content: `', start) + 'content: `'.length;
-  // The seed as it stood when this migration ran: 20261009152000 later changed the Blindside statement of the Flag line (its own test pins the seed).
-  return seedScript.slice(open, seedScript.indexOf('`,', open)).replace(blindsideOneAYear._NEXT, () => blindsideOneAYear._OLD);
+  // The seed as it stood when this migration ran: 20261009152000 later changed the Blindside statement of the Flag line (its own test pins the seed),
+  // and 20261023120000 corrected Dismiss NXT's actives in the Dismiss line.
+  return seedScript.slice(open, seedScript.indexOf('`,', open))
+    .replace(blindsideOneAYear._NEXT, () => blindsideOneAYear._OLD)
+    .replace(catalogCleanup.KB_NEW, () => catalogCleanup.KB_OLD);
 }
 // The article as 176000 left it: the seed with the Dismiss line put back.
 const beforeDismiss = () => seedArticle().replace(NEXT, () => OLD);
