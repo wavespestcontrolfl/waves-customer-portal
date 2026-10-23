@@ -794,6 +794,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_tetrino', 'Tetrino Insecticide', 'pesticide', 'insecticide'],
   ['v13_arena', 'Arena 50 WDG', 'pesticide', 'insecticide'],
   ['v13_talak', 'Atticus Talak 7.9 F', 'pesticide', 'insecticide'],
+  ['v13_advion_insect_granule', 'Advion Insect Granule', 'pesticide', 'insecticide'],
   ['v13_acelepryn', 'Acelepryn Insecticide', 'pesticide', 'insecticide'],
   ['v13_dylox_6_2_g', 'Dylox 6.2 G Granular Insecticide', 'pesticide', 'insecticide'],
   ['v13_artavia', 'Artavia 2 SC (Azoxy)', 'pesticide', 'fungicide'],
