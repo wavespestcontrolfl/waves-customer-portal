@@ -165,3 +165,18 @@ describe('gate on', () => {
     expect(plan.high).toBe(59);
   });
 });
+
+describe('gate on: commercial property', () => {
+  beforeAll(() => { process.env.GATE_MOSQUITO_MISTING = 'true'; });
+  afterAll(() => { delete process.env.GATE_MOSQUITO_MISTING; });
+
+  test('a commercial input takes the commercial manual-quote rail, never the residential misting price', () => {
+    const est = generateEstimate({ ...PROPERTY, propertyType: 'commercial', isCommercial: true, services: { mosquitoMisting: { tier: 'essential', nozzles: 40 } } });
+    const priced = est.lineItems.find((l) => l.service === 'mosquito_misting' && l.quoteRequired === false);
+    expect(priced).toBeUndefined();
+    expect(est.summary.installationTotal).toBe(0);
+    const manual = JSON.stringify(est);
+    expect(manual).toMatch(/commercial/i);
+    expect(manual).not.toMatch(/4170/);
+  });
+});

@@ -1285,7 +1285,10 @@ function generateEstimate(input) {
     err.failClosed = true;
     throw err;
   }
-  if (mistingService && require('../../config/feature-gates').mosquitoMistingLive()) {
+  // A commercial property never auto-prices the residential misting plan (no commercial misting program exists):
+  // it rides the existing commercial manual-quote rail, like every other residential-only pricer.
+  if (mistingService && require('../../config/feature-gates').mosquitoMistingLive()
+    && !useCommercialManualQuote(mistingService, 'mosquito')) {
     // knobs: the quote-time snapshot replayed from a stored estimate (server-derived only, like the termite knobs).
     const result = priceMosquitoMisting(property, { ...serviceOptions(mistingService), knobs: mistingReplayKnobs });
     lineItems.push(result);

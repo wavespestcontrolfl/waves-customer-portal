@@ -1975,6 +1975,19 @@ gated (its replay would throw). `GET /:token/data` is unchanged: it serves the s
 Bermuda-gated estimate. With the gate on, or with no add-on on the estimate, every body and status on these routes is unchanged.
 An estimate that carries both a gated Bermuda add-on and a gated area add-on answers the Bermuda body.
 
+**Mosquito misting gate (`GATE_MOSQUITO_MISTING`, 2026-10-23, dark).** An estimate that carries a persisted mosquito misting
+system (a stored `services.mosquitoMisting` / `mosquito_misting` engine input, a mapped `mosquito_misting` recurring row, a
+`mosquito_misting_installation` one-time item, a raw `mosquito_misting` engine line, or an itemized proposal line of either
+key) while the gate is off is refused on the SAME rail and at the SAME position as the area add-on gate above, on the same
+endpoints: `PUT /:token/accept` (pre-transaction check and the locked in-transaction recheck), `GET /:token/available-slots`,
+`POST /:token/find-slots`, `POST /:token/reserve`, `POST /:token/card-hold-intent`, `POST /:token/recurring-card-intent` and
+`POST /:token/reserve/:scheduledServiceId/extend`. Refusal: HTTP 409 with the same customer text as the area add-on refusal and
+`"code": "MOSQUITO_MISTING_GATED"` (reason `mosquito_misting_disabled`). Precedence among gated add-ons: Bermuda, then misting,
+then area add-ons. A gated misting estimate is never priced for the park check (its replay throws a fail-closed 400 carrying the
+same code); the deposit webhook records nothing for it (reason `mosquito_misting_disabled`). `GET /:token/data` is unchanged.
+With the gate on, or with no misting row on the estimate, every body and status on these routes is unchanged. The gate is off
+by default, so today no public response changes.
+
 Which stored rows count (Codex round 17; no new status or body): the add-on rows are read from the estimate's AUTHORITATIVE result
 container only (`storedAreaAddOnRows`, `server/services/estimate-result-container.js`, the pick the Bermuda evidence detector uses: a
 revision's own `result` wins over the raw `engineResult` it left behind, a SERVER-priced `result` wins even when it prices nothing, and an
