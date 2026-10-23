@@ -447,7 +447,7 @@ function grossNote(e) {
   return e.gross != null && Number(e.gross) !== Number(e.amount) ? ` (gross ${Number(e.gross).toFixed(2)} before refunds)` : '';
 }
 
-function formatReport({ dryRun, file, read, inserted, duplicates, held = [], parked = [], portalExpenses = [], summary }) {
+function formatReport({ dryRun, file, read, inserted, duplicates, held = [], parked = [], kept = [], portalExpenses = [], summary }) {
   const lines = [
     `${dryRun ? 'DRY RUN - nothing written. ' : ''}Ledger import report for ${path.basename(file)}`,
     `rows read:                 ${read}`,
@@ -457,6 +457,8 @@ function formatReport({ dryRun, file, read, inserted, duplicates, held = [], par
     ...held.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
     `parked for review:         ${parked.length} (loaded as open rows, no expense: an expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days is already in the portal; link or create it in Bank Import)`,
     ...parked.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
+    `bookings kept:             ${kept.length} (an expense of the same amount was entered while a run booked these; the booking stands because its expense was edited or refunded since, or the check still waits for a real run: compare the two on the Expenses tab)`,
+    ...kept.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
     `expenses in the portal:    ${portalExpenses.length} entered by hand or from a feed within ${EXPENSE_DATE_WINDOW_DAYS} days of this file's dates (never matched by guesswork: a ledger expense row of the same amount nearby is parked above; check each once)`,
     ...portalExpenses.map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}${grossNote(e)}${e.claimedByRow ? ' (linked to a feed or upload row)' : ''}`),
     `${dryRun ? 'expenses to create:' : 'expenses created:'}`.padEnd(27) + summary.expensesCreated,
@@ -744,7 +746,6 @@ function reconcileRows(mapped, rows, portal) {
   mapped.forEach((m, i) => {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
-      if (prior.verifiedKept) { duplicates += 1; return; } // finishPendingVerifies already reported it
       const reason = reloadReason(prior, m);
       if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, status: prior.status, portalNote: reason.portalNote, conflict: reason.conflict, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion), reading: readingKeys(m.bank.suggestion), category: m.expense ? ledgerCategory(m, categoryIds) : {}, refund: !!(m.bank.suggestion && m.bank.suggestion.refundCredit) });
       else duplicates += 1;
@@ -826,17 +827,26 @@ function parkAtWrite(m, found, portal, when) {
 // before it judges the row (finishPendingVerifies), so an expense that
 // landed in that gap still parks the row instead of staying doubled.
 // Returns the park's report line, or null when the expense stands.
+// The marker carries a snapshot of the expense as written: a later check
+// compares the expense against THAT, never against the file it is run
+// from (the owner may have corrected both the expense and the file).
 const VERIFY_MARKER = 'ledgerVerifyPending';
-async function verifyAfterCommit(db, m, portal, expenseId, createdIds, when) {
+function expenseToWrite(m, portal) {
+  return { ...m.expense, category_id: portal.categoryIds.get(m.categoryName) || null };
+}
+async function verifyAfterCommit(db, m, portal, expenseId, createdIds, when, wrote) {
   createdIds.add(expenseId); // the ledger's own from here on: never a candidate for its own row
-  const wrote = { ...m.expense, category_id: portal.categoryIds.get(m.categoryName) || null }; // before a park reshapes m
   const after = await nearbyAtWrite(db, m, portal, createdIds);
   if (!after.near.length && !after.covered.length) {
     await db('bank_transactions').where({ row_hash: m.bank.row_hash, matched_expense_id: expenseId, status: 'created_expense' })
       .update({ suggestion: db.raw(`suggestion - '${VERIFY_MARKER}'`), updated_at: new Date() });
     return null;
   }
-  const line = parkAtWrite(m, after, portal, when);
+  // the park is worked out on a copy: the row is reshaped only once the
+  // booking is actually reverted, so a booking that stands still reports
+  // as the expense it is
+  const probe = { ...m, bank: { ...m.bank, suggestion: m.bank.suggestion ? { ...m.bank.suggestion } : null }, expense: m.expense ? { ...m.expense } : null };
+  const line = parkAtWrite(probe, after, portal, when);
   // The revert is conditional, under the expense's row lock, on (1) the
   // bank row still being this booking of that expense (a writer that
   // changed the row meanwhile, an unlink or a decision, keeps its state and
@@ -852,7 +862,7 @@ async function verifyAfterCommit(db, m, portal, expenseId, createdIds, when) {
     if (!exp) return 'row-changed';
     if (expenseEdited(exp, wrote) || (await appliedRefundTotal(expenseId, trx)) > 0) return 'expense-changed';
     const n = await trx('bank_transactions').where({ id: bankRow.id, matched_expense_id: expenseId, status: 'created_expense' })
-      .update({ status: 'unmatched', matched_expense_id: null, match_method: null, matched_at: null, suggestion: m.bank.suggestion, updated_at: new Date() });
+      .update({ status: 'unmatched', matched_expense_id: null, match_method: null, matched_at: null, suggestion: probe.bank.suggestion, updated_at: new Date() });
     if (Number(n) !== 1) return 'row-changed';
     await trx('expenses').where({ id: expenseId }).delete();
     return 'reverted';
@@ -864,6 +874,7 @@ async function verifyAfterCommit(db, m, portal, expenseId, createdIds, when) {
       .update({ suggestion: db.raw(`(coalesce(suggestion, '{}'::jsonb) - '${VERIFY_MARKER}') || ?::jsonb`, [JSON.stringify({ review: true, note: kept })]), updated_at: new Date() });
     return { ...line, why: kept, kept: true };
   }
+  Object.assign(m, probe); // reverted: the row is the park now (open, no expense), for the report
   createdIds.delete(expenseId);
   return line;
 }
@@ -895,12 +906,14 @@ function expenseEdited(exp, want) {
 // snapshot this run reads. A dry run only lists them.
 async function finishPendingVerifies(db, mapped, portal, dryRun) {
   const lines = [];
+  const kept = [];
   for (const m of mapped) {
     const prior = portal.existing.get(m.bank.row_hash);
-    if (!prior || !prior.suggestion || prior.suggestion[VERIFY_MARKER] !== true) continue;
+    const marker = prior && prior.suggestion ? prior.suggestion[VERIFY_MARKER] : null;
+    if (!marker) continue;
     const pending = prior.status === 'created_expense' && !!prior.matched_expense_id;
     if (dryRun) {
-      if (pending) lines.push({ line: m.ledgerRow.line, description: m.ledgerRow.description, amount: Number(m.ledgerRow.amount).toFixed(2), date: m.ledgerRow.date, why: 'booked by an earlier run that ended before its check; the next run (not a dry run) checks it', rowHash: m.bank.row_hash });
+      if (pending) kept.push({ line: m.ledgerRow.line, description: m.ledgerRow.description, amount: Number(m.ledgerRow.amount).toFixed(2), date: m.ledgerRow.date, why: 'booked by an earlier run that ended before its check; the next run (not a dry run) checks it', rowHash: m.bank.row_hash });
       continue;
     }
     if (!pending) {
@@ -909,18 +922,27 @@ async function finishPendingVerifies(db, mapped, portal, dryRun) {
       delete prior.suggestion[VERIFY_MARKER];
       continue;
     }
-    const line = await verifyAfterCommit(db, m, portal, prior.matched_expense_id, new Set(), 'entered while an earlier run wrote it; that run ended before its check');
+    // the snapshot the marker carries is the baseline; a marker without one
+    // (never written by this script) only checks a row the file still
+    // reads as it was loaded, and otherwise leaves the booking to the hold
+    const baseline = marker && typeof marker === 'object' && marker.expense ? marker.expense : null;
+    if (!baseline && readingOf(prior.suggestion) !== readingOf(m.bank.suggestion)) {
+      await db('bank_transactions').where({ id: prior.id }).update({ suggestion: db.raw(`suggestion - '${VERIFY_MARKER}'`), updated_at: new Date() });
+      delete prior.suggestion[VERIFY_MARKER];
+      continue;
+    }
+    const line = await verifyAfterCommit(db, m, portal, prior.matched_expense_id, new Set(), 'entered while an earlier run wrote it; that run ended before its check', baseline || expenseToWrite(m, portal));
     if (line && !line.kept) {
       lines.push(line);
       Object.assign(prior, { status: 'unmatched', matched_expense_id: null, suggestion: m.bank.suggestion });
     } else {
       // kept (its expense edited or refunded since) or clean: the booking
-      // stands and the row is this file's row, judged no further this run
-      if (line) { lines.push(line); prior.verifiedKept = true; }
+      // stands; reconcileRows still judges the row's reading against the file
+      if (line) { kept.push(line); prior.suggestion = { ...prior.suggestion, review: true, note: line.why }; }
       delete prior.suggestion[VERIFY_MARKER];
     }
   }
-  return lines;
+  return { parked: lines, kept };
 }
 
 // One expense row: the recheck, then the expense and the bank row (with the
@@ -930,6 +952,7 @@ async function finishPendingVerifies(db, mapped, portal, dryRun) {
 async function writeExpenseRow(db, m, portal, createdIds) {
   let parkedAtWrite = null;
   let expenseId = null;
+  const wrote = expenseToWrite(m, portal);
   await db.transaction(async trx => {
     const found = await nearbyAtWrite(trx, m, portal, createdIds);
     if (found.near.length || found.covered.length) {
@@ -943,14 +966,14 @@ async function writeExpenseRow(db, m, portal, createdIds) {
       .returning('id');
     expenseId = exp && typeof exp === 'object' ? exp.id : exp;
     const res = await trx('bank_transactions')
-      .insert({ ...m.bank, suggestion: { ...(m.bank.suggestion || {}), [VERIFY_MARKER]: true }, matched_expense_id: expenseId, matched_at: new Date() })
+      .insert({ ...m.bank, suggestion: { ...(m.bank.suggestion || {}), [VERIFY_MARKER]: { at: new Date().toISOString(), expense: wrote } }, matched_expense_id: expenseId, matched_at: new Date() })
       .onConflict('row_hash')
       .ignore()
       .returning('id');
     if (!res.length) throw new DuplicateRace('row_hash already present');
   });
   if (parkedAtWrite) return parkedAtWrite;
-  return verifyAfterCommit(db, m, portal, expenseId, createdIds, 'entered while this run wrote it');
+  return verifyAfterCommit(db, m, portal, expenseId, createdIds, 'entered while this run wrote it', wrote);
 }
 
 // Writes the fresh rows: non-expense rows in bulk (row_hash conflicts
@@ -959,6 +982,7 @@ async function writeExpenseRow(db, m, portal, createdIds) {
 async function writeRows(db, fresh, portal) {
   const createdIds = new Set();
   const parked = [];
+  const kept = [];
   let inserted = 0;
   let duplicates = 0;
   for (const part of chunk(fresh.filter(m => !m.expense), INSERT_CHUNK)) {
@@ -977,13 +1001,13 @@ async function writeRows(db, fresh, portal) {
     try {
       const line = await writeExpenseRow(db, m, portal, createdIds);
       inserted += 1;
-      if (line) parked.push(line);
+      if (line) (line.kept ? kept : parked).push(line);
     } catch (err) {
       if (err instanceof DuplicateRace) { duplicates += 1; m.skipped = true; continue; }
       throw err;
     }
   }
-  return { inserted, duplicates, parked };
+  return { inserted, duplicates, parked, kept };
 }
 
 /**
@@ -1024,18 +1048,19 @@ async function run({ file, dryRun = false, db, log = () => {} } = {}) {
     const state = await loadPortalState(db, mapped, rows);
     const done = await finishPendingVerifies(db, mapped, state, dryRun);
     const rec = reconcileRows(mapped, rows, state);
-    const out = dryRun ? { inserted: rec.fresh.length, duplicates: 0, parked: [] } : await writeRows(db, rec.fresh, state);
+    const out = dryRun ? { inserted: rec.fresh.length, duplicates: 0, parked: [], kept: [] } : await writeRows(db, rec.fresh, state);
     if (!dryRun) await noteHeldRows(db, rec.held);
     return { portal: state, r: rec, written: out, finished: done };
   });
   // Rows lost to an insert-time conflict are not in the report's tallies.
   const landed = dryRun ? r.fresh : r.fresh.filter(m => !m.skipped);
   const landedHashes = new Set(landed.map(m => m.bank.row_hash));
-  const parked = [...finished, ...r.parked.filter(p => landedHashes.has(p.rowHash)), ...written.parked];
+  const parked = [...finished.parked, ...r.parked.filter(p => landedHashes.has(p.rowHash)), ...written.parked];
+  const kept = [...finished.kept, ...written.kept];
   const summary = summarize(landed);
   const duplicates = r.duplicates + written.duplicates;
-  const counts = { read: rows.length, inserted: written.inserted, duplicates, held: r.held.length, parked: parked.length, portalExpenses: portal.portalExpenses.length };
-  const report = formatReport({ dryRun, file, read: rows.length, inserted: written.inserted, duplicates, held: r.held, parked, portalExpenses: portal.portalExpenses, summary });
+  const counts = { read: rows.length, inserted: written.inserted, duplicates, held: r.held.length, parked: parked.length, kept: kept.length, portalExpenses: portal.portalExpenses.length };
+  const report = formatReport({ dryRun, file, read: rows.length, inserted: written.inserted, duplicates, held: r.held, parked, kept, portalExpenses: portal.portalExpenses, summary });
   log(report);
   return { report, counts, summary };
 }
