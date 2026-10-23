@@ -8,8 +8,17 @@ jest.mock('../services/audit-log', () => ({ auditLawnSqftFromEstimate: (...a) =>
 jest.mock('../services/property-service-areas', () => ({ hasAreaMeasurementsColumn: async () => mockColumn }));
 jest.mock('../services/customer-pricing-ai', () => ({ withTurfProfileFence: async (db, _id, work) => work(db.__trx) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The weekly plan's lawn-area ledger entry (codex #6498 r1 P2): the real writer takes a Postgres advisory lock, so
+// it is observed here, not run.
+const mockConfirm = jest.fn(async () => 1);
+jest.mock('../services/irrigation-schedule-confirmation', () => ({
+  ...jest.requireActual('../services/irrigation-schedule-confirmation'),
+  confirmIrrigationFields: (...a) => mockConfirm(...a),
+}));
 
 const sync = require('../services/lawn-size-sync');
+
+afterEach(() => mockConfirm.mockClear());
 
 const ADDR = { address_line1: '100 Main St', address_line2: null, city: 'Bradenton', zip: '34205' };
 
@@ -331,5 +340,26 @@ describe('applyEstimateLawnSqft', () => {
     const db = fakeDb({ turf: { lawn_sqft: 4000 } });
     mockAudit.mockRejectedValueOnce(new Error('audit insert failed'));
     await expect(sync.applyEstimateLawnSqft(db, { customerId: 'c1', estimate, estimateData: adminEstimate() })).rejects.toThrow('audit insert failed');
+  });
+});
+
+describe('lawn-area confirmation for the weekly plan (codex #6498 r1 P2)', () => {
+  test('every confirmed positive size stamps turf_lawn_sqft in the same transaction, changed or not (a post-move estimate may equal the old number); a refused write stamps nothing', async () => {
+    const written = fakeDb({ turf: { lawn_sqft: 4000 } });
+    const trx = written.__trx;
+    const r = await sync.applyEstimateLawnSqft(written, { customerId: 'c1', estimate: { id: 'e1', property_id: null, address: '100 Main St, Bradenton, FL 34205' }, estimateData: adminEstimate() });
+    expect(r.status).toBe('written');
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+    expect(mockConfirm).toHaveBeenCalledWith(trx, 'c1', ['turf_lawn_sqft']);
+    mockConfirm.mockClear();
+    const same = fakeDb({ turf: { lawn_sqft: 5200 }, customer: { property_sqft: 5200 }, primary: { property_sqft: 5200 } });
+    expect((await sync.applyEstimateLawnSqft(same, { customerId: 'c1', estimate: { id: 'e1', property_id: null, address: '100 Main St, Bradenton, FL 34205' }, estimateData: adminEstimate() })).status).toBe('unchanged');
+    expect(mockConfirm).toHaveBeenCalledWith(same.__trx, 'c1', ['turf_lawn_sqft']);
+    mockConfirm.mockClear();
+    // Refused (a guess against an existing size): no write, no stamp.
+    const refused = fakeDb({ turf: { lawn_sqft: 4000 } });
+    const out = await sync.applyEstimateLawnSqft(refused, { customerId: 'c1', estimate: { id: 'e1', property_id: null, address: '100 Main St, Bradenton, FL 34205' }, estimateData: adminEstimate({ turfBasis: 'estimatedTurfSf', turfEstimated: true, lawnSqFt: 4793 }), trigger: 'backfill_unconfirmed', allowUnconfirmedWhenEmpty: true });
+    expect(out.status).toBe('skipped');
+    expect(mockConfirm).not.toHaveBeenCalled();
   });
 });

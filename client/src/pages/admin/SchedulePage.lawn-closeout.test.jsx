@@ -14,6 +14,7 @@ let delayPlan;
 let mixAmount;
 let improvementsEnabled;
 let history;
+let lastVisit;
 let defaultsEnabled;
 let failPlan;
 let withdrawDefaults;
@@ -37,6 +38,7 @@ beforeEach(async () => {
   failActions = false;
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
   improvementsEnabled = true;
+  lastVisit = undefined;
   defaultsEnabled = false;
   failPlan = false;
   withdrawDefaults = false;
@@ -60,7 +62,7 @@ beforeEach(async () => {
     }
     if (url.includes('property-areas')) data = propertyAreas || { enabled: false };
     if (url.includes('turf-profile')) data = { profile: { lawn_sqft: 5000 } };
-    if (url.includes('lawn-assessment/service')) data = { assessment: { id: 'assessment-current', confirmed_by_tech: true, turf_density: 82, weed_suppression: 85, color_health: 85, stress_damage: 80 } };
+    if (url.includes('lawn-assessment/service')) data = { ...(lastVisit !== undefined ? { lastVisit } : {}), assessment: { id: 'assessment-current', confirmed_by_tech: true, turf_density: 82, weed_suppression: 85, color_health: 85, stress_damage: 80 } };
     if (url.includes('lawn-assessment/history')) data = { history };
     if (url.includes('treatment-plans')) {
       const body = options.body ? JSON.parse(options.body) : {};
@@ -528,7 +530,6 @@ it('keeps the existing defaults when the server flag is disabled, even with a qu
   window.history.replaceState({}, '', '/?completionImprovements=1');
   mount();
   await screen.findByText('Assessment confirmed');
-  expect(screen.queryByLabelText('Previous lawn visit')).toBeNull();
   expect(screen.queryByPlaceholderText('Total')).toBeNull();
   expect(screen.queryByRole('group', { name: 'Lawn findings' })).toBeNull();
 });
@@ -709,15 +710,25 @@ it('a draft restored after its completion list failed keeps its protocol action'
 });
 
 
-it('normalizes legacy previous scores using the same four categories as the customer report', async () => {
-  history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 99,
-    turf_density: 80, weed_suppression: 80, color_health: 80, stress_damage: null,
-    fungus_control: 60, thatch_level: 70 }];
+it('shows the last visit\'s four scores and overall score for every user, without the per-user setting', async () => {
+  improvementsEnabled = false;
+  await refetchFlags();
+  lastVisit = { date: '2026-07-10', overall: 76, scores: { turf_density: 80, weed_suppression: 81, color_health: 82, stress_damage: 60 } };
   mount();
-  const card = await screen.findByLabelText('Previous lawn visit');
-  await waitFor(() => expect(card.textContent).toContain('Overall score 76/100'));
-  expect(card.textContent).toContain('Condition60/100');
-  expect(card.textContent).not.toContain('99/100');
+  const card = await screen.findByLabelText('Last visit scores');
+  expect(card.textContent).toContain('Jul 10, 2026');
+  expect(screen.getByTestId('lawn-last-visit-overall').textContent).toBe('76/100');
+  expect(screen.getByTestId('lawn-last-visit-turf_density').textContent).toBe('Density80/100');
+  expect(screen.getByTestId('lawn-last-visit-weed_suppression').textContent).toBe('Weed control81/100');
+  expect(screen.getByTestId('lawn-last-visit-color_health').textContent).toBe('Color82/100');
+  expect(screen.getByTestId('lawn-last-visit-stress_damage').textContent).toBe('Condition60/100');
+});
+
+it('says today sets the baseline when no earlier visit was confirmed', async () => {
+  lastVisit = null;
+  mount();
+  const card = await screen.findByLabelText('Last visit scores');
+  expect(card.textContent).toContain('Today sets the baseline');
 });
 
 const enableDefaults = () => { defaultsEnabled = true; catalog = [...products, secondProduct]; };
