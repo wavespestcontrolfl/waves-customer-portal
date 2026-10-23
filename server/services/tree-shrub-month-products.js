@@ -59,8 +59,12 @@ const PROTOCOL_PRODUCTS = [
 // suggested row's method is fixed on the sheet, so a guessed foliar/drench
 // method would be saved on the record (KPHITE, Sequestar; Codex r2 #5089).
 // Same for a line whose label or dose is still unverified ("exact bag label
-// needed; hold dose" — 13-0-13, Copper; Codex r3 #5089): the sheet cannot
-// show that hold, so the product is not offered until the recipe is confirmed.
+// needed; hold dose", Codex r3 #5089): the sheet cannot show that hold, so the
+// product is not offered until the recipe is confirmed. No program line says
+// that today: the 13-0-13 bag label was read 2026-10-22 (its Feb-May and Oct-Dec
+// primary line now carries the dose, and the sheet suggests it through the
+// 13-0-13 due rule in tree-shrub-completion-defaults.js), and Sequestar is a
+// symptom-only secondary line, which this table never reads.
 const NON_PRODUCT_LINE = /^(scout\b|sarasota\/manatee:\s*zero|annual health report)|\(held\b|\bverify\b[^;]*\bmethod\b|\bno verified\b[^;]*\brecipe\b|\bexact\b[^;]*\blabel needed\b|\bhold dose\b/i;
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];

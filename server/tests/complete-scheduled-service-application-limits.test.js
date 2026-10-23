@@ -427,6 +427,87 @@ describe('the office notification for a finding (raised through the admin alert 
     expect(notify.mock.calls[0][3].detail).toContain("is over the add-on's yearly limit. Snapshot 2.5TG was applied or booked 1 time");
   });
 
+  test('a 13-0-13 row whose county cap could not be checked rings a needs-you alert with a clear reason, deduped per record and product', async () => {
+    const notify = notifyFor();
+    const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const finding = { code: 'application_limit_exceeded', productId: 'p-orn', productName: name, limitType: 'ornamental_fertilizer_rate_unchecked', reason: 'area_missing', current: null, max: 7.5 };
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Tree & Shrub Care' }, record, findings: [finding] });
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [, headline, why, opts] = notify.mock.calls[0];
+    expect(headline).toBe('Schedule — review LESCO 13-0-13 60%… limit not checked');
+    expect(why).toBe('LESCO 13-0-13 60%… recorded with no treated sq ft; county cap not checked.');
+    expect(why.length).toBeLessThanOrEqual(110);
+    expect(headline.length).toBeLessThanOrEqual(60);
+    expect(opts.detail).toContain('county limit is 7.5 lb per 1,000 sq ft (0.75 lb per 100 sq ft)');
+    expect(opts.detail).toContain('recorded with no treated sq ft; county cap not checked');
+    expect(opts.metadata.dedupeKey).toBe('application-limit-finding:record-1:application_limit_exceeded:p-orn:ornamental_fertilizer_rate_unchecked');
+  });
+
+  test('the unchecked 13-0-13 findings are done when checked (limits_checked), and a rate-unchecked and a history-unchecked finding on one record ring separately', async () => {
+    const notify = notifyFor();
+    const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const base = { code: 'application_limit_exceeded', productId: 'p-orn', productName: name, current: null, max: 7.5 };
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Tree & Shrub Care' }, record, findings: [
+      { ...base, limitType: 'ornamental_fertilizer_rate_unchecked', reason: 'area_missing' },
+      { ...base, limitType: 'ornamental_fertilizer_history_unchecked', reason: 'history_unavailable' },
+      { ...base, limitType: 'ornamental_fertilizer_rate', current: 10 },
+    ] });
+    expect(notify).toHaveBeenCalledTimes(3);
+    const [rateCall, historyCall, overCall] = notify.mock.calls.map((call) => call[3]);
+    expect(rateCall.metadata.doneWhen).toBe('limits_checked');
+    expect(historyCall.metadata.doneWhen).toBe('limits_checked');
+    expect(overCall.metadata.doneWhen).toBe('limit_overage_reviewed');
+    expect(new Set([rateCall, historyCall, overCall].map((opts) => opts.metadata.dedupeKey)).size).toBe(3);
+    expect(historyCall.metadata.dedupeKey).toBe('application-limit-finding:record-1:application_limit_exceeded:p-orn:ornamental_fertilizer_history_unchecked');
+    expect(notify.mock.calls[1][1]).toBe('Schedule — review LESCO 13-0-13 60%… history not checked');
+    expect(notify.mock.calls[1][2]).toBe('LESCO 13-0-13 60%… recorded but its history could not be read; 2-a-year and 5-month rules not checked.');
+    expect(historyCall.detail).toContain('Check this property\'s 13-0-13 history');
+  });
+
+  test('a 13-0-13 whose post-save read failed rings a needs-you alert (limits_checked) with its own dedupe key', async () => {
+    const notify = notifyFor();
+    const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const message = '13-0-13 limits could not be checked for this visit; the office will review.';
+    const audit = { code: 'application_limit_exceeded', productName: name, limitType: 'ornamental_fertilizer_audit_unavailable', reason: 'audit_unavailable', current: null, max: 7.5, message };
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Lawn Care' }, record, findings: [audit, { ...audit, productId: 'p-orn', limitType: 'ornamental_fertilizer_rate_unchecked', reason: 'area_missing' }] });
+    expect(notify).toHaveBeenCalledTimes(2);
+    const [, headline, why, opts] = notify.mock.calls[0];
+    expect(headline).toBe('Schedule — review LESCO 13-0-13 60%… limits not checked');
+    expect(why).toBe('LESCO 13-0-13 60%… limits could not be checked for this visit.');
+    expect(opts.metadata.doneWhen).toBe('limits_checked');
+    expect(opts.detail).toContain('could not be read back');
+    expect(opts.metadata.dedupeKey).toBe('application-limit-finding:record-1:application_limit_exceeded:all:ornamental_fertilizer_audit_unavailable');
+    expect(notify.mock.calls[1][3].metadata.dedupeKey).not.toBe(opts.metadata.dedupeKey);
+    for (const call of notify.mock.calls) { expect(call[1].length).toBeLessThanOrEqual(60); expect(call[2].length).toBeLessThanOrEqual(110); }
+  });
+
+  test('the 13-0-13 rate and history findings obey the notification rule and name the county limit and the reason', async () => {
+    const notify = notifyFor();
+    const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Tree & Shrub Care' }, record, findings: [
+      { code: 'application_limit_exceeded', productId: 'p-orn', productName: name, limitType: 'ornamental_fertilizer_rate', current: 10, max: 7.5 },
+      { code: 'application_limit_exceeded', productId: 'p-orn', productName: name, limitType: 'ornamental_fertilizer_history', current: null, max: null, reason: 'The last 13-0-13 application was less than five months ago.' },
+    ] });
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify.mock.calls[0][2]).toBe('LESCO 13-0-13 60%… was applied at 10 lb per 1,000 sq ft, over the 7.5 county limit.');
+    expect(notify.mock.calls[0][3].detail).toContain('The county limit is 7.5 lb per 1,000 sq ft (0.75 lb per 100 sq ft, 1 lb of nitrogen per 1,000 sq ft)');
+    expect(notify.mock.calls[1][2]).toMatch(/: The last 13-0-13 application was less than five months ago\.$/);
+    expect(notify.mock.calls[1][3].detail).toContain('the last 13-0-13 application was less than five months ago. The program allows 2 in 12 months, at least 5 months apart, none June 1 to Sept. 30.');
+    for (const call of notify.mock.calls) {
+      expect(call[1].length).toBeLessThanOrEqual(60);
+      expect(call[2].length).toBeLessThanOrEqual(110);
+    }
+  });
+
+  test('the closeout calls the 13-0-13 check on every completion (the row is the trigger, not the service line), after the save, with the office notifier', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    const at = src.indexOf('tsOrnamental.flagOrnamentalFertilizer({');
+    expect(at).toBeGreaterThan(0);
+    // No service-line gate on the line before the call.
+    expect(src.slice(at - 120, at)).not.toMatch(/detectServiceLine|tree_shrub/);
+    expect(src).toContain('tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames, submittedProductIds: payloadProductIds(products) })');
+  });
+
   test('a bell that is not recorded (null) is logged, a failure never throws', async () => {
     const notify = notifyFor();
     notify.mockResolvedValue(null);

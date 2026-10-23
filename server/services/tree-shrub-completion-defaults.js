@@ -1,7 +1,13 @@
 const { etCalendarDayOf } = require('../utils/datetime-et');
+const { inferTreeShrubOrdinanceZone, isSummerBlackoutForZone } = require('./tree-shrub-closeout');
 
 const PALM = /(?:8[-–]0[-–]12|8[-–]2[-–]12|palm.*fertili|fertili.*palm|\b510513\b)/i;
 const PALM_ZERO_N_LEGACY = /^LESCO\s+0[-–]0[-–]16$/i;
+// The bed and tree fertilizer (LESCO 13-0-13, label read 2026-10-22). Its bag is titled "Palm & Tropical", so the
+// palm pattern above can match its name; it is a separate product with its own due rule and never a palm feeding.
+const ORNAMENTAL_13_0_13 = /\b13[-–]0[-–]13\b/;
+const ORNAMENTAL_MAX_PER_YEAR = 2;
+const ORNAMENTAL_MIN_MONTHS_APART = 5;
 const SNAPSHOT = /\bsnapshot\b/i;
 const MAX_SNAPSHOT_LB_PER_1000 = 600 / 43.56;
 
@@ -54,10 +60,17 @@ function snapshotRatePer1000(row) {
   return SNAPSHOT_LABEL_MAX_LB_PER_1000;
 }
 
-function treeShrubDueReason(key, history, scheduledDate, propertyId) {
+// `zone` is the property's ordinance zone, as tree-shrub-closeout.js reads it (inferTreeShrubOrdinanceZone). The 13-0-13
+// June 1 to Sept. 30 hold applies where the closeout's N/P blackout does: Sarasota, Manatee and an unknown zone (the
+// conservative default). North Port landscape plants are route-gated separately and are not in this blackout.
+function treeShrubDueReason(key, history, scheduledDate, propertyId, zone = 'other_unknown') {
   const today = dayNumber(scheduledDate);
   if (!Number.isFinite(today) || !propertyId) return 'Confirm the service property and visit date.';
-  const matches = name => key === 'snapshot' ? SNAPSHOT.test(name) : PALM.test(name) || PALM_ZERO_N_LEGACY.test(name.trim());
+  const ornamental = key === 'f13013';
+  if (ornamental && isSummerBlackoutForZone(etCalendarDayOf(scheduledDate), zone)) return '13-0-13 holds nitrogen, so it is not allowed June 1 to September 30.';
+  const matches = name => key === 'snapshot' ? SNAPSHOT.test(name)
+    : ornamental ? ORNAMENTAL_13_0_13.test(name)
+      : !ORNAMENTAL_13_0_13.test(name) && (PALM.test(name) || PALM_ZERO_N_LEGACY.test(name.trim()));
   // Only the past 12 months can affect a due decision. An older row (even an
   // unlinked one) never holds a suggestion; an undated row still does.
   const relevant = history.filter(row => matches(row.product_name || '') &&
@@ -70,6 +83,11 @@ function treeShrubDueReason(key, history, scheduledDate, propertyId) {
   // product by silently dropping a conflicting application date.
   if (relevant.some(row => dayNumber(row.application_date) >= today)) return 'An application is already recorded on or after this visit.';
   const annual = relevant.filter(row => today < monthsAfter(row.application_date, 12));
+  if (ornamental) {
+    if (annual.length >= ORNAMENTAL_MAX_PER_YEAR) return 'Two 13-0-13 applications are already recorded in the past year.';
+    if (annual.some(row => today < monthsAfter(row.application_date, ORNAMENTAL_MIN_MONTHS_APART))) return 'The last 13-0-13 application was less than five months ago.';
+    return null;
+  }
   if (annual.length >= 4) return 'Four applications are already recorded in the past year.';
   if (key === 'snapshot') {
     if (annual.some(row => today - dayNumber(row.application_date) < 60)) return 'Snapshot was applied less than 60 days ago.';
@@ -93,32 +111,51 @@ function treeShrubDueReason(key, history, scheduledDate, propertyId) {
   return null;
 }
 
-async function filterTreeShrubDefaults({ db, scheduled, entries }) {
-  // Use the existing closeout ledger. A missing table/read is an unavailable
-  // history, never proof that the property has had no applications.
-  const history = await db('property_application_history as history')
+// The customer's recorded applications, in the shape treeShrubDueReason reads. Uses the existing closeout ledger. A
+// missing table/read is an unavailable history, never proof that the property has had no applications.
+// `excludeRecordId` leaves out the closeout being judged (it is already in the ledger when the check runs after the save).
+async function loadTreeShrubApplicationHistory({ db, scheduled, excludeRecordId = null }) {
+  const query = db('property_application_history as history')
     .leftJoin('service_records as record', 'record.id', 'history.service_record_id')
     .leftJoin('scheduled_services as visit', 'visit.id', 'record.scheduled_service_id')
     .leftJoin('service_products as applied', 'applied.id', 'history.service_product_id')
     .leftJoin('products_catalog as product', 'product.id', 'history.product_id')
-    .where('history.customer_id', scheduled.customer_id).whereNull('history.retracted_at')
+    .where('history.customer_id', scheduled.customer_id).whereNull('history.retracted_at');
+  if (excludeRecordId) query.where((q) => q.whereNull('history.service_record_id').orWhereNot('history.service_record_id', excludeRecordId));
+  const history = await query
     .select('history.application_date', 'history.application_rate', 'history.rate_unit', 'history.property_id as ledger_property_id', 'visit.property_id',
       'product.name as catalog_name', 'applied.product_name',
       'applied.total_amount', 'applied.amount_unit', 'applied.area_value', 'applied.area_unit');
   // The treated property is the one frozen on the ledger row; only a legacy row without one falls back to
   // its visit's property (which a later address correction can change).
-  const normalized = history.map(row => ({ ...row, property_id: row.ledger_property_id || row.property_id, product_name: row.product_name || row.catalog_name }));
-  if (normalized.some(row => !row.product_name && (!row.property_id || row.property_id === scheduled.property_id))) {
-    return { entries: [], holds: entries.map(entry => ({ name: entry.name, reason: 'Review an application with an unidentified product.' })) };
+  return history.map(row => ({ ...row, property_id: row.ledger_property_id || row.property_id, product_name: row.product_name || row.catalog_name }));
+}
+
+const UNIDENTIFIED_PRODUCT_REASON = 'Review an application with an unidentified product.';
+// Only the past 12 months can affect a due decision (treeShrubDueReason's own window): an old unidentified row never holds a
+// suggestion or flags a new feeding; an undated one still does.
+function hasUnidentifiedApplication(normalized, scheduled, visitDate = scheduled.scheduled_date) {
+  const today = dayNumber(visitDate);
+  return normalized.some(row => !row.product_name && (!row.property_id || row.property_id === scheduled.property_id) &&
+    !(Number.isFinite(today) && Number.isFinite(dayNumber(row.application_date)) && today >= monthsAfter(row.application_date, 12)));
+}
+
+async function filterTreeShrubDefaults({ db, scheduled, entries, zone = inferTreeShrubOrdinanceZone(scheduled) }) {
+  const normalized = await loadTreeShrubApplicationHistory({ db, scheduled });
+  if (hasUnidentifiedApplication(normalized, scheduled)) {
+    return { entries: [], holds: entries.map(entry => ({ name: entry.name, reason: UNIDENTIFIED_PRODUCT_REASON })) };
   }
   const allowed = [], holds = [];
   for (const entry of entries) {
-    if (!['snapshot', 'f8012', 'f0016'].includes(entry.treeShrubKey)) continue;
-    const reason = treeShrubDueReason(entry.treeShrubKey, normalized, scheduled.scheduled_date, scheduled.property_id);
+    if (!['snapshot', 'f8012', 'f0016', 'f13013'].includes(entry.treeShrubKey)) continue;
+    const reason = treeShrubDueReason(entry.treeShrubKey, normalized, scheduled.scheduled_date, scheduled.property_id, zone);
     if (reason) holds.push({ name: entry.name, reason });
     else allowed.push(entry);
   }
   return { entries: allowed, holds };
 }
 
-module.exports = { treeShrubDueReason, filterTreeShrubDefaults, palmFeedingTooSoon, PALM_SPACING_LOOKBACK_DAYS };
+module.exports = {
+  treeShrubDueReason, filterTreeShrubDefaults, palmFeedingTooSoon, PALM_SPACING_LOOKBACK_DAYS,
+  loadTreeShrubApplicationHistory, hasUnidentifiedApplication, UNIDENTIFIED_PRODUCT_REASON, ORNAMENTAL_13_0_13,
+};

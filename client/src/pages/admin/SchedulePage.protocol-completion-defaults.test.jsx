@@ -9,7 +9,7 @@
 // unconditionally, typed or not, so seeding must not be typed-gated).
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { CompletionPanel } from './SchedulePage';
+import { CompletionPanel, treeShrubHighRateAdvisory, bedFeedRatePer1000 } from './SchedulePage';
 
 // Minimal typed 'cockroach' schema — same shape lawn-closeout's own typed
 // fixture uses (a real findingsSchema needs no more to render).
@@ -115,6 +115,53 @@ it('an untouched Tree & Shrub suggestion requires an actual quantity before clos
   expect(onSubmit).not.toHaveBeenCalled();
   fireEvent.change(screen.getByPlaceholderText('Total'), { target: { value: '2.76' } });
   await waitFor(() => expect(screen.queryByRole('button', { name: /Product Actuals Required/ })).toBeNull());
+});
+
+const TS_ORN = 'LESCO 13-0-13 60% PolyPlus Landscape';
+function tsService() {
+  return cockroachService({ serviceType: 'Tree & Shrub Care',
+    completionProfile: { serviceKey: 'tree_shrub', findingsType: 'tree_shrub', requiresProducts: false },
+    findingsSchema: { type: 'tree_shrub', fields: [], nextStepChips: [] } });
+}
+const tsCatalog = [
+  { id: 'orn', name: TS_ORN, category: 'fertilizer', application_method: 'granular_broadcast', rate_unit: 'lb' },
+  { id: 'snapshot', name: 'Snapshot 2.5TG', category: 'herbicide', application_method: 'granular_broadcast', rate_unit: 'lb' },
+];
+
+it('a Tree & Shrub 13-0-13 rate over the county limit shows a quiet warning before Complete, naming the county limit, and does not block', async () => {
+  stubFetchWithImmediateDefaults({ source: 'protocol_visit', programKey: 'tree_shrub', products: [{ id: 'orn', treeShrubKey: 'f13013', requiresDoseSelection: true }] });
+  render(<CompletionPanel service={tsService()} products={tsCatalog} onClose={() => {}} onSubmit={vi.fn()} />);
+  await screen.findByText(TS_ORN);
+  const warning = (text) => screen.queryAllByText((_, node) => node?.children.length === 0 && /county limit/.test(node.textContent || '') && node.textContent.includes(text));
+  expect(warning(TS_ORN)).toHaveLength(0);
+  fireEvent.change(screen.getAllByPlaceholderText('Rate')[0], { target: { value: '10' } });
+  await waitFor(() => expect(warning(TS_ORN).length).toBeGreaterThan(0));
+  const text = warning(TS_ORN)[0].textContent;
+  expect(text).toContain(`${TS_ORN} rate 10 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft)`);
+  expect(text).not.toMatch(/label max/);
+  // Advisory only: no approval wording, and the rate at the limit clears it.
+  expect(screen.queryByText(/manager|approval/i)).toBeNull();
+  fireEvent.change(screen.getAllByPlaceholderText('Rate')[0], { target: { value: '7.5' } });
+  await waitFor(() => expect(warning(TS_ORN)).toHaveLength(0));
+});
+
+it('the Tree & Shrub high-rate line says county limit for 13-0-13, label max for another product, and nothing off Tree & Shrub', () => {
+  const orn = { name: TS_ORN, rate: '10', rateUnit: 'lb', catalogRateUnit: 'lb', maxLabelRatePer1000: 7.5 };
+  expect(treeShrubHighRateAdvisory(orn, 'Tree & Shrub Care')).toMatch(/is over the county limit of 7\.5 lb\/1k \(0\.75 lb per 100 sq ft\)/);
+  expect(treeShrubHighRateAdvisory({ ...orn, name: 'Snapshot 2.5TG', maxLabelRatePer1000: 4.6 }, 'Tree & Shrub Care')).toMatch(/exceeds label max 4\.6 lb\/1k/);
+  expect(treeShrubHighRateAdvisory(orn, 'Lawn Care')).toBeNull();
+});
+
+it('the 13-0-13 line reads the rate from total over treated area when no rate is entered (Codex #6516 r2)', () => {
+  const base = { name: TS_ORN, rate: '', rateUnit: 'lb', catalogRateUnit: 'lb', maxLabelRatePer1000: 7.5, areaUnit: 'sqft' };
+  expect(bedFeedRatePer1000({ ...base, totalAmount: '12', amountUnit: 'lb', areaValue: 1200 })).toBe(10);
+  expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '12', amountUnit: 'lb', areaValue: 1200 }, 'Tree & Shrub Care'))
+    .toMatch(/rate 10 lb\/1k is over the county limit of 7\.5 lb\/1k/);
+  expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '9', amountUnit: 'lb', areaValue: 1200 }, 'Tree & Shrub Care')).toBeNull();
+  expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '192', amountUnit: 'oz', areaValue: 1200 }, 'Tree & Shrub Care')).toMatch(/rate 10 lb/);
+  expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '12', amountUnit: 'lb', areaValue: '' }, 'Tree & Shrub Care')).toBeNull();
+  // An overridden total above an entered at-cap rate still warns: the higher reading wins.
+  expect(treeShrubHighRateAdvisory({ ...base, rate: '7.5', totalAmount: '12', amountUnit: 'lb', areaValue: 1200 }, 'Tree & Shrub Care')).toMatch(/rate 10 lb/);
 });
 
 it('seeds Alpine WSG + Gentrol IGR + Advion Cockroach Gel Bait on a completed, typed cockroach visit', async () => {

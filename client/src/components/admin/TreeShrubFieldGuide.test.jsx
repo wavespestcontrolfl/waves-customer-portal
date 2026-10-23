@@ -48,6 +48,21 @@ test('suggested granular identities cannot inherit an unrelated catalog dose or 
   expect(rows[0]).toMatchObject({ rate: '', rateUnit: 'lb/palm', totalAmount: '', carrierGallons: '', amountUnit: 'lb' });
 });
 
+test('the 13-0-13 bed suggestion carries lb, never lb/palm, and no prefilled amount; Snapshot and palm units stay', () => {
+  const build = () => ({ rate: 7.5, rateUnit: 'lb', totalAmount: 9, carrierGallons: 110 });
+  const response = { source: 'protocol_visit', programKey: 'tree_shrub', products: [
+    { id: 'orn', treeShrubKey: 'f13013', requiresDoseSelection: true },
+    { id: 'snap', treeShrubKey: 'snapshot', requiresDoseSelection: true },
+    { id: 'palm', treeShrubKey: 'f8012', requiresDoseSelection: true },
+    { id: 'palm16', treeShrubKey: 'f0016', requiresDoseSelection: true },
+  ] };
+  const rows = protocolCompletionDefaultSelections(response, [{ id: 'orn' }, { id: 'snap' }, { id: 'palm' }, { id: 'palm16' }], build);
+  expect(rows[0]).toMatchObject({ rate: '', totalAmount: '', totalAmountManual: false, rateUnit: 'lb', catalogRateUnit: 'lb', amountUnit: 'lb', carrierGallons: '', maxLabelRatePer1000: 7.5, requiresDoseSelection: true });
+  expect(rows[1]).toMatchObject({ rate: '', rateUnit: 'lb', catalogRateUnit: 'lb', maxLabelRatePer1000: 4.6 });
+  expect(rows[2]).toMatchObject({ rate: '', rateUnit: 'lb/palm', catalogRateUnit: 'lb/palm', maxLabelRatePer1000: null });
+  expect(rows[3]).toMatchObject({ rate: '', rateUnit: 'lb/palm', catalogRateUnit: 'lb/palm' });
+});
+
 test('a September guide offers Snapshot, the summer palm feed and TriStar; Talus and Headway are gone', () => {
   const sep = protocols.tree_shrub.visits.find(v => v.month === 'Sep');
   const products = Object.fromEntries([...sep.fieldGuide.routine, ...sep.fieldGuide.conditional].map(r => [r.key, reference.products[r.key]]));

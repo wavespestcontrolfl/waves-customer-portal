@@ -561,48 +561,70 @@
       "summary": ""
     },
     "f13013": {
-      "kind": "Plant nutrition",
-      "pending": "13-0-13 identifies the nutrient analysis, but the manufacturer and exact bag label are not confirmed.",
-      "targetTitle": "Purpose",
-      "targets": "Pending the exact product label.",
-      "apply": "Application method and directions are not verified.",
+      "kind": "Plant nutrition · granules",
+      "targetTitle": "Nutrients",
+      "targets": "13% nitrogen (7.8% slow release), 13% potash, 2% magnesium, 2% iron, 2% manganese, 5.69% sulfur. Contains no phosphate.",
+      "apply": "Use a rotary or chest spreader, or spread by hand. For trees and larger shrubs, spread evenly from the outer edge of the leaves inward to the trunk. Sweep granules off walks and painted surfaces.",
       "rates": [
         [
-          "Label needed",
-          "No application recipe has been verified."
+          "Waves beds: 0.75 lb / 100 sq ft",
+          "A 1,200 sq ft bed takes 9 lb. That is 0.98 lb nitrogen per 1,000 sq ft, under the county limit of 1 lb."
+        ],
+        [
+          "Trees and larger shrubs: ½ lb / inch of trunk diameter",
+          "Spread under the drip line. Never more than 0.75 lb per 100 sq ft of the area under it."
+        ],
+        [
+          "Bag label: 1–1½ lb / 100 sq ft beds",
+          "Waves runs below this. 1 lb per 100 sq ft is 1.3 lb nitrogen per 1,000 sq ft, over the county limit."
         ]
       ],
       "limits": [
-        "Confirm the actual container label before adding treatment instructions."
+        "Two feedings a year, spring and late fall, at least 5 months apart.",
+        "No nitrogen or phosphorus fertilizer June 1 to Sept. 30 (Sarasota and Manatee landscape).",
+        "Keep fertilizer out of water and storm drains.",
+        "Not for nursery container production.",
+        "Harmful if inhaled; eye and skin irritant. Avoid breathing dust and wash after handling."
       ],
-      "source": "Exact product label not on file",
-      "name": "13-0-13",
+      "program": "The bag says to apply two times per year as needed, in spring and late fall for trees and larger shrubs. The Waves bed and tree rates are company choices set by the county nitrogen limit.",
+      "source": "LESCO 13-0-13 Palm & Tropical Ornamental Fertilizer · SiteOne 510245WB · bag label · rev. 9/1/2020",
+      "url": "/labels/lesco-13-0-13-510245WB-label.pdf",
+      "name": "LESCO 13-0-13",
       "equipment": [
         "hand",
         "push"
       ],
-      "summary": "Label needed"
+      "summary": "0.75 lb / 100 sq ft beds · ½ lb / inch trunk"
     },
     "sequestar": {
-      "kind": "Plant nutrition",
-      "pending": "Confirm the exact Sequestar EDDHA formulation and label before assigning a dose or injector recipe.",
-      "targetTitle": "Purpose",
-      "targets": "Pending the exact product label.",
-      "apply": "Application method and directions are not verified.",
+      "kind": "Plant nutrition · iron",
+      "targetTitle": "Symptoms",
+      "targets": "Iron chlorosis: yellow new leaves with green veins, as on ixora and gardenia in high-pH soil near slabs and walks. Not a routine feeding.",
+      "apply": "Dissolve in water and pour at the root zone, or broadcast the dry product on the soil. Irrigate into the soil afterward.",
       "rates": [
         [
-          "Label needed",
-          "No application recipe has been verified."
+          "Small shrubs: 2 oz each",
+          "Per plant."
+        ],
+        [
+          "Large shrubs and trees: up to 2 oz / inch of trunk diameter",
+          "Per plant."
+        ],
+        [
+          "Beds and groundcovers: up to 2 oz / 100 sq ft",
+          "Per 100 sq ft of bed."
         ]
       ],
       "limits": [
-        "Confirm the actual container label before adding treatment instructions."
+        "Label direction for shrubs and trees: apply annually in the spring before the flush of growth, or when deficiency symptoms appear.",
+        "Never tank-mix with oil. The label also bars mixing it with miticides in foliar sprays on trees."
       ],
-      "source": "Exact product label not on file",
-      "program": "The FlowZone soil injector kit is available. Confirm the exact product label and delivery method before assigning it to this treatment.",
-      "name": "Sequestar EDDHA",
+      "program": "Waves uses this only when iron chlorosis shows. It is not a routine line.",
+      "source": "BRANDT Sequestar 6% Fe EDDHA · specimen label · F76",
+      "url": "/labels/brandt-sequestar-6fe-eddha-label.pdf",
+      "name": "Sequestar 6% Fe EDDHA",
       "equipment": [],
-      "summary": "Label needed"
+      "summary": "2 oz / small shrub · up to 2 oz / inch trunk"
     },
     "copper": {
       "kind": "Diseases",
