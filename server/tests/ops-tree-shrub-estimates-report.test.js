@@ -126,6 +126,23 @@ describe('tree-shrub-estimates-report extraction', () => {
     expect(summarize([{ ...base, ...residential }, { ...base, ...extractTreeShrub(raw) }]).byService).toEqual({ tree_shrub: 1, commercial_tree_shrub: 1 });
   });
 
+  test('a parked PUBLIC quote reports the FULL result line, not the field-stripped engineResult projection (Codex #6398 r22)', () => {
+    // buildQuoteRequiredEstimateResult spreads the whole estimate into
+    // result (full lines); engineResult.lineItems is the audit projection
+    // without bed/tree/review fields and there is no tsMeta.
+    const full = { service: 'tree_shrub', bedAreaUsed: 3200, bedAreaSource: 'lot_based', treeCount: 3, monthly: 61.4, requiresManualReview: true, manualReviewReasons: ['open_parcel_basis_unconfirmed_footprint'], pricingKnobs: { lotBedBasis: 'open_parcel', marginTarget: 0.4 } };
+    const projected = { service: 'tree_shrub', name: 'Tree & Shrub', monthly: 61.4, tier: 'standard', pricingKnobs: { lotBedBasis: 'open_parcel', marginTarget: 0.4 } };
+    const parked = { result: { lineItems: [full], recurring: { services: [] }, specItems: [full] }, engineResult: { lineItems: [projected] } };
+    expect(extractTreeShrub(parked)).toMatchObject({
+      shape: 'raw', service: 'tree_shrub', bedSqFt: 3200, bedSource: 'lot_based', treeCount: 3, monthly: 61.4,
+      reviewReasons: ['open_parcel_basis_unconfirmed_footprint'], lotBedBasis: 'open_parcel', marginTarget: 0.4,
+    });
+    // A mapped line with NO engine inputs (Admin V2 / wizard compact row) does
+    // not displace a retained full raw line.
+    const compactMapped = { result: { lineItems: [{ service: 'tree_shrub', monthly: 61.4 }] }, engineResult: { lineItems: [full] } };
+    expect(extractTreeShrub(compactMapped)).toMatchObject({ shape: 'raw', bedSqFt: 3200, bedSource: 'lot_based' });
+  });
+
   test('a compact quote-wizard line reports price only, never a fabricated zero', () => {
     const data = { result: { lineItems: [{ service: 'tree_shrub', monthly: 35, tier: 'standard' }] } };
     expect(extractTreeShrub(data)).toMatchObject({ shape: 'compact', bedSqFt: null, bedSource: 'unknown', treeCount: null, monthly: 35 });

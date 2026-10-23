@@ -252,8 +252,17 @@ function extractTreeShrub(estimateData) {
   if (!estimateData || typeof estimateData !== 'object') return null;
   const ctx = mappedContext(estimateData);
   if (mappedEnvelopeWithoutTreeShrub(estimateData, ctx)) return null;
-  const raw = Array.isArray(estimateData.engineResult?.lineItems)
+  // A parked PUBLIC quote stores the FULL engine line in result.lineItems
+  // (buildQuoteRequiredEstimateResult spreads the estimate) while its
+  // engineResult.lineItems is the field-stripped projection — no bed source,
+  // bed area, tree count or review reasons. With no tsMeta the projection
+  // "agrees" by default, so the authoritative mapped line must win whenever
+  // it carries the engine inputs the projection dropped (Codex #6398 r22).
+  const fullMappedLine = ctx.mappedLine && (enumOf(ctx.mappedLine.bedAreaSource) || positive(ctx.mappedLine.bedAreaUsed ?? ctx.mappedLine.bedArea))
+    ? ctx.mappedLine : null;
+  const projected = Array.isArray(estimateData.engineResult?.lineItems)
     ? estimateData.engineResult.lineItems.find(isTreeShrubLine) : null;
+  const raw = fullMappedLine || projected;
   const fromRaw = raw && rawAgreesWithMapped(raw, ctx) ? rawShape(raw, ctx) : null;
   // A commercial line Admin V2 kept only as a mapped recurring row reports
   // price and review flags (compact) — it carries no bed/tree inputs.

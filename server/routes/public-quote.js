@@ -1037,6 +1037,22 @@ const RESIDENTIAL_VERIFICATION_REASONS = new Set([
   'unknown_grass_type_priced_st_augustine',
   'lawn_v13_bahia_no_program',
 ]);
+// The RESIDENTIAL Tree & Shrub open-parcel holds (Codex #6398 r22): a
+// lot-inferred bed with no server-trusted footprint, or a footprint over
+// half the lot, parks the line via manualReviewReasons. Without this leg the
+// 202 told the homeowner "Commercial properties require a manual quote" and
+// the office bell filed the lead as commercial. The commercial program
+// raises the same reason strings and keeps the commercial copy, so the
+// classification reads the parked line's service, not the reason alone.
+const OPEN_PARCEL_BASIS_REASONS = new Set([
+  'open_parcel_basis_unconfirmed_footprint',
+  'open_parcel_basis_footprint_over_half_lot',
+]);
+function isResidentialVerificationHold(reason, manualQuoteLine) {
+  if (RESIDENTIAL_VERIFICATION_REASONS.has(reason)) return true;
+  return OPEN_PARCEL_BASIS_REASONS.has(reason)
+    && !String(manualQuoteLine?.service || '').startsWith('commercial_');
+}
 
 const PUBLIC_QUOTE_SERVICE_KEYS = [
   'pest', 'oneTimePest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
@@ -3518,7 +3534,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         `${quoteRequired
           ? (quoteRequiredReason === 'quote_on_request'
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
-            : RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason)
+            : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
           : isOneTimeOnly
@@ -4137,6 +4153,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
+          : (OPEN_PARCEL_BASIS_REASONS.has(quoteRequiredReason) && isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine))
+          ? 'Tree & shrub pricing depends on your planting-bed area, and we could not confirm your home\'s footprint from records alone — the Waves team will confirm it and send your exact price shortly.'
           // A stale single-visit flea request (retired offer key) prices the
           // two-visit package but parks for review — say so, never the
           // commercial fallback (GH codex #3845 r5 P2).
@@ -4373,6 +4391,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._internals = {
+  isResidentialVerificationHold,
   trustedTreeShrubFootprintSqFt,
   deriveAddressUnverified,
   findPriorOpenWizardLeadId,

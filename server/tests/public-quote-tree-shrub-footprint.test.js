@@ -7,7 +7,27 @@
 // stayed under the half-lot heuristic and shrank the bed and the price).
 const { _internals } = require('../routes/public-quote');
 
-const { trustedTreeShrubFootprintSqFt } = _internals;
+const { trustedTreeShrubFootprintSqFt, isResidentialVerificationHold } = _internals;
+
+describe('isResidentialVerificationHold', () => {
+  test('the open-parcel holds on a RESIDENTIAL T&S line are property-confirmation holds, never the commercial fallback (Codex #6398 r22)', () => {
+    const residential = { service: 'tree_shrub', requiresManualReview: true, manualReviewReasons: ['open_parcel_basis_unconfirmed_footprint'] };
+    expect(isResidentialVerificationHold('open_parcel_basis_unconfirmed_footprint', residential)).toBe(true);
+    expect(isResidentialVerificationHold('open_parcel_basis_footprint_over_half_lot', residential)).toBe(true);
+    // No parked line at all (the reason came from another leg) still reads residential.
+    expect(isResidentialVerificationHold('open_parcel_basis_unconfirmed_footprint', null)).toBe(true);
+  });
+  test('the same reason strings on the COMMERCIAL program keep the commercial copy', () => {
+    const commercial = { service: 'commercial_tree_shrub', requiresManualReview: true, manualReviewReasons: ['open_parcel_basis_unconfirmed_footprint'] };
+    expect(isResidentialVerificationHold('open_parcel_basis_unconfirmed_footprint', commercial)).toBe(false);
+    expect(isResidentialVerificationHold('open_parcel_basis_footprint_over_half_lot', commercial)).toBe(false);
+  });
+  test('the existing residential verification reasons are unchanged; unknown reasons are not holds', () => {
+    expect(isResidentialVerificationHold('lot_size_requires_verification', { service: 'commercial_pest' })).toBe(true);
+    expect(isResidentialVerificationHold('bed_area_at_or_above_8000', { service: 'tree_shrub' })).toBe(false);
+    expect(isResidentialVerificationHold(null, null)).toBe(false);
+  });
+});
 
 describe('trustedTreeShrubFootprintSqFt', () => {
   const V = { storiesSource: 'verified' };
