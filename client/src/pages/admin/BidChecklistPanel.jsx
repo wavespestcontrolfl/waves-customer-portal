@@ -175,9 +175,35 @@ function Documents({ documents }) {
   );
 }
 
-function ChecklistRow({ item, first, last, busy, onTick, onNotes, onArchive, onMove }) {
+function EditRow({ item, busy, onSave, onCancel }) {
+  const [label, setLabel] = useState(item.label);
+  const [source, setSource] = useState(item.source_text || "");
+  const [required, setRequired] = useState(!!item.required);
+  return (
+    <form className="grid gap-2 rounded-sm border-hairline border-zinc-200 px-3 py-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" onSubmit={async (event) => {
+      event.preventDefault();
+      if (await onSave(item, { label: label.trim(), sourceText: source.trim(), required })) onCancel();
+    }}>
+      <Field id={`edit-label-${item.id}`} label="Line">
+        <Input value={label} maxLength={500} onChange={(event) => setLabel(event.target.value)} />
+      </Field>
+      <Field id={`edit-source-${item.id}`} label="Quote or page from the solicitation">
+        <Input value={source} maxLength={2000} onChange={(event) => setSource(event.target.value)} />
+      </Field>
+      <Checkbox id={`edit-required-${item.id}`} label="Required" checked={required} onChange={(event) => setRequired(event.target.checked)} />
+      <div className="flex gap-2">
+        <Button type="submit" size="sm" disabled={busy || !label.trim()}>Save line</Button>
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+      </div>
+    </form>
+  );
+}
+
+function ChecklistRow({ item, first, last, busy, onTick, onNotes, onArchive, onMove, onEdit }) {
   const [notes, setNotes] = useState(item.notes || "");
+  const [editing, setEditing] = useState(false);
   useEffect(() => setNotes(item.notes || ""), [item.notes]);
+  if (editing) return <li data-section={item.section}><EditRow item={item} busy={busy} onSave={onEdit} onCancel={() => setEditing(false)} /></li>;
   return (
     // A stop check (a go / no-go question) sits first and is shaded so it reads apart from the paperwork lines.
     <li data-section={item.section} className={`grid gap-1 rounded-sm border-hairline border-zinc-200 px-3 py-2${item.section === "stop" ? " bg-zinc-50" : ""}`}>
@@ -187,6 +213,7 @@ function ChecklistRow({ item, first, last, busy, onTick, onNotes, onArchive, onM
         <span className="ml-auto flex gap-1">
           <Button size="sm" variant="ghost" disabled={busy || first} aria-label={`Move up: ${item.label}`} onClick={() => onMove(item, -1)}>Up</Button>
           <Button size="sm" variant="ghost" disabled={busy || last} aria-label={`Move down: ${item.label}`} onClick={() => onMove(item, 1)}>Down</Button>
+          <Button size="sm" variant="ghost" disabled={busy} aria-label={`Edit: ${item.label}`} onClick={() => setEditing(true)}>Edit</Button>
           <Button size="sm" variant="ghost" disabled={busy} aria-label={`Remove: ${item.label}`} onClick={() => onArchive(item)}>Remove</Button>
         </span>
       </div>
@@ -219,9 +246,9 @@ function AddRow({ busy, onAdd }) {
 function Checklist({ bidId, bid, items, progress, missing, busy, run, invite }) {
   const act = (path, method, body, query = "") => adminFetch(`/admin/bid-desk/${bidId}/checklist${path}${query}`, { method, ...(body === undefined ? {} : { body }) });
   const start = (query) => run(() => act("/start", "POST", bid.solicitation_type ? { type: bid.solicitation_type } : {}, query));
-  // "Add missing lines" is offered whenever the bid has a type and template lines it does not carry, even with no live
-  // lines left (a line added and removed must not leave the page with no way to start).
-  const addMissing = bid.solicitation_type && missing > 0 && (
+  // "Add missing lines" is offered whenever the bid has template lines it does not carry (an unset type means the base
+  // ten), even with no live lines left (a line added and removed must not leave the page with no way to start).
+  const addMissing = missing > 0 && (
     <Button size="sm" variant="ghost" disabled={busy} onClick={() => start("?add=missing")}>Add missing lines for this type</Button>
   );
   return (
@@ -245,6 +272,7 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite }) 
                 onTick={(row, checked) => run(() => act(`/${row.id}`, "PATCH", { checked }))}
                 onNotes={(row, notes) => run(() => act(`/${row.id}`, "PATCH", { notes }))}
                 onArchive={(row) => run(() => act(`/${row.id}`, "DELETE"))}
+                onEdit={(row, changes) => run(() => act(`/${row.id}`, "PATCH", changes))}
                 onMove={(row, step) => {
                   const ids = items.map((entry) => entry.id);
                   const at = ids.indexOf(row.id);
@@ -296,15 +324,22 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
   const [state, setState] = useState(extras);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState({ text: "", error: false });
+  const [refreshError, setRefreshError] = useState("");
   const first = useRef(true);
 
+  // Reloads the lines, progress, estimate and documents. A failure (network error, a refusal, the gate turned off) is
+  // shown in the checklist section until the next success; it never throws.
   const refresh = useCallback(async () => {
-    const res = await adminFetch(`/admin/bid-desk/${bidId}`);
-    const body = await res.json().catch(() => ({}));
-    if (res.ok && body.checklist_live) {
+    try {
+      const res = await adminFetch(`/admin/bid-desk/${bidId}`);
+      const body = await res.json().catch(() => ({}));
+      if (!(res.ok && body.checklist_live)) throw new Error(`HTTP ${res.status}`);
       setState({ checklist: body.checklist, progress: body.checklist_progress, missing: body.checklist_missing ?? 0, estimate: body.estimate, documents: body.documents });
       // The list row's chip follows at once, not on the next list load.
       if (onProgress) onProgress(bidId, body.checklist_progress);
+      setRefreshError("");
+    } catch {
+      setRefreshError("Could not reload the checklist, so the lines below may be out of date. Reload the page to check.");
     }
   }, [bidId, onProgress]);
 
@@ -312,7 +347,7 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
   // and how many template lines for the type the bid does not carry yet).
   useEffect(() => {
     if (first.current) { first.current = false; return; }
-    refresh().catch(() => {});
+    refresh();
   }, [bid.estimate_id, bid.solicitation_type, refresh]);
 
   // Runs one checklist call, then reloads the lines. Returns whether it worked.
@@ -344,6 +379,7 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
       <Section title="Checklist">
         <Checklist bidId={bidId} bid={bid} items={state.checklist} progress={state.progress} missing={state.missing ?? 0} busy={disabled} run={run} invite={invite} />
         {message.text && <ActionFeedback error={message.error} className="mt-2">{message.text}</ActionFeedback>}
+        {refreshError && <ActionFeedback error className="mt-2">{refreshError}</ActionFeedback>}
       </Section>
       <Section title="Submission record"><Submission bid={bid} busy={disabled} save={save} invite={invite} /></Section>
     </div>

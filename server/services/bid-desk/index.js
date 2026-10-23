@@ -426,7 +426,9 @@ async function sendDueReminders({ now = new Date() } = {}) {
             reminder_2d_sent_at: window === '2d' ? trx.fn.now() : bid.reminder_2d_sent_at,
             reminder_7d_sent_at: bid.reminder_7d_sent_at || trx.fn.now(),
           };
-        await trx('bid_opportunities').where({ id }).update({ ...stamps, updated_at: trx.fn.now() });
+        // updated_at is the version the operator's date save is fenced on; a reminder stamp is not an edit of the bid, so
+        // it leaves it alone (an open page must not get a 409 because a reminder fired).
+        await trx('bid_opportunities').where({ id }).update(stamps);
         return true;
       });
       if (done) sent += 1;
@@ -472,7 +474,7 @@ async function sendDateReminders({ now = new Date() } = {}) {
           stamps.job_walk_reminder_sent_at = trx.fn.now();
         }
         if (!owed.length) return 0;
-        await trx('bid_opportunities').where({ id }).update({ ...stamps, updated_at: trx.fn.now() });
+        await trx('bid_opportunities').where({ id }).update(stamps); // not an edit: updated_at stays (see above)
         return owed.length;
       });
       sent += rung;

@@ -310,3 +310,73 @@ it("offers Add missing lines once the type changes on a checklist that is alread
   fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
   expect(await screen.findByRole("button", { name: "Add missing lines for this type" })).toBeInTheDocument();
 });
+
+it("edits a line's wording, source text and required flag", async () => {
+  const edit = vi.fn(() => reply({ ok: true }));
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ checklist: [item(1, { source_text: "Page 3" })], checklist_progress: { checked: 0, required: 1, total: 1 } })),
+    "PATCH /admin/bid-desk/b1/checklist/i1": edit,
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Edit: Line 1" }));
+  const form = within(screen.getByLabelText("Line").closest("form"));
+  fireEvent.change(screen.getByLabelText("Line"), { target: { value: "Line one, reworded" } });
+  fireEvent.change(form.getByLabelText("Quote or page from the solicitation"), { target: { value: "Page 4, item 2" } });
+  fireEvent.click(screen.getByLabelText("Required"));
+  fireEvent.click(screen.getByRole("button", { name: "Save line" }));
+  await waitFor(() => expect(edit).toHaveBeenCalled());
+  expect(edit.mock.calls[0][0].body).toEqual({ label: "Line one, reworded", sourceText: "Page 4, item 2", required: false });
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Save line" })).toBeNull());
+});
+
+it("keeps the edit form open and shows the server's answer when a line cannot be saved", async () => {
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ checklist: [item(1)], checklist_progress: { checked: 0, required: 1, total: 1 } })),
+    "PATCH /admin/bid-desk/b1/checklist/i1": () => reply({ error: "Invalid checklist update" }, { ok: false, status: 400 }),
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Edit: Line 1" }));
+  fireEvent.change(screen.getByLabelText("Line"), { target: { value: "Changed" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save line" }));
+  expect(await screen.findByText("Not saved: Invalid checklist update")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save line" })).toBeInTheDocument();
+});
+
+it("offers Add missing lines for a bid with no solicitation type when template lines are missing", async () => {
+  const add = vi.fn(() => reply({ ok: true, added: 10 }, { status: 201 }));
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(detail({ bid: bid({ solicitation_type: null }), checklist: [item(1, { section: "custom", label: "By hand" })], checklist_progress: { checked: 0, required: 1, total: 1 }, checklist_missing: 10 })),
+    "POST /admin/bid-desk/b1/checklist/start?add=missing": add,
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Add missing lines for this type" }));
+  await waitFor(() => expect(add).toHaveBeenCalled());
+  expect(add.mock.calls[0][0].body).toEqual({});
+});
+
+it("shows a plain error when the checklist cannot be reloaded, and clears it on the next success", async () => {
+  let reloads = 0;
+  const tick = vi.fn(() => reply({ ok: true }));
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => {
+      reloads += 1;
+      if (reloads === 2) return reply({ error: "boom" }, { ok: false, status: 500 }); // the reload after the first tick
+      if (reloads === 3) return Promise.reject(new Error("network")); // the reload after the second
+      return reply(detail({ checklist: [item(1)], checklist_progress: { checked: 0, required: 1, total: 1 } }));
+    },
+    "PATCH /admin/bid-desk/b1/checklist/i1": tick,
+  });
+  renderPage();
+  fireEvent.click(await screen.findByLabelText("Line 1"));
+  expect(await screen.findByText(/Could not reload the checklist/)).toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText("Line 1"));
+  await waitFor(() => expect(tick).toHaveBeenCalledTimes(2));
+  expect(await screen.findByText(/Could not reload the checklist/)).toBeInTheDocument(); // a network failure shows it too
+  fireEvent.click(screen.getByLabelText("Line 1"));
+  await waitFor(() => expect(tick).toHaveBeenCalledTimes(3));
+  await waitFor(() => expect(screen.queryByText(/Could not reload the checklist/)).toBeNull());
+});

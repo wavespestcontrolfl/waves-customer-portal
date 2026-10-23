@@ -287,6 +287,17 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect((await call('POST', `/${randomUUID()}/checklist/start`, {})).status).toBe(404);
     });
 
+    test('a bid with no type still counts and adds the missing base lines', async () => {
+      const bidId = await newBid();
+      await call('POST', `/${bidId}/checklist`, { label: 'By hand' });
+      const detail = (await call('GET', `/${bidId}`)).body;
+      expect(detail.bid.solicitation_type).toBeNull();
+      expect(detail.checklist_missing).toBe(10);
+      const res = await call('POST', `/${bidId}/checklist/start?add=missing`, {});
+      expect(res.body).toMatchObject({ added: 10, type: null, checklist_missing: 0 });
+      expect((await call('GET', `/${bidId}`)).body.checklist_missing).toBe(0);
+    });
+
     test('add=missing adds only the lines the bid lacks, and never brings back one the operator removed', async () => {
       const bidId = await newBid();
       await call('POST', `/${bidId}/checklist/start`, {});
@@ -646,6 +657,26 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect((await call('PATCH', `/${other}`, { status: 'no_bid' })).status).toBe(200);
       for (const key of otherKeys) expect(await open(key)).toBe(false);
       expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    });
+
+    test('a reminder stamp is not an edit: updated_at stays, so a page opened before it fired can still save a date', async () => {
+      const id = await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1), job_walk_confirmed: true });
+      const seen = (await call('GET', `/${id}`)).body.bid.updated_at;
+      // 14-day, questions and job-walk reminders fire after the page loaded.
+      expect(await service.sendDueReminders({ now: NOW })).toBe(3);
+      expect((await call('GET', `/${id}`)).body.bid.updated_at).toBe(seen);
+      // The 7-day and 2-day stamps leave the version alone too.
+      expect(await service.sendDueReminders({ now: at(4) })).toBe(1);
+      expect(await service.sendDueReminders({ now: at(8.5) })).toBe(1);
+      expect(await bidRow(id)).toMatchObject({ reminder_7d_sent_at: expect.any(Date), reminder_2d_sent_at: expect.any(Date) });
+      expect((await call('GET', `/${id}`)).body.bid.updated_at).toBe(seen);
+      const wall = (date) => new Date(date.getTime() - 4 * 60 * 60 * 1000).toISOString().slice(0, 16);
+      const saved = await call('PATCH', `/${id}`, { due_at: wall(at(12)), expected_updated_at: seen });
+      expect(saved.status).toBe(200);
+      // An email filed after the page loaded still moves the version and is still refused (the fence works).
+      const after = (await call('GET', `/${id}`)).body.bid.updated_at;
+      await service.ingestEmail(await storeEmail({ gmail_thread_id: (await bidRow(id)).gmail_thread_id, subject: 'Addendum 1', body_text: 'x', received_at: new Date(NOW.getTime() - 30000) }));
+      expect((await call('PATCH', `/${id}`, { confirm_due: true, expected_updated_at: after })).status).toBe(409);
     });
 
     test('a tick of the job with the gate on runs the new reminders; with it off it does not', async () => {
