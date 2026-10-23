@@ -287,6 +287,70 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
   });
 
 
+  // ── The fence also proves the runner still owns its bundle (real row locks) ────────────────────────────────────
+  describe('bundle ownership in the fence', () => {
+    const owned = async (token = 'tok', leaseSql = "now() + interval '5 minutes'") => {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      await app(TABLE).where({ id }).update({ lease_owner: token, lease_until: app.raw(leaseSql) });
+      return { id, fence: { visitId: visit, restorations: 0, bundleId: id, leaseToken: token, hits: [] } };
+    };
+    const check = (fence) => app.transaction((trx) => assertCancelGeneration(trx, fence));
+
+    test('the holder passes; a different token, an expired lease and a finished bundle are refused with lease_lost (nothing written)', async () => {
+      const { id, fence } = await owned();
+      await expect(check(fence)).resolves.toBeUndefined();
+      const stranger = { ...fence, leaseToken: 'worker-2', hits: [] };
+      await expect(check(stranger)).rejects.toMatchObject({ code: 'CANCEL_FENCE', fenceReason: 'lease_lost' });
+      await app(TABLE).where({ id }).update({ lease_until: app.raw("now() - interval '1 second'") });
+      await expect(check({ ...fence, hits: [] })).rejects.toMatchObject({ fenceReason: 'lease_lost' });
+      for (const status of ['expired', 'abandoned', 'recovered', 'complete']) {
+        await app(TABLE).where({ id }).update({ status, lease_until: app.raw("now() + interval '5 minutes'") });
+        await expect(check({ ...fence, hits: [] })).rejects.toMatchObject({ fenceReason: 'lease_lost' });
+      }
+    });
+
+    test('a bundle row locked by another transaction (an owner update in flight) fails at once with bundle_busy, never waits', async () => {
+      const { id, fence } = await owned();
+      const holder = await app.transaction();
+      try {
+        await holder(TABLE).where({ id }).forUpdate().first('id');
+        const started = Date.now();
+        await expect(check(fence)).rejects.toMatchObject({ fenceReason: 'bundle_busy' });
+        expect(Date.now() - started).toBeLessThan(2000);
+      } finally {
+        await holder.rollback();
+      }
+    });
+
+    test('the finalizing transaction (bundle FOR UPDATE, then the visit share lock) and effect proofs (bundle share, then visit share) never deadlock', async () => {
+      const { id, fence } = await owned();
+      const runs = [];
+      for (let i = 0; i < 6; i += 1) {
+        runs.push(check({ ...fence, hits: [] }).then(() => 'ok', (e) => e.fenceReason));
+        runs.push(app.transaction(async (trx) => {
+          await trx(TABLE).where({ id }).forUpdate().first('id');
+          await assertCancelGeneration(trx, { visitId: visit, restorations: 0, hits: [] });
+        }).then(() => 'final', (e) => e.fenceReason || e.code));
+      }
+      const results = await Promise.all(runs);
+      expect(results.every((r) => ['ok', 'final', 'bundle_busy', 'visit_busy'].includes(r))).toBe(true);
+    });
+
+    test('a stale runner whose bundle was taken over mid-run does nothing more: the sweep reports it as lost, no receipt, no alert', async () => {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins({ notifyCustomer: false, approvedNotice: null, linkedChildren: [], approvedMoney: {} })));
+      await ageBundle(id, 30);
+      mockFollowThrough.mockImplementationOnce(async (args) => {
+        // Another worker claimed the bundle while this runner paused past its lease.
+        await app(TABLE).where({ id }).update({ lease_owner: 'worker-2', lease_until: app.raw("now() + interval '5 minutes'") });
+        await app.transaction((trx) => assertCancelGeneration(trx, args.cancelFence)).catch(() => {});
+      });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ lost: 1, recovered: 0, failed: 0 });
+      expect(mockRecordResult).not.toHaveBeenCalled();
+      expect(mockRaise).not.toHaveBeenCalled();
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'pending', lease_owner: 'worker-2' });
+    });
+  });
+
   // ── The cancellation-generation fence, on real row locks ────────────────────────────────────────────────────
   describe('cancel generation fence', () => {
     const fenceFor = (restorations = 0) => ({ visitId: visit, restorations, hits: [] });

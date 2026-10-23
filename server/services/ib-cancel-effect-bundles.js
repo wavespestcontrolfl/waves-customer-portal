@@ -423,12 +423,30 @@ class Abandon extends Error {
   }
 }
 
+// The cancel fence every sweep effect passes: the generation the card approved AND this runner's ownership of the bundle
+// (services/cancel-generation-fence.js proves both, in the same transaction as each effect). A runner that lost its lease is
+// stopped at its next effect without a write.
+function sweepFence(bundle, token) {
+  return { visitId: bundle.scheduled_service_id, restorations: bundle.restorations_seen, bundleId: bundle.id, leaseToken: token, hits: [] };
+}
+
+// An effect was refused because this runner no longer owns the bundle: stop at once, report nothing (the new owner reports).
+function throwIfLeaseLost(fence) {
+  if (fence.hits.includes('lease_lost')) throw new LeaseLost(`lease on bundle ${fence.bundleId} was lost`);
+}
+
+// Keeps the lease alive between steps (and notices a lost one before the next effect starts).
+async function renewLease(bundle, token) {
+  await ownedUpdate(bundle.id, token, { lease_until: nowPlusMs(db, LEASE_MS) });
+}
+
 async function recoverFollowThrough(bundle, token) {
   const { runVisitCancellationFollowThrough } = require('./visit-cancellation-followthrough');
   const reports = { money: { skipped: [] }, linked: { skipped: [] } };
-  const fence = { visitId: bundle.scheduled_service_id, restorations: bundle.restorations_seen, hits: [] };
+  const fence = sweepFence(bundle, token);
   const { remaining, alreadyCancelled } = await splitLinkedChildren(bundle);
   await runVisitCancellationFollowThrough(followThroughArgs(bundle, remaining, reports, fence));
+  throwIfLeaseLost(fence);
   if (fence.hits.length) {
     // A mutation was refused. The visit is either no longer the approved cancel (abandon: some steps may already have
     // run before it changed) or only busy because a restore is in flight (retry on the next pass, nothing is saved).
@@ -474,13 +492,13 @@ const NOTICE_TERMINAL_BY_STATUS = {
 };
 
 // Sends the approved text through the same call the request uses. Returns { done, outcome }; done false = try again later.
-async function sendApprovedNotice(bundle, svc) {
+async function sendApprovedNotice(bundle, svc, token) {
   const { isWithinSendWindowET } = require('./messaging/send-window');
   if (visitDateHasPassed(svc)) return { done: true, outcome: { state: 'not_sent', note: 'The visit date has passed, so the cancellation text was not sent.' } };
   if (!isWithinSendWindowET(new Date())) return { done: false };
   const AppointmentReminders = require('./appointment-reminders');
   const reported = {};
-  const fence = { visitId: bundle.scheduled_service_id, restorations: bundle.restorations_seen, hits: [] };
+  const fence = sweepFence(bundle, token);
   await AppointmentReminders.handleCancellation(bundle.scheduled_service_id, {
     sendNotification: true,
     outcome: reported,
@@ -489,6 +507,7 @@ async function sendApprovedNotice(bundle, svc) {
     // AppointmentReminders.claimApprovedNoticeForGeneration.
     cancelGeneration: fence,
   });
+  throwIfLeaseLost(fence);
   // The send window closed before the first recipient was reached: the approved marker is untouched, park to the next window.
   if (fence.windowHeld === true) return { done: false };
   // The claim was refused by the fence: nothing was claimed or sent. Changed visit: abandon. Only busy: retry next pass.
@@ -556,7 +575,7 @@ async function reclassifyUnclaimedSend(bundle, classified) {
   return { state: 'uncertain', note: 'Another send already holds this text and its delivery is not proven. It was NOT sent again.' };
 }
 
-async function recoverNotice(bundle, svc) {
+async function recoverNotice(bundle, svc, token) {
   if (bundle.notify_customer !== true) return { done: true, outcome: { state: 'no_text' } };
   if (!Array.isArray(bundle.approved_notice) || !bundle.approved_notice.length) {
     return { done: true, outcome: { state: 'not_sent', note: 'The approved text was not saved with the card, so nothing was sent.' } };
@@ -568,7 +587,7 @@ async function recoverNotice(bundle, svc) {
   // send's own stamp is conditional on status 'cancelled', and a restore sheds the approved marker.)
   const standing = await cancelStillStands(bundle);
   if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
-  return sendApprovedNotice(bundle, svc);
+  return sendApprovedNotice(bundle, svc, token);
 }
 
 // ── Receipts ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -830,12 +849,14 @@ async function runBundle(bundle, token) {
   try {
     let ft = bundle.followthrough_done_at ? bundle.followthrough_outcome : null;
     if (!bundle.followthrough_done_at) {
+      await renewLease(bundle, token);
       ft = await recoverFollowThrough(bundle, token);
       known = { ...known, followthrough_done_at: new Date(), followthrough_outcome: ft };
     }
     let notice = bundle.notice_outcome || null;
     if (!notice) {
-      const step = await recoverNotice(bundle, standing.svc);
+      await renewLease(bundle, token);
+      const step = await recoverNotice(bundle, standing.svc, token);
       if (!step.done) return 'deferred';
       notice = step.outcome;
       await ownedUpdate(bundle.id, token, { notice_outcome: JSON.stringify({ ...notice, by: 'sweep' }) });

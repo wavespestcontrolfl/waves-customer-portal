@@ -2910,22 +2910,6 @@ function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimSta
     if (String(svc?.status) !== 'cancelled') {
       return { ok: false, code: 'appointment_restored', reason: `appointment is now ${svc?.status || 'missing'}` };
     }
-    // The recovery sweep's approved text (cancelGeneration): one more proof of the approved cancellation right before the stamp
-    // that precedes the provider handoff. A point-in-time check: the handoff cannot be un-sent, and the claim's token already
-    // fails if a restore cleared the marker (the same window the request itself has).
-    if (cancelGeneration) {
-      try {
-        await require('./cancel-generation-fence').assertCancelGeneration(db, cancelGeneration);
-      } catch (err) {
-        if (err && err.code === 'CANCEL_FENCE') {
-          // A visit that is only BUSY (a restore or an edit in flight) is not a verdict: nothing was stamped or handed off yet, so
-          // the finalizer leaves the approved marker untouched and the sweep retries the text on its next pass.
-          if (err.fenceReason === 'visit_busy') cancelGeneration.retryable = true;
-          return { ok: false, code: 'appointment_restored', reason: err.message };
-        }
-        throw err;
-      }
-    }
     // Durable pre-dispatch stamp (codex r21): a process exit
     // between provider acceptance and audit persistence must
     // read as SENT, never retry. A definite failure reverts via
@@ -2934,7 +2918,7 @@ function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimSta
     // Accepts our own prior stamp (multi-contact fanout) and
     // MUST win rows — zero rows means a restoration cleared the
     // claim mid-flight (codex r22).
-    const stamped = await db('appointment_reminders')
+    const stampOnce = (conn) => conn('appointment_reminders')
       .where({ id: record.id })
       .whereIn('cancellation_notice_state', claimStatesWithSent)
       .where('cancellation_notice_at', noticeToken)
@@ -2945,6 +2929,28 @@ function makeCancellationPreDispatchCheck({ record, scheduledServiceId, claimSta
       // the token alone would still match. Zero rows = abort.
       .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
       .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
+    let stamped;
+    if (cancelGeneration) {
+      // The recovery sweep's approved text: the proof (this runner still owns its bundle AND the visit is still the approved
+      // cancel) and the stamp that precedes the provider handoff share ONE transaction, so a stale runner or a restored visit
+      // is stopped before anything is marked sent. (The handoff itself cannot be un-sent or held under a lock.)
+      try {
+        stamped = await db.transaction(async (trx) => {
+          await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelGeneration);
+          return stampOnce(trx);
+        });
+      } catch (err) {
+        if (err && err.code === 'CANCEL_FENCE') {
+          // Nothing was stamped or handed off: the finalizer leaves the approved marker untouched. A BUSY visit or bundle is
+          // retried by the sweep; a lost lease belongs to the new owner, whose claim must find the marker as it was.
+          if (['visit_busy', 'bundle_busy', 'lease_lost'].includes(err.fenceReason)) cancelGeneration.retryable = true;
+          return { ok: false, code: 'appointment_restored', reason: err.message };
+        }
+        throw err;
+      }
+    } else {
+      stamped = await stampOnce(db);
+    }
     if (!stamped) {
       return { ok: false, code: 'notice_claim_lost', reason: 'claim cleared before dispatch (restoration?)' };
     }

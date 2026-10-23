@@ -593,6 +593,37 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
 
   // A BUSY visit (an edit or a restore in flight) is not a verdict. The check runs before any stamp or handoff, so the finalizer
   // must leave the approved marker as it is (not terminal suppressed) and the next pass sends the text.
+  test.each(['lease_lost', 'bundle_busy'])('a runner that no longer owns the bundle (%s) at the pre-dispatch stamp stamps nothing, hands nothing off and leaves the approved marker for the new owner', async (reason) => {
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      mockFence.mockRejectedValueOnce(Object.assign(new Error(`cancellation fence: ${reason}`), { code: 'CANCEL_FENCE', fenceReason: reason }));
+      const verdict = await input.preDispatchCheck();
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: fence, outcome: {} });
+    expect(fence.retryable).toBe(true);
+    const stateWrites = mockState.updates.filter((u) => 'cancellation_notice_state' in u).map((u) => u.cancellation_notice_state);
+    expect(stateWrites).toEqual(['pending_approved']); // the claim only: never 'sent', never 'suppressed'
+  });
+
+  test('the proof and the pre-dispatch stamp share one transaction (proof first)', async () => {
+    const order = [];
+    const dbMock = require('../models/db');
+    const original = dbMock.transaction.getMockImplementation();
+    mockSendCustomerMessage.mockImplementationOnce(async (input) => {
+      dbMock.transaction.mockImplementationOnce(async (fn) => { order.push('begin'); const out = await fn(dbMock); order.push('end'); return out; });
+      mockFence.mockImplementationOnce(async () => { order.push('proof'); });
+      await input.preDispatchCheck();
+      return { sent: true, blocked: false };
+    });
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { visitId: 'svc-1', restorations: 2, hits: [] }, outcome: {} });
+    expect(order).toEqual(['begin', 'proof', 'end']);
+    expect(mockState.updates.some((u) => u.cancellation_notice_state === 'sent')).toBe(true);
+    dbMock.transaction.mockImplementation(original);
+  });
+
   test('a busy visit at the pre-dispatch proof blocks this attempt but keeps the approved marker for the retry', async () => {
     const fence = { visitId: 'svc-1', restorations: 2, hits: [] };
     // The claim transaction's proof passes; the pre-dispatch proof (the pool) reports busy as the send runs.

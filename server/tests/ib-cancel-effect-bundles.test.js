@@ -86,6 +86,9 @@ jest.mock('../models/db', () => {
       if (this.counting) return { n: String(this._rows().length) };
       const [row] = this._rows();
       if (!row) return undefined;
+      if (this.table === 'ib_cancel_effect_bundles') {
+        return { ...row, lease_live: Boolean(row.lease_until) && new Date(row.lease_until) > mockNow };
+      }
       if (this.table.startsWith('scheduled_services as s')) {
         const customer = mockStore.customers.find((c) => c.id === row.customer_id) || {};
         return { ...row, first_name: customer.first_name, last_name: customer.last_name };
@@ -520,7 +523,7 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
     expect(mockHandleCancellation.mock.calls[0][0]).toBe(SERVICE);
     expect(mockHandleCancellation.mock.calls[0][1]).toMatchObject({ sendNotification: true, approvedNotice: NOTICE });
     // The claim itself is bound to this cancellation (one statement), and the delivery proof counts every approved recipient.
-    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toEqual({ visitId: SERVICE, restorations: 0, hits: [] });
+    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toEqual({ visitId: SERVICE, restorations: 0, bundleId: 'bundle-1', leaseToken: expect.any(String), hits: [] });
     expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, { recipientKeys: ['abc123abc123abc1'] });
     expect(mockStore.bundles[0]).toMatchObject({ status: 'recovered', finish_note: 'sweep', lease_owner: null });
     expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'sent', by: 'sweep' });
@@ -947,6 +950,72 @@ describe('the terminal status re-proves the cancellation generation', () => {
     expect(mockStore.bundles[0].status).toBe('recovered');
     expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ visitId: SERVICE, restorations: 0 }));
     spy.mockRestore();
+  });
+});
+
+describe('every sweep effect proves the runner still owns the bundle (the fence carries ownership)', () => {
+  const fenceModule = () => require('../services/cancel-generation-fence');
+  const fenceFor = (row, token) => ({ visitId: SERVICE, restorations: 0, bundleId: row.id, leaseToken: token, hits: [] });
+
+  test('the proof passes for the lease holder, in either order of the checks', async () => {
+    const row = seedBundle({ lease_owner: 'tok', lease_until: new Date(mockNow.getTime() + 5 * MIN) });
+    const fence = fenceFor(row, 'tok');
+    await expect(db.transaction((trx) => fenceModule().assertCancelGeneration(trx, fence))).resolves.toBeUndefined();
+    expect(fence.hits).toEqual([]);
+  });
+
+  test.each([
+    ['another worker took the lease', { lease_owner: 'worker-2', lease_until: new Date(mockNow.getTime() + 5 * MIN) }],
+    ['the lease ran out', { lease_owner: 'tok', lease_until: new Date(mockNow.getTime() - MIN) }],
+    ['the bundle expired', { status: 'expired', lease_owner: null, lease_until: null }],
+    ['the bundle was abandoned', { status: 'abandoned', lease_owner: null, lease_until: null }],
+    ['the bundle was recovered', { status: 'recovered', lease_owner: null, lease_until: null }],
+  ])('%s: the effect is refused with lease_lost before any write', async (_label, change) => {
+    const row = seedBundle({ lease_owner: 'tok', lease_until: new Date(mockNow.getTime() + 5 * MIN) });
+    Object.assign(row, change);
+    const fence = fenceFor(row, 'tok');
+    await expect(db.transaction((trx) => fenceModule().assertCancelGeneration(trx, fence))).rejects.toMatchObject({ code: 'CANCEL_FENCE', fenceReason: 'lease_lost' });
+    expect(fence.hits).toEqual(['lease_lost']);
+  });
+
+  test('a runner that lost the bundle during the follow-through stops: no receipt, no alert, no text, the new owner is untouched', async () => {
+    const row = seedBundle();
+    mockFollowThrough.mockImplementationOnce(async (args) => {
+      // The effect transaction's proof is refused because another worker owns the bundle now.
+      row.lease_owner = 'worker-2';
+      await db.transaction((trx) => fenceModule().assertCancelGeneration(trx, args.cancelFence)).catch(() => {});
+    });
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary).toMatchObject({ lost: 1, failed: 0, recovered: 0 });
+    expect(mockRecordResult).not.toHaveBeenCalled();
+    expect(mockRaised).toEqual([]);
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ status: 'pending', lease_owner: 'worker-2' });
+  });
+
+  test('a stale runner that finds its bundle expired at the text claim sends nothing and leaves the approved marker alone', async () => {
+    const row = seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      // The claim transaction's proof: the bundle was expired by claimUnactable meanwhile.
+      Object.assign(row, { status: 'expired', lease_owner: null, lease_until: null });
+      await db.transaction((trx) => fenceModule().assertCancelGeneration(trx, opts.cancelGeneration)).catch(() => {});
+      Object.assign(opts.outcome, { notificationSent: false, notificationError: 'cancellation fence: lease_lost' });
+    });
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary).toMatchObject({ lost: 1, failed: 0 });
+    expect(mockRecordResult).not.toHaveBeenCalled();
+    expect(row.notice_outcome).toBeNull();
+    expect(row.status).toBe('expired');
+  });
+
+  test('the lease is renewed between steps', async () => {
+    const row = seedBundle();
+    const before = row.lease_until.getTime();
+    let during = null;
+    mockFollowThrough.mockImplementationOnce(async () => { during = row.lease_until.getTime(); });
+    await svc.sweepIbCancelBundles();
+    expect(before).toBeLessThan(mockNow.getTime());
+    expect(during).toBe(mockNow.getTime() + svc.LEASE_MS);
   });
 });
 
@@ -1534,7 +1603,7 @@ describe('the recovery is fenced against a restore of the visit', () => {
     seedBundle();
     await svc.sweepIbCancelBundles();
     const { cancelFence } = mockFollowThrough.mock.calls[0][0];
-    expect(cancelFence).toEqual({ visitId: SERVICE, restorations: 0, hits: [] });
+    expect(cancelFence).toEqual({ visitId: SERVICE, restorations: 0, bundleId: 'bundle-1', leaseToken: expect.any(String), hits: [] });
   });
 
   test('a mutation refused because the visit was restored mid-recovery abandons the bundle, sends no text, and says steps may have run', async () => {
