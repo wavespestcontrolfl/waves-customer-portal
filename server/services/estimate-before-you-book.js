@@ -50,7 +50,7 @@ function detectServices({ rows = [], items = [], commercial = false, residential
   const recurringPest = keys.has('pest_control');
   const recurringLawn = keys.has('lawn_care');
   const termiteRecurring = hasKey((k) => k.startsWith('termite'));
-  const rodentBait = keys.has('rodent_bait');
+  const rodentBait = keys.has('rodent_bait') || keys.has('commercial_rodent_bait');
   const rodent = keys.has('rodent') || rodentBait || anyItem(RODENT_TEXT);
   return {
     commercial: isCommercial,
@@ -64,8 +64,9 @@ function detectServices({ rows = [], items = [], commercial = false, residential
     termiteRecurring,
     wdo: anyItem(WDO_TEXT),
     rodent,
-    // Trapping is a different job from a bait-station program: the trap-check line is only true of trapping.
-    rodentTrapping: rodent && (!rodentBait || anyItem(TRAPPING_TEXT)),
+    // Trapping is a different job from a bait-station program: the trap-check line needs explicit trapping in a
+    // quoted line, never just a rodent key (a commercial bait-station plan has no trap checks - pre-push P1).
+    rodentTrapping: rodent && anyItem(TRAPPING_TEXT),
     roach: anyItem(ROACH_TEXT),
   };
 }

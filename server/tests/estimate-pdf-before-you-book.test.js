@@ -318,3 +318,15 @@ describe('Before you book trim and payload block', () => {
     expect(block.sections.every((s) => s.lines.every((l) => typeof l === 'string'))).toBe(true);
   });
 });
+
+describe('rodent trap checks need explicit trapping (pre-push P1)', () => {
+  test('a commercial or residential bait-station plan promises no trap check; a quoted trapping line does', () => {
+    for (const key of ['commercial_rodent_bait', 'rodent_bait']) {
+      const s = detectServices({ rows: [{ key }], items: ['Rodent Bait Stations'] });
+      expect(s.rodent).toBe(true);
+      expect(s.rodentTrapping).toBe(false);
+    }
+    expect(detectServices({ rows: [{ key: 'rodent' }], items: ['Rodent Control'] }).rodentTrapping).toBe(false);
+    expect(detectServices({ items: ['Rodent Trapping & Exclusion'] }).rodentTrapping).toBe(true);
+  });
+});
