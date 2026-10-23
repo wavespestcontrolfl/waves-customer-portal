@@ -275,7 +275,12 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     const ids = Array.from({ length: sam.REFRESH_LIMIT + 3 }, (_, i) => `r-${String(i).padStart(3, '0')}`);
     await mockPg('bid_opportunities').insert(ids.map((id) => ({ source: 'sam_gov', external_id: id, status: 'new', source_active: true })));
     const read = async () => {
-      const fetchImpl = fakeFetch([]);
+      // Answers each by-id read with that notice, unchanged.
+      const fetchImpl = jest.fn(async (url) => {
+        const id = new URL(url).searchParams.get('noticeid');
+        const body = id ? { totalRecords: 1, opportunitiesData: [{ noticeId: id, type: 'Solicitation', active: 'Yes' }] } : { totalRecords: 0, opportunitiesData: [] };
+        return { ok: true, status: 200, json: async () => body };
+      });
       await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'test-key' });
       return fetchImpl.mock.calls.map(([u]) => new URL(u).searchParams.get('noticeid')).filter(Boolean);
     };
@@ -297,6 +302,24 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(bid.source_active).toBe(false);
     expect(bid.needs_date_confirmation).toBe(true);
     expect(bid.location).toBe('GA 30301');
+  });
+
+  test('an open bid whose notice SAM.gov no longer returns is flagged once and leaves the refresh', async () => {
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-15')]), apiKey: 'test-key' });
+    const [filed] = await samBids();
+    await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid' });
+    raiseAdminAlertWithReopen.mockClear();
+    const gone = jest.fn(async () => ({ ok: false, status: 404, json: async () => ({ error: 'No Data found' }) }));
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: gone, apiKey: 'test-key' })).toMatchObject({ unreachable: 1, rung: 1 });
+    const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
+    expect(bid.source_active).toBe(false);
+    expect(bid.needs_date_confirmation).toBe(true);
+    expect(bid.due_source_line).toMatch(/^SAM\.gov no longer returns this notice/);
+    expect(raiseAdminAlertWithReopen.mock.calls[0][3].dedupeKey).toBe(`bid-desk:addendum:${filed.id}:sam:unreachable`);
+
+    gone.mockClear();
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: gone, apiKey: 'test-key' })).toMatchObject({ unreachable: 0 });
+    expect(gone.mock.calls.some(([u]) => new URL(u).searchParams.get('noticeid'))).toBe(false);
   });
 
   test('a cursor older than a year is clamped to the API window', async () => {

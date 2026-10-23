@@ -173,6 +173,14 @@ it("a SAM.gov bid shows its source, solicitation and notice link, and no email l
   expect(screen.queryByText("Emails on this bid")).toBeNull();
 });
 
+it("a flagged SAM.gov bid says the source line names what changed, not that a new deadline was posted", async () => {
+  const samBid = bid({ id: "s3", source: "sam_gov", needs_date_confirmation: true, due_source_line: "SAM.gov no longer lists this notice as active" });
+  route({ "GET /admin/bid-desk/": () => reply({ bids: [samBid] }), "GET /admin/bid-desk/s3": () => reply({ bid: samBid, emails: [] }) });
+  renderPage("/?bid=s3");
+  expect(await screen.findByText(/SAM\.gov changed this notice: the line above says what changed/)).toBeInTheDocument();
+  expect(screen.getByText(/SAM\.gov no longer lists this notice as active/)).toBeInTheDocument();
+});
+
 it("a notice link off sam.gov is not shown", async () => {
   const samBid = bid({ id: "s2", source: "sam_gov", external_url: "https://evil.example/opp" });
   route({ "GET /admin/bid-desk/": () => reply({ bids: [samBid] }), "GET /admin/bid-desk/s2": () => reply({ bid: samBid, emails: [] }) });

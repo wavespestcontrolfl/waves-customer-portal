@@ -204,7 +204,7 @@ function BidDetail({ bidId, onChanged, onClose }) {
           <SourceLines bid={bid} />
           {bid.needs_date_confirmation && (
             <div className="text-warn-fg">{bid.source === "sam_gov"
-              ? "SAM.gov posted a different deadline (shown above). Check the notice, then type or confirm the date."
+              ? "SAM.gov changed this notice: the line above says what changed (a new deadline, no deadline, or a closed notice). Check the notice on SAM.gov before you type or confirm a date."
               : "A later email may have changed the date. Check the emails below, then type or confirm the date."}</div>
           )}
           {bid.job_walk_at && <div><span className="text-ink-secondary">Job walk: </span>{dueText(bid.job_walk_at)}</div>}

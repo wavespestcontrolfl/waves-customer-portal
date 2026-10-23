@@ -279,6 +279,24 @@ function safeError(err) {
   return `${err?.name || 'Error'}${err?.code ? ` ${err.code}` : ''}`;
 }
 
+const UNREACHABLE_LINE = 'SAM.gov no longer returns this notice (deleted, or posted over a year ago); check it on SAM.gov';
+
+// An open bid whose notice SAM.gov no longer returns can no longer be kept current: it is flagged once for review and
+// leaves the refresh (source_active false), so it is not silently treated as unchanged.
+async function markUnreachable(externalId) {
+  return db.transaction(async (trx) => {
+    const bid = await trx('bid_opportunities').where({ source: 'sam_gov', external_id: externalId }).forUpdate().first();
+    if (!bid || bid.source_active === false) return false;
+    const patch = { source_active: false, due_source_line: UNREACHABLE_LINE, needs_date_confirmation: true };
+    if (OPEN_STATUSES.includes(bid.status) && !bid.historical && bid.owed_alert_kind !== 'new') {
+      patch.owed_alert_kind = 'addendum';
+      patch.owed_alert_key = `bid-desk:addendum:${bid.id}:sam:unreachable`;
+    }
+    await trx('bid_opportunities').where({ id: bid.id }).update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
+    return true;
+  });
+}
+
 // Every notice posted in the window, once per notice id across the NAICS codes, plus the latest version of open
 // SAM.gov bids already filed (one rotating batch a run). The posted-date window alone would never see an older notice again once it is archived
 // without a repost, so each run re-reads the open bids by notice id: republish, a removed deadline and an archive all
@@ -297,12 +315,15 @@ async function collectNotices({ apiKey, postedFrom, postedTo, refreshFrom, refre
   // The by-id read needs a posted-date range too. The notice may have been posted long before it was filed here (the
   // first run looks back 30 days), so it uses the API's whole one-year range.
   const batch = await openSamBids(refreshAfter);
+  const missing = [];
   for (const externalId of batch) {
     const { notices } = await fetchPage({ apiKey, filter: { noticeid: externalId }, postedFrom: refreshFrom, postedTo, offset: 0, fetchImpl });
     add(notices, externalId);
+    // No version came back: the notice was deleted, or it was posted more than a year ago (the API searches one year).
+    if (!notices.some((n) => text(n?.noticeId) === externalId)) missing.push(externalId);
   }
   // A full batch continues after its last id next run; a short one wraps to the start, so every open bid is checked.
-  return { notices: [...seen.values()], nextRefreshAfter: batch.length === REFRESH_LIMIT ? batch[batch.length - 1] : null };
+  return { notices: [...seen.values()], missing, nextRefreshAfter: batch.length === REFRESH_LIMIT ? batch[batch.length - 1] : null };
 }
 
 // Open SAM.gov bids whose notice is still listed active (the ones a change on SAM.gov could still affect), in notice-id
@@ -342,10 +363,12 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
   const stored = cursor.from || etDayOffset(now, -FIRST_RUN_LOOKBACK_DAYS);
   let from = stored < oldest ? oldest : stored;
   if (from > today) from = today;
-  const { notices, nextRefreshAfter } = await collectNotices({
+  const { notices, missing, nextRefreshAfter } = await collectNotices({
     apiKey: key, postedFrom: apiDate(from), postedTo: apiDate(today), refreshFrom: apiDate(oldest), refreshAfter: cursor.refreshAfter, fetchImpl,
   });
   const counts = await fileNotices(notices, now);
+  counts.unreachable = 0;
+  for (const externalId of missing) if (await markUnreachable(externalId)) counts.unreachable += 1;
   await writeCursor({ from: etDayOffset(now, -CURSOR_OVERLAP_DAYS), refreshAfter: nextRefreshAfter });
   // The bells go out through the Bid Desk's one owed-bell sweep (also run every 15 minutes, so a failure retries there).
   const rung = await deliverOwedAlerts();
