@@ -584,9 +584,10 @@ function evaluateProjectReadiness({
       {
         label:
           'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)',
-        ok:
-          hasMeaningfulValue(findings?.warranty_type) &&
-          !/^no warranty$/i.test(String(findings?.warranty_type).trim()),
+        ok: (
+          (typeCfg?.findingsFields || []).find((item) => item.key === "warranty_type")
+            ?.options || []
+        ).includes(String(findings?.warranty_type || "").trim()),
         hard: true,
       },
       {
@@ -595,6 +596,28 @@ function evaluateProjectReadiness({
         hard: true,
       },
     );
+    if (
+      [
+        "final_exterior_date",
+        "final_exterior_product",
+        "final_exterior_active_ingredient",
+        "final_exterior_applicator_name",
+        "final_exterior_time",
+      ].some((key) => hasMeaningfulValue(findings?.[key]))
+    ) {
+      required.push(
+        {
+          label: "Date of final exterior treatment",
+          ok: hasMeaningfulValue(findings?.final_exterior_date),
+          hard: true,
+        },
+        {
+          label: "Time of final exterior treatment",
+          ok: hasMeaningfulValue(findings?.final_exterior_time),
+          hard: true,
+        },
+      );
+    }
   }
 
   const text = [recommendations, ...Object.values(findings || {})]

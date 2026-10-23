@@ -1160,6 +1160,8 @@ const PROJECT_TYPES = {
       // and never gate the send; the office fills them on the sent
       // certificate when that visit is done.
       { key: 'final_exterior_date', label: 'Date of final exterior treatment', type: 'date', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
+      // FBC 105.10 lists the time of each treatment.
+      { key: 'final_exterior_time', label: 'Time of final exterior treatment', type: 'time', section: 'Final exterior treatment (later visit; leave blank on slab day)' },
       // Plain text, not product_search: the product picker writes the chosen
       // product's chemistry into application 1's epa_registration and
       // active_ingredient, which would overwrite the slab-day record.

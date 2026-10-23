@@ -283,12 +283,13 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
         ...findings,
         applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
         final_exterior_date: '2026-09-14',
+        final_exterior_time: '09:30',
         final_exterior_product: 'Termidor SC',
         final_exterior_active_ingredient: 'Fipronil',
         final_exterior_applicator_name: 'Sam Example',
       },
     }));
-    expect(await findByText('09/14/2026 · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
+    expect(await findByText('09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
     expect(getByText(/This signature covers the initial treatment only\./)).toBeInTheDocument();
   });
 });

@@ -1168,12 +1168,12 @@ function CertificateFieldGrid({ fields, compact }) {
   );
 }
 
-// "09/14/2026 · Termidor SC / Fipronil · applied by <name>" — the later
+// "09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by <name>" — the later
 // exterior visit's own record, kept apart from the slab-day attestation.
 function finalExteriorLine(f) {
   const materials = [f.final_exterior_product, f.final_exterior_active_ingredient].filter(Boolean).join(' / ');
   const parts = [
-    stickerDate(f.final_exterior_date),
+    [stickerDate(f.final_exterior_date), formatAppointmentTime(f.final_exterior_time)].filter(Boolean).join(' '),
     materials,
     f.final_exterior_applicator_name ? `applied by ${f.final_exterior_applicator_name}` : '',
   ].filter(Boolean);

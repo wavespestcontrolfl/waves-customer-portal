@@ -206,11 +206,17 @@ describe('admin project route guards', () => {
     expect(evaluate({ ...complete, warranty_type: 'Addition to an existing building (no warranty required)' }, true).missing).toEqual([]);
     expect(hardKeys(evaluate({ ...complete, warranty_type: 'No warranty' }, true))).toEqual(['cert_warranty']);
     expect(hardKeys(evaluate({ ...complete, warranty_type: '' }, true))).toEqual(['cert_warranty']);
+    // Only the form's own choices pass; free text from the update route does not.
+    expect(hardKeys(evaluate({ ...complete, warranty_type: 'None' }, true))).toEqual(['cert_warranty']);
     // FBC 105.10 lists the time of treatment.
     expect(hardKeys(evaluate({ ...complete, treatment_time: '' }, true))).toEqual(['cert_treatment_time']);
+    // A recorded final exterior treatment needs its own date and time.
+    expect(hardKeys(evaluate({ ...complete, final_exterior_product: 'Termidor SC' }, true))).toEqual(['cert_final_exterior_date', 'cert_final_exterior_time']);
+    expect(hardKeys(evaluate({ ...complete, final_exterior_date: '2026-06-01' }, true))).toEqual(['cert_final_exterior_time']);
+    expect(evaluate({ ...complete, final_exterior_date: '2026-06-01', final_exterior_time: '09:30' }, true).missing).toEqual([]);
 
     // A certificate held before these checks existed still releases once paid.
-    const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '' }, false);
+    const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '', final_exterior_date: '2026-06-01' }, false);
     expect(legacy.missing).toEqual([]);
     expect(legacy.hardMissing).toEqual([]);
   });

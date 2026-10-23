@@ -749,24 +749,33 @@ function certApplicationChecks(app, { keyPrefix, labelPrefix }) {
 
 // Rule 5E-14.105(3) F.A.C.: a pre-construction treatment for a new building
 // carries a retreatment warranty (at least 1 year, renewable 4 more); only
-// work attached to an existing building is exempt. The legacy "No warranty"
-// choice no longer passes a staff send (owner 2026-10-23, "follow the law").
-const PRETREAT_LEGACY_NO_WARRANTY_RE = /^no warranty$/i;
-function pretreatWarrantyOk(value) {
-  const warranty = String(value || '').trim();
-  return Boolean(warranty) && !PRETREAT_LEGACY_NO_WARRANTY_RE.test(warranty);
+// work attached to an existing building is exempt (owner 2026-10-23, "follow
+// the law"). Only the form's own choices pass, so a legacy "No warranty" or a
+// free-text value written through the update route does not.
+function pretreatWarrantyOk(value, typeCfg) {
+  const field = (typeCfg?.findingsFields || []).find((item) => item.key === 'warranty_type');
+  return (field?.options || []).includes(String(value || '').trim());
 }
+
+const FINAL_EXTERIOR_RECORD_KEYS = ['final_exterior_date', 'final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name', 'final_exterior_time'];
 
 // Checks added 2026-10-23 run only on a staff send (/send, /send-with-invoice),
 // never on the automatic release of a paid held report: a certificate held
 // before these checks existed must still deliver once paid (see the note in
 // certApplicationChecks).
-function pretreatStaffSendChecks(findings) {
-  return [
-    { key: 'cert_warranty', label: 'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)', ok: pretreatWarrantyOk(findings.warranty_type), hard: true },
-    // FBC 105.10 lists the time of treatment on the certificate.
+function pretreatStaffSendChecks(findings, typeCfg) {
+  const checks = [
+    { key: 'cert_warranty', label: 'Warranty / retreatment bond (a new building needs a warranty; "No warranty" is only for an addition)', ok: pretreatWarrantyOk(findings.warranty_type, typeCfg), hard: true },
+    // FBC 105.10 lists the time and date of each treatment.
     { key: 'cert_treatment_time', label: 'Time of treatment', ok: hasMeaningfulValue(findings.treatment_time), hard: true },
   ];
+  if (FINAL_EXTERIOR_RECORD_KEYS.some((key) => hasMeaningfulValue(findings[key]))) {
+    checks.push(
+      { key: 'cert_final_exterior_date', label: 'Date of final exterior treatment', ok: hasMeaningfulValue(findings.final_exterior_date), hard: true },
+      { key: 'cert_final_exterior_time', label: 'Time of final exterior treatment', ok: hasMeaningfulValue(findings.final_exterior_time), hard: true },
+    );
+  }
+  return checks;
 }
 
 function evaluateProjectSendReadiness({ project, customer, staffSend = false }) {
@@ -818,7 +827,7 @@ function evaluateProjectSendReadiness({ project, customer, staffSend = false }) 
       // requirement when paired with the typed name + FDACS ID + date.
       { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
-    if (staffSend) required.push(...pretreatStaffSendChecks(findings));
+    if (staffSend) required.push(...pretreatStaffSendChecks(findings, typeCfg));
   }
 
   // Termite Phase-3 compliance content (Codex P1 r2 on #2703): the termite
