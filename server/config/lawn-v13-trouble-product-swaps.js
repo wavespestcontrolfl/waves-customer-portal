@@ -67,6 +67,27 @@ function swapOnlyRule(row, rules = V13_TROUBLE_PRODUCT_SWAPS) {
   return rules.find((rule) => names.includes(rule.to) || (rule.trigger && row.gates?.trigger === rule.trigger)) || null;
 }
 
+// Each check compares one field of a track's recipe block with the rule (or with the visit's own line) and returns a
+// plain sentence when they differ, or null.
+const SWAP_RECIPE_CHECKS = [
+  (swap, rule) => (swap.replaces !== rule.from ? `replaces ${swap.replaces}, the rule replaces ${rule.from}` : null),
+  (swap, rule) => (nameOf(swap.primary) !== rule.to ? `the line names ${nameOf(swap.primary)}, the rule names ${rule.to}` : null),
+  (swap, rule) => (swap.primary !== rule.line ? "the line differs from the rule's line" : null),
+  (swap, rule) => (swap.targetN !== rule.targetN ? `targetN ${swap.targetN}, the rule ${rule.targetN}` : null),
+  (swap, rule) => (swap.note !== rule.note ? 'the technician note differs' : null),
+  (swap, rule) => (swap.trigger?.troubleType !== rule.troubleType || swap.trigger?.evidence !== rule.evidence ? 'the trigger differs' : null),
+  // The replaced bag is the visit's own whole-lawn line, so the swap can only ever replace what the recipe puts down.
+  (swap, rule, visit) => (nameOf(visit.primary) !== swap.replaces ? `the December primary is ${nameOf(visit.primary)}, not the bag the swap replaces` : null),
+  // The line states the nitrogen the rule sets.
+  (swap) => {
+    const stated = String(swap.primary).match(/\((\d+(?:\.\d+)?) lb N,/);
+    return !stated || Number(stated[1]) !== Number(swap.targetN) ? `the line does not state ${swap.targetN} lb N` : null;
+  },
+  // The summary names the product and its replacement, so a reader of the recipe sees the condition.
+  (swap, rule) => (!String(swap.summary).includes(rule.to) || !String(swap.summary).includes('GATE_LAWN_DEC_LARGE_PATCH_K')
+    ? 'the summary does not name the product and the gate' : null),
+];
+
 // What differs between the recipe block and the rule the plan applies, as a list of plain sentences ([] = they agree). Pure; the tests
 // run it, so a recipe edit that is not matched by the overlay (or the reverse) fails the build.
 function swapRecipeProblems(recipe = v13, rules = V13_TROUBLE_PRODUCT_SWAPS) {
@@ -78,19 +99,10 @@ function swapRecipeProblems(recipe = v13, rules = V13_TROUBLE_PRODUCT_SWAPS) {
     if (!swap) { problems.push(`${track}: the December visit has no swaps.${SWAP_KEY}`); continue; }
     if (swap.gate !== 'GATE_LAWN_DEC_LARGE_PATCH_K') problems.push(`${track}: gate is ${swap.gate}`);
     if (!rule) { problems.push('no rule for the recipe block'); continue; }
-    if (swap.replaces !== rule.from) problems.push(`${track}: replaces ${swap.replaces}, the rule replaces ${rule.from}`);
-    if (nameOf(swap.primary) !== rule.to) problems.push(`${track}: the line names ${nameOf(swap.primary)}, the rule names ${rule.to}`);
-    if (swap.primary !== rule.line) problems.push(`${track}: the line differs from the rule's line`);
-    if (swap.targetN !== rule.targetN) problems.push(`${track}: targetN ${swap.targetN}, the rule ${rule.targetN}`);
-    if (swap.note !== rule.note) problems.push(`${track}: the technician note differs`);
-    if (swap.trigger?.troubleType !== rule.troubleType || swap.trigger?.evidence !== rule.evidence) problems.push(`${track}: the trigger differs`);
-    // The replaced bag is the visit's own whole-lawn line, so the swap can only ever replace what the recipe puts down.
-    if (nameOf(visit.primary) !== swap.replaces) problems.push(`${track}: the December primary is ${nameOf(visit.primary)}, not the bag the swap replaces`);
-    // The line states the nitrogen the rule sets.
-    const stated = String(swap.primary).match(/\((\d+(?:\.\d+)?) lb N,/);
-    if (!stated || Number(stated[1]) !== Number(swap.targetN)) problems.push(`${track}: the line does not state ${swap.targetN} lb N`);
-    // The summary names the product and its replacement, so a reader of the recipe sees the condition.
-    if (!String(swap.summary).includes(rule.to) || !String(swap.summary).includes('GATE_LAWN_DEC_LARGE_PATCH_K')) problems.push(`${track}: the summary does not name the product and the gate`);
+    for (const check of SWAP_RECIPE_CHECKS) {
+      const problem = check(swap, rule, visit);
+      if (problem) problems.push(`${track}: ${problem}`);
+    }
   }
   return problems;
 }
