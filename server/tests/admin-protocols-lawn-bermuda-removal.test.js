@@ -32,7 +32,7 @@ const CATALOG = [
   { id: 'rec', name: REC, aliases: [], default_rate_per_1000: 0.03, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'fus', name: FUS, aliases: [], default_rate_per_1000: 0.55, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'nis', name: NIS, aliases: [], default_rate_per_1000: 0.25, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
-  // April on the 12x plan is the LESCO 44-0-0 polymer bag (20261022194000), unpriced until SiteOne quotes it.
+  // April on the 12x plan is the LESCO 44-0-0 polymer bag (20261022195000), unpriced until SiteOne quotes it.
   { id: 'f44', name: 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', aliases: [], analysis_n: 44, analysis_p: 0, analysis_k: 0, default_rate_per_1000: 2.27, rate_unit: 'lb', needs_pricing: true },
 ];
 const GATES = { bermudaRemoval: true, activelyGrowingOnly: true, noRainOrIrrigationHours: 3, noMowDaysBeforeAfter: 2, skipCelsiusInBermudaArea: true };

@@ -23,7 +23,7 @@ const protocolReader = require('../services/protocol-reader');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
-const aprilPolymerMigration = require('../models/migrations/20261022194000_lawn_v13_april_polymer_n_v2');
+const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
 
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 // The v13 recipe has no bahia track (owner 2026-10-06); protocols.json (gate off) still does.
@@ -269,7 +269,7 @@ const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_ma
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 // December's whole-lawn bag is the LESCO 10-0-22 row (20261008130000 swaps it in for the staged 24-0-11 line).
 const F10_22 = decemberMigration.NEW_NAME;
-// April's 12x whole-lawn bag is the LESCO 44-0-0 polymer row (20261022194000 swaps it in for the staged 24-0-11 line).
+// April's 12x whole-lawn bag is the LESCO 44-0-0 polymer row (20261022195000 swaps it in for the staged 24-0-11 line).
 const F44_0_0 = aprilPolymerMigration.NEW_NAME;
 const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
@@ -485,7 +485,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const decSwapped = (spec) => (spec[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW
       ? [F10_22, spec[1], spec[2], spec[3], spec[4], spec[5], spec[6], { ...spec[7], ...decemberMigration.NEW_GATES }]
       : spec);
-    // 20261022194000 swaps April's 24-0-11 row for the 44-0-0 polymer bag (still a lb_n row; the target is 1.0 lb N).
+    // 20261022195000 swaps April's 24-0-11 row for the 44-0-0 polymer bag (still a lb_n row; the target is 1.0 lb N).
     const aprSwapped = (spec) => (spec[0] === aprilPolymerMigration.OLD_NAME && windowKey === aprilPolymerMigration.APRIL_WINDOW
       ? [F44_0_0, spec[1], spec[2], spec[3], spec[4], spec[5], spec[6], { ...spec[7], ...aprilPolymerMigration.NEW_GATES }]
       : spec);

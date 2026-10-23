@@ -27,8 +27,8 @@ const STW_4FL = 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbic
 const STW_15 = 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer';
 const WDG = 'Prodiamine 65 WDG';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
-// April on the 12x plan after 20261022194000: the 44-0-0 polymer bag (1.0 lb N, 22.727 lb on 10,000 sq ft).
-const aprilPolymerMigration = require('../models/migrations/20261022194000_lawn_v13_april_polymer_n_v2');
+// April on the 12x plan after 20261022195000: the 44-0-0 polymer bag (1.0 lb N, 22.727 lb on 10,000 sq ft).
+const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
 const F44 = aprilPolymerMigration.NEW_NAME;
 const DIMENSION = aprilMigration.DIMENSION;
 const DIM_2EW = octoberMigration.NAME_2EW;
@@ -155,8 +155,6 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     await product(WDG, { active_ingredient: 'Prodiamine 65.0%', formulation: 'WDG', default_rate_per_1000: 0.37, rate_unit: 'oz', min_label_rate_per_1000: 0.185, max_label_rate_per_1000: 0.83 });
     await product(F24, { category: 'fertilizer', formulation: 'granular', default_rate_per_1000: 4.2, rate_unit: 'lb', analysis_n: 24, analysis_p: 0, analysis_k: 11 });
     await product(DIMENSION, { active_ingredient: 'Dithiopyr', formulation: 'granular', default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10, max_label_rate_per_1000: 5.48, best_price: 47.5, best_vendor: 'Fixture vendor', cost_per_unit: 0.95, cost_unit: 'lb', needs_pricing: false });
-    // The polymer bag has no price (available by request): the plan still plans it.
-    await product(F44, { category: 'fertilizer', formulation: 'granular', default_rate_per_1000: 2.27, rate_unit: 'lb', analysis_n: 44, analysis_p: 0, analysis_k: 0, slow_release_n_pct: 100, needs_pricing: true });
     await product(DIM_2EW, { active_ingredient: 'Dithiopyr', formulation: 'liquid', default_rate_per_1000: 0.5, rate_unit: 'fl oz', min_label_rate_per_1000: 0.37, max_label_rate_per_1000: 0.73 });
 
     await knex('lawn_protocols').insert({ protocol_key: KEY, version: '2026.06', name: 'Fixture old', status: 'active', grass_track: 'bermuda', region: 'swfl' });
