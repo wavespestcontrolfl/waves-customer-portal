@@ -113,7 +113,7 @@ function httpError(status, message) {
 // backreference, no lookaround, no anchors. Every seed and every pattern
 // the Inbox writes fits.
 const GRAMMAR_TOKEN = /\\[bB]|\\[WwsSdD][*?]?|\\[.*+?()[\]{}|\\\/$^-]\??|\.[*?]?|[A-Za-z0-9 _&',\/#:;@%!=-]\??|\(|\)\??|\||\[\^?(?:\\.|[^\]\\])+\]\??/y;
-const GRAMMAR_HELP = 'allowed: words and spaces, |, (…) or (…)?, \\b, \\W* \\s* \\d*, . .* .?, an escaped literal such as \\., a [class], ? after one character, at most 2 wildcards, 3 optional parts and 2 groups per alternative; not allowed: + * {} on a word, class or group, backreferences, lookarounds, anchors';
+const GRAMMAR_HELP = 'allowed: words and spaces, |, (…) or (…)?, \\b, \\W* \\s* \\d*, . .* .?, an escaped literal such as \\., a [class], ? after one character, at most 2 wildcards, 3 optional parts and 2 groups per alternative, and every alternative needs some text that must match; not allowed: + * {} on a word, class or group, backreferences, lookarounds, anchors';
 // Per top-level alternative the ambiguous parts are capped too: at most
 // MAX_STARS wildcards (.* \W* \s* \d* \w*), MAX_OPTIONAL optional parts
 // (x? .? (…)? [..]?) and MAX_GROUPS groups, so the worst case on one
@@ -124,26 +124,42 @@ const MAX_STARS = 2;
 const MAX_OPTIONAL = 3;
 const MAX_GROUPS = 2; // (a|aa)(a|aa)… without any quantifier is exponential too
 const MAX_DESCRIPTION = 300;
+// A token that must consume at least one character: not |, not a paren,
+// not \b, not a part made optional or repeatable with ? or *. Every
+// alternative, at every depth, needs one — "wawa|", "(wawa|)", ".*" or "x?"
+// alone would match every description, and an owner rule outranks the seeds.
+function consumes(t) {
+  if (t === '|' || t === '(' || t[0] === ')' || /^\\[bB]$/.test(t)) return false;
+  if (t === '\\?') return true;
+  return !/[*?]$/.test(t);
+}
 function fitsGrammar(p) {
-  let depth = 0;
   let i = 0;
   let stars = 0;
   let optional = 0;
   let groups = 0;
+  const solid = [0]; // per depth: consuming tokens in the current alternative
   while (i < p.length) {
     GRAMMAR_TOKEN.lastIndex = i;
     const m = GRAMMAR_TOKEN.exec(p);
     if (!m) return false;
     const t = m[0];
-    if (t === '(') { depth += 1; groups += 1; }
-    else if (t[0] === ')') { depth -= 1; if (depth < 0) return false; }
-    if (t === '|' && depth === 0) { stars = 0; optional = 0; groups = 0; }
+    if (t === '(') { groups += 1; solid.push(0); }
+    else if (t[0] === ')') {
+      if (solid.length < 2 || solid[solid.length - 1] === 0) return false;
+      solid.pop();
+      if (t === ')') solid[solid.length - 1] += 1; // a required group counts for its parent
+    } else if (t === '|') {
+      if (solid[solid.length - 1] === 0) return false;
+      solid[solid.length - 1] = 0;
+      if (solid.length === 1) { stars = 0; optional = 0; groups = 0; }
+    } else if (consumes(t)) solid[solid.length - 1] += 1;
     if (t.endsWith('*')) stars += 1;
     else if (t.endsWith('?') && t !== '\\?') optional += 1;
     if (stars > MAX_STARS || optional > MAX_OPTIONAL || groups > MAX_GROUPS) return false;
     i += t.length;
   }
-  return depth === 0;
+  return solid.length === 1 && solid[0] > 0;
 }
 // maxLength caps what the owner types; a stored rule (seeds are long
 // alternations of literals) is checked for safety only.
@@ -360,7 +376,11 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
   const stale = !writes && !pattern && force && hasKey(sug, 'rule') && !matcherFlag;
   const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
   if (writes && matcherFlag) patch.examined = true;
-  return { skip: false, writes, stale, rule, patch, removeKeys: (writes || stale) ? CLASSIFICATION_KEYS : [], guardMatcherFlag: !matcherFlag };
+  // a stale clear also drops the override marker an owner rule left on a
+  // matcher-flagged row: with the rule gone the row returns to the
+  // matcher's reading (its next rescan flags it again), not to "unexplained"
+  const removeKeys = stale ? [...CLASSIFICATION_KEYS, 'examined'] : (writes ? CLASSIFICATION_KEYS : []);
+  return { skip: false, writes, stale, rule, patch, removeKeys, guardMatcherFlag: !matcherFlag };
 }
 
 // Writes one row's outcome and books it in the counts and the hit map —

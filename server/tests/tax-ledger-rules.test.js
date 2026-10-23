@@ -127,7 +127,9 @@ describe('compileRules / matchRule', () => {
   test('compilePattern admits only the safe grammar: the catastrophic shapes are refused, every seed and every Inbox pattern passes', () => {
     for (const bad of ['(a+)+$', '(a*)*b', '(x|xy)+z', '((ab)+)+', '(\\w+\\s?)+$', '(a?a?)+$', '(a|a)*', '(a)\\1', '(?=a)b', '(?<!a)b', '(?:ab)+', 'a{2,4}b', 'ab+', '[a-z]+', 'ab*c', '^wawa$', '(ab', 'ab)',
       // too many variable-length parts in one alternative
-      'a?'.repeat(35) + 'b', 'a?b?c?d?', '.*a.*b.*c', '\\W*\\s*\\d*x', '(a)?(b)?(c)?(d)?', '(a|aa)'.repeat(30) + 'b', '(a|aa)(b|bb)(c|cc)']) {
+      'a?'.repeat(35) + 'b', 'a?b?c?d?', '.*a.*b.*c', '\\W*\\s*\\d*x', '(a)?(b)?(c)?(d)?', '(a|aa)'.repeat(30) + 'b', '(a|aa)(b|bb)(c|cc)',
+      // an alternative with nothing that must match would match every description
+      'wawa|', '|wawa', 'wawa||shell', '(wawa|)', '(|wawa) gas', '.*', 'x?', '\\b', '(wawa)?', '\\W*', '()']) {
       expect([bad, () => svc.compilePattern(bad)]).toEqual([bad, expect.any(Function)]);
       expect(() => svc.compilePattern(bad)).toThrow(expect.objectContaining({ status: 400 }));
     }
@@ -397,13 +399,15 @@ describe('applyRules (suggestion-only)', () => {
   test('a full forced pass clears a classification an earlier rule wrote when no rule matches any more', async () => {
     state.rules = state.rules.filter((r) => r.id !== 'r-gas');
     state.bankRows = [
-      { id: 'b1', txn_date: '2026-01-02', description: 'COSTCO GAS #1', suggestion: { noMatch: true, rule: { id: 'r-gas', kind: 'expense' }, categoryId: 'cat-v', rulesAt: 'old' } },
+      // an owner override of the matcher's transfer flag (examined, no ignore) whose rule is gone
+      { id: 'b1', txn_date: '2026-01-02', description: 'COSTCO GAS #1', suggestion: { examined: true, rule: { id: 'r-gas', kind: 'expense', source: 'owner' }, categoryId: 'cat-v', rulesAt: 'old' } },
       { id: 'b7', txn_date: '2026-01-03', description: 'HOME DEPOT', suggestion: { noMatch: true, categoryId: 'cat-ai', categorySource: 'ai' } },
     ];
     const out = await svc.applyRules({ force: true });
     expect(out).toEqual({ examined: 2, suggested: 0, cleared: 1, byKind: {}, more: false, cursor: null });
     const byId = Object.fromEntries(state.updates.map((u) => [u.wheres[0].id, u.patch.suggestion]));
-    expect(byId.b1).toEqual({ merged: { rulesAt: expect.any(String) }, removed: svc.CLASSIFICATION_KEYS });
+    // the override marker goes with the stale classification: the row returns to the matcher's reading
+    expect(byId.b1).toEqual({ merged: { rulesAt: expect.any(String) }, removed: [...svc.CLASSIFICATION_KEYS, 'examined'] });
     // an AI suggestion no rule owns is left alone
     expect(byId.b7).toEqual({ merged: { rulesAt: expect.any(String) }, removed: [] });
     // the non-forced pass never clears: it only sees unstamped rows
@@ -455,7 +459,7 @@ describe('applyRules (suggestion-only)', () => {
     state.bankRows = [{ id: 'b1', txn_date: '2026-01-02', description: 'COSTCO GAS #1', suggestion: { noMatch: true, rule: { id: 'r-gas' }, categoryId: 'cat-v', rulesAt: 'old' } }];
     const out = await svc.applyRules({ force: true });
     expect(out).toEqual(expect.objectContaining({ examined: 1, cleared: 1 }));
-    expect(state.updates[0].patch.suggestion).toEqual({ merged: { rulesAt: expect.any(String) }, removed: svc.CLASSIFICATION_KEYS });
+    expect(state.updates[0].patch.suggestion).toEqual({ merged: { rulesAt: expect.any(String) }, removed: [...svc.CLASSIFICATION_KEYS, 'examined'] });
   });
 });
 
