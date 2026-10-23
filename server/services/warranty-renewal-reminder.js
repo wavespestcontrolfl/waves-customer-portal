@@ -37,7 +37,8 @@ function isoFromUs(value) {
   if (!match) return null;
   const iso = `${match[3]}-${match[1]}-${match[2]}`;
   const check = new Date(`${iso}T12:00:00Z`);
-  return check.toISOString().slice(0, 10) === iso ? iso : null;
+  // Month 13 is an Invalid Date, which toISOString would throw on.
+  return !Number.isNaN(check.getTime()) && check.toISOString().slice(0, 10) === iso ? iso : null;
 }
 
 function snapshotOf(row) {

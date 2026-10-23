@@ -33,6 +33,7 @@ describe('warranty renewal reminder (pure)', () => {
   test('reads the signed MM/DD/YYYY date and composes a rule-clean office notification', () => {
     expect(isoFromUs('10/01/2027')).toBe('2027-10-01');
     expect(isoFromUs('02/30/2027')).toBeNull();
+    expect(isoFromUs('13/45/2027')).toBeNull();
     expect(isoFromUs('2027-10-01')).toBeNull();
     const spec = alertSpec({ id: 'c1', customer_id: 'cust-1', day: '2027-10-01', first_name: 'Pat', last_name: 'Owner', company_name: null });
     const composed = composeAdminAlert(spec);
