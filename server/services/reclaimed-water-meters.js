@@ -69,6 +69,16 @@ function rawCoordinate(value) {
   return NaN;
 }
 
+// One in-service feature as a point, or null when its id or geometry is unusable.
+function featurePoint(feature) {
+  const objectid = Number(feature?.attributes?.OBJECTID);
+  const lng = rawCoordinate(feature?.geometry?.x);
+  const lat = rawCoordinate(feature?.geometry?.y);
+  if (!Number.isInteger(objectid) || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) return null;
+  return isInService(feature.attributes) ? { objectid, lat, lng } : null;
+}
+
 // One ArcGIS answer to points. A feature with no usable geometry, or one that is retired or not in service, is dropped; the server reports its own error as a 200 body.
 function parsePage(body) {
   if (!body || typeof body !== 'object') throw Object.assign(new Error('county layer answered with no body'), { code: 'bad_body' });
@@ -79,13 +89,8 @@ function parsePage(body) {
   const features = body.features;
   const points = [];
   for (const feature of features) {
-    const objectid = Number(feature?.attributes?.OBJECTID);
-    const lng = rawCoordinate(feature?.geometry?.x);
-    const lat = rawCoordinate(feature?.geometry?.y);
-    if (!Number.isInteger(objectid) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-    if (Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) continue;
-    if (!isInService(feature.attributes)) continue;
-    points.push({ objectid, lat, lng });
+    const point = featurePoint(feature);
+    if (point) points.push(point);
   }
   return { points, received: features.length, more: body.exceededTransferLimit === true };
 }
