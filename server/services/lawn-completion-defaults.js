@@ -134,11 +134,18 @@ const isCutTarget = (unit, range, target, nitrogenCut) => unit === 'lb_n' && nit
 // (GATE_LAWN_NOV_LARGE_PATCH_N: the decision visitNutrientTargets returned, never re-derived here), else null. A lb_n row
 // whose stored range admits `from` then also admits a mix sized for exactly `to`, because the stored row keeps the program's own range (gates.targetN) and the cut is the plan's override of it. No other
 // row, unit or value is loosened.
-function archivedRateMatches(product, mix, nitrogenCut = null) {
+// `chinchRate` is `{ from, to, productName }` (GATE_LAWN_CHINCH_TETRINO_RATE): the May Tetrino rate the stored row states and the raised
+// one the plan applied to THIS visit. A row of that product whose stored rate is exactly `from` also admits a mix at exactly `to`. No
+// other row, unit or value is loosened.
+const isRaisedRate = (product, mix, chinchRate) => chinchRate != null
+  && String(product.productName ?? product.protocolProductName ?? '').trim() === chinchRate.productName
+  && Number(product.ratePer1000) === Number(chinchRate.from) && mix?.ratePer1000 === Number(chinchRate.to);
+
+function archivedRateMatches(product, mix, nitrogenCut = null, chinchRate = null) {
   if (product.ratePer1000 != null) {
     // Protocol rows and the catalog spell the same unit differently ('fl oz'
     // vs 'fl_oz'); only a different physical unit is recipe drift.
-    return Number(product.ratePer1000) > 0 && Number(product.ratePer1000) === mix?.ratePer1000
+    return Number(product.ratePer1000) > 0 && (Number(product.ratePer1000) === mix?.ratePer1000 || isRaisedRate(product, mix, chinchRate))
       && normalizeInventoryUnit(product.rateUnit) === normalizeInventoryUnit(mix?.rateUnit);
   }
   const unit = String(product.rateUnit || '').toLowerCase();
@@ -155,7 +162,7 @@ function archivedRateMatches(product, mix, nitrogenCut = null) {
 // `swap` is the rule the plan applied to THIS visit (GATE_LAWN_DEC_LARGE_PATCH_K: the decision visitNutrientTargets returned): the whole-lawn
 // bag it replaced (`from`) is then not expected among the selected items, its replacement (`to`) is a non-default row of the same window
 // that is checked like any other row (its stored K target, its mix), and nothing else is loosened. null = no swap.
-function archivedLawnRecipeMatches(protocol, items, nitrogenCut = null, swap = null) {
+function archivedLawnRecipeMatches(protocol, items, nitrogenCut = null, chinchRate = null, swap = null) {
   if (protocol?.status !== 'archived') return true;
   const selected = items.filter(item => item.selected && item.product);
   const products = protocol.products || [];
@@ -163,7 +170,7 @@ function archivedLawnRecipeMatches(protocol, items, nitrogenCut = null, swap = n
   return products.filter(product => product.defaultInPlan && !replaced(product)).every(product => selected.some(item => item.product.id === product.productId))
     && selected.every(item => {
       const product = products.find(row => row.productId === item.product.id);
-      return !!product && !item.substitution && archivedRateMatches(product, item.mix, nitrogenCut)
+      return !!product && !item.substitution && archivedRateMatches(product, item.mix, nitrogenCut, chinchRate)
         && product.applicationMode === (item.scope?.includes('SPOT') ? 'spot' : 'broadcast');
     });
 }

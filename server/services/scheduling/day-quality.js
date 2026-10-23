@@ -13,6 +13,7 @@ const { isHoldStop } = require('./travel-gap');
 const QUALITY_EXCLUDED_STATUSES = [...require('../stops-ahead').NOT_A_ROUTE_STOP_STATUSES, 'completed'];
 const { parseHHMM } = require('./window-rules');
 const { plannedWorkMinutes } = require('./planning-minutes');
+const { loadTechStartPoints, homeFromMap } = require('./tech-start-point');
 
 // Two customers promised the same technician at the same time. Staff and
 // phone-reschedule saves commit through such a clash by owner ruling
@@ -216,6 +217,10 @@ function unallocatedSummary(unallocated, includeStopExtras) {
 
 function measureDayQuality(RouteOptimizer, stops, {
   departureMinutes = null, targetReturnMinutes = null, breakMinutes = null, future = true,
+  // Where this tech's day starts and ends (GATE_TECH_START_POINTS): the
+  // office (simulateArrivalRoute's default) unless the caller passes the
+  // tech's start point. Never put it in the returned measurement.
+  home,
 } = {}) {
   const modeledDeparture = departureMinutes ?? 480;
   const ordered = currentOrder(stops);
@@ -256,7 +261,7 @@ function measureDayQuality(RouteOptimizer, stops, {
   // reportLate is diagnostic only. Writers use the default fail-on-lateness
   // simulation; an overloaded route still needs measurable lateness here.
   const simulation = !missingCoordinates.length && !grouped
-    ? simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered, { startMin: modeledDeparture, reportLate: true }) : null;
+    ? simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered, { startMin: modeledDeparture, reportLate: true, origin: home, end: home }) : null;
   const budget = !unknown.length && simulation
     ? targetReturnMinutes - departureMinutes - serviceMinutes - simulation.travelMin - breakMinutes : null;
   return {
@@ -341,6 +346,9 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
   const candidate = input.candidate_service_id
     ? await require('./gap-candidates').loadGapCandidate(input.candidate_service_id, conn) : null;
   const techs = await applyAssignable(conn('technicians')).select('technicians.id', 'technicians.name');
+  // Every tech's start point in one query (none with the gate off); a tech
+  // without one is measured from the office. Coordinates stay out of results.
+  const techHomes = await loadTechStartPoints(conn, techs.map(tech => tech.id));
   // Strict lookup: a failed closure read must not certify open capacity.
   const blackouts = await getBlackoutLayers(from, to, conn);
   const days = [];
@@ -353,8 +361,10 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
     const closed = blackouts.dates.has(date);
     const byTech = techs.map(tech => {
       const techStops = stops.filter(stop => stop.technician_id === tech.id);
+      const home = homeFromMap(techHomes, tech.id);
       const quality = measureDayQuality(RouteOptimizer, techStops, {
         departureMinutes, targetReturnMinutes, breakMinutes, future: date > today,
+        home,
       });
       if (unallocated.length || closed) {
         quality.remainingServiceBudgetMinutes = null;
@@ -365,6 +375,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
       }
       const candidateAnalysis = candidate ? require('./gap-candidates').analyzeGapCandidate(candidate, stops, {
         date, technicianId: tech.id, now, today, departureMinutes, targetReturnMinutes, breakMinutes, closed,
+        home,
       }) : null;
       if (candidateAnalysis) {
         quality.feasibleInsertionWindows = candidateAnalysis.feasibleInsertionWindows;

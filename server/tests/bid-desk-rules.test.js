@@ -60,6 +60,12 @@ describe('reminderDue', () => {
     expect(reminderDue(due(3 * DAY, { needs_date_confirmation: true }), NOW)).toBeNull();
   });
 
+  test('a notice closed on SAM.gov is never reminded, even with a confirmed date', () => {
+    expect(reminderDue(due(3 * DAY, { source_active: false }), NOW)).toBeNull();
+    expect(reminderDue(due(3 * DAY, { source_active: true }), NOW)).toBe('7d');
+    expect(reminderDue(due(3 * DAY, { source_active: null }), NOW)).toBe('7d');
+  });
+
   const due = (ms, over = {}) => bid({ due_at: new Date(NOW.getTime() + ms), due_confirmed: true, ...over });
 
   test('an unconfirmed date never reminds', () => {
@@ -146,5 +152,16 @@ describe('notification copy follows the admin notification rule', () => {
     expect(reminderSpec(at(new Date(NOW.getTime() + 2 * DAY)), '2d', NOW).spec.action).toMatch(/due in 2 days/);
     expect(reminderSpec(at(new Date(NOW.getTime() + 1 * DAY)), '7d', NOW).spec.action).toMatch(/due tomorrow/);
     expect(reminderSpec(at(new Date(NOW.getTime() + 3 * DAY)), '7d', NOW).spec.action).toMatch(/due in 3 days/);
+  });
+
+  test('a closed SAM.gov notice asks for a decision, not a date', () => {
+    const closed = { ...dated, source: 'sam_gov', source_active: false, due_source_line: 'SAM.gov no longer lists this notice as active' };
+    const { spec, detail } = addendumSpec(closed, null);
+    expect(() => composeAdminAlert(spec)).not.toThrow();
+    expect(spec.doneWhen).toBe('bid_decided');
+    expect(spec.action).toMatch(/SAM\.gov closed/);
+    expect(detail).not.toMatch(/confirm the due date/);
+    // A moved deadline on an active notice is still a date question.
+    expect(addendumSpec({ ...closed, source_active: true }, null).spec.doneWhen).toBe('due_date_confirmed');
   });
 });

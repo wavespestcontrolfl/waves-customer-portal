@@ -313,6 +313,28 @@ describe('buildLawnFastContext', () => {
     expect(spray).not.toHaveProperty('gateNotes');
   });
 
+  test('GATE_LAWN_CHINCH_TETRINO_RATE: a Tetrino line the plan sized at the raised rate keeps its chinch note and amount on the sheet; no other planned row gains a note', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const NOTE = "Chinch bugs mapped here: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.";
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [
+          {
+            product: { id: P_HERB, name: 'Tetrino Insecticide' }, applicationMethod: 'broadcast_spray',
+            mix: { amount: 3.675, amountUnit: 'fl oz', ratePer1000: 0.735, rateUnit: 'fl oz', treatedSqft: 5000 },
+            gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }, { key: 'chinchTetrinoRate', severity: 'note', text: NOTE }],
+          },
+          { product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' }, gateNotes: [{ key: 'delayWateringHours', severity: 'note', text: 'Delay watering for 24 hours.' }] },
+        ],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    const [tetrino, feed] = ctx.plannedProducts.items;
+    expect(tetrino).toMatchObject({ productId: P_HERB, amount: 3.675, amountUnit: 'fl oz', ratePer1000: 0.735, rateUnit: 'fl oz', treatedSqft: 5000, gateNotes: [NOTE] });
+    expect(feed).not.toHaveProperty('gateNotes');
+  });
+
   describe('a visit that OFFERS the bermuda removal mix takes the full form, whatever the completion defaults or the visit type say', () => {
     const removal = require('../services/lawn-bermuda-removal');
     let offered;
@@ -1260,7 +1282,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const byKind = Object.fromEntries(result.cards.map((card) => [card.kind, card]));
       expect(byKind.weeds).toMatchObject({ finding: 'Photos show weeds on about 30% of the lawn.', productIds: [P_LEAD, P_CERT], detail: 'Test Lead WG, Test Cert Herbicide' });
       expect(byKind.fungus).toMatchObject({ productIds: [P_ART], detail: 'Test Artavia — mapped large patch', items: [expect.objectContaining({ productId: P_ART })] });
-      expect(byKind.chinch).toMatchObject({ productIds: [P_ARENA], check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.', actionLabel: 'Found at the edge. Add it' });
+      expect(byKind.chinch).toMatchObject({ productIds: [P_ARENA], check: 'Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.', actionLabel: 'Found at the edge. Add it' });
       expect(byKind.caterpillars).toMatchObject({ productIds: [P_ACE] });
       expect(byKind.dry_spots).toMatchObject({ productIds: [P_DISP] });
     });

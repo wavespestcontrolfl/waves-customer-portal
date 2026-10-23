@@ -32,6 +32,7 @@ const shotList = require('./lawn-photo-shots');
 const bermudaRemoval = require('./lawn-bermuda-removal');
 const { FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
 const { PRODUCT_SWAP_NOTE_KEY } = require('../config/lawn-v13-trouble-product-swaps');
+const { CHINCH_TETRINO_NOTE_KEY } = require('../config/lawn-v13-chinch-rate');
 const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
 
 const LAWN_CATEGORY = 'lawn_care';
@@ -543,8 +544,9 @@ function programRateFor(item, programRows) {
 
 // GATE_LAWN_NOV_LARGE_PATCH_N / GATE_LAWN_DEC_LARGE_PATCH_K: a nitrogen line the plan sized for the reduced target (or the potassium bag the plan swapped in) keeps the plan's note on the sheet (the planned row
 // prints its gateNotes). Only that note is carried: every other planned row is the payload it was. `{}` when the plan did not cut the bag.
+// GATE_LAWN_CHINCH_TETRINO_RATE: the Tetrino line the plan sized at the raised chinch rate keeps its note the same way.
 function fungusNitrogenNoteOf(item) {
-  const texts = (Array.isArray(item.gateNotes) ? item.gateNotes : []).filter((note) => (note?.key === FUNGUS_NITROGEN_NOTE_KEY || note?.key === PRODUCT_SWAP_NOTE_KEY) && note.text).map((note) => note.text);
+  const texts = (Array.isArray(item.gateNotes) ? item.gateNotes : []).filter((note) => (note?.key === FUNGUS_NITROGEN_NOTE_KEY || note?.key === CHINCH_TETRINO_NOTE_KEY || note?.key === PRODUCT_SWAP_NOTE_KEY) && note.text).map((note) => note.text);
   return texts.length ? { gateNotes: texts } : {};
 }
 
