@@ -337,9 +337,11 @@ export default function LedgerInboxTab() {
         await post(`${T}/ledger/decide`, { id: row.id, decision, always: !!always });
       }
       // a decision that keeps the row on the current shelf reloads the view
-      // instead of hiding the row (an unrecorded receipt must stay visible)
+      // instead of hiding the row (an unrecorded receipt must stay visible);
+      // an Always decision reloads too, because the new rule has just
+      // re-labelled every other row of that payee on the server
       const stays = decision === view;
-      if (stays) {
+      if (stays || always) {
         await loadRows(view, 0);
       } else {
         setRows((prev) => prev.filter((r) => r.id !== row.id));

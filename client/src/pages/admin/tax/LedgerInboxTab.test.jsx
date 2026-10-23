@@ -236,3 +236,25 @@ it('checking Always removes the Later action, and a decided row shows the decisi
   expect(within(decided).getByText('income')).toBeInTheDocument();
   expect(within(decided).queryByText(/review/)).not.toBeInTheDocument();
 });
+
+it('an Always decision reloads the view so sibling rows show the new rule', async () => {
+  let inboxLoads = 0;
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/inbox')) {
+      inboxLoads += 1;
+      const sibling = { ...row, id: 'row-5', description: 'ACME HARDWARE 999', suggestion: inboxLoads >= 2 ? { ...row.suggestion, rule: { id: 'r-owner', kind: 'personal', source: 'owner' }, personal: true, categoryName: null } : null };
+      return json({ rows: inboxLoads >= 2 ? [sibling] : [row, sibling], total: inboxLoads >= 2 ? 1 : 2 });
+    }
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  const card = await screen.findByTestId('ledger-row-row-1');
+  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later)'));
+  fireEvent.click(within(card).getByRole('button', { name: 'Personal' }));
+  await waitFor(() => expect(inboxLoads).toBeGreaterThanOrEqual(2));
+  const sibling = await screen.findByTestId('ledger-row-row-5');
+  await waitFor(() => expect(within(sibling).getByText('personal')).toBeInTheDocument());
+  expect(screen.queryByTestId('ledger-row-row-1')).not.toBeInTheDocument();
+});
