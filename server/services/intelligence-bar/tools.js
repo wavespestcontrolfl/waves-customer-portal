@@ -2860,9 +2860,21 @@ async function cancelPlan(input, actionContext = {}) {
       const why = preview.scopeError === 'scope_not_owned'
         ? 'That service is not on the plan any more.'
         : preview.scopeError === 'scoped_covers_prepaid'
-          ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan, or leave the covered service in place.'
+          ? (preview.prepayRefund90Day === true
+            ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (refunded only within 90 days of its start; after that it ends at the end of paid coverage with no refund), or leave the covered service in place.'
+            : 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan, or leave the covered service in place.')
           : 'The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first.';
       return { error: why, code: preview.scopeError || 'scoped_unsupported' };
+    }
+    // GATE_PREPAY_REFUND_90_DAY: past day 90 "end now" is not offered (no
+    // refund is owed, the customer keeps the paid coverage). A card for it
+    // would fail on Confirm, so it is a tool failure here, like the other
+    // unexecutable previews above.
+    if (preview.prepay && preview.prepay.endNowAvailable === false && preview.prepay.disposition === 'end_now_refund') {
+      return {
+        error: 'Ending now is not offered: this plan started more than 90 days ago, so no refund is owed and the paid visits stay (owner rule). Propose End of paid coverage (effective_date end_of_coverage) instead.',
+        code: 'end_now_past_refund_window',
+      };
     }
     const impact = preview.impact || {};
     return {
@@ -3939,11 +3951,6 @@ async function createAppointment(input, actionContext = {}) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
-    // Visit groups (visit-group-scope.md §2): stamp at scheduling —
-    // gate-checked + best-effort + self-refusing inside maybeGroupRow
-    // (savepoint on the trx; a grouping failure never poisons the booking;
-    // the IB write-gate confirm boundary is upstream and unaffected).
-    await require('../visit-groups').maybeGroupRow(created.id, { database: trx, createdBy: 'dispatch' });
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the

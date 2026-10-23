@@ -7,6 +7,7 @@ const {
   selectRemainingServicePrompt, resolveRemainingServiceModules, REMAINING_SERVICE_PROMPT_VERSION, REMAINING_SERVICE_MODIFIERS,
 } = require('./remaining-service-copy-prompts');
 const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt, PEST_WRITER_ADAPTER } = require('./report-writer-rules');
+const { pestReportVoicePrompt } = require('./pest-report-voice');
 
 const LAWN_COPY_CORE = `## ROLE AND PURPOSE
 
@@ -233,10 +234,14 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
     ? [...modules.lawn, LAWN_RESULT_TIMING_RULE]
     : modules[writer];
   if (!selected) return null;
+  const reservice = context.isCallback === true || context.serviceKey === 'pest_re_service';
+  // GATE_PEST_REPORT_VOICE (pest-report-voice.js): under the writer rules the
+  // recurring pest writer gets one prompt in one voice in place of the
+  // stacked blocks below. Inputs and output screens stay the same.
+  if (writerRules && writer === 'pest' && context.pestVoice === true) return pestReportVoicePrompt({ reservice });
   // Under the writer rules a pest re-service gets the remaining-service
   // callback modifier, which the pest writer never received.
-  const callback = writerRules && writer === 'pest'
-    && (context.isCallback === true || context.serviceKey === 'pest_re_service')
+  const callback = writerRules && writer === 'pest' && reservice
     ? [REMAINING_SERVICE_MODIFIERS.callback] : [];
   // The pest writer's own fill-in block comes last, after the constraints
   // and the module it builds on (owner 2026-10-09).

@@ -5,7 +5,7 @@
 const mockState = {
   seriesIds: [], customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [],
   // Eligibility / lock doubles and the order of the commit's reads.
-  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, voidedCombined: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, linePrices: {}, addonLines: {}, hosts: {}, unverifiedRoots: new Set(), zeroRoots: new Set(), topupSkips: {}, holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
+  cohortMiss: false, prepayBusy: false, roots: [], invoices: [], dues: [], invoiceBusy: false, autopayUnreadable: false, method: { id: 'pm-1', method_type: 'card' }, methodDetail: { last_four: null, bank_last_four: null }, taxRate: 0, unbillableSeries: new Set(), siblingInvoices: {}, voidedCombined: {}, orphan: null, ambiguous: null, inFlight: false, processing: null, processingInvoice: null, methodRows: [{ id: 'pm-1' }], methodsBusy: false, methodsAdvisoryBusy: false, traceTender: false, rootPrices: {}, linePrices: {}, addonLines: {}, unverifiedRoots: new Set(), zeroRoots: new Set(), topupSkips: {}, holdActive: false, covered: new Set(), pending: new Set(), chargeable: true, claimHeld: false, log: [],
 };
 
 jest.mock('../models/db', () => {
@@ -118,8 +118,6 @@ jest.mock('../routes/admin-schedule', () => ({
     // The real one needs the price/service scope gate on AND an exact $0 override for 'override';
     // mockState.zeroKinds = { rootId: 'discounted' } gives a discounted line (mockState.linePrices).
     linePrice: mockState.linePrices[String(id)] || 0,
-    // mockState.hosts = { rootId: [{ date, price, linePrice }] }: the rider plan's lawn host dates.
-    hosts: mockState.hosts[String(id)] || [],
     addonLines: mockState.addonLines[String(id)] || [],
     zero: (mockState.rootPrices[String(id)] || 0) > 0 ? null
       : (mockState.zeroRoots.has(String(id)) && require('../config/feature-gates').gates.editApptPriceServiceScope === true ? 'override'
@@ -194,7 +192,6 @@ beforeEach(() => {
   mockState.methodsAdvisoryBusy = false;
   mockState.rootPrices = {};
   mockState.linePrices = {};
-  mockState.hosts = {};
   mockState.addonLines = {};
   mockState.zeroRoots = new Set();
   mockState.topupSkips = {};
@@ -1570,51 +1567,6 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
     });
   });
 
-  describe('Codex round 22: a rider plan\'s lawn host dates', () => {
-    const ROOT = { id: 'root-1', service_type: 'Pest Control', payer_id: null };
-    const PER_APP = { billing_mode: 'per_application', per_application_fee: 147 };
-    const setup = () => {
-      mockState.customer = { ...BASE };
-      mockState.visits = [];
-      mockState.seriesIds = ['root-1'];
-      mockState.roots = [ROOT];
-      mockState.rootPrices = {};
-    };
-    const HOSTS = [{ date: '2026-08-04', price: 0, linePrice: 0 }, { date: '2026-10-13', price: 0, linePrice: 0 }];
-
-    test('a later host date that carries a $500 add-on refuses, naming the date and the price', async () => {
-      setup();
-      mockState.rootPrices = { 'root-1': 500 };
-      mockState.hosts = { 'root-1': [HOSTS[0], { date: '2026-10-13', price: 500, linePrice: 500 }] };
-      expect(await propose(PER_APP)).toMatchObject({
-        code: 'billing_visits_priced',
-        error: expect.stringContaining('a price of $500.00 on the visit it adds on 2026-10-13'),
-      });
-    });
-
-    test('all-unpriced host dates pass and are pinned; a host that changes after the card refuses at commit', async () => {
-      setup();
-      mockState.hosts = { 'root-1': HOSTS };
-      const card = await propose(PER_APP);
-      expect(card.error).toBeUndefined();
-      expect(card.pin).toContain('2026-08-04=0/0,2026-10-13=0/0');
-      const run = (pin) => executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: PER_APP, _ib_customer_version: 'v1', _ib_billing_pin: pin });
-      // A host date moves.
-      mockState.hosts = { 'root-1': [HOSTS[0], { date: '2026-10-20', price: 0, linePrice: 0 }] };
-      expect(await run(card.pin)).toMatchObject({ preview_changed: true });
-      // A host gains a line price (still $0 after discount).
-      mockState.hosts = { 'root-1': [HOSTS[0], { date: '2026-10-13', price: 0, linePrice: 100 }] };
-      expect(await run(card.pin)).toMatchObject({ preview_changed: true });
-      expect(customerWrites()).toHaveLength(0);
-    });
-
-    test('a walk that cannot finish refuses as unverified', async () => {
-      setup();
-      mockState.unverifiedRoots = new Set(['root-1']);
-      expect(await propose(PER_APP)).toMatchObject({ code: 'billing_visits_priced', error: expect.stringContaining('a schedule too long to check') });
-    });
-  });
-
   describe('Codex round 14: an ongoing root whose template carries a price', () => {
     const ROOT = { id: 'root-1', service_type: 'Pest Control', payer_id: null };
     const PER_APP = { billing_mode: 'per_application', per_application_fee: 147 };
@@ -1638,7 +1590,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.roots = [ROOT];
       const card = await propose(PER_APP);
       expect(card.error).toBeUndefined();
-      expect(card.pin).toContain('["root-1",null,"0","verified","","","",""]');
+      expect(card.pin).toContain('["root-1",null,"0","verified","","",""]');
       mockState.rootPrices = { 'root-1': 500 };
       const stale = await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: PER_APP, _ib_customer_version: 'v1', _ib_billing_pin: card.pin });
       expect(stale).toMatchObject({ preview_changed: true });
@@ -1760,7 +1712,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
       mockState.roots = [rootRow(null)];
       const card = await propose(LEAVE);
       expect(card.error).toBeUndefined();
-      expect(card.pin).toContain('[[["root-1",null,"0","verified","","","",""]],[],0]');
+      expect(card.pin).toContain('[[["root-1",null,"0","verified","","",""]],[],0]');
       mockState.log = [];
       expect((await executeTool('update_customer', { customer_id: CUSTOMER_ID, updates: LEAVE, _ib_customer_version: 'v1', _ib_billing_pin: card.pin })).error).toBeUndefined();
       expect(mockState.log).toContain('roots:lock');

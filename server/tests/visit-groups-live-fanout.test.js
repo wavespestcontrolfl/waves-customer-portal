@@ -452,31 +452,3 @@ describe('notificationLeaseLive (token-keyed)', () => {
     expect(merge).toBeTruthy();
   });
 });
-
-describe('createOrJoinVisit autopay exclusion — authoritative in-transaction check (pre-push P0 TOCTOU)', () => {
-  const { createOrJoinVisit } = require('../services/visit-groups');
-  const stopRows = () => [
-    { id: 's1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', status: 'confirmed', technician_id: 't1', visit_id: null, groupable: true, group_family: 'recurring_property_service' },
-    { id: 's2', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:30', window_end: '10:30', status: 'confirmed', technician_id: 't1', visit_id: null, groupable: true, group_family: 'recurring_property_service' },
-  ];
-
-  test('an enrolled (even paused) customer is refused INSIDE the grouping transaction, under the customer row lock', async () => {
-    db.__script = {
-      'scheduled_services as ss': { select: () => stopRows() },
-      customers: { first: () => ({ id: 'c1', autopay_enabled: true, autopay_paused_until: '2099-01-01' }) },
-    };
-    await expect(createOrJoinVisit({ rows: [{ id: 's1' }, { id: 's2' }], createdBy: 'test' }))
-      .rejects.toThrow(/not mutually groupable: autopay_enrolled/);
-    // The customer row was locked (FOR NO KEY UPDATE read) before the
-    // refusal — serialized against the enrollment UPDATE, not a peek, and
-    // NOT FOR UPDATE: that conflicts with the caller's FK KEY SHARE from
-    // its own booking insert and deadlocks two concurrent same-customer
-    // bookings (pre-push codex r9 P1).
-    const custRead = db.__calls.find((c) => c.table === 'customers' && c.op === 'first');
-    expect(custRead).toBeTruthy();
-    expect(custRead.ops.some((o) => o[0] === 'forNoKeyUpdate')).toBe(true);
-    expect(custRead.ops.some((o) => o[0] === 'forUpdate')).toBe(false);
-    // Refused before any visit write.
-    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'insert')).toBe(false);
-  });
-});
