@@ -221,6 +221,30 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     expect(await svc.sweepIbCancelBundles()).toMatchObject({ recovered: 1 });
   });
 
+  test('an exhausted bundle on a restored visit is abandoned, not expired; a restore in flight at the expired write keeps it pending', async () => {
+    const restoredId = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+    await app(TABLE).where({ id: restoredId }).update({ attempts: 5, lease_owner: null, lease_until: null, created_at: app.raw("now() - interval '3 hours'") });
+    await app('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+    await app('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() });
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ abandoned: 1, reported: 0 });
+    expect(await app(TABLE).where({ id: restoredId }).first()).toMatchObject({ status: 'abandoned' });
+    // Back to a cancelled visit (a new generation), and a fresh exhausted bundle for it.
+    await app('scheduled_services').where({ id: visit }).update({ status: 'cancelled' });
+    await app('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: app.fn.now() });
+    const busyId = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+    await app(TABLE).where({ id: busyId }).update({ attempts: 5, lease_owner: null, lease_until: null, created_at: app.raw("now() - interval '3 hours'") });
+    const restoring = await app.transaction();
+    try {
+      await restoring('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ failed: 1, reported: 0 });
+      expect(await app(TABLE).where({ id: busyId }).first()).toMatchObject({ status: 'pending', lease_owner: null });
+    } finally {
+      await restoring.rollback();
+    }
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ reported: 1 });
+    expect(await app(TABLE).where({ id: busyId }).first()).toMatchObject({ status: 'expired', finish_note: 'attempts_exhausted' });
+  });
+
   test('a visit restored after the cancel is abandoned: nothing runs', async () => {
     const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
     await ageBundle(id, 30);

@@ -892,6 +892,63 @@ describe('races and a lost lease', () => {
   });
 });
 
+describe('an unactable bundle on a visit that was restored', () => {
+  const exhausted = (over = {}) => seedBundle({ attempts: svc.MAX_ATTEMPTS, lease_owner: null, lease_until: null, ...over });
+  const restore = () => {
+    mockStore.visits[0].status = 'confirmed';
+    mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
+  };
+
+  test.each([
+    ['out of attempts', {}],
+    ['past the 24 hour limit', { created_at: new Date(mockNow.getTime() - 25 * HOUR), attempts: 1 }],
+  ])('%s: the abandonment is recorded (saved outcomes and text evidence kept), never an expired report about a "cancelled visit"', async (_label, over) => {
+    exhausted({
+      ...over,
+      followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN),
+      followthrough_outcome: { money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'paid_since_card' }], linked_skipped: [] },
+      notice_outcome: { state: 'partial', note: 'one recipient not reached', by: 'sweep' },
+    });
+    restore();
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary).toMatchObject({ abandoned: 1, reported: 0 });
+    expect(mockStore.bundles[0].status).toBe('abandoned');
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.warning).toMatch(/no longer the cancelled visit/);
+    expect(result.warning).not.toMatch(/could not be confirmed/);
+    expect(result).toMatchObject({ customer_text_partial: true, money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'paid_since_card' }] });
+    expect(mockRaised[0].spec.why).not.toMatch(/not confirmed finished/);
+  });
+
+  test('a restore between the check and the expired write abandons instead, replacing the provisional report', async () => {
+    exhausted();
+    mockRecordResult.mockImplementationOnce(async () => { restore(); return true; });
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary).toMatchObject({ abandoned: 1, reported: 0 });
+    expect(mockStore.bundles[0].status).toBe('abandoned');
+    expect(mockRecordResult).toHaveBeenCalledTimes(2);
+    expect(mockRecordResult.mock.calls[0][1].warning).toMatch(/could not be confirmed/);
+    expect(mockRecordResult.mock.calls[1][1].warning).toMatch(/no longer the cancelled visit/);
+    expect(mockRaised[1].opts.dedupeKey).toBe(mockRaised[0].opts.dedupeKey);
+  });
+
+  test('a visit that is only busy at the expired write leaves the bundle for the next pass; a standing cancel expires as before', async () => {
+    exhausted();
+    const fenceModule = require('../services/cancel-generation-fence');
+    const spy = jest.spyOn(fenceModule, 'assertCancelGeneration').mockImplementationOnce(async (_conn, fence) => {
+      fence.hits.push('visit_busy');
+      throw new fenceModule.CancelFenceError('visit_busy');
+    });
+    const first = await svc.sweepIbCancelBundles();
+    expect(first).toMatchObject({ failed: 1, reported: 0 });
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'pending', lease_owner: null });
+    const second = await svc.sweepIbCancelBundles();
+    expect(second.reported).toBe(1);
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'expired', finish_note: 'attempts_exhausted' });
+    spy.mockRestore();
+  });
+});
+
 describe('an exhausted bundle reports what it saved', () => {
   test('every step finished but finalization kept failing: the result says so and keeps the skipped lists and the text state', async () => {
     seedBundle({

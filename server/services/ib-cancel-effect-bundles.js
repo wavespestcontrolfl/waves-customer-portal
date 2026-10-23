@@ -677,6 +677,13 @@ async function finishRecovered(bundle, token, ft, notice) {
 // has none after the money steps) cannot be recorded as a clean recovery of a live visit. The receipt and alert written just
 // before are provisional: a restore found here abandons the bundle, which replaces both. A visit that is only busy retries.
 async function terminalizeRecovered(bundle, token) {
+  await terminalizeOwned(bundle, token, { status: 'recovered', finish_note: 'sweep' });
+}
+
+// The shared terminal write: the proof and the owned status update in one transaction. A restore found there throws Abandon
+// (the caller reports the abandonment, replacing its provisional outputs); a visit that is only busy throws a plain error, so
+// the row stays pending and the next pass retries.
+async function terminalizeOwned(bundle, token, patch) {
   const { assertCancelGeneration, isCancelFence } = require('./cancel-generation-fence');
   const fence = { visitId: bundle.scheduled_service_id, restorations: bundle.restorations_seen, hits: [] };
   try {
@@ -684,7 +691,7 @@ async function terminalizeRecovered(bundle, token) {
       await assertCancelGeneration(trx, fence);
       const rows = await trx(TABLE)
         .where({ id: bundle.id, lease_owner: token, status: 'pending' })
-        .update({ status: 'recovered', finished_at: db.fn.now(), finish_note: 'sweep', lease_owner: null, lease_until: null, updated_at: db.fn.now() });
+        .update({ ...patch, finished_at: db.fn.now(), lease_owner: null, lease_until: null, updated_at: db.fn.now() });
       if (!rows) throw new LeaseLost(`lease on bundle ${bundle.id} was lost`);
     });
   } catch (err) {
@@ -835,7 +842,26 @@ function unactableResult(bundle, { why, open, done, notice }) {
 }
 
 // A bundle past the hard stop or out of attempts is only REPORTED: nothing runs, the office checks the visit by hand.
+// Returns 'reported' (the expired report) or 'abandoned' (the visit was restored: the abandonment report instead).
 async function reportUnactable(bundle, token) {
+  // A bundle that ran out of time or attempts AFTER its visit was restored must not be reported as unresolved work on a
+  // "cancelled visit": the abandonment result (with the saved outcomes and text evidence) is the right record.
+  const standing = await cancelStillStands(bundle);
+  if (!standing.ok) {
+    await finishAbandoned(bundle, token, standing.reason);
+    return 'abandoned';
+  }
+  try {
+    await reportExpired(bundle, token);
+    return 'reported';
+  } catch (err) {
+    if (!(err instanceof Abandon)) throw err;
+    await finishAbandoned(bundle, token, err.reason, err.partial);
+    return 'abandoned';
+  }
+}
+
+async function reportExpired(bundle, token) {
   const why = bundle.attempts >= MAX_ATTEMPTS && new Date(bundle.created_at).getTime() > Date.now() - HARD_STOP_MS
     ? 'attempts_exhausted'
     : 'hard_stop';
@@ -865,7 +891,8 @@ async function reportUnactable(bundle, token) {
       : 'The approved cancel steps finished, but the recovery could not be finalized.',
     lines,
   });
-  await ownedUpdate(bundle.id, token, { status: 'expired', finished_at: db.fn.now(), finish_note: why, lease_owner: null, lease_until: null });
+  // The terminal write carries the generation proof too: a restore between the check above and this write abandons instead.
+  await terminalizeOwned(bundle, token, { status: 'expired', finish_note: why });
 }
 
 async function assertCompleteOwned(id, token) {
@@ -940,8 +967,7 @@ async function sweepIbCancelBundles() {
     const stale = await claimUnactable(reportToken);
     if (!stale) break;
     try {
-      await reportUnactable(stale, reportToken);
-      summary.reported += 1;
+      summary[await reportUnactable(stale, reportToken)] += 1;
     } catch (err) {
       if (err instanceof LeaseLost) {
         summary.lost += 1;
