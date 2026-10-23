@@ -6447,6 +6447,16 @@ function pinParkedCheckLive() {
   return process.env.GATE_PIN_PARKED_CHECK === 'true';
 }
 
+// GATE_WARRANTY_RENEWAL_REMINDER read at CALL time — strict `=== 'true'`, dark
+// by default (owner 10-23 option A on #6515). The canonical reader for
+// services/warranty-renewal-reminder.js. On: a daily job posts one admin
+// notification 45 days before each signed new construction warranty renews.
+// Off: the job returns before any query. It sends nothing to a customer and
+// charges nothing. Kill: unset.
+function warrantyRenewalReminderLive() {
+  return process.env.GATE_WARRANTY_RENEWAL_REMINDER === 'true';
+}
+
 // GATE_TRUCK_KIT read at CALL time — strict `=== 'true'`, dark by default
 // (docs/tool-inventory-tracker-scope.md PR 1). The canonical reader for
 // services/truck-kit.js and routes/tech-truck-check.js. Off: both tech routes
@@ -7282,6 +7292,7 @@ module.exports.staffOnboardingDocsLive = staffOnboardingDocsLive;
 module.exports.callLastNameLookupLive = callLastNameLookupLive;
 // GATE_PIN_PARKED_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.pinParkedCheckLive = pinParkedCheckLive;
+module.exports.warrantyRenewalReminderLive = warrantyRenewalReminderLive;
 module.exports.truckKitLive = truckKitLive;
 // GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportClarityLive = lawnReportClarityLive;
