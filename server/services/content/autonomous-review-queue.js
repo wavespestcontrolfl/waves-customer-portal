@@ -46,6 +46,7 @@ async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMI
 
     const briefs = latestByOpportunity(briefRows);
     const runs = latestByOpportunity(runRows);
+    const publishWork = new Set(runRows.filter(runShowsPublishWork).map((row) => row.opportunity_id));
 
     return {
       status: normalizedStatus,
@@ -57,6 +58,7 @@ async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMI
         opportunity,
         brief: briefs.get(opportunity.id),
         run: runs.get(opportunity.id),
+        anyRunPublishWork: publishWork.has(opportunity.id),
         includeDraftBody: false,
       })),
     };
@@ -108,7 +110,8 @@ async function getReviewItem(opportunityId) {
     }
   }
 
-  return buildReviewItem({ opportunity, brief, run, remediation, includeDraftBody: true });
+  const anyRunPublishWork = await opportunityHasPublishWork(db, opportunityId);
+  return buildReviewItem({ opportunity, brief, run, remediation, anyRunPublishWork, includeDraftBody: true });
 }
 
 /**
@@ -292,7 +295,8 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
       // after the pre-transaction read (Codex r19).
       const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId, normalizedDecision);
       if (currentRun) {
-        if (dismissRefused(currentRun)) {
+        if (dismissRefused(currentRun)
+          || (currentRun.outcome !== 'completed_pending_review' && await opportunityHasPublishWork(trx, opportunityId))) {
           const err = new Error('This item was already decided (a publish is in flight or completed); refresh before applying a decision');
           err.statusCode = 409;
           err.isOperational = true;
@@ -372,7 +376,7 @@ function prNumberFromUrl(url) {
   return match ? Number(match[1]) : null;
 }
 
-function buildReviewItem({ opportunity, brief, run, remediation = null, includeDraftBody = false }) {
+function buildReviewItem({ opportunity, brief, run, remediation = null, anyRunPublishWork, includeDraftBody = false }) {
   const scoreBreakdown = parseJsonMaybe(opportunity?.score_breakdown, {});
   const signalMetadata = parseJsonMaybe(opportunity?.signal_metadata, {});
   const qualityGate = parseJsonMaybe(run?.quality_gate_result, {});
@@ -446,12 +450,14 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
       gate_summary: summarizeGates(qualityGate, uniquenessGate, comparisonGate, topicTargeting),
       seo_completion: seoCompletion,
     } : null,
-    review_actions: reviewActions({ opportunity, run }),
+    review_actions: reviewActions({ opportunity, run, anyRunPublishWork }),
     draft,
   };
 }
 
-function reviewActions({ opportunity, run }) {
+// anyRunPublishWork: true/false when the caller read every run; null (unknown)
+// never offers the never-published Dismiss.
+function reviewActions({ opportunity, run, anyRunPublishWork = null }) {
   const superseded = pageEditSuperseded(opportunity);
   const inReview = opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
   const unreconciled = unreconciledRefreshHold(opportunity);
@@ -459,7 +465,7 @@ function reviewActions({ opportunity, run }) {
   // A may-have-published hold is dismissable on every lane, blogs included.
   const holdDismissable = opportunity?.status === 'pending_review' && unreconciled;
   // A run that never published can always be dismissed, blogs included.
-  const unpublishedDismissable = opportunity?.status === 'pending_review' && !superseded && !unreconciled && neverPublishedRun(run);
+  const unpublishedDismissable = !superseded && !unreconciled && neverPublishedDismissable(opportunity, run, anyRunPublishWork);
   return {
     can_requeue: pendingReview,
     can_dismiss: pendingReview || holdDismissable || unpublishedDismissable || (inReview && supersededReconciliationHold(opportunity)),
@@ -495,6 +501,26 @@ function neverPublishedRun(run) {
   return !!(run
     && NEVER_PUBLISHED_OUTCOMES.includes(run.outcome)
     && !run.astro_pr_url && !run.published_url && !run.astro_pr_merged_at);
+}
+
+// Any run of the opportunity, not only the latest: a requeued item can end in
+// a gate fail while an EARLIER run still holds an open PR the poller keeps
+// polling, so that item may still publish (Codex #6486 r2). A closed
+// (retired) PR is not publish work.
+function runShowsPublishWork(run) {
+  return !!((run.astro_pr_url && !run.astro_pr_retired_at) || run.published_url || run.astro_pr_merged_at);
+}
+
+function neverPublishedDismissable(opportunity, run, anyRunPublishWork) {
+  return opportunity?.status === 'pending_review' && neverPublishedRun(run) && anyRunPublishWork === false;
+}
+
+async function opportunityHasPublishWork(conn, opportunityId) {
+  const row = await conn('autonomous_runs').where('opportunity_id', opportunityId)
+    .where((q) => q.where((w) => w.whereNotNull('astro_pr_url').whereNull('astro_pr_retired_at'))
+      .orWhereNotNull('published_url').orWhereNotNull('astro_pr_merged_at'))
+    .first('id');
+  return !!row;
 }
 
 // The engine owns a blog, except a may-have-published hold or a run that

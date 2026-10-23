@@ -186,10 +186,11 @@ describe('autonomous-review-queue read model helpers', () => {
       recommended_links: [expect.objectContaining({ url: '/contact/' })],
     });
     expect(item.draft.title).toBe('Draft');
-    // A shadow-mode blog never published, so it can be dismissed (owner 2026-10-22).
+    // Without the all-runs read (anyRunPublishWork unknown) a shadow blog is
+    // not offered the never-published Dismiss (Codex #6486 r2).
     expect(item.review_actions).toMatchObject({
       can_requeue: false,
-      can_dismiss: true,
+      can_dismiss: false,
       can_approve_trust_build: false,
     });
   });
@@ -535,13 +536,15 @@ describe('a run that never published can be dismissed', () => {
   const db = require('../models/db');
   const { decideReviewItem } = require('../services/content/autonomous-review-queue');
 
-  function mockDismiss(opportunity, run) {
+  // publishWork: an earlier run of the same item that holds an open PR, a
+  // merge or a live page. first('id') is the all-runs publish-work lookup.
+  function mockDismiss(opportunity, run, { publishWork = false } = {}) {
     const oppUpdates = [];
     const chainFor = (result) => ({
       where: jest.fn(function () { return this; }),
       orderBy: jest.fn(function () { return this; }),
       forUpdate: jest.fn(function () { return this; }),
-      first: jest.fn(() => Promise.resolve(result)),
+      first: jest.fn((col) => Promise.resolve(col === 'id' ? (publishWork ? { id: 'run-0' } : undefined) : result)),
       update: jest.fn((p) => { oppUpdates.push(p); return Promise.resolve(1); }),
     });
     const pick = (table) => chainFor(table === 'opportunity_queue' ? opportunity : run);
@@ -559,7 +562,10 @@ describe('a run that never published can be dismissed', () => {
     ['a blog whose writer gave up', opp({ action_type: 'new_supporting_blog', skip_reason: 'attempts_exhausted' }), run({ action_type: 'new_supporting_blog', outcome: 'failed_agent', skip_reason: null })],
     ['a shadow-mode blog', opp({ action_type: 'new_supporting_blog', skip_reason: 'shadow_would_gate' }), run({ action_type: 'new_supporting_blog', outcome: 'skipped_shadow_mode' })],
   ])('%s: Dismiss is offered and it closes the item', async (_label, o, r) => {
-    expect(reviewActions({ opportunity: o, run: r })).toMatchObject({ can_dismiss: true, never_published: true });
+    expect(reviewActions({ opportunity: o, run: r, anyRunPublishWork: false })).toMatchObject({ can_dismiss: true, never_published: true });
+    // Unknown (the caller did not read every run) or an earlier run with publish work: no never-published Dismiss.
+    expect(reviewActions({ opportunity: o, run: r }).never_published).toBe(false);
+    expect(reviewActions({ opportunity: o, run: r, anyRunPublishWork: true }).never_published).toBe(false);
     const updates = mockDismiss(o, r);
     await decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }).catch(() => {});
     expect(updates).toContainEqual(expect.objectContaining({ status: 'skipped' }));
@@ -578,11 +584,25 @@ describe('a run that never published can be dismissed', () => {
     expect(updates.find((u) => u.status === 'skipped')).toBeFalsy();
   });
 
+  test('Codex #6486 r2: a requeued item whose EARLIER run still holds an open PR refuses the dismiss', async () => {
+    const updates = mockDismiss(opp({ skip_reason: 'claims_ledger_failed' }), run(), { publishWork: true });
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/already decided/) });
+    expect(updates.find((u) => u.status === 'skipped')).toBeFalsy();
+  });
+
+  test('the list view reads every run: an earlier run with an open PR hides the never-published Dismiss', async () => {
+    const { buildReviewItem: build } = require('../services/content/autonomous-review-queue');
+    const item = build({ opportunity: opp(), brief: null, run: run(), anyRunPublishWork: true });
+    expect(item.review_actions.never_published).toBe(false);
+    expect(build({ opportunity: opp(), brief: null, run: run(), anyRunPublishWork: false }).review_actions.never_published).toBe(true);
+  });
+
   test('a blog with a merged PR stays engine-managed', async () => {
     const o = opp({ action_type: 'new_supporting_blog', skip_reason: 'attempts_exhausted' });
     const r = run({ action_type: 'new_supporting_blog', outcome: 'failed_agent', astro_pr_url: 'https://github.com/x/y/pull/2' });
-    expect(reviewActions({ opportunity: o, run: r }).can_dismiss).toBe(false);
-    mockDismiss(o, r);
+    expect(reviewActions({ opportunity: o, run: r, anyRunPublishWork: true }).can_dismiss).toBe(false);
+    mockDismiss(o, r, { publishWork: true });
     await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/managed by the engine/) });
   });
