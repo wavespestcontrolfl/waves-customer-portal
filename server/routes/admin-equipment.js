@@ -12,6 +12,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
 const { etDateString } = require('../utils/datetime-et');
+const { normalizeKitKey, isValidKitKey } = require('../services/kit-key');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -47,6 +48,17 @@ function conditionValue(raw) {
   return { value: rating };
 }
 
+// kit_key (PR 2): what the tool is, lowercase snake_case; blank clears it.
+// Only while GATE_TRUCK_KIT is on: the kill switch covers the writer too, so
+// nothing can preconfigure holds in the dark.
+function kitKeyValue(raw) {
+  if (raw === undefined) return { skip: true };
+  if (!require('../services/truck-kit').truckKitEnabled()) return { error: 'kit_key needs GATE_TRUCK_KIT' };
+  const key = normalizeKitKey(raw);
+  if (key && !isValidKitKey(key)) return { error: 'kit_key must be letters, digits and underscores, 2 to 60 characters' };
+  return { value: key };
+}
+
 // assigned_vehicle_id: the equipment row (category 'vehicle') a tool rides on.
 // A row can never be its own truck, and a truck is never cargo on another
 // truck (by the body's category, or the stored one when the body is silent).
@@ -56,8 +68,9 @@ async function vehicleTarget(body, selfId) {
   if (raw === null || raw === '') return { value: null };
   const vehicleId = String(raw);
   if (!UUID_RE.test(vehicleId) || vehicleId === selfId) return { error: 'assigned_vehicle_id must be a vehicle' };
-  const vehicle = await db('equipment').where({ id: vehicleId, category: 'vehicle' }).first('id');
-  if (!vehicle) return { error: 'assigned_vehicle_id must be a vehicle' };
+  // ...and a live one: a retired, sold or lost truck carries no kit.
+  const vehicle = await db('equipment').where({ id: vehicleId, category: 'vehicle' }).whereNotIn('status', DEAD_ITEM_STATUSES).first('id');
+  if (!vehicle) return { error: 'assigned_vehicle_id must be a live vehicle' };
   let category = body.category;
   if (category === undefined && selfId) {
     const self = await db('equipment').where({ id: selfId }).first('category');
@@ -75,6 +88,7 @@ async function custodyFields(body, { selfId = null } = {}) {
     ['asset_tag', optionalText(body.asset_tag, ASSET_TAG_MAX)],
     ['location', optionalText(body.location, LOCATION_MAX)],
     ['condition_rating', conditionValue(body.condition_rating)],
+    ['kit_key', kitKeyValue(body.kit_key)],
     ['assigned_vehicle_id', await vehicleTarget(body, selfId)],
   ];
   for (const [key, result] of checks) {
@@ -84,6 +98,17 @@ async function custodyFields(body, { selfId = null } = {}) {
   // Recategorizing a row as a vehicle drops any truck it rode on.
   if (body.category === 'vehicle') values.assigned_vehicle_id = null;
   return { values };
+}
+
+// A technician holds one live truck: a second vehicle assigned to the same
+// person would leave the truck check guessing which roster is theirs.
+const DEAD_ITEM_STATUSES = ['lost', 'retired', 'sold'];
+const SECOND_TRUCK_ERROR = 'That technician already has a truck. Unassign the other vehicle first.';
+async function secondLiveTruck({ category, assigned_to, status }, selfId, conn = db) {
+  if (category !== 'vehicle' || !assigned_to || DEAD_ITEM_STATUSES.includes(status)) return null;
+  let q = conn('equipment').where({ category: 'vehicle', assigned_to }).whereNotIn('status', DEAD_ITEM_STATUSES);
+  if (selfId) q = q.whereNot('id', selfId);
+  return (await q.first('id')) || null;
 }
 
 // Postgres unique violation on equipment.asset_tag (the only unique column a
@@ -143,6 +168,20 @@ router.get('/equipment', async (req, res, next) => {
   }
 });
 
+// GET /kit-keys — every kit key in use (checklist items and equipment rows),
+// for the Assets dialog's suggestions (docs/tool-inventory-tracker-scope.md PR 2).
+// The gate's answer is the dialog's capability: off = 404 { enabled: false }
+// and the Kit key field stays away (fail closed, like the tech route).
+router.get('/kit-keys', async (req, res, next) => {
+  try {
+    const truckKit = require('../services/truck-kit');
+    if (!truckKit.truckKitEnabled()) return res.status(404).json({ enabled: false });
+    res.json({ enabled: true, keys: await truckKit.kitKeyVocabulary() });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /equipment — add new
 // Custody and identity columns are the office's: a technician token never
 // creates or edits an asset, whatever GATE_STAFF_DEFAULT_DENY says.
@@ -159,8 +198,22 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
     if (!name) return res.status(400).json({ error: 'Equipment name is required' });
     const custody = await custodyFields(req.body);
     if (custody.error) return res.status(400).json({ error: custody.error });
-
-    const [record] = await db('equipment').insert({
+    // A vehicle given to a technician: the one-live-truck check and the
+    // insert serialize on that technician's lock.
+    const record = await db.transaction(async (trx) => {
+      // A new item placed straight onto a truck waits for a check in flight
+      // on that truck (same lock as recordTruckCheck), then the target is
+      // validated AGAIN under the lock: a truck retired meanwhile is refused.
+      if (custody.values.assigned_vehicle_id) {
+        await require('../services/truck-kit').lockTruck(trx, custody.values.assigned_vehicle_id);
+        const target = await trx('equipment').where({ id: custody.values.assigned_vehicle_id, category: 'vehicle' }).whereNotIn('status', DEAD_ITEM_STATUSES).first('id');
+        if (!target) return 'target-gone';
+      }
+      if (category === 'vehicle' && assigned_to) {
+        await require('../services/truck-kit').lockTechnician(trx, assigned_to);
+        if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null, trx)) return 'second-truck';
+      }
+      const [row] = await trx('equipment').insert({
       ...custody.values,
       name, category, make, model, serial_number,
       purchase_date: purchase_date || null,
@@ -176,6 +229,10 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
       specs: specs ? JSON.stringify(specs) : null,
       notes: notes || null,
     }).returning('*');
+      return row;
+    });
+    if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });
+    if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
 
     logger.info(`Equipment added: ${record.name} (${record.id})`);
     res.status(201).json({ equipment: record });
@@ -184,6 +241,95 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
     next(err);
   }
 });
+
+// The asset update, inside one transaction. Returns the updated row, null
+// (not found) or a refusal word the handler maps to a 409.
+const ITEM_COLUMNS = ['assigned_vehicle_id', 'category', 'assigned_to', 'status', 'updated_at'];
+const sameInstant = (a, b) => (a == null && b == null) || (a != null && b != null && new Date(a).getTime() === new Date(b).getTime());
+// Every truck a write can touch: the target truck, the item's truck on a move
+// or any status change, and the vehicle row itself when the write can change
+// whether it serves as a truck (status, category, technician).
+function trucksTouched(id, row, updates) {
+  return [...new Set([
+    updates.assigned_vehicle_id,
+    (updates.assigned_vehicle_id !== undefined || updates.status !== undefined) ? row.assigned_vehicle_id : null,
+    row.category === 'vehicle' && ['status', 'category', 'assigned_to'].some((key) => updates[key] !== undefined) ? id : null,
+  ].filter(Boolean))].sort();
+}
+// A form opened before another save landed: the dialog sends the status,
+// the truck and the row version (updated_at) it loaded, and a stored value
+// that differs refuses the save (a stale full payload would otherwise move
+// the tool back, resurrect it, or revert its kit key).
+function staleForm(expected, before) {
+  if (expected.status !== undefined && expected.status !== null && String(expected.status) !== String(before.status)) return true;
+  if (expected.assigned_vehicle_id !== undefined && (expected.assigned_vehicle_id || null) !== (before.assigned_vehicle_id || null)) return true;
+  return expected.updated_at !== undefined && expected.updated_at !== null && !sameInstant(expected.updated_at, before.updated_at);
+}
+async function applyAssetUpdate(trx, id, updates, expected = {}) {
+  const truckKit = require('../services/truck-kit');
+  // The item row itself is serialized first (one advisory lock per row), so
+  // two saves of the same item never derive their truck locks from the same
+  // stale read; then every truck the write can touch, in one order, so a
+  // truck check in flight finishes before the item moves or dies; then the
+  // row is read AGAIN under the locks and a raced move or recategorization
+  // is refused, never applied to a truck nobody locked.
+  await truckKit.lockTruck(trx, id);
+  const first = await trx('equipment').where({ id }).first(...ITEM_COLUMNS);
+  if (!first) return null;
+  for (const truckId of trucksTouched(id, first, updates)) await truckKit.lockTruck(trx, truckId);
+  const before = await trx('equipment').where({ id }).first(...ITEM_COLUMNS);
+  // Truck, category OR status: an alert outcome (Lost / Retired) that landed
+  // while this save waited must not be undone by the dialog's full payload.
+  if (!before || ['assigned_vehicle_id', 'category', 'status'].some((key) => before[key] !== first[key])) return 'moved';
+  if (staleForm(expected, before)) return 'stale-status';
+  const refusal = await writeRefusal(trx, id, updates, before);
+  if (refusal) return refusal;
+  const moved = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id;
+  const oldTruck = moved ? (before.assigned_vehicle_id || null) : null;
+  const [row] = await trx('equipment').where({ id }).update(updates).returning('*');
+  if (row && oldTruck) await truckKit.closeTruckBellIfClear(oldTruck, new Date(), trx);
+  return row || null;
+}
+// Why the write is refused under the locks, or null.
+async function writeRefusal(trx, id, updates, before) {
+  const truckKit = require('../services/truck-kit');
+  // A truck with tools still riding on it cannot stop being a vehicle (the
+  // riders would point at a non-vehicle): checked under the vehicle's own
+  // lock, so a rider assigned meanwhile is seen.
+  // ...nor retire, sell or lose a truck with tools still on it: the tools
+  // would vanish from the technician's check and readiness while Assets
+  // still shows them riding.
+  const stopsBeingTruck = (updates.category !== undefined && updates.category !== 'vehicle') || DEAD_ITEM_STATUSES.includes(updates.status);
+  if (before.category === 'vehicle' && stopsBeingTruck) {
+    const rider = await trx('equipment').where({ assigned_vehicle_id: id }).first('id');
+    if (rider) return 'riders';
+  }
+  // The target truck is re-validated under its lock: a writer that retired
+  // or recategorized it while this save waited loses the race.
+  if (updates.assigned_vehicle_id) {
+    const target = await trx('equipment').where({ id: updates.assigned_vehicle_id, category: 'vehicle' }).whereNotIn('status', DEAD_ITEM_STATUSES).first('id');
+    if (!target) return 'target-gone';
+  }
+  // An unresolved tool alert belongs to the truck it was found on and closes
+  // only through the office's outcome (Found / Lost, Repaired / Retired,
+  // routes/admin-equipment-maintenance.js): the item neither moves nor goes
+  // lost, retired or sold from the dialog while one is open.
+  const moved = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id;
+  if ((moved || DEAD_ITEM_STATUSES.includes(updates.status)) && await truckKit.openToolAlertFor(id, trx)) return 'open-alert';
+  // A technician never holds two live trucks (truck-kit.js would refuse to
+  // guess). An omitted key keeps the stored value; an explicit null clears it
+  // (that is how a second truck is unassigned).
+  const pick = (key) => (Object.prototype.hasOwnProperty.call(updates, key) ? updates[key] : before[key]);
+  const live = { category: pick('category'), assigned_to: pick('assigned_to'), status: pick('status') };
+  // The invariant itself, on the FINAL row under the locks: a vehicle is
+  // never cargo (a save that raced a recategorization is refused).
+  if (live.category === 'vehicle' && pick('assigned_vehicle_id')) return 'vehicle-cargo';
+  if (live.category === 'vehicle' && live.assigned_to && !DEAD_ITEM_STATUSES.includes(live.status)) {
+    await truckKit.lockTechnician(trx, live.assigned_to);
+    if (await secondLiveTruck(live, id, trx)) return 'second-truck';
+  }
+  return null;
+}
 
 // PUT /equipment/:id — update
 router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
@@ -207,18 +353,18 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     const custody = await custodyFields(req.body, { selfId: req.params.id });
     if (custody.error) return res.status(400).json({ error: custody.error });
     Object.assign(updates, custody.values);
-    // A truck with tools still riding on it cannot stop being a vehicle:
-    // the riders would point at a non-vehicle and fail every later save.
-    if (updates.category !== undefined && updates.category !== 'vehicle') {
-      const rider = await db('equipment').where({ assigned_vehicle_id: req.params.id }).first('id');
-      if (rider) return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
-    }
 
-    const [record] = await db('equipment')
-      .where({ id: req.params.id })
-      .update(updates)
-      .returning('*');
-
+    // A tool that leaves a truck (moved or unassigned) takes its open tool
+    // alerts with it, so the old truck's bell must be re-judged: under both
+    // trucks' locks, in the same transaction as the move (truck-kit.js).
+    const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates, { status: req.body.expected_status, assigned_vehicle_id: req.body.expected_assigned_vehicle_id, updated_at: req.body.expected_updated_at }));
+    if (record === 'moved') return res.status(409).json({ error: 'Another save changed this item (its truck, category or status). Reload and try again.' });
+    if (record === 'vehicle-cargo') return res.status(409).json({ error: 'This item is now a vehicle; a vehicle cannot ride on a truck. Reload and try again.' });
+    if (record === 'riders') return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
+    if (record === 'stale-status') return res.status(409).json({ error: 'This item changed since you opened it. Reload and try again.' });
+    if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
+    if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
+    if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });
     if (!record) return res.status(404).json({ error: 'Equipment not found' });
 
     logger.info(`Equipment updated: ${record.name} (${record.id})`);

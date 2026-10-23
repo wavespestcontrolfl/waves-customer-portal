@@ -534,7 +534,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     .leftJoin('services as s', 'ss.service_id', 's.id')
     .where('ss.id', serviceId)
     .select(
-      'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes',
+      'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes', 'ss.technician_id',
       // The primary line's catalog identity (booking snapshot, else the live
       // row); null on legacy rows booked before the catalog link existed.
       dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
@@ -589,6 +589,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
   return {
     serviceId: svc.id,
     customerId: svc.customer_id,
+    technicianId: svc.technician_id || null,
     scheduledDate: etCalendarDayOf(svc.scheduled_date),
     serviceType: svc.service_type,
     serviceCategory: svc.service_category || null,
@@ -1678,7 +1679,13 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
   const labelSources = await checkReviewedWeatherSources(products);
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources });
-  if (readinessOnly) return dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
+  if (readinessOnly) {
+    const readiness = dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
+    // Truck kit (GATE_TRUCK_KIT, docs/tool-inventory-tracker-scope.md PR 2): a
+    // required tool the assigned truck lacks is a hold like stock or weather
+    // (gate, add-ons and the never-fatal read live in truck-kit.js).
+    return require('./truck-kit').addReadinessToolIssue(readiness, facts, dbh);
+  }
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   // A chemical area add-on's card also says how many applications of its product the property has had in 12 months.
   const cards = await require('./area-addon-limits').attachLimitUse(
