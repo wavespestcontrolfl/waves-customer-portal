@@ -31,9 +31,13 @@ const state = { rules: [], bankRows: [], bankRow: null, updates: [], ruleUpdates
 
 function builder(table) {
   const wheres = [];
+  let counting = false;
   const b = {
     table,
     leftJoin: jest.fn(() => b), where: jest.fn((c) => { wheres.push(c); return b; }), whereRaw: jest.fn((sql) => { wheres.push(sql); return b; }),
+    // the rule cap's count: enabled rules, minus the pattern being written
+    whereNot: jest.fn((c) => { wheres.push({ not: c }); return b; }),
+    count: jest.fn(() => { counting = true; return b; }),
     orderBy: jest.fn(() => b), limit: jest.fn(() => b), select: jest.fn(() => b),
     first: jest.fn(() => Promise.resolve(table === 'expense_categories' ? state.category : state.bankRow)),
     update: jest.fn((patch) => {
@@ -48,7 +52,11 @@ function builder(table) {
     returning: jest.fn(() => Promise.resolve([{ id: 'rule-new', ...state.inserted[state.inserted.length - 1] }])),
   };
   const rows = table === 'tax_ledger_rules as r' ? state.rules : table === 'expense_categories' ? state.categories : state.bankRows;
-  b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+  const counted = () => {
+    const excluded = wheres.filter((w) => w && w.not && w.not.pattern).map((w) => w.not.pattern);
+    return [{ n: String(state.rules.filter((r) => r.enabled !== false && !excluded.includes(r.pattern)).length) }];
+  };
+  b.then = (resolve, reject) => Promise.resolve(counting ? counted() : rows).then(resolve, reject);
   return b;
 }
 const mockDb = jest.fn((table) => builder(table));
@@ -289,6 +297,24 @@ describe('patternFromDescription reads the prefix matching reads', () => {
   });
 });
 
+describe('the rule table is capped', () => {
+  test('at MAX_ENABLED_RULES enabled rules a new rule or a re-enable is refused; the same slot and a disable are not', async () => {
+    const many = Array.from({ length: svc.MAX_ENABLED_RULES }, (_, i) => ({ id: `r${i}`, pattern: `payee${i}`, kind: 'personal', enabled: true, priority: 10, created_at: '2026-01-01' }));
+    state.rules = many; state.inserted = [];
+    await expect(svc.createRule({ pattern: 'wawa', kind: 'personal' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/rule table holds 250 enabled rules/) });
+    expect(state.inserted).toHaveLength(0);
+    // the same pattern again is that slot, not a new one
+    await expect(svc.createRule({ pattern: 'payee3', kind: 'personal' })).resolves.toBeTruthy();
+    // re-enabling a disabled rule takes a slot; disabling never does
+    state.bankRow = { id: 'r-off', kind: 'personal', category_id: null, enabled: false, pattern: 'oldpayee' };
+    await expect(svc.updateRule('r-off', { enabled: true })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/rule table holds/) });
+    await expect(svc.updateRule('r-off', { enabled: false })).resolves.toBeTruthy();
+    state.rules = many.slice(0, 10);
+    await expect(svc.updateRule('r-off', { enabled: true })).resolves.toBeTruthy();
+    state.rules = [];
+  });
+});
+
 describe('assertPatternFast (worker probe)', () => {
   test('every seed and a plain owner pattern finish within the budget; an overrun is a 400 and the worker is stopped', async () => {
     await expect(svc.assertPatternFast('wawa')).resolves.toBe(true);
@@ -393,6 +419,20 @@ describe('applyRules (suggestion-only)', () => {
       // on the Later shelf (a decision): an income rule must not pull it onto the Income shelf too
       { id: 'bL', txn_date: '2026-01-09', description: 'ZELLE MONEY RECEIVED FROM ACME', direction: 'credit', suggestion: { noMatch: true, later: true, decision: 'later' } },
     ];
+  });
+
+  test('a pass stops at its time budget with its cursor; the Always propagation stops at its own and reports incomplete', async () => {
+    let t = 0;
+    const clock = () => { t += 300; return t; }; // every read of the clock is 300 ms later: the 500 ms budget ends inside row 2
+    const out = await svc.applyRules({ limit: 500, now: clock });
+    expect(out.examined).toBe(2);
+    expect(out.more).toBe(true);
+    expect(out.cursor).toEqual({ txn_date: '2026-01-03', id: 'b2' });
+    t = 0;
+    const slow = () => { t += 1500; return t; }; // one round, then past the loop budget
+    expect(await svc.applyRulesForPattern('costco\\W*gas', { now: slow })).toMatchObject({ complete: false });
+    // a pass that finishes its rows inside the budget reports done, as before
+    expect((await svc.applyRules({ limit: 500 })).more).toBe(false);
   });
 
   test('counts and rule hits book only the classifications whose guarded UPDATE landed', async () => {

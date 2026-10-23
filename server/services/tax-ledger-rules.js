@@ -33,6 +33,13 @@ const MAX_PATTERN = 240;
 const OWNER_PRIORITY = 10;
 const PAGE = 500;
 const MAX_EXAMINE = 20000;
+// Bounds on the rules × rows work one request can do: every enabled rule is
+// tested against every row a pass reads, so both sides are capped. A pass
+// stops at its time budget and hands back its cursor (the callers already
+// resume: Apply rules now, the import hook, the Always propagation).
+const MAX_ENABLED_RULES = 250;
+const PASS_TIME_BUDGET_MS = 500;    // one applyRules call: one request's worth
+const LOOP_TIME_BUDGET_MS = 2000;   // applyAfterImport / applyRulesForPattern, all rounds together
 
 // The suggestion keys a classification owns. A new classification removes
 // them before it merges, so a row never carries two answers at once; the
@@ -475,6 +482,15 @@ function ymd(v) {
   return String(v || '').slice(0, 10);
 }
 function cursorOf(row) { return row ? { txn_date: ymd(row.txn_date), id: String(row.id) } : null; }
+
+// The cap on enabled rules: a table that keeps growing makes every pass
+// slower for every row. The pattern being written does not count against
+// itself (an upsert or a re-enable of that slot).
+async function assertRuleRoom(pattern, conn = db) {
+  const canonical = canonicalPattern(pattern);
+  const [{ n }] = await conn('tax_ledger_rules').where({ enabled: true }).whereNot({ pattern: canonical }).count({ n: '*' });
+  if (Number(n) >= MAX_ENABLED_RULES) throw httpError(400, `the rule table holds ${MAX_ENABLED_RULES} enabled rules: disable or delete rules before adding one`);
+}
 const hasKey = (sug, k) => sug[k] !== undefined && sug[k] !== null;
 
 // One page of open, matcher-examined, undecided rows, oldest first.
@@ -558,7 +574,8 @@ async function recordHits(hits) {
 // force re-examines stamped rows too (after a rule changed); pattern limits
 // the pass to one rule's matches (an Always decision); after = {txn_date,
 // id} continues past a row budget (the result carries more + cursor).
-async function applyRules({ limit = PAGE, force = false, pattern = null, after: start = null } = {}) {
+async function applyRules({ limit = PAGE, force = false, pattern = null, after: start = null, now = Date.now, deadline = null } = {}) {
+  const stopAt = deadline || now() + PASS_TIME_BUDGET_MS;
   const counts = { examined: 0, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null };
   let compiled = compileRules(await loadRules());
   // nothing to suggest: only a full forced pass still runs, to clear what
@@ -569,7 +586,8 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
   const hits = new Map();
   let after = start && start.id && start.txn_date ? { txn_date: ymd(start.txn_date), id: String(start.id) } : null;
   let lastPageFull = false;
-  while (counts.examined < maxRows) {
+  let outOfTime = false;
+  while (counts.examined < maxRows && !outOfTime) {
     const pageSize = Math.min(PAGE, maxRows - counts.examined);
     const rows = await rulePassPage({ pageSize, force, after });
     // the active rule set is read AFTER the page's rows: an Always
@@ -577,35 +595,47 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
     // its rulesAt stamps), one that finishes after it changes rulesAt and
     // the versioned UPDATE below refuses the older result
     compiled = compileRules(await loadRules());
-    for (const row of rows) {
-      counts.examined += 1;
-      const c = classifyRow(row, compiled, { pattern, force, stamp });
-      if (!c.skip) await applyClassification(row, c, counts, hits);
-    }
     lastPageFull = rows.length >= pageSize;
+    const stoppedAt = await examinePage(rows, { compiled, pattern, force, stamp, counts, hits, now, stopAt, lastPageFull });
+    if (stoppedAt) { outOfTime = true; after = stoppedAt; break; }
     if (!lastPageFull) break;
     after = cursorOf(rows[rows.length - 1]);
   }
   await recordHits(hits);
-  if (lastPageFull && counts.examined >= maxRows) { counts.more = true; counts.cursor = after; }
+  if (outOfTime || (lastPageFull && counts.examined >= maxRows)) { counts.more = true; counts.cursor = after; }
   return counts;
+}
+
+// One page of a pass: classify each row and write what lands. Out of time
+// with rows still to read, it stops and returns the cursor of the row it
+// stopped on (null = the page was finished).
+async function examinePage(rows, { compiled, pattern, force, stamp, counts, hits, now, stopAt, lastPageFull }) {
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    counts.examined += 1;
+    const c = classifyRow(row, compiled, { pattern, force, stamp });
+    if (!c.skip) await applyClassification(row, c, counts, hits);
+    if (now() >= stopAt && (i < rows.length - 1 || lastPageFull)) return cursorOf(row);
+  }
+  return null;
 }
 
 // The payee pass after an Always decision: force, one pattern, and it
 // follows its own cursor to the end of the open rows (bounded by rounds so
 // a runaway backlog cannot pin a request). complete:false means the pass
 // stopped short and the caller reports propagated:false.
-async function applyRulesForPattern(pattern, { budget = MAX_EXAMINE, maxRounds = 10 } = {}) {
+async function applyRulesForPattern(pattern, { budget = MAX_EXAMINE, maxRounds = 10, now = Date.now } = {}) {
+  const deadline = now() + LOOP_TIME_BUDGET_MS;
   let after = null;
   let rounds = 0;
   const totals = { examined: 0, suggested: 0 };
   do {
-    const out = await applyRules({ limit: budget, force: true, pattern, after });
+    const out = await applyRules({ limit: budget, force: true, pattern, after, now, deadline });
     totals.examined += out.examined;
     totals.suggested += out.suggested;
     after = out.more ? out.cursor : null;
     rounds += 1;
-  } while (after && rounds < maxRounds);
+  } while (after && rounds < maxRounds && now() < deadline);
   return { ...totals, complete: !after };
 }
 
@@ -635,18 +665,21 @@ function visibleSuggestion(suggestion) {
 // run examined gets its rule pre-fill now, not at the next sync: unstamped
 // rows only, oldest first, up to budget rows (the caller's matching budget;
 // a manual pass examines up to 2,000 rows, the page is 500).
-async function applyAfterImport(where, { budget = 2000 } = {}) {
+async function applyAfterImport(where, { budget = 2000, now = Date.now } = {}) {
   if (!isOn()) return null;
   try {
+    // bounded in rows AND time: what is left gets its pre-fill on the next
+    // pass (the next sync, or Apply rules now), never a request that runs on
+    const deadline = now() + LOOP_TIME_BUDGET_MS;
     const totals = { examined: 0, suggested: 0, cleared: 0 };
     let after = null;
     do {
-      const out = await applyRules({ limit: Math.min(PAGE, budget - totals.examined), after });
+      const out = await applyRules({ limit: Math.min(PAGE, budget - totals.examined), after, now, deadline });
       totals.examined += out.examined;
       totals.suggested += out.suggested;
       totals.cleared += out.cleared;
       after = out.more ? out.cursor : null;
-    } while (after && totals.examined < budget);
+    } while (after && totals.examined < budget && now() < deadline);
     return totals;
   } catch (err) {
     logger.warn(`[tax-ledger] rule pass after ${where} failed: ${err.message}`);
@@ -674,6 +707,7 @@ async function createRule({ pattern, kind, categoryId = null, note = null, prior
   if (!KINDS.includes(kind)) throw httpError(400, `kind must be one of ${KINDS.join(', ')}`);
   const cat = await resolveCategory(categoryId, conn);
   if (kind === 'expense' && !cat) throw httpError(400, 'an expense rule needs a categoryId');
+  await assertRuleRoom(pattern, conn);
   await assertPatternFast(pattern); // last: the probe takes a worker slot
   const row = {
     pattern: canonicalPattern(pattern), kind, category_id: cat ? cat.id : null, irs_line: cat ? cat.irs_line : null,
@@ -701,12 +735,15 @@ async function updateRule(id, patch = {}) {
   const row = await ruleUpdatePatch(patch);
   if (!Object.keys(row).length) throw httpError(400, 'nothing to update');
   // the rule as it would be after the change keeps createRule's invariant
+  const needsCurrent = row.kind !== undefined || row.category_id !== undefined || row.enabled === true;
+  const current = needsCurrent ? await db('tax_ledger_rules').where({ id }).first('id', 'kind', 'category_id', 'enabled', 'pattern') : null;
+  if (needsCurrent && !current) throw httpError(404, 'rule not found');
   if (row.kind !== undefined || row.category_id !== undefined) {
-    const current = await db('tax_ledger_rules').where({ id }).first('id', 'kind', 'category_id');
-    if (!current) throw httpError(404, 'rule not found');
     const next = { kind: row.kind !== undefined ? row.kind : current.kind, category_id: row.category_id !== undefined ? row.category_id : current.category_id };
     if (next.kind === 'expense' && !next.category_id) throw httpError(400, 'an expense rule needs a categoryId');
   }
+  // re-enabling takes a slot under the cap; disabling never does
+  if (row.enabled === true && !current.enabled) await assertRuleRoom(current.pattern);
   if (patch.pattern !== undefined) await assertPatternFast(patch.pattern); // last: the probe takes a worker slot
   row.updated_at = new Date();
   const [saved] = await db('tax_ledger_rules').where({ id }).update(row).returning('*');
@@ -804,7 +841,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 }
 
 module.exports = {
-  KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON,
+  KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON, MAX_ENABLED_RULES, PASS_TIME_BUDGET_MS, LOOP_TIME_BUDGET_MS,
   NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, assertPatternFast, probeStrings, PROBE_CONCURRENCY, PROBE_QUEUE, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
