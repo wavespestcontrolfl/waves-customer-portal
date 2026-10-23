@@ -101,7 +101,7 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       expect(item.mix.amount).toBeCloseTo(41.25, 2);
       expect(item.gateNotes).toContainEqual({ key: 'activeLargePatchPotassium', severity: 'note', text: NOTE });
       expect(item.productSwapIn).toBe(true);
-      expect(item.raw).toBe(`${BO} — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active large patch mapped`);
+      expect(item.raw).toBe(`${BO} — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`);
       // The 10-0-22 is gone from the plan; no text still states its rate.
       expect(itemOf(result.mixCalculator.items, TEN)).toBeUndefined();
       expect(JSON.stringify(result.protocol)).not.toContain('4.5 lb per 1,000');

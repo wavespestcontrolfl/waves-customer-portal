@@ -12,7 +12,7 @@ const KEY = 'fixture_v13_lawn_nov';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
-const NOTE = 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
+const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
 const day = etDateString(addETDays(new Date(), -1));
 const LARGE = 'Large patch';
 
@@ -94,7 +94,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
       expect(item.mix.amount).toBeCloseTo(20.833, 2);
       expect(item.gateNotes).toContainEqual({ key: 'activeFungusNitrogen', severity: 'note', text: NOTE });
       // The recipe text staff read (item.raw, the visit) states the same cut, never the stale 3.1 lb / 0.75 lb N.
-      expect(item.raw).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active fungus mapped');
+      expect(item.raw).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active patch mapped');
       expect(item.product.name).toBe(F24);
       expect(JSON.stringify(result.protocol)).not.toContain('3.1 lb per 1,000');
       const defaulted = bagOf(result.completionDefaults.items);

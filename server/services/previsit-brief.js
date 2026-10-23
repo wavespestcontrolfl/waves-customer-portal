@@ -389,7 +389,7 @@ async function projectFungusNitrogenCut(dbh, svc, entries, summary) {
   for (const entry of entries) {
     const stated = String(entry.gates.targetN || '').match(/^\s*(\d+(?:\.\d+)?)\s*lb N\/1000/i);
     const cut = stated ? await fungusNitrogenCut(dbh, svc, { targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, strict: true }) : null;
-    if (cut != null) entry.gates = { ...entry.gates, targetN: `${cut} lb N/1000 (active fungus mapped; normal ${stated[1]} lb N/1000)` };
+    if (cut != null) entry.gates = { ...entry.gates, targetN: `${cut} lb N/1000 (active large patch mapped; normal ${stated[1]} lb N/1000)` };
   }
 }
 

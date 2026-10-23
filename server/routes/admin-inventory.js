@@ -826,7 +826,10 @@ function protocolProductReferences(definition) {
       // A cadence variant's step (v13 April on the 9x plan) is part of the visit: its
       // products are referenced by that month too.
       const variantSteps = Object.values(visit.cadenceVariants || {}).flatMap((variant) => [variant.primary, variant.secondary]);
-      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes, ...variantSteps].filter(Boolean).join('\n'));
+      // A conditional swap of the visit's bag (v13 December, GATE_LAWN_DEC_LARGE_PATCH_K) is part of the visit too; lawnProtocols() hands the
+      // block out only while its gate is live, so with the gate off nothing changes.
+      const swapLines = Object.values(visit.swaps || {}).map((swap) => swap.primary);
+      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes, ...variantSteps, ...swapLines].filter(Boolean).join('\n'));
       if (definition.aliases.some((alias) => text.includes(normalizeProtocolText(alias)))) {
         refs.push({
           turf: trackKey,

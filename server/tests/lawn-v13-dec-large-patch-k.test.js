@@ -8,7 +8,7 @@ jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
   // The rules ask for a LARGE PATCH area (loadActiveLargePatch); this store answers for it with the areas the test sets. The evidence itself
-  // (the newest fungicide target at the place) is tested against real rows in lawn-trouble-areas-large-patch.db.test.js.
+  // (the newest fungicide target at the place) is tested against real rows in lawn-v13-nov-large-patch-n.db.test.js and lawn-v13-dec-large-patch-k.plan.db.test.js.
   loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
@@ -82,7 +82,7 @@ describe('the rule and the recipe', () => {
     const block = decOf('zoysia').swaps[SWAP_KEY];
     expect(block).toMatchObject({
       gate: 'GATE_LAWN_DEC_LARGE_PATCH_K', replaces: DEC_FROM, targetN: 0, trigger: { troubleType: 'fungus', evidence: 'large_patch' },
-      primary: `${DEC_K_PRODUCT} \u2014 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active large patch mapped`,
+      primary: `${DEC_K_PRODUCT} \u2014 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`,
     });
     expect(block.summary).toContain(`${DEC_K_PRODUCT} \u2014 4.1 lb per 1,000 sq ft (0 N, 0.99 lb K2O) in place of the LESCO 10-0-22`);
     // The three tracks carry the same block.
@@ -124,11 +124,17 @@ describe('the rule and the recipe', () => {
     }
   });
 
+  test('the swapped line classifies like the line it replaces (no disease-gated condition flag, whole-lawn scope): the wording never says "large patch" inline', () => {
+    const rule = V13_TROUBLE_PRODUCT_SWAPS[0];
+    expect(engine.classifyProtocolLine(rule.line, 'base')).toEqual(engine.classifyProtocolLine(rule.from, 'base'));
+    expect(engine.classifyProtocolLine(rule.line, 'base')).toMatchObject({ scope: 'BROADCAST_FULL', conditionFlag: 'none' });
+  });
+
   test('the figures: 4.1 lb of a 24% bag is 0.984 lb K2O (the 10-0-22 gives 0.99); the plan derives 4.125 lb; no nitrogen', () => {
     expect(4.5 * 0.22).toBeCloseTo(0.99, 2);
     expect(4.1 * 0.24).toBeCloseTo(0.99, 1);
     expect(0.99 / 0.24).toBeCloseTo(4.125, 3);
-    expect(V13_TROUBLE_PRODUCT_SWAPS[0].line).toBe(`${DEC_K_PRODUCT} — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active large patch mapped`);
+    expect(V13_TROUBLE_PRODUCT_SWAPS[0].line).toBe(`${DEC_K_PRODUCT} — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped`);
     expect(migration.CATALOG).toMatchObject({ analysis_n: 0, analysis_p: 0, analysis_k: 24, default_rate_per_1000: 4.1 });
   });
 });

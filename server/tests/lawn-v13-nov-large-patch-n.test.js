@@ -6,7 +6,7 @@ jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
   // The rules ask for a LARGE PATCH area (loadActiveLargePatch); this store answers for it with the areas the test sets. The evidence itself
-  // (the newest fungicide target at the place) is tested against real rows in lawn-trouble-areas-large-patch.db.test.js.
+  // (the newest fungicide target at the place) is tested against real rows in lawn-v13-nov-large-patch-n.db.test.js and lawn-v13-dec-large-patch-k.plan.db.test.js.
   loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
@@ -156,8 +156,8 @@ describe('the visit text staff read agrees with the cut (codex #6256 r1 P1)', ()
 
   test('cut: the primary line states 2.1 lb per 1,000 and 0.5 lb N and why; the notes state 0.5 lb N and the normal figure; the rest is untouched', async () => {
     const found = await run();
-    expect(found.visit.primary).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active fungus mapped');
-    expect(found.visit.notes).toBe(NOV_NOTES.replace('N rate: 0.75 lb N', 'N rate: 0.5 lb N (active fungus mapped; normal 0.75 lb N)'));
+    expect(found.visit.primary).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active patch mapped');
+    expect(found.visit.notes).toBe(NOV_NOTES.replace('N rate: 0.75 lb N', 'N rate: 0.5 lb N (active large patch mapped; normal 0.75 lb N)'));
     expect(found.visit.notes).toContain('Spreader visit. Fertilizer safety:');
     expect(found.visit.secondary).toBe(NOV_VISIT.secondary);
     expect(found.visit.tiers).toBe(NOV_VISIT.tiers);
@@ -341,7 +341,7 @@ describe('fungusNitrogenNotes', () => {
     expect(mix.ratePer1000 * 0.24).toBeCloseTo(0.5, 4);
     expect(engine.fungusNitrogenNotes(mix, 0.5)).toEqual([{
       key: FUNGUS_NITROGEN_NOTE_KEY, severity: 'note',
-      text: 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.',
+      text: 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.',
     }]);
   });
 

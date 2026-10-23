@@ -22,7 +22,7 @@ jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
   // The rules ask for a LARGE PATCH area (loadActiveLargePatch); this store answers for it with the areas the test sets. The evidence itself
-  // (the newest fungicide target at the place) is tested against real rows in lawn-trouble-areas-large-patch.db.test.js.
+  // (the newest fungicide target at the place) is tested against real rows in lawn-v13-nov-large-patch-n.db.test.js and lawn-v13-dec-large-patch-k.plan.db.test.js.
   loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
@@ -102,7 +102,7 @@ describe('active large patch mapped, gate on', () => {
   test.each(['bermuda', 'st_augustine', 'zoysia'])('%s: the December bag is the 0-0-24 at 4.125 lb per 1,000, 41.25 lb on 10,000 sq ft, 0 lb N, with the technician note', async (track) => {
     const body = await sheet({}, track);
     const bag = itemOf(body, DEC_K_PRODUCT);
-    expect(bag).toMatchObject({ selected: true, raw: expect.stringMatching(/^LESCO Black Out 0-0-24 AM Spar-TECH \u2014 4\.1 lb per 1,000 sq ft \(0 lb N, 0\.99 lb K2O\), spreader, active large patch mapped$/) });
+    expect(bag).toMatchObject({ selected: true, raw: expect.stringMatching(/^LESCO Black Out 0-0-24 AM Spar-TECH \u2014 4\.1 lb per 1,000 sq ft \(0 lb N, 0\.99 lb K2O\), spreader, active patch mapped$/) });
     expect(bag.jobMix).toMatchObject({ rateSource: 'target_k_analysis', targetKPer1000: 0.99, amountUnit: 'lb', targetNPer1000: null });
     expect(bag.jobMix.ratePer1000).toBeCloseTo(4.125, 3);
     expect(bag.jobMix.amount).toBeCloseTo(41.25, 2);

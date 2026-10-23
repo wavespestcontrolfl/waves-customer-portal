@@ -229,7 +229,7 @@
             },
             "appliesTo": "Lawns with an active mapped large patch: a fungicide spot treatment at the mapped place with the target Large patch on record. Never listed for any other lawn, and not for any other disease (gray leaf spot, Pythium, dollar spot, fairy ring, rust) or when the disease is not on record.",
             "replaces": "LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer",
-            "primary": "LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active large patch mapped",
+            "primary": "LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped",
             "targetN": 0,
             "summary": "Active large patch mapped (GATE_LAWN_DEC_LARGE_PATCH_K): LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 N, 0.99 lb K2O) in place of the LESCO 10-0-22. A potassium-only bag: the same potassium as the 10-0-22 and no nitrogen. Every other lawn keeps the 10-0-22.",
             "note": "Active large patch mapped: potassium-only bag, no nitrogen (4.1 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22."
@@ -450,7 +450,7 @@
             },
             "appliesTo": "Lawns with an active mapped large patch: a fungicide spot treatment at the mapped place with the target Large patch on record. Never listed for any other lawn, and not for any other disease (gray leaf spot, Pythium, dollar spot, fairy ring, rust) or when the disease is not on record.",
             "replaces": "LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer",
-            "primary": "LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active large patch mapped",
+            "primary": "LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped",
             "targetN": 0,
             "summary": "Active large patch mapped (GATE_LAWN_DEC_LARGE_PATCH_K): LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 N, 0.99 lb K2O) in place of the LESCO 10-0-22. A potassium-only bag: the same potassium as the 10-0-22 and no nitrogen. Every other lawn keeps the 10-0-22.",
             "note": "Active large patch mapped: potassium-only bag, no nitrogen (4.1 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22."
@@ -689,7 +689,7 @@
             },
             "appliesTo": "Lawns with an active mapped large patch: a fungicide spot treatment at the mapped place with the target Large patch on record. Never listed for any other lawn, and not for any other disease (gray leaf spot, Pythium, dollar spot, fairy ring, rust) or when the disease is not on record.",
             "replaces": "LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer",
-            "primary": "LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active large patch mapped",
+            "primary": "LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 lb N, 0.99 lb K2O), spreader, active patch mapped",
             "targetN": 0,
             "summary": "Active large patch mapped (GATE_LAWN_DEC_LARGE_PATCH_K): LESCO Black Out 0-0-24 AM Spar-TECH — 4.1 lb per 1,000 sq ft (0 N, 0.99 lb K2O) in place of the LESCO 10-0-22. A potassium-only bag: the same potassium as the 10-0-22 and no nitrogen. Every other lawn keeps the 10-0-22.",
             "note": "Active large patch mapped: potassium-only bag, no nitrogen (4.1 lb per 1,000 sq ft = 0.99 lb K2O). Used in place of the LESCO 10-0-22."

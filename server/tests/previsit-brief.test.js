@@ -1310,7 +1310,7 @@ describe('the November nitrogen target on the lawn brief', () => {
   test('active fungus: the bag states 0.5 lb N/1000 with the reason and the normal figure; nothing else changes', async () => {
     november();
     const guidance = await guidanceFor();
-    expect(bagOf(guidance).gates).toEqual({ targetN: '0.5 lb N/1000 (active fungus mapped; normal 0.75 lb N/1000)', blackoutSensitive: true });
+    expect(bagOf(guidance).gates).toEqual({ targetN: '0.5 lb N/1000 (active large patch mapped; normal 0.75 lb N/1000)', blackoutSensitive: true });
     expect(JSON.stringify(guidance)).not.toContain('"targetN":"0.75');
     expect(guidance.conditional_products.find((p) => p.name === 'Velista').gates).toEqual({ trigger: 'large patch' });
   });

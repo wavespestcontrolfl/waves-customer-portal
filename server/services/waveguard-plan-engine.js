@@ -770,10 +770,12 @@ function fungusAdjustedVisit(visit, cut) {
     const found = line.match(NITROGEN_LINE);
     if (!found || !(Number(found[2]) > cut)) return line;
     const rate = ((Number(found[1]) * cut) / Number(found[2])).toFixed(1);
-    return `${line.replace(found[0], `${rate} lb per 1,000 sq ft (${cut} lb N)`)}, active fungus mapped`;
+    // The suffix never says "large patch": classifyProtocolLine reads that phrase in a line as a disease-gated line (conditionFlag
+    // active_disease), and the cut line must classify exactly as the line it replaces. The notes and the technician note say it in full.
+    return `${line.replace(found[0], `${rate} lb per 1,000 sq ft (${cut} lb N)`)}, active patch mapped`;
   }).join('\n');
   const notes = typeof visit.notes !== 'string' ? visit.notes
-    : visit.notes.replace(NITROGEN_NOTE, (whole, normal) => (Number(normal) > cut ? `N rate: ${cut} lb N (active fungus mapped; normal ${normal} lb N)` : whole));
+    : visit.notes.replace(NITROGEN_NOTE, (whole, normal) => (Number(normal) > cut ? `N rate: ${cut} lb N (active large patch mapped; normal ${normal} lb N)` : whole));
   return { ...visit, primary, notes };
 }
 
@@ -842,7 +844,7 @@ function fungusNitrogenNotes(mix, nitrogenCut) {
   return [{
     key: FUNGUS_NITROGEN_NOTE_KEY,
     severity: 'note',
-    text: `Active fungus mapped: nitrogen reduced to ${nitrogenCut} lb N (${Number(mix.ratePer1000).toFixed(1)} lb per 1,000). Close the spreader over the patch and 6 ft around it.`,
+    text: `Active large patch mapped: nitrogen reduced to ${nitrogenCut} lb N (${Number(mix.ratePer1000).toFixed(1)} lb per 1,000). Close the spreader over the patch and 6 ft around it.`,
   }];
 }
 
