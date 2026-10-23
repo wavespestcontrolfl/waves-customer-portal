@@ -263,6 +263,22 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     expect(db.__state.updated).toBeNull();
   });
 
+  test('a create onto a truck retired while it waited for the lock is refused', async () => {
+    db.__state.vehicles[OTHER] = { id: OTHER };
+    const vehicles = db.__state.vehicles;
+    let reads = 0;
+    Object.defineProperty(db.__state, 'vehicles', { get: () => (reads++ === 0 ? vehicles : { [VEHICLE]: vehicles[VEHICLE] }), configurable: true });
+    const res = await run('post', '/equipment', { body: { name: 'Synthetic probe', category: 'tool', assigned_vehicle_id: OTHER } });
+    Object.defineProperty(db.__state, 'vehicles', { value: vehicles, writable: true, configurable: true });
+    expect(res.statusCode).toBe(409);
+    expect(db.__state.inserted).toBeNull();
+  });
+
+  test('every save of an item takes the item\'s own lock first', async () => {
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed' } });
+    expect(truckKit.lockTruck.mock.calls[0]).toEqual([db, TOOL]);
+  });
+
   test('a target truck retired while the save waited for its lock is refused', async () => {
     // vehicleTarget saw OTHER as a live vehicle; under the lock it is gone.
     db.__state.vehicles[OTHER] = { id: OTHER };
@@ -281,7 +297,8 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: OTHER } });
     expect(res.statusCode).toBe(200);
     expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(truckKit.lockTruck.mock.calls.map(([, id]) => id).sort()).toEqual([VEHICLE, OTHER].sort());
+    const truckLocks = () => truckKit.lockTruck.mock.calls.map(([, id]) => id).filter((id) => id !== TOOL);
+    expect(truckLocks().sort()).toEqual([VEHICLE, OTHER].sort());
     expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(VEHICLE, expect.any(Date), db);
   });
 
@@ -347,7 +364,8 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     expect(truckKit.lockTruck).toHaveBeenCalledWith(db, OTHER);
     jest.clearAllMocks();
     await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed' } });
-    expect(truckKit.lockTruck).not.toHaveBeenCalled();
+    // Only the item's own lock, never a truck's.
+    expect(truckKit.lockTruck.mock.calls.map(([, id]) => id)).toEqual([TOOL]);
   });
 
   test('unassigning a tool re-judges its old truck; a save that keeps the truck touches no bell', async () => {
@@ -356,9 +374,10 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
     jest.clearAllMocks();
     await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: VEHICLE, name: 'Renamed' } });
     expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
-    expect(truckKit.lockTruck).toHaveBeenCalledTimes(1);
+    const truckLocks = () => truckKit.lockTruck.mock.calls.map(([, id]) => id).filter((id) => id !== TOOL);
+    expect(truckLocks()).toEqual([VEHICLE]);
     await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed again' } });
-    expect(truckKit.lockTruck).toHaveBeenCalledTimes(1);
+    expect(truckLocks()).toEqual([VEHICLE]);
   });
 });
 

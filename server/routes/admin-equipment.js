@@ -199,8 +199,13 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
     // insert serialize on that technician's lock.
     const record = await db.transaction(async (trx) => {
       // A new item placed straight onto a truck waits for a check in flight
-      // on that truck (same lock as recordTruckCheck).
-      if (custody.values.assigned_vehicle_id) await require('../services/truck-kit').lockTruck(trx, custody.values.assigned_vehicle_id);
+      // on that truck (same lock as recordTruckCheck), then the target is
+      // validated AGAIN under the lock: a truck retired meanwhile is refused.
+      if (custody.values.assigned_vehicle_id) {
+        await require('../services/truck-kit').lockTruck(trx, custody.values.assigned_vehicle_id);
+        const target = await trx('equipment').where({ id: custody.values.assigned_vehicle_id, category: 'vehicle' }).whereNotIn('status', DEAD_ITEM_STATUSES).first('id');
+        if (!target) return 'target-gone';
+      }
       if (category === 'vehicle' && assigned_to) {
         await require('../services/truck-kit').lockTechnician(trx, assigned_to);
         if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null, trx)) return 'second-truck';
@@ -224,6 +229,7 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
       return row;
     });
     if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });
+    if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
 
     logger.info(`Equipment added: ${record.name} (${record.id})`);
     res.status(201).json({ equipment: record });
@@ -267,6 +273,10 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     // trucks' locks, in the same transaction as the move (truck-kit.js).
     const record = await db.transaction(async (trx) => {
       const truckKit = require('../services/truck-kit');
+      // The item row itself is serialized first (one advisory lock per row),
+      // so two saves of the same item never derive their truck locks from
+      // the same stale read.
+      await truckKit.lockTruck(trx, req.params.id);
       const columns = ['assigned_vehicle_id', 'category', 'assigned_to', 'status'];
       const first = await trx('equipment').where({ id: req.params.id }).first(...columns);
       if (!first) return null;
@@ -286,7 +296,7 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       ].filter(Boolean);
       for (const truckId of [...new Set(touches(first))].sort()) await truckKit.lockTruck(trx, truckId);
       const before = await trx('equipment').where({ id: req.params.id }).first(...columns);
-      if (!before || before.assigned_vehicle_id !== first.assigned_vehicle_id) return 'moved';
+      if (!before || before.assigned_vehicle_id !== first.assigned_vehicle_id || before.category !== first.category) return 'moved';
       // The target truck is re-validated under its lock too: a writer that
       // retired or recategorized it while this save waited loses the race.
       if (updates.assigned_vehicle_id) {
