@@ -2559,6 +2559,28 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
 });
 
 router.put('/:serviceId/status', serviceStatusHandler);
+// The cancellation text step (or the no-text suppression) of a post-commit cancel, under the request's fence when it has one.
+// Never throws: a failure is logged and the outcome object reports what is known. Returns the outcome the reply reports.
+async function sendCancelNotice({ req, svc, notifyCustomer, fence, fallback }) {
+  let outcome = fallback;
+  try {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    // Out-param so the response can tell the operator the cancel committed but the requested text didn't go out (missing
+    // reminder row/phone, consent block, provider failure).
+    outcome = notifyCustomer !== false ? {} : null;
+    req.ibCancelNoticeOutcome = outcome;
+    await AppointmentReminders.handleCancellation(svc.id, {
+      sendNotification: notifyCustomer !== false,
+      ...(outcome ? { outcome } : {}),
+      // Set only by cancelServiceFromBar: the text the Intelligence Bar card approved, per recipient.
+      ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
+      // The approved text AND the no-text choice both run under the fence (the no-text suppression is a marker write too).
+      ...(fence && (req.ibApprovedCancelNotice || notifyCustomer === false) ? { cancelGeneration: fence } : {}),
+    });
+  } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
+  return outcome;
+}
+
 // The post-commit effects of a cancel (the text, then the invoice/credit/linked-visit follow-through), for the Dispatch handler and
 // the Intelligence Bar replay. Only the Intelligence Bar cancel carries a recovery record (req.ibCancelBundleId, written in the
 // cancel transaction by cancelServiceFromBar): the request takes its lease, notes the text outcome and marks the record complete.
@@ -2575,22 +2597,7 @@ async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, can
   // the approved cancel. A request that paused past its lease cannot send an untouched text after the office was told otherwise.
   const fence = await cancelBundles.liveFence(req);
   if (req.ibCancelBundleLost) return cancelNoticeOutcome;
-  let outcome = cancelNoticeOutcome;
-  try {
-    const AppointmentReminders = require('../services/appointment-reminders');
-    // Out-param so the response can tell the operator the cancel committed but the requested text didn't go out (missing
-    // reminder row/phone, consent block, provider failure).
-    outcome = notifyCustomer !== false ? {} : null;
-    req.ibCancelNoticeOutcome = outcome;
-    await AppointmentReminders.handleCancellation(svc.id, {
-      sendNotification: notifyCustomer !== false,
-      ...(outcome ? { outcome } : {}),
-      // Set only by cancelServiceFromBar: the text the Intelligence Bar card approved, per recipient.
-      ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
-      // The approved text AND the no-text choice both run under the fence (the no-text suppression is a marker write too).
-      ...(fence && (req.ibApprovedCancelNotice || notifyCustomer === false) ? { cancelGeneration: fence } : {}),
-    });
-  } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
+  const outcome = await sendCancelNotice({ req, svc, notifyCustomer, fence, fallback: cancelNoticeOutcome });
   // The text outcome is recorded FIRST, under the request's ownership protection (it never overwrites a sweep's): when a restore
   // or a lost lease stopped the fan-out after some recipients were reached, that delivery evidence (partial, uncertain) must
   // survive, because the restore clears the reminder's claim token and the sweep could not rebuild it. A fence refusal that
