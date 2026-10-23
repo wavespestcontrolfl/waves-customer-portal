@@ -9588,10 +9588,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings,
     });
 
-    // LESCO 13-0-13 on a Tree & Shrub visit (rate over the 7.5 lb per 1,000 sq ft county cap; more than 2 in 12 months, under
-    // 5 months apart, or inside June to September): flagged and sent to the office, never blocks. The June to September
-    // N/P blackout itself is the hard block in validateTreeShrubTypedCompliance. Covers a hand-added row as well as the suggestion.
-    if (record?.id && !issuedInvoiceCloseout && detectServiceLine(svc.service_type) === 'tree_shrub') {
+    // LESCO 13-0-13 (rate over the 7.5 lb per 1,000 sq ft county cap; more than 2 in 12 months, under 5 months apart, or inside
+    // June to September): flagged and sent to the office, never blocks. The June to September N/P blackout itself is the hard block
+    // in validateTreeShrubTypedCompliance. The row is the trigger, not the visit's service line: the check reads the record's saved
+    // rows and returns at once when none is a 13-0-13, so a Tree & Shrub companion on a lawn or pest visit is judged too, as is a
+    // hand-added row as well as the suggestion.
+    if (!issuedInvoiceCloseout) {
       applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings });
     }
 

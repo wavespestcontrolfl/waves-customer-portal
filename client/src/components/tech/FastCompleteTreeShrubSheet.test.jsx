@@ -90,7 +90,7 @@ const PREVIEW = {
   status: 'complete',
 };
 
-function makeRequest({ context = CONTEXT, preview = PREVIEW, previewError = null } = {}) {
+function makeRequest({ context = CONTEXT, preview = PREVIEW, previewError = null, completeResponse = { success: true } } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
@@ -105,7 +105,7 @@ function makeRequest({ context = CONTEXT, preview = PREVIEW, previewError = null
       return preview;
     }
     if (path.endsWith('/tech-tips')) return { available: false };
-    if (path.endsWith('/complete')) return { success: true };
+    if (path.endsWith('/complete')) return completeResponse;
     return {};
   });
   request.calls = calls;
@@ -932,6 +932,45 @@ describe('13-0-13 treated square feet (the county cap needs an area)', () => {
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ totalAmount: 12, amountUnit: 'lb', areaValue: 1200 });
+  });
+
+  test('a held 13-0-13 added by hand shows the hold reason on its row and still records; a product that is not held shows none', async () => {
+    const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const holds = [{ name: orn, reason: 'The last 13-0-13 application was less than five months ago.' }];
+    const request = makeRequest({ context: { ...CONTEXT, bedSqft: 900, monthProductHolds: holds } });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '13-0-13' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 13-0-13/ }));
+    const line = within(editorFor(orn)).getByText(/^Held:/);
+    expect(line.textContent).toBe('Held: The last 13-0-13 application was less than five months ago. It will be recorded and the office will review it.');
+    // The hold is a line, never a reason Complete is held.
+    expect(screen.queryByText(/Held:.*Complete|cannot be completed/i)).toBeNull();
+    // No hold, no line.
+    cleanup();
+    await openSheet(makeRequest({ context: { ...CONTEXT, bedSqft: 900 } }));
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '13-0-13' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 13-0-13/ }));
+    expect(within(editorFor(orn)).queryByText(/^Held:/)).toBeNull();
+  });
+
+  test('a held 13-0-13 still completes: the hold line never blocks the send', async () => {
+    const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const request = await ready({ ...withOrn(1200), monthProductHolds: [{ name: orn, reason: 'Two 13-0-13 applications are already recorded in the past year.' }] });
+    enterAmount(orn, 9);
+    expect(within(editorFor(orn)).getByText(/^Held: Two 13-0-13 applications are already recorded in the past year\. It will be recorded/)).toBeTruthy();
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ totalAmount: 9, areaValue: 1200 });
+  });
+
+  test('the saved view lists the server\'s completion advisories', async () => {
+    const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const advisory = `${orn} rate 10 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`;
+    const request = makeRequest({ context: withOrn(1200), completeResponse: { success: true, completionAdvisories: [advisory] } });
+    await readyVisit(request);
+    fireEvent.click(tile('LESCO 13-0-13'));
+    enterAmount(orn, 12);
+    fireEvent.click(completeButton());
+    expect(await screen.findByText(advisory)).toBeTruthy();
   });
 
   test('the 13-0-13 amount starts blank even when last time recorded one', async () => {

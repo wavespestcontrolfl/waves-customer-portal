@@ -482,9 +482,12 @@ describe('the office notification for a finding (raised through the admin alert 
     }
   });
 
-  test('the closeout calls the 13-0-13 check for a Tree & Shrub visit, after the save, with the office notifier', () => {
+  test('the closeout calls the 13-0-13 check on every completion (the row is the trigger, not the service line), after the save, with the office notifier', () => {
     const src = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
-    expect(src).toContain("detectServiceLine(svc.service_type) === 'tree_shrub'");
+    const at = src.indexOf('tsOrnamental.flagOrnamentalFertilizer({');
+    expect(at).toBeGreaterThan(0);
+    // No service-line gate on the line before the call.
+    expect(src.slice(at - 120, at)).not.toMatch(/detectServiceLine|tree_shrub/);
     expect(src).toContain('tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings })');
   });
 

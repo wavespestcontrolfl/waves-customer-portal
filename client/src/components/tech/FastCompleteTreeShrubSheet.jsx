@@ -248,6 +248,13 @@ function productRow(product, { method, last = null, added = false, bedSqft = nul
 
 const hasBedArea = (row) => !row.needsArea || Number(row.areaValue) > 0;
 
+// A product the server held back as this month's suggestion can still be added by hand. The sheet never refuses it; it says why it
+// was held, and the office reviews the record (the 13-0-13 history check at closeout).
+const heldLine = (row, holds) => {
+  const hold = holds.find((item) => item.name === row.name);
+  return hold ? `Held: ${String(hold.reason).replace(/\.\s*$/, '')}. It will be recorded and the office will review it.` : null;
+};
+
 // The non-blocking county-limit line for an applied 13-0-13 row: the higher of the entered rate (none on this sheet) and the
 // amount over the treated square feet, the same reading the full form and the server use. null when it cannot be read or is fine.
 const bedFeedLine = (row) => (row.needsArea && row.active
@@ -326,6 +333,8 @@ const firstText = (...texts) => texts.find(Boolean) || '';
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
 const positiveOrNull = (value) => (Number(value) > 0 ? Number(value) : null);
 
+const monthHoldsFrom = (data) => (Array.isArray(data?.monthProductHolds) ? data.monthProductHolds : []).filter((hold) => hold?.name && hold?.reason);
+
 function contextFrom(data, service) {
   if (data?.eligible !== true && RETRYABLE_REASONS.has(data?.reason)) {
     return { ...EMPTY_CONTEXT, loading: false, loadError: 'Couldn’t load this visit’s products. Try again.' };
@@ -339,6 +348,8 @@ function contextFrom(data, service) {
     blockedReason: blockedReasonFor(data, service),
     visit: data?.service || {},
     bedSqft: positiveOrNull(data?.bedSqft),
+    // Month suggestions the server held back (2 in 12 months, under 5 months apart, ...): { name, reason }.
+    monthProductHolds: monthHoldsFrom(data),
     products,
     rows: monthRows(data, products, lastVisit),
     lastVisit,
@@ -363,7 +374,7 @@ function contextFrom(data, service) {
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, bedSqft: null, watchList: null, pestCheck: null, neonicCap: null, wrapUp: false, stockAdvisory: false,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, bedSqft: null, monthProductHolds: [], watchList: null, pestCheck: null, neonicCap: null, wrapUp: false, stockAdvisory: false,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -588,7 +599,15 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
 }
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, onWrapChecking }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+  if (submission.done) {
+    // The server's completion advisories (a 13-0-13 over the county limit, a history rule) are listed under the summary.
+    const advisories = (Array.isArray(submission.done.response?.completionAdvisories) ? submission.done.response.completionAdvisories : []).filter((text) => typeof text === 'string' && text);
+    return (
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
+        {advisories.map((text) => <p key={text} className="tech-visit-muted tech-visit-status--warn" role="status">{text}</p>)}
+      </SavedView>
+    );
+  }
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
   const refusal = refusalWithoutContext(submission, ctx);
@@ -1134,6 +1153,7 @@ function ProductsSection({ ctx, products, neonicLines, locked, other, popover, i
           row={row}
           warnings={ctx.warnings.filter((warning) => warning.productId != null && String(warning.productId) === String(row.productId))}
           neonicLine={neonicLines[row.productId]}
+          heldLine={heldLine(row, ctx.monthProductHolds)}
           locked={locked}
           onChange={(patch) => updateRow(row.productId, patch)}
           onRemove={() => removeRow(row.productId)}
@@ -1165,7 +1185,7 @@ function ProductTile({ row, locked, onClick }) {
 
 // An applied product: how much (blank until the tech enters it, or last
 // time's amount, labeled), how it went down, and the server's warnings for it.
-function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }) {
+function ProductEditor({ row, warnings, neonicLine, heldLine, locked, onChange, onRemove }) {
   const nameId = useId();
   const amountId = useId();
   const areaId = useId();
@@ -1200,6 +1220,7 @@ function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }
         </div>
       )}
       {neonicLine && <p className="tech-visit-muted" role="status">{neonicLine}</p>}
+      {heldLine && <p className="tech-visit-muted" role="status">{heldLine}</p>}
       {row.fromLast && <p className="tech-visit-muted">last time</p>}
       {row.added ? (
         <div>

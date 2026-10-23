@@ -183,6 +183,38 @@ describe('scope and merging', () => {
   });
 });
 
+describe('a 13-0-13 on a lawn-primary visit with a Tree & Shrub companion is judged the same (the row is the trigger)', () => {
+  const lawnSvc = { ...svc, service_type: 'Lawn Care', city: 'Sarasota' };
+  const run = (opts, extra = {}) => {
+    const notify = jest.fn(async () => {});
+    return limits.flagOrnamentalFertilizer({ svc: lawnSvc, record, database: fakeDb(opts), advisory: null, notify, ...extra }).then((out) => ({ out, notify }));
+  };
+  test('an over-cap 13-0-13 rings the office', async () => {
+    const { out, notify } = await run({ rows: [row({ total_amount: 12, amount_unit: 'lb', area_value: 1200, area_unit: 'sqft' })] });
+    expect(out.blocks[0]).toMatchObject({ code: 'application_limit_exceeded' });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0].svc).toBe(lawnSvc);
+    expect(notify.mock.calls[0][0].findings[0]).toMatchObject({ limitType: 'ornamental_fertilizer_rate', current: 10 });
+  });
+  test('the history and zone rules read the lawn visit\'s customer, property and city (a July visit in Sarasota is held)', async () => {
+    const july = { ...lawnSvc, scheduled_date: '2028-07-10' };
+    const notify = jest.fn(async () => {});
+    const db = fakeDb({ rows: [row({ application_rate: 7.5, rate_unit: 'lb' })], history: [past('2028-02-10')] });
+    const out = await limits.flagOrnamentalFertilizer({ svc: july, record: { id: 'rec-1', service_date: '2028-07-10' }, database: db, advisory: null, notify });
+    expect(out.blocks.map((b) => b.message).join(' ')).toMatch(/not allowed June 1 to September 30/);
+    expect(db.seen.excluded).toBe('rec-1');
+  });
+  test('a lawn visit with no 13-0-13 row does nothing and reads no history', async () => {
+    const db = fakeDb({ rows: [row({ product_name: 'Celsius WG', application_rate: 99, rate_unit: 'oz' })], failHistory: true });
+    const notify = jest.fn();
+    expect(await limits.flagOrnamentalFertilizer({ svc: lawnSvc, record, database: db, advisory: null, notify })).toBeNull();
+    expect(notify).not.toHaveBeenCalled();
+    const none = await run({ rows: [] });
+    expect(none.out).toBeNull();
+    expect(none.notify).not.toHaveBeenCalled();
+  });
+});
+
 describe('the June to September blackout is still a hard block on a hand-added 13-0-13', () => {
   const typed = (date, zoneCity = 'Parrish') => validateTreeShrubTypedCompliance({
     service: { city: zoneCity, scheduled_date: date, service_type: 'Tree & Shrub Care' }, serviceDate: date, values: {},
