@@ -184,6 +184,14 @@ async function kitKeyVocabulary(conn = db) {
   return [...byKey.values()].sort((a, b) => a.kit_key.localeCompare(b.kit_key));
 }
 
+// Keys are set up for a truck once ANY row assigned to it carries one, whatever
+// its status: a truck whose last keyed tool was just marked lost is not
+// unconfigured, it is missing a tool (pre-push P1 on #6497).
+async function truckHasKeys(vehicleId, conn = db) {
+  const row = await conn('equipment').where({ assigned_vehicle_id: vehicleId }).whereNotNull('kit_key').first('id');
+  return Boolean(row);
+}
+
 // The keyed tools a truck carries today: keyed live rows minus any with an open
 // tool alert (reported missing or damaged on the last check).
 const keysOnTruck = (kit) => new Set(kit.filter((item) => item.kit_key && !item.open_issue).map((item) => normalizeKitKey(item.kit_key)));
@@ -192,11 +200,10 @@ const keysOnTruck = (kit) => new Set(kit.filter((item) => item.kit_key && !item.
 // Empty when the truck has no keyed row at all (keys are not set up for it)
 // or the lines require nothing keyed.
 async function toolGapsForTruck(vehicleId, serviceLines, conn = db) {
-  const kit = await kitForTruck(vehicleId, conn);
-  if (!kit.some((item) => item.kit_key)) return [];
+  if (!(await truckHasKeys(vehicleId, conn))) return [];
   const required = await requiredToolsForLines(serviceLines, conn);
   if (!required.length) return [];
-  const onTruck = keysOnTruck(kit);
+  const onTruck = keysOnTruck(await kitForTruck(vehicleId, conn));
   return required.filter((tool) => !onTruck.has(tool.kit_key));
 }
 
@@ -230,9 +237,8 @@ async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = 
     .whereIn('status', LIVE_VISIT_STATUSES)
     .select('id', 'service_type');
   if (!visits.length) return [];
-  const kit = await kitForTruck(truck.id, conn);
-  if (!kit.some((item) => item.kit_key)) return [];
-  const onTruck = keysOnTruck(kit);
+  if (!(await truckHasKeys(truck.id, conn))) return [];
+  const onTruck = keysOnTruck(await kitForTruck(truck.id, conn));
   const requiredByLines = new Map();
   const out = [];
   for (const visit of visits) {
@@ -451,6 +457,7 @@ module.exports = {
   requiredToolsForLines,
   serviceLinesFor,
   lockTruck,
+  truckHasKeys,
   kitKeyVocabulary,
   toolGapsForTruck,
   toolGapIssue,

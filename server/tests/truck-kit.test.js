@@ -383,6 +383,16 @@ describe('tool gaps by kit key', () => {
     expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
   });
 
+  test('a truck whose last keyed tool was marked lost is still judged: the lost tool is the gap', async () => {
+    db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
+    expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([]);
+    db.__state.equipment.find((e) => e.id === METER).status = 'lost';
+    expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
+    const today = require('../utils/datetime-et').etDateString(NOW);
+    db.__state.scheduled_services = [{ id: 'v1', technician_id: TECH, scheduled_date: today, status: 'confirmed', service_type: 'Termite Inspection' }];
+    expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Termite Inspection', missing: ['Moisture meter'] }]);
+  });
+
   test('toolGapIssue is a hold with a readable label, and nothing behind the gate or without a truck', async () => {
     db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
     expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).toEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });

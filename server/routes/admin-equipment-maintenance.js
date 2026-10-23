@@ -692,6 +692,7 @@ router.get('/alerts', async (req, res, next) => {
 // only close the alert. The truck's office bell closes once no tool alert on
 // it is open. Admin only: an item's status is an office call.
 const TOOL_OUTCOME_STATUS = { found: null, repaired: null, replaced: null, lost: 'lost', retired: 'retired' };
+const OPEN_TOOL_ALERT_STATUSES = ['new', 'acknowledged'];
 
 // PUT /alerts/:id — update alert status
 router.put('/alerts/:id', async (req, res, next) => {
@@ -730,11 +731,13 @@ router.put('/alerts/:id', async (req, res, next) => {
         item = await trx('equipment').where('id', existing.equipment_id).first('assigned_vehicle_id');
         if (item?.assigned_vehicle_id) await truckKit.lockTruck(trx, item.assigned_vehicle_id);
       }
-      const [row] = await trx('maintenance_alerts')
-        .where('id', req.params.id)
-        .update(updates)
-        .returning('*');
-      if (!row) return null;
+      // A stale office button never re-closes a tool alert a truck check
+      // already closed (it would mark a found tool lost): resolve only an
+      // open one, and answer 409 when none matches.
+      let query = trx('maintenance_alerts').where('id', req.params.id);
+      if (toolAlert && status === 'resolved') query = query.whereIn('status', OPEN_TOOL_ALERT_STATUSES);
+      const [row] = await query.update(updates).returning('*');
+      if (!row) return toolAlert && status === 'resolved' ? 'closed' : null;
       if (status === 'resolved' && toolAlert) {
         const nextStatus = outcome ? TOOL_OUTCOME_STATUS[outcome] : null;
         if (nextStatus) await trx('equipment').where('id', row.equipment_id).update({ status: nextStatus, updated_at: db.fn.now() });
@@ -743,6 +746,7 @@ router.put('/alerts/:id', async (req, res, next) => {
       return row;
     });
 
+    if (record === 'closed') return res.status(409).json({ error: 'That alert is already closed (the truck check found the tool). Reload the list.' });
     if (!record) return res.status(404).json({ error: 'Alert not found' });
     res.json({ alert: record });
   } catch (err) {

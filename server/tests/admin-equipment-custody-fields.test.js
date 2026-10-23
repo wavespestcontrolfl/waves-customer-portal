@@ -40,6 +40,7 @@ jest.mock('../models/db', () => {
     return c;
   };
   const db = jest.fn(chain);
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.raw = jest.fn((sql) => ({ sql }));
   db.fn = { now: () => 'NOW()' };
   db.__state = state;
@@ -78,7 +79,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   const s = db.__state;
   s.vehicles = { [VEHICLE]: { id: VEHICLE } };
-  s.rows = { [TOOL]: { id: TOOL, category: 'tool' }, [OTHER]: { id: OTHER, category: 'vehicle' } };
+  s.rows = { [TOOL]: { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE }, [OTHER]: { id: OTHER, category: 'vehicle' } };
   s.riders = { [VEHICLE]: { id: TOOL } };
   s.inserted = null;
   s.updated = null;
@@ -239,7 +240,32 @@ describe('GET /equipment', () => {
 jest.mock('../services/truck-kit', () => ({
   truckKitEnabled: jest.fn(() => true),
   kitKeyVocabulary: jest.fn(async () => [{ kit_key: 'moisture_meter', label: 'Moisture meter' }]),
+  lockTruck: jest.fn(async () => ({ rows: [] })),
+  closeTruckBellIfClear: jest.fn(async () => true),
 }));
+const truckKit = require('../services/truck-kit');
+
+describe('a tool leaving a truck re-judges that truck\'s bell', () => {
+  test('moving a tool to another truck locks both trucks and re-judges the old one, in the update transaction', async () => {
+    db.__state.vehicles[OTHER] = { id: OTHER };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: OTHER } });
+    expect(res.statusCode).toBe(200);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(truckKit.lockTruck.mock.calls.map(([, id]) => id).sort()).toEqual([VEHICLE, OTHER].sort());
+    expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(VEHICLE, expect.any(Date), db);
+  });
+
+  test('unassigning a tool re-judges its old truck; a save that keeps the truck touches no bell', async () => {
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: null } });
+    expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(VEHICLE, expect.any(Date), db);
+    jest.clearAllMocks();
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: VEHICLE, name: 'Renamed' } });
+    expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
+    expect(truckKit.lockTruck).toHaveBeenCalledTimes(1);
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed again' } });
+    expect(truckKit.lockTruck).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('kit key', () => {
   test('is normalized to snake_case, cleared when blank, refused when not a key', async () => {

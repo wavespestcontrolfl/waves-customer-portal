@@ -19,11 +19,13 @@ jest.mock('../models/db', () => {
   const chain = (table) => {
     const c = { table, id: null, patch: null };
     c.where = (...args) => { c.id = args.length === 2 ? args[1] : args[0]?.id; return c; };
+    c.whereIn = (col, vals) => { c.statuses = vals; return c; };
     c.first = async () => (table === 'maintenance_alerts' ? state.alerts[c.id] : state.equipment[c.id]) || null;
     c.update = (patch) => { c.patch = patch; state.updates.push([table, c.id, patch]); return c; };
     c.returning = async () => {
       const row = state.alerts[c.id];
       if (!row) return [];
+      if (c.statuses && !c.statuses.includes(row.status)) return [];
       Object.assign(row, c.patch);
       return [row];
     };
@@ -85,6 +87,17 @@ test('Lost resolves the alert, marks the item lost and closes the truck bell', a
   const lockAt = truckKit.lockTruck.mock.invocationCallOrder[0];
   const updateAt = db.mock.invocationCallOrder.find((n) => n > lockAt);
   expect(updateAt).toBeGreaterThan(lockAt);
+});
+
+test('a stale Lost on an alert the truck check already closed is refused and marks nothing', async () => {
+  db.__state.alerts['a-missing'].status = 'resolved';
+  const res = await put('a-missing', { status: 'resolved', outcome: 'lost' });
+  expect(res.statusCode).toBe(409);
+  expect(db.__state.equipment[TOOL].status).toBe('active');
+  expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
+  // A plain maintenance alert keeps its idempotent resolve.
+  db.__state.alerts['a-due'].status = 'resolved';
+  expect((await put('a-due', { status: 'resolved' })).statusCode).toBe(200);
 });
 
 test('a tool alert never resolves without an outcome', async () => {
