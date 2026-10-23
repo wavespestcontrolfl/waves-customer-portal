@@ -308,3 +308,59 @@ describe('a forged provider email', () => {
   });
 });
 
+
+// The SHAPE of a VendorLink "Solicitation Broadcast" (the date sits on the line after its label); invented agency.
+const VL_BODY = (city = 'Sampleville, FL 34200') => [
+  'SOLICITATION NOTIFICATION',
+  'Sample County School Board',
+  'Purchasing Department',
+  '100 Fixture Way',
+  city,
+  'Sample County School Board requests interested parties to submit formal sealed bids/proposals for the below referenced solicitation.',
+  'BID NUMBER: ITB 27-001',
+  'BID TITLE: Pest Control Services',
+  'BID OPENING DUE DATE/TIME:',
+  '11/4/2026 at 2:00 PM, Local Time, Sampleville, FL',
+  'PRE-BID/PROPOSAL CONFERENCE:',
+  'None',
+  'PURCHASING AGENT: Pat Sample (pat.sample@sample-schools.example ) 9415550100',
+].join('\n');
+const vlNotice = (over = {}) => email({
+  from_address: 'vendorlink@myvendorlink.com', from_name: 'VendorLink', subject: 'Solicitation Broadcast', body_text: VL_BODY(), ...over,
+});
+
+describe('VendorLink solicitation broadcasts', () => {
+  test('a notice from an agency in the service area is a bid, read from the fixed template', () => {
+    expect(detectBidEmail(vlNotice())).toMatchObject({ bid: true, source: 'gov_email', kind: 'invite' });
+    expect(parseBidEmail(vlNotice())).toMatchObject({
+      template: 'vendorlink',
+      gc_or_agency: 'Sample County School Board',
+      project_title: 'Pest Control Services',
+      solicitation_number: 'ITB 27-001',
+      location: 'Sampleville, FL 34200',
+      buyer_email: 'pat.sample@sample-schools.example',
+      due_source_line: '11/4/2026 at 2:00 PM, Local Time, Sampleville, FL',
+    });
+    expect(parseBidEmail(vlNotice()).due_at.toISOString()).toBe('2026-11-04T19:00:00.000Z');
+    // The state spelled out counts too.
+    expect(detectBidEmail(vlNotice({ body_text: VL_BODY('SAMPLEVILLE, FLORIDA 33601') })).bid).toBe(true);
+  });
+
+  test('an agency outside the service area, a catch-up list, or a forged sender is not a bid', () => {
+    expect(detectBidEmail(vlNotice({ body_text: VL_BODY('Sampleton, TN 37402') }))).toMatchObject({ bid: false, reason: 'outside_area' });
+    expect(detectBidEmail(vlNotice({ body_text: VL_BODY('Sampleton, FL 32401') }))).toMatchObject({ bid: false, reason: 'outside_area' });
+    expect(detectBidEmail(vlNotice({ subject: 'Solicitation Broadcast - Vendor Commodity Code Changed' })))
+      .toMatchObject({ bid: false, reason: 'catch_up_list' });
+    expect(detectBidEmail(vlNotice({ subject: 'VendorLink Registration', body_text: 'Welcome to VendorLink.' })))
+      .toMatchObject({ bid: false, reason: 'provider_not_bid' });
+    // Without aligned SPF/DKIM the template is not trusted: no subject bid words, so it is not a bid.
+    expect(detectBidEmail(vlNotice({ provider_verified: false }))).toMatchObject({ bid: false });
+    expect(parseBidEmail(vlNotice({ provider_verified: false }))).toMatchObject({ template: null, due_at: null });
+  });
+
+  test('HA eProcurement and MyFloridaMarketPlace mail with bid words counts as government mail', () => {
+    for (const from of ['notices@ha.internationaleprocurement.com', 'MFMP.NoReply@dms.myflorida.com']) {
+      expect(detectBidEmail(email({ from_address: from, subject: 'New RFP: Pest Control' }))).toMatchObject({ bid: true, source: 'gov_email' });
+    }
+  });
+});

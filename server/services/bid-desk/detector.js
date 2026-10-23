@@ -6,10 +6,16 @@
  * detectBidEmail(email)  is this stored email a bid invite, an addendum or a reminder for one?
  * parseBidEmail(email)   the fields we may read from it.
  *
- * Fields are read ONLY from the two fixed provider templates:
+ * Fields are read ONLY from the fixed provider templates:
  *   BuildingConnected   "<GC> has invited you to bid on <Project>: <Package>", "Location: ...", "Job Walk: <date>",
  *                       "Bid Due: <date>", "Lead: <name> | <email>"
  *   Procore             "Bid Due: <weekday>, <date> at <time>", "Project Name <x>", "Bid Form Name <x>"
+ *   VendorLink          "SOLICITATION NOTIFICATION", then the agency's name and address, then "BID NUMBER: <x>",
+ *                       "BID TITLE: <x>", "BID OPENING DUE DATE/TIME: <mm/dd/yyyy> at <h:mm AM>, Local Time, <city>"
+ *                       (or SOLICITATION NUMBER / TITLE / OPENING DUE DATE/TIME)
+ * A VendorLink broadcast can come from any agency in the country, so one is a bid only when the agency's address is
+ * in the Tampa Bay to Southwest Florida ZIP areas (the same ones the SAM.gov reader files). Its "Vendor Commodity
+ * Code Changed" list (every open bid that loosely matches, sent when the codes change) is never a bid.
  * Every other email (a city RFQ, an HOA RFP, a portal notice) leaves the fields null: a date guessed out of free
  * text would become a deadline somebody trusts. A date we do read is stored with the exact line it came from.
  * Dates are America/New_York wall time; a date with no time is stored at 23:59 ET.
@@ -19,13 +25,20 @@ const { parseETDateTime, validCalendarDate } = require('../../utils/datetime-et'
 const OWN_ADDRESS = 'contact@wavespestcontrol.com';
 const BC_DOMAIN = 'buildingconnected.com';
 const PROCORE_DOMAIN = 'procoretech.com';
-const PORTAL_DOMAINS = ['bonfirehub.com', 'opengov.com', 'demandstar.com', 'bidnetdirect.com'];
+const VENDORLINK_DOMAIN = 'myvendorlink.com';
+const PORTAL_DOMAINS = ['bonfirehub.com', 'opengov.com', 'demandstar.com', 'bidnetdirect.com', 'internationaleprocurement.com', 'myflorida.com'];
 const GOV_SUFFIXES = ['.gov', '.fl.us'];
 const INTERNAL_SUBJECT = /^\s*(?:FIX|ACT|FYI|OK)\s*:/;
 const BID_WORDS = /\b(?:RFP|RFQ|ITB|IFB|ITN)\b|invitation to bid|bid invite|request for (?:proposal|quote|qualifications)|addend(?:um|ums|a)\b|pre-?bid/i;
 // Subject patterns for the kind of message once an email is known to be about a bid.
 const ADDENDUM_WORDS = /\baddend(?:um|ums|a)\b|\bdate change\b|\b(?:due date|deadline|bid date|bid due)\b.{0,40}\b(?:change[sd]?|extended|extension|revised|moved|postponed)\b|\b(?:extended|extension|revised|postponed)\b.{0,40}\b(?:due|deadline|bid)\b/i;
 const PROVIDER_BID_BODY = /^\s*Bid Due\s*:|has invited you to bid on|sent your company a message about|invitation to bid/im;
+// VendorLink's notice: the subject says only "Solicitation Broadcast", the body opens with this line.
+const VENDORLINK_NOTICE = /^\s*SOLICITATION NOTIFICATION\s*$/im;
+// Sent when the vendor's codes change: a catch-up list of every open bid that loosely matches, not a new posting.
+const VENDORLINK_CATCH_UP = /\bVendor Commodity Code Changed\b/i;
+// The agency address block, before the first labelled field: "<City>, FL 34231". ZIP areas as the SAM.gov reader.
+const AREA_ZIP = /\b(?:FL|FLORIDA)\.?,?\s+(33[5-9]\d\d|34[12]\d\d)(?:-\d{4})?\b/i;
 const REMINDER_WORDS = /\breminder\b|\bdue (?:soon|tomorrow|today)\b|\bclosing soon\b|\blast chance\b/i;
 
 const MONTH_INDEX = {
@@ -120,6 +133,7 @@ function senderKind(email) {
   const verified = email.provider_verified === true;
   if (inDomain(domain, BC_DOMAIN)) return verified ? 'buildingconnected' : null;
   if (inDomain(domain, PROCORE_DOMAIN)) return verified ? 'procore' : null;
+  if (inDomain(domain, VENDORLINK_DOMAIN)) return verified ? 'vendorlink' : null;
   if (PORTAL_DOMAINS.some((root) => inDomain(domain, root)) || GOV_SUFFIXES.some((suffix) => domain.endsWith(suffix))) {
     return 'gov_email';
   }
@@ -145,18 +159,28 @@ function detectBidEmail(email = {}) {
   const domain = domainOf(from);
   if (inDomain(domain, 'github.com') || from.endsWith('@github.com')) return { bid: false, reason: 'github' };
 
-  const sender = senderKind(email);
-  const bidWords = BID_WORDS.test(subject);
-  let source = null;
+  const { source, reason } = bidSource(email, senderKind(email), BID_WORDS.test(subject));
+  if (!source) return { bid: false, reason };
+  return { bid: true, source, kind: classifyKind(email), reason: 'matched' };
+}
+
+// The source a bid from this sender would carry, or why the email is not a bid.
+function bidSource(email, sender, bidWords) {
+  const subject = String(email.subject || '');
   // BuildingConnected / Procore also send account and marketing mail: a bid needs a bid line in the body or bid
   // words in the subject.
-  if ((sender === 'buildingconnected' || sender === 'procore') && (bidWords || PROVIDER_BID_BODY.test(subject) || PROVIDER_BID_BODY.test(bodyText(email)))) {
-    source = sender;
-  } else if (sender === 'buildingconnected' || sender === 'procore') return { bid: false, reason: 'provider_not_bid' };
-  else if (sender === 'gov_email' && bidWords) source = 'gov_email';
-  else if (bidWords) source = 'email_subject';
-  if (!source) return { bid: false, reason: 'not_bid' };
-  return { bid: true, source, kind: classifyKind(email), reason: 'matched' };
+  if (sender === 'buildingconnected' || sender === 'procore') {
+    return bidWords || PROVIDER_BID_BODY.test(subject) || PROVIDER_BID_BODY.test(bodyText(email))
+      ? { source: sender } : { reason: 'provider_not_bid' };
+  }
+  if (sender === 'vendorlink') {
+    if (VENDORLINK_CATCH_UP.test(subject)) return { reason: 'catch_up_list' };
+    const notice = vendorlinkNotice(bodyLines(email));
+    if (!notice) return { reason: 'provider_not_bid' };
+    return notice.inArea ? { source: 'gov_email' } : { reason: 'outside_area' };
+  }
+  if (bidWords) return { source: sender === 'gov_email' ? 'gov_email' : 'email_subject' };
+  return { reason: 'not_bid' };
 }
 
 // ---------- parsing ----------
@@ -265,10 +289,46 @@ function parseProcore(lines) {
   return out;
 }
 
+// The notice header (agency name and address) runs from "SOLICITATION NOTIFICATION" to the first labelled line.
+const VL_LABEL = /^(?:BID|SOLICITATION|PROPOSAL|RFP|RFQ|ITB)\b[^:]{0,40}:/i;
+function vendorlinkNotice(lines) {
+  const start = lines.findIndex((line) => VENDORLINK_NOTICE.test(line));
+  if (start === -1) return null;
+  const end = lines.findIndex((line, i) => i > start && VL_LABEL.test(line));
+  const header = lines.slice(start + 1, end === -1 ? start + 6 : end);
+  return { header, inArea: header.some((line) => AREA_ZIP.test(line)) };
+}
+
+function parseVendorLink(lines) {
+  const notice = vendorlinkNotice(lines);
+  if (!notice) return {};
+  const value = (re) => lines.map((line) => re.exec(line)).find(Boolean)?.[1]?.trim() || null;
+  const out = {
+    gc_or_agency: notice.header[0] || null,
+    location: notice.header.find((line) => AREA_ZIP.test(line)) || null,
+    solicitation_number: value(/^(?:BID|SOLICITATION|PROPOSAL)\s+NUMBER\s*:\s*(.+)$/i),
+    project_title: value(/^(?:BID|SOLICITATION|PROPOSAL)\s+TITLE\s*:\s*(.+)$/i),
+  };
+  const agent = lines.find((line) => /^PURCHASING AGENT\s*:/i.test(line));
+  const email = agent && EMAIL_IN_LINE.exec(agent);
+  if (email) out.buyer_email = email[1].toLowerCase();
+  return out;
+}
+
+// "BID OPENING DUE DATE/TIME:" with the date on the same line or alone on the next one; the date line is the source.
+function vendorlinkDue(lines) {
+  const label = /^(?:BID|SOLICITATION|PROPOSAL) OPENING DUE DATE\/TIME\s*:\s*(.*)$/i;
+  const index = lines.findIndex((line) => label.test(line));
+  if (index === -1) return null;
+  const rest = label.exec(lines[index])[1].trim();
+  const line = rest ? lines[index] : lines[index + 1] || '';
+  return firstDate([{ line, value: rest || line }], '23:59');
+}
+
 const normalizeTitle = (title) => String(title || '')
   .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-const TEMPLATE_PARSERS = { buildingconnected: parseBuildingConnected, procore: parseProcore };
+const TEMPLATE_PARSERS = { buildingconnected: parseBuildingConnected, procore: parseProcore, vendorlink: parseVendorLink };
 
 // The cross-thread identity of a bid. Only a provider template names the GC and the project (read only when the
 // sender is the provider's own domain), so only a template email groups across threads: every other email (a city
@@ -289,7 +349,7 @@ function templateFields(template, lines) {
   if (!template) return { fields: {}, due: null, jobWalk: null };
   return {
     fields: TEMPLATE_PARSERS[template](lines),
-    due: firstDate(labelledValues(lines, 'Bid Due', { allowBare: template === 'procore' }), '23:59'),
+    due: template === 'vendorlink' ? vendorlinkDue(lines) : firstDate(labelledValues(lines, 'Bid Due', { allowBare: template === 'procore' }), '23:59'),
     jobWalk: firstDate(labelledValues(lines, 'Job Walk'), '23:59'),
   };
 }
@@ -313,7 +373,7 @@ function parseBidEmail(email = {}) {
     gc_or_agency: pick('gc_or_agency'),
     project_title: pick('project_title'),
     package_name: pick('package_name'),
-    solicitation_number: null,
+    solicitation_number: pick('solicitation_number'),
     location: pick('location'),
     due_at: due?.at || null,
     due_source_line: due?.line || null,
