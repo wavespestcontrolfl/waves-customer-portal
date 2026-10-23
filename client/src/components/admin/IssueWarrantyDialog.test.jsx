@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../lib/adminFetch', () => ({ adminFetch: vi.fn() }));
 import { adminFetch } from '../../lib/adminFetch';
-import IssueWarrantyDialog from './IssueWarrantyDialog';
+import IssueWarrantyDialog, { IssueWarrantyAction } from './IssueWarrantyDialog';
 
 const project = { id: 'abcd1234-0000', customer_id: 'cust-1', project_date: '2026-10-01' };
 const findings = {
@@ -65,5 +65,20 @@ describe('IssueWarrantyDialog', () => {
     fillOfficeFields();
     fireEvent.click(screen.getByRole('button', { name: 'Create warranty' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The certificate is missing: treatment.product'));
+  });
+});
+
+
+describe('IssueWarrantyAction', () => {
+  const certificate = { ...project, project_type: 'pre_treatment_termite_certificate' };
+  it('shows for a certificate with a warranty plan, not for an addition or without a customer', () => {
+    const { rerender } = render(<IssueWarrantyAction project={certificate} findings={findings} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+    expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeEnabled();
+    rerender(<IssueWarrantyAction project={certificate} findings={{ ...findings, warranty_type: 'Addition to an existing building (no warranty required)' }} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+    expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
+    rerender(<IssueWarrantyAction project={{ ...certificate, customer_id: null }} findings={findings} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+    expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
+    rerender(<IssueWarrantyAction project={certificate} findings={findings} allowed blocked={false} unsaved buttonStyle={{}} />);
+    expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeDisabled();
   });
 });

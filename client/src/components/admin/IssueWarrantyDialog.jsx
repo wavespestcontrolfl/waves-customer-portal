@@ -9,6 +9,7 @@ import {
   NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY,
   pretreatWarrantyValues,
   warrantyContractBasis,
+  warrantyPlanYears,
 } from "../../lib/pretreatWarrantyValues";
 
 const fieldStyle = {
@@ -152,5 +153,32 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         )}
       </DialogFooter>
     </Dialog>
+  );
+}
+
+// The "Issue warranty" button on a pre-treat certificate. Rule
+// 5E-14.105(3): a new-building pre-treat gets a written warranty within 30
+// days; an addition to an existing building (no plan years) gets none.
+export function IssueWarrantyAction({ project, findings, allowed, blocked, unsaved, buttonStyle }) {
+  const [open, setOpen] = useState(false);
+  const eligible = allowed
+    && project?.project_type === "pre_treatment_termite_certificate"
+    && Boolean(project?.customer_id)
+    && Boolean(warrantyPlanYears(findings?.warranty_type));
+  if (!eligible) return null;
+  const disabled = blocked || unsaved;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        disabled={disabled}
+        style={{ ...buttonStyle, opacity: disabled ? 0.4 : 1 }}
+        title={unsaved ? "Save changes first" : "Create the new construction warranty for signature"}
+      >
+        Issue warranty
+      </button>
+      {open && <IssueWarrantyDialog open onClose={() => setOpen(false)} project={project} findings={findings} />}
+    </>
   );
 }
