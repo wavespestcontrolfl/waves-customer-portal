@@ -125,6 +125,15 @@ describe('row hashing', () => {
     expect(new Set(hashes).size).toBe(4);
   });
 
+  test('the source is case-folded before the identity: AMEX and amex are one row on a reimport', () => {
+    const lower = parsedRow({ source: 'amex' });
+    const upper = parsedRow({ source: 'AMEX' });
+    expect(upper.source).toBe('amex');
+    expect(mapRow(upper, 0, 'l.csv').bank.row_hash).toBe(mapRow(lower, 0, 'l.csv').bank.row_hash);
+    expect(mapRow(upper, 0, 'l.csv').bank.account_label).toBe('ledger-amex');
+    expect(withOrdinals([lower, upper])).toEqual([0, 1]); // the same tuple twice in one file: ordinals, not two identities
+  });
+
   test('same tuple but different source or direction is a different row', () => {
     const rows = parseLedgerCsv(csv(
       row({ source: '3098' }), row({ source: '3965' }), row({ direction: 'in', class: 'refund' }),

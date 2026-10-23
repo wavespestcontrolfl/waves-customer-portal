@@ -150,7 +150,10 @@ function parseLedgerCsv(text) {
     for (const h of HEADER) {
       if (String(r[h]).includes('\u0000')) throw fail(`line ${line}: ${h} contains a NUL byte`);
     }
-    if (!KNOWN_SOURCES.has(r.source.toLowerCase())) throw fail(`line ${line}: source must be one of ${[...KNOWN_SOURCES].join(', ')} (got "${r.source}")`);
+    // the source is part of the row identity (hash, ordinal): one spelling,
+    // so "AMEX" and "amex" are the same account on a reimport
+    r.source = r.source.toLowerCase();
+    if (!KNOWN_SOURCES.has(r.source)) throw fail(`line ${line}: source must be one of ${[...KNOWN_SOURCES].join(', ')} (got "${r.source}")`);
     const amount = parseAmountCell(r.amount);
     if (amount === null) throw fail(`line ${line}: amount must be a positive decimal (got "${r.amount}")`);
     r.amount = amount;
