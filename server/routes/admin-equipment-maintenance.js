@@ -717,6 +717,28 @@ router.get('/alerts', async (req, res, next) => {
 const TOOL_OUTCOME_STATUS = { found: null, repaired: null, replaced: null, lost: 'lost', retired: 'retired' };
 const OPEN_TOOL_ALERT_STATUSES = ['new', 'acknowledged'];
 
+// Why a status change on an alert is refused, or null. A truck-check alert
+// closes from the office (the technician's own path is the next truck check,
+// which finds the tool), only by resolving it, only with an outcome from the
+// fixed list; a plain maintenance alert keeps its old reach.
+function alertTransitionRefusal({ toolAlert, status, outcome, techRole }) {
+  if ((toolAlert || outcome !== undefined) && techRole !== 'admin') return { code: 403, error: 'Admin access required' };
+  if (outcome !== undefined) {
+    if (!toolAlert) return { code: 400, error: 'outcome applies to truck check alerts only' };
+    if (!Object.prototype.hasOwnProperty.call(TOOL_OUTCOME_STATUS, outcome)) {
+      return { code: 400, error: 'outcome must be found, repaired, replaced, lost or retired' };
+    }
+    if (status !== 'resolved') return { code: 400, error: 'an outcome resolves the alert' };
+  }
+  // (The Fleet tab lists status=new only, so an acknowledged tool alert
+  // would vanish while still holding the tool and the bell.)
+  if (toolAlert && status !== 'resolved') return { code: 400, error: 'a truck check alert closes only by resolving it with an outcome' };
+  if (toolAlert && outcome === undefined) {
+    return { code: 400, error: 'resolving a truck check alert needs an outcome: found, repaired, replaced, lost or retired' };
+  }
+  return null;
+}
+
 // PUT /alerts/:id — update alert status
 router.put('/alerts/:id', async (req, res, next) => {
   try {
@@ -724,28 +746,8 @@ router.put('/alerts/:id', async (req, res, next) => {
     const existing = await db('maintenance_alerts').where('id', req.params.id).first();
     if (!existing) return res.status(404).json({ error: 'Alert not found' });
     const toolAlert = truckKit.TOOL_ALERT_TYPES.includes(existing.alert_type);
-    // A truck-check alert closes from the office (the technician's own path is
-    // the next truck check, which finds the tool); the outcome is admin-only too.
-    if ((toolAlert || outcome !== undefined) && req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-    if (outcome !== undefined) {
-      if (!toolAlert) return res.status(400).json({ error: 'outcome applies to truck check alerts only' });
-      if (!Object.prototype.hasOwnProperty.call(TOOL_OUTCOME_STATUS, outcome)) {
-        return res.status(400).json({ error: 'outcome must be found, repaired, replaced, lost or retired' });
-      }
-      if (status !== 'resolved') return res.status(400).json({ error: 'an outcome resolves the alert' });
-    }
-    // A tool alert never closes without saying what happened to the tool:
-    // a plain resolve would count the item as back on the truck.
-    // A tool alert knows three states; any other value would drop it out of
-    // the open queries without the outcome lifecycle (and strand the bell).
-    // (The Fleet tab lists status=new only, so an acknowledged tool alert
-    // would vanish while still holding the tool and the bell.)
-    if (toolAlert && status !== 'resolved') {
-      return res.status(400).json({ error: 'a truck check alert closes only by resolving it with an outcome' });
-    }
-    if (toolAlert && status === 'resolved' && outcome === undefined) {
-      return res.status(400).json({ error: 'resolving a truck check alert needs an outcome: found, repaired, replaced, lost or retired' });
-    }
+    const refusal = alertTransitionRefusal({ toolAlert, status, outcome, techRole: req.techRole });
+    if (refusal) return res.status(refusal.code).json({ error: refusal.error });
     const updates = { status, updated_at: db.fn.now() };
     if (status === 'resolved') {
       updates.resolved_at = db.fn.now();
