@@ -390,7 +390,10 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Quarterly Pest + Termite Bait Station')).toEqual(['pest', 'termite']);
     expect(truckKit.serviceLinesFor('Pest & Rodent Control')).toEqual(['pest', 'rodent']);
     expect(truckKit.serviceLinesFor('Termite Inspection')).toEqual(['termite']);
-    expect(truckKit.serviceLinesFor('Lawn Pest Treatment')).toEqual(['lawn', 'pest']);
+    // A single-service name with another line's word in it stays one line; only composite syntax adds companions.
+    expect(truckKit.serviceLinesFor('Lawn Pest Treatment')).toEqual(['lawn']);
+    expect(truckKit.serviceLinesFor('Rodent Pest Control', { serviceKey: 'rodent_general_one_time' })).toEqual(['rodent']);
+    expect(truckKit.serviceLinesFor('Lawn and Pest Program')).toEqual(['lawn', 'pest']);
     expect(truckKit.serviceLinesFor('')).toEqual([]);
   });
 

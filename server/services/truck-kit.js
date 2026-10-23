@@ -57,6 +57,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // A combined job ("Quarterly Pest + Termite Bait Station") reads as ONE line
 // for the report layout (detectServiceLine) but needs every named line's
 // tools. A companion line is any checklist line the service name mentions.
+const COMPOSITE_NAME = /[+&/]|\b(and|with|plus)\b/i;
 const COMPANION_LINES = [
   ['termite', /\b(termite|wdo)\b/],
   ['rodent', /\b(rodent|rat|rats|mouse|mice)\b/],
@@ -164,8 +165,11 @@ function linesForService(serviceType, serviceKey, serviceCategory = null, match 
   // then the report's primary-line rule on the name.
   const primary = PROGRAM_LINE[keyedProgram(serviceKey)] || byCategory || detectServiceLine(serviceType) || PROGRAM_LINE[resolved.programKey];
   if (primary) lines.push(primary);
+  // Companions only for a composite name ("Pest & Rodent", "Quarterly Pest +
+  // Termite Bait Station", "Lawn and Pest"); a single-service name that
+  // happens to carry another line's word ("Rodent Pest Control") stays one line.
   const text = String(serviceType || '').toLowerCase();
-  for (const [line, re] of COMPANION_LINES) if (re.test(text) && !lines.includes(line)) lines.push(line);
+  if (COMPOSITE_NAME.test(text)) for (const [line, re] of COMPANION_LINES) if (re.test(text) && !lines.includes(line)) lines.push(line);
   return lines;
 }
 

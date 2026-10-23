@@ -18,8 +18,12 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json"
     },
     ...options
-  }).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async r => {
+    if (!r.ok) {
+      // The server's refusal says what to do (resolve the alert, reload, move riders): show it.
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body?.error || `HTTP ${r.status}`);
+    }
     return r.json();
   });
 }
@@ -502,6 +506,7 @@ function EquipmentTab({
                   assigned_vehicle_id: e.assigned_vehicle_id ?? "",
                   assigned_to: e.assigned_to ?? "",
                   kit_key: e.kit_key ?? "",
+                  expected_status: e.status ?? null,
                   condition_rating: e.condition_rating ?? ""
                 });
               }} type="button" variant="secondary" className="min-w-11" disabled={saving}>

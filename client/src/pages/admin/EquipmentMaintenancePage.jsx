@@ -149,12 +149,18 @@ const TOOL_ALERT_OUTCOMES = {
     label: "Found",
     outcome: "found"
   }, {
+    label: "Replaced",
+    outcome: "replaced"
+  }, {
     label: "Lost",
     outcome: "lost"
   }],
   tool_damaged: [{
     label: "Repaired",
     outcome: "repaired"
+  }, {
+    label: "Replaced",
+    outcome: "replaced"
   }, {
     label: "Retired",
     outcome: "retired"
@@ -426,6 +432,11 @@ function FleetTab({
           color: "#27272A"
         }}>
                 {a.title}
+                {a.description && <span style={{
+            display: "block",
+            fontSize: 12,
+            color: "#71717A"
+          }}>{a.description}</span>}
               </span>{" "}
               {!readOnly && (TOOL_ALERT_OUTCOMES[a.alert_type] || DISMISS_ONLY).map(({
           label,

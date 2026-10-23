@@ -11,7 +11,7 @@ import EquipmentMaintenancePage from './EquipmentMaintenancePage';
 
 const ok = (body) => ({ ok: true, json: async () => body });
 const ALERTS = [
-  { id: 'a-missing', severity: 'high', alert_type: 'tool_missing', title: 'Missing: Moisture meter T-002 (truck check by Synthetic Tech)' },
+  { id: 'a-missing', severity: 'high', alert_type: 'tool_missing', title: 'Missing: Moisture meter T-002 (truck check by Synthetic Tech)', description: 'Last seen at the Smith stop' },
   { id: 'a-damaged', severity: 'high', alert_type: 'tool_damaged', title: 'Damaged: B&G sprayer T-001 (truck check by Synthetic Tech)' },
   { id: 'a-due', severity: 'medium', alert_type: 'maintenance_due', title: 'Oil change due' },
 ];
@@ -44,6 +44,10 @@ describe('truck-check alert outcomes', () => {
     await screen.findByText(/3 Active Alerts/);
     expect(rowOf(ALERTS[0].title).getByRole('button', { name: 'Found' })).toBeInTheDocument();
     expect(rowOf(ALERTS[0].title).getByRole('button', { name: 'Lost' })).toBeInTheDocument();
+    expect(rowOf(ALERTS[0].title).getByRole('button', { name: 'Replaced' })).toBeInTheDocument();
+    expect(rowOf(ALERTS[1].title).getByRole('button', { name: 'Replaced' })).toBeInTheDocument();
+    // The technician's note (the alert description) is readable in the row.
+    expect(screen.getByText('Last seen at the Smith stop')).toBeInTheDocument();
     expect(rowOf(ALERTS[1].title).getByRole('button', { name: 'Repaired' })).toBeInTheDocument();
     expect(rowOf(ALERTS[1].title).getByRole('button', { name: 'Retired' })).toBeInTheDocument();
     expect(rowOf(ALERTS[2].title).getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();

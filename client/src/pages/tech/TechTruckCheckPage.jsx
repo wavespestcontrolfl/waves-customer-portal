@@ -41,9 +41,11 @@ export default function TechTruckCheckPage() {
   const [saved, setSaved] = useState(null);
 
   const kit = data?.kit || [];
-  // One idempotency key per loaded list: a retry after a lost answer sends the
-  // same key and the server returns the check it already saved.
-  const clientKey = useMemo(() => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`), [data]);
+  // One idempotency key per loaded list AND payload: a retry of the same
+  // answers after a lost response sends the same key and gets the saved check
+  // back; answers changed before the retry get a new key and a new check.
+  const loadKey = useMemo(() => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().slice(0, 18) : `tc${Date.now().toString(36)}`), [data]);
+  const digest = (text) => { let h = 5381; for (let i = 0; i < text.length; i += 1) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0; return h.toString(16).padStart(8, '0'); };
   const groups = useMemo(() => groupKit(kit), [kit]);
   const stateOf = (item) => marks[item.id]?.state || item.open_issue || 'present';
   const noteOf = (item) => marks[item.id]?.note || '';
@@ -56,12 +58,14 @@ export default function TechTruckCheckPage() {
     setSaving(true);
     setSaveError('');
     try {
+      // A note typed for a missing or damaged item and then switched back
+      // to Here never rides along on a present result.
+      const results = kit.map((item) => ({ equipmentId: item.id, state: stateOf(item), note: stateOf(item) === 'present' ? '' : noteOf(item) }));
+      const clientKey = `${loadKey}-${digest(JSON.stringify(results))}`;
       const res = await fetch(`${API}/api/tech/truck-check`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getAdminAuthToken()}`, 'Content-Type': 'application/json' },
-        // A note typed for a missing or damaged item and then switched back
-        // to Here never rides along on a present result.
-        body: JSON.stringify({ clientKey, results: kit.map((item) => ({ equipmentId: item.id, state: stateOf(item), note: stateOf(item) === 'present' ? '' : noteOf(item) })) }),
+        body: JSON.stringify({ clientKey, results }),
       });
       const body = await res.json().catch(() => ({}));
       if (res.status === 409 && body.code === 'kit_changed') {
