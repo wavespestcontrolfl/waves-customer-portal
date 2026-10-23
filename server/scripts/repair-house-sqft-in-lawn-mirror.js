@@ -13,8 +13,13 @@
  * A row is a candidate only when ALL of these hold, so a real lawn size is never cleared:
  *   - the active turf profile has no lawn_sqft (every lawn writer sets the turf row together with the mirrors);
  *   - no reviewed lawn area sits on the primary property (service-area review also writes the turf row);
- *   - customers.property_sqft equals a home size the customer's own estimate records (engine profile homeSqFt or
- *     the quote intake's homeSqFt / squareFootage), so the value is proven to be the house.
+ *   - the customer is a public-quote lead (lead_source website_quote or lead_source_detail quote_wizard: the two
+ *     markers that write stamps);
+ *   - a quote-wizard estimate (estimates.source = 'quote_wizard', the row the same request writes) for the
+ *     customer's PRIMARY property (estimateTargetsPrimary: property link or address match) records that exact
+ *     number as the home size (engine profile homeSqFt or the intake's homeSqFt / squareFootage).
+ *   A legacy lawn mirror with no turf row is left alone unless all four tie it to the former public-quote write
+ *   (codex #6520 r1 P1: an unrelated estimate's home size must not clear a real lawn by numerical coincidence).
  * --apply nulls customers.property_sqft and, when it holds the same number, the primary property's property_sqft,
  * under the turf-profile fence, one customer per transaction, with one audit row. Afterwards run
  * backfill-lawn-sqft-from-estimate.js (--use-unconfirmed-when-empty, per the owner's 2026-10-04 ruling) so the
@@ -27,6 +32,11 @@
  */
 
 const fs = require('fs');
+const { estimateTargetsPrimary } = require('../services/lawn-size-sync');
+
+const QUOTE_ESTIMATE_SOURCE = 'quote_wizard';
+const QUOTE_LEAD_SOURCE = 'website_quote';
+const QUOTE_LEAD_DETAIL = 'quote_wizard';
 
 const HOME_SQFT_CARRIERS = [
   ['engineRequest.profile', (d) => d.engineRequest?.profile],
@@ -63,9 +73,15 @@ function homeSqFtFromEstimate(estimateData) {
   return out;
 }
 
+/** The customer carries a public-quote marker (the same request that wrote the house value stamps one of these). */
+function isQuoteLead(customer) {
+  return customer?.lead_source === QUOTE_LEAD_SOURCE || customer?.lead_source_detail === QUOTE_LEAD_DETAIL;
+}
+
 /**
  * Classify one customer. Pure. `estimates` = every estimate row of the customer (any status: the quote writes the
- * lead's estimate before it is accepted, and the house value lands with it).
+ * lead's estimate before it is accepted, and the house value lands with it); only quote-wizard estimates for the
+ * customer's primary property can prove a house value.
  * @returns {{ class: string, houseField?: string, propertySqft?: number, primaryMatches?: boolean }}
  */
 function classify({ customer, turf, primary, estimates }) {
@@ -75,7 +91,10 @@ function classify({ customer, turf, primary, estimates }) {
   const reviewed = primary?.service_area_measurements;
   const reviewedLawn = (typeof reviewed === 'string' ? parseData(reviewed) : reviewed)?.areas?.lawn?.sqft;
   if (Number(reviewedLawn) > 0) return { class: 'has_reviewed_lawn', propertySqft };
+  if (!isQuoteLead(customer)) return { class: 'not_a_quote_lead', propertySqft };
   for (const e of estimates || []) {
+    if (e.source !== QUOTE_ESTIMATE_SOURCE) continue;
+    if (!estimateTargetsPrimary(e, customer, primary).match) continue;
     const hit = homeSqFtFromEstimate(e.estimate_data).find((h) => h.value === propertySqft);
     if (hit) {
       return {
@@ -112,18 +131,20 @@ async function loadCustomers(knex, only) {
     .leftJoin('customer_properties as cp', function joinPrimary() { this.on('cp.customer_id', '=', 'c.id').andOnVal('cp.is_primary', '=', true).andOnVal('cp.active', '=', true); })
     .whereNull('c.deleted_at')
     .where('c.property_sqft', '>', 0)
-    .select('c.id', 'c.property_sqft', 'c.lead_source', 'tp.lawn_sqft as turf_lawn_sqft', 'cp.id as primary_id', 'cp.property_sqft as primary_property_sqft', 'cp.service_area_measurements')
+    .select('c.id', 'c.property_sqft', 'c.lead_source', 'c.lead_source_detail', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
+      'tp.lawn_sqft as turf_lawn_sqft', 'cp.id as primary_id', 'cp.property_sqft as primary_property_sqft', 'cp.service_area_measurements',
+      'cp.address_line1 as p_address_line1', 'cp.address_line2 as p_address_line2', 'cp.city as p_city', 'cp.state as p_state', 'cp.zip as p_zip')
     .orderBy('c.id');
   if (only) q.where('c.id', only);
   const rows = await q;
   const ids = rows.map((r) => r.id);
-  const estimates = ids.length ? await knex('estimates').whereIn('customer_id', ids).select('id', 'customer_id', 'status', 'estimate_data') : [];
+  const estimates = ids.length ? await knex('estimates').whereIn('customer_id', ids).select('id', 'customer_id', 'status', 'source', 'property_id', 'address', 'estimate_data') : [];
   const byCustomer = new Map();
   for (const e of estimates) byCustomer.set(e.customer_id, [...(byCustomer.get(e.customer_id) || []), e]);
   return rows.map((r) => ({
-    customer: { id: r.id, property_sqft: r.property_sqft, lead_source: r.lead_source },
+    customer: { id: r.id, property_sqft: r.property_sqft, lead_source: r.lead_source, lead_source_detail: r.lead_source_detail, address_line1: r.address_line1, address_line2: r.address_line2, city: r.city, state: r.state, zip: r.zip },
     turf: { lawn_sqft: r.turf_lawn_sqft },
-    primary: r.primary_id ? { id: r.primary_id, property_sqft: r.primary_property_sqft, service_area_measurements: r.service_area_measurements } : null,
+    primary: r.primary_id ? { id: r.primary_id, property_sqft: r.primary_property_sqft, service_area_measurements: r.service_area_measurements, address_line1: r.p_address_line1, address_line2: r.p_address_line2, city: r.p_city, state: r.p_state, zip: r.p_zip } : null,
     estimates: byCustomer.get(r.id) || [],
   }));
 }
@@ -188,4 +209,4 @@ if (require.main === module) {
   main().catch((e) => { console.error(e.message); process.exit(1); });
 }
 
-module.exports = { classify, homeSqFtFromEstimate, parseArgs };
+module.exports = { classify, homeSqFtFromEstimate, isQuoteLead, parseArgs };

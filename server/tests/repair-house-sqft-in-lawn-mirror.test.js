@@ -2,7 +2,8 @@
 // 2026-10-23). The repair clears a value only when it is proven to be the house and no lawn writer has set a size.
 const { classify, homeSqFtFromEstimate, parseArgs } = require('../scripts/repair-house-sqft-in-lawn-mirror');
 
-const quoteEstimate = (homeSqFt, over = {}) => ({ id: 'e1', status: 'draft', estimate_data: { engineRequest: { profile: { homeSqFt, estimatedTurfSf: 2900, turfSource: 'vision' } } }, ...over });
+const ADDR = { address_line1: '100 Main St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
+const quoteEstimate = (homeSqFt, over = {}) => ({ id: 'e1', status: 'draft', source: 'quote_wizard', property_id: 'p1', address: '100 Main St, Bradenton, FL 34205', estimate_data: { engineRequest: { profile: { homeSqFt, estimatedTurfSf: 2900, turfSource: 'vision' } } }, ...over });
 
 describe('homeSqFtFromEstimate', () => {
   test('reads every carrier the quote and the engine write, as a JSON string or an object', () => {
@@ -16,13 +17,26 @@ describe('homeSqFtFromEstimate', () => {
 });
 
 describe('classify', () => {
-  const base = { customer: { id: 'c1', property_sqft: 2614 }, turf: { lawn_sqft: null }, primary: { id: 'p1', property_sqft: 2614, service_area_measurements: null }, estimates: [quoteEstimate(2614)] };
+  const base = { customer: { id: 'c1', property_sqft: 2614, lead_source: 'website_quote', ...ADDR }, turf: { lawn_sqft: null }, primary: { id: 'p1', property_sqft: 2614, service_area_measurements: null, ...ADDR }, estimates: [quoteEstimate(2614)] };
 
   test('house value proven by the estimate, no lawn anywhere → house_in_lawn_mirror (primary cleared with it)', () => {
     expect(classify(base)).toEqual({ class: 'house_in_lawn_mirror', houseField: 'engineRequest.profile.homeSqFt', estimateId: 'e1', propertySqft: 2614, primaryMatches: true });
     // The primary holds a different number: only the customer row is cleared.
     expect(classify({ ...base, primary: { ...base.primary, property_sqft: 3000 } }).primaryMatches).toBe(false);
-    expect(classify({ ...base, primary: null }).primaryMatches).toBe(false);
+    // No primary row yet: the quote's address still ties the estimate to the customer's own address.
+    expect(classify({ ...base, primary: null, estimates: [quoteEstimate(2614, { property_id: null })] })).toMatchObject({ class: 'house_in_lawn_mirror', primaryMatches: false });
+  });
+
+  test('only a quote-wizard estimate for the customer\'s own primary, on a public-quote lead, can prove the house (codex #6520 r1 P1)', () => {
+    // Same number, but the estimate came from another flow: a legacy lawn mirror with a coincidental home size stays.
+    expect(classify({ ...base, estimates: [quoteEstimate(2614, { source: 'admin_tool' })] }).class).toBe('unproven');
+    // Quote estimate for ANOTHER property (linked elsewhere, or a different address).
+    expect(classify({ ...base, estimates: [quoteEstimate(2614, { property_id: 'p9' })] }).class).toBe('unproven');
+    expect(classify({ ...base, estimates: [quoteEstimate(2614, { property_id: null, address: '9 Other Rd, Bradenton, FL 34205' })] }).class).toBe('unproven');
+    // Not a public-quote lead at all: never a candidate, whatever the estimates say.
+    expect(classify({ ...base, customer: { ...base.customer, lead_source: 'google_ads' } }).class).toBe('not_a_quote_lead');
+    // The existing-customer update path marks lead_source_detail when lead_source was already taken.
+    expect(classify({ ...base, customer: { ...base.customer, lead_source: 'referral', lead_source_detail: 'quote_wizard' } }).class).toBe('house_in_lawn_mirror');
   });
 
   test('a real lawn size is never cleared: turf lawn_sqft, a reviewed lawn, or a value no estimate explains', () => {
@@ -35,8 +49,8 @@ describe('classify', () => {
   });
 
   test('the quote default (2,000) counts only when the estimate records it as the home size', () => {
-    expect(classify({ ...base, customer: { id: 'c1', property_sqft: 2000 }, estimates: [quoteEstimate(2000)] }).class).toBe('house_in_lawn_mirror');
-    expect(classify({ ...base, customer: { id: 'c1', property_sqft: 2000 }, estimates: [quoteEstimate(2614)] }).class).toBe('unproven');
+    expect(classify({ ...base, customer: { ...base.customer, property_sqft: 2000 }, estimates: [quoteEstimate(2000)] }).class).toBe('house_in_lawn_mirror');
+    expect(classify({ ...base, customer: { ...base.customer, property_sqft: 2000 }, estimates: [quoteEstimate(2614)] }).class).toBe('unproven');
   });
 });
 
