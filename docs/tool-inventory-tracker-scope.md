@@ -1,5 +1,30 @@
 # Tool inventory tracker (truck kit): scope
 
+> **Status 2026-10-23:** owner approved the recommendation ("do whatever you
+> recommend"). PR 0, PR 1 and PR 2 below are BUILT on branch
+> `claude/tool-inventory-tracker-scope-oh0xoa` (one commit per slice, plus a
+> hardening commit from the pre-push audit: the check commits in one
+> transaction under a per-truck lock),
+> with the recommended answer taken on each owner decision: weekly cadence
+> (`CHECK_INTERVAL_DAYS` in `server/services/truck-kit.js`), one technician
+> write endpoint (`own-truck` bucket), nothing deducts anything, the vehicle
+> inspection stays a staff document, gate `GATE_TRUCK_KIT` (dark). Two
+> implementation choices differ from the PR 1 text: `equipment_checks` has no
+> `kind` column (only the truck check exists, so a one-value CHECK earned
+> nothing) and a tool reported missing or damaged on an earlier check defaults
+> to that state on the next check, so a tap on "Everything's here" can never
+> quietly find it. PR 3 (receipt link, Intelligence Bar reads, the tax de
+> minimis threshold) is NOT built: decision 7 is still the owner's and the
+> accountant's. No database was available to the build session; the
+> migrations were exercised against stub builders only, so the first preview
+> deploy is the migration proof. Codex round 1 (#6496 / #6497, 2026-10-23):
+> asset create and edit are admin-only; a vehicle is never cargo; the Kit key
+> field needs the gate; a tool alert resolves only with an outcome, under the
+> truck's lock; a repeat check keeps the earlier note; the bell is
+> owner-silenceable; a combined job reads every line its name mentions; the
+> termite flashlight-and-probe item is split into two keys
+> (`20261023000030`).
+
 Scope proposal, 2026-10-22. It proposes; it decides nothing. Section 8 lists the
 owner decisions. Every "exists" claim below was read from the portal checkout at
 `1cd5552` with no database access, so it describes code and seeds, not

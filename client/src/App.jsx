@@ -383,6 +383,7 @@ const AdminAssessmentsHubPage = lazyWithRetry(() => import('./pages/admin/Assess
 const AdminRecruitingPage = lazyWithRetry(() => import('./pages/admin/RecruitingPage'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
 const TechSocialPostPage = lazyWithRetry(() => import('./pages/tech/TechSocialPostPage'));
+const TechTruckCheckPage = lazyWithRetry(() => import('./pages/tech/TechTruckCheckPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
 const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
@@ -401,6 +402,7 @@ const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatch
 const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminNeighborhoodGateCodesPage = lazyWithRetry(() => import('./pages/admin/NeighborhoodGateCodesPage'));
 const AdminBidDeskPage = lazyWithRetry(() => import('./pages/admin/BidDeskPage'));
+const AdminBidKitPage = lazyWithRetry(() => import('./pages/admin/BidKitPage'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminTurfHeightReviewPage = lazyWithRetry(() => import('./pages/admin/TurfHeightReviewPage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
@@ -735,6 +737,7 @@ export default function App() {
             <Route path="estimates" element={<AdminTabRedirect to="/admin/pipeline" tab="estimates" preserveTabs={['leads', 'estimates', 'new', 'pricing']} />} />
             <Route path="agent-estimate" element={<Suspense fallback={<div style={{color:'#71717a',padding:40}}>Loading Agent Estimate...</div>}><AdminAgentEstimatePage /></Suspense>} />
             <Route path="bid-desk" element={<Suspense fallback={<RouteFallback label="Loading bid desk..." />}><AdminBidDeskPage /></Suspense>} />
+            <Route path="bid-kit" element={<Suspense fallback={<RouteFallback label="Loading bid kit..." />}><AdminBidKitPage /></Suspense>} />
             <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<RouteFallback label="Loading proposal..." />}><AdminCommercialProposalPage /></Suspense>} />
             <Route path="estimates/:id" element={<AdminDetailRedirect to="/admin/pipeline" queryKey="estimateId" tab="estimates" />} />
             {/* /admin/dispatch is now the canonical dispatcher surface
@@ -856,6 +859,7 @@ export default function App() {
               <Route path="pay-growth" element={<Suspense fallback={<RouteFallback label="Loading pay and growth…" />}><PayGrowth /></Suspense>} />
               <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
               <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
+              <Route path="truck-check" element={<Suspense fallback={<RouteFallback label="Loading truck check…" />}><TechTruckCheckPage /></Suspense>} />
             </Route>
           </Route>
           <Route

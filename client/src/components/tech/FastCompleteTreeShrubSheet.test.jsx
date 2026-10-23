@@ -41,6 +41,9 @@ const CATALOG = [
   // Something the tech adds from the picker: a rotation-logged oil with no
   // resistance group, which the app cannot rotation-check.
   { id: 'oil', name: 'SuffOil-X', category: 'insecticide', tsFlags: { insectFamily: true, needsIracFrac: true } },
+  // The bed fertilizer: held to the county cap, so its row carries the treated square feet.
+  { id: 'orn', name: 'LESCO 13-0-13 60% PolyPlus Landscape', category: 'fertilizer', formulation: 'granular', rate_unit: 'lb', tsFlags: {} },
+  { id: 'palm812', name: 'LESCO 8-0-12 Palm & Tropical', category: 'fertilizer', formulation: 'granular', rate_unit: 'lb', tsFlags: {} },
   { id: 'drench', name: 'Imidacloprid Drench', category: 'insecticide', inventory_unit: 'fl_oz', inventory_on_hand: '0.0000', tsFlags: {} },
 ];
 
@@ -88,7 +91,7 @@ const PREVIEW = {
   status: 'complete',
 };
 
-function makeRequest({ context = CONTEXT, preview = PREVIEW, previewError = null } = {}) {
+function makeRequest({ context = CONTEXT, preview = PREVIEW, previewError = null, completeResponse = { success: true } } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
@@ -103,7 +106,7 @@ function makeRequest({ context = CONTEXT, preview = PREVIEW, previewError = null
       return preview;
     }
     if (path.endsWith('/tech-tips')) return { available: false };
-    if (path.endsWith('/complete')) return { success: true };
+    if (path.endsWith('/complete')) return completeResponse;
     return {};
   });
   request.calls = calls;
@@ -857,5 +860,144 @@ describe('suspended behind the appointment details sheet', () => {
     expect(document.querySelector('.tech-visit-overlay').style.display).toBe('');
     expect(screen.getByPlaceholderText('What you treated, where, and what you saw').value).toBe(NOTE);
     expect(tile('Merit 2F').getAttribute('aria-pressed')).toBe(pressedBefore);
+  });
+});
+
+
+describe('13-0-13 treated square feet (the county cap needs an area)', () => {
+  const withOrn = (bedSqft) => ({ ...CONTEXT, ...(bedSqft === undefined ? {} : { bedSqft }), monthProducts: [...CONTEXT.monthProducts, { productId: 'orn', method: 'granular_broadcast' }] });
+  const areaField = () => within(editorFor('LESCO 13-0-13 60% PolyPlus Landscape')).getByLabelText('Treated square feet');
+  const ready = async (context) => {
+    const request = makeRequest({ context });
+    await readyVisit(request);
+    fireEvent.click(tile('LESCO 13-0-13'));
+    return request;
+  };
+
+  test('the property\'s bed square feet prefill the row, and the tech can edit it', async () => {
+    await ready(withOrn(1200));
+    expect(areaField().value).toBe('1200');
+    fireEvent.change(areaField(), { target: { value: '1500' } });
+    expect(areaField().value).toBe('1500');
+  });
+
+  test('numeric areaValue and areaUnit sqft ride the 13-0-13 row, and only that row', async () => {
+    const request = await ready(withOrn(1200));
+    enterAmount('LESCO 13-0-13 60% PolyPlus Landscape', 9);
+    fireEvent.click(tile('Chelated Iron Plus'));
+    enterAmount('Chelated Iron Plus', 1);
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ totalAmount: 9, amountUnit: 'lb', areaValue: 1200, areaUnit: 'sqft' });
+    expect(typeof body.products.find((p) => p.productId === 'orn').areaValue).toBe('number');
+    expect(body.products.find((p) => p.productId === 'iron')).not.toHaveProperty('areaValue');
+  });
+
+  test('an edited area is what is sent', async () => {
+    const request = await ready(withOrn(1200));
+    enterAmount('LESCO 13-0-13 60% PolyPlus Landscape', 9);
+    fireEvent.change(areaField(), { target: { value: '800' } });
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ areaValue: 800, areaUnit: 'sqft' });
+  });
+
+  test('no recorded bed area: the field is blank and Complete is held until the tech enters one', async () => {
+    const request = await ready(withOrn(null));
+    enterAmount('LESCO 13-0-13 60% PolyPlus Landscape', 9);
+    expect(areaField().value).toBe('');
+    expect(screen.getByText('Enter the treated square feet for LESCO 13-0-13 60% PolyPlus Landscape.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(areaField(), { target: { value: '0' } });
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(areaField(), { target: { value: '1000' } });
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ areaValue: 1000, areaUnit: 'sqft' });
+  });
+
+  test('an amount over the county limit shows a quiet line near the row and never blocks Complete', async () => {
+    const request = await ready(withOrn(1200));
+    const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const line = () => within(editorFor(orn)).queryByText(/over the county limit/);
+    enterAmount(orn, 9);
+    expect(line()).toBeNull();
+    enterAmount(orn, 12);
+    expect(line().textContent).toBe(`${orn} rate 10 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`);
+    expect(line().textContent).not.toMatch(/label max/);
+    // A smaller treated area raises the rate; a larger one clears it.
+    fireEvent.change(areaField(), { target: { value: '2000' } });
+    expect(line()).toBeNull();
+    fireEvent.change(areaField(), { target: { value: '1000' } });
+    expect(line().textContent).toContain('rate 12 lb/1k');
+    fireEvent.change(areaField(), { target: { value: '1200' } });
+    enterAmount(orn, 12);
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ totalAmount: 12, amountUnit: 'lb', areaValue: 1200 });
+  });
+
+  test('a held 13-0-13 added by hand shows the hold reason on its row and still records; a product that is not held shows none', async () => {
+    const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const holds = [{ name: orn, reason: 'The last 13-0-13 application was less than five months ago.' }];
+    const request = makeRequest({ context: { ...CONTEXT, bedSqft: 900, monthProductHolds: holds } });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '13-0-13' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 13-0-13/ }));
+    const line = within(editorFor(orn)).getByText(/^Held:/);
+    expect(line.textContent).toBe('Held: The last 13-0-13 application was less than five months ago. It will be recorded and the office will review it.');
+    // The hold is a line, never a reason Complete is held.
+    expect(screen.queryByText(/Held:.*Complete|cannot be completed/i)).toBeNull();
+    // No hold, no line.
+    cleanup();
+    await openSheet(makeRequest({ context: { ...CONTEXT, bedSqft: 900 } }));
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '13-0-13' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 13-0-13/ }));
+    expect(within(editorFor(orn)).queryByText(/^Held:/)).toBeNull();
+  });
+
+  test('another held product (the palm feed) shows the reason alone, with no office promise', async () => {
+    const palm = 'LESCO 8-0-12 Palm & Tropical';
+    const context = { ...CONTEXT, monthProductHolds: [{ name: palm, reason: 'The last palm feeding was less than three months ago.' }] };
+    await openSheet(makeRequest({ context }));
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '8-0-12' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 8-0-12/ }));
+    const line = within(editorFor(palm)).getByText(/^Held:/);
+    expect(line.textContent).toBe('Held: The last palm feeding was less than three months ago.');
+    expect(line.textContent).not.toMatch(/office/);
+  });
+
+  test('a held 13-0-13 still completes: the hold line never blocks the send', async () => {
+    const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const request = await ready({ ...withOrn(1200), monthProductHolds: [{ name: orn, reason: 'Two 13-0-13 applications are already recorded in the past year.' }] });
+    enterAmount(orn, 9);
+    expect(within(editorFor(orn)).getByText(/^Held: Two 13-0-13 applications are already recorded in the past year\. It will be recorded/)).toBeTruthy();
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'orn')).toMatchObject({ totalAmount: 9, areaValue: 1200 });
+  });
+
+  test('the saved view lists the server\'s completion advisories', async () => {
+    const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    const advisory = `${orn} rate 10 lb/1k is over the county limit of 7.5 lb/1k (0.75 lb per 100 sq ft). It will be recorded and the office will review it.`;
+    const request = makeRequest({ context: withOrn(1200), completeResponse: { success: true, completionAdvisories: [advisory] } });
+    await readyVisit(request);
+    fireEvent.click(tile('LESCO 13-0-13'));
+    enterAmount(orn, 12);
+    fireEvent.click(completeButton());
+    expect(await screen.findByText(advisory)).toBeTruthy();
+  });
+
+  test('the 13-0-13 amount starts blank even when last time recorded one', async () => {
+    const context = { ...withOrn(1200), lastVisit: { ...CONTEXT.lastVisit, products: [{ productId: 'orn', productName: 'LESCO 13-0-13 60% PolyPlus Landscape', totalAmount: 9, amountUnit: 'lb' }] } };
+    await ready(context);
+    const field = within(editorFor('LESCO 13-0-13 60% PolyPlus Landscape')).getByLabelText('How much?');
+    expect(field.value).toBe('');
+    expect(within(editorFor('LESCO 13-0-13 60% PolyPlus Landscape')).queryByText('last time')).toBeNull();
+  });
+
+  test('a 13-0-13 the tech adds by hand gets the same area field, prefilled', async () => {
+    const request = makeRequest({ context: { ...CONTEXT, bedSqft: 900 } });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: '13-0-13' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /LESCO 13-0-13/ }));
+    expect(areaField().value).toBe('900');
   });
 });

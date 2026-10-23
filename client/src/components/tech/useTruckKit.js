@@ -1,0 +1,68 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { getAdminAuthToken } from '../../lib/adminAuth';
+
+const API = import.meta.env.VITE_API_URL || '';
+export const TRUCK_KIT_OFF = { enabled: false };
+export const TRUCK_KIT_ERROR = { enabled: true, truck: null, kit: [], lastCheck: null, due: false, intervalDays: 7, gaps: [] };
+
+// GET /api/tech/truck-check (GATE_TRUCK_KIT): the signed-in technician's truck,
+// its kit, the last check and whether one is due. The gate off answers 404
+// { enabled: false }; any other failure throws so a page can offer a retry.
+export async function fetchTruckKit(signal) {
+  const res = await fetch(`${API}/api/tech/truck-check`, {
+    headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
+    signal,
+    cache: 'no-store',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 404 && data?.enabled === false) return TRUCK_KIT_OFF;
+  if (!res.ok) throw Object.assign(new Error(data?.error || `HTTP ${res.status}`), { code: data?.code || null, status: res.status });
+  return data;
+}
+
+// "Last checked 9 days ago" for the card and the page; whole days are enough.
+export function lastCheckedLabel(checkedAt, now = new Date()) {
+  if (!checkedAt) return 'Never checked';
+  const at = new Date(checkedAt).getTime();
+  if (!Number.isFinite(at)) return 'Never checked';
+  const days = Math.floor(Math.max(0, now.getTime() - at) / 86400000);
+  if (days === 0) return 'Checked today';
+  if (days === 1) return 'Checked yesterday';
+  return `Last checked ${days} days ago`;
+}
+
+// The Today card and the Tools tile read this once per mount. A read that
+// fails leaves `data` null: the card and the tile simply stay away (the
+// truck check page shows the error and a retry).
+// Latest wins: a reload aborts the read in flight, and a read that was
+// superseded anyway (sequence guard, like the schedule loader) never writes
+// its stale answer over a fresher one.
+export default function useTruckKit() {
+  const [state, setState] = useState({ loading: true, data: null, error: '' });
+  const seq = useRef(0);
+  const inflight = useRef(null);
+  const load = useCallback(async () => {
+    if (inflight.current) inflight.current.abort();
+    const controller = new AbortController();
+    inflight.current = controller;
+    const mine = ++seq.current;
+    setState((prev) => ({ ...prev, loading: true, error: '' }));
+    try {
+      const data = await fetchTruckKit(controller.signal);
+      if (mine === seq.current && !controller.signal.aborted) setState({ loading: false, data, error: '' });
+    } catch (err) {
+      if (err?.name === 'AbortError' || mine !== seq.current) return;
+      // The kit answered (the gate is on) but with an error the technician
+      // must see and act on (two trucks assigned, a server fault): keep the
+      // Tools tile reachable so the check page can show it with its retry.
+      setState({ loading: false, data: { ...TRUCK_KIT_ERROR, errorCode: err?.code || null }, error: err?.message || 'Could not load your truck' });
+    }
+  }, []);
+  useEffect(() => {
+    void load();
+    return () => { seq.current += 1; if (inflight.current) inflight.current.abort(); };
+  }, [load]);
+  // Stable, so a page can fold it into its own route refresh without churn.
+  const reload = useCallback(() => load(), [load]);
+  return { ...state, reload };
+}

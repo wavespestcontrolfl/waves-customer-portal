@@ -626,7 +626,7 @@ describe('/confirm-action commit path', () => {
       const body = await res.json();
       expect(body.success).toBe(false);
       expect(body.result).toEqual(outcome);
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, outcome);
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, outcome, { keepRecoveryFinal: true });
     });
   });
 
@@ -652,7 +652,7 @@ describe('/confirm-action commit path', () => {
         { first_name: 'Jeff', phone: '9415550100', confirmed: true },
         expect.objectContaining({ confirmed: true, technicianId: 'admin-1' }),
       );
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ success: true }));
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ success: true }), { keepRecoveryFinal: true });
     });
   });
 
@@ -686,7 +686,7 @@ describe('/confirm-action commit path', () => {
         body: JSON.stringify({ pending_action_id: PENDING_ID }),
       });
       expect(await response.json()).toMatchObject({ success: false, result });
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, result);
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, result, { keepRecoveryFinal: true });
     });
   });
 
@@ -703,7 +703,7 @@ describe('/confirm-action commit path', () => {
       });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ success: false, outcome: 'outcome_unknown', result });
-      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, result);
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, result, { keepRecoveryFinal: true });
     });
   });
 

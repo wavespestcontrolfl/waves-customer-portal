@@ -134,6 +134,7 @@ const { typedFollowupVerdict, typedFollowupObligationForCompletedSource, parkFol
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
 const areaAddOnGovernedRate = require('./area-addon-governed-rate');
 const areaAddOnLimits = require('./area-addon-limits');
+const tsOrnamental = require('./tree-shrub-ornamental-fertilizer-limits');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
 // into customer-visible completion text. Three shapes: a code word near a
@@ -2101,6 +2102,9 @@ const limitFigure = (finding) => {
   if (finding.limitType === areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE) return `the add-on uses ${finding.max}`;
   if (finding.limitType === 'min_interval_days') return `only ${finding.current} days from another application, minimum ${finding.max}`;
   if (finding.limitType === 'annual_max_rate') return `${finding.current}% of the yearly label amount used`;
+  if (finding.limitType === tsOrnamental.RATE_LIMIT_TYPE) return `${finding.current} lb per 1,000 sq ft, county limit ${finding.max}`;
+  if (finding.limitType === tsOrnamental.HISTORY_LIMIT_TYPE) return finding.reason;
+  if (tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType)) return tsOrnamental.uncheckedClause(finding.reason);
   return `${finding.current} of ${finding.max} already used`;
 };
 
@@ -2114,6 +2118,11 @@ const FINDING_WHY = {
   min_interval_days: (name, f) => `${name}: only ${f.current} days since another application, minimum ${f.max}.`,
   annual_max_rate: (name, f) => `${name} is over its yearly amount limit: ${f.current}% used.`,
   annual_max_apps: (name, f) => `${name} is over its yearly limit: ${f.current} of ${f.max} already used.`,
+  [tsOrnamental.RATE_LIMIT_TYPE]: (name, f) => `${name} was applied at ${f.current} lb per 1,000 sq ft, over the ${f.max} county limit.`,
+  [tsOrnamental.HISTORY_LIMIT_TYPE]: (name, f) => `${name}: ${f.reason}`,
+  [tsOrnamental.UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
+  [tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
+  [tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE]: (name, f) => `${name} ${tsOrnamental.uncheckedClause(f.reason)}.`,
   [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
@@ -2122,6 +2131,14 @@ const FINDING_DETAIL = {
   [areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: (fullName, f, svc) => `On a ${svc.service_type || 'lawn'} visit, ${areaAddOnGovernedRate.uncheckedRateSentence(fullName, f)} Check the rate on the application record and report it if needed.`,
 };
 FINDING_DETAIL[areaAddOnLimits.YEARLY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'visit'} visit for an area add-on and is over the add-on's yearly limit. ${f.detail} Review it and report it if needed.`;
+FINDING_DETAIL[tsOrnamental.RATE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'tree & shrub'} visit at ${f.current} lb per 1,000 sq ft. The county limit is ${f.max} lb per 1,000 sq ft (0.75 lb per 100 sq ft, 1 lb of nitrogen per 1,000 sq ft). Review it and report it if needed.`;
+FINDING_DETAIL[tsOrnamental.HISTORY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'tree & shrub'} visit, and ${f.reason.charAt(0).toLowerCase()}${f.reason.slice(1)} The program allows 2 in 12 months, at least 5 months apart, none June 1 to Sept. 30. Review it and report it if needed.`;
+const tsUncheckedDetail = (fullName, f, svc) => (f.reason === 'history_unavailable'
+  ? `${fullName} was ${tsOrnamental.uncheckedClause(f.reason)} on a ${svc.service_type || 'tree & shrub'} visit. The label and county rules allow 2 feedings in 12 months, at least 5 months apart, none June 1 to Sept. 30. Check this property's 13-0-13 history.`
+  : `${fullName} was ${tsOrnamental.uncheckedClause(f.reason)} on a ${svc.service_type || 'tree & shrub'} visit. The county limit is ${f.max} lb per 1,000 sq ft (0.75 lb per 100 sq ft), so the rate could not be held to it. Check the amount and treated area on the application record and report it if needed.`);
+FINDING_DETAIL[tsOrnamental.UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
+FINDING_DETAIL[tsOrnamental.HISTORY_UNCHECKED_LIMIT_TYPE] = tsUncheckedDetail;
+FINDING_DETAIL[tsOrnamental.AUDIT_UNAVAILABLE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was submitted on a ${svc.service_type || 'tree & shrub'} visit, but its ${tsOrnamental.uncheckedClause(f.reason)}: the record's products could not be read back. Check the 13-0-13 amount, treated area and history on the application record and report it if needed.`;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -2133,6 +2150,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   for (const finding of findings) {
     try {
       const over = finding.code === 'application_limit_exceeded';
+      const unchecked = tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType);
       const fullName = finding.productName || 'a product';
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
@@ -2144,13 +2162,14 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : over ? `review ${name} over its limit` : 'review product limits not checked',
         why,
         severity: 'needs-you',
         who: 'person',
         link: `/admin/customers?customerId=${svc.customer_id}`,
         subject: { type: 'visit', id: String(svc.id) },
-        doneWhen: over ? 'limit_overage_reviewed' : 'limits_checked',
+        // A limit that could not be checked is done when it is checked, not when an overage is reviewed.
+        doneWhen: over && !unchecked ? 'limit_overage_reviewed' : 'limits_checked',
       }, {
         bell: true,
         dedupeKey,
@@ -2950,6 +2969,10 @@ async function settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome) {
   });
 }
 
+// The names the completion payload itself carries for its products (an id-only row has none).
+const payloadProductIds = (products) => (Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean);
+const payloadProductNames = (products) => (Array.isArray(products) ? products : []).map((p) => p?.name || p?.product_name).filter(Boolean);
+
 async function completeScheduledService(completionInput, packetContext = null) {
   // Internal packet context is supplied separately from the HTTP body. All
   // member writes share its OUTER transaction; no member starts post-commit
@@ -3377,6 +3400,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // crossed: an advisory in the response and one dispatch alert. The work is done;
     // the completion is never blocked.
     let applicationLimitAdvisory = null;
+    // The names of the products this completion submitted (the payload's own, then the catalog's once it is read inside the record
+    // transaction): the only evidence of a 13-0-13 if the post-save read of the record's rows fails (tsOrnamental.flagOrnamentalFertilizer).
+    let submittedProductNames = payloadProductNames(products);
     let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
@@ -7128,6 +7154,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : []
             ).map((row) => [canonicalProductId(row.id), row]),
           );
+          submittedProductNames = [...completionCatalogRowsById.values()].map((row) => row.name).filter(Boolean);
           // Lawn Fast Complete: the target a spot fungicide / insecticide row is stored with (lawn-spot-target.js; the row's own tags for any other
           // completion). Resolved BEFORE the report facts freeze, so the stored application and every frozen report fact use the same targets.
           const spotTargets = await require('../services/lawn-spot-target').resolveForCompletion({
@@ -9570,6 +9597,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     applicationLimitAdvisory = await areaAddOnGovernedRate.flagRatesAboveGoverned({
       svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings,
     });
+
+    // LESCO 13-0-13 (rate over the 7.5 lb per 1,000 sq ft county cap; more than 2 in 12 months, under 5 months apart, or inside
+    // June to September): flagged and sent to the office, never blocks. The June to September N/P blackout itself is the hard block
+    // in validateTreeShrubTypedCompliance. The row is the trigger, not the visit's service line: the check reads the record's saved
+    // rows and returns at once when none is a 13-0-13, so a Tree & Shrub companion on a lawn or pest visit is judged too, as is a
+    // hand-added row as well as the suggestion.
+    if (!issuedInvoiceCloseout) {
+      applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings, submittedProductNames, submittedProductIds: payloadProductIds(products) });
+    }
 
     // The add-on's OWN yearly limit (maxPerYear / minDaysApart, the place-based history the booking used; the add-ons carry no
     // product_limits rows): each tagged row is judged whatever the host's line or GATE_LAWN_V13, a second application of the

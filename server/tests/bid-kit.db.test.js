@@ -1,0 +1,644 @@
+// Bid kit (GATE_BID_KIT) through PostgreSQL: the migration (columns, check, index, up/down/up, credential link), the real
+// store behind the routes (create, fenced patch, sign-off clearing, file replace, archive, facts sheet), the daily
+// expiry job, and the public credentials feed staying unchanged. Every write runs in a transaction that is rolled back.
+// Synthetic data only. Skips without DATABASE_URL (CI runs it against the migrated database).
+const SKIP = !process.env.DATABASE_URL;
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+jest.mock('../models/db', () => {
+  const db = (...args) => mockPg(...args);
+  for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
+  for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../config', () => ({ s3: { region: 'us-east-1', bucket: 'test-bucket' } }));
+// The bell service is a stand-in here (its SQL runs in alert-episodes-db.test.js); the kit's own SQL is real.
+jest.mock('../services/admin-alert-episodes', () => ({
+  raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn(),
+}));
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, res, next) => { req.techRole = 'admin'; req.technicianId = mockAdminId; next(); },
+  requireAdmin: (req, res, next) => next(),
+}));
+const mockSent = [];
+jest.mock('@aws-sdk/client-s3', () => {
+  class Command { constructor(input) { this.input = input; } }
+  return {
+    S3Client: class { async send(command) { mockSent.push(command); return {}; } },
+    PutObjectCommand: class PutObjectCommand extends Command {},
+    GetObjectCommand: class GetObjectCommand extends Command {},
+    DeleteObjectCommand: class DeleteObjectCommand extends Command {},
+  };
+});
+jest.mock('@aws-sdk/s3-request-presigner', () => ({
+  getSignedUrl: jest.fn(async (_client, command, options) => `https://storage.example.test/${command.input.Key}?expires=${options.expiresIn}`),
+}));
+
+const knex = require('knex');
+const express = require('express');
+const { randomUUID } = require('crypto');
+const migration = require('../models/migrations/20261023120000_bid_kit_items');
+const episodes = require('../services/admin-alert-episodes');
+const { runBidKitExpiryCheck } = require('../services/bid-kit-expiry');
+
+const describeDb = SKIP ? describe.skip : describe;
+jest.setTimeout(60000);
+let database;
+let mockPg;
+let mockAdminId = randomUUID();
+let server;
+let baseUrl;
+const PDF = Buffer.from('%PDF-1.4\n%fixture bytes\n', 'latin1');
+const addDays = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+
+describeDb('Bid kit (PostgreSQL)', () => {
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
+    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
+    mockPg = database;
+    process.env.GATE_BID_KIT = 'true';
+    const app = express();
+    app.use(express.json());
+    app.use('/api/admin/bid-kit', require('../routes/admin-bid-kit'));
+    app.use('/api/public/credentials', require('../routes/public-credentials'));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+    server = await new Promise((resolve) => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  beforeEach(async () => {
+    mockPg = await database.transaction();
+    mockSent.length = 0;
+    for (const fn of Object.values(episodes)) fn.mockReset();
+    episodes.raiseAdminAlertWithReopen.mockImplementation(async () => ({ id: randomUUID(), deduped: false, rang: true }));
+    episodes.openAdminAlertKeys.mockResolvedValue([]);
+    episodes.closeAdminAlertKeys.mockResolvedValue(0);
+    mockAdminId = randomUUID();
+    await mockPg('technicians').insert({ id: mockAdminId, name: 'Fixture admin' });
+  });
+  afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
+  afterAll(async () => {
+    delete process.env.GATE_BID_KIT;
+    if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    if (database) await database.destroy();
+  });
+
+  // ---- fixtures ----
+  const call = async (method, url, body) => {
+    const res = await fetch(`${baseUrl}/api/admin/bid-kit${url}`, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  const create = async (over = {}) => (await call('POST', '', { kind: 'document', item_key: 'business_license_copy', ...over })).body.item;
+  // The upload carries the version the page loaded: the row's current one unless a test says otherwise.
+  const upload = async (id, name = 'license.pdf', version) => {
+    const form = new FormData();
+    const sent = version === undefined ? (await rowOf(id)).updated_at.toISOString() : version;
+    if (sent !== null) form.append('expected_updated_at', sent);
+    form.append('file', new Blob([PDF], { type: 'application/pdf' }), name);
+    const res = await fetch(`${baseUrl}/api/admin/bid-kit/${id}/file`, { method: 'POST', body: form });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  // Archive as the page does: with the version it loaded (the row's current one unless a test says otherwise).
+  const archive = async (id, version) => {
+    const sent = version === undefined ? (await rowOf(id)).updated_at.toISOString() : version;
+    return call('DELETE', `/${id}${sent === null ? '' : `?expected_updated_at=${encodeURIComponent(sent)}`}`);
+  };
+  // A document is there only with a file: put one on the item and return the item as it is afterwards.
+  const withFile = async (item) => (await upload(item.id, 'doc.pdf', item.updated_at)).body.item;
+  const rowOf = (id) => mockPg('bid_kit_items').where({ id }).first();
+  const credential = (over = {}) => mockPg('business_credentials').insert({
+    slug: `fixture-${randomUUID()}`, display_name: 'Fixture license', credential_type: 'license', credential_number: 'FX000000', expiration_date: '2999-03-03', ...over,
+  }).returning('*').then(([row]) => row);
+
+  describe('the migration', () => {
+    test('creates the table with exactly the planned columns, the kind check and the partial index', async () => {
+      const columns = await mockPg('information_schema.columns').where({ table_name: 'bid_kit_items' }).orderBy('ordinal_position').select('column_name', 'data_type', 'is_nullable', 'column_default');
+      expect(columns.map((c) => c.column_name)).toEqual([
+        'id', 'kind', 'item_key', 'label', 'value', 'file_s3_key', 'file_name', 'file_content_type', 'file_size', 'limits', 'details',
+        'source_document', 'checked_on', 'expires_on', 'permission_on', 'attested_by', 'attested_at', 'notes', 'archived_at', 'created_at', 'updated_at',
+      ]);
+      const type = (name) => columns.find((c) => c.column_name === name).data_type;
+      expect(type('id')).toBe('uuid');
+      expect(type('limits')).toBe('jsonb');
+      expect(type('details')).toBe('jsonb');
+      expect(type('checked_on')).toBe('date');
+      expect(type('expires_on')).toBe('date');
+      expect(type('permission_on')).toBe('date');
+      expect(type('attested_by')).toBe('uuid');
+      expect(type('attested_at')).toBe('timestamp with time zone');
+      expect(type('file_size')).toBe('integer');
+      expect(columns.filter((c) => c.is_nullable === 'NO').map((c) => c.column_name)).toEqual(['id', 'kind', 'item_key', 'label', 'created_at', 'updated_at']);
+      const index = await mockPg('pg_indexes').where({ tablename: 'bid_kit_items', indexname: 'bid_kit_items_kind_key' }).first('indexdef');
+      expect(index.indexdef).toMatch(/\(kind, item_key\)/);
+      expect(index.indexdef).toMatch(/WHERE \(archived_at IS NULL\)/);
+      expect(await mockPg('bid_kit_items').count('* as n').first()).toMatchObject({ n: '0' }); // no seed rows
+      await expect(mockPg('bid_kit_items').insert({ kind: 'spreadsheet', item_key: 'x', label: 'x' })).rejects.toThrow(/bid_kit_items_kind_check/);
+    });
+
+    test('is reversible and idempotent, and leaves business_credentials alone', async () => {
+      const before = await mockPg('information_schema.columns').where({ table_name: 'business_credentials' }).orderBy('ordinal_position').pluck('column_name');
+      await migration.up(mockPg); // already there: a no-op
+      await migration.down(mockPg);
+      expect(await mockPg.schema.hasTable('bid_kit_items')).toBe(false);
+      await migration.down(mockPg); // already gone: a no-op
+      await migration.up(mockPg);
+      expect(await mockPg.schema.hasTable('bid_kit_items')).toBe(true);
+      const after = await mockPg('information_schema.columns').where({ table_name: 'business_credentials' }).orderBy('ordinal_position').pluck('column_name');
+      expect(after).toEqual(before);
+      expect(after.some((name) => /bid|kit|attest/.test(name))).toBe(false);
+    });
+
+    test('has no link to business_credentials: no column, no foreign key', async () => {
+      const links = await mockPg.raw(`
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'bid_kit_items'::regclass AND contype = 'f'`);
+      expect(links.rows).toEqual([]);
+      expect(await mockPg.schema.hasColumn('bid_kit_items', 'credential_id')).toBe(false);
+    });
+  });
+
+  describe('through the routes and the real store', () => {
+    test('a row keeps dates as calendar days, jsonb as objects, and never returns the stored key', async () => {
+      const item = await create({
+        item_key: 'insurance_certificate', value: 'POL-0001', source_document: 'Certificate dated Sep 1', checked_on: '2026-09-01', expires_on: '2999-12-31',
+        limits: { glEachOccurrence: 1000000, workersComp: 'statutory' },
+      });
+      // A typed number alone is not a paper: missing until a file is uploaded.
+      expect(item).toMatchObject({ checked_on: '2026-09-01', expires_on: '2999-12-31', limits: { glEachOccurrence: 1000000, workersComp: 'statutory' }, status: 'missing' });
+      expect(await rowOf(item.id)).toMatchObject({ limits: { glEachOccurrence: 1000000, workersComp: 'statutory' } });
+      const uploaded = await upload(item.id);
+      expect(uploaded.status).toBe(200);
+      expect(typeof (await rowOf(item.id)).file_s3_key).toBe('string');
+      expect(uploaded.body.item.status).toBe('unattested');
+      expect(JSON.stringify((await call('GET', '')).body)).not.toMatch(/bid-kit\/|file_s3_key|https?:/);
+    });
+
+    test('the version the page loaded is accepted exactly, and an older one is refused', async () => {
+      const created = await create({ item_key: 'w9' });
+      const loaded = (await call('GET', '')).body.items.find((item) => item.id === created.id);
+      const first = await call('PATCH', `/${created.id}`, { value: 'On file', expected_updated_at: loaded.updated_at });
+      expect(first.status).toBe(200);
+      expect((await call('PATCH', `/${created.id}`, { value: 'Other', expected_updated_at: loaded.updated_at })).status).toBe(409);
+      expect((await rowOf(created.id)).value).toBe('On file');
+      const second = await call('PATCH', `/${created.id}`, { value: 'Newer', expected_updated_at: first.body.item.updated_at });
+      expect(second.status).toBe(200);
+    });
+
+    test('sign-off: recorded with the admin and time, cleared in the same update by an edit, a replaced file and a relink', async () => {
+      const created = await withFile(await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-06-30' }));
+      const attested = await call('POST', `/${created.id}/attest`, { expected_updated_at: created.updated_at });
+      expect(attested.status).toBe(200);
+      expect(await rowOf(created.id)).toMatchObject({ attested_by: mockAdminId });
+      expect((await rowOf(created.id)).attested_at).toBeInstanceOf(Date);
+
+      const edited = await call('PATCH', `/${created.id}`, { expires_on: '2999-01-01', expected_updated_at: attested.body.item.updated_at });
+      expect(edited.body.item).toMatchObject({ attested_at: null, attested_by: null });
+      expect(await rowOf(created.id)).toMatchObject({ attested_at: null, attested_by: null });
+
+      const again = await call('POST', `/${created.id}/attest`, { expected_updated_at: edited.body.item.updated_at });
+      expect((await rowOf(created.id)).attested_at).not.toBeNull();
+      expect(again.status).toBe(200);
+      await upload(created.id);
+      expect(await rowOf(created.id)).toMatchObject({ attested_at: null, attested_by: null });
+    });
+
+    test('a sign-off is refused for a missing item, an expired one and one with no expiry date, and the row is left alone', async () => {
+      const missing = await create({ item_key: 'w9' });
+      expect((await call('POST', `/${missing.id}/attest`, { expected_updated_at: missing.updated_at })).status).toBe(400);
+      const old = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' }));
+      expect((await call('POST', `/${old.id}/attest`, { expected_updated_at: old.updated_at })).status).toBe(400);
+      expect((await rowOf(old.id)).attested_at).toBeNull();
+      const typed = await create({ item_key: 'business_license_copy', value: 'JB000000' });
+      expect(typed.status).toBe('missing'); // a number alone is not a paper
+      const undated = await withFile(typed);
+      expect(undated.status).toBe('needs_expiry');
+      const refused = await call('POST', `/${undated.id}/attest`, { expected_updated_at: undated.updated_at });
+      expect(refused).toMatchObject({ status: 400, body: { error: 'Add the expiry date first.' } });
+      expect((await rowOf(undated.id)).attested_at).toBeNull();
+      // A stale version is still a 409.
+      const plan = await create({ item_key: 'ipm_plan', value: 'On file' });
+      await call('PATCH', `/${plan.id}`, { value: 'Replaced', expected_updated_at: plan.updated_at });
+      expect((await call('POST', `/${plan.id}/attest`, { expected_updated_at: plan.updated_at })).status).toBe(409);
+    });
+
+    test('a file replace points the row at the new private key, removes the old object and clears the sign-off', async () => {
+      const created = await create({ item_key: 'business_license_copy' });
+      await upload(created.id, 'first.pdf');
+      const firstKey = (await rowOf(created.id)).file_s3_key;
+      expect(firstKey).toMatch(new RegExp(`^bid-kit/${created.id}/[0-9a-f]{16}\\.pdf$`));
+      expect(firstKey).not.toContain('first');
+      await upload(created.id, 'second.pdf');
+      const row = await rowOf(created.id);
+      expect(row.file_s3_key).toMatch(/\.pdf$/);
+      expect(row.file_s3_key).not.toContain('second');
+      expect(row).toMatchObject({ file_name: 'second.pdf', file_content_type: 'application/pdf', file_size: PDF.length });
+      expect(mockSent.filter((c) => c.constructor.name === 'DeleteObjectCommand').map((c) => c.input.Key)).toEqual([firstKey]);
+      expect(mockSent.filter((c) => c.constructor.name === 'PutObjectCommand').every((c) => !('ACL' in c.input))).toBe(true);
+      const link = await call('GET', `/${created.id}/file`);
+      expect(link.status).toBe(200);
+      expect(link.body.url).toContain(row.file_s3_key);
+      expect(link.body.url).toMatch(/expires=300$/);
+    });
+
+    test('a file name with a tax ID is refused: nothing is stored, no row or key holds it', async () => {
+      const created = await create({ item_key: 'business_license_copy' });
+      for (const name of ['W9-123-45-6789.pdf', 'W9 12-3456789.pdf', 'EIN 123456789.pdf', 'W9 123456789.pdf', 'w-9_123456789.pdf']) {
+        expect((await upload(created.id, name)).status).toBe(400);
+      }
+      expect(mockSent).toHaveLength(0);
+      expect(await rowOf(created.id)).toMatchObject({ file_s3_key: null, file_name: null });
+      expect(JSON.stringify((await call('GET', '')).body)).not.toMatch(/123-45-6789|12-3456789|123456789/);
+      expect((await upload(created.id, 'FDACS license 2026.pdf')).status).toBe(200);
+      expect((await rowOf(created.id)).file_name).toBe('FDACS license 2026.pdf');
+    });
+
+    test('a file replacement is fenced on the version the page loaded: stale or missing is refused and nothing is written', async () => {
+      const created = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-06-30' });
+      const stale = created.updated_at;
+      await call('PATCH', `/${created.id}`, { source_document: 'Typed by someone else', expected_updated_at: stale });
+      expect((await upload(created.id, 'late.pdf', stale)).status).toBe(409);
+      expect((await upload(created.id, 'none.pdf', null)).status).toBe(400);
+      expect(mockSent.filter((c) => c.constructor.name === 'PutObjectCommand')).toHaveLength(0);
+      expect(await rowOf(created.id)).toMatchObject({ file_s3_key: null, source_document: 'Typed by someone else' });
+      // The version read from the database now is accepted (millisecond precision, as the page sends it).
+      expect((await upload(created.id, 'fresh.pdf')).status).toBe(200);
+      expect((await rowOf(created.id)).file_name).toBe('fresh.pdf');
+      // Under the row lock the same fence holds: a version that moved between the early check and the write is a conflict.
+      const store = require('../services/bid-kit-store');
+      const before = await rowOf(created.id);
+      const conflict = await store.replaceFile(created.id, { key: 'bid-kit/x/y.pdf', fileName: 'y.pdf', contentType: 'application/pdf', size: 1 }, new Date(before.updated_at.getTime() - 1000).toISOString());
+      expect(conflict).toEqual({ conflict: true });
+      expect((await rowOf(created.id)).file_s3_key).toBe(before.file_s3_key);
+    });
+
+    test('archive is fenced on the version the page loaded: stale is 409 and leaves the row and its bell, current works, missing is 400', async () => {
+      const created = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) });
+      const stale = created.updated_at;
+      const renewed = await call('PATCH', `/${created.id}`, { expires_on: addDays(300), expected_updated_at: stale });
+      expect(renewed.status).toBe(200);
+      episodes.closeAdminAlertKeys.mockClear();
+      expect((await archive(created.id, stale)).status).toBe(409);
+      expect((await archive(created.id, null)).status).toBe(400);
+      expect((await archive(created.id, 'yesterday')).status).toBe(400);
+      expect(await rowOf(created.id)).toMatchObject({ archived_at: null, expires_on: expect.anything() });
+      expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+      // The version read from the database now (millisecond precision, as the page sends it) archives it atomically.
+      expect((await archive(created.id)).status).toBe(200);
+      expect((await rowOf(created.id)).archived_at).toBeInstanceOf(Date);
+      expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[`bid-kit:expiry:${created.id}`], 'archived']);
+      expect((await archive(created.id, renewed.body.item.updated_at)).status).toBe(404); // already archived
+      // The store's own single UPDATE: a version that does not match writes nothing.
+      const store = require('../services/bid-kit-store');
+      const live = await create({ item_key: 'w9', value: 'On file' });
+      expect(await store.archiveItem(live.id, '2000-01-01T00:00:00.000Z')).toEqual({ conflict: true });
+      expect((await rowOf(live.id)).archived_at).toBeNull();
+    });
+
+    describe('the new object is deleted only when the replacement is known not to have committed', () => {
+      const logger = require('../services/logger');
+      const files = require('../services/bid-kit-files');
+      const expiryService = require('../services/bid-kit-expiry');
+      const store = require('../services/bid-kit-store');
+      const puts = () => mockSent.filter((c) => c.constructor.name === 'PutObjectCommand').map((c) => c.input.Key);
+      const deletes = () => mockSent.filter((c) => c.constructor.name === 'DeleteObjectCommand').map((c) => c.input.Key);
+      let created;
+      let firstKey;
+      beforeEach(async () => {
+        created = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-06-30' });
+        expect((await upload(created.id, 'first.pdf')).status).toBe(200);
+        firstKey = (await rowOf(created.id)).file_s3_key;
+        mockSent.length = 0;
+        logger.warn.mockClear();
+      });
+
+      test('a later step throws after the commit: the new object is kept, the row points at it, the previous object goes after the commit', async () => {
+        const bell = jest.spyOn(expiryService, 'syncExpiryBell').mockRejectedValueOnce(new Error('bell down'));
+        const res = await upload(created.id, 'second.pdf');
+        bell.mockRestore();
+        expect(res.status).toBe(200);
+        const [newKey] = puts();
+        expect(await rowOf(created.id)).toMatchObject({ file_s3_key: newKey, file_name: 'second.pdf' });
+        expect(mockSent.map((c) => `${c.constructor.name}:${c.input.Key}`)).toEqual([`PutObjectCommand:${newKey}`, `DeleteObjectCommand:${firstKey}`]);
+      });
+
+      test('the commit acknowledgement is lost (the row is committed, then the call throws): the new object is kept and nothing is deleted', async () => {
+        const outer = mockPg;
+        const begin = outer.transaction.bind(outer);
+        let armed = true;
+        const wrapped = async (...args) => {
+          const trx = await begin(...args);
+          if (armed && args.length === 0) {
+            armed = false; // only the file replacement's own transaction
+            const commit = trx.commit.bind(trx);
+            Object.defineProperty(trx, 'commit', { configurable: true, writable: true, value: async (...rest) => { await commit(...rest); throw new Error('connection reset by peer'); } });
+          }
+          return trx;
+        };
+        Object.defineProperty(outer, 'transaction', { configurable: true, writable: true, value: wrapped });
+        let res;
+        try {
+          res = await upload(created.id, 'second.pdf');
+        } finally {
+          delete outer.transaction;
+        }
+        expect(res.status).toBe(500);
+        const [newKey] = puts();
+        expect(await rowOf(created.id)).toMatchObject({ file_s3_key: newKey, file_name: 'second.pdf' }); // the row points at the new object
+        expect(deletes()).toEqual([]); // neither the new nor the previous object
+        expect(logger.warn.mock.calls.map(([line]) => line)).toContain(`[bid-kit] file replacement outcome unknown for item ${created.id}; the new stored file was kept`);
+      });
+
+      test('knex reports a failed COMMIT through executionPromise while commit() resolves: that is an unknown outcome, so nothing is deleted and nothing is reported as saved', async () => {
+        const outer = mockPg;
+        const begin = outer.transaction.bind(outer);
+        let armed = true;
+        const wrapped = async (...args) => {
+          const trx = await begin(...args);
+          if (armed && args.length === 0) {
+            armed = false;
+            // commit() resolves, but the transaction's own promise says the COMMIT failed.
+            const failed = Promise.reject(new Error('commit failed: connection terminated'));
+            failed.catch(() => {});
+            Object.defineProperty(trx, 'executionPromise', { configurable: true, writable: true, value: failed });
+          }
+          return trx;
+        };
+        Object.defineProperty(outer, 'transaction', { configurable: true, writable: true, value: wrapped });
+        let res;
+        try {
+          res = await upload(created.id, 'second.pdf');
+        } finally {
+          delete outer.transaction;
+        }
+        expect(res.status).toBe(500);
+        expect(res.body.item).toBeUndefined(); // never reported as saved
+        expect(deletes()).toEqual([]); // neither the new object nor the previous one
+        expect(logger.warn.mock.calls.map(([line]) => line)).toContain(`[bid-kit] file replacement outcome unknown for item ${created.id}; the new stored file was kept`);
+        const [newKey] = puts();
+        expect(newKey).toMatch(/\.pdf$/);
+      });
+
+      test('a statement that fails before any commit is a rollback: the store says so, the row is untouched, and the route deletes the new object', async () => {
+        const before = await rowOf(created.id);
+        const failure = await store.replaceFile(created.id, { key: 'bid-kit/x/y.pdf', fileName: 'y.pdf', contentType: 'application/pdf', size: 3000000000 }, before.updated_at.toISOString()).catch((err) => err);
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure.bidKitOutcome).toBe('rolled_back');
+        expect(await rowOf(created.id)).toMatchObject({ file_s3_key: before.file_s3_key, file_name: before.file_name });
+        // Through the route: the same failure after the new object was stored.
+        const spy = jest.spyOn(files, 'putFile').mockImplementationOnce(async (id, file) => {
+          const stored = await jest.requireActual('../services/bid-kit-files').putFile(id, file);
+          return { ...stored, size: 3000000000 };
+        });
+        const res = await upload(created.id, 'second.pdf');
+        spy.mockRestore();
+        expect(res.status).toBe(500);
+        const [newKey] = puts();
+        expect(deletes()).toEqual([newKey]);
+        expect((await rowOf(created.id)).file_s3_key).toBe(firstKey);
+      });
+
+      test('a change that lands between the early check and the row lock is a 409: the new object is deleted and the row keeps its file', async () => {
+        const realPut = files.putFile.bind(files);
+        const spy = jest.spyOn(files, 'putFile').mockImplementationOnce(async (...args) => {
+          const stored = await realPut(...args);
+          await mockPg('bid_kit_items').where({ id: created.id }).update({ notes: 'Typed by someone else', updated_at: mockPg.raw('clock_timestamp()') });
+          return stored;
+        });
+        const res = await upload(created.id, 'second.pdf');
+        spy.mockRestore();
+        expect(res.status).toBe(409);
+        const [newKey] = puts();
+        expect(deletes()).toEqual([newKey]);
+        expect((await rowOf(created.id)).file_s3_key).toBe(firstKey);
+      });
+    });
+
+    test('a tax label and a nine-digit value are screened together as stored: across two edits, and in reference details', async () => {
+      const first = await call('POST', '', { kind: 'fact', item_key: 'custom', label: 'EIN' });
+      expect(first.status).toBe(201);
+      const refused = await call('PATCH', `/${first.body.item.id}`, { value: '123456789', expected_updated_at: first.body.item.updated_at });
+      expect(refused.status).toBe(400);
+      expect(JSON.stringify(refused.body)).not.toContain('123456789');
+      expect((await rowOf(first.body.item.id)).value).toBeNull();
+      const second = await call('POST', '', { kind: 'fact', item_key: 'custom', label: 'Policy number', value: '1234 56789' });
+      expect(second.status).toBe(201);
+      expect((await call('PATCH', `/${second.body.item.id}`, { label: 'EIN', expected_updated_at: second.body.item.updated_at })).status).toBe(400);
+      expect((await rowOf(second.body.item.id)).label).toBe('Policy number');
+      // Stored jsonb details are read back as fields too.
+      const reference = await call('POST', '', { kind: 'reference', item_key: 'reference', details: { entity: 'Sample District', annualValue: '12345 6789' } });
+      expect(reference.status).toBe(201);
+      expect((await call('PATCH', `/${reference.body.item.id}`, { label: 'Taxpayer ID', expected_updated_at: reference.body.item.updated_at })).status).toBe(400);
+    });
+
+    test('on real rows: a document needs a file, a custom label change clears the sign-off, and checks cannot be dated ahead', async () => {
+      const emptyFact = await call('POST', '', { kind: 'fact', item_key: 'legal_name' });
+      expect((await upload(emptyFact.body.item.id)).status).toBe(400); // a fact takes a value, not a file
+      expect((await rowOf(emptyFact.body.item.id)).file_s3_key).toBeNull();
+      const paper = await create({ item_key: 'w9', value: 'On file' });
+      expect(paper.status).toBe('missing');
+      expect((await withFile(paper)).status).toBe('unattested');
+      const fact = await call('POST', '', { kind: 'fact', item_key: 'custom', label: 'County vendor letter', value: 'Letter 7' });
+      expect(fact.body.item.status).toBe('unattested'); // a fact is there on text
+      const signedFact = await call('POST', `/${fact.body.item.id}/attest`, { expected_updated_at: fact.body.item.updated_at });
+      expect(signedFact.body.item.status).toBe('ready');
+      const renamed = await call('PATCH', `/${fact.body.item.id}`, { label: 'County vendor letter 2027', expected_updated_at: signedFact.body.item.updated_at });
+      expect(renamed.body.item).toMatchObject({ attested_at: null, attested_by: null });
+      const tomorrow = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+      const ahead = await call('PATCH', `/${fact.body.item.id}`, { checked_on: tomorrow, expected_updated_at: renamed.body.item.updated_at });
+      expect(ahead).toMatchObject({ status: 400, body: { error: 'checked date cannot be in the future' } });
+      expect((await call('PATCH', `/${fact.body.item.id}`, { checked_on: '2000-01-01', expires_on: tomorrow, expected_updated_at: renamed.body.item.updated_at })).status).toBe(200);
+    });
+
+    test('one live row per catalog item (references repeat); archive keeps the row and frees the slot', async () => {
+      await create({ item_key: 'w9' });
+      expect((await call('POST', '', { kind: 'document', item_key: 'w9' })).status).toBe(409);
+      for (const entity of ['Sample District', 'Sample HOA']) expect((await call('POST', '', { kind: 'reference', item_key: 'reference', details: { entity } })).status).toBe(201);
+      const w9 = (await call('GET', '')).body.items.find((item) => item.item_key === 'w9');
+      expect((await archive(w9.id)).status).toBe(200);
+      expect(await rowOf(w9.id)).toMatchObject({ archived_at: expect.any(Date) });
+      expect((await call('POST', '', { kind: 'document', item_key: 'w9' })).status).toBe(201);
+      const live = (await call('GET', '')).body;
+      expect(live.items.filter((item) => item.item_key === 'w9')).toHaveLength(1);
+      expect((await call('GET', '?all=1')).body.items.filter((item) => item.item_key === 'w9')).toHaveLength(2);
+    });
+
+    test('the facts sheet shows typed values, leaves archived rows out and carries no key or link', async () => {
+      await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'FX123456' });
+      await create({ kind: 'fact', item_key: 'legal_name', value: 'Example Pest Services LLC' });
+      const gone = await create({ kind: 'fact', item_key: 'phone', value: '941-555-0199' });
+      await archive(gone.id);
+      const license = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-01-01' });
+      await upload(license.id);
+      const res = await call('GET', '/facts-sheet');
+      expect(res.status).toBe(200);
+      const byKey = Object.fromEntries(res.body.facts.map((fact) => [fact.key, fact]));
+      expect(byKey.fdacs_license_number.value).toBe('FX123456'); // typed by the owner
+      expect(byKey.legal_name.value).toBe('Example Pest Services LLC');
+      expect(byKey.phone.value).toBeNull();
+      expect(res.body.documents).toEqual([expect.objectContaining({ key: 'business_license_copy', number: 'JB000000', expiresOn: '2999-01-01' })]);
+      expect(JSON.stringify(res.body)).not.toMatch(/941-555-0199|bid-kit\/|s3_key|https?:/);
+    });
+
+    test('editing a business_credentials row changes nothing the kit returns, and a signed-off fact stays signed off', async () => {
+      const cred = await credential({ credential_number: 'FX000000', expiration_date: '2999-03-03' });
+      const fact = await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'FX000000' });
+      expect((await call('POST', `/${fact.id}/attest`, { expected_updated_at: fact.updated_at })).status).toBe(200);
+      const read = async () => ({ list: (await call('GET', '')).body, sheet: (await call('GET', '/facts-sheet')).body });
+      const before = await read();
+      await mockPg('business_credentials').where({ id: cred.id }).update({ credential_number: 'FX999999', expiration_date: '2000-01-01', updated_at: new Date() });
+      await mockPg('business_credentials').where({ id: cred.id }).del();
+      const after = await read();
+      expect(after).toEqual(before);
+      expect(JSON.stringify(after)).not.toContain('FX999999');
+      expect(after.sheet.facts.find((entry) => entry.key === 'fdacs_license_number')).toMatchObject({ value: 'FX000000', signedOff: true, status: 'ready' });
+      expect(await rowOf(fact.id)).toMatchObject({ value: 'FX000000', attested_by: mockAdminId });
+    });
+
+    test('a failed activity insert logs a fixed message and the error code, never the label the database error quotes', async () => {
+      const logger = require('../services/logger');
+      logger.warn.mockClear();
+      mockAdminId = randomUUID(); // not a technician: the activity_log foreign key refuses the insert
+      const label = 'Sample HOA board, board.sample@example.test, 100 Fixture Way';
+      const res = await call('POST', '', { kind: 'reference', item_key: 'reference', details: { entity: label } });
+      expect(res.status).toBe(201); // the save stands; only the activity row failed
+      const lines = logger.warn.mock.calls.map(([line]) => String(line));
+      expect(lines.filter((line) => line.includes('activity_log write failed'))).toEqual(['[bid-kit] activity_log write failed: 23503 constraint=activity_log_admin_user_id_foreign']);
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/Sample HOA|board\.sample|Fixture Way|insert into/);
+    });
+
+    test('the activity log records who did what, with field names and no values', async () => {
+      const created = await create({ item_key: 'w9' });
+      await call('PATCH', `/${created.id}`, { value: 'On file with the office', expected_updated_at: created.updated_at });
+      const rows = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).orderBy('created_at').select('action', 'description', 'metadata');
+      expect(rows.map((row) => row.action)).toEqual(['bid_kit_created', 'bid_kit_updated']);
+      expect(rows[1].metadata).toMatchObject({ bid_kit_item_id: created.id, item_key: 'w9', fields: ['value'] });
+      expect(JSON.stringify(rows)).not.toContain('On file with the office');
+    });
+  });
+
+  test('a custom item never puts its label, value, notes or details into the activity log, on any write', async () => {
+    const name = 'Maria Fixture';
+    const phone = '941-555-0199';
+    const address = '100 Fixture Way, Sampleville';
+    const label = `${name}, ${phone}, ${address}`;
+    const created = await call('POST', '', { kind: 'fact', item_key: 'custom', label, value: `Call ${name} at ${phone}`, notes: address });
+    expect(created.status).toBe(201);
+    const id = created.body.item.id;
+    const edited = await call('PATCH', `/${id}`, { label: `${label} again`, value: `${address} gate`, notes: `${name} ${phone}`, expected_updated_at: created.body.item.updated_at });
+    expect(edited.status).toBe(200);
+    const signed = await call('POST', `/${id}/attest`, { expected_updated_at: edited.body.item.updated_at });
+    expect(signed.status).toBe(200);
+    expect((await archive(id)).status).toBe(200);
+    const doc = await call('POST', '', { kind: 'document', item_key: 'custom', label: `${name} letter ${phone}`, source_document: address });
+    expect((await upload(doc.body.item.id, 'letter.pdf', doc.body.item.updated_at)).status).toBe(200);
+    const rows = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).orderBy('created_at').select('action', 'description', 'metadata');
+    expect(rows.map((row) => row.action)).toEqual(['bid_kit_created', 'bid_kit_updated', 'bid_kit_attested', 'bid_kit_archived', 'bid_kit_created', 'bid_kit_file_uploaded']);
+    const everything = JSON.stringify(rows);
+    for (const text of [name, 'Maria', phone, '555-0199', address, 'Fixture Way', 'Sampleville', 'gate']) expect(everything).not.toContain(text);
+    expect(rows[0].description).toBe('custom item (custom) created');
+    expect(rows[1].description).toBe('custom item (custom) updated: label, value, notes');
+    expect(rows[1].metadata).toMatchObject({ bid_kit_item_id: id, item_key: 'custom', fields: ['label', 'value', 'notes'] });
+    // A catalog item is named by its catalog label.
+    const catalogItem = await create({ item_key: 'w9' });
+    const named = await mockPg('activity_log').where({ admin_user_id: mockAdminId }).whereRaw("metadata->>'bid_kit_item_id' = ?", [catalogItem.id]).select('description', 'metadata');
+    expect(named.map((row) => row.description)).toEqual(['W-9 (w9) created']);
+    expect(named[0].metadata).toMatchObject({ item_key: 'w9' });
+  });
+
+  describe('the daily expiry job', () => {
+    test('rings once for each expired or soon-expiring item, with a spec the notification rules accept, and not for the rest', async () => {
+      const expired = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' }));
+      const soon = await withFile(await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(5) }));
+      await create({ item_key: 'w9', value: 'On file', expires_on: addDays(200) });
+      await create({ item_key: 'ipm_plan', value: 'On file' });
+      const gone = await withFile(await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: '2000-01-01' }));
+      await archive(gone.id);
+      const result = await runBidKitExpiryCheck();
+      expect(result).toEqual({ scanned: 2, rang: 2, closed: 0, overflow: 0 });
+      const rung = episodes.raiseAdminAlertWithReopen.mock.calls.map(([category, , , opts]) => ({ category, id: opts.metadata.subject.id, key: opts.dedupeKey, window: opts.dedupeWindowMs }));
+      expect(rung).toEqual(expect.arrayContaining([
+        { category: 'system', id: expired.id, key: `bid-kit:expiry:${expired.id}`, window: 7 * 86400000 },
+        { category: 'system', id: soon.id, key: `bid-kit:expiry:${soon.id}`, window: 7 * 86400000 },
+      ]));
+    });
+
+    test('a renewal, an archive and a vanished item close their bells; an item still inside the window keeps its bell', async () => {
+      const kept = await withFile(await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(5) }));
+      const renewed = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) }));
+      const archived = await withFile(await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: addDays(5) }));
+      episodes.closeAdminAlertKeys.mockClear();
+      // A save that moves the date out of the window closes that bell at once.
+      expect((await call('PATCH', `/${renewed.id}`, { expires_on: addDays(300), expected_updated_at: renewed.updated_at })).status).toBe(200);
+      expect(episodes.closeAdminAlertKeys.mock.calls.map(([, keys, reason]) => [keys, reason])).toEqual([[[`bid-kit:expiry:${renewed.id}`], 'renewed']]);
+      // So does an archive.
+      await archive(archived.id);
+      expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[`bid-kit:expiry:${archived.id}`], 'archived']);
+      // The daily job closes every open bell that no longer qualifies, and only those.
+      episodes.closeAdminAlertKeys.mockClear();
+      episodes.openAdminAlertKeys.mockResolvedValue([kept, renewed, archived, { id: randomUUID() }].map((row) => `bid-kit:expiry:${row.id}`));
+      const result = await runBidKitExpiryCheck();
+      expect(result.scanned).toBe(1);
+      // One locked close per stale bell.
+      const keys = episodes.closeAdminAlertKeys.mock.calls.flatMap(([, closing]) => closing);
+      expect(episodes.closeAdminAlertKeys.mock.calls.every(([, , reason]) => reason === 'no_longer_qualifies')).toBe(true);
+      expect(keys).toEqual(expect.arrayContaining([`bid-kit:expiry:${renewed.id}`, `bid-kit:expiry:${archived.id}`]));
+      expect(keys).not.toContain(`bid-kit:expiry:${kept.id}`);
+    });
+
+    test('a renewal or an archive that lands after the list was read but before the raise leaves no bell', async () => {
+      const store = require('../services/bid-kit-store');
+      const renewed = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) }));
+      const archived = await withFile(await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: addDays(5) }));
+      const kept = await withFile(await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(6) }));
+      const realList = store.listItems;
+      const spy = jest.spyOn(store, 'listItems').mockImplementationOnce(async (...args) => {
+        const snapshot = await realList(...args);
+        // The snapshot is taken; now two admins change items before the job raises.
+        await mockPg('bid_kit_items').where({ id: renewed.id }).update({ expires_on: addDays(300), updated_at: mockPg.raw('clock_timestamp()') });
+        await mockPg('bid_kit_items').where({ id: archived.id }).update({ archived_at: mockPg.fn.now(), updated_at: mockPg.raw('clock_timestamp()') });
+        return snapshot;
+      });
+      try {
+        const result = await runBidKitExpiryCheck();
+        expect(result).toMatchObject({ scanned: 3, rang: 1 });
+      } finally {
+        spy.mockRestore();
+      }
+      const keys = episodes.raiseAdminAlertWithReopen.mock.calls.map(([, , , opts]) => opts.dedupeKey);
+      expect(keys).toEqual([`bid-kit:expiry:${kept.id}`]);
+    });
+
+    test('with the gate off it reads nothing', async () => {
+      await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
+      process.env.GATE_BID_KIT = 'false';
+      try {
+        expect(await runBidKitExpiryCheck()).toEqual({ skipped: 'gate_off' });
+        expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+      } finally {
+        process.env.GATE_BID_KIT = 'true';
+      }
+    });
+  });
+
+  describe('the public credentials feed', () => {
+    test('is identical with and without bid-kit rows, and never names a bid-kit field', async () => {
+      const cred = await credential({ slug: `fixture-feed-${randomUUID()}`, display_name: 'Fixture feed license' });
+      const read = async () => {
+        const res = await fetch(`${baseUrl}/api/public/credentials`);
+        const body = await res.json();
+        return { status: res.status, credentials: body.credentials, keys: Object.keys(body).sort() };
+      };
+      const before = await read();
+      expect(before.credentials.some((c) => c.slug === cred.slug)).toBe(true);
+      const item = await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'Bid kit only value' });
+      await upload((await create({ item_key: 'business_license_copy', value: 'JB000000' })).id);
+      await call('POST', `/${item.id}/attest`, { expected_updated_at: item.updated_at });
+      const after = await read();
+      expect(after).toEqual(before);
+      expect(JSON.stringify(after)).not.toMatch(/bid.kit|Bid kit only value|attested|file_s3_key/i);
+    });
+  });
+});

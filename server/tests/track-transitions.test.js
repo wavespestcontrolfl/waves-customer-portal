@@ -18,6 +18,12 @@ jest.mock('../sockets', () => ({
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
 }));
+const mockFence = jest.fn(async () => {});
+jest.mock('../services/cancel-generation-fence', () => ({
+  CancelFenceError: jest.requireActual('../services/cancel-generation-fence').CancelFenceError,
+  assertCancelGeneration: (...a) => mockFence(...a),
+  isCancelFence: (err) => Boolean(err) && err.code === 'CANCEL_FENCE',
+}));
 
 const db = require('../models/db');
 const { sendTechArrived } = require('../services/twilio');
@@ -1270,5 +1276,201 @@ describe('future-scheduled-date stale-attempt guard', () => {
     expect(result).toEqual({ ok: false, reason: 'cannot_cancel_no_show' });
     expect(transitionJobStatus).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+});
+
+// The Intelligence Bar cancel recovery sweep passes cancelFence (services/cancel-generation-fence.js): cancel() would
+// cancel a LIVE visit, so with a fence it only ever finishes the cancellation the card approved.
+describe('cancel with a cancelFence (the cancel recovery sweep)', () => {
+  const FENCE = { visitId: 'job-1', restorations: 0, hits: [] };
+  const refuse = (fenceReason) => Object.assign(new Error(`cancellation fence: ${fenceReason}`), { code: 'CANCEL_FENCE', fenceReason });
+  const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, status: 'cancelled', track_state: 'scheduled' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFence.mockReset();
+    mockFence.mockResolvedValue(undefined);
+    db.raw = jest.fn(async () => ({ rows: [] }));
+    transitionJobStatus.mockReset().mockResolvedValue({});
+    getIo.mockReturnValue(socketStub());
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('a visit that is no longer the approved cancel is left alone: no transaction, no transition, no cascade', async () => {
+    mockFence.mockRejectedValueOnce(refuse('visit_is_confirmed'));
+    db.transaction = jest.fn(async (fn) => fn(db));
+    db.mockReturnValueOnce(query({ ...svc, status: 'confirmed' }));
+    const cascade = jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel');
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(cascade).not.toHaveBeenCalled();
+  });
+
+  test('the fence is re-proved INSIDE the cancelling transaction, and the cascade carries it as parentFence', async () => {
+    const trackingUpdate = query(1);
+    const trx = jest.fn(() => trackingUpdate);
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    db.mockReturnValueOnce(query(svc));
+    const cascade = jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result.ok).toBe(true);
+    expect(mockFence).toHaveBeenCalledWith(db, FENCE);
+    expect(mockFence).toHaveBeenCalledWith(trx, FENCE);
+    expect(cascade).toHaveBeenCalledWith(expect.objectContaining({ parentServiceId: 'job-1', parentFence: FENCE }));
+  });
+
+  test('a restore that lands between the pre-check and the transaction stops the tracker write (the live visit is not cancelled)', async () => {
+    mockFence.mockResolvedValueOnce(undefined).mockRejectedValueOnce(refuse('visit_busy'));
+    const trackingUpdate = query(1);
+    const trx = jest.fn(() => trackingUpdate);
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query({ ...svc, status: 'confirmed' })); // the reconcile re-read after the refusal
+    await expect(trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE })).rejects.toMatchObject({ code: 'CANCEL_FENCE' });
+    expect(trackingUpdate.update).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  // The share lock of the tracker transaction ends at its commit; the writes that follow stay under the same proof.
+  test('the technician-state cleanup runs in a fenced transaction (proof first, tech_status NOWAIT), not on a bare connection', async () => {
+    const svcWithTech = { ...svc, technician_id: 'tech-1' };
+    const trackingUpdate = query(1);
+    const trx = jest.fn(() => trackingUpdate);
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    db.mockReturnValueOnce(query(svcWithTech));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    const order = [];
+    mockFence.mockImplementation(async (conn) => { order.push(conn === db ? 'fence(pool)' : 'fence(trx)'); });
+    clearTechCurrentJob.mockImplementation(async (args) => { order.push(['clear', args.conn === trx, args.noWait]); });
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result.ok).toBe(true);
+    expect(order).toEqual(['fence(pool)', 'fence(trx)', 'fence(trx)', ['clear', true, true], 'fence(pool)']);
+    expect(clearTechCurrentJob).toHaveBeenCalledWith({ tech_id: 'tech-1', current_job_id: 'job-1', status: 'idle', conn: trx, noWait: true });
+  });
+
+  // The recovery read a live tracker, another writer (the dead request) flipped it first and died before clearing tech_status.
+  test('a lost tracker race whose winner left the tech bound: the fenced cleanup still runs (and a bare cancel still does not clean)', async () => {
+    const svcWithTech = { ...svc, technician_id: 'tech-1', status: 'confirmed', track_state: 'scheduled' };
+    const fresh = { ...svcWithTech, status: 'cancelled', track_state: 'cancelled', cancelled_at: new Date('2026-07-01T15:00:00Z') };
+    const trx = jest.fn(() => query(0));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    db.mockReturnValueOnce(query(svcWithTech)).mockReturnValueOnce(query(fresh));
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result.ok).toBe(true);
+    expect(clearTechCurrentJob).toHaveBeenCalledTimes(1);
+    expect(clearTechCurrentJob).toHaveBeenCalledWith(expect.objectContaining({ tech_id: 'tech-1', current_job_id: 'job-1', noWait: true }));
+    // Unchanged for every other caller: no fence, no cleanup after a lost race.
+    clearTechCurrentJob.mockClear();
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(0))));
+    db.mockReturnValueOnce(query(svcWithTech)).mockReturnValueOnce(query(fresh));
+    await trackTransitions.cancel('job-1', { reason: 'x' });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  });
+
+  test('a restore that lands after the tracker commit stops the tech cleanup, the cascade and the stale cancelled refresh', async () => {
+    const svcWithTech = { ...svc, technician_id: 'tech-1' };
+    const trx = jest.fn(() => query(1));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    db.mockReturnValueOnce(query(svcWithTech));
+    const cascade = jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    // pre-check ok, tracker transaction ok, then the cleanup transaction's proof is refused.
+    mockFence.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValueOnce(refuse('visit_is_confirmed'));
+    const io = socketStub();
+    getIo.mockReturnValue(io);
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(cascade).not.toHaveBeenCalled();
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  test('a busy tech_status row (NOWAIT refused) is a fence hit to retry, not a silent skip or a wait', async () => {
+    const svcWithTech = { ...svc, technician_id: 'tech-1' };
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    db.mockReturnValueOnce(query(svcWithTech));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    clearTechCurrentJob.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+    const fence = { ...FENCE, hits: [] };
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: fence });
+    expect(result).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(fence.hits).toEqual(['tech_state_busy']);
+  });
+
+  test('a busy first attempt (the tracker flip already committed) is finished by the retry on the already-cancelled path', async () => {
+    const trx = jest.fn(() => query(1));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    const fence = { ...FENCE, hits: [] };
+    // First attempt: the tracker flips to cancelled, the tech_status row is busy.
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1' }));
+    clearTechCurrentJob.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: fence })).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(clearTechCurrentJob).toHaveBeenCalledTimes(1);
+    // The retry finds the tracker already cancelled and still runs the fenced cleanup, then finishes.
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1', track_state: 'cancelled', cancelled_at: new Date() }));
+    clearTechCurrentJob.mockResolvedValueOnce({});
+    const retry = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: { ...FENCE, hits: [] } });
+    expect(retry).toMatchObject({ ok: true, state: 'cancelled' });
+    expect(clearTechCurrentJob).toHaveBeenCalledTimes(2);
+    expect(clearTechCurrentJob).toHaveBeenLastCalledWith(expect.objectContaining({ tech_id: 'tech-1', current_job_id: 'job-1', conn: trx, noWait: true }));
+  });
+
+  test('a technician cleanup that FAILS (not a fence refusal) is a recorded fence hit for the sweep to retry, never a silent success', async () => {
+    const trx = jest.fn(() => query(1));
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    const cascade = jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    const fence = { ...FENCE, hits: [] };
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1' }));
+    clearTechCurrentJob.mockRejectedValueOnce(new Error('connection terminated'));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: fence })).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(fence.hits).toEqual(['tech_state_error']);
+    expect(cascade).not.toHaveBeenCalled();
+    // Unfenced callers keep the best-effort behavior: logged, the cancel still succeeds.
+    cascade.mockClear();
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1' }));
+    clearTechCurrentJob.mockRejectedValueOnce(new Error('connection terminated'));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x' })).toMatchObject({ ok: true, state: 'cancelled' });
+  });
+
+  test('a cascade that THROWS is a retryable hit under a fence (and only logged without one)', async () => {
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockRejectedValue(new Error('connection terminated'));
+    const fence = { ...FENCE, hits: [] };
+    db.mockReturnValueOnce(query({ ...svc, track_state: 'cancelled', status: 'cancelled', cancelled_at: new Date() }));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: fence })).toMatchObject({ ok: true });
+    expect(fence.hits).toEqual(['cascade_error']);
+    db.mockReturnValueOnce(query({ ...svc, track_state: 'cancelled', status: 'cancelled', cancelled_at: new Date() }));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x' })).toMatchObject({ ok: true });
+  });
+
+  test('without a fence the already-cancelled path still does not touch the technician state (unchanged)', async () => {
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1', track_state: 'cancelled', cancelled_at: new Date() }));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    await trackTransitions.cancel('job-1', { reason: 'x' });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  });
+
+  test('a restore detected just before the stale refresh suppresses it (already-cancelled tracker path too)', async () => {
+    const trackerDone = { ...svc, track_state: 'cancelled', cancelled_at: new Date() };
+    db.mockReturnValueOnce(query(trackerDone));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    mockFence.mockResolvedValueOnce(undefined).mockRejectedValueOnce(refuse('visit_restored_since'));
+    const io = socketStub();
+    getIo.mockReturnValue(io);
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(io.to).not.toHaveBeenCalled();
+  });
+
+  test('without a fence the cancel never consults it', async () => {
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    db.mockReturnValueOnce(query({ ...svc, status: 'confirmed' })).mockReturnValue(query([]));
+    await trackTransitions.cancel('job-1', { reason: 'x' });
+    expect(mockFence).not.toHaveBeenCalled();
   });
 });

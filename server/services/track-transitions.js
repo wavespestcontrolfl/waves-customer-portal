@@ -1530,16 +1530,20 @@ async function markComplete(serviceId, opts = {}) {
 // also runs on the already-cancelled/0-row retry paths — a prior attempt
 // may have cancelled the tracker but died before reaching the cascade,
 // which would otherwise strand the follow-up active forever.
-async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null) {
+async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null, cancelFence = null) {
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
     await cancelCallFollowUpsForParentCancel({
       conn: db, parentServiceId: serviceId, actorId,
+      // Recovery sweep only: each child's cancel re-proves the parent is still the cancelled one the card approved.
+      ...(cancelFence ? { parentFence: cancelFence } : {}),
       // Opt-in (the Intelligence Bar cancel card): only the approved linked visits, each re-checked under its lock.
       ...(approval ? { approvedChildren: approval.linkedChildren, report: approval.linkedChildReport } : {}),
     });
   } catch (err) {
     logger.error(`[track-transitions] call follow-up cancel cascade failed for ${serviceId}: ${err.message}`);
+    // Recovery sweep only: a failed cascade is not a finished step; the sweep retries the bundle.
+    if (cancelFence) cancelFence.hits.push('cascade_error');
     if (approval && approval.linkedChildReport && Array.isArray(approval.linkedChildReport.skipped)) {
       for (const child of approval.linkedChildren) approval.linkedChildReport.skipped.push({ id: child.id, reason: 'cascade_failed' });
     }
@@ -1550,28 +1554,80 @@ async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = n
  * Admin-only cancel. Extends token expiry to NOW()+24h so the customer
  * can still see the cancelled state for a day.
  */
-async function cancel(serviceId, { reason, actorId, linkedChildren = null, linkedChildReport = null } = {}) {
-  const approval = Array.isArray(linkedChildren) ? { linkedChildren, linkedChildReport } : null;
-  let svc = await loadService(serviceId);
-  if (!svc) return { ok: false, reason: 'not_found' };
-  if (svc.status === 'completed') return { ok: false, reason: 'cannot_cancel_complete' };
-  if (svc.status === 'skipped') return { ok: false, reason: 'cannot_cancel_skipped' };
-  if (svc.status === 'no_show') return { ok: false, reason: 'cannot_cancel_no_show' };
-  if (svc.track_state === 'cancelled') {
-    // Continue below when an older writer advanced only track_state; the
-    // canonical status transition will repair it and append history.
-    if (svc.status === 'cancelled') {
-      await cascadeCallFollowUpCancel(serviceId, actorId, approval);
-      emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
-      return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
+// Recovery sweep only (cancelFence, services/cancel-generation-fence.js). The tracker flip's own transaction proves the
+// generation, but its share lock ends at the commit. These two helpers keep the two writes that follow under the same proof:
+//  - the technician-state cleanup runs in a transaction that share-locks the visit and proves the generation first, and takes
+//    the tech_status row NOWAIT (a busy row refuses at once instead of waiting while the visit lock is held);
+//  - the stale "cancelled" refresh broadcast is sent only after a fresh check that the visit is still the approved cancel.
+async function clearTechStateUnderFence(svc, cancelFence) {
+  const { assertCancelGeneration, CancelFenceError } = require('./cancel-generation-fence');
+  try {
+    await db.transaction(async (trx) => {
+      await assertCancelGeneration(trx, cancelFence);
+      await clearTechCurrentJob({ tech_id: svc.technician_id, current_job_id: svc.id, status: 'idle', conn: trx, noWait: true });
+    });
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      cancelFence.hits.push('tech_state_busy');
+      throw new CancelFenceError('tech_state_busy');
+    }
+    throw err;
+  }
+}
+
+// The technician's current-job cleanup of a cancelled visit. Without a fence it is the ordinary best-effort clear (errors are
+// logged). With a fence it runs under the generation proof; returns false when the fence refused it (the visit changed or a row
+// was busy), so the caller stops and the sweep abandons or retries. It also runs on the already-cancelled path, so a retry after
+// a busy first attempt (the tracker flip had already committed) still finishes it.
+async function clearTechStateOnCancel(svc, cancelFence) {
+  if (!svc.technician_id) return true;
+  try {
+    if (cancelFence) {
+      await clearTechStateUnderFence(svc, cancelFence);
+    } else {
+      await clearTechCurrentJob({ tech_id: svc.technician_id, current_job_id: svc.id, status: 'idle' });
+    }
+  } catch (err) {
+    if (err && err.code === 'CANCEL_FENCE') return false;
+    logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
+    // Recovery sweep only: a failed cleanup is NOT done. It is recorded as a fence hit so the sweep retries the bundle instead
+    // of saving the follow-through as finished (the unfenced callers keep the best-effort behavior).
+    if (cancelFence) {
+      cancelFence.hits.push('tech_state_error');
+      return false;
     }
   }
-  if (svc.track_state === 'complete') {
-    return { ok: false, reason: 'cannot_cancel_complete' };
-  }
+  return true;
+}
 
+async function approvedCancelStillStands(cancelFence) {
+  if (!cancelFence) return true;
+  const { assertCancelGeneration, isCancelFence } = require('./cancel-generation-fence');
+  try {
+    await assertCancelGeneration(db, cancelFence);
+    return true;
+  } catch (err) {
+    if (isCancelFence(err)) return false;
+    throw err;
+  }
+}
+
+// The refusal for a visit that can no longer be cancelled by status or tracker state, or null.
+function cancelRefusalFor(svc) {
+  if (svc.status === 'completed') return 'cannot_cancel_complete';
+  if (svc.status === 'skipped') return 'cannot_cancel_skipped';
+  if (svc.status === 'no_show') return 'cannot_cancel_no_show';
+  // A tracker already cancelled with an older status is repaired by the canonical transition, so it is not refused here.
+  if (svc.track_state === 'complete') return 'cannot_cancel_complete';
+  return null;
+}
+
+// The one transaction that cancels the visit: fence proof first (recovery sweep only), the canonical status transition when
+// the status is not yet cancelled, then the tracker flip. A lost tracker race throws TRACK_CANCEL_RACE for the reconcile.
+async function persistTrackCancellation({ serviceId, current, now, expiry, reason, actorId, cancelFence }) {
   const { transitionJobStatus } = require('./job-status');
-  const persistCancellation = async (current, now, expiry) => db.transaction(async (trx) => {
+  return db.transaction(async (trx) => {
+    if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelFence);
     if (current.status !== 'cancelled') {
       if (!['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'].includes(current.status)) {
         const invalid = new Error(`cannot cancel service from operational status ${current.status}`);
@@ -1603,51 +1659,74 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
       throw race;
     }
   });
+}
+
+// Reconcile a racing canonical status/track writer once. A concurrent completion wins; a concurrent cancellation is
+// idempotent; and a status writer that reached cancelled before its tracker sync can be safely finished from the freshly-read
+// state. Returns { result } to answer the caller at once, or { svc } (the row to continue from). Anything else rethrows.
+async function reconcileTrackCancelRace(err, serviceId, persist) {
+  const fresh = await loadService(serviceId);
+  if (fresh?.track_state === 'complete' || fresh?.status === 'completed') {
+    return { result: { ok: true, state: 'complete', completedAt: fresh.completed_at || null } };
+  }
+  if (fresh?.status === 'skipped') {
+    return { result: { ok: true, state: fresh.track_state || 'scheduled', status: 'skipped' } };
+  }
+  if (fresh?.track_state !== 'cancelled' && fresh?.status === 'cancelled') {
+    await persist(fresh);
+    return { svc: fresh };
+  }
+  if (fresh?.track_state === 'cancelled' && fresh?.status === 'cancelled') return { svc: fresh };
+  throw err;
+}
+
+// What follows a cancelled tracker: the follow-up cascade, the fence re-check, then the customer refresh. With `cleanTech` the
+// technician's current-job state is cleared first (under the fence when there is one); a refused cleanup stops everything.
+async function finishTrackCancellation(svc, { serviceId, actorId, approval, cancelFence, cleanTech, emitAt }) {
+  if (cleanTech && !(await clearTechStateOnCancel(svc, cancelFence))) return { ok: false, reason: 'cancel_fence' };
+  await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
+  if (!(await approvedCancelStillStands(cancelFence))) return { ok: false, reason: 'cancel_fence' };
+  emitCustomerTrackRefresh(svc, 'cancelled', emitAt);
+  return null;
+}
+
+// cancelFence (the Intelligence Bar cancel recovery sweep only, services/cancel-generation-fence.js): this function
+// would cancel a LIVE visit, so with a fence it only ever finishes the cancellation the card approved. A visit
+// restored since is left alone ({ ok: false, reason: 'cancel_fence' }), re-proved inside the cancelling transaction.
+async function cancel(serviceId, { reason, actorId, linkedChildren = null, linkedChildReport = null, cancelFence = null } = {}) {
+  const approval = Array.isArray(linkedChildren) ? { linkedChildren, linkedChildReport } : null;
+  let svc = await loadService(serviceId);
+  if (!svc) return { ok: false, reason: 'not_found' };
+  if (!(await approvedCancelStillStands(cancelFence))) return { ok: false, reason: 'cancel_fence' };
+  const refusal = cancelRefusalFor(svc);
+  if (refusal) return { ok: false, reason: refusal };
+  const finishCtx = { serviceId, actorId, approval, cancelFence };
+  if (svc.track_state === 'cancelled' && svc.status === 'cancelled') {
+    // Already cancelled: a retry still owes the fenced technician cleanup, the cascade and the re-check.
+    const refused = await finishTrackCancellation(svc, { ...finishCtx, cleanTech: !!cancelFence, emitAt: svc.cancelled_at || new Date() });
+    return refused || { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
+  }
 
   const now = new Date();
   const expiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const persist = (current) => persistTrackCancellation({ serviceId, current, now, expiry, reason, actorId, cancelFence });
   try {
-    await persistCancellation(svc, now, expiry);
+    await persist(svc);
   } catch (err) {
-    // Reconcile a racing canonical status/track writer once. A concurrent
-    // completion wins; a concurrent cancellation is idempotent; and a status
-    // writer that reached cancelled before its tracker sync can be safely
-    // finished from the freshly-read state.
-    const fresh = await loadService(serviceId);
-    if (fresh?.track_state === 'complete' || fresh?.status === 'completed') {
-      return { ok: true, state: 'complete', completedAt: fresh.completed_at || null };
-    }
-    if (fresh?.status === 'skipped') {
-      return { ok: true, state: fresh.track_state || 'scheduled', status: 'skipped' };
-    }
-    if (fresh?.track_state !== 'cancelled' && fresh?.status === 'cancelled') {
-      await persistCancellation(fresh, now, expiry);
-      svc = fresh;
-    } else if (fresh?.track_state === 'cancelled' && fresh?.status === 'cancelled') {
-      svc = fresh;
-    } else {
-      throw err;
-    }
+    const reconciled = await reconcileTrackCancelRace(err, serviceId, persist);
+    if (reconciled.result) return reconciled.result;
+    svc = reconciled.svc;
   }
 
   if (svc.track_state === 'cancelled') {
-    await cascadeCallFollowUpCancel(serviceId, actorId, approval);
-    emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
-    return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
+    // The tracker was already cancelled by the racing writer. Without a fence the technician cleanup is that writer's (unchanged
+    // behavior). The recovery sweep cleans it under the fence like the direct already-cancelled retry: the writer may have
+    // died after its tracker commit and before clearing tech_status.
+    const refused = await finishTrackCancellation(svc, { ...finishCtx, cleanTech: !!cancelFence, emitAt: svc.cancelled_at || new Date() });
+    return refused || { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
-  if (svc.technician_id) {
-    try {
-      await clearTechCurrentJob({
-        tech_id: svc.technician_id,
-        current_job_id: svc.id,
-        status: 'idle',
-      });
-    } catch (err) {
-      logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
-    }
-  }
-  await cascadeCallFollowUpCancel(serviceId, actorId, approval);
-  emitCustomerTrackRefresh(svc, 'cancelled', now);
+  const refused = await finishTrackCancellation(svc, { ...finishCtx, cleanTech: true, emitAt: now });
+  if (refused) return refused;
   return {
     ok: true,
     state: 'cancelled',

@@ -10,7 +10,7 @@ A route being listed as reachable means a technician may call it; routers still 
 
 Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, admin-revenue, …) run a router-level function that admits a technician only on the router's own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.
 
-Allow-list buckets: session, own-visits, own-time, own-texts, promises, documents, pay-growth, knowledge-read, equipment-read.
+Allow-list buckets: session, own-visits, own-time, own-texts, promises, documents, pay-growth, knowledge-read, equipment-read, own-truck.
 
 ## Reachable by a technician after the flip
 
@@ -132,6 +132,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/equipment-systems/reconciliation` | admin-equipment-systems |
 | GET | `/api/admin/equipment/equipment` | admin-equipment |
 | GET | `/api/admin/equipment/equipment/:id/calibration-history` | admin-equipment |
+| GET | `/api/admin/equipment/kit-keys` | admin-equipment |
 | GET | `/api/admin/equipment/tank-mixes` | admin-equipment |
 | GET | `/api/admin/feature-flags` | admin-feature-flags |
 | GET | `/api/admin/intelligence-bar/actions/:id` | admin-intelligence-bar |
@@ -346,6 +347,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/tech/timetracking/start-job/:jobId` | tech-timetracking |
 | GET | `/api/tech/timetracking/status` | tech-timetracking |
 | GET | `/api/tech/timetracking/weekly` | tech-timetracking |
+| GET | `/api/tech/truck-check` | tech-truck-check |
+| POST | `/api/tech/truck-check` | tech-truck-check |
 | DELETE | `/api/visual-moments/:momentId` | visual-service-moments |
 | PATCH | `/api/visual-moments/:momentId` | visual-service-moments |
 
@@ -407,9 +410,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/email/vendors` | admin-email |
 | POST | `/api/admin/email/vendors` | admin-email |
 | DELETE | `/api/admin/email/vendors/:id` | admin-email |
-| POST | `/api/admin/equipment-maintenance` | admin-equipment-maintenance |
-| DELETE | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})` | admin-equipment-maintenance |
-| PUT | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})` | admin-equipment-maintenance |
 | POST | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/downtime` | admin-equipment-maintenance |
 | POST | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/mileage` | admin-equipment-maintenance |
 | POST | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/records` | admin-equipment-maintenance |

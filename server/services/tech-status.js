@@ -163,10 +163,14 @@ async function setTechJobStatus({ tech_id, status, current_job_id }) {
  * being closed. This avoids wiping a newer en-route assignment when an
  * old tab completes/cancels a stale job.
  */
-async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' }) {
+// `conn` (optional, the cancel recovery sweep): run on the caller's transaction, which holds the cancel-generation share lock.
+// `noWait`: take the tech_status row with FOR UPDATE NOWAIT first, so a busy row fails at once (55P03) instead of waiting
+// while the visit lock is held (no lock-order deadlock with a tech transition that locks tech_status, then the visit).
+async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle', conn = db, noWait = false }) {
   if (!tech_id || !current_job_id) return null;
+  if (noWait) await conn('tech_status').where({ tech_id, current_job_id }).forUpdate().noWait().first('id');
 
-  const [row] = await db('tech_status')
+  const [row] = await conn('tech_status')
     .where({ tech_id, current_job_id })
     .update({
       status,
@@ -177,11 +181,21 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' })
 
   if (!row) return null;
 
-  const io = getIo();
-  if (io) {
-    io.to(ROOM).emit(EVENT, sanitizeTechStatusForDispatch(row));
+  const broadcast = () => {
+    const io = getIo();
+    if (io) {
+      io.to(ROOM).emit(EVENT, sanitizeTechStatusForDispatch(row));
+    } else {
+      logger.warn('[tech-status] io not initialized; skipping clear-current-job broadcast');
+    }
+  };
+  // On the caller's transaction the change is not visible (and may never be: a rollback) until it commits, so the event waits
+  // for the commit; a rolled-back transaction emits nothing. Without a transaction handle (or a test harness with no commit
+  // promise) it goes out at once, exactly as before.
+  if (conn !== db && conn.executionPromise && typeof conn.executionPromise.then === 'function') {
+    conn.executionPromise.then(broadcast).catch(() => {});
   } else {
-    logger.warn('[tech-status] io not initialized; skipping clear-current-job broadcast');
+    broadcast();
   }
 
   return row;

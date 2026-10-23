@@ -11,11 +11,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/equipment-maintenance', () => ({}));
 jest.mock('../models/db', () => {
-  const state = { vehicles: {}, rows: {}, riders: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
+  const state = { vehicles: {}, rows: {}, riders: {}, trucksOf: {}, inserted: null, updated: null, fail: null, listRows: [], chains: [] };
   const chain = (table) => {
     const c = { table, calls: [], cond: null };
     const rec = (name) => jest.fn((...args) => { c.calls.push([name, ...args]); return c; });
-    for (const m of ['leftJoin', 'select', 'orderBy', 'whereNull']) c[m] = rec(m);
+    for (const m of ['leftJoin', 'select', 'orderBy', 'whereNull', 'whereNotIn', 'whereNot']) c[m] = rec(m);
     c.where = jest.fn((...args) => {
       c.calls.push(['where', ...args]);
       if (args.length === 1 && typeof args[0] === 'object') c.cond = { ...(c.cond || {}), ...args[0] };
@@ -23,8 +23,9 @@ jest.mock('../models/db', () => {
     });
     c.first = jest.fn(async (...args) => {
       c.calls.push(['first', ...args]);
+      if (table === 'equipment' && c.cond && c.cond.assigned_to && c.cond.category === 'vehicle') return state.trucksOf[c.cond.assigned_to] || null;
       if (table === 'equipment' && c.cond && c.cond.category === 'vehicle') return state.vehicles[c.cond.id] || null;
-      if (table === 'equipment' && c.cond && c.cond.id && c.cond.category === undefined) return state.rows[c.cond.id] || null;
+      if (table === 'equipment' && c.cond && c.cond.id && c.cond.category === undefined) return state.rows[c.cond.id] ? { ...state.rows[c.cond.id] } : null;
       if (table === 'equipment' && c.cond && c.cond.assigned_vehicle_id) return state.riders[c.cond.assigned_vehicle_id] || null;
       return null;
     });
@@ -40,6 +41,7 @@ jest.mock('../models/db', () => {
     return c;
   };
   const db = jest.fn(chain);
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.raw = jest.fn((sql) => ({ sql }));
   db.fn = { now: () => 'NOW()' };
   db.__state = state;
@@ -78,8 +80,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   const s = db.__state;
   s.vehicles = { [VEHICLE]: { id: VEHICLE } };
-  s.rows = { [TOOL]: { id: TOOL, category: 'tool' }, [OTHER]: { id: OTHER, category: 'vehicle' } };
+  s.rows = { [TOOL]: { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE }, [OTHER]: { id: OTHER, category: 'vehicle' } };
   s.riders = { [VEHICLE]: { id: TOOL } };
+  s.trucksOf = {};
+  s.rows[VEHICLE] = { id: VEHICLE, category: 'vehicle', assigned_to: 'tech-1', status: 'active' };
   s.inserted = null;
   s.updated = null;
   s.fail = null;
@@ -131,6 +135,15 @@ describe('a vehicle is never cargo', () => {
     expect(db.__state.updated).toBeNull();
   });
 
+  test('a truck with riders cannot be retired, sold or lost either', async () => {
+    for (const status of ['retired', 'sold', 'lost']) {
+      const res = await run('put', '/equipment/:id', { params: { id: VEHICLE }, body: { status } });
+      expect(res.statusCode).toBe(409);
+      expect(res.body.error).toMatch(/still ride/);
+    }
+    expect(db.__state.updated).toBeNull();
+  });
+
   test('an empty truck may be recategorized', async () => {
     const res = await run('put', '/equipment/:id', { params: { id: OTHER }, body: { category: 'other' } });
     expect(res.statusCode).toBe(200);
@@ -154,6 +167,8 @@ describe('POST /equipment custody columns', () => {
     expect(db.__state.inserted).toEqual(expect.objectContaining({
       asset_tag: 'T-001', location: 'van', assigned_vehicle_id: VEHICLE, condition_rating: 9,
     }));
+    // Placed straight onto a truck: that truck's lock is taken before the insert.
+    expect(require('../services/truck-kit').lockTruck).toHaveBeenCalledWith(db, VEHICLE);
   });
 
   test('a body without custody keys leaves the table defaults alone', async () => {
@@ -167,7 +182,7 @@ describe('POST /equipment custody columns', () => {
   test('refuses a truck that is not a vehicle row, writing nothing', async () => {
     const res = await run('post', '/equipment', { body: { name: 'Synthetic duster', assigned_vehicle_id: OTHER } });
     expect(res.statusCode).toBe(400);
-    expect(res.body).toEqual({ error: 'assigned_vehicle_id must be a vehicle' });
+    expect(res.body).toEqual({ error: 'assigned_vehicle_id must be a live vehicle' });
     expect(db.__state.inserted).toBeNull();
   });
 
@@ -231,5 +246,219 @@ describe('GET /equipment', () => {
     chain = db.__state.chains[0];
     expect(chain.calls).toEqual(expect.arrayContaining([['whereNull', 'equipment.assigned_vehicle_id']]));
     expect(chain.calls.some((c) => c[0] === 'where' && c[1] === 'equipment.assigned_vehicle_id')).toBe(false);
+  });
+});
+
+// PR 2: the kit key rides with the custody columns and the dialog's
+// suggestions come from the truck kit's vocabulary.
+jest.mock('../services/truck-kit', () => ({
+  truckKitEnabled: jest.fn(() => true),
+  kitKeyVocabulary: jest.fn(async () => [{ kit_key: 'moisture_meter', label: 'Moisture meter' }]),
+  lockTruck: jest.fn(async () => ({ rows: [] })),
+  closeTruckBellIfClear: jest.fn(async () => true),
+  openToolAlertFor: jest.fn(async () => null),
+  lockTechnician: jest.fn(async () => ({ rows: [] })),
+}));
+const truckKit = require('../services/truck-kit');
+
+describe('a tool leaving a truck re-judges that truck\'s bell', () => {
+  test('a save that raced another move of the same item is refused', async () => {
+    // The first read says VEHICLE; under the locks the row already moved to OTHER.
+    let reads = 0;
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', get assigned_vehicle_id() { return reads++ === 0 ? VEHICLE : OTHER; } };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: null } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/changed this item/);
+    expect(db.__state.updated).toBeNull();
+  });
+
+  test('a create onto a truck retired while it waited for the lock is refused', async () => {
+    db.__state.vehicles[OTHER] = { id: OTHER };
+    const vehicles = db.__state.vehicles;
+    let reads = 0;
+    Object.defineProperty(db.__state, 'vehicles', { get: () => (reads++ === 0 ? vehicles : { [VEHICLE]: vehicles[VEHICLE] }), configurable: true });
+    const res = await run('post', '/equipment', { body: { name: 'Synthetic probe', category: 'tool', assigned_vehicle_id: OTHER } });
+    Object.defineProperty(db.__state, 'vehicles', { value: vehicles, writable: true, configurable: true });
+    expect(res.statusCode).toBe(409);
+    expect(db.__state.inserted).toBeNull();
+  });
+
+  test('a row that became a vehicle while the save waited cannot end up as cargo', async () => {
+    // vehicleTarget saw a tool; under the locks the stored row is a vehicle (both snapshots agree).
+    let reads = 0;
+    db.__state.rows[TOOL] = { id: TOOL, assigned_vehicle_id: null, status: 'active', get category() { return reads++ === 0 ? 'tool' : 'vehicle'; } };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: VEHICLE } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/cannot ride on a truck/);
+    expect(db.__state.updated).toBeNull();
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE };
+  });
+
+  test('a Lost outcome that landed while the save waited is not undone by the dialog payload', async () => {
+    let reads = 0;
+    // Reads: the target check, the first snapshot (both active), then the under-lock snapshot (lost).
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE, get status() { return reads++ < 2 ? 'active' : 'lost'; } };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status: 'active', name: 'Full payload', assigned_vehicle_id: VEHICLE } });
+    expect(res.statusCode).toBe(409);
+    expect(db.__state.updated).toBeNull();
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE };
+  });
+
+  test('a form opened before a Lost outcome landed cannot resurrect the item (expected_status)', async () => {
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE, status: 'lost' };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status: 'active', expected_status: 'active' } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/changed since you opened it/);
+    expect(db.__state.updated).toBeNull();
+    // The same form with the status it really loaded saves.
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status: 'active', expected_status: 'lost' } })).statusCode).toBe(200);
+    // A form that loaded the tool on VEHICLE while it has since moved to OTHER cannot move it back.
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: OTHER, status: 'active' };
+    db.__state.vehicles[OTHER] = { id: OTHER };
+    const back = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Edited', assigned_vehicle_id: VEHICLE, expected_assigned_vehicle_id: VEHICLE } });
+    expect(back.statusCode).toBe(409);
+    expect(back.body.error).toMatch(/changed since you opened it/);
+    // Any other save since the form loaded (a kit key change, say) is caught by the row version.
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE, status: 'active', updated_at: '2026-10-23T12:00:00.000Z' };
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Edited', expected_updated_at: '2026-10-23T11:00:00.000Z' } })).statusCode).toBe(409);
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Edited', expected_updated_at: '2026-10-23T12:00:00.000Z' } })).statusCode).toBe(200);
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', assigned_vehicle_id: VEHICLE };
+  });
+
+  test('every save of an item takes the item\'s own lock first', async () => {
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed' } });
+    expect(truckKit.lockTruck.mock.calls[0]).toEqual([db, TOOL]);
+  });
+
+  test('a target truck retired while the save waited for its lock is refused', async () => {
+    // vehicleTarget saw OTHER as a live vehicle; under the lock it is gone.
+    db.__state.vehicles[OTHER] = { id: OTHER };
+    const vehicles = db.__state.vehicles;
+    let reads = 0;
+    Object.defineProperty(db.__state, 'vehicles', { get: () => (reads++ === 0 ? vehicles : { [VEHICLE]: vehicles[VEHICLE] }), configurable: true });
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: OTHER } });
+    Object.defineProperty(db.__state, 'vehicles', { value: vehicles, writable: true, configurable: true });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/no longer a live vehicle/);
+    expect(db.__state.updated).toBeNull();
+  });
+
+  test('moving a tool to another truck locks both trucks and re-judges the old one, in the update transaction', async () => {
+    db.__state.vehicles[OTHER] = { id: OTHER };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: OTHER } });
+    expect(res.statusCode).toBe(200);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    const truckLocks = () => truckKit.lockTruck.mock.calls.map(([, id]) => id).filter((id) => id !== TOOL);
+    expect(truckLocks().sort()).toEqual([VEHICLE, OTHER].sort());
+    expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(VEHICLE, expect.any(Date), db);
+  });
+
+  test('a tool with an open truck check alert cannot move or leave its truck', async () => {
+    truckKit.openToolAlertFor.mockResolvedValueOnce({ id: 'alert-1' });
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: null } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/open truck check alert/);
+    expect(db.__state.updated).toBeNull();
+    expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
+  });
+
+  test('an item with an open truck check alert cannot go lost, retired or sold from the dialog', async () => {
+    truckKit.openToolAlertFor.mockResolvedValue({ id: 'alert-1' });
+    for (const status of ['lost', 'retired', 'sold']) {
+      const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status, assigned_vehicle_id: VEHICLE } });
+      expect(res.statusCode).toBe(409);
+      expect(res.body.error).toMatch(/Found \/ Lost/);
+    }
+    expect(db.__state.updated).toBeNull();
+    // The item's truck is locked before the alert check, so a check in flight finishes first.
+    expect(truckKit.lockTruck).toHaveBeenCalledWith(db, VEHICLE);
+    // Re-entering the live kit (maintenance → active) locks the truck too.
+    jest.clearAllMocks();
+    truckKit.openToolAlertFor.mockResolvedValue(null);
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { status: 'active' } })).statusCode).toBe(200);
+    expect(truckKit.lockTruck).toHaveBeenCalledWith(db, VEHICLE);
+    truckKit.openToolAlertFor.mockResolvedValue({ id: 'alert-1' });
+    // Any other edit of that item still saves.
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed', assigned_vehicle_id: VEHICLE } })).statusCode).toBe(200);
+    truckKit.openToolAlertFor.mockResolvedValue(null);
+  });
+
+  test('a technician never holds two live trucks', async () => {
+    db.__state.trucksOf['tech-1'] = { id: VEHICLE };
+    let res = await run('post', '/equipment', { body: { name: 'Second van', category: 'vehicle', assigned_to: 'tech-1' } });
+    expect(res.statusCode).toBe(409);
+    expect(db.__state.inserted).toBeNull();
+    // The check and the write serialize on the technician's lock, in one transaction.
+    expect(truckKit.lockTechnician).toHaveBeenCalledWith(db, 'tech-1');
+    expect(db.transaction).toHaveBeenCalled();
+    jest.clearAllMocks();
+    res = await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: 'tech-1' } });
+    expect(res.statusCode).toBe(409);
+    expect(db.__state.updated).toBeNull();
+    expect(truckKit.lockTechnician).toHaveBeenCalledWith(db, 'tech-1');
+    // The repair the message asks for: clearing one truck's technician saves.
+    db.__state.rows[OTHER] = { id: OTHER, category: 'vehicle', assigned_to: 'tech-1', status: 'active' };
+    expect((await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: null } })).statusCode).toBe(200);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ assigned_to: null }));
+    // A retired second vehicle, or a tool, is fine.
+    expect((await run('post', '/equipment', { body: { name: 'Old van', category: 'vehicle', assigned_to: 'tech-1', status: 'retired' } })).statusCode).toBe(201);
+    expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_to: 'tech-1' } })).statusCode).toBe(200);
+  });
+
+  test('handing a truck to another technician takes the truck lock', async () => {
+    await run('put', '/equipment/:id', { params: { id: OTHER }, body: { assigned_to: 'tech-2' } });
+    expect(truckKit.lockTruck).toHaveBeenCalledWith(db, OTHER);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ assigned_to: 'tech-2' }));
+    // So does retiring or recategorizing the vehicle row itself.
+    jest.clearAllMocks();
+    await run('put', '/equipment/:id', { params: { id: OTHER }, body: { status: 'retired' } });
+    expect(truckKit.lockTruck).toHaveBeenCalledWith(db, OTHER);
+    jest.clearAllMocks();
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed' } });
+    // Only the item's own lock, never a truck's.
+    expect(truckKit.lockTruck.mock.calls.map(([, id]) => id)).toEqual([TOOL]);
+  });
+
+  test('unassigning a tool re-judges its old truck; a save that keeps the truck touches no bell', async () => {
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: null } });
+    expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(VEHICLE, expect.any(Date), db);
+    jest.clearAllMocks();
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: VEHICLE, name: 'Renamed' } });
+    expect(truckKit.closeTruckBellIfClear).not.toHaveBeenCalled();
+    const truckLocks = () => truckKit.lockTruck.mock.calls.map(([, id]) => id).filter((id) => id !== TOOL);
+    expect(truckLocks()).toEqual([VEHICLE]);
+    await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed again' } });
+    expect(truckLocks()).toEqual([VEHICLE]);
+  });
+});
+
+describe('kit key', () => {
+  test('is normalized to snake_case, cleared when blank, refused when not a key', async () => {
+    let res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { kit_key: ' Moisture Meter ' } });
+    expect(res.statusCode).toBe(200);
+    expect(db.__state.updated).toEqual(expect.objectContaining({ kit_key: 'moisture_meter' }));
+    res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { kit_key: '' } });
+    expect(db.__state.updated).toEqual(expect.objectContaining({ kit_key: null }));
+    res = await run('post', '/equipment', { body: { name: 'Synthetic duster', kit_key: 'bad key!' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/kit_key/);
+    expect(db.__state.inserted).toBeNull();
+  });
+
+  test('kit_key writes need the gate: refused in the dark', async () => {
+    require('../services/truck-kit').truckKitEnabled.mockReturnValueOnce(false);
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { kit_key: 'moisture_meter' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/GATE_TRUCK_KIT/);
+    expect(db.__state.updated).toBeNull();
+  });
+
+  test('GET /kit-keys answers the vocabulary with the gate on, 404 enabled:false with it off', async () => {
+    const res = await run('get', '/kit-keys');
+    expect(res.body).toEqual({ enabled: true, keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });
+    require('../services/truck-kit').truckKitEnabled.mockReturnValueOnce(false);
+    const dark = await run('get', '/kit-keys');
+    expect(dark.statusCode).toBe(404);
+    expect(dark.body).toEqual({ enabled: false });
   });
 });

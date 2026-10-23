@@ -3248,22 +3248,39 @@ async function resettleAppointmentFeeFromPi(piId) {
 // regardless (the visit is already being cancelled), but a NON-released
 // outcome means a fee may still land after an attempted waiver — the
 // operator must hear about it, never read a silent success. Never throws.
-async function alertUnresolvedCancellationFee({ scheduledServiceId, outcome }) {
+//
+// cancelFence (the Intelligence Bar cancel recovery sweep only, services/cancel-generation-fence.js): the alert says a CANCELLED
+// visit's fee state is unresolved, so the generation is proven in the same transaction as the alert row (visit share lock,
+// NOWAIT), and the row takes a per-visit dedupe key so a retry cannot double it. A restore after the sweep's earlier check
+// then raises no alert (the refusal lands on cancelFence.hits).
+async function alertUnresolvedCancellationFee({ scheduledServiceId, outcome, cancelFence = null }) {
   if (!outcome || outcome.released !== false) return;
   try {
     const row = await db('appointment_card_requests')
       .where({ scheduled_service_id: scheduledServiceId })
       .first('customer_id');
-    await require('./notification-service').notifyAdmin(
+    const raise = (extra = {}) => require('./notification-service').notifyAdmin(
       'billing',
       'Cancellation fee needs review',
       `A cancelled visit's saved-card fee state is unresolved (${outcome.reason}) — review the customer's billing before assuming no fee was (or will be) charged.`,
       {
         link: row?.customer_id ? `/admin/customers?customerId=${row.customer_id}` : '/admin/dispatch',
         metadata: { scheduledServiceId, reason: outcome.reason },
+        ...extra,
       },
     );
+    if (!cancelFence) {
+      await raise();
+      return;
+    }
+    const { assertCancelGeneration } = require('./cancel-generation-fence');
+    await db.transaction(async (trx) => {
+      await assertCancelGeneration(trx, cancelFence);
+      const raised = await raise({ trx, dedupeKey: `cancel-fee-review:${scheduledServiceId}:${outcome.reason}` });
+      if (!raised) throw new Error('the fee alert could not be saved');
+    });
   } catch (err) {
+    if (err && err.code === 'CANCEL_FENCE') return;
     logger.warn(`[appt-card-request] unresolved-fee alert failed for visit ${scheduledServiceId}: ${err.message}`);
   }
 }

@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
-const { bidDeskLive } = require('../config/feature-gates');
+const { bidDeskLive, bidKitLive } = require('../config/feature-gates');
 const {
   VISUAL_SERVICE_NOTES_FLAG,
   getVisualServiceNotesSettings,
@@ -27,6 +27,9 @@ router.get('/', async (req, res, next) => {
     // Bid Desk nav entry (GATE_BID_DESK): a deploy-wide gate, so a stray per-user row can never show it while the gate is off.
     if (bidDeskLive()) flags.bid_desk = true;
     else delete flags.bid_desk;
+    // Bid kit nav entry (GATE_BID_KIT), the same way.
+    if (bidKitLive()) flags.bid_kit = true;
+    else delete flags.bid_kit;
     res.json({ flags });
   } catch (err) {
     next(err);

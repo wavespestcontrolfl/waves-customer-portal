@@ -107,6 +107,8 @@
 .tf-col { display: contents; }
 .tf-area-changes { order: 1; }
 .tf-area-next { order: 2; }
+.tf-area-truck { order: 3; }
+.tf-area-truck:empty { display: none; }
 .tf-area-clock { order: 3; }
 .tf-area-route { order: 4; }
 .tf-area-follow { order: 5; }
@@ -118,6 +120,8 @@
 .tf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 4px; }
 .tf-chip { min-height: 44px; padding: 4px 12px; border: 0.5px solid var(--tf-line-strong); border-radius: 4px; background: transparent; color: var(--tf-muted); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
 .tf-chip[aria-pressed="true"] { background: var(--tf-ink); border-color: var(--tf-ink); color: #ffffff; }
+/* A note field on the truck check: 16px so a phone never zooms into it. */
+.tf-input { width: 100%; box-sizing: border-box; min-height: 44px; margin-top: 8px; padding: 6px 12px; border: 0.5px solid var(--tf-line-strong); border-radius: 4px; background: var(--tf-surface); color: var(--tf-ink); font: inherit; font-size: 16px; }
 .tf-change-list { list-style: none; margin: 8px 0 0; padding: 0; border: 0.5px solid var(--tf-line); border-radius: 6px; max-height: 60vh; overflow-y: auto; }
 .tf-change-row { padding: 10px 12px; border-bottom: 0.5px solid var(--tf-line); display: grid; gap: 2px; }
 .tf-change-row:last-child { border-bottom: 0; }

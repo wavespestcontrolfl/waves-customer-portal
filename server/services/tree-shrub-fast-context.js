@@ -13,6 +13,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { propertyServiceAreasEnabled, resolveVisitPropertyId, reviewedAreas } = require('./property-service-areas');
 const { resolveEligibility, recapServiceIdentity, loadRecapCatalogProducts } = require('./pest-recap');
 const { resolveMonthProducts } = require('./tree-shrub-month-products');
 const {
@@ -380,17 +381,19 @@ async function loadRecentApplications(svc, visitDate, knex) {
 // visits start on the signup date, so any month can host a visit). Those
 // suggestions pass the same due rules as the full form's completion defaults
 // (filterTreeShrubDefaults: Snapshot 60 days / one per quarter / annual cap;
-// palm three months; at most four a year). A failed history read holds them,
+// palm three months; at most four a year; LESCO 13-0-13 at most twice a year,
+// 5 months apart, never June to September). A failed history read holds them,
 // never suggests them unchecked.
 function dueKeyFor(row) {
   const name = String(row?.name || '').trim();
   if (/^snapshot\s*2\.5\s*tg\b/i.test(name)) return 'snapshot';
   if (/^lesco\s+8-0-12\s+palm\b/i.test(name)) return 'f8012';
   if (/^lesco\s+0-0-16\s+palm\b/i.test(name)) return 'f0016';
+  if (/^lesco\s+13-0-13\b/i.test(name)) return 'f13013';
   return null;
 }
 
-async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
+async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId, zone) {
   const byId = new Map((catalog || []).map((row) => [String(row.id), row]));
   const keyed = [];
   const passThrough = [];
@@ -402,7 +405,7 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
   }
   if (!keyed.length) return { entries, holds: [] };
   try {
-    const { entries: allowed, holds } = await filterTreeShrubDefaults({ db: knex, scheduled: svc, entries: keyed });
+    const { entries: allowed, holds } = await filterTreeShrubDefaults({ db: knex, scheduled: svc, entries: keyed, zone });
     const allowedIds = new Set(allowed.map((item) => String(item.entry.productId)));
     return {
       entries: entries.filter((entry) => passThrough.includes(entry) || allowedIds.has(String(entry.productId))),
@@ -414,6 +417,24 @@ async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
       entries: passThrough,
       holds: keyed.map((item) => ({ name: item.name, reason: 'Application history is unavailable; check before applying.' })),
     };
+  }
+}
+
+// The property's REVIEWED bed square feet, or null. It prefills the treated area of the 13-0-13 row, which the county cap
+// (0.75 lb per 100 sq ft) is judged against at closeout; the tech can edit it. It reads the same property record and the same
+// review state as the full form's area reader (property-service-areas.js reviewedAreas): a legacy bed_sqft that no one reviewed,
+// an area service gate that is off, or no property all start the field blank, and the tech enters it (the hold already exists).
+// A failed read is a blank, never a throw.
+async function loadBedSqft(svc, knex) {
+  try {
+    if (!propertyServiceAreasEnabled()) return null;
+    const propertyId = await resolveVisitPropertyId(svc, knex);
+    const property = propertyId ? await knex('customer_properties').where({ id: propertyId, customer_id: svc.customer_id, active: true }).first() : null;
+    const beds = property?.address_line1 ? reviewedAreas(property).beds : null;
+    return beds?.reviewedAt && Number(beds.sqft) > 0 ? Number(beds.sqft) : null;
+  } catch (err) {
+    logger.warn(`[ts-fast-context] bed square feet unavailable: ${err?.code || err?.name || 'Error'}`);
+    return null;
   }
 }
 
@@ -492,11 +513,15 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   }
   const lastAmounts = lastAmountsByProduct(history);
   const { entries: dueMonthEntries, holds: monthProductHolds } = await filterDueMonthProducts(
-    resolveMonthProducts(svc.scheduled_date, catalog), catalog, svc, knex, serviceId,
+    resolveMonthProducts(svc.scheduled_date, catalog), catalog, svc, knex, serviceId, zone,
   );
+  // The 13-0-13 bed feed never starts from last time's amount: its dose follows this bed's treated square feet (county cap),
+  // so its amount starts blank, like the full form.
+  const catalogById = new Map(catalog.map((row) => [String(row.id), row]));
   const monthProducts = dueMonthEntries.map((entry) => ({
     ...entry,
-    ...(lastAmounts.has(String(entry.productId)) && { lastAmount: lastAmounts.get(String(entry.productId)) }),
+    ...(lastAmounts.has(String(entry.productId)) && dueKeyFor(catalogById.get(String(entry.productId))) !== 'f13013'
+      && { lastAmount: lastAmounts.get(String(entry.productId)) }),
   }));
 
   let warnings = [];
@@ -519,6 +544,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     service,
     products,
     monthProducts,
+    bedSqft: await loadBedSqft(svc, knex),
     ...(monthProductHolds.length && { monthProductHolds }),
     lastVisit: buildLastVisit(history),
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),

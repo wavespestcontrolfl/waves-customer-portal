@@ -70,6 +70,7 @@ const BELL_CATEGORY_LABELS = {
   estimate_hot_view: "Estimate hot views",
   estimate_change_request: "Estimate change requests",
   visit_prep_photos: "Customer photos before a visit",
+  truck_kit: "Truck check tool issues",
   alert: "Operational alerts",
   system: "System events",
   service: "Service events",
