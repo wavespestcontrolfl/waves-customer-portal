@@ -71,7 +71,7 @@ jest.mock('../models/db', () => {
       async columnInfo() { return { recurring_ongoing: {} }; },
       update(u) {
         state.writes.push({ table, op: 'update', u });
-        return { returning: async () => [], then: (res, rej) => Promise.resolve(1).then(res, rej) };
+        return { returning: async () => [], then: (res, rej) => Promise.resolve(table === 'ib_cancel_effect_bundles' && state.bundleChangesNoRow ? 0 : 1).then(res, rej) };
       },
       insert(r) {
         state.writes.push({ table, op: 'insert', r });
@@ -112,7 +112,7 @@ beforeEach(() => {
   db.__state.rows = [
     { id: 'svc-bar-1', technician_id: 'tech-2', customer_id: 'cust-bar', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_pattern: 'quarterly', recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null, source_action: null, customer_confirmed: true },
   ];
-  db.__state.writes = []; db.__state.reads = []; db.__state.failInsert = null;
+  db.__state.writes = []; db.__state.reads = []; db.__state.failInsert = null; db.__state.bundleChangesNoRow = false;
   jest.clearAllMocks();
 });
 
@@ -319,6 +319,18 @@ describe('the recovery bundle rides the cancel transaction', () => {
     expect(JSON.parse(done.followthrough_outcome)).toEqual({ money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'not_voided_changed_since_card' }], linked_skipped: [] });
     const doneAt = db.__state.writes.findIndex((w) => w.table === BUNDLE && w.u && w.u.status === 'complete');
     expect(doneAt).toBeGreaterThanOrEqual(writesAtFollowThrough);
+  });
+
+  test('a request the sweep overtook (its bundle writes change no row) tells the caller the recovery owns the outcome', async () => {
+    db.__state.bundleChangesNoRow = true;
+    const { json } = await run();
+    expect(json.success).toBe(true);
+    expect(json.recoveryOwnsOutcome).toBe(true);
+  });
+
+  test('the normal path (the request still owns its bundle) carries no such flag', async () => {
+    const { json } = await run();
+    expect(json.recoveryOwnsOutcome).toBeUndefined();
   });
 
   test('a follow-through that throws leaves the bundle PENDING for the recovery sweep, and the reply says a step failed', async () => {

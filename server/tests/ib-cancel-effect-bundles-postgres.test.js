@@ -543,6 +543,35 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(mockRaise).toHaveBeenCalledTimes(1);
     });
 
+    test('recordResult: a request pointer receipt is replaced by the sweep, a real receipt is not, and a request never overwrites either', async () => {
+      const { recordResult } = jest.requireActual('../services/intelligence-bar/pending-actions');
+      const read = async (id) => (await app('ib_pending_actions').where({ id }).first()).result;
+      const empty = randomUUID();
+      const pointer = randomUUID();
+      const real = randomUUID();
+      await app('ib_pending_actions').insert([
+        { id: empty, result: null },
+        { id: pointer, result: JSON.stringify({ success: true, recovery_owns_outcome: true, from: 'request' }) },
+        { id: real, result: JSON.stringify({ success: true, from: 'request' }) },
+      ]);
+      // The sweep's save (onlyIfEmpty + replaceRecoveryPointer).
+      await recordResult(empty, { from: 'sweep' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
+      await recordResult(pointer, { from: 'sweep' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
+      await recordResult(real, { from: 'sweep' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
+      expect(await read(empty)).toEqual({ from: 'sweep' });
+      expect(await read(pointer)).toEqual({ from: 'sweep' });
+      expect(await read(real)).toEqual({ success: true, from: 'request' });
+      // The request's pointer save (onlyIfEmpty only) never replaces a sweep receipt or another pointer.
+      await recordResult(empty, { recovery_owns_outcome: true }, { onlyIfEmpty: true });
+      expect(await read(empty)).toEqual({ from: 'sweep' });
+      const fresh = randomUUID();
+      await app('ib_pending_actions').insert({ id: fresh, result: null });
+      await recordResult(fresh, { recovery_owns_outcome: true, from: 'request' }, { onlyIfEmpty: true });
+      expect(await read(fresh)).toEqual({ recovery_owns_outcome: true, from: 'request' });
+      await recordResult(fresh, { recovery_owns_outcome: true, from: 'again' }, { onlyIfEmpty: true });
+      expect(await read(fresh)).toMatchObject({ from: 'request' });
+    });
+
     test('a row completed 3 minutes ago, and one completed past the hard stop, are not reconciled', async () => {
       mockRecordResult.mockImplementation(writeLikeRecordResult);
       await completeWithoutReceipt({ finished_at: app.raw("now() - interval '3 minutes'") });

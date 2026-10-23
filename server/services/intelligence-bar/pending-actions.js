@@ -572,11 +572,14 @@ async function retireExpiredAction(id, requestedBy, { trx = null } = {}) {
   return row ? { ...row, params: paramsOf(row) } : null;
 }
 
-async function recordResult(id, result, { database = db, critical = false, onlyIfEmpty = false } = {}) {
+async function recordResult(id, result, { database = db, critical = false, onlyIfEmpty = false, replaceRecoveryPointer = false } = {}) {
   try {
     const query = database('ib_pending_actions').where({ id });
     if (critical) query.where({ status: 'confirmed' }).whereNotNull('consumed_at');
-    if (onlyIfEmpty) query.whereNull('result');
+    if (onlyIfEmpty && replaceRecoveryPointer) {
+      // The cancel recovery sweep: also replaces a request's pointer receipt (recovery_owns_outcome), never a real one.
+      query.where(function emptyOrPointer() { this.whereNull('result').orWhereRaw("result->>'recovery_owns_outcome' = 'true'"); });
+    } else if (onlyIfEmpty) query.whereNull('result');
     const updated = await query.update({
       result: JSON.stringify(result ?? null),
       updated_at: database.fn.now(),

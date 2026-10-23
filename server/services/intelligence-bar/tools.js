@@ -4702,6 +4702,16 @@ function cancelReplayWarnings(json, sendText) {
   return warnings;
 }
 
+// The recovery sweep took this cancel's saved steps over while this request ran: its receipt and office alert are the record.
+// The route then saves this result only if the action has none (and the sweep may replace it). Otherwise just the warnings.
+function recoveryOwnedFields(json, warnings) {
+  if (!json.recoveryOwnsOutcome) return warnings.length ? { warning: warnings.join(' ') } : {};
+  return {
+    recovery_owns_outcome: true,
+    warning: [...warnings, 'The system took over the follow-up steps of this cancel while it ran. Its own note in the office alerts is the record of what was finished: check that note before doing anything again.'].join(' '),
+  };
+}
+
 // The bar's reply for the Dispatch handler's reply: a refusal passes through (a 409 is a stale card), a success names
 // the customer and says honestly whether the cancellation text went out.
 async function cancelReplayResult({ status, json = {} }, { appointment_id, appt, frozen, changed, sendText }) {
@@ -4726,7 +4736,7 @@ async function cancelReplayResult({ status, json = {} }, { appointment_id, appt,
     ...(sendText && json.notificationUncertain === true ? { customer_text_uncertain: true } : {}),
     ...(skipped.length ? { linked_visits_skipped: skipped } : {}),
     ...(moneySkipped.length ? { money_skipped: moneySkipped } : {}),
-    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
+    ...recoveryOwnedFields(json, warnings),
   };
 }
 

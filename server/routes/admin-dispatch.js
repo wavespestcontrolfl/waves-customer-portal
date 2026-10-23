@@ -3504,6 +3504,8 @@ async function serviceStatusHandler(req, res, next) {
         : {}),
       ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
       ...(req.ibMoneyReport ? { moneySkipped: req.ibMoneyReport.skipped } : {}),
+      // The recovery sweep took this bundle over while the request ran (its lease ran out): the sweep owns the outcome.
+      ...(req.ibCancelBundleLost ? { recoveryOwnsOutcome: true } : {}),
     });
   } catch (err) { next(err); }
 }
@@ -3581,6 +3583,7 @@ function cancelServiceFromBar({ serviceId, notifyCustomer, notes, actor, beforeC
             : {}),
           ...(req.ibLinkedChildReport ? { linkedVisitsSkipped: req.ibLinkedChildReport.skipped } : {}),
           ...(req.ibMoneyReport ? { moneySkipped: req.ibMoneyReport.skipped } : {}),
+          ...(req.ibCancelBundleLost ? { recoveryOwnsOutcome: true } : {}),
         },
       });
     };

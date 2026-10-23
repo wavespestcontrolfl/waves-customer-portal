@@ -1503,6 +1503,10 @@ async function rebindRedeemedOffer(offerId, bookingId, cancelFence = null) {
     });
     return rebound;
   } catch (err) {
+    // A fence refusal is NOT "could not rebind": the caller must stop and leave the offer where it is. Returning false would
+    // fall through to the reversal, which could take the credit back (the live alternate booking still earns it) if the
+    // visit's lock cleared before the reversal's own proof.
+    if (err && err.code === 'CANCEL_FENCE') throw err;
     logger.warn(`[inspection-credit] rebind failed for offer ${offerId} → booking ${bookingId}: ${err.message}`);
     return false;
   }
@@ -1808,6 +1812,11 @@ async function reverseInspectionCreditForBooking({
         logger.info(`[inspection-credit] offer ${offer.id} reversed — booking ${scheduledServiceId} went non-live`);
       } catch (err) {
         if (err?.inspectionCreditSkip === 'claim_lost') continue;
+        if (err?.code === 'CANCEL_FENCE') {
+          // The booking is no longer (or not provably) the approved cancel: this offer is left exactly as it is.
+          logger.info(`[inspection-credit] offer ${offer.id} left untouched: ${err.message}`);
+          continue;
+        }
         logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
         // The office alert is reserved for the one failure that is a
         // BILLING fact, not an operational one (PR #3178 r18 P2): the

@@ -214,6 +214,17 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     expect(result.warning).toBeUndefined();
   });
 
+  test('a cancel the recovery sweep took over is flagged so the route saves the receipt only if none exists', async () => {
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true, recoveryOwnsOutcome: true } });
+    const result = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(result.success).toBe(true);
+    expect(result.recovery_owns_outcome).toBe(true);
+    expect(result.warning).toMatch(/took over the follow-up steps/);
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: true } });
+    const normal = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(normal.recovery_owns_outcome).toBeUndefined();
+  });
+
   test('a text that the handler could not send is reported as a warning, not hidden', async () => {
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationError: 'customer opted out' } });
     const result = await executeTool('cancel_appointment', input(), ADMIN);

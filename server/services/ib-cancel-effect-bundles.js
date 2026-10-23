@@ -134,6 +134,14 @@ async function guarded(label, fn) {
   }
 }
 
+// A request bookkeeping write that changed NO row means the sweep (or a finished recovery) owns the bundle now: the request
+// has to say so on its own receipt (req.ibCancelBundleLost -> the route), instead of overwriting the recovery's outcome.
+async function trackOwnership(req, write) {
+  const changed = await write;
+  if (changed === 0) req.ibCancelBundleLost = true;
+  return changed;
+}
+
 // Heartbeat at the start of the request's post-commit work: the sweep cannot claim before this lease runs out.
 // Does not take a lease a sweep already holds (the work below is idempotent either way).
 function liveStart(req) {
@@ -203,7 +211,7 @@ function liveNotice(req, outcome) {
   const id = req && req.ibCancelBundleId;
   const classified = classifyNoticeOutcome(outcome);
   if (!id || !classified) return Promise.resolve(null);
-  return guarded('notice outcome', async () => {
+  return trackOwnership(req, guarded('notice outcome', async () => {
     const row = classified.state === 'not_sent' || classified.state === 'sent'
       ? await db(TABLE).where({ id }).first('scheduled_service_id', 'approved_notice')
       : null;
@@ -212,7 +220,7 @@ function liveNotice(req, outcome) {
       .where({ id, status: 'pending' })
       .where(notHeldBySweep)
       .update({ notice_outcome: JSON.stringify({ ...settled, by: 'request' }), updated_at: db.fn.now() });
-  });
+  }));
 }
 
 // The follow-through returned: the request finished its work.
@@ -223,7 +231,7 @@ function liveFinish(req) {
     money_skipped: (req.ibMoneyReport && req.ibMoneyReport.skipped) || [],
     linked_skipped: (req.ibLinkedChildReport && req.ibLinkedChildReport.skipped) || [],
   };
-  return guarded('complete', () => db(TABLE)
+  return trackOwnership(req, guarded('complete', () => db(TABLE)
     .where({ id, status: 'pending' })
     // Not completed under a live sweep lease (see notHeldBySweep): the sweep then finishes the row itself, idempotently,
     // and records its own result; a normal recovery that the request beat to it still ends in the sweep's LeaseLost.
@@ -237,7 +245,7 @@ function liveFinish(req) {
       lease_owner: null,
       lease_until: null,
       updated_at: db.fn.now(),
-    }));
+    })));
 }
 
 // ── The sweep's side ──────────────────────────────────────────────────────────────────────────────────────────
@@ -587,7 +595,7 @@ const withVisitFacts = (result, info) => ({
 // there (onlyIfEmpty) is a success: the request's own receipt wins.
 async function recordOnPendingAction(bundle, result) {
   if (!bundle.pending_action_id) return;
-  const saved = await require('./intelligence-bar/pending-actions').recordResult(bundle.pending_action_id, result, { onlyIfEmpty: true });
+  const saved = await require('./intelligence-bar/pending-actions').recordResult(bundle.pending_action_id, result, { onlyIfEmpty: true, replaceRecoveryPointer: true });
   if (saved === false) throw new Error('the receipt could not be saved on the pending action');
 }
 
@@ -655,6 +663,15 @@ function abandonedLines(bundle, partial) {
   return lines;
 }
 
+// The skipped money and linked-visit steps already saved on the bundle, in the receipt's own field names.
+function savedSkips(bundle) {
+  const done = bundle.followthrough_done_at ? bundle.followthrough_outcome || {} : {};
+  return {
+    ...((done.money_skipped || []).length ? { money_skipped: done.money_skipped } : {}),
+    ...((done.linked_skipped || []).length ? { linked_visits_skipped: done.linked_skipped } : {}),
+  };
+}
+
 async function finishAbandoned(bundle, token, reason, partial = false) {
   await assertStillOwned(bundle.id, token);
   const info = await visitInfo(bundle);
@@ -664,7 +681,7 @@ async function finishAbandoned(bundle, token, reason, partial = false) {
     appointment_id: bundle.scheduled_service_id,
     ran_dispatch_cancel: true,
     recovered_after_interruption: true,
-    ...(bundle.followthrough_done_at && bundle.followthrough_outcome && bundle.followthrough_outcome.money_skipped && bundle.followthrough_outcome.money_skipped.length ? { money_skipped: bundle.followthrough_outcome.money_skipped } : {}),
+    ...savedSkips(bundle),
     warning: `The visit is no longer the cancelled visit the card approved (${plain(reason)}), so the recovery stopped. ${lines.join(' ')}`,
   }, info));
   await tellOffice(bundle, info, {
@@ -691,9 +708,14 @@ async function runBundle(bundle, token) {
     await finishAbandoned(bundle, token, standing.reason);
     return 'abandoned';
   }
+  // What this run has saved so far, so an abandonment later in the SAME run reports it (the claimed snapshot predates it).
+  let known = bundle;
   try {
     let ft = bundle.followthrough_done_at ? bundle.followthrough_outcome : null;
-    if (!bundle.followthrough_done_at) ft = await recoverFollowThrough(bundle, token);
+    if (!bundle.followthrough_done_at) {
+      ft = await recoverFollowThrough(bundle, token);
+      known = { ...known, followthrough_done_at: new Date(), followthrough_outcome: ft };
+    }
     let notice = bundle.notice_outcome || null;
     if (!notice) {
       const step = await recoverNotice(bundle, standing.svc);
@@ -705,7 +727,7 @@ async function runBundle(bundle, token) {
     return 'recovered';
   } catch (err) {
     if (!(err instanceof Abandon)) throw err;
-    await finishAbandoned(bundle, token, err.reason, err.partial);
+    await finishAbandoned(known, token, err.reason, err.partial);
     return 'abandoned';
   }
 }

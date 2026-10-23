@@ -330,6 +330,34 @@ describe('the request marks its bundle complete', () => {
     expect(row.status).toBe('complete');
   });
 
+  test('a request that finds the sweep owns the bundle flags it, so its receipt cannot overwrite the sweep; the normal path sets no flag', async () => {
+    const lost = seedBundle({ lease_owner: 'sweep-token', lease_until: new Date(mockNow.getTime() + 5 * MIN) });
+    const lostReq = { ibCancelBundleId: lost.id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } };
+    await svc.liveNotice(lostReq, { notificationSent: true });
+    await svc.liveFinish(lostReq);
+    expect(lostReq.ibCancelBundleLost).toBe(true);
+    mockStore.bundles = [];
+    const mine = seedBundle({ lease_owner: 'request', lease_until: new Date(mockNow.getTime() + 5 * MIN) });
+    const mineReq = { ibCancelBundleId: mine.id, ibMoneyReport: { skipped: [] }, ibLinkedChildReport: { skipped: [] } };
+    await svc.liveNotice(mineReq, { notificationSent: true });
+    await svc.liveFinish(mineReq);
+    expect(mineReq.ibCancelBundleLost).toBeUndefined();
+    expect(mine.status).toBe('complete');
+    // A row the sweep already finished: the request's write changes nothing, and says so.
+    mockStore.bundles = [];
+    const done = seedBundle({ status: 'recovered', lease_owner: null, lease_until: null, finished_at: new Date(mockNow.getTime() - MIN) });
+    const doneReq = { ibCancelBundleId: done.id };
+    await svc.liveFinish(doneReq);
+    expect(doneReq.ibCancelBundleLost).toBe(true);
+    expect(done.status).toBe('recovered');
+  });
+
+  test('the sweep saves its receipt over a request pointer receipt, but never over a real one', async () => {
+    seedBundle();
+    await svc.sweepIbCancelBundles();
+    expect(mockRecordResult.mock.calls[0][2]).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
+  });
+
   describe('a request send that lost the text to another sender', () => {
     const unclaimed = () => ({ notificationSent: false, notificationError: 'A cancellation notice is already being handled for this visit' });
 
@@ -422,7 +450,7 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
   test('the receipt lands on the pending action (only if it has none) and the office is told', async () => {
     seedBundle();
     await svc.sweepIbCancelBundles();
-    expect(mockRecordResult).toHaveBeenCalledWith(ACTION, expect.objectContaining({ success: true, recovered_after_interruption: true, customer_text_sent: true, customer_name: 'Synthia Tester', service_type: 'Pest Control', date: '2026-10-30' }), { onlyIfEmpty: true });
+    expect(mockRecordResult).toHaveBeenCalledWith(ACTION, expect.objectContaining({ success: true, recovered_after_interruption: true, customer_text_sent: true, customer_name: 'Synthia Tester', service_type: 'Pest Control', date: '2026-10-30' }), { onlyIfEmpty: true, replaceRecoveryPointer: true });
     expect(mockRaised).toHaveLength(1);
     expect(mockRaised[0].spec).toMatchObject({ area: 'Schedule', severity: 'fyi', subject: { type: 'visit', id: SERVICE } });
     expect(mockRaised[0].opts).toMatchObject({ dedupeKey: 'ib-cancel-bundle:bundle-1', fyiRow: true, bell: false });
@@ -760,6 +788,26 @@ describe('the hard stop and a visit that is no longer cancelled', () => {
     expect(mockRaised[0].opts.detail).toMatch(/may already have run/);
   });
 
+  test('a restore found in the text step of the SAME run: the outcome that run just saved is reported, not "not confirmed"', async () => {
+    const row = seedBundle();
+    mockFollowThrough.mockImplementationOnce(async (args) => {
+      args.moneyReport.skipped.push({ kind: 'invoice', id: 'inv-1', reason: 'paid_since_card' });
+      args.linkedChildReport.skipped.push({ id: CHILD, reason: 'no_longer_linked' });
+      // The operator restores the visit right after the money step.
+      mockStore.visits[0].status = 'confirmed';
+      mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
+    });
+    await svc.sweepIbCancelBundles();
+    expect(row.status).toBe('abandoned');
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.warning).toMatch(/had finished before the change/);
+    expect(result.warning).not.toMatch(/not confirmed finished/);
+    expect(result.money_skipped).toEqual([{ kind: 'invoice', id: 'inv-1', reason: 'paid_since_card' }]);
+    expect(result.linked_visits_skipped).toEqual([{ id: CHILD, reason: 'no_longer_linked' }]);
+    expect(mockRaised[0].opts.detail).toContain('invoice inv-1');
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+  });
+
   test('abandoned before the recovery ran anything: still says the original request may have done some', async () => {
     seedBundle();
     mockStore.visits[0].status = 'confirmed';
@@ -877,7 +925,7 @@ describe('a complete bundle whose receipt was never saved', () => {
     expect(mockRecordResult).toHaveBeenCalledTimes(1);
     const [id, result, opts] = mockRecordResult.mock.calls[0];
     expect(id).toBe(ACTION);
-    expect(opts).toEqual({ onlyIfEmpty: true });
+    expect(opts).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
     expect(result).toMatchObject({ success: true, ran_dispatch_cancel: true, customer_text_sent: true, money_skipped: FT_SKIPPED.money_skipped });
     expect(result.warning).toMatch(/stopped before it saved this result/);
     expect(result.warning).toMatch(/invoice inv-1/);
