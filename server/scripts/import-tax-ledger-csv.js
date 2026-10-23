@@ -57,6 +57,9 @@ const CARD_SOURCES = new Set(['9731', '6646', '8804', 'amex']);
 const BANK_SOURCES = new Set(['3098', '3965']);
 const KNOWN_SOURCES = new Set([...CARD_SOURCES, ...BANK_SOURCES]);
 const MAX_AMOUNT = 9999999999.99; // numeric(12,2)
+// The ledgers this loader is for: the first business year on. A transposed
+// year ("2052-03-14") would book an expense in a tax year no report shows.
+const FIRST_TAX_YEAR = 2024;
 const SOURCE_TAG = 'ledger-csv';
 const MATCH_METHOD = 'ledger-import';
 const INSERT_CHUNK = 500;
@@ -145,7 +148,10 @@ function parseLedgerCsv(text) {
     HEADER.forEach((h, k) => { r[h] = String(rec[k] === undefined ? '' : rec[k]).trim(); });
     if (!r.source) throw fail(`line ${line}: missing source`);
     const period = taxPeriodFor(r.date);
-    if (!period || Number(period.tax_year) < 2000) throw fail(`line ${line}: date must be a real YYYY-MM-DD date from 2000 on (got "${r.date}")`);
+    const lastTaxYear = new Date().getFullYear();
+    if (!period || Number(period.tax_year) < FIRST_TAX_YEAR || Number(period.tax_year) > lastTaxYear) {
+      throw fail(`line ${line}: date must be a real YYYY-MM-DD date in ${FIRST_TAX_YEAR}-${lastTaxYear} (got "${r.date}")`);
+    }
     r.period = period;
     if (!r.description) throw fail(`line ${line}: missing description`);
     for (const h of HEADER) {
@@ -197,6 +203,15 @@ function sameAccount(source, accountLabel, masks) {
   if ((ACCOUNT_ALIASES[code] || [code]).some(a => label.includes(a))) return true;
   const mask = masks.get(String(accountLabel));
   return !!mask && mask.toLowerCase() === code;
+}
+// A portal row's account: a Plaid row carries the account's stable id, so a
+// renamed Plaid label (plaid_accounts is updated, old rows keep the old
+// label) still resolves to its mask; other rows go by their label.
+function sameAccountRow(source, row, ids) {
+  const code = String(source || '').trim().toLowerCase();
+  const byId = row.plaid_account_id ? ids.masksById.get(String(row.plaid_account_id)) : null;
+  if (byId && byId.toLowerCase() === code) return true;
+  return sameAccount(source, row.account_label, ids.masks);
 }
 
 /** sha256 over the ledger identity tuple plus the in-file ordinal. */
@@ -366,6 +381,7 @@ function summarize(mappedRows) {
   const s = {
     rows: mappedRows.length,
     byStatus: {},
+    byYear: {},
     expensesByCategory: {},
     unmatchedByLine: {},
     expensesCreated: 0,
@@ -374,6 +390,7 @@ function summarize(mappedRows) {
   for (const m of mappedRows) {
     const cents = toCents(m.bank.amount);
     bump(s.byStatus, m.bank.status, cents);
+    bump(s.byYear, String(m.bank.txn_date).slice(0, 4), cents);
     if (m.bank.direction === 'debit') s.totals.debitCents += cents; else s.totals.creditCents += cents;
     if (m.expense) {
       s.expensesCreated += 1;
@@ -408,6 +425,7 @@ function formatReport({ dryRun, file, read, inserted, duplicates, overlaps = 0, 
     ...formatTable(summary.byStatus, 'by status'),
     ...formatTable(summary.expensesByCategory, `expenses ${dryRun ? 'to create' : 'created'} by category`),
     ...formatTable(summary.unmatchedByLine, 'left unmatched by Schedule C line (refund = a refund credit to apply in Bank Import)'),
+    ...formatTable(summary.byYear, 'rows by tax year (one return year per file: a stray year is a typo to fix)'),
     `total outflow (debit):     ${fmtMoney(summary.totals.debitCents)}`,
     `total inflow (credit):     ${fmtMoney(summary.totals.creditCents)}`,
     `total expense amount:      ${fmtMoney(summary.totals.expenseCents)}`,
@@ -440,7 +458,7 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   const dates = rows.map(r => r.date).sort();
   const range = [dates[0], dates[dates.length - 1]];
   const existingBank = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).whereNot('source', SOURCE_TAG)
-    .select('id', 'status', 'account_label', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction') : [];
+    .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction') : [];
   // expenses this importer made on an earlier run are the ledger's own, not
   // "already there from elsewhere": they are linked from a ledger bank row
   // the file's range widened by the matcher window: a receipt dated days
@@ -462,7 +480,7 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   // the bank rows these expenses are linked to, whatever their posting date:
   // they carry the expense's account identity
   const linkedRows = inRange.length ? await db('bank_transactions').whereIn('matched_expense_id', inRange.map(e => e.id)).whereNot('source', SOURCE_TAG)
-    .select('id', 'status', 'account_label', 'matched_expense_id', 'txn_date', 'description', 'amount', 'direction') : [];
+    .select('id', 'status', 'account_label', 'plaid_account_id', 'matched_expense_id', 'txn_date', 'description', 'amount', 'direction') : [];
   const linkedExpenseIds = new Set(linkedRows.map(f => f.matched_expense_id));
   const handExpenses = inRange.filter(e => !linkedExpenseIds.has(e.id));
   const coveredExpenses = inRange.filter(e => linkedExpenseIds.has(e.id));
@@ -472,13 +490,16 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   if ((existingBank.length || handExpenses.length) && !skipExisting) {
     throw fail(`the portal already holds ${existingBank.length} bank row(s) from a feed or upload between ${range[0]} and ${range[1]} and ${handExpenses.length} hand-entered expense(s) within ${EXPENSE_DATE_WINDOW_DAYS} days of that range; rerun with --skip-existing to leave out the ledger rows the portal already answers (a row still open there is held and listed; hand-entered expenses are listed for you to check)`);
   }
-  const masks = new Map((await db('plaid_accounts').select('account_label', 'mask')).map(a => [String(a.account_label), String(a.mask || '')]));
+  const plaidAccounts = await db('plaid_accounts').select('account_id', 'account_label', 'mask');
+  const masks = new Map(plaidAccounts.map(a => [String(a.account_label), String(a.mask || '')]));
+  const masksById = new Map(plaidAccounts.filter(a => a.account_id).map(a => [String(a.account_id), String(a.mask || '')]));
   const categories = await db('expense_categories').select('id', 'name');
-  return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+  return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, masksById, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
 }
 
 // Pools of the portal's rows, consumed one-for-one as ledger rows match them.
-function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRows = [], masks = new Map() }) {
+function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRows = [], masks = new Map(), masksById = new Map() }) {
+  const ids = { masks, masksById };
   const bankLeft = new Map();
   existingBank.forEach(f => { const k = tupleKey(f); if (!bankLeft.has(k)) bankLeft.set(k, []); bankLeft.get(k).push(f); });
   // A feed writes its own text for a transaction ("Wawa" against the
@@ -529,7 +550,7 @@ function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRo
   // and date alone.
   const sameAccountAsLinked = (e, source) => {
     const linked = rowsOfExpense.get(e.id);
-    return !linked || linked.some(f => sameAccount(source, f.account_label, masks));
+    return !linked || linked.some(f => sameAccountRow(source, f, ids));
   };
   // The matcher's own plausibility rule: an expense paid by ach, check or
   // cash is not a card charge, a cash one is not a bank debit.
@@ -568,8 +589,10 @@ function describeGap(days) {
 // or payout was deleted since (the FK is null; bank-import's
 // resetDanglingLinks reopens such rows on its next pass).
 const LINKED_TO_EXPENSE = new Set(['matched_expense', 'created_expense']);
-function openReason(row) {
+function openReason(row, m) {
   if (row.status === 'unmatched') return 'the same row is open in the portal, not booked';
+  // the portal said ignore, the ledger books an expense: a conflict for the owner, not an answer
+  if (row.status === 'ignored' && m.expense) return 'the portal ignored this row but the ledger books it as an expense (unignore and decide it)';
   if (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) return 'the same row is in the portal but its expense was deleted (the next matching pass reopens it)';
   if (row.status === 'matched_payout' && !row.matched_payout_id) return 'the same row is in the portal but its payout link is gone (the next matching pass reopens it)';
   return null;
@@ -577,7 +600,8 @@ function openReason(row) {
 
 // Which ledger rows load, and which the portal already answers for.
 function reconcileRows(mapped, rows, portal) {
-  const { existing, masks, categoryIds } = portal;
+  const { existing, masks, masksById, categoryIds } = portal;
+  const ids = { masks, masksById };
   const pools = buildPools(portal);
   const fresh = [];
   const unsure = [];
@@ -597,13 +621,13 @@ function reconcileRows(mapped, rows, portal) {
   mapped.forEach((m, i) => {
     if (existing.has(m.bank.row_hash)) { duplicates += 1; settled.add(i); return; }
     const pool = pools.bankLeft.get(tupleKey(m.bank)) || [];
-    const same = pool.findIndex(f => sameAccount(rows[i].source, f.account_label, masks));
+    const same = pool.findIndex(f => sameAccountRow(rows[i].source, f, ids));
     if (same === -1) return;
     const [used] = pool.splice(same, 1);
     pools.dropLoose(used);
     pools.dropExpense(used.matched_expense_id);
     settled.add(i);
-    const why = openReason(used);
+    const why = openReason(used, m);
     if (why) held.push(note(i, used.description, used.account_label || '(no label)', `${why}; ${reading(m, i)}`));
     else overlaps += 1;
   });
@@ -621,7 +645,7 @@ function reconcileRows(mapped, rows, portal) {
       }
     }
     const loose = pools.looseLeft.get(pools.looseKey(m.bank)) || [];
-    const sameLoose = loose.findIndex(f => sameAccount(rows[i].source, f.account_label, masks));
+    const sameLoose = loose.findIndex(f => sameAccountRow(rows[i].source, f, ids));
     if (sameLoose !== -1) {
       const [used] = loose.splice(sameLoose, 1);
       pools.dropExact(used);

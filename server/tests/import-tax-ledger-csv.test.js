@@ -51,6 +51,8 @@ describe('parseLedgerCsv header validation', () => {
 
   test.each([
     [{ date: '2025-02-31' }, /date/],
+    [{ date: '2052-03-14' }, /date must be a real YYYY-MM-DD date in 2024-/],
+    [{ date: '2023-12-31' }, /date must be a real YYYY-MM-DD date in 2024-/],
     [{ source: 'amexx' }, /source must be one of/],
     [{ source: '1234' }, /source must be one of/],
     [{ amount: '-4.00' }, /amount/],
@@ -555,12 +557,13 @@ describe('shared helpers', () => {
     expect(report).toMatch(/\[the same row is open in the portal, not booked; the ledger says expense \(Supplies\)\]  \(portal: "acme supply 4471" in capone-card-3098\)/);
     expect(db.tables().expenses).toHaveLength(0);
     expect(db.tables().bank_transactions).toHaveLength(2);
-    // the same open row, ignored or linked in the portal, is answered there: an overlap
-    for (const status of ['ignored', 'matched_expense']) {
+    // the same row linked in the portal is answered there: an overlap; IGNORED there while the
+    // ledger books an expense is a conflict: held
+    for (const [status, expected] of [['matched_expense', { overlaps: 1, held: 0 }], ['ignored', { overlaps: 0, held: 1 }]]) {
       const dbs = makeFakeDb();
       dbs.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'capone-card-3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status, matched_expense_id: status === 'matched_expense' ? 'exp-x' : null });
       const out = await run({ file, db: dbs, skipExisting: true });
-      expect(out.counts).toMatchObject({ overlaps: 1, held: 0, inserted: 1 });
+      expect(out.counts).toMatchObject({ ...expected, inserted: 1 });
     }
   });
 
@@ -747,6 +750,40 @@ describe('--skip-existing and expenses', () => {
     db.tables().bank_transactions.push({ id: 'led-1', row_hash: 'prior', source: 'ledger-csv', account_label: 'ledger-3098', txn_date: '2025-03-12', description: 'ACME SUPPLY 4471', amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-prior' });
     const { counts } = await run({ file, db, skipExisting: true });
     expect(counts).toEqual({ read: 1, inserted: 1, duplicates: 0, overlaps: 0, held: 0, unsure: 0, handExpenses: 0 });
+  });
+
+  test('an exact overlap the portal IGNORED is held when the ledger books an expense, and settled when the ledger also ignores it', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
+    const file = path.join(dir, 'ledger-2025.csv');
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50' })));
+    const db = makeFakeDb();
+    const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
+    db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'ignored' });
+    const { counts, report } = await run({ file, db, skipExisting: true });
+    expect(counts).toMatchObject({ overlaps: 0, held: 1, inserted: 0 });
+    expect(report).toMatch(/the portal ignored this row but the ledger books it as an expense/);
+    // the ledger says personal too: the portal's ignore is the same answer
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'personal', sched_c_line: '', category: 'Personal' })));
+    const db2 = makeFakeDb();
+    db2.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'ignored' });
+    expect((await run({ file, db: db2, skipExisting: true })).counts).toMatchObject({ overlaps: 1, held: 0, inserted: 0 });
+  });
+
+  test('a Plaid row whose account label was renamed since still resolves to its account through plaid_account_id', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
+    const file = path.join(dir, 'ledger-2025.csv');
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', source: '3098' })));
+    const db = makeFakeDb();
+    const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
+    // the account was first labelled without its last four, then renamed; old rows keep the old label
+    db.tables().plaid_accounts.push({ account_id: 'plaid-acct-1', account_label: 'main checking 3098', mask: '3098' });
+    db.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h1', source: 'plaid', account_label: 'main checking', plaid_account_id: 'plaid-acct-1', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
+    expect((await run({ file, db, skipExisting: true })).counts).toMatchObject({ overlaps: 1, held: 0, inserted: 0 });
+    // another Plaid account's row (other mask) is not this account, whatever its label says
+    const db2 = makeFakeDb();
+    db2.tables().plaid_accounts.push({ account_id: 'plaid-acct-2', account_label: 'main checking', mask: '7777' });
+    db2.tables().bank_transactions.push({ id: 'pl-2', row_hash: 'h2', source: 'plaid', account_label: 'main checking', plaid_account_id: 'plaid-acct-2', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
+    expect((await run({ file, db: db2, skipExisting: true })).counts).toMatchObject({ overlaps: 0, unsure: 1, inserted: 1 });
   });
 
   test('a hand-entered expense a refund reduced is compared at its gross amount (applied or released refund), as the matcher does', async () => {
