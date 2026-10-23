@@ -235,6 +235,9 @@ const coordinateNumber = (value) => (value === null || value === '' || typeof va
 const validCoordinates = (lat, lng) => Number.isFinite(coordinateNumber(lat)) && Number.isFinite(coordinateNumber(lng))
   && Math.abs(coordinateNumber(lat)) <= 90 && Math.abs(coordinateNumber(lng)) <= 180 && !(coordinateNumber(lat) === 0 && coordinateNumber(lng) === 0);
 const roundCoordinate = (value) => Math.round(coordinateNumber(value) * 1e7) / 1e7;
+// The address picker's coordinates as insert columns: a validated pair, rounded, or nothing.
+const pickerCoordinateColumns = (lat, lng) => (validCoordinates(lat, lng)
+  ? { latitude: roundCoordinate(lat), longitude: roundCoordinate(lng) } : {});
 
 async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, latitude = null, longitude = null, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
   const street = String(address_line1 || '').trim();
@@ -298,7 +301,7 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
     zip: zip || null,
     // The address picker's selected coordinates (staff-added address), when the caller has validated ones: the county reclaimed-water match
     // and the route planner read them. Absent = the property stays coordinate-less until an enrichment sets them, as before.
-    ...(validCoordinates(latitude, longitude) ? { latitude: roundCoordinate(latitude), longitude: roundCoordinate(longitude) } : {}),
+    ...pickerCoordinateColumns(latitude, longitude),
     address_key: key,
     source,
     active: true,
