@@ -9,7 +9,7 @@ import {
   NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY,
   pretreatWarrantyValues,
   warrantyContractBasis,
-  warrantyPlanYears,
+  warrantyEligible,
 } from "../../lib/pretreatWarrantyValues";
 
 const fieldStyle = {
@@ -158,13 +158,14 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
 
 // The "Issue warranty" button on a pre-treat certificate. Rule
 // 5E-14.105(3): a new-building pre-treat gets a written warranty within 30
-// days; an addition to an existing building (no plan years) gets none.
+// days; an addition to an existing building (no plan years) gets none. Only
+// a single soil-barrier application matches this warranty's wording.
 export function IssueWarrantyAction({ project, findings, allowed, blocked, unsaved, buttonStyle }) {
   const [open, setOpen] = useState(false);
   const eligible = allowed
     && project?.project_type === "pre_treatment_termite_certificate"
     && Boolean(project?.customer_id)
-    && Boolean(warrantyPlanYears(findings?.warranty_type));
+    && warrantyEligible(findings || {});
   if (!eligible) return null;
   const disabled = blocked || unsaved;
   return (

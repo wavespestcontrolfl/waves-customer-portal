@@ -10,6 +10,7 @@ import IssueWarrantyDialog, { IssueWarrantyAction } from './IssueWarrantyDialog'
 const project = { id: 'abcd1234-0000', customer_id: 'cust-1', project_date: '2026-10-01' };
 const findings = {
   treatment_date: '2026-10-01',
+  treatment_method: 'Soil barrier (chemical)',
   treatment_address: '12 Test Lane, Bradenton, FL 34202',
   builder_contractor: 'Example Homes LLC',
   product_name: 'Termidor SC',
@@ -77,6 +78,8 @@ describe('IssueWarrantyAction', () => {
     rerender(<IssueWarrantyAction project={certificate} findings={{ ...findings, warranty_type: 'Addition to an existing building (no warranty required)' }} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
     expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
     rerender(<IssueWarrantyAction project={{ ...certificate, customer_id: null }} findings={findings} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+    expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
+    rerender(<IssueWarrantyAction project={certificate} findings={{ ...findings, treatment_method: 'Wood treatment (borate)' }} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
     expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
     rerender(<IssueWarrantyAction project={certificate} findings={findings} allowed blocked={false} unsaved buttonStyle={{}} />);
     expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeDisabled();

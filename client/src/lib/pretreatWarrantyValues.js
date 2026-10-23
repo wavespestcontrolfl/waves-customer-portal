@@ -44,6 +44,24 @@ export function warrantyPlanYears(warrantyType) {
   return PLAN_YEARS[text(warrantyType)] || null;
 }
 
+function additionalApplications(value) {
+  let rows = value;
+  if (typeof rows === 'string') {
+    try { rows = JSON.parse(rows); } catch { rows = []; }
+  }
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === 'object' && Object.values(row).some((v) => text(v)));
+}
+
+// The warranty text describes one preventive soil treatment. A borate wood
+// treatment, a bait system (its own program agreement) or a combined job
+// needs other wording, so only a single soil-barrier application qualifies.
+export function warrantyEligible(findings = {}) {
+  return Boolean(warrantyPlanYears(findings.warranty_type))
+    && text(findings.treatment_method) === 'Soil barrier (chemical)'
+    && additionalApplications(findings.additional_applications).length === 0;
+}
+
 // The certificate's own values; '' where the certificate has nothing, so the
 // issue route reports the field as unfilled instead of printing a guess.
 export function pretreatWarrantyValues({ project = {}, findings = {}, today = etDateString() } = {}) {

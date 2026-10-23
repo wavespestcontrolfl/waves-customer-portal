@@ -3,11 +3,13 @@ import {
   FINAL_EXTERIOR_NOT_DONE,
   pretreatWarrantyValues,
   warrantyContractBasis,
+  warrantyEligible,
   warrantyPlanYears,
 } from './pretreatWarrantyValues';
 
 const findings = {
   treatment_date: '2026-10-01',
+  treatment_method: 'Soil barrier (chemical)',
   treatment_address: '12 Test Lane, Bradenton, FL 34202',
   lot_block: 'Lot 4',
   subdivision: 'Test Grove',
@@ -63,5 +65,14 @@ describe('pretreatWarrantyValues', () => {
       .toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
     expect(warrantyContractBasis({ kind: 'signed', date: '09/30/2026' }))
       .toBe('Signed by the owner or authorized agent before treatment, on 09/30/2026.');
+  });
+
+  it('offers the warranty only for one soil-barrier application with a plan', () => {
+    expect(warrantyEligible(findings)).toBe(true);
+    expect(warrantyEligible({ ...findings, treatment_method: 'Wood treatment (borate)' })).toBe(false);
+    expect(warrantyEligible({ ...findings, treatment_method: 'Bait system' })).toBe(false);
+    expect(warrantyEligible({ ...findings, additional_applications: [{ treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care' }] })).toBe(false);
+    expect(warrantyEligible({ ...findings, additional_applications: JSON.stringify([{ product_name: '' }]) })).toBe(true);
+    expect(warrantyEligible({ ...findings, warranty_type: 'Addition to an existing building (no warranty required)' })).toBe(false);
   });
 });
