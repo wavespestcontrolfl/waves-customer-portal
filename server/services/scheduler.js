@@ -7780,7 +7780,8 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 6AM ET — Credential expiry check (credentials v1 §7)
   // Scans business_credentials for anything expiring within 60 days; fires a
-  // `credential_expiring_soon` notification per credential (deduped 7d).
+  // `credential_expiring_soon` notification per credential (deduped 7d). The Bid kit
+  // expiry check (GATE_BID_KIT, dark) rides the same slot.
   // =========================================================================
   cron.schedule('5 6 * * *', async () => {
     logger.info('Running: Credential expiry check');
@@ -7789,6 +7790,13 @@ function initScheduledJobs() {
       await runCredentialExpiryCheck();
     } catch (err) {
       logger.error(`Credential expiry check failed: ${err.message}`);
+    }
+    // Bid kit (GATE_BID_KIT, dark): one admin bell per kit paper that expired or expires within 30 days, once a week each.
+    // Gate off = returns before any query. Admin bell only.
+    try {
+      await require('./bid-kit-expiry').runBidKitExpiryCheck();
+    } catch (err) {
+      logger.error(`Bid kit expiry check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

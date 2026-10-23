@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_BID_KIT=true (Bid kit, admin only: one page for the documents and company facts every government bid asks for (business license copy, certified operator certificate and notarized full-time statement, employee ID cards, product list, insurance certificate, W-9, Sunbiz status, tax receipt, E-Verify, references and the company fact sheet), each with its file, limits, source document, checked-on date, expiry and the owner's sign-off, plus a facts sheet the owner copies from while filling agency forms by hand. Files sit in private storage and open only by a short signed link. Never public, never on the website, never sent to anyone, no AI. Once a day at 6:05 AM ET (the compliance slot) a job posts one admin notification per item that expired or expires within 30 days (once a week per item). Read at call time via bidKitLive(), strict 'true', dark by default; off = every /api/admin/bid-kit route answers 404, the nav entry is hidden and the daily job does nothing.)
  *   GATE_REVIEW_ASK_AFTER_REPORT=true (owner 2026-10-22: the same-day (Day 0) review-ask text goes out about 10 minutes after the service report text, for every service line, instead of the smart send window. Only a report sent as a text at completion anchors it: 10 minutes after that text, or 10 minutes after payment for a paid invoice. A report held for the morning moves the ask to 10 minutes after its 8 AM replay goes out as a text. A report sent by the Waves app, failed, blocked, skipped or unknown keeps the smart window. Cadence mode only (needs GATE_REVIEW_SEQUENCES): the legacy path ignores this gate. Covers a completion, a paid invoice and combined-visit packets; the ask goes at the first :14/:44 review send after the 10 minutes. The 8 AM-8 PM window, 72 h ask spacing, click guard, holds, opt-outs and explicit operator timing are unchanged. Read at call time; off unless exactly 'true'; off = today's smart window for new enrollments (an ask already planned keeps its time, at most ~10 minutes out).)
  *   GATE_REVIEW_SENDER_EVERY_5_MIN=true (owner 2026-10-22: the review cadence sender runs every 5 minutes on its own offset (:04 ... :59) instead of :14/:44, so a due review text goes within 5 minutes. Same job and lock. Read at boot; off unless exactly 'true'; off = :14/:44 exactly as before.)
  *   GATE_CALL_ENRICH_CODES_REQUIRE_ANI=true (a call writes gate / garage / lockbox codes and access notes to a customer's profile only when the call's caller ID is that customer's primary phone; a spoken callback number alone no longer does. Pets and internal notes are unchanged. Read at call time via callEnrichCodesRequireAniLive(), strict === 'true', dark by default; off = unchanged; sends nothing to a customer)
@@ -2161,6 +2162,8 @@ const gates = {
   bidDesk: process.env.GATE_BID_DESK === 'true',
   // GATE_BID_DESK_SAM (Bid Desk SAM.gov reader, dark). Boot-log entry only; the call-time reader is bidDeskSamLive().
   bidDeskSam: process.env.GATE_BID_DESK_SAM === 'true',
+  // GATE_BID_KIT (Bid kit, admin only, dark). Boot-log entry only; the call-time reader is bidKitLive().
+  bidKit: process.env.GATE_BID_KIT === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -5413,6 +5416,14 @@ function estimateBeforeYouBookLive() {
   return process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK === 'true';
 }
 
+// GATE_BID_KIT read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader for the
+// Bid kit: routes/admin-bid-kit.js, services/bid-kit-expiry.js (the daily job) and the `bid_kit` flag on
+// GET /api/admin/feature-flags that shows the nav entry. Off: every route answers 404, the nav entry is hidden and the job
+// returns before any query. It stores and sends nothing public. Kill: unset.
+function bidKitLive() {
+  return process.env.GATE_BID_KIT === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -7397,3 +7408,5 @@ module.exports.prepayRefund90DayLive = prepayRefund90DayLive;
 module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
 // GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK reader, on its own line so gate PRs never conflict.
 module.exports.estimateBeforeYouBookLive = estimateBeforeYouBookLive;
+// GATE_BID_KIT reader, on its own line so gate PRs never conflict.
+module.exports.bidKitLive = bidKitLive;
