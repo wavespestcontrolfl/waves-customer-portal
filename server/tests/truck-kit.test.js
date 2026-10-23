@@ -407,7 +407,7 @@ describe('tool gaps by kit key', () => {
       { item: 'Bait station keys and replacement cartridges', required: false, kit_key: 'bait_station_key' },
       { item: 'Foam drill kit and patch materials', required: false, kit_key: 'foam_drill_kit' },
     ])];
-    expect(truckKit.requirementsFor('Termite Bait Station System', { serviceKey: 'termite_bait' })).toEqual({ lines: ['termite'], promote: new Set(['bait_station_key']), restrict: null });
+    expect(truckKit.requirementsFor('Termite Bait Station System', { serviceKey: 'termite_bait' })).toEqual({ lines: ['termite'], promote: new Set(['bait_station_key']), restrict: { termite: null } });
     expect(truckKit.requirementsFor('Drill and Foam Treatment', { serviceKey: 'foam_drill' }).promote).toEqual(new Set(['foam_drill_kit']));
     expect(truckKit.requirementsFor('Termite Spot Treatment Service', { serviceKey: 'termite_spot_treatment' }).promote).toEqual(new Set(['foam_drill_kit']));
     expect(truckKit.requirementsFor('Termite Spot Treatment Service').promote).toEqual(new Set(['foam_drill_kit']));
@@ -443,7 +443,7 @@ describe('tool gaps by kit key', () => {
     // By name alone "Lawn Assessment" reads as a consultation; the live key says lawn_inspection.
     expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Lawn Assessment', missing: ['Soil probe (thatch)'] }]);
     // The fire ant yard add-on is a spreader job, never the probe.
-    expect(truckKit.requirementsFor('Fire Ant Yard Treatment', { serviceKey: 'area_addon_fire_ant_yard', serviceCategory: 'lawn_care' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: new Set(['push_spreader']) });
+    expect(truckKit.requirementsFor('Fire Ant Yard Treatment', { serviceKey: 'area_addon_fire_ant_yard', serviceCategory: 'lawn_care' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']) } });
   });
 
   test('mechanical lawn work and the web sweep need no treatment tools', () => {
@@ -453,9 +453,19 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Top Dressing', { serviceKey: 'top_dressing' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Web Sweep', serviceKey: 'area_addon_web_sweep' }] })).toEqual(['pest']);
     // The web sweep is a focused pest job: the cobweb duster, nothing else.
-    expect(truckKit.requirementsFor('Web Sweep', { serviceKey: 'area_addon_web_sweep' })).toEqual({ lines: ['pest'], promote: new Set(), restrict: new Set(['cobweb_duster']) });
-    expect(truckKit.requirementsFor('Quarterly Pest Control', { addons: [{ name: 'Web Sweep', serviceKey: 'area_addon_web_sweep' }] }).restrict).toBeNull();
+    expect(truckKit.requirementsFor('Web Sweep', { serviceKey: 'area_addon_web_sweep' })).toEqual({ lines: ['pest'], promote: new Set(), restrict: { pest: new Set(['cobweb_duster']) } });
+    expect(truckKit.requirementsFor('Quarterly Pest Control', { addons: [{ name: 'Web Sweep', serviceKey: 'area_addon_web_sweep' }] }).restrict).toEqual({ pest: null });
     expect(truckKit.serviceLinesFor('Lawn Care — Standard Visit', { serviceKey: 'lawn_standard' })).toEqual(['lawn']);
+  });
+
+  test('a pest visit with a fire ant add-on needs the whole pest kit but only the lawn spreader', async () => {
+    db.__state.equipment_checklists = [
+      CHECKLIST('pest', [{ item: 'B&G 1 gal sprayer (interior)', required: true, kit_key: 'bg_sprayer' }]),
+      CHECKLIST('lawn', [{ item: 'LESCO push spreader — calibrated', required: true, kit_key: 'push_spreader' }, { item: 'Soil probe (thatch)', required: true, kit_key: 'soil_probe' }]),
+    ];
+    db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
+    const hold = await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'Quarterly Pest Control', addons: [{ name: 'Fire Ant Yard Treatment', serviceKey: 'area_addon_fire_ant_yard', category: 'lawn_care' }] });
+    expect(hold.tools).toEqual(['bg_sprayer', 'push_spreader']);
   });
 
   test('a web sweep visit holds for the duster only', async () => {
@@ -478,9 +488,11 @@ describe('tool gaps by kit key', () => {
     // ...and by name alone it is still the spreader job, whatever category a row carries.
     expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceCategory: 'inspection' })).toEqual(['lawn']);
     // Specialized lawn add-ons are one-tool jobs, never the whole lawn kit.
-    expect(truckKit.requirementsFor('Shell, Rock & Paver Weed Control', { serviceKey: 'area_addon_hardscape_weed', serviceCategory: 'lawn_care' })).toEqual({ lines: ['tree_shrub'], promote: new Set(), restrict: new Set(['backpack_sprayer']) });
-    expect(truckKit.requirementsFor('Bed Pre-Emergent Weed Control', { serviceKey: 'area_addon_bed_pre_emergent' }).restrict).toEqual(new Set(['hand_spreader']));
-    expect(truckKit.requirementsFor('Yearly Lawn Insect Preventive', { serviceKey: 'area_addon_lawn_insect_preventive' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: new Set(['push_spreader']) });
+    expect(truckKit.requirementsFor('Shell, Rock & Paver Weed Control', { serviceKey: 'area_addon_hardscape_weed', serviceCategory: 'lawn_care' })).toEqual({ lines: ['tree_shrub'], promote: new Set(), restrict: { tree_shrub: new Set(['backpack_sprayer']) } });
+    expect(truckKit.requirementsFor('Bed Pre-Emergent Weed Control', { serviceKey: 'area_addon_bed_pre_emergent' }).restrict).toEqual({ tree_shrub: new Set(['hand_spreader']) });
+    expect(truckKit.requirementsFor('Yearly Lawn Insect Preventive', { serviceKey: 'area_addon_lawn_insect_preventive' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']) } });
+    // A full-kit pest visit with a focused lawn add-on: the whole pest list, only the lawn spreader.
+    expect(truckKit.requirementsFor('Quarterly Pest Control', { addons: [{ name: 'Fire Ant Yard Treatment', serviceKey: 'area_addon_fire_ant_yard', category: 'lawn_care' }] }).restrict).toEqual({ pest: null, lawn: new Set(['push_spreader']) });
     db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
     db.__state.equipment.push({ id: '66666666-2222-4333-8444-555555555555', name: 'Flashlight', category: 'tool', status: 'active', assigned_vehicle_id: TRUCK, kit_key: 'flashlight' });
     // The spot treatment add-on brings the termite line AND promotes the foam kit.

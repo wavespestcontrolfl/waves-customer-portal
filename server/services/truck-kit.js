@@ -162,16 +162,22 @@ function serviceRequirement(svc) {
   return { lines, promote: promotedKeysFor(svc?.name, svc?.serviceKey, lines), restrict: focused ? focused.keys : null };
 }
 
-// `restrict` (a Set of keys, or null) narrows the requirement to focused
-// tools when EVERY service on the visit is a focused job; one full-kit
-// service on the visit lifts the restriction.
+// `restrict` is per LINE: { line: Set(keys) } for a line only focused jobs
+// touched, { line: null } for a line some full-kit service claims. A pest
+// visit with a fire ant add-on reads the whole pest list but only the lawn
+// spreader.
 function requirementsFor(serviceType, { serviceKey = null, serviceCategory = null, addons = [] } = {}) {
   const services = [{ name: serviceType, serviceKey, category: serviceCategory }, ...(Array.isArray(addons) ? addons : [])];
   const parts = services.map(serviceRequirement).filter(Boolean);
   const lines = [...new Set(parts.flatMap((part) => part.lines))];
   const promote = new Set(parts.flatMap((part) => part.promote));
-  const allFocused = parts.length > 0 && parts.every((part) => part.restrict);
-  const restrict = allFocused ? new Set(parts.flatMap((part) => part.restrict)) : null;
+  const restrict = {};
+  for (const part of parts) {
+    for (const line of part.lines) {
+      if (!part.restrict) restrict[line] = null;
+      else if (restrict[line] !== null) restrict[line] = new Set([...(restrict[line] || []), ...part.restrict]);
+    }
+  }
   return { lines, promote, restrict };
 }
 const serviceLinesFor = (serviceType, opts) => requirementsFor(serviceType, opts).lines;
@@ -263,6 +269,7 @@ async function requiredToolsForLine(serviceLine, conn = db) {
 // The same across several lines (a combined job), once per key. `promote`
 // names optional keyed items this job makes required.
 async function requiredToolsForLines(serviceLines, conn = db, promote = new Set(), restrict = null) {
+  const allowed = (line, key) => !restrict || !(line in restrict) || restrict[line] === null || restrict[line].has(key);
   const lines = [...new Set((Array.isArray(serviceLines) ? serviceLines : [serviceLines]).filter(Boolean))];
   if (!lines.length) return [];
   const rows = await conn('equipment_checklists').whereIn('service_line', lines).select('service_line', 'checklist_items');
@@ -273,7 +280,7 @@ async function requiredToolsForLines(serviceLines, conn = db, promote = new Set(
       for (const item of Array.isArray(group?.items) ? group.items : []) {
         const key = normalizeKitKey(item?.kit_key);
         if (!key || (item.required === false && !promote.has(key)) || byKey.has(key)) continue;
-        if (restrict && !restrict.has(key)) continue;
+        if (!allowed(row.service_line, key)) continue;
         byKey.set(key, { kit_key: key, label: String(item.item || key) });
       }
     }
@@ -410,7 +417,7 @@ async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = 
   for (const visit of visits) {
     const { lines, promote, restrict } = requirementsFor(visit.service_type, { serviceKey: visit.serviceKey, serviceCategory: visit.serviceCategory, addons: addonsByVisit.get(visit.id) || [] });
     if (!lines.length) continue;
-    const key = `${lines.join('+')}|${[...promote].sort().join('+')}|${restrict ? [...restrict].sort().join('+') : '*'}`;
+    const key = `${lines.join('+')}|${[...promote].sort().join('+')}|${Object.entries(restrict).map(([line, keys]) => `${line}:${keys ? [...keys].sort().join(',') : '*'}`).sort().join('+')}`;
     if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn, promote, restrict));
     const missing = requiredByLines.get(key).filter((tool) => !onTruck.has(tool.kit_key));
     if (missing.length) out.push({ serviceId: visit.id, serviceType: visit.service_type, missing: missing.map((tool) => tool.label) });
