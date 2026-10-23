@@ -24,4 +24,13 @@ describe('final exterior copy screen', () => {
     expect(screenFinalExteriorFindings({ final_exterior_product: 'EPA-approved fipronil', final_exterior_active_ingredient: 'Fipronil' }))
       .toEqual({ final_exterior_product: '', final_exterior_active_ingredient: 'Fipronil' });
   });
+
+  test('a final exterior time must be a clock time; free text or a bad hour is blanked', () => {
+    expect(failingFinalExteriorKeys({ final_exterior_time: '09:30' })).toEqual([]);
+    expect(failingFinalExteriorKeys({ final_exterior_time: '14:05:00' })).toEqual([]);
+    expect(failingFinalExteriorKeys({ final_exterior_time: 'gate code 1234' })).toEqual(['final_exterior_time']);
+    expect(failingFinalExteriorKeys({ final_exterior_time: '25:00' })).toEqual(['final_exterior_time']);
+    expect(screenFinalExteriorFindings({ final_exterior_time: 'call me', final_exterior_product: 'Termidor SC' }))
+      .toEqual({ final_exterior_time: '', final_exterior_product: 'Termidor SC' });
+  });
 });

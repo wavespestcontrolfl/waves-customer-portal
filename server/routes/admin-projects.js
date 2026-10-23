@@ -123,7 +123,7 @@ const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_c
 // screen runs here at write time: a claim ("pet-safe", "EPA-approved") or an
 // access code is refused, not stored. reports-public blanks the same keys at
 // egress, and the detail payload names them for the staff preview.
-const { failingFinalExteriorKeys } = require('../services/final-exterior-screen');
+const { failingFinalExteriorKeys, isClockTime } = require('../services/final-exterior-screen');
 // The final exterior date is a completed treatment on a legal document:
 // blank, or a real YYYY-MM-DD no later than today (ET), like project_date,
 // and never before the initial treatment (same day allowed).
@@ -186,7 +186,14 @@ function finalExteriorRejection(projectType, rawFindings, projectDate) {
       code: 'final_exterior_date_invalid', field: 'final_exterior_date',
     };
   }
-  const [failingKey] = failingFinalExteriorKeys(findings);
+  const failingKeys = failingFinalExteriorKeys(findings);
+  if (failingKeys.includes('final_exterior_time')) {
+    return {
+      error: 'The final exterior treatment time must be a clock time (HH:MM).',
+      code: 'final_exterior_time_invalid', field: 'final_exterior_time',
+    };
+  }
+  const [failingKey] = failingKeys;
   if (failingKey) {
     return {
       error: 'The final exterior treatment fields print on the customer notice — remove the claim or code and save again.',
@@ -772,7 +779,7 @@ function pretreatStaffSendChecks(findings, typeCfg) {
   if (FINAL_EXTERIOR_RECORD_KEYS.some((key) => hasMeaningfulValue(findings[key]))) {
     checks.push(
       { key: 'cert_final_exterior_date', label: 'Date of final exterior treatment', ok: hasMeaningfulValue(findings.final_exterior_date), hard: true },
-      { key: 'cert_final_exterior_time', label: 'Time of final exterior treatment', ok: hasMeaningfulValue(findings.final_exterior_time), hard: true },
+      { key: 'cert_final_exterior_time', label: 'Time of final exterior treatment', ok: isClockTime(findings.final_exterior_time), hard: true },
     );
   }
   return checks;

@@ -214,6 +214,7 @@ describe('admin project route guards', () => {
     expect(hardKeys(evaluate({ ...complete, final_exterior_product: 'Termidor SC' }, true))).toEqual(['cert_final_exterior_date', 'cert_final_exterior_time']);
     expect(hardKeys(evaluate({ ...complete, final_exterior_date: '2026-06-01' }, true))).toEqual(['cert_final_exterior_time']);
     expect(evaluate({ ...complete, final_exterior_date: '2026-06-01', final_exterior_time: '09:30' }, true).missing).toEqual([]);
+    expect(hardKeys(evaluate({ ...complete, final_exterior_date: '2026-06-01', final_exterior_time: 'gate code 1234' }, true))).toEqual(['cert_final_exterior_time']);
 
     // A certificate held before these checks existed still releases once paid.
     const legacy = evaluate({ ...complete, warranty_type: 'No warranty', treatment_time: '', final_exterior_date: '2026-06-01' }, false);
