@@ -135,7 +135,7 @@ describe('compileRules / matchRule', () => {
     }
     for (const ok of ['costco\\W*gas', '\\bwawa\\b', 'google\\W*ads|facebk|meta ads', 'o.?reilly auto', 'wu\\b.*\\bco\\b', '(ab|cd)e', '(mobile )?ach', 'usps po\\b', 'check deposit \\(mobile\\) reversal', 'cash app \\*', 'x corp\\.? paid', 'nic\\W*-?\\s*fl', 'colou?r', "o'reilly", 'at&t', 'apple\\.com/bill', '[a-z]ar', 'take 5',
       // the caps are per alternative
-      'a?b?c?|d?e?f?', '.*a.*|.*b.*', '\\bsiteone\\W*landscape\\W*supply\\b', '(a|aa)(b|bb)c', '(a|aa)b|(c|cc)d|(e|ee)f']) {
+      'a?b?c?x|d?e?f?y', '.*a.*|.*b.*', '\\bsiteone\\W*landscape\\W*supply\\b', '(a|aa)(b|bb)c', '(a|aa)b|(c|cc)d|(e|ee)f']) {
       expect([ok, svc.compilePattern(ok)]).toEqual([ok, expect.any(RegExp)]);
     }
     for (const r of seeds.SEED_RULES) expect([r.pattern, svc.compilePattern(r.pattern, { maxLength: Infinity })]).toEqual([r.pattern, expect.any(RegExp)]);
@@ -213,6 +213,12 @@ describe('patternFromDescription', () => {
     ['ACH DEBIT 1234 ACME', '\\bacme\\b'],
     ['ACH DEBIT 1234', null],
     ['1234567 ##', null],
+    // a digit glued to the payee sits inside the word boundary: the rule tolerates a digit run there
+    ['GOOGLE *ADS1234567', '\\bgoogle\\W*ads\\d*\\b'],
+    ['1PASSWORD', '\\b\\d*password\\b'],
+    ['ACME2 HARDWARE', '\\bacme\\d*\\b'],
+    // a third wildcard would break the grammar's cap: two words instead of a rule that is refused later
+    ['ALPHA BETA GAMMA9 CITY', '\\balpha\\W*beta\\b'],
   ];
   test.each(cases)('%s → %s', (description, expected) => {
     expect(svc.patternFromDescription(description)).toBe(expected);
@@ -547,8 +553,13 @@ describe('decide', () => {
     expect(state.updates[0].patch.suggestion.removed).toContain('ignore');
     expect(svc.matcherExamined({ suggestion: { income: true, examined: true } })).toBe(true);
     expect(svc.MATCHER_EXAMINED_SQL).toContain("'examined'");
-    // with another marker present nothing extra is written
+    // with another marker present the marker is still written: the matcher reads 'examined' (or the
+    // decision) as "do not put the transfer flag back", whatever else the row carries
     state.updates = []; state.bankRow = { ...moneyIn(), suggestion: { ignore: true, noMatch: true } };
+    await svc.decide({ id: 'b1', decision: 'income' });
+    expect(state.updates[0].patch.suggestion.merged.examined).toBe(true);
+    // no flag to replace: no marker
+    state.updates = []; state.bankRow = { ...moneyIn(), suggestion: { noMatch: true } };
     await svc.decide({ id: 'b1', decision: 'income' });
     expect(state.updates[0].patch.suggestion.merged.examined).toBeUndefined();
   });

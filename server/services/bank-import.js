@@ -1355,10 +1355,13 @@ function hasUnresolvedBankChange(row) {
 
 // The matcher writes its transfer flag only on a row that carries no flag
 // and no owner ruling: tax-ledger-rules replaces the flag with the owner's
-// classification (or an Income decision) and keeps the examination evidence
-// under 'examined', so a rescan must not relabel that row as an internal
-// transfer in Bank Import. The human actions on it are still refreshed.
-function transferFlagWanted(sug) { return !sug || (!sug.ignore && !sug.examined); }
+// classification or an Income decision (suggestion.decision) and keeps the
+// examination evidence under 'examined', so a rescan must not relabel that
+// row as an internal transfer in Bank Import. The human actions on it are
+// still refreshed. The UPDATE repeats the check (NO_OWNER_RULING_SQL) so a
+// decision made after the read wins too.
+function transferFlagWanted(sug) { return !sug || (!sug.ignore && !sug.examined && !sug.decision); }
+const NO_OWNER_RULING_SQL = "(suggestion is null or ((suggestion -> 'decision') is null and not jsonb_exists(suggestion, 'examined')))";
 
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
@@ -1512,7 +1515,7 @@ async function runDeterministicMatching({ limit } = {}) {
       if (transferFlagWanted(row.suggestion)) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_OWNER_RULING_SQL).update({
           suggestion: suggestionMerge({ ...transfer, ...actionPatch }, hasActions ? ['noMatch'] : []),
           updated_at: new Date(),
         });

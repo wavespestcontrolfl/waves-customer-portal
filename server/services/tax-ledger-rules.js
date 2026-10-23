@@ -248,12 +248,13 @@ const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function patternFromDescription(description) {
   const s = String(description || '').toLowerCase().replace(PREFIX_RE, '');
   const kept = [];
+  let firstStart = -1;
   let lastEnd = -1;
   for (const m of s.matchAll(TOKEN_RE)) {
     const tok = m[0].replace(/^[.'&-]+|[.'&-]+$/g, '');
     const ok = tok.length >= 3 && !STOP.has(tok);
     if (!kept.length) {
-      if (ok) { kept.push(tok); lastEnd = m.index + m[0].length; }
+      if (ok) { kept.push(tok); firstStart = m.index; lastEnd = m.index + m[0].length; }
       continue;
     }
     if (!ok || /\d/.test(s.slice(lastEnd, m.index))) break;
@@ -262,7 +263,20 @@ function patternFromDescription(description) {
     if (kept.length === 3) break;
   }
   if (!kept.length) return null;
-  return `\\b${kept.map(escapeRe).join('\\W*')}\\b`;
+  // A digit glued to the payee ("GOOGLE *ADS1234567", "1PASSWORD") sits
+  // inside the word boundary, so the rule tolerates a digit run on that
+  // side (\d*: the digits vary per transaction). The pattern must fit the
+  // grammar and match the description it came from; a 3-word payee that
+  // would need a third wildcard drops to 2 words rather than fail later.
+  const digitBefore = /\d$/.test(s.slice(0, firstStart));
+  const digitAfter = /^\d/.test(s.slice(lastEnd));
+  for (let n = kept.length; n >= 1; n -= 1) {
+    const words = kept.slice(0, n).map(escapeRe).join('\\W*');
+    const trailing = n === kept.length && digitAfter ? '\\d*' : '';
+    const pattern = `\\b${digitBefore ? '\\d*' : ''}${words}${trailing}\\b`;
+    if (fitsGrammar(pattern) && new RegExp(pattern, 'i').test(description)) return pattern;
+  }
+  return null;
 }
 
 // The seed rows live in code (tax-ledger-seed-rules.js) and are written
@@ -562,7 +576,9 @@ function decisionWrite(decision, row, now) {
     // ignore flag must not drop the row's examination evidence with it.
     const sug = row.suggestion || {};
     const patch = { income: true, reason: INCOME_REASON, decision, decidedAt: now.toISOString() };
-    if (sug.ignore && !MATCHER_KEYS.some((k) => hasKey(sug, k))) patch.examined = true;
+    // 'examined' is also the marker the matcher honors: a rescan never puts
+    // its transfer flag back on a row whose flag a decision replaced
+    if (sug.ignore) patch.examined = true;
     return { action: 'income', write: { suggestion: bankImport.suggestionMerge(patch, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now } };
   }
   const patch = { reason: `${decision} per the owner`, decision, decidedAt: now.toISOString() };

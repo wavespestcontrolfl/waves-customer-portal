@@ -781,6 +781,22 @@ describe('runDeterministicMatching', () => {
     expect(sugOf(refreshed).refundCandidates).toHaveLength(1); // the refund action stays offered
   });
 
+  test('an Income decision made on a row that still carried other matcher markers (no examined) is never re-flagged; the flag write guards on no ruling', async () => {
+    state.bankRows = [{
+      id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card',
+      suggestion: { noMatch: true, income: true, decision: 'income', decidedAt: '2026-08-12T00:00:00.000Z' },
+    }];
+    const summary = await runDeterministicMatching();
+    expect(summary.transferFlagged).toBe(0);
+    expect(state.updates.find(u => sugOf(u) && sugOf(u).ignore)).toBeUndefined();
+    // a fresh transfer-shaped row IS flagged, with the UPDATE repeating the no-ruling check
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card', suggestion: null }];
+    state.updates = [];
+    expect((await runDeterministicMatching()).transferFlagged).toBe(1);
+    const flagged = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    expect(flagged.raws).toContainEqual(expect.stringContaining("(suggestion -> 'decision') is null"));
+  });
+
   test('a bounded pass serves an examined (owner-overridden) row from the examined pool, not as a fresh row', async () => {
     state.bankRows = [];
     await runDeterministicMatching({ limit: 5 });
