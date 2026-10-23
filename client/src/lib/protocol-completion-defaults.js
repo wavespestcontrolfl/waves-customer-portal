@@ -46,6 +46,10 @@ export function shouldApplyProtocolCompletionDefaults(response) {
 // amount; every other keyed suggestion is a palm feed, dosed in lb per palm from the canopy chart.
 const BED_DOSE_KEYS = new Set(['snapshot', 'f13013']);
 const doseRateUnit = (treeShrubKey) => (BED_DOSE_KEYS.has(treeShrubKey) ? 'lb' : 'lb/palm');
+// The most lb per 1,000 sq ft the form accepts without a warning: Snapshot's label maximum, and the 13-0-13 county cap
+// (0.75 lb per 100 sq ft = 7.5 lb per 1,000 = 0.98 lb N, under the 1 lb N per 1,000 sq ft ordinance limit). The server
+// holds the same 7.5 at closeout (tree-shrub-ornamental-fertilizer-limits.js).
+const MAX_RATE_PER_1000 = { snapshot: 4.6, f13013: 7.5 };
 
 // Maps the server's resolved products onto the CALLER's already-loaded
 // catalog rows (by id — never re-derived from the name, so the client and
@@ -79,7 +83,7 @@ export function protocolCompletionDefaultSelections(response, clientProducts, bu
         rate: '', totalAmount: '', totalAmountManual: false,
         amountUnit: 'lb', rateUnit: doseRateUnit(item.treeShrubKey),
         catalogRateUnit: doseRateUnit(item.treeShrubKey),
-        carrierGallons: '', maxLabelRatePer1000: item.treeShrubKey === 'snapshot' ? 4.6 : null,
+        carrierGallons: '', maxLabelRatePer1000: MAX_RATE_PER_1000[item.treeShrubKey] ?? null,
       } : {}),
       // Provenance flag only — no visible tag renders from it today (the
       // product-card UI has no cheap per-line badge slot), but it lets a

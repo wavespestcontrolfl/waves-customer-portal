@@ -113,23 +113,33 @@ function treeShrubDueReason(key, history, scheduledDate, propertyId) {
   return null;
 }
 
-async function filterTreeShrubDefaults({ db, scheduled, entries }) {
-  // Use the existing closeout ledger. A missing table/read is an unavailable
-  // history, never proof that the property has had no applications.
-  const history = await db('property_application_history as history')
+// The customer's recorded applications, in the shape treeShrubDueReason reads. Uses the existing closeout ledger. A
+// missing table/read is an unavailable history, never proof that the property has had no applications.
+// `excludeRecordId` leaves out the closeout being judged (it is already in the ledger when the check runs after the save).
+async function loadTreeShrubApplicationHistory({ db, scheduled, excludeRecordId = null }) {
+  const query = db('property_application_history as history')
     .leftJoin('service_records as record', 'record.id', 'history.service_record_id')
     .leftJoin('scheduled_services as visit', 'visit.id', 'record.scheduled_service_id')
     .leftJoin('service_products as applied', 'applied.id', 'history.service_product_id')
     .leftJoin('products_catalog as product', 'product.id', 'history.product_id')
-    .where('history.customer_id', scheduled.customer_id).whereNull('history.retracted_at')
+    .where('history.customer_id', scheduled.customer_id).whereNull('history.retracted_at');
+  if (excludeRecordId) query.where((q) => q.whereNull('history.service_record_id').orWhereNot('history.service_record_id', excludeRecordId));
+  const history = await query
     .select('history.application_date', 'history.application_rate', 'history.rate_unit', 'history.property_id as ledger_property_id', 'visit.property_id',
       'product.name as catalog_name', 'applied.product_name',
       'applied.total_amount', 'applied.amount_unit', 'applied.area_value', 'applied.area_unit');
   // The treated property is the one frozen on the ledger row; only a legacy row without one falls back to
   // its visit's property (which a later address correction can change).
-  const normalized = history.map(row => ({ ...row, property_id: row.ledger_property_id || row.property_id, product_name: row.product_name || row.catalog_name }));
-  if (normalized.some(row => !row.product_name && (!row.property_id || row.property_id === scheduled.property_id))) {
-    return { entries: [], holds: entries.map(entry => ({ name: entry.name, reason: 'Review an application with an unidentified product.' })) };
+  return history.map(row => ({ ...row, property_id: row.ledger_property_id || row.property_id, product_name: row.product_name || row.catalog_name }));
+}
+
+const UNIDENTIFIED_PRODUCT_REASON = 'Review an application with an unidentified product.';
+const hasUnidentifiedApplication = (normalized, scheduled) => normalized.some(row => !row.product_name && (!row.property_id || row.property_id === scheduled.property_id));
+
+async function filterTreeShrubDefaults({ db, scheduled, entries }) {
+  const normalized = await loadTreeShrubApplicationHistory({ db, scheduled });
+  if (hasUnidentifiedApplication(normalized, scheduled)) {
+    return { entries: [], holds: entries.map(entry => ({ name: entry.name, reason: UNIDENTIFIED_PRODUCT_REASON })) };
   }
   const allowed = [], holds = [];
   for (const entry of entries) {
@@ -141,4 +151,7 @@ async function filterTreeShrubDefaults({ db, scheduled, entries }) {
   return { entries: allowed, holds };
 }
 
-module.exports = { treeShrubDueReason, filterTreeShrubDefaults, palmFeedingTooSoon, PALM_SPACING_LOOKBACK_DAYS };
+module.exports = {
+  treeShrubDueReason, filterTreeShrubDefaults, palmFeedingTooSoon, PALM_SPACING_LOOKBACK_DAYS,
+  loadTreeShrubApplicationHistory, hasUnidentifiedApplication, UNIDENTIFIED_PRODUCT_REASON, ORNAMENTAL_13_0_13,
+};

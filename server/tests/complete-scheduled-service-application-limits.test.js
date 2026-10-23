@@ -427,6 +427,30 @@ describe('the office notification for a finding (raised through the admin alert 
     expect(notify.mock.calls[0][3].detail).toContain("is over the add-on's yearly limit. Snapshot 2.5TG was applied or booked 1 time");
   });
 
+  test('the 13-0-13 rate and history findings obey the notification rule and name the county limit and the reason', async () => {
+    const notify = notifyFor();
+    const name = 'LESCO 13-0-13 60% PolyPlus Landscape';
+    await notifyOfficeOfLimitFindings({ svc: { ...service, service_type: 'Tree & Shrub Care' }, record, findings: [
+      { code: 'application_limit_exceeded', productId: 'p-orn', productName: name, limitType: 'ornamental_fertilizer_rate', current: 10, max: 7.5 },
+      { code: 'application_limit_exceeded', productId: 'p-orn', productName: name, limitType: 'ornamental_fertilizer_history', current: null, max: null, reason: 'The last 13-0-13 application was less than five months ago.' },
+    ] });
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify.mock.calls[0][2]).toBe('LESCO 13-0-13 60%… was applied at 10 lb per 1,000 sq ft, over the 7.5 county limit.');
+    expect(notify.mock.calls[0][3].detail).toContain('The county limit is 7.5 lb per 1,000 sq ft (0.75 lb per 100 sq ft, 1 lb of nitrogen per 1,000 sq ft)');
+    expect(notify.mock.calls[1][2]).toMatch(/: The last 13-0-13 application was less than five months ago\.$/);
+    expect(notify.mock.calls[1][3].detail).toContain('the last 13-0-13 application was less than five months ago. The program allows 2 in 12 months, at least 5 months apart, none June 1 to Sept. 30.');
+    for (const call of notify.mock.calls) {
+      expect(call[1].length).toBeLessThanOrEqual(60);
+      expect(call[2].length).toBeLessThanOrEqual(110);
+    }
+  });
+
+  test('the closeout calls the 13-0-13 check for a Tree & Shrub visit, after the save, with the office notifier', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    expect(src).toContain("detectServiceLine(svc.service_type) === 'tree_shrub'");
+    expect(src).toContain('tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings })');
+  });
+
   test('a bell that is not recorded (null) is logged, a failure never throws', async () => {
     const notify = notifyFor();
     notify.mockResolvedValue(null);

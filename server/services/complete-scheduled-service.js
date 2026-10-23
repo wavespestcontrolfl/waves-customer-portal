@@ -134,6 +134,7 @@ const { typedFollowupVerdict, typedFollowupObligationForCompletedSource, parkFol
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
 const areaAddOnGovernedRate = require('./area-addon-governed-rate');
 const areaAddOnLimits = require('./area-addon-limits');
+const tsOrnamental = require('./tree-shrub-ornamental-fertilizer-limits');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
 // into customer-visible completion text. Three shapes: a code word near a
@@ -2101,6 +2102,8 @@ const limitFigure = (finding) => {
   if (finding.limitType === areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE) return `the add-on uses ${finding.max}`;
   if (finding.limitType === 'min_interval_days') return `only ${finding.current} days from another application, minimum ${finding.max}`;
   if (finding.limitType === 'annual_max_rate') return `${finding.current}% of the yearly label amount used`;
+  if (finding.limitType === tsOrnamental.RATE_LIMIT_TYPE) return `${finding.current} lb per 1,000 sq ft, county limit ${finding.max}`;
+  if (finding.limitType === tsOrnamental.HISTORY_LIMIT_TYPE) return finding.reason;
   return `${finding.current} of ${finding.max} already used`;
 };
 
@@ -2114,6 +2117,8 @@ const FINDING_WHY = {
   min_interval_days: (name, f) => `${name}: only ${f.current} days since another application, minimum ${f.max}.`,
   annual_max_rate: (name, f) => `${name} is over its yearly amount limit: ${f.current}% used.`,
   annual_max_apps: (name, f) => `${name} is over its yearly limit: ${f.current} of ${f.max} already used.`,
+  [tsOrnamental.RATE_LIMIT_TYPE]: (name, f) => `${name} was applied at ${f.current} lb per 1,000 sq ft, over the ${f.max} county limit.`,
+  [tsOrnamental.HISTORY_LIMIT_TYPE]: (name, f) => `${name}: ${f.reason}`,
   [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
@@ -2122,6 +2127,8 @@ const FINDING_DETAIL = {
   [areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: (fullName, f, svc) => `On a ${svc.service_type || 'lawn'} visit, ${areaAddOnGovernedRate.uncheckedRateSentence(fullName, f)} Check the rate on the application record and report it if needed.`,
 };
 FINDING_DETAIL[areaAddOnLimits.YEARLY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'visit'} visit for an area add-on and is over the add-on's yearly limit. ${f.detail} Review it and report it if needed.`;
+FINDING_DETAIL[tsOrnamental.RATE_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'tree & shrub'} visit at ${f.current} lb per 1,000 sq ft. The county limit is ${f.max} lb per 1,000 sq ft (0.75 lb per 100 sq ft, 1 lb of nitrogen per 1,000 sq ft). Review it and report it if needed.`;
+FINDING_DETAIL[tsOrnamental.HISTORY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'tree & shrub'} visit, and ${f.reason.charAt(0).toLowerCase()}${f.reason.slice(1)} The program allows 2 in 12 months, at least 5 months apart, none June 1 to Sept. 30. Review it and report it if needed.`;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -9570,6 +9577,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     applicationLimitAdvisory = await areaAddOnGovernedRate.flagRatesAboveGoverned({
       svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings,
     });
+
+    // LESCO 13-0-13 on a Tree & Shrub visit (rate over the 7.5 lb per 1,000 sq ft county cap; more than 2 in 12 months, under
+    // 5 months apart, or inside June to September): flagged and sent to the office, never blocks. The June to September
+    // N/P blackout itself is the hard block in validateTreeShrubTypedCompliance. Covers a hand-added row as well as the suggestion.
+    if (record?.id && !issuedInvoiceCloseout && detectServiceLine(svc.service_type) === 'tree_shrub') {
+      applicationLimitAdvisory = await tsOrnamental.flagOrnamentalFertilizer({ svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings });
+    }
 
     // The add-on's OWN yearly limit (maxPerYear / minDaysApart, the place-based history the booking used; the add-ons carry no
     // product_limits rows): each tagged row is judged whatever the host's line or GATE_LAWN_V13, a second application of the

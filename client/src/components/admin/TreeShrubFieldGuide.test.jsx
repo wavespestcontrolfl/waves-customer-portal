@@ -57,7 +57,7 @@ test('the 13-0-13 bed suggestion carries lb, never lb/palm, and no prefilled amo
     { id: 'palm16', treeShrubKey: 'f0016', requiresDoseSelection: true },
   ] };
   const rows = protocolCompletionDefaultSelections(response, [{ id: 'orn' }, { id: 'snap' }, { id: 'palm' }, { id: 'palm16' }], build);
-  expect(rows[0]).toMatchObject({ rate: '', totalAmount: '', totalAmountManual: false, rateUnit: 'lb', catalogRateUnit: 'lb', amountUnit: 'lb', carrierGallons: '', maxLabelRatePer1000: null, requiresDoseSelection: true });
+  expect(rows[0]).toMatchObject({ rate: '', totalAmount: '', totalAmountManual: false, rateUnit: 'lb', catalogRateUnit: 'lb', amountUnit: 'lb', carrierGallons: '', maxLabelRatePer1000: 7.5, requiresDoseSelection: true });
   expect(rows[1]).toMatchObject({ rate: '', rateUnit: 'lb', catalogRateUnit: 'lb', maxLabelRatePer1000: 4.6 });
   expect(rows[2]).toMatchObject({ rate: '', rateUnit: 'lb/palm', catalogRateUnit: 'lb/palm', maxLabelRatePer1000: null });
   expect(rows[3]).toMatchObject({ rate: '', rateUnit: 'lb/palm', catalogRateUnit: 'lb/palm' });
