@@ -260,6 +260,9 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).not.toHaveTextContent('retreatment contract');
     expect(sticker).not.toHaveTextContent('Activate your termite warranty');
     expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
+    // FBC 105.11: every notice names the need for reinspection and contract renewal.
+    expect(sticker).toHaveTextContent('Annual reinspection and renewal of the treatment contract are needed');
+    expect(sticker).toHaveTextContent('Posted per FL Building Code 105.11');
   });
 
   it('gate on: an addition to an existing building reads like "No warranty" (Rule 5E-14.105(3)(d))', async () => {

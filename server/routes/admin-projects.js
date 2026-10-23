@@ -814,7 +814,7 @@ function evaluateProjectSendReadiness({ project, customer, staffSend = false }) 
       })),
       { key: 'cert_applicator_name', label: "Applicator's printed name", ok: hasMeaningfulValue(findings.applicator_name) },
       { key: 'cert_applicator_fdacs_id', label: 'Applicator FDACS ID #', ok: hasMeaningfulValue(findings.applicator_fdacs_id) },
-      // Applicator attestation satisfies FBC 1816.1.7 authorized-signature
+      // Applicator attestation satisfies the FBC 1816.1 / R318.1 authorized-signature
       // requirement when paired with the typed name + FDACS ID + date.
       { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
