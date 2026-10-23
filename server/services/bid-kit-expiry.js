@@ -12,7 +12,7 @@ const episodes = require('./admin-alert-episodes');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const logger = require('./logger');
 const { errorTag } = require('./bid-kit-log');
-const { composeAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
+const { composeAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { fitAction, shortDateET } = require('./admin-alert-names');
 
 const AREA = 'Estimates';
@@ -28,12 +28,11 @@ const KEY_PREFIX = 'bid-kit:expiry:';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const keyFor = (item) => `${KEY_PREFIX}${item.id}`;
 
-// The item's name as a person says it. A custom label with a code-shaped word falls back to the catalog's own words.
+// The item's name as a person says it: the catalog's own words. A custom row's label is free text (it can hold a name, a
+// phone number or an address), so an alert never copies it: fixed words, and the link opens the item.
 function nameOf(item) {
-  const entry = catalog.catalogItem(item.item_key);
-  const label = String(item.label || '').replace(/\s+/g, ' ').trim();
-  if (label && !breaksAlertRules(label)) return label;
-  return entry ? entry.label : 'a bid paper';
+  const entry = item.item_key === 'custom' ? null : catalog.catalogItem(item.item_key);
+  return entry ? entry.label : 'a custom bid paper';
 }
 
 // "Expires Nov 4" / "Expired Oct 20", from the date itself (an Eastern calendar day, never a clock instant).
@@ -121,6 +120,10 @@ async function raiseIfStillDue(candidate, today) {
       bell: true,
       dedupeKey: keyFor(fresh),
       dedupeWindowMs: DEDUPE_DAYS * 86400000,
+      // The words count down ("in 12 days") and follow a changed date: a standing bell is rewritten each day, quietly
+      // (never rung again inside the week); a bell closed by a renewal still rings when the item comes back.
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
       detail,
       link: composed.link,
       trx,

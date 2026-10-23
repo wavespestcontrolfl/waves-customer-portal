@@ -81,6 +81,8 @@ test('each bell is an admin bell, deduped per item for 7 days, and links to the 
   expect(category).toBe('system');
   expect(opts).toMatchObject({ bell: true, dedupeKey: `bid-kit:expiry:${ID(1)}`, dedupeWindowMs: 7 * 86400000, link: `/admin/bid-kit?item=${ID(1)}` });
   expect(opts.trx).toBe(trx); // raised inside the item's locked transaction
+  expect(opts.refreshOnDedupe).toBe(true); // a standing bell's words are rewritten each day...
+  expect(opts.ringOnRefresh({}, {})).toBe(false); // ...quietly, never rung again inside the week
   expect(DEDUPE_DAYS).toBe(7);
   expect(keyFor({ id: ID(1) })).toBe(`bid-kit:expiry:${ID(1)}`);
   expect(opts.metadata).toMatchObject({ severity: 'needs-you', who: 'person', subject: { type: 'check', id: ID(1) }, doneWhen: 'item_renewed', bidKitItemId: ID(1) });
@@ -106,10 +108,14 @@ test('the words say expired, expires today or the day count, and every spec pass
   for (const spec of [expired, same, one]) expect(() => composeAdminAlert(spec)).not.toThrow();
 });
 
-test('a long custom label still fits the 60-character headline, and a code-shaped label falls back to the catalog name', () => {
-  const long = specFor(item(ID(1), { item_key: 'custom', label: 'Sarasota County Schools vendor registration confirmation letter for pest control services', expires_on: '2026-11-04' }), '2026-10-23').spec;
-  expect(() => composeAdminAlert(long)).not.toThrow();
-  expect(composeAdminAlert(long).headline.length).toBeLessThanOrEqual(60);
+test('a custom label never reaches an alert (fixed words), and a catalog item is named by the catalog', () => {
+  const label = 'Pat Example 941-555-0123 pat@example.com 100 Example Way';
+  const custom = specFor(item(ID(1), { item_key: 'custom', label, expires_on: '2026-11-04' }), '2026-10-23');
+  const composed = composeAdminAlert(custom.spec);
+  expect(composed.headline).toBe('Estimates — renew a custom bid paper, expires Nov 4');
+  for (const text of [composed.headline, composed.why, custom.detail]) {
+    for (const part of ['Pat', '941-555-0123', 'pat@example.com', 'Example Way']) expect(text).not.toContain(part);
+  }
   const coded = specFor(item(ID(1), { label: 'coi_final_v2', expires_on: '2026-11-04' }), '2026-10-23').spec;
   expect(() => composeAdminAlert(coded)).not.toThrow();
   expect(coded.action).toContain('Certificate of insurance');
@@ -301,8 +307,10 @@ describe('the daily ring budget (docs/admin-notifications.md rule 3)', () => {
     expect(opts).toMatchObject({ bell: true, refreshOnDedupe: true, link: '/admin/bid-kit' }); // admitted by the bell policy, kept off the bell by feed: 'activity'
     expect(opts.metadata).toMatchObject({ count: 9, feed: 'activity', quiet: true, doneWhen: 'count_zero', severity: 'needs-you' });
     expect(opts.metadata.itemKeys).toHaveLength(9);
-    for (const row of MANY(12).slice(3)) expect(opts.detail).toContain(row.label);
-    for (const row of MANY(3)) expect(opts.detail).not.toContain(row.label);
+    // The standing row names each waiting paper by its catalog name and date; the three with bells are not in it.
+    expect([...opts.metadata.itemKeys].sort()).toEqual(MANY(12).slice(3).map((row) => row.id).sort());
+    for (const day of ['Oct 13', 'Oct 17', 'Oct 21']) expect(opts.detail).toContain(day);
+    for (const day of ['Oct 10', 'Oct 11', 'Oct 12']) expect(opts.detail).not.toContain(day);
     expect(() => composeAdminAlert({ area: 'Estimates', action: 'renew 9 more bid papers', why, severity: 'needs-you', link: '/admin/bid-kit', subject: { type: 'check', id: 'x' }, doneWhen: 'count_zero', who: 'person' })).not.toThrow();
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });

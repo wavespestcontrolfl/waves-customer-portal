@@ -7792,9 +7792,12 @@ function initScheduledJobs() {
       logger.error(`Credential expiry check failed: ${err.message}`);
     }
     // Bid kit (GATE_BID_KIT, dark): one admin bell per kit paper that expired or expires within 30 days, once a week each.
-    // Gate off = returns before any query. Admin bell only.
+    // Gate off = returns before any query. Admin bell only. runExclusive: the sweep reads open bells, then rings at most
+    // three; a deploy overlap must not run two sweeps that each ring three.
     try {
-      await require('./bid-kit-expiry').runBidKitExpiryCheck();
+      await runExclusive('bid-kit-expiry', async () => {
+        await require('./bid-kit-expiry').runBidKitExpiryCheck();
+      });
     } catch (err) {
       logger.error(`Bid kit expiry check failed: ${err.message}`);
     }
