@@ -770,9 +770,14 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   // date_exception_cadence_date recorded (pre-dates the column) — fall back
   // to scheduled_date exactly like rebooker.dateExceptionStamp's own
   // COALESCE-equivalent (rebooker.js:323-334), never to today's date.
+  // Likewise a handed-off row (no time, recurring_dispatch_due_date = its
+  // cadence date) that the night tool placed up to three days away keeps
+  // that due date — the night tool never stamps an exception — so the next
+  // extension projects from the due date, not the placement; otherwise every
+  // hand-off could shift the plan by up to three days, compounding.
   const anchorDate = (latest?.date_exception && latest?.date_exception_cadence_date)
     ? latest.date_exception_cadence_date
-    : latest?.scheduled_date;
+    : (latest?.recurring_dispatch_due_date || latest?.scheduled_date);
   const latestStr = dateOnly(anchorDate) || '';
   if (!latestStr) return etDateString();
   return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
@@ -19165,13 +19170,15 @@ function latestLiveSeriesVisit(conn, parentId) {
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .where('is_recurring', true)
     .whereNotIn('status', ['cancelled', 'rescheduled'])
-    // Order by cadence POSITION, not the raw (possibly one-off-moved) date —
-    // a "this visit only" exception row occupies date_exception_cadence_date
-    // in the series, same as rescheduleSeries.readSiblings (rebooker.js) and
+    // Order by cadence POSITION, not the raw (possibly moved) date — a "this
+    // visit only" exception row occupies date_exception_cadence_date in the
+    // series, same as rescheduleSeries.readSiblings (rebooker.js) and
     // recurring-schedule-audit.recurringCadenceDate already treat it
-    // (ADMIN-BUG-R30). Matters only when 2+ live rows compete for "latest"
-    // (e.g. a booster sitting past an exception's raw moved date).
-    .orderBy(conn.raw('COALESCE(date_exception_cadence_date, scheduled_date)'), 'desc')
+    // (ADMIN-BUG-R30), and a handed-off row the night tool placed up to three
+    // days away still occupies its recurring_dispatch_due_date. Matters only
+    // when 2+ live rows compete for "latest" (e.g. a booster sitting past an
+    // exception's raw moved date).
+    .orderBy(conn.raw('COALESCE(date_exception_cadence_date, recurring_dispatch_due_date, scheduled_date)'), 'desc')
     .first();
 }
 

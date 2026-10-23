@@ -137,6 +137,8 @@ function ongoingScenario({
   // the caller's conn): weekly days-off JSON + one-off blackout rows.
   weeklyValue = null, blackoutRows = [],
   latestDate = '2098-07-15', seriesDates = ['2098-01-15', '2098-04-15', '2098-07-15'],
+  // Extra fields on the latest live row (e.g. a placed hand-off's due date).
+  latestExtra = {},
   addonRows = [],
   failAddonInsert = 0,
   failAddonRead = false,
@@ -170,7 +172,7 @@ function ongoingScenario({
         if (firstCall[1] === 'status') {
           return statusAfterRegistration == null ? undefined : { status: statusAfterRegistration };
         }
-        if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: latestDate }; // latest
+        if (calls.some((c) => c[0] === 'orderBy')) return { scheduled_date: latestDate, ...latestExtra }; // latest
         return parent;
       }
       if (op === 'await') {
@@ -370,6 +372,23 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15' });
     expect(inserted).toHaveLength(1);
     expect(inserted[0]).toMatchObject({ scheduled_date: '2098-10-15', window_start: '08:00' });
+  });
+
+  test('a handed-off visit the night tool placed 3 days late anchors the next extension on its due date, not the placement', async () => {
+    // Every-6-weeks plan; the latest visit was handed off for Jul 15 and the
+    // night tool placed it on Jul 18 (recurring_dispatch_due_date stays Jul 15,
+    // no exception stamp). The next visit is Jul 15 + 42 = Aug 26, not Aug 29.
+    const { conn, inserted } = ongoingScenario({
+      upcomingCount: 1,
+      sibling: undefined,
+      parentOverrides: { recurring_pattern: 'every_6_weeks', scheduled_date: '2098-06-03' },
+      latestDate: '2098-07-18',
+      latestExtra: { recurring_dispatch_due_date: '2098-07-15' },
+      seriesDates: ['2098-06-03', '2098-07-18'],
+    });
+    await runRecurringSeriesMaintenance(conn, { id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-18' });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].scheduled_date).toBe('2098-08-26');
   });
 
   test('gate on: a completion-time extend on a taken hour hands off — cadence date, no time, windowless reminder', async () => {
@@ -672,9 +691,10 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     const helperBody = src.slice(helper, helperEnd);
     expect(helperBody).toContain(".whereNotIn('status', ['cancelled', 'rescheduled'])");
     // Orders by cadence POSITION (COALESCE date_exception_cadence_date,
-    // scheduled_date), not the raw date — a "this visit only" exception row
-    // must not out-rank its own cadence slot (ADMIN-BUG-R30).
-    expect(helperBody).toContain("COALESCE(date_exception_cadence_date, scheduled_date)");
+    // recurring_dispatch_due_date, scheduled_date), not the raw date — a
+    // "this visit only" exception row or a placed hand-off must not out-rank
+    // its own cadence slot (ADMIN-BUG-R30).
+    expect(helperBody).toContain("COALESCE(date_exception_cadence_date, recurring_dispatch_due_date, scheduled_date)");
     expect(helperBody).toContain(".where('is_recurring', true)");
     // 4th consumer: planUpdateDetailsRecurrenceDates (update-details' pre-trx
     // rung-1 date peek) anchors its extend plan on the same helper.

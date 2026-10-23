@@ -292,7 +292,7 @@ describe('admin-schedule child-insert sites (source)', () => {
     // 3 in-transaction registrations + the 2 alert-action spawn records the
     // post-commit registration reads back.
     expect(src.match(/serviceType: childIdentity\.service_type/g)).toHaveLength(5);
-    expect(src).toContain("spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });");
+    expect(src).toContain("spawned.push({ id: row?.id, date: nd, windowStart: data.window_start, serviceType: childIdentity.service_type });");
     expect(src).toContain('serviceType: row.serviceType || parent.service_type,');
   });
 });
