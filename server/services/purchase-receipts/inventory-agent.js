@@ -24,6 +24,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
+const { savepointRead } = require('../../utils/savepoint-read');
 const { gateEnvValue, gateEnvTimestamp } = require('../../config/feature-gates');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
@@ -1179,10 +1180,12 @@ async function ringBell(notifyAdmin, { lineId, emailId, status, title, body, lin
 
 // An equipment line's bell names the missing or damaged tool it can replace
 // and links to its Assets row (receipt-equipment-link.js, GATE_TRUCK_KIT).
+// The read runs in its own savepoint: a failed SQL read would otherwise
+// abort the settlement transaction, and the plain bell could not be written.
 // A failed read keeps the plain bell: the line is settled either way.
 async function equipmentBell(trx, { lineId, line }) {
   try {
-    return await require('./receipt-equipment-link').equipmentBellFor(trx, { lineId, line });
+    return await savepointRead(trx, (k) => require('./receipt-equipment-link').equipmentBellFor(k, { lineId, line }));
   } catch (err) {
     logger.warn(`[inventory-agent] receipt link read failed for line ${lineId}: ${err?.message || err}`);
     return null;
@@ -2118,6 +2121,8 @@ module.exports = {
   validateReading, containerAgreement, classifyDecision, extractEpaRegNumber,
   canonicalSizeText, inventoryUnitForNewProduct,
   recordAttemptFailure,
+  // The equipment bell's savepoint-isolated receipt-link read (scope PR 3).
+  equipmentBell,
   // The fixed canonical-category rules (2026-09-27 category-canonicalization
   // review) — pure, no I/O — exported so a test can assert the wording a
   // title must carry to state each category, independent of the fuller
