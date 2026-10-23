@@ -189,6 +189,14 @@ describe('spray mix gallons need a liquid application (Codex #6398 r15)', () => 
     expect(none).toEqual({ plant_groups: 'Shrubs' });
     expect(dropSprayGallonsWithoutLiquidApplication(null, [], [])).toBeNull();
   });
+  test('companion T&S values (combined visit, shared products list) drop spray_mix_gallons even beside a liquid product (Codex #6398 r24)', () => {
+    const companion = { plant_groups: 'Shrubs', spray_mix_gallons: '5', hedge_linear_ft_serviced: '120' };
+    dropSprayGallonsWithoutLiquidApplication(companion, [foliar], [], { attributable: false });
+    expect(companion).toEqual({ plant_groups: 'Shrubs', hedge_linear_ft_serviced: '120' });
+    const primary = { plant_groups: 'Shrubs', spray_mix_gallons: '5' };
+    dropSprayGallonsWithoutLiquidApplication(primary, [foliar], [], { attributable: true });
+    expect(primary.spray_mix_gallons).toBe('5');
+  });
 });
 
 describe('owner template composition', () => {

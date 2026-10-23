@@ -356,10 +356,15 @@ function hasLiquidApplication(products = [], productRows = []) {
 }
 // Mutates the typed values in place (the snapshot is built from the same
 // reference): a visit with no liquid application records no spray mix.
-function dropSprayGallonsWithoutLiquidApplication(values, products = [], productRows = []) {
+// `attributable: false` — the values came from a tree_shrub COMPANION section
+// of a combined visit, whose completion payload has ONE shared products list
+// with no per-line attribution: a liquid LAWN product cannot vouch for a T&S
+// spray, so the gallons are dropped outright rather than stored as T&S
+// calibration actuals (Codex #6398 r24).
+function dropSprayGallonsWithoutLiquidApplication(values, products = [], productRows = [], { attributable = true } = {}) {
   if (!values || typeof values !== 'object') return values;
   if (values.spray_mix_gallons === undefined) return values;
-  if (!hasLiquidApplication(products, productRows)) delete values.spray_mix_gallons;
+  if (!attributable || !hasLiquidApplication(products, productRows)) delete values.spray_mix_gallons;
   return values;
 }
 

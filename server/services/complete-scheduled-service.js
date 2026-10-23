@@ -5437,8 +5437,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Spray mix gallons exist only when a product was sprayed or drenched:
       // the full form has no client gate, so a granular-only visit must not
       // feed a spray volume into estimate-actuals (Codex #6398 r15). Same
-      // in-place mutation, so the snapshot built later agrees.
-      dropSprayGallonsWithoutLiquidApplication(treeShrubComplianceValues, products || [], typedProductRows);
+      // in-place mutation, so the snapshot built later agrees. On a COMBINED
+      // visit (T&S as a companion) the shared products list cannot attribute
+      // a liquid product to the T&S line, so the gallons are dropped
+      // (Codex #6398 r24).
+      dropSprayGallonsWithoutLiquidApplication(treeShrubComplianceValues, products || [], typedProductRows, {
+        attributable: typedFindingsType === 'tree_shrub',
+      });
       // The cross-field contradiction rules ran on the pre-derivation values —
       // re-run them so a derived 'Inspection only' can't sit beside an
       // applied-treatment detail field (e.g. pre-emergent marked Yes with

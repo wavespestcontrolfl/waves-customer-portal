@@ -171,10 +171,15 @@ function resolveRealLotSqFt({ enrichedLotSqFt, lotSqFt, lotSizeConfirmed } = {})
 // home would otherwise pass the whole living area off as its footprint
 // (Codex #6398 security r24).
 const TRUSTED_STORIES_SOURCES = new Set(['ai', 'permit', 'verified', 'manual']);
+// The lookup's own verify flags outrank the provenance label: a HIGH
+// fieldVerifyFlags entry on squareFootage or stories (conflicting evidence)
+// — or the global address flag — means "verify before pricing", and a
+// footprint derived from either is not trusted (Codex #6398 r24 P1).
 function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) {
   const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
   if (t.footprintUnknown === true) return null;
   if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource)) return null;
+  if (!lookupDimensionIsTrustworthy(t, 'homeSqFt') || !lookupDimensionIsTrustworthy(t, 'stories')) return null;
   if (t.storiesSource === 'ai') {
     const { storiesSourceForPricing } = require('../services/estimator-engine/draft-builder');
     const graded = storiesSourceForPricing({ stories: t.stories, storiesEvidence: propertyRecord?._storiesEvidence || null });

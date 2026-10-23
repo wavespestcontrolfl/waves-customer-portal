@@ -686,6 +686,24 @@ describe('customer pricing AI helpers', () => {
     expect(review(await run({ stories: 2 }))).toBe(false);
   });
 
+  test('with no building footprint at all (lookup failed or carried none), a lot-inferred T&S line parks (Codex #6398 r24 P1)', async () => {
+    // missingPropertyFor lets T&S price from the lot alone; a zero footprint
+    // would infer beds from nearly the whole lot and publish unreviewed.
+    const run = (propertyLookup) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup,
+      prompt: 'I am interested in tree and shrub care',
+      customer: propertyCustomer({ id: 'cust-nofoot', property_sqft: null, lot_sqft: 30000 }),
+      propertySeed: null,
+    });
+    const review = (r) => r.options?.[0]?.manualReview;
+    expect(review(await run(null))).toBe(true);
+    expect(review(await run(async () => { throw new Error('lookup down'); }))).toBe(true);
+    expect(review(await run(async () => ({ enriched: { lotSqFt: 30000, stories: 1, storiesSource: 'verified' }, propertyRecord: {} })))).toBe(true);
+    // A vouched building prices as before.
+    expect(review(await run(async () => ({ enriched: { homeSqFt: 2400, lotSqFt: 30000, footprint: 2400, stories: 1, storiesSource: 'verified' }, propertyRecord: {} })))).toBe(false);
+  });
+
   test('an UNCERTAIN pool/cage read stays open for seeded features (PR r11 P1)', async () => {
     // The vision schema permits 'POSSIBLE' for pool and poolCage, and the
     // adoption rule maps only 'YES' to true. So an observed-but-undecided

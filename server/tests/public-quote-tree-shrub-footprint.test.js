@@ -87,6 +87,16 @@ describe('trustedTreeShrubFootprintSqFt', () => {
     expect(trustedTreeShrubFootprintSqFt({ storiesSource: 'ai', stories: 3, homeSqFt: 15000 }, { _storiesEvidence: direct })).toBe(5000);
   });
 
+  test("the lookup's own verify flags on squareFootage / stories (or the global address flag) yield NO trusted footprint (Codex #6398 r24 P1)", () => {
+    const base = { storiesSource: 'verified', stories: 2, footprint: 1800, homeSqFt: 3600 };
+    expect(trustedTreeShrubFootprintSqFt(base)).toBe(1800);
+    expect(trustedTreeShrubFootprintSqFt({ ...base, fieldVerifyFlags: [{ field: 'stories', reason: 'conflicting evidence', priority: 'HIGH' }] })).toBeNull();
+    expect(trustedTreeShrubFootprintSqFt({ ...base, fieldVerifyFlags: [{ field: 'squareFootage', reason: 'conflicting evidence', priority: 'HIGH' }] })).toBeNull();
+    expect(trustedTreeShrubFootprintSqFt({ ...base, fieldVerifyFlags: [{ field: 'address', reason: 'house number not on the roll', priority: 'HIGH' }] })).toBeNull();
+    // An unrelated flag (lot size) does not touch the footprint verdict.
+    expect(trustedTreeShrubFootprintSqFt({ ...base, fieldVerifyFlags: [{ field: 'lotSize', reason: 'weak', priority: 'MEDIUM' }] })).toBe(1800);
+  });
+
   test('no server-measured building → null (the pricer parks the lot-based line)', () => {
     expect(trustedTreeShrubFootprintSqFt({ ...V })).toBeNull();
     expect(trustedTreeShrubFootprintSqFt(null)).toBeNull();

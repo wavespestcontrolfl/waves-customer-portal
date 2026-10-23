@@ -571,7 +571,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
         // Adopting that home size without the suppression would let the
         // engine rebuild a one-story footprint from it for the T&S open-parcel
         // basis (Codex #6398 r20 P1); the public route refuses the same way.
-        if (homeSqFt !== before) {
+        // positiveNumber yields 0 when the lookup carried no home size: that
+        // is no adoption (and no footprint) — Codex #6398 r24 P1.
+        if (homeSqFt !== before && Number(homeSqFt) > 0) {
           lookupHomeSqFtAdopted = true;
           lookupStoriesSource = typeof p.storiesSource === 'string' ? p.storiesSource : null;
           if (p.footprintUnknown === true) lookupFootprintUnknown = true;
@@ -950,6 +952,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       ? (propertySeed?.storiesSource || 'estimated')
       : storiesSourceForPricing({ stories, storiesEvidence }))
     : 'default';
+  const lookupFootprintTrusted = lookupHomeSqFtAdopted && !lookupFootprintUnknown
+    && TRUSTED_FOOTPRINT_STORIES_SOURCES.has(resolvedStoriesSource)
+    && !(lookupStoriesSource && !TRUSTED_FOOTPRINT_STORIES_SOURCES.has(lookupStoriesSource));
   const propertyInput = {
     homeSqFt,
     lotSqFt,
@@ -978,17 +983,17 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
           ? { treeShrubFootprintSqFt: propertySeed.treeShrubFootprintSqFt } : {}),
       }
       : {}),
-    // The lookup's own footprint suppression travels with its home size: an
-    // aggregate living area is NOT a footprint (Codex #6398 r20 P1). Nor is
-    // a living area whose story count nobody vouched for (Codex #6398 r23
-    // P1): with stories absent, flagged, defaulted by the lookup or graded
-    // 'estimated', the engine would rebuild a one-story footprint from the
-    // full living area of a possibly multi-story home and shrink the
-    // open-parcel bed with no review reason.
-    ...(!homeSqFtFromSeed && lookupHomeSqFtAdopted
-      && (lookupFootprintUnknown || !TRUSTED_FOOTPRINT_STORIES_SOURCES.has(resolvedStoriesSource)
-        || (lookupStoriesSource && !TRUSTED_FOOTPRINT_STORIES_SOURCES.has(lookupStoriesSource)))
-      ? { treeShrubFootprintTrusted: false } : {}),
+    // Without a seed, the ONLY trusted footprint this lane can hold is a
+    // lookup home size whose story count is vouched for: the lookup's own
+    // footprint suppression travels with its home size (an aggregate living
+    // area is NOT a footprint; Codex #6398 r20 P1), a story count that is
+    // absent, flagged, defaulted by the lookup or graded 'estimated' would
+    // let the engine rebuild a one-story footprint from the full living area
+    // of a possibly multi-story home (r23 P1), and a failed lookup or one
+    // with no building at all leaves a zero footprint that infers beds from
+    // nearly the whole lot (r24 P1). Every one of those marks the footprint
+    // untrusted so a lot-inferred T&S line parks instead of publishing.
+    ...(!homeSqFtFromSeed && !lookupFootprintTrusted ? { treeShrubFootprintTrusted: false } : {}),
     yearBuilt,
     constructionMaterial,
     foundationType,
