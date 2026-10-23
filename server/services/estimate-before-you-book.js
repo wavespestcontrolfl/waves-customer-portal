@@ -28,7 +28,8 @@ const TITLE = 'Before you book';
 const PEST_TEXT = /\bpest\b|cockroach|\broach|\bwasp|\bant\b|\bants\b|\bflea|\bspider|silverfish/i;
 const LAWN_TEXT = /\blawn\b|\bturf\b/i;
 const TERMITE_TEXT = /termite|\bwdo\b|wood[ -]destroying|pre[ -]?slab|drywood/i;
-const WDO_TEXT = /\bwdo\b|wood[ -]destroying|termite inspection/i;
+// a WDO INSPECTION / report only: "Wood-Destroying Organism Treatment" quotes no report (Codex #6504 r2)
+const WDO_TEXT = /(?:\bwdo\b|wood[ -]destroying[a-z ]*?)[^|]*?\b(?:inspection|report|letter)\b|termite inspection/i;
 const RODENT_TEXT = /rodent|\brats?\b|\bmouse\b|\bmice\b/i;
 const TRAPPING_TEXT = /\btrap/i; // trapping only: an exclusion-only job promises no trap checks
 const ROACH_TEXT = /cockroach|\broach/i;
@@ -83,7 +84,7 @@ const SECTIONS = [
     lines: [
       { rank: 1, text: 'Your technician arrives during a two-hour window that starts on the hour.' },
       { rank: 1, text: 'There is no deposit.' },
-      { rank: 2, when: (s) => s.recurring, text: 'If you are a new recurring customer paying by card, you save your card when you book and we charge it after your first visit.' },
+      { rank: 2, when: (s) => s.recurring, text: 'If you are a new recurring customer paying by card for each visit, you save your card when you book and we charge it after your first visit.' },
       { rank: 2, text: 'At the visit, your technician can take a card, a check or cash. You can also pay with the card or bank account we have on file, or send a check or cash through our office.' },
       { rank: 2, when: (s) => s.planTerms && (s.recurringPest || s.recurringLawn), text: 'Residential pest and lawn plans have no long-term contract. You can cancel any time.' },
       // The neutral line: printed whenever the plan terms do not apply (not known residential, or a mix the proposal's own terms-scope check keeps terms-neutral), so such an estimate never reads as month-to-month.
@@ -216,7 +217,9 @@ function estimateSignals(estimate, proposal, { annualPrepayOffered } = {}) {
   try {
     const pub = require('../routes/estimate-public');
     const estData = pub.parseEstimateDataSafe(estimate);
-    const estResult = estData?.result || estData?.engineResult || estData || {};
+    // The authoritative container (a quote-wizard / agent-draft row may carry a sparse `result` beside the
+    // priced `engineResult`): the same pick the pricing audit uses (Codex #6504 r2).
+    const estResult = require('./estimate-result-container').storedEstimateContainer(estData, { pricingAuthority: estimate?.pricing_authority }) || estData || {};
     const services = pub.recurringServicesWithSupplements(estResult);
     const oneTime = [...(estResult.oneTime?.items || []), ...(estResult.oneTime?.specItems || []), ...(estResult.specItems || [])]
       .filter((item) => item && typeof item === 'object');

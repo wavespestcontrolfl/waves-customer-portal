@@ -421,3 +421,16 @@ describe('one-time lawn work gets no program promises (pre-push P1)', () => {
     expect(recurring).toContain('seasonal rotation');
   });
 });
+
+describe('Codex #6504 r2', () => {
+  test('a WDO treatment line promises no inspection report; an inspection line does', () => {
+    expect(detectServices({ items: ['Wood-Destroying Organism Treatment'] }).wdo).toBe(false);
+    expect(detectServices({ items: ['Wood-Destroying Organism Treatment'] }).termite).toBe(true);
+    expect(detectServices({ items: ['WDO Inspection'] }).wdo).toBe(true);
+    expect(detectServices({ items: ['Termite Inspection'] }).wdo).toBe(true);
+  });
+  test('the card-after-first-visit line is about paying per visit, never annual prepay timing', () => {
+    const line = SECTIONS.flatMap((x) => x.lines).find((l) => /after your first visit/.test(l.text));
+    expect(line.text).toMatch(/for each visit/);
+  });
+});
