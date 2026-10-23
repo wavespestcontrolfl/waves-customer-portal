@@ -216,6 +216,9 @@ const CHILD = '00000000-0000-4000-8000-0000000000c1';
 const ACTION = '00000000-0000-4000-8000-0000000000b1';
 const NOTICE = [{ recipient_key: 'abc123abc123abc1', body: 'Hi Synthia, your visit on Oct 30 is cancelled.' }];
 const MONEY = { invoices: [{ id: 'inv-1', total: 90, payment_intent_id: null }], creditReversalOfferIds: ['offer-1'] };
+// The claim token this cancellation's own send stored on its bundle (appointment-reminders.js claim transaction).
+const TOKEN = '2026-10-23T14:55:00.000Z';
+const MONEY_CLAIMED = { ...MONEY, notice_claim_tokens: [TOKEN] };
 
 function seedBundle(overrides = {}) {
   const row = {
@@ -875,7 +878,7 @@ describe('delivery evidence found when the text step stops because the visit cha
   });
 
   test('nothing reported but the reminder shows one recipient reached: recorded partial', async () => {
-    const row = seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    const row = seedBundle({ approved_money: MONEY_CLAIMED, followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
     mockNoticeStatus.mockResolvedValueOnce('ready').mockResolvedValue('partial');
     restoredMidSend({});
     await svc.sweepIbCancelBundles();
@@ -883,13 +886,81 @@ describe('delivery evidence found when the text step stops because the visit cha
   });
 
   test('no evidence that anything went out: no text outcome is invented', async () => {
-    const row = seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    const row = seedBundle({ approved_money: MONEY_CLAIMED, followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
     mockNoticeStatus.mockResolvedValueOnce('ready').mockResolvedValue('ready');
     restoredMidSend({ notificationSent: false, notificationError: 'cancellation fence: visit_is_confirmed' });
     await svc.sweepIbCancelBundles();
     expect(row.status).toBe('abandoned');
     expect(row.notice_outcome).toBeNull();
     expect(mockRecordResult.mock.calls[0][1].customer_text_sent).toBeUndefined();
+  });
+});
+
+describe('abandonment evidence belongs to this bundle\'s cancellation (claim tokens)', () => {
+  const claimed = { followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } };
+  // The operator restores the visit and cancels it again (a NEWER cancellation) before the recovery runs.
+  const restoreAndRecancel = () => {
+    mockStore.history.push(
+      { id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 20 * MIN) },
+      { id: 3, job_id: SERVICE, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: new Date(mockNow.getTime() - 10 * MIN) },
+    );
+  };
+
+  test('restore + re-cancel, no token stored for this bundle: the NEWER cancellation\'s delivered text is never reported as this one\'s', async () => {
+    const row = seedBundle(claimed);
+    restoreAndRecancel();
+    // The reminder now belongs to the newer cancellation and reads delivered; this bundle has no claim token, so it must not matter.
+    mockNoticeStatus.mockResolvedValue('delivered');
+    await svc.sweepIbCancelBundles();
+    expect(row.status).toBe('abandoned');
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.customer_text_sent).toBe(false);
+    expect(result.customer_text_uncertain).toBe(true);
+    expect(result.warning).toMatch(/not confirmed/);
+    expect(result.warning).not.toMatch(/went out\./);
+    expect(result.warning).toMatch(/before sending it again/);
+    expect(mockNoticeStatus).not.toHaveBeenCalledWith(SERVICE, expect.objectContaining({ claimTokens: expect.anything() }));
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    // The unconfirmed state is a report, not a recorded outcome.
+    expect(row.notice_outcome).toBeNull();
+  });
+
+  test('restore + re-cancel with a stored token: the audit rows of THAT token decide, not the current marker', async () => {
+    seedBundle({ ...claimed, approved_money: MONEY_CLAIMED });
+    restoreAndRecancel();
+    mockNoticeStatus.mockImplementation(async (_id, opts) => (opts && Array.isArray(opts.claimTokens) ? 'delivered' : 'ready'));
+    await svc.sweepIbCancelBundles();
+    expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, expect.objectContaining({ claimTokens: [TOKEN] }));
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.customer_text_sent).toBe(true);
+    expect(result.warning).toMatch(/went out/);
+  });
+
+  test('a stored token whose send has no accepted audit row is unconfirmed, not delivered, even if the current marker reads delivered', async () => {
+    seedBundle({ ...claimed, approved_money: MONEY_CLAIMED });
+    restoreAndRecancel();
+    mockNoticeStatus.mockImplementation(async (_id, opts) => (opts && Array.isArray(opts.claimTokens) ? 'uncertain' : 'delivered'));
+    await svc.sweepIbCancelBundles();
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.customer_text_sent).toBe(false);
+    expect(result.customer_text_uncertain).toBe(true);
+  });
+
+  test('the same cancellation (token stored) abandoned later by another cause still reports its delivered text', async () => {
+    const row = seedBundle({ ...claimed, approved_money: MONEY_CLAIMED });
+    mockStore.visits[0].status = 'confirmed';
+    mockNoticeStatus.mockImplementation(async (_id, opts) => (opts && Array.isArray(opts.claimTokens) ? 'delivered' : 'ready'));
+    await svc.sweepIbCancelBundles();
+    expect(row.status).toBe('abandoned');
+    expect(mockRecordResult.mock.calls[0][1].customer_text_sent).toBe(true);
+  });
+
+  test('a report written while the cancel still stands (the expiry report) reads the current reminder, unbound', async () => {
+    seedBundle({ attempts: svc.MAX_ATTEMPTS, lease_owner: null, lease_until: null, ...claimed });
+    mockNoticeStatus.mockResolvedValue('delivered');
+    await svc.sweepIbCancelBundles();
+    expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, expect.not.objectContaining({ claimTokens: expect.anything() }));
+    expect(mockRecordResult.mock.calls[0][1].customer_text_sent).toBe(true);
   });
 });
 
@@ -1255,20 +1326,22 @@ describe('a text stamped as sent but not proven is reported as in flight, never 
     expect(result.warning).toMatch(/Every approved step finished/);
   });
 
-  test('an abandonment on a stamped, unproven text says so; a rebuilt receipt shows delivered once the audit exists', async () => {
+  test('an abandonment on a stamped, unproven text says it is not confirmed and never advises a resend', async () => {
     mockNoticeStatus.mockResolvedValue('uncertain');
-    const row = seedBundle({ attempts: 2 });
+    const row = seedBundle({ attempts: 2, approved_money: MONEY_CLAIMED });
     mockStore.visits[0].status = 'confirmed';
     await svc.sweepIbCancelBundles();
     const abandoned = mockRecordResult.mock.calls[0][1];
     expect(abandoned.customer_text_uncertain).toBe(true);
-    expect(abandoned.warning).toMatch(/may be going out right now/);
+    expect(abandoned.warning).toMatch(/not confirmed/);
+    expect(abandoned.warning).toMatch(/Check the message history before sending it again/);
     expect(row.status).toBe('abandoned');
   });
 
   test('a request-finished row with no saved text outcome and a text that was later accepted rebuilds a receipt that says delivered', async () => {
     mockNoticeStatus.mockResolvedValue('delivered');
     seedBundle({
+      approved_money: MONEY_CLAIMED,
       status: 'complete', finish_note: 'request', lease_owner: null, lease_until: null, notice_outcome: null,
       finished_at: new Date(mockNow.getTime() - 15 * MIN),
       followthrough_done_at: new Date(mockNow.getTime() - 15 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] },

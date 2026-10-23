@@ -2652,9 +2652,23 @@ async function claimApprovedNoticeForGeneration(record, cancelGeneration) {
     // approved text is not untouched): the rows are locked together so the check and the claim cannot be split.
     const rows = await trx('appointment_reminders').where({ scheduled_service_id: record.scheduled_service_id }).orderBy('id').forUpdate().select('id', 'cancellation_notice_state');
     if ((rows || []).some((row) => row.cancellation_notice_state && row.cancellation_notice_state !== 'pending_approved')) return 0;
-    return trx('appointment_reminders')
+    const won = await trx('appointment_reminders')
       .where({ id: record.id, cancellation_notice_state: 'pending_approved' })
       .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending_approved', updated_at: noticeToken });
+    // The claim token is written on the bundle in the SAME transaction (before any stamp or handoff), so a report built after
+    // the visit was restored and cancelled again can still find THIS cancellation's text evidence by its token, and never mistake
+    // the newer cancellation's marker for it. It lives in approved_money (never rewritten after insert; the follow-through
+    // reads only invoices and creditReversalOfferIds from it).
+    if (won && cancelGeneration.bundleId) {
+      await trx('ib_cancel_effect_bundles').where({ id: cancelGeneration.bundleId }).update({
+        approved_money: trx.raw(
+          "jsonb_set(COALESCE(approved_money, '{}'::jsonb), '{notice_claim_tokens}', COALESCE(approved_money->'notice_claim_tokens', '[]'::jsonb) || to_jsonb(?::text), true)",
+          [new Date(noticeToken).toISOString()],
+        ),
+        updated_at: new Date(),
+      });
+    }
+    return won;
   });
   return { noticeToken, claimed };
 }
@@ -2729,7 +2743,8 @@ async function approvedRecipientsReached(record, scheduledServiceId, destination
 // (the approved send failed or was blocked, or the card chose no text). 'no_reminder' = no reminder row. 'other' = any
 // other marker, which the approved send does not own. Lives with the approved-send helpers
 // (cancel-notice-approved-marker.test.js keeps that marker out of every sweep); it claims and sends nothing.
-async function approvedNoticeStatus(scheduledServiceId, { recipientKeys = null } = {}) {
+async function approvedNoticeStatus(scheduledServiceId, { recipientKeys = null, claimTokens = null } = {}) {
+  if (Array.isArray(claimTokens)) return boundNoticeStatus(scheduledServiceId, claimTokens, recipientKeys);
   // A visit can carry several reminder rows (uniqueness is not guaranteed) and the cancel mints the marker on each: the status
   // is read across EVERY row. A live send can claim and send one row and die before reporting while a sibling stays untouched;
   // any touched row decides, so an untouched sibling can never read as "ready" and be sent a second time.
@@ -2744,6 +2759,24 @@ async function approvedNoticeStatus(scheduledServiceId, { recipientKeys = null }
   const sentRows = marked.filter((row) => row.cancellation_notice_state === 'sent');
   if (sentRows.length) return sentRowsStatus(scheduledServiceId, sentRows, recipientKeys);
   return marked.some((row) => row.cancellation_notice_state === 'suppressed') ? 'suppressed' : 'other';
+}
+
+// Evidence for ONE cancellation: judged only on the claim tokens that cancellation's sends stored (the bundle's), never on the
+// reminder's current marker, which after a restore and a new cancel belongs to the NEWER cancellation. 'delivered' / 'partial' =
+// accepted audit rows carry one of those tokens (per approved recipient); 'uncertain' = a token was stored but no accepted audit
+// row carries it (the send may have been handed to the provider, or parked, or never started: unconfirmed); 'unbound' = no token
+// was ever stored for this cancellation, so nothing can be attributed to it. It never answers 'ready'.
+async function boundNoticeStatus(scheduledServiceId, claimTokens, recipientKeys) {
+  if (!claimTokens.length) return 'unbound';
+  const destinations = new Set();
+  for (const token of claimTokens) {
+    for (const to of await cancellationAcceptedDestinations(scheduledServiceId, token)) destinations.add(to);
+  }
+  if (destinations.size === 0) return 'uncertain';
+  if (!recipientKeys || !recipientKeys.length) return 'delivered';
+  const record = await db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).orderBy('id').first('id', 'customer_id');
+  if (!record) return 'partial';
+  return (await approvedRecipientsReached(record, scheduledServiceId, destinations, recipientKeys)) ? 'delivered' : 'partial';
 }
 
 // 'sent' on at least one row: delivery is judged on the audit rows of EVERY sent row's own claim token (never a time window).

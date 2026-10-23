@@ -442,6 +442,67 @@ describe('approvedCancellationNoticeStatus', () => {
     });
   });
 
+  // A report about ONE cancellation (an abandonment after restore + re-cancel) is judged on the claim tokens that cancellation's
+  // sends stored, never on the reminder's current marker, which belongs to the newer cancellation.
+  describe('claimTokens: evidence bound to one cancellation', () => {
+    const TOKEN = '2026-10-23T14:55:00.000Z';
+    const keys = () => [KEY('+19415550101')];
+    const bound = async (state, auditRows, claimTokens, recipientKeys = keys()) => {
+      mockState.reminder = { id: 'rem-1', customer_id: 'cust-1', cancellation_notice_state: state, cancellation_notice_at: new Date('2026-10-23T16:00:00.000Z') };
+      mockState.reminders = null;
+      mockState.auditRows = auditRows;
+      mockState.raws.length = 0;
+      return AppointmentReminders.approvedCancellationNoticeStatus('svc-1', { recipientKeys, claimTokens });
+    };
+
+    test('no stored token is unbound whatever the current marker and audit rows say (never ready, never delivered)', async () => {
+      expect(await bound('sent', [{ to_hash: sha('+19415550101') }], [])).toBe('unbound');
+      expect(await bound('pending_approved', [], [])).toBe('unbound');
+    });
+
+    test('accepted audit rows of the stored token prove delivery per recipient, whatever state the current marker is in', async () => {
+      expect(await bound('pending_approved', [{ to_hash: sha('+19415550101') }], [TOKEN])).toBe('delivered');
+      expect(await bound('pending_approved', [{ to_hash: sha('someone@example.test') }], [TOKEN])).toBe('partial');
+    });
+
+    test('a stored token with no accepted audit row is unconfirmed, never ready', async () => {
+      expect(await bound('pending_approved', [], [TOKEN])).toBe('uncertain');
+      expect(await bound('sent', [], [TOKEN])).toBe('uncertain');
+    });
+
+    test('the audit rows are matched by the stored token (equality), not by the current claim token or a cycle window', async () => {
+      await bound('sent', [{ to_hash: sha('+19415550101') }], [TOKEN]);
+      const audit = mockState.raws.filter(([table]) => table === 'messaging_audit_log');
+      const byToken = audit.filter(([, sql]) => String(sql).includes("metadata->>'cancellation_notice_token' = ?"));
+      expect(byToken.length).toBeGreaterThan(0);
+      expect(byToken.every(([, , bindings]) => JSON.stringify(bindings) === JSON.stringify([TOKEN]))).toBe(true);
+      expect(audit.every(([, sql]) => !String(sql).includes('transitioned_at'))).toBe(true);
+    });
+  });
+
+  test('the fenced claim writes its token on the bundle in the same transaction (before any stamp or handoff)', async () => {
+    const dbMock = require('../models/db');
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    const seen = [];
+    mockState.reminders = null;
+    const original = dbMock.transaction.getMockImplementation();
+    dbMock.transaction.mockImplementationOnce(async (fn) => { seen.push('begin'); const out = await fn(dbMock); seen.push('end'); return out; });
+    mockState.updates.length = 0;
+    mockState.wheres.length = 0;
+    const { claimed } = await AppointmentReminders.claimApprovedNoticeForGeneration({ id: 'rem-1', scheduled_service_id: 'svc-1' }, fence);
+    dbMock.transaction.mockImplementation(original);
+    expect(claimed).toBe(1);
+    expect(mockState.wheres).toContainEqual(['ib_cancel_effect_bundles', { id: 'b-1' }]);
+    const written = mockState.updates.find((u) => 'approved_money' in u);
+    expect(written.approved_money.__raw).toMatch(/notice_claim_tokens/);
+    expect(written.approved_money.__raw).toMatch(/\|\| to_jsonb\(\?::text\)/);
+    expect(seen).toEqual(['begin', 'end']);
+    // A fence without a bundle (older callers) writes nothing extra.
+    mockState.updates.length = 0;
+    await AppointmentReminders.claimApprovedNoticeForGeneration({ id: 'rem-1', scheduled_service_id: 'svc-1' }, { visitId: 'svc-1', restorations: 2, hits: [] });
+    expect(mockState.updates.some((u) => 'approved_money' in u)).toBe(false);
+  });
+
   test('delivered needs an accepted audit row for the phone of EVERY approved recipient', async () => {
     const primary = '+19415550101';
     const keys = [KEY(primary)];

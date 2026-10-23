@@ -524,6 +524,29 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(new Date(after.cancellation_notice_at).getTime()).toBe(new Date(out.noticeToken).getTime());
     });
 
+    test('the claim writes its token on the bundle in the same transaction: appended, never replacing the pinned money, and only when it won the marker', async () => {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      await app(TABLE).where({ id }).update({ lease_owner: 'tok', lease_until: app.raw("now() + interval '5 minutes'") });
+      const owned = () => ({ visitId: visit, restorations: 0, bundleId: id, leaseToken: 'tok', hits: [] });
+      const [row] = await marker();
+      const first = await claimApprovedNoticeForGeneration(row, owned());
+      const tokens = async () => (await app(TABLE).where({ id }).first()).approved_money;
+      expect(first.claimed).toBe(1);
+      expect(await tokens()).toMatchObject({ invoices: expect.any(Array), creditReversalOfferIds: [], notice_claim_tokens: [new Date(first.noticeToken).toISOString()] });
+      // A second claim (the marker is still pending_approved under the first token) appends a second token.
+      const second = await claimApprovedNoticeForGeneration(row, owned());
+      expect((await tokens()).notice_claim_tokens).toEqual([new Date(first.noticeToken).toISOString(), new Date(second.noticeToken).toISOString()]);
+      // A claim that wins nothing (the marker was sent) writes nothing.
+      await app('appointment_reminders').where({ id: row.id }).update({ cancellation_notice_state: 'sent' });
+      expect((await claimApprovedNoticeForGeneration(row, owned())).claimed).toBe(0);
+      expect((await tokens()).notice_claim_tokens).toHaveLength(2);
+      // A bundle that lost its lease refuses the claim before anything is written.
+      await app(TABLE).where({ id }).update({ lease_owner: 'someone-else' });
+      await app('appointment_reminders').where({ id: row.id }).update({ cancellation_notice_state: 'pending_approved' });
+      await expect(claimApprovedNoticeForGeneration(row, owned())).rejects.toMatchObject({ fenceReason: 'lease_lost' });
+      expect((await tokens()).notice_claim_tokens).toHaveLength(2);
+    });
+
     test('any other marker is not claimed', async () => {
       const [row] = await marker({ cancellation_notice_state: 'sent' });
       expect((await claimApprovedNoticeForGeneration(row, fence())).claimed).toBe(0);
