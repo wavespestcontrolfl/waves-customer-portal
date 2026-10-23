@@ -4486,6 +4486,9 @@ const gates = {
   // the fast-context answer and the completion freeze read GATE_TS_WATCH_LIST
   // at call time via tsWatchListLive().
   tsWatchList: process.env.GATE_TS_WATCH_LIST === 'true',
+  // Tree & Shrub lighting-aware color (owner 2026-10-23). Boot-log entry only:
+  // every caller reads GATE_TS_LIGHTING at call time via tsLightingLive().
+  tsLighting: process.env.GATE_TS_LIGHTING === 'true',
 
   // Tree & Shrub live-insect check (owner 2026-10-05). Ships DARK in every
   // environment. This entry is for logGateStatus only: the fast-context answer
