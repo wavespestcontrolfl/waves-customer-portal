@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // The address picker's selected coordinates travel with a staff-added service address (the county reclaimed-water match and the route
-// planner read them), only while the typed address is still the selected one.
+// planner read them), only while the typed address is still the selected one, and only with GATE_LAWN_RECLAIMED_HALF_N on (the list
+// response's reclaimedWater flag); a dark gate sends the old body.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -22,10 +23,11 @@ import CustomerPropertiesPanelV2 from './CustomerPropertiesPanelV2';
 const PRIMARY = { id: 'p1', address_line1: '10 Palm Ave', city: 'Naples', state: 'FL', zip: '34102', is_primary: true, occupancy_type: 'unknown', label: null };
 const json = (body, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
 
-async function openAndPick(pick) {
+const LIST_ON = { properties: [PRIMARY], reclaimedWater: true };
+async function openAndPick(pick, list = LIST_ON) {
   window.__PICK__ = pick;
   const fetchMock = vi.fn((url, opts = {}) => (opts.method === 'POST'
-    ? json({ properties: [PRIMARY] }, 201) : json({ properties: [PRIMARY] })));
+    ? json({ properties: [PRIMARY] }, 201) : json(list)));
   vi.stubGlobal('fetch', fetchMock);
   render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
   fireEvent.click(await screen.findByRole('button', { name: 'Add service address' }));
@@ -49,6 +51,14 @@ describe('CustomerPropertiesPanelV2: coordinates of a picked address', () => {
     expect(body).toMatchObject({ address_line1: '30 Bay Rd', city: 'Parrish', state: 'FL', zip: '34219', latitude: 27.5821, longitude: -82.4276 });
   });
 
+  it('gate off (no reclaimedWater flag on the list): a picked address sends no coordinates', async () => {
+    const fetchMock = await openAndPick(PARTS, { properties: [PRIMARY] });
+    const body = await save(fetchMock);
+    expect(body).toMatchObject({ address_line1: '30 Bay Rd', zip: '34219' });
+    expect(body).not.toHaveProperty('latitude');
+    expect(body).not.toHaveProperty('longitude');
+  });
+
   it('sends none when the pick had no coordinates, or the street was edited after the pick', async () => {
     let fetchMock = await openAndPick({ ...PARTS, lat: null, lng: null });
     expect(await save(fetchMock)).not.toHaveProperty('latitude');
@@ -63,7 +73,7 @@ describe('CustomerPropertiesPanelV2: coordinates of a picked address', () => {
 
   it('typing an address by hand (no pick) sends no coordinates', async () => {
     window.__PICK__ = PARTS;
-    const fetchMock = vi.fn((url, opts = {}) => (opts.method === 'POST' ? json({ properties: [PRIMARY] }, 201) : json({ properties: [PRIMARY] })));
+    const fetchMock = vi.fn((url, opts = {}) => (opts.method === 'POST' ? json({ properties: [PRIMARY] }, 201) : json(LIST_ON)));
     vi.stubGlobal('fetch', fetchMock);
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
     fireEvent.click(await screen.findByRole('button', { name: 'Add service address' }));

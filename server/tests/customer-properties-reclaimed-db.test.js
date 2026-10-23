@@ -92,6 +92,15 @@ suite('reclaimed water edits against isolated Postgres', () => {
       expect(await rowOf(row.id)).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
     });
 
+    test('GATE_LAWN_RECLAIMED_HALF_N off: valid picker coordinates are not stored (the old insert)', async () => {
+      delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+      const res = await post({ ...next(), latitude: 27.58211234, longitude: -82.42763456 });
+      expect(res.status).toBe(201);
+      const row = await rowOf(res.body.propertyId);
+      expect(row.latitude).toBeNull();
+      expect(row.longitude).toBeNull();
+    });
+
     test.each([
       ['no coordinates', {}],
       ['only a latitude', { latitude: 27.5 }],

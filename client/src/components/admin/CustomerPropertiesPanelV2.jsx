@@ -180,8 +180,9 @@ export default function CustomerPropertiesPanelV2({
           state: stateCode,
           zip: form.zip.trim(),
           // The selected address's coordinates, only while the typed street, city and ZIP are still the ones selected (an edited address would
-          // otherwise keep the old pin); the server validates them and ignores a bad pair.
-          ...selectedCoordinates(selectedAddressRef.current, form),
+          // otherwise keep the old pin); the server validates them and ignores a bad pair. Only with GATE_LAWN_RECLAIMED_HALF_N on: the
+          // coordinates feed the reclaimed-water meter match, so a dark gate sends the old body.
+          ...(reclaimedEnabled ? selectedCoordinates(selectedAddressRef.current, form) : {}),
           occupancy_type: form.occupancy_type || "unknown",
           relationship: form.relationship || null,
           label: form.label.trim() || null,
