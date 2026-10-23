@@ -320,7 +320,8 @@ function makeFakeDb({ categories } = {}) {
       where(arg) { if (typeof arg === 'function') arg.call(b); else state.eq = arg; return b; },
       orWhere(arg) { if (typeof arg === 'function') arg.call(b); return b; },
       whereRaw(sql, binds) { state.raws.push({ sql, binds: binds || [] }); return b; },
-      first(expr) { state.first = expr || true; return b; },
+      first(...cols) { state.first = cols.length ? cols : true; return b; },
+      forUpdate() { return b; },
       update(patch) { state.patch = patch; return b; },
       delete() { state.deleting = true; return b; },
       select() { return b; },
@@ -362,9 +363,17 @@ function makeFakeDb({ categories } = {}) {
           if (state.not) out = out.filter(r => r[state.not.col] !== state.not.val);
           if (state.notNull) out = out.filter(r => r[state.notNull] !== null && r[state.notNull] !== undefined);
           if (state.eq) out = out.filter(r => Object.entries(state.eq).every(([k, v]) => r[k] === v));
-          if (state.patch) { out.forEach(r => Object.assign(r, state.patch)); log.writes += 1; return out.length; }
+          if (state.patch) {
+            // a raw jsonb key subtraction (the verify marker's clear) is applied; any other raw is stored as the tests inspect it
+            const sub = state.patch.suggestion && typeof state.patch.suggestion.sql === 'string' && state.patch.suggestion.sql.match(/^suggestion - '(\w+)'$/);
+            out.forEach(r => {
+              if (sub) { const sug = { ...(r.suggestion || {}) }; delete sug[sub[1]]; Object.assign(r, { ...state.patch, suggestion: sug }); } else Object.assign(r, state.patch);
+            });
+            log.writes += 1;
+            return out.length;
+          }
           if (state.deleting) { const gone = new Set(out); store[table] = store[table].filter(r => !gone.has(r)); log.writes += 1; return gone.size; }
-          return out;
+          return state.first ? (out[0] || null) : out;
         }).then(resolve, reject);
       },
     };
@@ -1134,6 +1143,81 @@ describe('what the portal already holds', () => {
     await expect(run({ file, db })).rejects.toThrow(/a connected bank feed starts inside this file's days/);
     expect(db.log.locks.filter(l => /pg_advisory_unlock/.test(l.sql)).map(l => l.conn)).toEqual(['conn-1', 'conn-2']);
     expect(db.log.locks.filter(l => l.released).map(l => l.released)).toEqual(['conn-1', 'conn-2']);
+  });
+
+  test('a booking commits with its verify marker and clears it only after the check; a marker a dead run left is finished by the next run before the row is judged', async () => {
+    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-03-14' }));
+    const db = makeFakeDb();
+    const inserts = [];
+    const seen = (t) => (table) => { const b = t(table); if (table === 'bank_transactions') { const ins = b.insert; b.insert = (rows) => { inserts.push(...(Array.isArray(rows) ? rows : [rows])); return ins(rows); }; } return b; };
+    const spy = seen(db);
+    spy.transaction = (fn) => db.transaction((trx) => fn(Object.assign(seen(trx), { raw: trx.raw })));
+    spy.raw = db.raw; spy.client = db.client; spy.tables = db.tables; spy.log = db.log;
+    expect((await run({ file, db: spy })).counts).toMatchObject({ inserted: 1, parked: 0 });
+    expect(inserts.find(r => r.status === 'created_expense').suggestion.ledgerVerifyPending).toBe(true); // committed with the booking
+    const stored = () => db.tables().bank_transactions[0];
+    expect(stored().suggestion.ledgerVerifyPending).toBeUndefined(); // cleared after the check
+    expect(stored().suggestion).toMatchObject({ ledgerClass: 'expense', schedCLine: '22' });
+    // a run that died between the commit and the check: the marker is still set, and a hand expense landed in that gap
+    stored().suggestion = { ...stored().suggestion, ledgerVerifyPending: true };
+    db.tables().expenses.push({ id: 'exp-hand', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies' });
+    const dry = await run({ file, db, dryRun: true });
+    expect(dry.counts).toMatchObject({ parked: 1, duplicates: 1 });
+    expect(dry.report).toMatch(/booked by an earlier run that ended before its check; the next run \(not a dry run\) checks it/);
+    expect(db.tables().expenses).toHaveLength(2); // a dry run writes nothing
+    const { counts, report } = await run({ file, db });
+    expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 1, held: 0, parked: 1, portalExpenses: 1 });
+    expect(report).toMatch(/an expense of the same amount already in the portal: "Acme Supply" dated the same day \(entered while an earlier run wrote it; that run ended before its check\)/);
+    expect(db.tables().expenses.map(e => e.id)).toEqual(['exp-hand']); // the doubled booking is gone
+    expect(stored()).toMatchObject({ status: 'unmatched', matched_expense_id: null, suggestion: expect.objectContaining({ review: true, manualLink: true }) });
+    expect(stored().suggestion.ledgerVerifyPending).toBeUndefined();
+    // the dead run's expense was EDITED or REFUNDED before the next run: a check never deletes it; the booking is kept and the row says so
+    for (const change of ['edited', 'receipt', 'job', 'refunded']) {
+      const db3 = makeFakeDb();
+      await run({ file, db: db3 });
+      const row3 = () => db3.tables().bank_transactions.find(b => b.source === 'ledger-csv');
+      row3().suggestion = { ...row3().suggestion, ledgerVerifyPending: true };
+      db3.tables().expenses.push({ id: 'exp-hand', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies' });
+      const booked = db3.tables().expenses.find(e => e.id === row3().matched_expense_id);
+      if (change === 'edited') booked.description = 'owner note';
+      else if (change === 'receipt') booked.receipt_s3_key = 'receipts/x.jpg'; // a column the ledger never set, filled since
+      else if (change === 'job') booked.scheduled_service_id = 'svc-1';
+      else db3.tables().bank_transactions.push({ id: 'rf', row_hash: 'rf', source: 'csv', status: 'refund_applied', amount: '2.00', direction: 'credit', suggestion: { refundAppliedTo: row3().matched_expense_id, refundAmount: 2 } });
+      const out3 = await run({ file, db: db3 });
+      expect(out3.counts).toMatchObject({ parked: 1, duplicates: 1, inserted: 0 });
+      expect(out3.report).toMatch(/this booking was kept: its expense was edited or refunded since, compare the two on the Expenses tab/);
+      expect(db3.tables().expenses).toHaveLength(2); // nothing deleted
+      expect(row3()).toMatchObject({ status: 'created_expense', matched_expense_id: expect.any(String) });
+      expect(row3().suggestion.sql).toMatch(/^\(coalesce\(suggestion, '\{\}'::jsonb\) - 'ledgerVerifyPending'\) \|\| \?::jsonb$/);
+      expect(JSON.parse(row3().suggestion.bindings[0])).toMatchObject({ review: true, note: expect.stringMatching(/this booking was kept/) });
+    }
+    // a marker on a row the owner unlinked since: nothing to verify, the marker goes
+    const db2 = makeFakeDb();
+    await run({ file, db: db2 });
+    Object.assign(db2.tables().bank_transactions[0], { status: 'unmatched', matched_expense_id: null, suggestion: { ...db2.tables().bank_transactions[0].suggestion, ledgerVerifyPending: true } });
+    expect((await run({ file, db: db2 })).counts).toMatchObject({ parked: 0, held: 1 });
+    expect(db2.tables().bank_transactions[0].suggestion.bindings).toBeDefined(); // held: open without its expense, noted
+    expect(db2.tables().expenses).toHaveLength(1);
+  });
+
+  test('a rerun of an unchanged file keeps the note an open row already carries (a nearby expense, a missing category); a reopened row with none gets the plain one', async () => {
+    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-03-14' }));
+    const db = makeFakeDb();
+    db.tables().expenses.push({ id: 'exp-hand', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies' });
+    expect((await run({ file, db })).counts).toMatchObject({ parked: 1 });
+    const stored = () => db.tables().bank_transactions[0];
+    expect(stored().suggestion.note).toMatch(/^an expense of the same amount already in the portal/);
+    expect((await run({ file, db })).counts).toMatchObject({ held: 1, duplicates: 0 });
+    let merged = JSON.parse(stored().suggestion.bindings[0]);
+    expect(merged.note).toBeUndefined(); // the park's own note stands
+    expect(merged.ledgerConflict).toBeUndefined(); // the reading did not change
+    expect(merged).toMatchObject({ review: true, ledgerClass: 'expense' });
+    // a reopened row (its expense deleted, the row back to open with no note) gets the plain note
+    stored().suggestion = { ledgerClass: 'expense', ledgerCategory: 'Supplies (chemicals, equipment, hardware)', schedCLine: '22', flag: '' };
+    expect((await run({ file, db })).counts).toMatchObject({ held: 1 });
+    merged = JSON.parse(stored().suggestion.bindings[0]);
+    expect(merged.note).toMatch(/^loaded from the ledger as expense .* and still open without its expense: create the expense here, or ignore the row$/);
+    expect(merged.ledgerConflict).toBeUndefined();
   });
 
   test('expenses the other year\'s ledger run made are the ledger\'s own: not listed, never held against, even within the window of this file', async () => {
