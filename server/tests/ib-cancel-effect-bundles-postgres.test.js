@@ -245,6 +245,23 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     expect(await app(TABLE).where({ id: busyId }).first()).toMatchObject({ status: 'expired', finish_note: 'attempts_exhausted' });
   });
 
+  test('a child the dead request cancelled and an operator restored is rechecked under its own lock: a linked skip, never recorded as done', async () => {
+    const child = randomUUID();
+    await app('scheduled_services').insert({ id: child, customer_id: customer, status: 'cancelled', service_type: 'Pest Control', scheduled_date: '2099-01-20' });
+    await app('job_status_history').insert({ job_id: child, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: app.fn.now() });
+    const id = await app.transaction((trx) => svc.insertBundle(trx, pins({ notifyCustomer: false, approvedNotice: null, approvedMoney: {}, linkedChildren: [{ id: child, status: 'confirmed' }] })));
+    await ageBundle(id, 30);
+    // The unlocked classification sees the child cancelled; then it is restored (status back, a restoration on record).
+    mockFollowThrough.mockImplementationOnce(async () => {
+      await app('scheduled_services').where({ id: child }).update({ status: 'confirmed' });
+      await app('job_status_history').insert({ job_id: child, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() });
+    });
+    await svc.sweepIbCancelBundles();
+    const row = await app(TABLE).where({ id }).first();
+    expect(row.followthrough_outcome.linked_skipped).toEqual([{ id: child, reason: 'child_restored_since' }]);
+    expect(row.followthrough_outcome.linked_already_cancelled).toBeUndefined();
+  });
+
   test('a visit restored after the cancel is abandoned: nothing runs', async () => {
     const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
     await ageBundle(id, 30);

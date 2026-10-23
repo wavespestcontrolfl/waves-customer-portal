@@ -534,6 +534,42 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
 });
 
 describe('the approved text is sent at most once and never when it cannot be proven safe', () => {
+  test('a child cancelled by the dead request and RESTORED since is rechecked under its lock: reported as a linked skip, never done', async () => {
+    seedBundle({ linked_children: [{ id: CHILD, status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control', restorations_seen: 0 }], notify_customer: false, approved_notice: null });
+    mockStore.visits[1].status = 'cancelled';
+    // Restored right after the unlocked classification: it reads cancelled first, then live with a restoration on record.
+    mockStore.history.push({ id: 7, job_id: CHILD, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - MIN) });
+    mockFollowThrough.mockImplementationOnce(async () => { mockStore.visits[1].status = 'confirmed'; });
+    await svc.sweepIbCancelBundles();
+    const outcome = mockStore.bundles[0].followthrough_outcome;
+    expect(outcome.linked_skipped).toEqual([{ id: CHILD, reason: 'child_restored_since' }]);
+    expect(outcome.linked_already_cancelled).toBeUndefined();
+    expect(mockRaised[0].spec.severity).toBe('needs-you');
+    expect(mockRaised[0].opts.detail).toMatch(new RegExp(CHILD));
+  });
+
+  test('a child still cancelled at its pinned generation is recorded done', async () => {
+    seedBundle({ linked_children: [{ id: CHILD, status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control', restorations_seen: 0 }], notify_customer: false, approved_notice: null });
+    mockStore.visits[1].status = 'cancelled';
+    await svc.sweepIbCancelBundles();
+    expect(mockStore.bundles[0].followthrough_outcome).toMatchObject({ linked_skipped: [], linked_already_cancelled: [CHILD] });
+  });
+
+  test('a text held by the send window before any recipient parks the bundle (marker untouched, no attempt used), then sends when the window opens', async () => {
+    seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+      opts.cancelGeneration.windowHeld = true;
+      Object.assign(opts.outcome, { notificationSent: false, notificationError: 'held for the send window' });
+    });
+    const first = await svc.sweepIbCancelBundles();
+    expect(first).toMatchObject({ deferred: 1, failed: 0, recovered: 0 });
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'pending', notice_outcome: null, attempts: 0 });
+    expect(mockStore.bundles[0].next_attempt_at).toBeTruthy();
+    setNow(new Date(mockStore.bundles[0].next_attempt_at.getTime() + MIN));
+    const second = await svc.sweepIbCancelBundles();
+    expect(second.recovered).toBe(1);
+  });
+
   test('the request already reported its text step: the sweep does not look at the text again', async () => {
     seedBundle({ notice_outcome: { state: 'not_sent', error: 'blocked', by: 'request' } });
     await svc.sweepIbCancelBundles();

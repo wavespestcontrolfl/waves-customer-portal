@@ -353,6 +353,27 @@ async function splitLinkedChildren(bundle) {
   };
 }
 
+// Children classified as already cancelled came from an UNLOCKED read: a child the dead request cancelled can have been restored
+// since, and it matches its card again. Each is re-read under its own row lock and checked against the generation pinned with
+// the bundle (cancelled, same restoration count); one that changed is reported as a linked skip, never recorded as done.
+async function recheckCancelledChildren(bundle, ids) {
+  if (!ids.length) return [];
+  const pinned = new Map((Array.isArray(bundle.linked_children) ? bundle.linked_children : []).map((c) => [String(c.id), c.restorations_seen]));
+  const skipped = [];
+  await db.transaction(async (trx) => {
+    const rows = await trx('scheduled_services').whereIn('id', ids).orderBy('id').forUpdate().select('id', 'status');
+    const byId = new Map((rows || []).map((r) => [String(r.id), r]));
+    for (const id of ids) {
+      const row = byId.get(String(id));
+      const want = pinned.get(String(id));
+      const restored = !row || String(row.status) !== 'cancelled'
+        || (want !== undefined && (await countRestorations(trx, id)) !== Number(want));
+      if (restored) skipped.push({ id, reason: 'child_restored_since' });
+    }
+  });
+  return skipped;
+}
+
 /** The follow-through call, with exactly the arguments the Dispatch handler's cancel branch passes. */
 function followThroughArgs(bundle, linkedChildren, reports, cancelFence = null) {
   return {
@@ -394,10 +415,13 @@ async function recoverFollowThrough(bundle, token) {
     if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
     throw new Error(`the visit was busy (${fence.hits.join(', ')}); recovery will retry`);
   }
+  const restoredChildren = await recheckCancelledChildren(bundle, alreadyCancelled);
+  const restoredIds = new Set(restoredChildren.map((c) => String(c.id)));
+  const stillCancelled = alreadyCancelled.filter((id) => !restoredIds.has(String(id)));
   const outcome = {
     money_skipped: reports.money.skipped,
-    linked_skipped: reports.linked.skipped,
-    ...(alreadyCancelled.length ? { linked_already_cancelled: alreadyCancelled } : {}),
+    linked_skipped: [...reports.linked.skipped, ...restoredChildren],
+    ...(stillCancelled.length ? { linked_already_cancelled: stillCancelled } : {}),
   };
   await ownedUpdate(bundle.id, token, {
     followthrough_done_at: db.fn.now(),
@@ -444,6 +468,8 @@ async function sendApprovedNotice(bundle, svc) {
     // AppointmentReminders.claimApprovedNoticeForGeneration.
     cancelGeneration: fence,
   });
+  // The send window closed before the first recipient was reached: the approved marker is untouched, park to the next window.
+  if (fence.windowHeld === true) return { done: false };
   // The claim was refused by the fence: nothing was claimed or sent. Changed visit: abandon. Only busy: retry next pass.
   if (fence.hits.length) {
     const standing = await cancelStillStands(bundle);
