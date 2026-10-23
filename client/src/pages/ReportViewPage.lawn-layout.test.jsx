@@ -243,7 +243,9 @@ describe('gate on: the phone order', () => {
   it('the lead\'s next-visit date is dropped only when Your plan prints that lawn visit', async () => {
     const { container } = renderReport(clone(spotOn));
     await waitForReport();
-    expect(text(container)).toContain('Lawn Care · Fri, Oct 23');
+    // Your plan prints the service and its date on two lines (owner 2026-10-22).
+    expect(container.querySelector('.plan-visit-service')).toHaveTextContent('Lawn Care');
+    expect(container.querySelector('.plan-visit-when')).toHaveTextContent('Fri, Oct 23');
     expect(text(container)).not.toContain('Friday, October 23');
     cleanup();
     const pestOnly = clone(spotOn);

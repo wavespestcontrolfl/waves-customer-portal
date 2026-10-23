@@ -2785,7 +2785,11 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
     ? String(smartStatus.heading || '').replace(/^your service\b/, `your ${headlineServiceLabel} service`)
     : smartStatus.heading;
   const serviceDateTime = serviceReportDateTimeLabel(data);
-  const nextAppointmentLabel = formatNextAppointmentLabel(data.nextAppointment);
+  // Left out when the plan card already lists that visit (owner 2026-10-22:
+  // the next service is named once on the report).
+  const nextAppointmentLabel = nextVisitShownInPlanCard(data, mode, data.nextAppointment)
+    ? null
+    : formatNextAppointmentLabel(data.nextAppointment);
 
   return (
     <section className="service-report-hero" id="service-status">
@@ -3051,7 +3055,7 @@ export function ReserviceReportCard({ data, mode }) {
 // pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
 // so `mode` is a belt-and-braces check here, same as the other live-only
 // cards on this page.
-function PlanSummaryCard({ data, mode }) {
+export function PlanSummaryCard({ data, mode }) {
   if (mode !== 'live') return null;
   const plan = data.planSummary;
   // With the gate on, upcoming visits live INSIDE this section (owner
@@ -3083,7 +3087,11 @@ function PlanSummaryCard({ data, mode }) {
   // another line's visit may come sooner. Not nextSameServiceAppointment,
   // which is scoped to this property for the "What's next" section.
   const nextAppointment = data.upcomingVisitsCard ? null : data.nextAppointment;
-  const nextVisit = hasPlan ? planNextVisitDateLabel(nextAppointment) : null;
+  // The arrival window rides with the date, so the status card can leave out
+  // its own "Next service" cell without losing the window (#6491 audit P1).
+  const nextVisitDate = hasPlan ? planNextVisitDateLabel(nextAppointment) : null;
+  const nextVisitWindow = nextVisitDate ? appointmentWindowLabel(nextAppointment) : null;
+  const nextVisit = nextVisitDate && nextVisitWindow ? `${nextVisitDate}, ${nextVisitWindow}` : nextVisitDate;
   const nextVisitService = String(nextServiceName(nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim();
   return (
     <section
@@ -3108,7 +3116,7 @@ function PlanSummaryCard({ data, mode }) {
             {upcoming.map((visit, index) => (
               <div className="sr-cell plan-visit-row" key={`${index}-${visit.scheduledDate || ''}-${visit.serviceType || ''}`}>
                 <div className="sr-cell-value plan-visit-label">
-                  {formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'Scheduled visit'}
+                  <VisitLabelLines visit={visit} />
                 </div>
                 {typeof visit.rescheduleUrl === 'string' && visit.rescheduleUrl && (
                   <a
@@ -3141,14 +3149,17 @@ function PlanSummaryCard({ data, mode }) {
 // date (a report opened months later must not promise a visit that has gone).
 // Past is judged on the Eastern calendar, whatever the browser's zone.
 // True when the plan card or the upcoming visits card (live view only) prints
-// the visit `data.nextSameServiceAppointment` names: the same date and
+// the visit `next` names (default: data.nextSameServiceAppointment): the same date and
 // service in its visits list, or as the plan card's "Your next … visit" line.
-export function nextVisitShownInPlanCard(data, mode) {
-  const next = data?.nextSameServiceAppointment;
+export function nextVisitShownInPlanCard(data, mode, next = data?.nextSameServiceAppointment) {
   if (mode !== 'live' || !next?.scheduledDate) return false;
+  // Date, service AND window: two same-day visits of one service (two
+  // properties) differ only by window, and the status card's visit is the
+  // customer-wide pick while the list is property-scoped (Codex P2 on #6491).
   const sameVisit = (visit) => Boolean(visit)
     && String(visit.scheduledDate || '').slice(0, 10) === String(next.scheduledDate).slice(0, 10)
-    && String(visit.serviceType || '') === String(next.serviceType || '');
+    && String(visit.serviceType || '') === String(next.serviceType || '')
+    && String(visit.windowStart || '').slice(0, 5) === String(next.windowStart || '').slice(0, 5);
   const listed = Array.isArray(data.upcomingVisitsCard?.visits) ? data.upcomingVisitsCard.visits : [];
   if (listed.some(sameVisit)) return true;
   const plan = data.planSummary;
@@ -3156,6 +3167,31 @@ export function nextVisitShownInPlanCard(data, mode) {
     && Boolean(planNextVisitDateLabel(data.nextAppointment))
     && Boolean(String(nextServiceName(data.nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim());
   return planLine && sameVisit(data.nextAppointment);
+}
+
+// A visit in the plan / upcoming visits list: the service on one line, the
+// date and window on the next (owner 2026-10-22: the one run-on line broke
+// mid-date, "Mon," / "Jan 18"). Same words as formatNextAppointmentLabel.
+function VisitLabelLines({ visit }) {
+  const label = formatNextAppointmentLabel(visit);
+  const service = nextServiceName(visit?.serviceType);
+  if (label && service && label.startsWith(`${service} · `)) {
+    return (
+      <>
+        <span className="plan-visit-service">{service}</span>
+        <span className="plan-visit-when">{label.slice(service.length + 3)}</span>
+      </>
+    );
+  }
+  return label || service || 'Scheduled visit';
+}
+
+// The customer-facing arrival window of a visit ("10:00 AM–12:00 PM"), the
+// last part of formatNextAppointmentLabel, or null when the visit has none.
+function appointmentWindowLabel(appointment) {
+  if (!/^\d{1,2}:\d{2}/.test(String(appointment?.windowStart || ''))) return null;
+  const parts = String(formatNextAppointmentLabel(appointment) || '').split(' · ');
+  return parts.length > 1 ? parts[parts.length - 1] : null;
 }
 
 function planNextVisitDateLabel(nextAppointment, todayEt = etDateString()) {
@@ -3707,7 +3743,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
                   letterSpacing: '0.06em',
                   textTransform: 'uppercase',
                   color: 'var(--muted)',
-                  fontWeight: 500,
+                  fontWeight: 600,
                   marginBottom: 6,
                 }}
               >
@@ -3950,7 +3986,7 @@ function UpcomingVisitsCard({ data, mode }) {
         {visits.map((visit, index) => (
           <div className="sr-cell" key={`${index}-${visit.scheduledDate || ''}-${visit.serviceType || ''}`}>
             <div className="sr-cell-value">
-              {formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'Scheduled visit'}
+              <VisitLabelLines visit={visit} />
             </div>
           </div>
         ))}
@@ -7018,6 +7054,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: flex-start;
           justify-content: space-between;
           gap: 16px;
+          /* The "Ready now" chip sat on the Precautions box (0px). */
+          margin-bottom: 16px;
         }
         .status-badge,
         .readiness-status-chip {
@@ -8178,7 +8216,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-cell-label { font-size: 14px; color: var(--soft); }
         /* Customer-facing body copy floor is 16px; 14px stays reserved for
            labels (codex round-2 P2, owner type scale 2026-10-05). */
-        .sr-cell-value { margin-top: 8px; font-size: 16px; color: var(--text); }
+        .sr-cell-value { margin-top: 8px; font-size: 16px; color: var(--text); line-height: 1.4; }
         /* "Your plan" upcoming-visit row: label left, small secondary
            Reschedule link right; wraps under the label on a narrow phone
            instead of overflowing. */
@@ -8187,10 +8225,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           flex-wrap: wrap;
           align-items: center;
           justify-content: space-between;
-          gap: 8px 12px;
+          gap: 12px;
           min-height: 0;
         }
-        .plan-visit-row .plan-visit-label { margin-top: 0; flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+        .plan-visit-row .plan-visit-label { margin-top: 0; flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+        /* Owner 2026-10-22 spacing audit: the note and the next line sit
+           clear of the visits box instead of 3px under it. */
+        .plan-visit-service, .plan-visit-when { display: block; }
+        .plan-visit-when { margin-top: 2px; color: var(--muted); }
+        .plan-summary-section > .sr-cell-note,
+        .upcoming-visits-card > .sr-cell-note { margin-top: 12px; }
+        .plan-summary-section > .sr-cell-note + p { margin-top: 12px; }
         .plan-visit-reschedule { flex: 0 0 auto; text-decoration: none; white-space: nowrap; }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
@@ -10088,7 +10133,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               stationPins={Boolean(data.termiteStationPins)}
               /* Same-line next visit only — the builder scopes it; the
                  top-level nextAppointment may be ANY service line. */
-              nextVisitLabel={termiteSectionsShown ? null : formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              nextVisitLabel={termiteSectionsShown || nextVisitShownInPlanCard(data, mode, data.termiteReportV2.nextVisit) ? null : formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
               reportNextVisitLabel={termiteSectionsShown ? nextSameServiceLabel : null}
               narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
               reportSections={reportSections}
@@ -10119,7 +10164,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mode={mode}
               /* Same-line next visit only — the builder scopes it to the
                  next ROACH-FAMILY appointment (live view only). */
-              nextVisitLabel={cockroachSectionsShown ? null : formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              nextVisitLabel={cockroachSectionsShown || nextVisitShownInPlanCard(data, mode, data.cockroachReportV2.nextVisit) ? null : formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
               reportNextVisitLabel={cockroachSectionsShown ? nextSameServiceLabel : null}
               narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
               reportSections={reportSections}

@@ -476,7 +476,7 @@ export function LawnProgramLine({ snapshot = null }) {
   return (
     <Card>
       <CardTitle>This time of year</CardTitle>
-      <p style={{ margin: 0, fontSize: 14.5, color: BODY, lineHeight: 1.55 }}>{text}</p>
+      <p className="sr-v2-body" style={{ margin: 0, fontSize: 16, color: BODY, lineHeight: 1.5 }}>{text}</p>
       {snapshot.seasonalDetail ? <ProgramDetail detail={snapshot.seasonalDetail} /> : null}
     </Card>
   );
@@ -486,7 +486,7 @@ export function LawnProgramLine({ snapshot = null }) {
 // the program line. The server
 // sends snapshot.seasonalDetail only while the gate is live.
 function ProgramDetail({ detail }) {
-  const paragraph = (text) => <p style={{ margin: 0, fontSize: 16, color: BODY, lineHeight: 1.55 }}>{text}</p>;
+  const paragraph = (text) => <p className="sr-v2-body" style={{ margin: 0, fontSize: 16, color: BODY, lineHeight: 1.5 }}>{text}</p>;
   const section = (label, body) => (
     <div style={{ marginTop: 14 }}>
       <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>{label}</div>
@@ -597,7 +597,7 @@ export function LawnPhotoFindings({ findings = [] }) {
                   })}
                 </div>
               ) : null}
-              {finding.confirm ? <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{finding.confirm}</p> : null}
+              {finding.confirm ? <p className="sr-v2-body" style={{ margin: '8px 0 0', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{finding.confirm}</p> : null}
             </div>
           );
         })}
@@ -681,10 +681,10 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
       {summary && lead ? (
         <details open={printOpen} style={{ marginTop: 12 }}>
           <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Technician notes</summary>
-          <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p>
+          <p className="sr-v2-body" style={{ margin: '8px 0 0', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{summary}</p>
         </details>
       ) : null}
-      {summary && !lead ? <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p> : null}
+      {summary && !lead ? <p className="sr-v2-body" style={{ margin: '12px 0 0', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{summary}</p> : null}
     </Frame>
   );
 }
@@ -1866,8 +1866,8 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
       </svg>
       {explanation && <details open={print || undefined} style={{ marginTop: 12, fontSize: 16, color: BODY, lineHeight: 1.5 }}>
         <summary style={{ cursor: 'pointer', fontSize: 14 }}>What this means</summary>
-        <p style={{ margin: '8px 0' }}>{explanation}</p>
-        <p style={{ margin: '8px 0' }}>Latest reading: {fmt(last.value)}. Previous reading: {fmt(pts[pts.length - 2].value)}.</p>
+        <p className="sr-v2-body" style={{ margin: '8px 0' }}>{explanation}</p>
+        <p className="sr-v2-body" style={{ margin: '8px 0' }}>Latest reading: {fmt(last.value)}. Previous reading: {fmt(pts[pts.length - 2].value)}.</p>
       </details>}
       {footnote ? (
         <div style={{ marginTop: 8, padding: '8px 11px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{footnote}</div>

@@ -211,7 +211,7 @@ function CardTitle({ children, sub }) {
 }
 function InsightLine({ label, value, strong }) {
   return (
-    <div style={{ fontSize: 14, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
+    <div style={{ fontSize: 16, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
       <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>{label}: </span>
       {value}
     </div>
@@ -223,7 +223,7 @@ function KeyLine({ label, value, dot }) {
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />
       <div>
         <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
-        <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{value}</div>
+        <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5 }}>{value}</div>
       </div>
     </div>
   );
@@ -237,7 +237,7 @@ function TechParagraphCard({ text }) {
   return (
     <div data-testid="ts-tech-paragraph" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
       <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>From your technician</div>
-      <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{text}</div>
+      <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{text}</div>
     </div>
   );
 }
@@ -269,7 +269,7 @@ export function TreeShrubSnapshotHero({ snapshot = {}, techParagraph }) {
             {statusHeadline || statusMeta(status).label}
           </h2>
           {scoreExplanation ? (
-            <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{scoreExplanation}</p>
+            <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{scoreExplanation}</p>
           ) : null}
           {todaysFocus.length ? (
             <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
@@ -283,7 +283,7 @@ export function TreeShrubSnapshotHero({ snapshot = {}, techParagraph }) {
       {peaceOfMind ? (
         <div style={{ marginTop: 14, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
           <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Peace of mind</div>
-          <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{peaceOfMind}</div>
+          <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{peaceOfMind}</div>
         </div>
       ) : null}
 
@@ -293,7 +293,7 @@ export function TreeShrubSnapshotHero({ snapshot = {}, techParagraph }) {
       {snapshot.treatmentSummary ? (
         <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
           <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
-          <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{snapshot.treatmentSummary}</div>
+          <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{snapshot.treatmentSummary}</div>
         </div>
       ) : null}
 

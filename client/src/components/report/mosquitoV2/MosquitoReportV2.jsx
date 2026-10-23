@@ -168,7 +168,8 @@ export function MosquitoStatusHero({ status, statusSummary, supportingMetric, ai
           text={aiSummary.body}
           sections={reportSections}
           nextVisitLabel={nextVisitLabel}
-          style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}
+          className="sr-v2-body"
+          style={{ fontSize: 16, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}
           titleStyle={{ color: TEXT }}
         />
       ) : null}

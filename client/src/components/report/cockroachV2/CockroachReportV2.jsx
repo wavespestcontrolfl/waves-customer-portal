@@ -42,7 +42,8 @@ const eyebrow = {
   textTransform: 'uppercase',
   letterSpacing: '0.08em',
   color: MUTED,
-  fontWeight: 700,
+  // 600, the glass eyebrow weight (estimate = the template, owner 2026-10-22).
+  fontWeight: 600,
   marginBottom: 8,
 };
 const chip = {
@@ -78,15 +79,15 @@ export function CockroachStatusHero({ status, statusSummary, metrics, narrative 
       <div style={eyebrow}>Today&apos;s result{position}</div>
       <h2 style={{ margin: 0, fontSize: 22, lineHeight: 1.25, color: TEXT }}>{status.label}</h2>
       {statusSummary ? (
-        <p style={{ margin: '10px 0 0', fontSize: 15, lineHeight: 1.55, color: TEXT }}>{statusSummary}</p>
+        <p className="sr-v2-body" style={{ margin: '10px 0 0', fontSize: 16, lineHeight: 1.5, color: TEXT }}>{statusSummary}</p>
       ) : null}
       {narrative && narrative !== statusSummary ? (
         <ReportText
           text={narrative}
           sections={reportSections}
           nextVisitLabel={reportNextVisitLabel}
-          className="ai-summary-body"
-          style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}
+          className="ai-summary-body sr-v2-body"
+          style={{ margin: '12px 0 0', fontSize: 16, lineHeight: 1.5, color: MUTED }}
           titleStyle={{ color: TEXT }}
         />
       ) : null}
@@ -94,9 +95,9 @@ export function CockroachStatusHero({ status, statusSummary, metrics, narrative 
         <p style={{ margin: '10px 0 0', fontSize: 14, color: MUTED }}>{trendLine}</p>
       ) : null}
       {Array.isArray(metrics) && metrics.length ? (
-        <div style={{ marginTop: 16, display: 'grid', gap: 6 }}>
+        <div style={{ marginTop: 16, display: 'grid', gap: 10 }}>
           {metrics.map((m) => (
-            <div key={m.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 14, borderTop: `1px solid ${BORDER}`, paddingTop: 6 }}>
+            <div key={m.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 16, borderTop: `1px solid ${BORDER}`, paddingTop: 10 }}>
               <span style={{ color: MUTED }}>{m.label}</span>
               <span style={{ color: t.color, fontWeight: 700 }}>{m.value}</span>
             </div>
