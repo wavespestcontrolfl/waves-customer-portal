@@ -89,7 +89,11 @@ function isMistingSystemIdentity(value) {
 // key shape (`mosquito_misting`, `mosquito_misting_installation`, ...) EXCEPT the free design visit `mosquito_misting_system`,
 // which is a different identity; text fields only by the engine's own plan phrase or the commercial manual-quote label.
 const MISTING_PROPOSAL_KEY_PATTERN = /^mosquito_misting(?!_system$)(?:_[a-z0-9_]+)?$/;
-const MISTING_PROPOSAL_TEXT_PATTERN = /misting\s+service\s+plan|misting\s+system\s*\(commercial\)/i;
+// Work labels: the engine's plan phrase, the commercial manual-quote label, and the canonical hand-booked work labels the
+// service normalizer emits ("Mosquito Misting System Installation / Refill / Maintenance"). "Mosquito Misting System Service"
+// (the free design visit) is deliberately NOT here.
+const MISTING_PROPOSAL_TEXT_PATTERN = /misting\s+service\s+plan|misting\s+system\s*\(commercial\)|misting\s+system\s+(?:refill|maintenance)\b/i;
+const MISTING_PROPOSAL_INSTALL_TEXT_PATTERN = /misting\s+system\s+installation\b/i;
 function mistingProposalIdentity(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const keys = [raw.service, raw.serviceKey, raw.service_key, raw.originalRequestedService, raw.identity, raw.family]
@@ -97,6 +101,7 @@ function mistingProposalIdentity(raw) {
   const hit = keys.find((k) => MISTING_PROPOSAL_KEY_PATTERN.test(k));
   if (hit) return hit.includes('installation') ? 'mosquito_misting_installation' : 'mosquito_misting';
   const text = [raw.label, raw.name, raw.description].map((v) => String(v == null ? '' : v)).join(' ');
+  if (MISTING_PROPOSAL_INSTALL_TEXT_PATTERN.test(text)) return 'mosquito_misting_installation';
   if (MISTING_PROPOSAL_TEXT_PATTERN.test(text)) return 'mosquito_misting';
   // The install item the mapper emits is named "<tier label> Installation" (derived from the tier table, never hard-coded), so a
   // fully rebuilt line is still recognized by its text.

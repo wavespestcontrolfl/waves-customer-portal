@@ -712,3 +712,29 @@ describe('Codex round 8: whole-number counts, one commercial misting key', () =>
   });
 });
 
+describe('pre-push audit: the canonical hand-booked work labels are misting identities in proposals', () => {
+  const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
+  const { normalizeCorrectiveWork, normalizeBuilding } = require('../services/estimate-proposal');
+  afterEach(() => { delete process.env.GATE_MOSQUITO_MISTING; });
+
+  test('labels', () => {
+    expect(mistingProposalIdentity({ label: 'Mosquito Misting System Installation' })).toBe('mosquito_misting_installation');
+    expect(mistingProposalIdentity({ description: 'Mosquito Misting System Refill' })).toBe('mosquito_misting');
+    expect(mistingProposalIdentity({ name: 'Mosquito Misting System Maintenance' })).toBe('mosquito_misting');
+    expect(mistingProposalIdentity({ label: 'Mosquito Misting System Service' })).toBeNull();
+    expect(mistingProposalIdentity({ label: '21-day mosquito misting' })).toBeNull();
+  });
+
+  test('an authored installation row under the canonical label is seen by both guards', () => {
+    const cw = normalizeCorrectiveWork([{ id: 'cw-c', label: 'Mosquito Misting System Installation', amount: 4595 }]);
+    expect(cw[0].service).toBe('mosquito_misting_installation');
+    const data = { result: { recurring: { services: [] } }, proposal: { enabled: true, buildings: [normalizeBuilding({ name: 'Home', lineItems: [] })], correctiveWork: cw } };
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_ACCEPT_PENDING' });
+    delete process.env.GATE_MOSQUITO_MISTING;
+    expect(mapper.gatedAddOnCustomerRefusal(data)).toMatchObject({ code: 'MOSQUITO_MISTING_GATED' });
+    const design = { ...data, proposal: { ...data.proposal, correctiveWork: normalizeCorrectiveWork([{ id: 'cw-d', label: 'Mosquito Misting System Service', amount: 0 }]) } };
+    expect(mapper.gatedAddOnCustomerRefusal(design)).toBeNull();
+  });
+});
+
