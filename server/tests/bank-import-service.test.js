@@ -459,6 +459,27 @@ describe('runDeterministicMatching', () => {
     expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
   });
 
+  test('a credit marked manualLink (a ledger row held or parked for the owner) is offered its one exact payout, never linked to it; a marker set after the read makes the claim land nothing', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: { review: true, manualLink: true } }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
+    let summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
+    expect(sugOf(state.updates.find(u => sugOf(u))).payoutCandidates).toHaveLength(1); // offered, for the owner to link
+    // the marker arriving between the read and the claim
+    state.updates = [];
+    state.bankRows[0].suggestion = { review: true };
+    state.beforeUpdate = (u) => { if (u.patch.status === 'matched_payout') state.bankRows[0].suggestion = { review: true, manualLink: true }; };
+    try {
+      summary = await runDeterministicMatching();
+      expect(summary.payoutsLinked).toBe(0);
+      expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
+    } finally {
+      state.beforeUpdate = null;
+    }
+  });
+
   test('a credit with exactly one payout candidate links through a status CAS and echoes reconciliation', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
@@ -470,6 +491,8 @@ describe('runDeterministicMatching', () => {
     expect(link.where).toContainEqual({ id: 'bt-1', status: 'unmatched' });
     // …and re-checks there is no unresolved Plaid bank change on the row
     expect(link.raws.some(r => r.includes("(suggestion->'plaidModified') is null"))).toBe(true);
+    // …and that the row was not marked for the owner's own link meanwhile
+    expect(link.raws.some(r => r.includes("coalesce(suggestion->>'manualLink','') <> 'true'"))).toBe(true);
     // reconciliation INTENT rides in the claim itself (crash-safe)…
     expect(sugOf(link).reconcilePending).toBe(true);
     // …the echo goes through the existing mechanism with a row-specific

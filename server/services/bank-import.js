@@ -1580,7 +1580,9 @@ async function runDeterministicMatching({ limit } = {}) {
       const surveyPayoutCandidates = () => surveyPayoutCandidatesForRow(row, rejected);
       const { candidates, overflow: surveyOverflow } = await surveyPayoutCandidates();
       const exact = candidates.filter(c => centsEqual(c.effective_amount, row.amount));
-      if (!surveyOverflow && candidates.length === 1 && exact.length === 1 && payoutProvenance(row, exact[0])) {
+      // a row marked for the owner's own link (manualLinkOnly: a ledger
+      // row held or parked for them) is offered its payout, never claimed
+      if (!surveyOverflow && candidates.length === 1 && exact.length === 1 && payoutProvenance(row, exact[0]) && !manualLinkOnly(row)) {
         try {
           // Reconciliation intent is persisted ATOMICALLY with the claim —
           // ALWAYS, not conditioned on a pre-read of `reconciled` (that read
@@ -1594,6 +1596,8 @@ async function runDeterministicMatching({ limit } = {}) {
             // re-checked at the claim: the row may have been linked, got a
             // bank change parked, and been unlinked since this pass read it
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            // ...or been marked for the owner's own link (manualLinkOnly)
+            .whereRaw(NO_MANUAL_LINK_SQL)
             .update({
               status: 'matched_payout',
               matched_payout_id: exact[0].id,
