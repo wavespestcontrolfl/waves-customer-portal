@@ -197,6 +197,9 @@ router.post('/equipment', requireAdmin, async (req, res, next) => {
     // A vehicle given to a technician: the one-live-truck check and the
     // insert serialize on that technician's lock.
     const record = await db.transaction(async (trx) => {
+      // A new item placed straight onto a truck waits for a check in flight
+      // on that truck (same lock as recordTruckCheck).
+      if (custody.values.assigned_vehicle_id) await require('../services/truck-kit').lockTruck(trx, custody.values.assigned_vehicle_id);
       if (category === 'vehicle' && assigned_to) {
         await require('../services/truck-kit').lockTechnician(trx, assigned_to);
         if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null, trx)) return 'second-truck';

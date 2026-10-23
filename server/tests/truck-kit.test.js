@@ -285,7 +285,7 @@ describe('recordTruckCheck', () => {
     expect(composed.why).toBe('Synthetic found missing Moisture meter and damaged B&G 1 gal sprayer on the truck check');
     expect(composed.metadata).toEqual(expect.objectContaining({ subject: { type: 'equipment', id: TRUCK }, doneWhen: 'tool_alerts_resolved', who: 'person' }));
     // bellDefault, not bell: the owner can silence the truck_kit category in Settings.
-    expect(opts).toEqual(expect.objectContaining({ dedupeKey: `truck-kit:${TRUCK}`, dedupeOpenOnly: true, refreshOnDedupe: true, bellDefault: true, trx: expect.anything() }));
+    expect(opts).toEqual(expect.objectContaining({ dedupeKey: `truck-kit:${TRUCK}`, dedupeOpenOnly: true, refreshOnDedupe: true, bellDefault: true, trx: expect.anything(), dedupeVersion: expect.stringMatching(/^check:/) }));
     expect(opts.bell).toBeUndefined();
     expect(require('../services/notification-bell-policy').OVERRIDABLE_CATEGORIES).toContain('truck_kit');
     expect(reportEquipmentIssue.mock.calls.every(([args]) => args.conn)).toBe(true);
@@ -385,6 +385,35 @@ describe('tool gaps by kit key', () => {
     // Catalog category "inspection" is NOT an exemption: the WDO letter needs the meter and probe.
     expect(truckKit.serviceLinesFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' })).toEqual(['termite']);
     expect(truckKit.serviceLinesFor('Lawn Health Inspection', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
+  });
+
+  test('a bait station or foam job promotes its optional kit to required', async () => {
+    db.__state.equipment_checklists = [CHECKLIST('termite', [
+      { item: 'Moisture meter', required: true, kit_key: 'moisture_meter' },
+      { item: 'Bait station keys and replacement cartridges', required: false, kit_key: 'bait_station_key' },
+      { item: 'Foam drill kit and patch materials', required: false, kit_key: 'foam_drill_kit' },
+    ])];
+    expect(truckKit.requirementsFor('Termite Bait Station System', { serviceKey: 'termite_bait' })).toEqual({ lines: ['termite'], promote: new Set(['bait_station_key']) });
+    expect(truckKit.requirementsFor('Drill and Foam Treatment', { serviceKey: 'foam_drill' }).promote).toEqual(new Set(['foam_drill_kit']));
+    expect(truckKit.requirementsFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' }).promote).toEqual(new Set());
+    db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'WDO Inspection (Termite Letter)' })).toBeNull();
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'Termite Bait Station System', serviceKey: 'termite_bait' }))
+      .toEqual(expect.objectContaining({ tools: ['bait_station_key'], label: 'Truck lacks Bait station keys and replacement cartridges' }));
+    // A termite bait add-on on a pest visit promotes the same kit.
+    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'Quarterly Pest Control', addons: [{ name: 'Termite Bait Station System', serviceKey: 'termite_bait' }] }))
+      .toEqual(expect.objectContaining({ tools: expect.arrayContaining(['bait_station_key']) }));
+  });
+
+  test('a truck stays configured after its last keyed tool moves away: the latest check named a keyed row', async () => {
+    db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
+    db.__state.equipment_checks = [{ id: 'k1', vehicle_id: TRUCK, technician_id: TECH, checked_at: daysAgo(1), results: JSON.stringify([{ equipment_id: METER, state: 'present', note: '' }, { equipment_id: SPRAYER, state: 'present', note: '' }]) }];
+    db.__state.equipment.find((e) => e.id === METER).assigned_vehicle_id = null;
+    expect(await truckKit.truckHasKeys(TRUCK)).toBe(true);
+    expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
+    // A truck that never had a keyed row or a check stays unjudged.
+    db.__state.equipment_checks = [];
+    expect(await truckKit.truckHasKeys(TRUCK)).toBe(false);
   });
 
   test('mechanical lawn work and the web sweep need no treatment tools', () => {

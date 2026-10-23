@@ -158,6 +158,8 @@ describe('POST /equipment custody columns', () => {
     expect(db.__state.inserted).toEqual(expect.objectContaining({
       asset_tag: 'T-001', location: 'van', assigned_vehicle_id: VEHICLE, condition_rating: 9,
     }));
+    // Placed straight onto a truck: that truck's lock is taken before the insert.
+    expect(require('../services/truck-kit').lockTruck).toHaveBeenCalledWith(db, VEHICLE);
   });
 
   test('a body without custody keys leaves the table defaults alone', async () => {

@@ -98,16 +98,35 @@ function linesForService(serviceType, serviceKey) {
   return lines;
 }
 
-// The lines a visit's tools come from: the primary service's lines, then
-// each booked add-on's (a Tree & Shrub add-on on a pest visit needs the tree
-// and shrub tools too). `addons` is [{ name, serviceKey }].
-function serviceLinesFor(serviceType, { serviceKey = null, addons = [] } = {}) {
-  const lines = linesForService(serviceType, serviceKey);
-  for (const addon of Array.isArray(addons) ? addons : []) {
-    for (const line of linesForService(addon?.name, addon?.serviceKey)) if (!lines.includes(line)) lines.push(line);
+// Treatment-specific kits the generic checklist marks optional: the job's
+// identity promotes them to required (a bait station visit needs the station
+// key, a foam job the drill kit), by service key or by name for legacy rows.
+const PROMOTED_KITS = [
+  { keys: ['bait_station_key'], key: /bait|cartridge|monitoring|station/i, name: /\b(bait\s*station|termite\s*bait|cartridge|monitoring)\b/i },
+  { keys: ['foam_drill_kit'], key: /foam|drill/i, name: /\b(foam|drill)\b/i },
+];
+function promotedKeysFor(serviceType, serviceKey) {
+  const out = [];
+  for (const kit of PROMOTED_KITS) {
+    if ((serviceKey && kit.key.test(String(serviceKey))) || kit.name.test(String(serviceType || ''))) out.push(...kit.keys);
   }
-  return lines;
+  return out;
 }
+
+// What a visit requires: the primary service's lines, then each booked
+// add-on's (a Tree & Shrub add-on on a pest visit needs the tree and shrub
+// tools too), plus the keys its identity promotes. `addons` is [{ name, serviceKey }].
+function requirementsFor(serviceType, { serviceKey = null, addons = [] } = {}) {
+  const lines = linesForService(serviceType, serviceKey);
+  const promote = new Set(lines.length ? promotedKeysFor(serviceType, serviceKey) : []);
+  for (const addon of Array.isArray(addons) ? addons : []) {
+    const addonLines = linesForService(addon?.name, addon?.serviceKey);
+    for (const line of addonLines) if (!lines.includes(line)) lines.push(line);
+    if (addonLines.length) for (const key of promotedKeysFor(addon?.name, addon?.serviceKey)) promote.add(key);
+  }
+  return { lines, promote };
+}
+const serviceLinesFor = (serviceType, opts) => requirementsFor(serviceType, opts).lines;
 
 function truckKitEnabled() {
   return truckKitLive();
@@ -193,8 +212,9 @@ async function requiredToolsForLine(serviceLine, conn = db) {
   return requiredToolsForLines([serviceLine], conn);
 }
 
-// The same across several lines (a combined job), once per key.
-async function requiredToolsForLines(serviceLines, conn = db) {
+// The same across several lines (a combined job), once per key. `promote`
+// names optional keyed items this job makes required.
+async function requiredToolsForLines(serviceLines, conn = db, promote = new Set()) {
   const lines = [...new Set((Array.isArray(serviceLines) ? serviceLines : [serviceLines]).filter(Boolean))];
   if (!lines.length) return [];
   const rows = await conn('equipment_checklists').whereIn('service_line', lines).select('service_line', 'checklist_items');
@@ -204,7 +224,7 @@ async function requiredToolsForLines(serviceLines, conn = db) {
     for (const group of parseGroups(row.checklist_items)) {
       for (const item of Array.isArray(group?.items) ? group.items : []) {
         const key = normalizeKitKey(item?.kit_key);
-        if (!key || item.required === false || byKey.has(key)) continue;
+        if (!key || (item.required === false && !promote.has(key)) || byKey.has(key)) continue;
         byKey.set(key, { kit_key: key, label: String(item.item || key) });
       }
     }
@@ -234,9 +254,18 @@ async function kitKeyVocabulary(conn = db) {
 // Keys are set up for a truck once ANY row assigned to it carries one, whatever
 // its status: a truck whose last keyed tool was just marked lost is not
 // unconfigured, it is missing a tool (pre-push P1 on #6497).
+// Durable: a truck stays configured after its last keyed tool moves away,
+// because the latest check's roster still names a keyed row (the next check,
+// on the unkeyed roster, is the explicit new state).
 async function truckHasKeys(vehicleId, conn = db) {
   const row = await conn('equipment').where({ assigned_vehicle_id: vehicleId }).whereNotNull('kit_key').first('id');
-  return Boolean(row);
+  if (row) return true;
+  const last = await conn('equipment_checks').where({ vehicle_id: vehicleId }).orderBy('checked_at', 'desc').first('results');
+  const results = last ? parseGroups(last.results) : [];
+  const ids = results.map((r) => r?.equipment_id).filter((id) => UUID_RE.test(String(id || '')));
+  if (!ids.length) return false;
+  const keyed = await conn('equipment').whereIn('id', ids).whereNotNull('kit_key').first('id');
+  return Boolean(keyed);
 }
 
 // The keyed tools a truck carries today: keyed live rows minus any with an open
@@ -246,9 +275,9 @@ const keysOnTruck = (kit) => new Set(kit.filter((item) => item.kit_key && !item.
 // What a truck lacks for a service line (or several, for a combined job).
 // Empty when the truck has no keyed row at all (keys are not set up for it)
 // or the lines require nothing keyed.
-async function toolGapsForTruck(vehicleId, serviceLines, conn = db) {
+async function toolGapsForTruck(vehicleId, serviceLines, conn = db, promote = new Set()) {
   if (!(await truckHasKeys(vehicleId, conn))) return [];
-  const required = await requiredToolsForLines(serviceLines, conn);
+  const required = await requiredToolsForLines(serviceLines, conn, promote);
   if (!required.length) return [];
   const onTruck = keysOnTruck(await kitForTruck(vehicleId, conn));
   return required.filter((tool) => !onTruck.has(tool.kit_key));
@@ -290,7 +319,7 @@ function toolGapLabel(gaps) {
 // serviceType, when given, adds the companion lines of a combined job.
 async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey = null, addons = [] }, conn = db) {
   if (!truckKitLive() || !technicianId) return null;
-  const lines = serviceType ? serviceLinesFor(serviceType, { serviceKey, addons }) : [serviceLine].filter(Boolean);
+  const { lines, promote } = serviceType ? requirementsFor(serviceType, { serviceKey, addons }) : { lines: [serviceLine].filter(Boolean), promote: new Set() };
   if (!lines.length) return null;
   let truck;
   try { truck = await truckForTechnician(technicianId, conn); } catch (err) {
@@ -298,7 +327,7 @@ async function toolGapIssue({ technicianId, serviceLine, serviceType, serviceKey
     throw err;
   }
   if (!truck) return null;
-  const gaps = await toolGapsForTruck(truck.id, lines, conn);
+  const gaps = await toolGapsForTruck(truck.id, lines, conn, promote);
   if (!gaps.length) return null;
   return { kind: 'tools', status: 'hold', label: toolGapLabel(gaps), tools: gaps.map((gap) => gap.kit_key) };
 }
@@ -325,10 +354,10 @@ async function toolGapsForToday(technicianId, truck, { now = new Date(), conn = 
   const requiredByLines = new Map();
   const out = [];
   for (const visit of visits) {
-    const lines = serviceLinesFor(visit.service_type, { serviceKey: visit.service_key_snapshot, addons: addonsByVisit.get(visit.id) || [] });
+    const { lines, promote } = requirementsFor(visit.service_type, { serviceKey: visit.service_key_snapshot, addons: addonsByVisit.get(visit.id) || [] });
     if (!lines.length) continue;
-    const key = lines.join('+');
-    if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn));
+    const key = `${lines.join('+')}|${[...promote].sort().join('+')}`;
+    if (!requiredByLines.has(key)) requiredByLines.set(key, await requiredToolsForLines(lines, conn, promote));
     const missing = requiredByLines.get(key).filter((tool) => !onTruck.has(tool.kit_key));
     if (missing.length) out.push({ serviceId: visit.id, serviceType: visit.service_type, missing: missing.map((tool) => tool.label) });
   }
@@ -456,6 +485,8 @@ async function raiseTruckBell({ truck, technician, missing, damaged, check, trx 
     dedupeOpenOnly: true,
     refreshOnDedupe: true,
     bumpOnRefresh: true,
+    // Each check is a new version: the same items still missing rings again.
+    dedupeVersion: `check:${check.id}`,
     // Rings by default; the owner can silence the truck_kit category in
     // Settings (bellDefault sits below the saved category override).
     bellDefault: true,
@@ -545,6 +576,7 @@ module.exports = {
   requiredToolsForLine,
   requiredToolsForLines,
   serviceLinesFor,
+  requirementsFor,
   lockTruck,
   lockTechnician,
   readinessToolIssue,
