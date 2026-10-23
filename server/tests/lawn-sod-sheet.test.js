@@ -290,6 +290,48 @@ describe('loadSodForContext', () => {
         expect(reclaimed).not.toHaveBeenCalled();
       });
 
+      // A 9x April visit rescheduled into May keeps its pinned April window under the completion defaults: the bag replaces April's 0.5 lb N pass.
+      describe('a 9x April visit rescheduled into May (pinned to the April window)', () => {
+        const MAY = () => visitRow({ scheduled_date: '2026-05-12', lawn_protocol_key: 'fixture_v13', lawn_protocol_version: '2026.10-v13', lawn_protocol_window_key: 'apr_v13_spreader_feeding' });
+        const engineOf = () => require('../services/waveguard-plan-engine');
+        const GATES = ['GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
+        const withDefaults = (on) => { for (const name of GATES) { if (on) process.env[name] = 'true'; else delete process.env[name]; } };
+        afterEach(() => { for (const name of GATES) delete process.env[name]; });
+
+        test('completion defaults on: sized from the pinned April window, 1.05 lb per 1,000 (0.25 lb N), not October\'s 1.25', async () => {
+          withDefaults(true);
+          engineOf().visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 4 });
+          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
+          expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 1.05 });
+          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 5.25, ratePer1000: 1.05, gateNotes: [NOTE(0.25, '1.1')] });
+        });
+
+        test('completion defaults on, a lawn that is not reclaimed: the same pinned-window baseline, 2.1 lb (the April pass), no note', async () => {
+          withDefaults(true);
+          reclaimed.mockResolvedValue(false);
+          engineOf().visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 4 });
+          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
+          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 10.5, ratePer1000: 2.1 });
+          expect(out.plannedProducts.items[1]).not.toHaveProperty('gateNotes');
+        });
+
+        test('completion defaults off: the planner reads the service date\'s month (May), so the October bag: 1.25 lb halved', async () => {
+          withDefaults(false);
+          engineOf().visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 4 });
+          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
+          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 6.25, ratePer1000: 1.25 });
+        });
+
+        test('the reclaimed gate off (the sod sheet as it was): the bag follows the visit day, May, so the October bag 2.5 lb, unread and unchanged', async () => {
+          withDefaults(true);
+          delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+          engineOf().visitOnV13Protocol.mockClear();
+          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
+          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 12.5, ratePer1000: 2.5 });
+          expect(engineOf().visitOnV13Protocol).not.toHaveBeenCalled();
+        });
+      });
+
       test('a visit pinned to v13 is halved, and the pin is passed to the planner\'s own lookup with the lawn\'s track', async () => {
         const engine = require('../services/waveguard-plan-engine');
         engine.visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 10 });

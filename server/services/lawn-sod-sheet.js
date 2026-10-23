@@ -248,7 +248,7 @@ const round2 = (n) => Math.round(n * 100) / 100;
 // GATE_LAWN_RECLAIMED_HALF_N: the swap bag is plain 24-0-11, which carries no pre-emergent, so on a reclaimed lawn it takes the same half
 // nitrogen as any other N line. The decision is the plan engine's ONE nitrogenDecision (the bag's stated nitrogen is the target; the rate
 // scales with it), never a second copy. Gate off, not reclaimed or a failed read: the bag as it was (the engine is not even loaded).
-// Returns the swap bag, with `reclaimedNote` (the line note the plan writes for a halved bag) when it was halved.
+// Returns the swap bag (the baseline for the plan window when it could be resolved, else the visit day's), with `reclaimedNote` (the line note the plan writes for a halved bag) when it was halved.
 async function reclaimedSwapBag({ swapBag, swapRow, visitDay, knex, svc, grass }) {
   if (!featureGates.lawnReclaimedHalfNLive()) return swapBag;
   const engine = require('./waveguard-plan-engine');
@@ -257,15 +257,18 @@ async function reclaimedSwapBag({ swapBag, swapRow, visitDay, knex, svc, grass }
   if (featureGates.lawnV13Live?.() !== true) return swapBag;
   const { onV13, windowMonth } = await engine.visitOnV13Protocol(knex, svc, { trackKey: grass });
   if (!onV13) return swapBag;
-  const decision = await engine.nitrogenDecision(knex, svc, {
-    targetN: swapBag.lbN, monthNumber: windowMonth || Number(String(visitDay || '').slice(5, 7)), v13Active: true,
-  });
-  if (decision?.reclaimed !== 'half' || !(decision.cut < swapBag.lbN)) return swapBag;
-  const lbPer1000 = round2((swapBag.lbPer1000 * decision.cut) / swapBag.lbN);
+  // The month of the plan window the bag replaces: the pinned window under the completion defaults (a 9x April visit moved into May still
+  // replaces April's 0.5 lb N pass), else the service date's month, exactly as the planner reads it. The baseline bag follows that month.
+  const planMonth = (windowMonth && require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled() ? windowMonth : null)
+    || Number(String(visitDay || '').slice(5, 7));
+  const baseline = swapBagFor(visitDay, planMonth);
+  const decision = await engine.nitrogenDecision(knex, svc, { targetN: baseline.lbN, monthNumber: planMonth, v13Active: true });
+  if (decision?.reclaimed !== 'half' || !(decision.cut < baseline.lbN)) return baseline;
+  const lbPer1000 = round2((baseline.lbPer1000 * decision.cut) / baseline.lbN);
   const [note] = engine.nitrogenCutNotes(
     { rateSource: 'target_n_analysis', targetNPer1000: decision.cut, ratePer1000: lbPer1000 }, swapRow, { reclaimedWater: 'half', nitrogenCut: decision.cut },
   );
-  return { ...swapBag, lbPer1000, lbN: decision.cut, reclaimedNote: note?.text || null };
+  return { ...baseline, lbPer1000, lbN: decision.cut, reclaimedNote: note?.text || null };
 }
 
 // The swap bag as a plan-shaped item, built from the item it replaces (method, area) and the
