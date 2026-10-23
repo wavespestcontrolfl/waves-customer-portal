@@ -44,6 +44,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { countRestorations } = require('./cancel-generation-fence');
 
 const TABLE = 'ib_cancel_effect_bundles';
 const GRACE_MS = 10 * 60 * 1000;
@@ -67,11 +68,17 @@ function scrub(text) {
 
 /**
  * Writes the bundle on the cancel handler's transaction (rolls back with it). Everything here is what the card
- * approved. created_at / lease_until use clock_timestamp() (commit time is close to it), not now() (transaction start).
+ * approved. created_at / lease_until use clock_timestamp() (commit time is close to it), not now() (transaction start); no generation
+ * decision ever compares times (restorations_seen is the generation).
  * A failure THROWS: the cancel aborts rather than committing without its recovery record.
  */
 async function insertBundle(trx, pins) {
+  // The cancellation generation (see cancel-generation-fence.js): the visit row is locked FOR UPDATE here (the caller's
+  // handler holds it already; locking again is free), so no restoration can be in flight and the count is exact.
+  await trx('scheduled_services').where({ id: pins.scheduledServiceId }).forUpdate().first('id');
+  const restorationsSeen = await countRestorations(trx, pins.scheduledServiceId);
   const inserted = await trx(TABLE).insert({
+    restorations_seen: restorationsSeen,
     pending_action_id: pins.pendingActionId || null,
     scheduled_service_id: pins.scheduledServiceId,
     actor_id: pins.actorId ? String(pins.actorId) : null,
@@ -212,17 +219,13 @@ async function listUnactable() {
     .limit(BATCH);
 }
 
-// The cancel must still stand: the visit is cancelled and nothing moved it out of cancelled since the bundle was written.
+// The cancel must still stand: the visit is cancelled and has had no restoration since the bundle was written (an unlocked
+// pre-check; the guard of each write is assertCancelGeneration inside that write's transaction). Counts, never times.
 async function cancelStillStands(bundle) {
   const svc = await db('scheduled_services').where({ id: bundle.scheduled_service_id }).first('status', 'scheduled_date');
   if (!svc) return { ok: false, reason: 'visit_missing' };
   if (String(svc.status) !== 'cancelled') return { ok: false, reason: `visit_is_${svc.status}` };
-  const later = await db('job_status_history')
-    .where({ job_id: bundle.scheduled_service_id })
-    .whereNot('to_status', 'cancelled')
-    .where('transitioned_at', '>', bundle.created_at)
-    .first('id');
-  if (later) return { ok: false, reason: 'visit_restored_since' };
+  if ((await countRestorations(db, bundle.scheduled_service_id)) !== Number(bundle.restorations_seen)) return { ok: false, reason: 'visit_restored_since' };
   return { ok: true, svc };
 }
 
@@ -268,7 +271,7 @@ class Abandon extends Error {
 async function recoverFollowThrough(bundle, token) {
   const { runVisitCancellationFollowThrough } = require('./visit-cancellation-followthrough');
   const reports = { money: { skipped: [] }, linked: { skipped: [] } };
-  const fence = { visitId: bundle.scheduled_service_id, since: bundle.created_at, hits: [] };
+  const fence = { visitId: bundle.scheduled_service_id, restorations: bundle.restorations_seen, hits: [] };
   const { remaining, alreadyCancelled } = await splitLinkedChildren(bundle);
   await runVisitCancellationFollowThrough(followThroughArgs(bundle, remaining, reports, fence));
   if (fence.hits.length) {
@@ -324,7 +327,7 @@ async function sendApprovedNotice(bundle, svc) {
     outcome: reported,
     approvedNotice: bundle.approved_notice,
     // Binds the claim itself (one statement) to THIS cancellation: see bindClaimToCancelGeneration.
-    cancelGeneration: { since: bundle.created_at },
+    cancelGeneration: { restorations: bundle.restorations_seen },
   });
   const classified = classifyNoticeOutcome(reported)
     || { state: 'uncertain', error: 'no result was reported' };

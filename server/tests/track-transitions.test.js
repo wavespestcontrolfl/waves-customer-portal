@@ -1281,7 +1281,7 @@ describe('future-scheduled-date stale-attempt guard', () => {
 // The Intelligence Bar cancel recovery sweep passes cancelFence (services/cancel-generation-fence.js): cancel() would
 // cancel a LIVE visit, so with a fence it only ever finishes the cancellation the card approved.
 describe('cancel with a cancelFence (the cancel recovery sweep)', () => {
-  const FENCE = { visitId: 'job-1', since: new Date('2026-10-23T14:00:00Z'), hits: [] };
+  const FENCE = { visitId: 'job-1', restorations: 0, hits: [] };
   const refuse = (fenceReason) => Object.assign(new Error(`cancellation fence: ${fenceReason}`), { code: 'CANCEL_FENCE', fenceReason });
   const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, status: 'cancelled', track_state: 'scheduled' };
 

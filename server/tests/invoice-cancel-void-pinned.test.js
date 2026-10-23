@@ -480,7 +480,7 @@ describe('combined-payment lock preparation failure', () => {
 // Recovery sweep only (services/cancel-generation-fence.js): every void re-proves, inside its own transaction and under
 // the invoice row lock, that the visit is still the cancelled one the card approved; a pre-check keeps Stripe untouched.
 describe('cancelFence (the cancel recovery sweep)', () => {
-  const FENCE = { visitId: 'svc-1', since: new Date('2026-10-23T14:00:00Z'), hits: [] };
+  const FENCE = { visitId: 'svc-1', restorations: 0, hits: [] };
   const refuse = (reason) => Object.assign(new Error(`cancellation fence: ${reason}`), { code: 'CANCEL_FENCE', fenceReason: reason });
   const sweep = async () => {
     const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');

@@ -184,34 +184,37 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
 
   // ── The cancellation-generation fence, on real row locks ────────────────────────────────────────────────────
   describe('cancel generation fence', () => {
-    const fenceFor = (since) => ({ visitId: visit, since, hits: [] });
-    const longAgo = () => new Date(Date.now() - 60 * 60 * 1000);
+    const fenceFor = (restorations = 0) => ({ visitId: visit, restorations, hits: [] });
     const restore = (conn) => conn('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+    const recancel = async () => {
+      await app('scheduled_services').where({ id: visit }).update({ status: 'cancelled' });
+      await app('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: app.fn.now() });
+    };
 
     test('a standing cancel passes; the share lock is held only for the transaction', async () => {
-      const fence = fenceFor(longAgo());
+      const fence = fenceFor();
       await app.transaction((trx) => assertCancelGeneration(trx, fence));
       expect(fence.hits).toEqual([]);
     });
 
     test('a restored visit is refused, and so is one cancelled, restored and cancelled again', async () => {
-      const since = longAgo();
       await restore(app);
       await app('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() });
-      const restored = fenceFor(since);
+      const restored = fenceFor();
       await expect(app.transaction((trx) => assertCancelGeneration(trx, restored))).rejects.toMatchObject({ code: 'CANCEL_FENCE', fenceReason: 'visit_is_confirmed' });
-      await app('scheduled_services').where({ id: visit }).update({ status: 'cancelled' });
-      await app('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: app.fn.now() });
-      const again = fenceFor(since);
+      await recancel();
+      const again = fenceFor();
       await expect(app.transaction((trx) => assertCancelGeneration(trx, again))).rejects.toMatchObject({ fenceReason: 'visit_restored_since' });
       expect(again.hits).toEqual(['visit_restored_since']);
+      // The NEW cancellation's own generation (one restoration seen) passes.
+      await app.transaction((trx) => assertCancelGeneration(trx, fenceFor(1)));
     });
 
     test('a restore in flight (row locked, uncommitted) fails at once with visit_busy instead of waiting', async () => {
       const trxA = await app.transaction();
       try {
         await restore(trxA);
-        const fence = fenceFor(longAgo());
+        const fence = fenceFor();
         const started = Date.now();
         await expect(app.transaction((trx) => assertCancelGeneration(trx, fence))).rejects.toMatchObject({ fenceReason: 'visit_busy' });
         expect(Date.now() - started).toBeLessThan(2000);
@@ -222,7 +225,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     });
 
     test('while the fence transaction holds its share lock a restore WAITS, then sees the commit order', async () => {
-      const fence = fenceFor(longAgo());
+      const fence = fenceFor();
       const trxB = await app.transaction();
       await assertCancelGeneration(trxB, fence);
       let restored = false;
@@ -233,6 +236,52 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       await restoring;
       expect(restored).toBe(true);
       expect((await app('scheduled_services').where({ id: visit }).first()).status).toBe('confirmed');
+    });
+
+    // The ordering a timestamp comparison gets wrong. job_status_history.transitioned_at defaults to the transaction START
+    // time. A restore transaction R begins, the cancel transaction C writes the bundle and commits, R (blocked on C's visit
+    // row lock) then proceeds and commits its restoration: its history row is OLDER than the bundle. A different cancel D
+    // follows. The count-based generation still refuses the old bundle.
+    test('a restoration that began BEFORE the bundle insert but committed AFTER it is caught, even after the visit is cancelled again', async () => {
+      await app('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      await app('job_status_history').del();
+      const restoreTx = await app.transaction();
+      await restoreTx.raw('select 1'); // R's transaction clock starts here: now() is fixed from this point
+      const cancelTx = await app.transaction();
+      await cancelTx('scheduled_services').where({ id: visit }).forUpdate().first('id');
+      const id = await svc.insertBundle(cancelTx, pins());
+      await cancelTx('scheduled_services').where({ id: visit }).update({ status: 'cancelled' });
+      await cancelTx('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled' });
+      // R now asks for the visit row: it blocks on C's lock and reads the cancelled version once C commits.
+      const restoreSees = restoreTx('scheduled_services').where({ id: visit }).forUpdate().first('status');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await cancelTx.commit();
+      expect((await restoreSees).status).toBe('cancelled');
+      await restoreTx('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      await restoreTx('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed' }); // transitioned_at = R's start
+      await restoreTx.commit();
+      await recancel(); // a DIFFERENT cancel D
+      const bundle = await app(TABLE).where({ id }).first();
+      const restoreRow = await app('job_status_history').where({ job_id: visit, to_status: 'confirmed' }).first();
+      // The scenario is real: the restoration's timestamp is OLDER than the bundle, so a time comparison would have passed it.
+      expect(new Date(restoreRow.transitioned_at).getTime()).toBeLessThan(new Date(bundle.created_at).getTime());
+      expect(bundle.restorations_seen).toBe(0);
+      expect((await app('scheduled_services').where({ id: visit }).first()).status).toBe('cancelled');
+      // Every guard refuses the old bundle: the fence, the sweep's pre-check (abandons), and no effect runs.
+      const fence = fenceFor(bundle.restorations_seen);
+      await expect(app.transaction((trx) => assertCancelGeneration(trx, fence))).rejects.toMatchObject({ fenceReason: 'visit_restored_since' });
+      await app(TABLE).where({ id }).update({ created_at: app.raw("now() - interval '30 minutes'"), lease_until: app.raw("now() - interval '20 minutes'") });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ abandoned: 1, recovered: 0 });
+      expect(mockFollowThrough).not.toHaveBeenCalled();
+      expect(mockHandleCancellation).not.toHaveBeenCalled();
+      expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'abandoned', finish_note: 'visit_restored_since' });
+    });
+
+    test('restorations from earlier lifecycles are pinned with the new cancel and do not block its recovery', async () => {
+      await app('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.raw("now() - interval '3 days'") });
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      expect((await app(TABLE).where({ id }).first()).restorations_seen).toBe(1);
+      await app.transaction((trx) => assertCancelGeneration(trx, fenceFor(1)));
     });
   });
 

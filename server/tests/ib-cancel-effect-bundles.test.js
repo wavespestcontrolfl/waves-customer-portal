@@ -57,6 +57,8 @@ jest.mock('../models/db', () => {
     whereIn(col, vals) { return this._push('and', (r) => vals.some((v) => same(r[strip(col)], v))); }
     leftJoin() { return this; }
     select() { return this; }
+    forUpdate() { return this; }
+    count() { this.counting = true; return this; }
     orderBy(col) { this.order = strip(col); return this; }
     limit(n) { this.max = n; return this; }
     _match(r) {
@@ -73,6 +75,7 @@ jest.mock('../models/db', () => {
       return rows.slice(0, this.max);
     }
     async first() {
+      if (this.counting) return { n: String(this._rows().length) };
       const [row] = this._rows();
       if (!row) return undefined;
       if (this.table.startsWith('scheduled_services as s')) {
@@ -186,6 +189,7 @@ function seedBundle(overrides = {}) {
     approved_notice: NOTICE,
     linked_children: [{ id: CHILD, status: 'confirmed', scheduled_date: '2026-11-02', service_type: 'pest_control' }],
     approved_money: MONEY,
+    restorations_seen: 0,
     status: 'pending',
     lease_owner: 'request',
     lease_until: new Date(mockNow.getTime() - 20 * MIN),
@@ -241,6 +245,18 @@ describe('the bundle is written in the cancel transaction', () => {
       approved_notice: NOTICE, linked_children: [{ id: CHILD }], approved_money: MONEY, status: 'pending', lease_owner: 'request',
     });
     expect(row.lease_until.getTime()).toBe(mockNow.getTime() + svc.LEASE_MS);
+  });
+
+  test('it pins the cancellation GENERATION: how many restorations the visit had before this cancel (no times)', async () => {
+    mockStore.history.push(
+      { id: 5, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 90 * MIN) },
+      { id: 6, job_id: SERVICE, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: new Date(mockNow.getTime() - 80 * MIN) },
+      { id: 7, job_id: SERVICE, from_status: 'cancelled', to_status: 'pending', transitioned_at: new Date(mockNow.getTime() - 70 * MIN) },
+      { id: 8, job_id: SERVICE, from_status: 'cancelled', to_status: 'cancelled', transitioned_at: new Date(mockNow.getTime() - 60 * MIN) }, // same-status audit row: not a restoration
+      { id: 9, job_id: 'some-other-visit', from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 60 * MIN) },
+    );
+    await db.transaction((trx) => svc.insertBundle(trx, pins));
+    expect(mockStore.bundles[0].restorations_seen).toBe(2);
   });
 
   test('the no-text choice is stored as a bundle with no approved notice', async () => {
@@ -323,7 +339,7 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
     expect(mockHandleCancellation.mock.calls[0][0]).toBe(SERVICE);
     expect(mockHandleCancellation.mock.calls[0][1]).toMatchObject({ sendNotification: true, approvedNotice: NOTICE });
     // The claim itself is bound to this cancellation (one statement), and the delivery proof counts every approved recipient.
-    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toEqual({ since: mockStore.bundles[0].created_at });
+    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toEqual({ restorations: 0 });
     expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, { recipients: 1 });
     expect(mockStore.bundles[0]).toMatchObject({ status: 'recovered', finish_note: 'sweep', lease_owner: null });
     expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'sent', by: 'sweep' });
@@ -609,10 +625,10 @@ describe('housekeeping and copy', () => {
 
 describe('the recovery is fenced against a restore of the visit', () => {
   test('the follow-through gets a fence for THIS cancellation: the visit and the instant the bundle was written', async () => {
-    const row = seedBundle();
+    seedBundle();
     await svc.sweepIbCancelBundles();
     const { cancelFence } = mockFollowThrough.mock.calls[0][0];
-    expect(cancelFence).toEqual({ visitId: SERVICE, since: row.created_at, hits: [] });
+    expect(cancelFence).toEqual({ visitId: SERVICE, restorations: 0, hits: [] });
   });
 
   test('a mutation refused because the visit was restored mid-recovery abandons the bundle, sends no text, and says steps may have run', async () => {
@@ -678,5 +694,30 @@ describe('a deferred text never holds up other bundles', () => {
     expect(mockFollowThrough).toHaveBeenCalledTimes(12);
     expect(mockHandleCancellation).toHaveBeenCalledTimes(12);
     expect(mockStore.bundles.every((b) => b.status === 'recovered')).toBe(true);
+  });
+});
+
+describe('the generation is a count, never a time comparison', () => {
+  test('a restoration that STARTED before the bundle was written but committed after it (an earlier transitioned_at) is still caught', async () => {
+    const row = seedBundle({ restorations_seen: 0 });
+    // The restore transaction began 5 minutes before the bundle existed; its history row carries that start time.
+    mockStore.history.push({ id: 20, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(row.created_at.getTime() - 5 * MIN) });
+    // ...and the visit was then cancelled again by a different cancel.
+    mockStore.history.push({ id: 21, job_id: SERVICE, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
+    expect(mockStore.visits[0].status).toBe('cancelled');
+    await svc.sweepIbCancelBundles();
+    expect(mockFollowThrough).not.toHaveBeenCalled();
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'abandoned', finish_note: 'visit_restored_since' });
+  });
+
+  test('restorations that happened BEFORE this cancel were pinned with it and do not stop the recovery', async () => {
+    seedBundle({ restorations_seen: 2 });
+    mockStore.history.push(
+      { id: 30, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 3 * 24 * HOUR) },
+      { id: 31, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 2 * 24 * HOUR) },
+    );
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ recovered: 1 });
+    expect(mockFollowThrough.mock.calls[0][0].cancelFence).toMatchObject({ restorations: 2 });
   });
 });

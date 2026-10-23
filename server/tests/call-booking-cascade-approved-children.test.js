@@ -202,7 +202,7 @@ describe('cancelCallFollowUpsForParentCancel with approvedChildren', () => {
 // Recovery sweep only (services/cancel-generation-fence.js): each child's cancel re-proves, in the child's own
 // transaction and after the child's lock, that the PARENT is still the cancelled visit the card approved.
 describe('cancelCallFollowUpsForParentCancel with parentFence', () => {
-  const FENCE = { visitId: 'svc-parent', since: new Date('2026-10-23T14:00:00Z'), hits: [] };
+  const FENCE = { visitId: 'svc-parent', restorations: 0, hits: [] };
   const runFenced = ({ children = [CHILD], locked = { 'child-1': { ...CHILD } } } = {}) => {
     const { conn, log } = fakeConn({ children, locked });
     const report = { skipped: [] };

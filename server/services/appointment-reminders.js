@@ -2609,18 +2609,21 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
 }
 
 // The Intelligence Bar cancel recovery sweep (services/ib-cancel-effect-bundles.js) sends a dead request's approved text
-// with `cancelGeneration: { since }`. The claim is then ONE statement that adopts only the untouched approved marker and
-// only while the visit is still cancelled with no transition to another status after the bundle was written. A visit
-// restored and cancelled again has such a transition (and a fresh marker), so the old approved text can never be
-// adopted by a newer cancellation. Every later step (pre-dispatch stamp, finalize) is fenced by the token this claim mints.
+// with `cancelGeneration: { restorations }`. The claim is then ONE statement that adopts only the untouched approved marker
+// and only while the visit is still cancelled and its restoration count (job_status_history rows leaving 'cancelled') equals
+// the count the cancel transaction pinned. A visit restored and cancelled again has a higher count (and a fresh marker), so
+// the old approved text can never be adopted by a newer cancellation. No times are compared (a history row's
+// transitioned_at is its transaction's START, which can precede the bundle). A restore in flight clears this marker in its
+// own transaction, so the claim waits for it and then finds no marker. Every later step (pre-dispatch stamp, finalize) is
+// fenced by the token this claim mints.
 function bindClaimToCancelGeneration(query, cancelGeneration) {
   if (!cancelGeneration) return query;
   return query
     .where('cancellation_notice_state', 'pending_approved')
     .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
     .whereRaw(
-      "NOT EXISTS (SELECT 1 FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status <> 'cancelled' AND h.transitioned_at > ?)",
-      [cancelGeneration.since],
+      "(SELECT count(*) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.from_status = 'cancelled' AND h.to_status <> 'cancelled') = ?",
+      [Number(cancelGeneration.restorations)],
     );
 }
 

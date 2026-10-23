@@ -461,7 +461,7 @@ describe('approved money effects (pinnedEffects + moneyReport)', () => {
 // no longer the cancelled one the card approved gets no money handling and no tracker cancel, and each mutation that does
 // run carries the fence to re-prove it inside its own transaction.
 describe('cancelFence (the cancel recovery sweep)', () => {
-  const FENCE = { visitId: 'svc-1', since: new Date('2026-10-23T14:00:00Z'), hits: [] };
+  const FENCE = { visitId: 'svc-1', restorations: 0, hits: [] };
   const NO_RAIL = { applies: false, amount: null, unresolved: false, rail: 'none', blocked_by_invoice: false };
   const fenced = (extra = {}) => ({ targetIds: ['svc-1'], cancelFence: FENCE, pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL, creditReversalOfferIds: [] } }, ...extra });
   beforeEach(() => {

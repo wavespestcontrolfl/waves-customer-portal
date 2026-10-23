@@ -394,30 +394,32 @@ describe('approvedCancellationNoticeStatus', () => {
 // The recovery sweep sends with cancelGeneration: the claim itself is one statement that adopts only the untouched approved
 // marker while the visit is still the cancelled one the bundle was written for (no transition to another status since).
 describe('handleCancellation with cancelGeneration (the cancel recovery sweep)', () => {
-  const SINCE = new Date('2026-10-23T14:00:00Z');
+  const RESTORATIONS = 2;
   const approvedNotice = [{ recipient_key: 'any', body: 'x' }];
 
   test('the tokenless claim is bound to the original cancellation generation', async () => {
-    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { since: SINCE }, outcome: {} });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { restorations: RESTORATIONS }, outcome: {} });
     expect(mockState.wheres).toContainEqual(['appointment_reminders', 'cancellation_notice_state', 'pending_approved']);
-    const raw = mockState.raws.find(([, sql]) => /NOT EXISTS \(SELECT 1 FROM job_status_history h/.test(sql));
+    const raw = mockState.raws.find(([, sql]) => /FROM job_status_history h/.test(sql));
     expect(raw).toBeTruthy();
-    expect(raw[1]).toMatch(/h\.to_status <> 'cancelled' AND h\.transitioned_at > \?/);
-    expect(raw[2]).toEqual([SINCE]);
+    // A count of restorations, never a time comparison.
+    expect(raw[1]).toMatch(/h\.from_status = 'cancelled' AND h\.to_status <> 'cancelled'\) = \?/);
+    expect(raw[1]).not.toMatch(/transitioned_at/);
+    expect(raw[2]).toEqual([RESTORATIONS]);
     expect(mockState.raws.some(([, sql]) => /ss\.status = 'cancelled'/.test(sql))).toBe(true);
   });
 
   test('a claim that matches no row (the visit changed) sends nothing', async () => {
     mockState.claim = 0;
     const outcome = {};
-    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { since: SINCE }, outcome });
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, cancelGeneration: { restorations: RESTORATIONS }, outcome });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(outcome.notificationSent).toBe(false);
   });
 
   test('without cancelGeneration the claim carries no generation condition (the request and Dispatch are unchanged)', async () => {
     await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice, outcome: {} });
-    expect(mockState.raws.some(([, sql]) => /NOT EXISTS \(SELECT 1 FROM job_status_history h/.test(sql))).toBe(false);
+    expect(mockState.raws.some(([, sql]) => /h\.from_status = 'cancelled' AND h\.to_status <> 'cancelled'/.test(sql))).toBe(false);
     expect(mockState.wheres).not.toContainEqual(['appointment_reminders', 'cancellation_notice_state', 'pending_approved']);
   });
 });

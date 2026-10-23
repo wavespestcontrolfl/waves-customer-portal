@@ -573,7 +573,7 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
       created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
       credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
     }];
-    const fence = { visitId: 'svc-2', since: new Date(), hits: [] };
+    const fence = { visitId: 'svc-2', restorations: 0, hits: [] };
     mockFence.mockReset();
     const taken = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
     expect(taken).toEqual({ reversed: 1 });

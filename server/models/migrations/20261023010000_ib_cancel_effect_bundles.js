@@ -22,6 +22,13 @@
  *    cancelled: nothing run, reported).
  *  - lease_owner / lease_until: one runner at a time. The request takes a 'request' lease as a heartbeat; a sweep
  *    claims with FOR UPDATE SKIP LOCKED and a random token, and only the holder of the token writes results.
+ *  - restorations_seen: the cancellation GENERATION, with no time comparison anywhere. job_status_history is append-only
+ *    and every status write inserts its row in the same transaction as the status UPDATE, which holds the visit row lock.
+ *    The cancel transaction (visit row locked) stores how many restorations (from 'cancelled' to any other status) the
+ *    visit has ever had. Later, under FOR SHARE NOWAIT on the visit, the count can only differ if a restoration happened
+ *    after this cancel, however early that transaction began (its transitioned_at is its start time, which can precede
+ *    this row's created_at, so timestamps cannot order them). A re-cancel needs a restoration first, so it changes the
+ *    count too. See services/cancel-generation-fence.js.
  *  - next_attempt_at: when only the customer text has to wait (the 8 AM to 8 PM send window is closed), the sweep sets
  *    this to the next window opening and the claim skips the row until then, so the money and linked work of other
  *    bundles never queue behind a deferred text. NULL = claimable now.
@@ -45,6 +52,7 @@ exports.up = async function up(knex) {
     t.string('status', 16).notNullable().defaultTo('pending');
     t.text('lease_owner');
     t.timestamp('lease_until', { useTz: true });
+    t.integer('restorations_seen').notNullable().defaultTo(0);
     t.integer('attempts').notNullable().defaultTo(0);
     t.timestamp('next_attempt_at', { useTz: true });
     t.timestamp('followthrough_done_at', { useTz: true });

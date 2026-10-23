@@ -52,6 +52,7 @@ jest.mock('../models/db', () => {
       whereNull(col) { (b._nullCols ||= []).push(String(col).replace(/^scheduled_services\./, '')); return b; },
       whereNotNull() { return b; },
       leftJoin() { return b; },
+      count() { return b; },
       whereRaw() { return b; },
       whereNotExists() { return b; },
       orderBy() { return b; },
@@ -283,7 +284,7 @@ describe('the recovery bundle rides the cancel transaction', () => {
     const insert = bundleWrites().find((w) => w.op === 'insert');
     expect(insert.r).toMatchObject({
       pending_action_id: 'action-1', scheduled_service_id: 'svc-bar-1', actor_id: 'admin-1', notify_customer: true,
-      notes: 'Cancelled via Intelligence Bar: rain', lease_owner: 'request',
+      notes: 'Cancelled via Intelligence Bar: rain', lease_owner: 'request', restorations_seen: 0,
     });
     expect(JSON.parse(insert.r.approved_notice)).toEqual(approvedNotice);
     expect(JSON.parse(insert.r.linked_children)).toEqual(linkedChildren);
