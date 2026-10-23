@@ -30,7 +30,7 @@ const LAWN_TEXT = /\blawn\b|\bturf\b/i;
 const TERMITE_TEXT = /termite|\bwdo\b|wood[ -]destroying|pre[ -]?slab|drywood/i;
 const WDO_TEXT = /\bwdo\b|wood[ -]destroying|termite inspection/i;
 const RODENT_TEXT = /rodent|\brats?\b|\bmouse\b|\bmice\b/i;
-const TRAPPING_TEXT = /trap|exclusion/i;
+const TRAPPING_TEXT = /\btrap/i; // trapping only: an exclusion-only job promises no trap checks
 const ROACH_TEXT = /cockroach|\broach/i;
 const NOT_PEST_TEXT = /\blawn\b|\bturf\b|tree|shrub|ornamental|mosquito|termite|rodent/i;
 const COMMERCIAL_TEXT = /commercial/i;
@@ -206,6 +206,8 @@ function estimateSignals(estimate, proposal) {
       if (line.frequency !== 'one_time') addRow(pub.recurringServiceKey({ name: line.description }));
     }
     for (const program of proposal.programs || []) items.push(program.label || '');
+    // Corrective work can be a proposal's whole itemization (one-time lines: never a recurring row).
+    for (const work of proposal.correctiveWork || []) items.push(work.label || '');
     // The refund rule is stated only when the estimate offers an annual prepay AND the 90-day rule is live.
     prepayOffered = featureGates.prepayRefund90DayLive() === true && pub.isAnnualPrepayEligibleServiceMix(services, oneTime) === true;
   } catch (err) {

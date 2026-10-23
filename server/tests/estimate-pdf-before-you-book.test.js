@@ -145,6 +145,13 @@ describe('estimate PDF Before you book page', () => {
     expect(residentialText).not.toContain(NEUTRAL);
   });
 
+  test('a proposal itemized only as corrective work still gets its service answers (pre-push P1)', async () => {
+    process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
+    const est = fixture('byb-cw', []);
+    est.estimate_data.proposal = { enabled: true, buildings: [], correctiveWork: [{ label: 'WDO inspection', amount: 150, includes: [] }] };
+    expect(extractPdfText(await render(est))).toContain('inspection report');
+  });
+
   test('the page is only for an estimate still being decided', async () => {
     process.env.GATE_ESTIMATE_PDF_BEFORE_YOU_BOOK = 'true';
     const open = await render(fixture('byb-open', [pest]));
@@ -328,5 +335,6 @@ describe('rodent trap checks need explicit trapping (pre-push P1)', () => {
     }
     expect(detectServices({ rows: [{ key: 'rodent' }], items: ['Rodent Control'] }).rodentTrapping).toBe(false);
     expect(detectServices({ items: ['Rodent Trapping & Exclusion'] }).rodentTrapping).toBe(true);
+    expect(detectServices({ items: ['Rodent Exclusion'] }).rodentTrapping).toBe(false);
   });
 });
