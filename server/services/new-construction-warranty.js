@@ -409,9 +409,10 @@ function soilLiquid(treatment) {
 // labels, so a legacy one is read as the plan it names.
 function sentCertificate(project, customer) {
   const sentCopy = parseFindings(project.pretreat_sent_snapshot);
-  // A migrated historical delivery ('legacy_sent') has no sent_at but was sent.
-  const wasSent = Boolean(project.sent_at) || project.status === 'sent' || project.delivery_status === 'legacy_sent';
-  if (!wasSent || !sentCopy.findings) {
+  // The copy is the proof of sending: a send writes it only once the report
+  // reached the owner (even when a payer leg left the send "partial"), and
+  // the backfills wrote it only for certificates already sent.
+  if (!sentCopy.findings) {
     throw bad('Send the pre-treat certificate first, then issue its warranty.', 409);
   }
   const findings = parseFindings(sentCopy.findings);

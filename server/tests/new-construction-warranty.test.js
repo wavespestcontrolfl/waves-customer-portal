@@ -200,7 +200,7 @@ describe('templateIssueValues (server-built warranty)', () => {
   });
 
   test('issues only from a sent certificate, for a known soil liquid whose ingredient agrees', async () => {
-    const draft = { ...project, sent_at: null, status: 'draft' };
+    const draft = { ...project, sent_at: null, status: 'draft', pretreat_sent_snapshot: null };
     await expect(issue({ projectId: project.id, values: office }, customer, draft)).rejects.toMatchObject({ status: 409 });
     for (const bad of [
       { product_name: 'Termidor SC WE REPAIR ALL DAMAGE' },
@@ -268,8 +268,11 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(v.treatment.gallons).toBe('180');
     expect(v.project.address).toBe('12 Test Lane, Bradenton, FL 34202');
     expect(mockReadiness.mock.calls.at(-1)[0].project.findings.gallons_applied).toBe('180');
-    const legacy = { ...project, sent_at: null, status: 'closed', delivery_status: 'legacy_sent' };
-    await expect(issue({ projectId: project.id, values: office }, customer, legacy)).resolves.toBeTruthy();
+    // A legacy delivery (no sent_at) and a partial combined send (report out,
+    // payer leg failed, not marked sent) both carry the copy, so both issue.
+    for (const sentWithoutStamp of [{ sent_at: null, status: 'closed', delivery_status: 'legacy_sent' }, { sent_at: null, status: 'in_progress', delivery_status: 'partial' }]) {
+      await expect(issue({ projectId: project.id, values: office }, customer, { ...project, ...sentWithoutStamp })).resolves.toBeTruthy();
+    }
     const noCopy = { ...project, pretreat_sent_snapshot: null };
     await expect(issue({ projectId: project.id, values: office }, customer, noCopy)).rejects.toMatchObject({ status: 409 });
   });
