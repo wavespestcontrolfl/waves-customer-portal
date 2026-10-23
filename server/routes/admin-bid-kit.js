@@ -293,8 +293,14 @@ router.get('/:id/file', async (req, res, next) => {
 
 router.delete('/:id', async (req, res, next) => {
   try {
-    const row = await store.archiveItem(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Not found' });
+    // An archive is fenced like every other write: it needs the version the page loaded (query or JSON body), and a row that
+    // changed since is a 409 with nothing archived and no bell closed.
+    const { error, value } = attestSchema.validate({ expected_updated_at: req.query.expected_updated_at ?? req.body?.expected_updated_at });
+    if (error) return badRequest(res, error);
+    const outcome = await store.archiveItem(req.params.id, value.expected_updated_at);
+    if (outcome.notFound) return res.status(404).json({ error: 'Not found' });
+    if (outcome.conflict) return res.status(409).json({ error: CHANGED });
+    const row = outcome.item;
     await activity(req, 'bid_kit_archived', row);
     await expiry.syncExpiryBell(statusRow(row));
     logger.info(`[bid-kit] item archived (${row.item_key})`);

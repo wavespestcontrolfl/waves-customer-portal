@@ -52,7 +52,7 @@ const createItem = (item, body, kind) => {
   if (item.key !== "custom") delete create.label;
   return api("/", { method: "POST", body: create });
 };
-const archiveItem = (row) => api(`/${row.id}`, { method: "DELETE" });
+const archiveItem = (row) => api(`/${row.id}?expected_updated_at=${encodeURIComponent(row.updated_at)}`, { method: "DELETE" });
 const signOffItem = (row) => api(`/${row.id}/attest`, { method: "POST", body: { expected_updated_at: row.updated_at } });
 const fetchFileLink = (row) => api(`/${row.id}/file`);
 const sendFile = (row, file) => {

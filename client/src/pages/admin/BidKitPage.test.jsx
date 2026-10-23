@@ -242,6 +242,40 @@ it("uploading a file on an item with no row creates the row first, then sends th
   expect(uploaded.mock.calls[0][0].body.get("expected_updated_at")).toBe("2026-10-23T17:00:00.000Z");
 });
 
+const ARCHIVE_I1 = "DELETE /admin/bid-kit/i1?expected_updated_at=2026-10-02T12%3A00%3A00.000Z";
+
+it("Archive sends the version the page loaded, then reads the list again", async () => {
+  let reads = 0;
+  const archive = vi.fn(() => reply({ success: true }));
+  route({ "GET /admin/bid-kit/": () => reply(payload(reads++ === 0 ? ITEMS : ITEMS.filter((item) => item.id !== "i1"))), [ARCHIVE_I1]: archive });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Edit" }));
+  fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+  await waitFor(() => expect(archive).toHaveBeenCalledTimes(1));
+  expect(archive.mock.calls[0][0].method).toBe("DELETE");
+  expect(await screen.findByText("Archived")).toBeInTheDocument();
+  await waitFor(() => expect(within(rowFor("FDACS business license copy")).getByText("Missing")).toBeInTheDocument()); // back to an empty slot
+  expect(screen.queryByRole("form", { name: "Edit FDACS business license copy" })).toBeNull();
+});
+
+it("a 409 on Archive (another admin changed the item) archives nothing, closes the editor, reloads and shows the latest row", async () => {
+  const theirs = ITEMS.map((item) => (item.id === "i1" ? { ...item, source_document: "Renewed by another admin", updated_at: "2026-10-23T18:00:00.000Z" } : item));
+  let reads = 0;
+  const archive = vi.fn(() => reply({ error: "This item changed since you opened it. Reload and check it again." }, { ok: false, status: 409 }));
+  route({ "GET /admin/bid-kit/": () => reply(payload(reads++ === 0 ? ITEMS : theirs)), [ARCHIVE_I1]: archive });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Edit" }));
+  fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+  expect(await screen.findByText(CONFLICT)).toBeInTheDocument();
+  expect(archive).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("form", { name: "Edit FDACS business license copy" })).toBeNull();
+  await waitFor(() => expect(within(rowFor("FDACS business license copy")).getByText(/Renewed by another admin/)).toBeInTheDocument());
+  expect(within(rowFor("FDACS business license copy")).getByText("Needs sign-off")).toBeInTheDocument(); // still there
+  expect(screen.queryByText("Archived")).toBeNull();
+});
+
 // An item with no row yet: the page creates a blank row, then uploads to it. The row is never archived by the page.
 const BLANK = row({ id: "new1", item_key: "ipm_plan", label: "IPM plan", file: null, status: "missing", updated_at: "2026-10-23T17:00:00.000Z" });
 const WITHOUT_PLAN = ITEMS.filter((item) => item.id !== "i7");

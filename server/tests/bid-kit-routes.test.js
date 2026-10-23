@@ -105,11 +105,12 @@ jest.mock('../services/bid-kit-store', () => {
       Object.assign(row, { file_s3_key: file.key, file_name: file.fileName, file_content_type: file.contentType, file_size: file.size, attested_by: null, attested_at: null, updated_at: stamp() });
       return { item: view(row), oldKey };
     }),
-    archiveItem: jest.fn(async (id) => {
+    archiveItem: jest.fn(async (id, expectedUpdatedAt) => {
       const row = rows.get(id);
-      if (!row || row.archived_at) return null;
+      if (!row || row.archived_at) return { notFound: true };
+      if (new Date(row.updated_at).getTime() !== new Date(expectedUpdatedAt).getTime()) return { conflict: true };
       Object.assign(row, { archived_at: new Date(), updated_at: stamp() });
-      return view(row);
+      return { item: view(row) };
     }),
     logActivity: jest.fn(async (adminUserId, action, description, metadata) => { activity.push({ adminUserId, action, description, metadata }); }),
   };
@@ -146,6 +147,12 @@ async function upload(id, { name = 'license.pdf', type = 'application/pdf', byte
   const res = await fetch(`${baseUrl}/api/admin/bid-kit/${id}/file`, { method: 'POST', headers: { Authorization: 'Bearer admin' }, body: form });
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
+// Archive as the page does: with the version it loaded (the row's current one unless a test says otherwise; null sends none).
+const archive = (id, version) => {
+  const current = store.rows.get(id)?.updated_at;
+  const sent = version === undefined ? (current ? current.toISOString() : '2026-10-23T12:00:00.000Z') : version;
+  return call('DELETE', `/api/admin/bid-kit/${id}${sent === null ? '' : `?expected_updated_at=${encodeURIComponent(sent)}`}`);
+};
 const create = async (over = {}) => (await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'business_license_copy', ...over })).body.item;
 // Fill a row (a value and, for a paper that expires, an expiry date) so it can be signed off, then sign it off.
 async function signed(over = {}) {
@@ -281,7 +288,7 @@ describe('create and list', () => {
     const license = await create();
     await create({ kind: 'fact', item_key: 'phone', value: '941-555-0100' });
     const gone = await create({ item_key: 'ipm_plan' });
-    await call('DELETE', `/api/admin/bid-kit/${gone.id}`);
+    await archive(gone.id);
     const res = await call('GET', '/api/admin/bid-kit');
     expect(res.status).toBe(200);
     expect(res.body.catalog.map((section) => section.key)).toEqual(['sank_bids', 'insurance', 'registration_tax', 'plans_company', 'references', 'facts']);
@@ -357,7 +364,7 @@ describe('patch', () => {
     expect((await call('PATCH', '/api/admin/bid-kit/11111111-2222-4333-8444-555555555555', body)).status).toBe(404);
     expect((await call('PATCH', '/api/admin/bid-kit/not-an-id', body)).status).toBe(404);
     const item = await create({ item_key: 'w9' });
-    await call('DELETE', `/api/admin/bid-kit/${item.id}`);
+    await archive(item.id);
     expect((await call('PATCH', `/api/admin/bid-kit/${item.id}`, { ...body, expected_updated_at: store.rows.get(item.id).updated_at.toISOString() })).status).toBe(404);
   });
 
@@ -464,13 +471,44 @@ describe('attest', () => {
 describe('archive', () => {
   test('DELETE archives the row (it stays), drops it from the list and the summary, and logs it', async () => {
     const item = await create({ item_key: 'w9', value: 'On file' });
-    const res = await call('DELETE', `/api/admin/bid-kit/${item.id}`);
+    const res = await archive(item.id);
     expect(res.status).toBe(200);
     expect(res.body.item.archived_at).not.toBeNull();
     expect(store.rows.has(item.id)).toBe(true);
     expect((await call('GET', '/api/admin/bid-kit')).body.items).toHaveLength(0);
-    expect((await call('DELETE', `/api/admin/bid-kit/${item.id}`)).status).toBe(404);
+    expect((await archive(item.id)).status).toBe(404);
     expect(store.activity.at(-1).action).toBe('bid_kit_archived');
+  });
+
+  test('the version may come in the JSON body too', async () => {
+    const item = await create({ item_key: 'w9', value: 'On file' });
+    const res = await call('DELETE', `/api/admin/bid-kit/${item.id}`, { expected_updated_at: item.updated_at });
+    expect(res.status).toBe(200);
+  });
+
+  test('a missing or malformed version is a 400 and nothing is archived', async () => {
+    const item = await create({ item_key: 'w9', value: 'On file' });
+    expect((await archive(item.id, null)).status).toBe(400);
+    expect((await archive(item.id, 'yesterday')).status).toBe(400);
+    expect(store.rows.get(item.id).archived_at).toBeNull();
+  });
+
+  test('a stale page cannot archive an item another admin renewed: 409, the row stays live and its expiry bell stays open', async () => {
+    const item = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
+    const stale = item.updated_at;
+    const renewed = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { expires_on: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10), expected_updated_at: stale });
+    expect(renewed.status).toBe(200);
+    episodes.closeAdminAlertKeys.mockClear();
+    store.activity.length = 0;
+    const res = await archive(item.id, stale);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/changed since you opened/);
+    expect(store.rows.get(item.id).archived_at).toBeNull();
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(store.activity).toEqual([]);
+    // With the current version the same archive goes through and closes the bell.
+    expect((await archive(item.id)).status).toBe(200);
+    expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[`bid-kit:expiry:${item.id}`], 'archived']);
   });
 });
 
@@ -630,7 +668,7 @@ describe('files', () => {
     const [, command, options] = getSignedUrl.mock.calls[0];
     expect(options.expiresIn).toBeLessThanOrEqual(300);
     expect(command.input).toMatchObject({ Bucket: 'test-bucket', ResponseContentDisposition: 'inline; filename="license.pdf"' });
-    await call('DELETE', `/api/admin/bid-kit/${item.id}`);
+    await archive(item.id);
     expect((await call('GET', `/api/admin/bid-kit/${item.id}/file`)).status).toBe(404);
   });
 });
@@ -695,7 +733,7 @@ describe('expiry bells close when the item no longer needs renewing', () => {
 
   test('archiving the item closes its bell', async () => {
     const item = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
-    await call('DELETE', `/api/admin/bid-kit/${item.id}`);
+    await archive(item.id);
     expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[key(item)], 'archived']);
   });
 
@@ -721,11 +759,11 @@ describe('facts sheet', () => {
   test('it returns fact values and paper numbers and dates, leaves archived rows out, and never returns a key, a file or a link', async () => {
     await create({ kind: 'fact', item_key: 'legal_name', value: 'Example Pest Services LLC' });
     const gone = await create({ kind: 'fact', item_key: 'phone', value: '941-555-0199' });
-    await call('DELETE', `/api/admin/bid-kit/${gone.id}`);
+    await archive(gone.id);
     const license = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-01-01' });
     await upload(license.id, { name: 'license.pdf' });
     const retired = await create({ item_key: 'business_tax_receipt', value: 'BTR-ARCHIVED', expires_on: '2999-02-02' });
-    await call('DELETE', `/api/admin/bid-kit/${retired.id}`);
+    await archive(retired.id);
     await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'JB123456' });
 
     const res = await call('GET', '/api/admin/bid-kit/facts-sheet');
@@ -749,7 +787,7 @@ describe('facts sheet', () => {
       (await call('GET', '/api/admin/bid-kit?all=1')).body,
       (await call('GET', '/api/admin/bid-kit/facts-sheet')).body,
       (await call('PATCH', `/api/admin/bid-kit/${item.id}`, { value: 'x', expected_updated_at: store.rows.get(item.id).updated_at.toISOString() })).body,
-      (await call('DELETE', `/api/admin/bid-kit/${item.id}`)).body,
+      (await archive(item.id)).body,
     ];
     for (const body of bodies) expect(JSON.stringify(body)).not.toMatch(/bid-kit\/|file_s3_key|https?:/);
   });

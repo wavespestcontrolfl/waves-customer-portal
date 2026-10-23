@@ -101,6 +101,11 @@ describeDb('Bid kit (PostgreSQL)', () => {
     const res = await fetch(`${baseUrl}/api/admin/bid-kit/${id}/file`, { method: 'POST', body: form });
     return { status: res.status, body: await res.json().catch(() => ({})) };
   };
+  // Archive as the page does: with the version it loaded (the row's current one unless a test says otherwise).
+  const archive = async (id, version) => {
+    const sent = version === undefined ? (await rowOf(id)).updated_at.toISOString() : version;
+    return call('DELETE', `/${id}${sent === null ? '' : `?expected_updated_at=${encodeURIComponent(sent)}`}`);
+  };
   const rowOf = (id) => mockPg('bid_kit_items').where({ id }).first();
   const credential = (over = {}) => mockPg('business_credentials').insert({
     slug: `fixture-${randomUUID()}`, display_name: 'Fixture license', credential_type: 'license', credential_number: 'FX000000', expiration_date: '2999-03-03', ...over,
@@ -263,12 +268,35 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect((await rowOf(created.id)).file_s3_key).toBe(before.file_s3_key);
     });
 
+    test('archive is fenced on the version the page loaded: stale is 409 and leaves the row and its bell, current works, missing is 400', async () => {
+      const created = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) });
+      const stale = created.updated_at;
+      const renewed = await call('PATCH', `/${created.id}`, { expires_on: addDays(300), expected_updated_at: stale });
+      expect(renewed.status).toBe(200);
+      episodes.closeAdminAlertKeys.mockClear();
+      expect((await archive(created.id, stale)).status).toBe(409);
+      expect((await archive(created.id, null)).status).toBe(400);
+      expect((await archive(created.id, 'yesterday')).status).toBe(400);
+      expect(await rowOf(created.id)).toMatchObject({ archived_at: null, expires_on: expect.anything() });
+      expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+      // The version read from the database now (millisecond precision, as the page sends it) archives it atomically.
+      expect((await archive(created.id)).status).toBe(200);
+      expect((await rowOf(created.id)).archived_at).toBeInstanceOf(Date);
+      expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[`bid-kit:expiry:${created.id}`], 'archived']);
+      expect((await archive(created.id, renewed.body.item.updated_at)).status).toBe(404); // already archived
+      // The store's own single UPDATE: a version that does not match writes nothing.
+      const store = require('../services/bid-kit-store');
+      const live = await create({ item_key: 'w9', value: 'On file' });
+      expect(await store.archiveItem(live.id, '2000-01-01T00:00:00.000Z')).toEqual({ conflict: true });
+      expect((await rowOf(live.id)).archived_at).toBeNull();
+    });
+
     test('one live row per catalog item (references repeat); archive keeps the row and frees the slot', async () => {
       await create({ item_key: 'w9' });
       expect((await call('POST', '', { kind: 'document', item_key: 'w9' })).status).toBe(409);
       for (const entity of ['Sample District', 'Sample HOA']) expect((await call('POST', '', { kind: 'reference', item_key: 'reference', details: { entity } })).status).toBe(201);
       const w9 = (await call('GET', '')).body.items.find((item) => item.item_key === 'w9');
-      expect((await call('DELETE', `/${w9.id}`)).status).toBe(200);
+      expect((await archive(w9.id)).status).toBe(200);
       expect(await rowOf(w9.id)).toMatchObject({ archived_at: expect.any(Date) });
       expect((await call('POST', '', { kind: 'document', item_key: 'w9' })).status).toBe(201);
       const live = (await call('GET', '')).body;
@@ -280,7 +308,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
       await create({ kind: 'fact', item_key: 'fdacs_license_number', value: 'FX123456' });
       await create({ kind: 'fact', item_key: 'legal_name', value: 'Example Pest Services LLC' });
       const gone = await create({ kind: 'fact', item_key: 'phone', value: '941-555-0199' });
-      await call('DELETE', `/${gone.id}`);
+      await archive(gone.id);
       const license = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-01-01' });
       await upload(license.id);
       const res = await call('GET', '/facts-sheet');
@@ -325,7 +353,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
       await create({ item_key: 'w9', value: 'On file', expires_on: addDays(200) });
       await create({ item_key: 'ipm_plan', value: 'On file' });
       const gone = await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: '2000-01-01' });
-      await call('DELETE', `/${gone.id}`);
+      await archive(gone.id);
       const result = await runBidKitExpiryCheck();
       expect(result).toEqual({ scanned: 2, rang: 2, closed: 0 });
       const rung = episodes.raiseAdminAlertWithReopen.mock.calls.map(([category, , , opts]) => ({ category, id: opts.metadata.subject.id, key: opts.dedupeKey, window: opts.dedupeWindowMs }));
@@ -344,7 +372,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect((await call('PATCH', `/${renewed.id}`, { expires_on: addDays(300), expected_updated_at: renewed.updated_at })).status).toBe(200);
       expect(episodes.closeAdminAlertKeys.mock.calls.map(([, keys, reason]) => [keys, reason])).toEqual([[[`bid-kit:expiry:${renewed.id}`], 'renewed']]);
       // So does an archive.
-      await call('DELETE', `/${archived.id}`);
+      await archive(archived.id);
       expect(episodes.closeAdminAlertKeys.mock.calls.at(-1).slice(1, 3)).toEqual([[`bid-kit:expiry:${archived.id}`], 'archived']);
       // The daily job closes every open bell that no longer qualifies, and only those.
       episodes.closeAdminAlertKeys.mockClear();

@@ -90,10 +90,16 @@ async function replaceFile(id, file, expectedUpdatedAt) {
   });
 }
 
-async function archiveItem(id) {
+// One UPDATE that archives the row only while it is live and still the version the page loaded (millisecond precision, the
+// precision the page has). Nothing matched: { notFound } for a row that is gone or already archived, { conflict } for a row
+// that changed since, and nothing is written in either case.
+async function archiveItem(id, expectedUpdatedAt) {
   const [row] = await db(TABLE).where({ id }).whereNull('archived_at')
+    .whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [expectedUpdatedAt])
     .update({ archived_at: db.fn.now(), updated_at: db.fn.now() }).returning('id');
-  return row ? getItem(row.id) : null;
+  if (row) return { item: await getItem(row.id) };
+  const live = await db(TABLE).where({ id }).whereNull('archived_at').first('id');
+  return live ? { conflict: true } : { notFound: true };
 }
 
 // Same shape as admin-credentials.js: the Activity page can show "last updated by". Field names only, never values.
