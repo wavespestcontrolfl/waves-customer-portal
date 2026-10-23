@@ -50,6 +50,7 @@ const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { MERGE_RETIRED_PHONE_PREFIX } = require('./merge-retired');
 const { NEW_SOD_COLUMNS, NEW_SOD_DATE_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
 const { dateOnlyString } = require('../utils/datetime-et');
+const { dedupeNoUnverifiedBackfillLive } = require('../config/feature-gates');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -1877,8 +1878,91 @@ async function repointPinSuggestions(trx, _table, _column, winnerId, loserId) {
   return trx('customer_pin_suggestions').where({ customer_id: loserId }).update({ customer_id: winnerId });
 }
 
+// service_contact_notification_prefs: PK (customer_id, phone_key) — an
+// on-location contact's OWN notification choices (contact login,
+// GATE_CONTACT_LOGIN). Both duplicate profiles holding a row for the SAME
+// phone is one person's choices recorded twice, so they fold MOST
+// RESTRICTIVELY — the table's posture everywhere (a choice only narrows;
+// notification_prefs folds with 'and' for the same reason): a purpose or
+// master switch off on either side stays off, a single-channel delivery
+// choice beats 'both' / unset (two different single channels keep the
+// winner's), and an attestation on either side stands (the same number
+// agreed). Phones the winner has no row for move across whole. The undo
+// refuses after a fold, as after every collision handler (codex #6363 r12 P1).
+function foldContactPrefRows(winnerRow, loserRow) {
+  const { CONTACT_PREF_TOGGLES, CHANNEL_COLUMN_FOR } = require('./contact-notification-prefs');
+  const patch = {};
+  for (const col of [...CONTACT_PREF_TOGGLES, 'sms_enabled', 'email_enabled']) {
+    patch[col] = (winnerRow[col] === false || loserRow[col] === false) ? false : (winnerRow[col] ?? loserRow[col] ?? null);
+  }
+  for (const [purpose, col] of Object.entries(CHANNEL_COLUMN_FOR)) {
+    const kept = winnerRow[col] || null;
+    const other = loserRow[col] || null;
+    // Two DIFFERENT single-channel choices (sms on one side, email on the
+    // other) leave no channel both agreed to — the purpose folds to OFF
+    // rather than widening either side's choice (codex #6363 r13 P1).
+    if (kept && other && kept !== 'both' && other !== 'both' && kept !== other) patch[purpose] = false;
+    patch[col] = (kept && kept !== 'both') ? kept : (other || kept);
+  }
+  patch.consent_attested_at = winnerRow.consent_attested_at || loserRow.consent_attested_at || null;
+  return patch;
+}
+
+async function foldContactNotificationPrefs(trx, table, column, winnerId, loserId) {
+  const loserRows = await trx(table).where(column, loserId).select('*');
+  let moved = 0;
+  let folded = 0;
+  for (const row of loserRows) {
+    const existing = await trx(table).where({ [column]: winnerId, phone_key: row.phone_key }).first();
+    if (!existing) {
+      await trx(table).where({ [column]: loserId, phone_key: row.phone_key }).update({ [column]: winnerId });
+      moved += 1;
+      continue;
+    }
+    await trx(table).where({ [column]: winnerId, phone_key: row.phone_key })
+      .update({ ...foldContactPrefRows(existing, row), updated_at: trx.fn.now() });
+    await trx(table).where({ [column]: loserId, phone_key: row.phone_key }).del();
+    folded += 1;
+  }
+  return `moved ${moved}, folded ${folded} row(s) most-restrictively into the winner's`;
+}
+
+// After the winner's backfill (codex #6363 r25 P2): the sweep repointed (or
+// folded) the loser's service_contact_notification_prefs rows onto the winner
+// BEFORE the slots were reconciled, so a loser-only contact that found no free
+// slot on the winner left its row behind — adding that number later would
+// resurrect its old channel choices and consent_attested_at under a new
+// contact identity. Drop every winner row whose phone occupies none of the
+// winner's FINAL slots (the row as backfilled). Returns the count; a non-zero
+// count makes the merge non-replayable, like a fold.
+async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
+  const slotPhones = require('./customer-contact').getServiceContactSlots(finalWinner).map((s) => s.phone);
+  // The contact families the sweep repointed onto the winner go the same way
+  // as the choices rows (codex #6363 r36 P2): a loser-only contact the winner
+  // had no free slot for would otherwise keep a live family on the winner,
+  // refused only while its number is absent and valid again without a new
+  // code the day the holder adds that number to a slot. Not journaled — the
+  // undo cannot un-revoke a session; a re-login is the cost.
+  await require('../middleware/auth').revokeRemovedContactRefreshSessions(trx, winnerId, slotPhones);
+  const keep = slotPhones.map(phone10).filter(Boolean);
+  const table = 'service_contact_notification_prefs';
+  let discarded;
+  try {
+    const q = trx(table).where({ customer_id: winnerId });
+    if (keep.length) q.whereNotIn('phone_key', keep);
+    discarded = (await q.select('phone_key')).map((row) => row.phone_key);
+  } catch (err) {
+    if (err && err.code === '42P01') return 0;
+    throw err;
+  }
+  if (!discarded.length) return 0;
+  await trx(table).where({ customer_id: winnerId }).whereIn('phone_key', discarded).del();
+  return discarded.length;
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
+  service_contact_notification_prefs: foldContactNotificationPrefs,
   notification_prefs: mergeSingletonPrefRow,
   property_preferences: mergeSingletonPrefRow,
   customer_properties: repointCustomerProperties,
@@ -1989,6 +2073,40 @@ function timestampMs(value) {
   if (value === null || value === undefined || value === '') return null;
   const ms = value instanceof Date ? value.getTime() : Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
+}
+
+// An UNVERIFIED anonymous intake shell: a row an anonymous web visitor's own
+// typed contact details created and nobody has worked since. The intake routes
+// stamp it: pipeline_stage stays 'new_lead' (public-quote.js, lead-webhook.js,
+// inspection-public.js all insert it), plus lead_source 'website_quote'
+// (public quote) or 'lead_pipeline' (inspection lead), last_contact_type
+// 'website_quote' / 'form_submission', or a form_id (lead webhook).
+const UNVERIFIED_INTAKE_LEAD_SOURCES = new Set(['website_quote', 'lead_pipeline']);
+const UNVERIFIED_INTAKE_CONTACT_TYPES = new Set(['website_quote', 'form_submission']);
+function isUnverifiedIntakeShell(row) {
+  if (!row || row.pipeline_stage !== 'new_lead') return false;
+  return UNVERIFIED_INTAKE_LEAD_SOURCES.has(row.lead_source)
+    || UNVERIFIED_INTAKE_CONTACT_TYPES.has(row.last_contact_type)
+    || !isEmptyValue(row.form_id);
+}
+
+// GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: the AUTOMATIC merge must not merge an
+// untouched anonymous intake row whose typed email would fill or differ from
+// the kept customer's email. Invoice and report mail go to customers.email, and
+// the visitor typed it unverified. Left for the office: the pair stays on the
+// Duplicates page for a manual merge. Returns the skip reason or null.
+const UNVERIFIED_INTAKE_EMAIL_REASON = 'unverified_intake_email';
+function unverifiedIntakeEmailSkip(winner, loser) {
+  if (!dedupeNoUnverifiedBackfillLive()) return null;
+  const sameEmail = String(winner.email || '').trim().toLowerCase()
+    === String(loser.email || '').trim().toLowerCase();
+  // Loser shell: its email would fill or differ from the kept customer's.
+  if (isUnverifiedIntakeShell(loser) && !isEmptyValue(loser.email) && !sameEmail) return UNVERIFIED_INTAKE_EMAIL_REASON;
+  // Winner shell (an older intake row kept over a newer real one): the
+  // survivor would carry the visitor-typed email forward. Both directions
+  // are left for the office.
+  if (isUnverifiedIntakeShell(winner) && !isEmptyValue(winner.email) && !sameEmail) return UNVERIFIED_INTAKE_EMAIL_REASON;
+  return null;
 }
 
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
@@ -3233,6 +3351,12 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (mode === 'auto') {
       const blockers = await loserAutoBlockers(trx, loser);
       if (blockers.length) throw new Error(`executeMerge(auto): loser is not a shell (${blockers.join(', ')})`);
+      const emailSkip = unverifiedIntakeEmailSkip(winner, loser);
+      if (emailSkip) {
+        const err = new Error(`executeMerge(auto): ${emailSkip}`);
+        err.skipReason = emailSkip;
+        throw err;
+      }
       if (!namesCompatible(winner, loser)) throw new Error('executeMerge(auto): names conflict');
       if (!ADDRESS_COMPATIBLE.has(addr.status)) throw new Error(`executeMerge(auto): address ${addr.status}`);
     }
@@ -4010,6 +4134,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
     }
+    // The contact choices rows the sweep brought over are reconciled with the
+    // slots the winner actually ends up with (codex #6363 r25 P2) — a dropped
+    // row is one the undo cannot replay, the same posture as a fold.
+    if (await pruneDiscardedContactPrefs(trx, winnerId, { ...winner, ...backfills })
+      && !collisionHandlers.includes('service_contact_notification_prefs')) {
+      collisionHandlers.push('service_contact_notification_prefs');
+    }
     // The backfill above is a live Bill-To transition like any other: a
     // payerless winner that just inherited the loser's payer now owns the
     // repointed self-pay packet invoices, including ones the homeowner
@@ -4029,6 +4160,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // a repointed service was already withdrawn by the writer that assigned it.
     // Both directions are fenced against a send in flight (the loser-side check
     // before the sweep, the winner-side one just above).
+    // A stamp the loser's invoices carried over (payer_billed:<payer>) is re-judged against the SURVIVOR's live owner
+    // first, as every Bill-To edit does (Codex #6472 P2): re-pointed to the payer that owns it now, or released when
+    // none does. The undo re-judges both records again after it splits them.
+    await require('./visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { customerId: winnerId });
     if (backfills.payer_id || winner.payer_id) {
       // Only invoices REPOINTED FROM THE LOSER can carry undo-relevant
       // reversals (local audit on r42): journaling the winner's own ledger
@@ -4242,6 +4377,13 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron', onlyPair = 
       } catch (e) {
         // A failed green merge means the row changed under us — leave it for
         // the next sweep / the review queue rather than retrying in-loop.
+        // GATE_DEDUPE_NO_UNVERIFIED_BACKFILL: an intentional skip, not a failure.
+        // Ids only in the log; the pair stays on the Duplicates page.
+        if (e.skipReason) {
+          logger.info(`[customer-dedupe] auto-merge ${candidate.loser.id} -> ${group.winner.id} left for the office: ${e.skipReason}`);
+          results.skipped.push({ loserId: candidate.loser.id, winnerId: group.winner.id, tier: 'green', reasons: [e.skipReason] });
+          continue;
+        }
         logger.warn(`[customer-dedupe] auto-merge ${candidate.loser.id} -> ${group.winner.id} failed: ${e.message}`);
         results.skipped.push({ loserId: candidate.loser.id, tier: 'green', reasons: [`merge_failed: ${e.message}`] });
       }
@@ -4455,7 +4597,15 @@ const REVERT_FINANCIAL_TABLES = new Set([
 // declined contact would start receiving texts after the split). Count-only
 // journal records for these tables REFUSE the undo exactly like the
 // financial set. Add future composite-PK consent tables here.
-const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin']);
+// service_contact_notification_prefs (contact login, GATE_CONTACT_LOGIN) is the
+// same shape: PK (customer_id, phone_key), and a missing row means "whatever
+// the account sends" — a contact's declined purpose would resume after a
+// split that skipped the row (codex #6363 r12 P1).
+const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin', 'service_contact_notification_prefs']);
+const CONSENT_TABLE_NOUNS = {
+  recipient_optin: 'recipient opt-in record(s)',
+  service_contact_notification_prefs: "on-location contact notification choice(s)",
+};
 
 // Non-financial tables whose JOURNALED rows are still activity-checked,
 // because completing/accepting/signing one MINTS winner-owned children the
@@ -4721,6 +4871,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   referral_promoters: ['updated_at'],
   // timestamps(true, true) — 20260723000004.
   recipient_optin: ['created_at', 'updated_at'],
+  // explicit created_at/updated_at (20261020120000) — a contact's own choices.
+  service_contact_notification_prefs: ['created_at', 'updated_at'],
   // explicit created_at/updated_at (20260730000030) — the first-touch hold
   // ledger; its updated_at doubles as the release-claim fence stamp.
   first_touch_holds: ['created_at', 'updated_at'],
@@ -5758,22 +5910,26 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // resume without its confirmation. Probe BOTH customers for rows
     // created or updated since the merge (the winner's own pre-merge rows
     // are legitimately its own and stay put) and refuse.
-    {
-      let optinRows = [];
+    // The same probe covers every composite-PK consent table
+    // (CONSENT_CRITICAL_TABLES): an on-location contact's choices row
+    // (service_contact_notification_prefs) skipped by the split would
+    // resume a purpose the contact declined (codex #6363 r12 P1).
+    for (const table of CONSENT_CRITICAL_TABLES) {
+      let consentRows = [];
       try {
-        optinRows = await trx('recipient_optin')
+        consentRows = await trx(table)
           .whereIn('customer_id', [winnerId, loserId])
-          .select(['customer_id', ...activityColumnsFor('recipient_optin')]);
+          .select(['customer_id', ...activityColumnsFor(table)]);
       } catch (e) {
-        refuse(`Cannot verify recipient_optin (comms consent) since the merge (${e.message}) — refusing to revert`);
+        refuse(`Cannot verify ${table} (comms consent) since the merge (${e.message}) — refusing to revert`);
       }
       // Composite PK (customer_id, phone_key) — no id column, so these can
       // never be journaled per-row; time is the only usable signal.
-      const newOptins = countActivityRows(optinRows, {
-        keyColumn: 'customer_id', journaledIds: new Set(), mergeAt, sinceOnly: true, table: 'recipient_optin',
+      const fresh = countActivityRows(consentRows, {
+        keyColumn: 'customer_id', journaledIds: new Set(), mergeAt, sinceOnly: true, table,
       });
-      if (newOptins) {
-        refuse(`${newOptins} recipient opt-in record(s) were created or updated since the merge — splitting the accounts would leave the restored customer with no consent row, which reads as "allowed to text"; reconcile consent by hand`);
+      if (fresh) {
+        refuse(`${fresh} ${CONSENT_TABLE_NOUNS[table]} were created or updated since the merge — splitting the accounts would leave the restored customer with no consent row, which reads as "allowed to text"; reconcile consent by hand`);
       }
     }
 
@@ -7297,6 +7453,8 @@ module.exports = {
   previewCollectionCaseReconciliation,
   surplusApprovedCollectionCases,
   predictWinnerBackfills,
+  isUnverifiedIntakeShell,
+  unverifiedIntakeEmailSkip,
   deriveSavedCardStripeCustomer,
   predictSavedCardDemotions,
   predictLoserStateDiscarded,
@@ -7351,6 +7509,8 @@ module.exports = {
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
     repointWeekPlansKeepAvailable,
+    foldContactNotificationPrefs,
+    pruneDiscardedContactPrefs,
   repointFlagsReleaseCollisions,
     repointHealthAlertsDismissCollisions,
     mergeConversationRows,

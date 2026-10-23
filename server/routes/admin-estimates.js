@@ -7,7 +7,7 @@ const { estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estim
 const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
 const router = express.Router();
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callSideBlocksForEstimates, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -70,8 +70,12 @@ const { publishedGroupLinks, publishedOfferExpiry, extendPublishedGroupLinks } =
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
+  adminDraftPreviewEligible,
   buildPricingBundle,
   bookingServiceFor,
+  isEstimateAcceptActive,
+  isEstimateCustomerViewable,
+  sentSnapshotServesAsIs,
 } = require('./estimate-public');
 const {
   leadEstimateAutoSendConfigFromEnv,
@@ -3787,6 +3791,164 @@ function applyEstimateSearchFilter(query, search) {
   });
 }
 
+// The proposal's recurring lines when ALL of them are priced per-application
+// lines (a flat-monthly or unknown-cadence line means the plan is not
+// described by application); otherwise null.
+function recurringPerApplicationLines(proposal) {
+  if (!proposal || proposal.enabled === true) return null;
+  if ((proposal.programs || []).length > 0 || (proposal.correctiveWork || []).length > 0) return null;
+  const recurring = (proposal.buildings || [])
+    .flatMap((b) => b.lineItems || [])
+    .filter((l) => l.frequency !== 'one_time');
+  if (recurring.length === 0) return null;
+  if (!recurring.every((l) => l.frequency === 'per_application'
+    && Number(l.amount) > 0 && Number(l.visitsPerYear) > 0 && l.taxable !== true)) return null;
+  return recurring.map((l) => ({
+    // The synthesized description is "<name> — N applications/yr"; the card prints the count itself.
+    label: String(l.description || '').replace(/\s+—\s+\d+\s+applications\/yr\s*$/, '').trim() || 'Recurring service',
+    amount: Math.round(Number(l.amount) * 100) / 100,
+    visitsPerYear: Math.round(Number(l.visitsPerYear)),
+  }));
+}
+
+// Per-application price lines for the Pipeline card (admin-only, read-only).
+// ONE source: normalizeProposal(row, { recurringMode: 'per_application' }), the
+// authority the estimate PDF and delivery emails read. It runs on the FROZEN
+// send snapshot (no live repricing, so the list stays cheap) and only returns
+// lines that already reconcile to the row's stored totals; anything else gives
+// null and the card shows exactly what it showed before. Skipped for commercial
+// proposals, quote-required rows, one-time-only plans, annual prepay sales and
+// customers who keep monthly billing. Never throws: one bad row never breaks
+// the list.
+function perApplicationLinesForRow(row, estData) {
+  try {
+    if (!row || String(row.category || '').toUpperCase() === 'COMMERCIAL') return null;
+    if (isCommercialProposalData(estData)) return null;
+    // Recursive check (nested result.recurring.services[*].quoteRequired included), the same one the send gate uses.
+    if (row.quote_required === true || estimateDataHasQuoteRequirement(estData)) return null;
+    if (!(parseFloat(row.monthly_total || 0) > 0)) return null;
+    return recurringPerApplicationLines(normalizeProposal(row, { recurringMode: 'per_application' }));
+  } catch (err) {
+    logger.warn(`[admin-estimates] per-application lines unavailable for estimate ${row?.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Fills `perApplicationById` for the page's rows. Rows with no frozen
+// per-application lines cost nothing; the rest are checked against the
+// annual-prepay sale (one batched query) and the billing lane. A closed offer
+// (accepted, declined, expired, archived, held, call-blocked) shows the lane it
+// was SENT in (sentBundleBillsPerApplication), the lane the staff PDF's frozen
+// view prints, so a later change to the customer's billing never rewrites an
+// old quote. An offer that can still be accepted (isEstimateAcceptActive, no
+// call-side block) shows the price only while the customer page still sells
+// exactly that snapshot in that lane: sent per application, billed per
+// application today (what accepting would bill), and served as is
+// (sentSnapshotServesAsIs; a rejected snapshot is rebuilt from live pricing).
+async function perApplicationByEstimateId(estimates, parsedDataById, callBlocks) {
+  const out = new Map();
+  const candidates = [];
+  for (const e of estimates) {
+    const lines = perApplicationLinesForRow(e, parsedDataById.get(e.id));
+    if (lines) candidates.push({ row: e, lines });
+  }
+  if (!candidates.length) return out;
+  let prepaidIds = new Set();
+  try {
+    if (await db.schema.hasTable('annual_prepay_terms')) {
+      const rows = await db('annual_prepay_terms')
+        .whereIn('source_estimate_id', candidates.map((c) => c.row.id))
+        .select('source_estimate_id');
+      prepaidIds = new Set(rows.map((r) => r.source_estimate_id));
+    }
+  } catch (err) {
+    // Unknown prepay state: show nothing rather than risk a wrong cadence.
+    logger.warn(`[admin-estimates] prepay lookup failed for the per-application card view: ${err.message}`);
+    return out;
+  }
+  const todo = candidates.filter((c) => !prepaidIds.has(c.row.id));
+  const { sentBundleBillsPerApplication } = require('../services/estimate-proposal-billing');
+  const liveRows = todo.map((c) => c.row).filter((row) => isEstimateAcceptActive(row) && !callBlocks.has(row.id));
+  const liveIds = new Set(liveRows.map((row) => row.id));
+  const perApplicationToday = await rowsBilledPerApplicationToday(liveRows);
+  const stillSold = (row) => {
+    const data = parsedDataById.get(row.id);
+    return perApplicationToday.has(row.id) && sentSnapshotServesAsIs(data?.sendSnapshot?.pricingBundle, row, data);
+  };
+  for (const c of todo) {
+    if (sentBundleBillsPerApplication(c.row) && (!liveIds.has(c.row.id) || stillSold(c.row))) out.set(c.row.id, c.lines);
+  }
+  return out;
+}
+
+// The ids of the offers (that can still be accepted) whose accept would bill
+// per application TODAY. Batched: ONE schema probe (cached in the billing
+// module), then the customer each row's accept lands on, in the accept's own
+// order (resolveProspectiveAcceptCustomer): the linked customer; for an
+// UNLINKED grouped row, the owner of its linked sibling
+// (resolveGroupedEstimateOwnerIds); otherwise the phone match
+// (matchAcceptCustomersByPhoneBatch, the same rules as
+// matchAcceptCustomerByPhone). Each step is one query (phones: one per 500),
+// so a limit=all list costs a constant number of queries. A customer who keeps
+// monthly membership bills monthly; no match, or an ambiguous one, is
+// per-application, as the resolver answers. A row the phone batch cannot judge
+// (unresolved) or whose customer could not be read is unknown, and so is every
+// row when a lookup fails: no price line.
+async function rowsBilledPerApplicationToday(rows) {
+  const ids = new Set();
+  if (!rows.length) return ids;
+  const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
+  try {
+    if (!(await require('../services/estimate-proposal-billing').perApplicationBillingColumnsExist())) return ids;
+    const unlinked = rows.filter((row) => !row.customer_id);
+    const ownerIds = unlinked.length
+      ? await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerIds(unlinked, db)
+      : new Map();
+    const customerIdOf = (row) => row.customer_id || ownerIds.get(row.id) || null;
+    const customerIds = [...new Set(rows.map(customerIdOf).filter(Boolean))];
+    const customers = customerIds.length
+      ? await db('customers').whereIn('id', customerIds).select('id', 'pipeline_stage', 'monthly_rate', 'billing_mode')
+      : [];
+    const byId = new Map(customers.map((c) => [c.id, c]));
+    const phoneRows = unlinked.filter((row) => !ownerIds.has(row.id));
+    const verdicts = phoneRows.length
+      ? await require('./estimate-public').matchAcceptCustomersByPhoneBatch(phoneRows, db)
+      : new Map();
+    for (const row of rows) {
+      const customerId = customerIdOf(row);
+      let customer = null;
+      if (customerId) {
+        customer = byId.get(customerId);
+        if (!customer) continue;
+      } else {
+        const verdict = verdicts.get(row.id);
+        if (!verdict) continue;
+        customer = verdict.match || null;
+      }
+      if (customer && customerPreservesMonthlyMembership(customer)) continue;
+      ids.add(row.id);
+    }
+  } catch (err) {
+    logger.warn(`[admin-estimates] billing lane unavailable for the per-application card view: ${err.message}`);
+    ids.clear();
+  }
+  return ids;
+}
+
+// Accepted rows that have a recorded acceptance (terms_version set AND a
+// estimate_acceptances row), the same condition the record helper uses.
+async function acceptanceRecordIdSet(estimates) {
+  const ids = estimates.filter((e) => e.status === 'accepted' && e.terms_version).map((e) => e.id);
+  if (!ids.length) return new Set();
+  try {
+    const rows = await db('estimate_acceptances').whereIn('estimate_id', ids).distinct('estimate_id');
+    return new Set(rows.map((r) => r.estimate_id));
+  } catch (err) {
+    logger.warn(`[admin-estimates] acceptance record lookup failed: ${err.message}`);
+    return new Set();
+  }
+}
+
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {
   try {
@@ -3995,10 +4157,21 @@ router.get('/', async (req, res, next) => {
       }
     }
 
+    // Parsed once: the per-application lines and the row payload read the same data.
+    const parsedDataById = new Map(estimates.map((e) => [e.id, parseEstimateData(e.estimate_data)]));
+    // The /data gate, judged per row: its row verdicts (the staff draft preview,
+    // or a row the customer page shows), then the call-side verdict for the
+    // rows it would serve (callSideBlocksForEstimates, one batched read; fails
+    // closed). A blocked row is neither previewable nor acceptable.
+    const servedRows = estimates.filter((e) => adminDraftPreviewEligible(e, '1') || isEstimateCustomerViewable(e));
+    const callBlocks = await callSideBlocksForEstimates(db, servedRows.map((e) => ({ id: e.id, status: e.status, data: parsedDataById.get(e.id) })));
+    const staffPreviewableIds = new Set(servedRows.filter((e) => !callBlocks.has(e.id)).map((e) => e.id));
+    const perApplicationById = await perApplicationByEstimateId(estimates, parsedDataById, callBlocks);
+    const acceptanceRecordIds = await acceptanceRecordIdSet(estimates);
+
     res.json({
       estimates: estimates.map(e => {
-        let estData = e.estimate_data;
-        if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = null; } }
+        const estData = parsedDataById.get(e.id);
         const monthlyTotal = parseFloat(e.monthly_total || 0);
         const onetimeTotal = parseFloat(e.onetime_total || 0);
         const hasBeenSent = !!e.sent_at;
@@ -4039,6 +4212,13 @@ router.get('/', async (req, res, next) => {
           updatedAt: e.updated_at,
           monthlyTotal,
           onetimeTotal,
+          // Per-application price lines for the card, or null (see perApplicationLinesForRow).
+          perApplication: perApplicationById.get(e.id) || null,
+          hasAcceptanceRecord: acceptanceRecordIds.has(e.id),
+          // Whether the staff preview (?adminPreview=1) renders this row; a held,
+          // invalidated, expired, archived or call-blocked row 404s there even for
+          // staff, so the card opens the staff PDF instead.
+          staffPreviewable: staffPreviewableIds.has(e.id),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at,
           viewedAt: hasBeenSent ? e.viewed_at : null,
@@ -4130,6 +4310,23 @@ router.get('/', async (req, res, next) => {
       // list-derived KPIs may be incomplete instead of silently undercounting.
       truncated: estimates.length >= ESTIMATE_LIST_LIMIT,
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/estimates/:id/acceptance — the recorded customer acceptance
+// (terms version + text, time, device, masked IP) for an accepted estimate.
+// Owner-only: the router's allowlist above only lets /:id and
+// /:id/schedule-source through to staff. 404 when there is no record
+// (staff "Mark Won" writes none).
+router.get('/:id/acceptance', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // Strict: a failed read (or a record terms_version promises but the table lacks) is a server
+    // error, never the 404 that means no acceptance record was ever committed.
+    const record = await require('../services/estimate-acceptance-record').acceptanceRecordForEstimate(estimate, { strict: true });
+    if (!record) return res.status(404).json({ error: 'No acceptance record for this estimate' });
+    res.json({ acceptance: record });
   } catch (err) { next(err); }
 });
 
@@ -4857,17 +5054,41 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    // Browser-rendered document (GATE_ESTIMATE_DOC_PDF) — same renderer as
-    // the customer download so the operator's copy matches the customer's.
-    // Only for rows the public /data route will serve (the headless page
-    // fetches it): drafts/scheduled/expired/send_failed/archived rows keep
-    // the pdfkit generator, which reads the row directly. Any render failure
-    // also falls through to pdfkit — the admin download must never 500 on a
+    const billing = require('../services/estimate-proposal-billing');
+    const data = parseEstimateData(estimate.estimate_data);
+    const unsent = ['draft', 'scheduled'].includes(estimate.status);
+    // Only a real handoff writes the send bundle; a row without one (unsent,
+    // or a first send that failed on every channel) has nothing to freeze to.
+    const sentBundle = data?.sendSnapshot?.pricingBundle;
+    const hasSentBundle = !unsent && Boolean(sentBundle) && typeof sentBundle === 'object';
+    // Judged as the public /data route judges the row: the public page's own
+    // predicate, then the call-side verdict.
+    const publicViewable = isEstimateCustomerViewable(estimate)
+      && !(await callSideBlockForEstimateData(db, data, { estimateStatus: estimate.status }));
+    // A price-locked quote (accepted / declined) is the offer as it was SENT.
+    // The customer's document reads today's billing lane, so when that lane is
+    // no longer the one the quote was sent in, the staff copy is the frozen one.
+    let laneMoved = false;
+    if (publicViewable && hasSentBundle && billing.estimateIsPriceLocked(estimate)) {
+      const [today, sent] = await Promise.all([
+        billing.resolveProposalBillingContext(estimate),
+        billing.resolveFrozenBillingContext(estimate),
+      ]);
+      laneMoved = today.billsPerApplication !== sent.billsPerApplication;
+    }
+    // A delivered quote the public page no longer serves (archived, expired by
+    // status or by date, send_failed after an earlier delivery, held for a
+    // re-price, invalidated, call-blocked), or a locked quote whose lane moved,
+    // renders from the frozen send bundle in the lane it was sent in
+    // (resolveFrozenBillingContext); resolveProposalBillingContext would reprice
+    // an unlocked row live and reads today's lane. Everything else is the
+    // customer's own document: the browser renderer (GATE_ESTIMATE_DOC_PDF,
+    // the renderer of the customer download, so the operator's copy matches the
+    // customer's), else pdfkit on the same live billing lane. Any render
+    // failure falls through to pdfkit — the admin download must never 500 on a
     // browser hiccup.
-    const publicViewable = !estimate.archived_at
-      && !['draft', 'scheduled', 'expired', 'send_failed'].includes(estimate.status)
-      && !(estimate.expires_at && new Date(estimate.expires_at) < new Date() && !['accepted', 'declined'].includes(estimate.status));
-    if (publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
+    const sentOfferView = hasSentBundle && (!publicViewable || laneMoved);
+    if (!sentOfferView && publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
         const buffer = await renderEstimateDocumentPdf(estimate);
@@ -4879,12 +5100,12 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
         logger.warn(`[admin-estimates] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${sanitizeRenderError(e)}`);
       }
     }
-    // Same live billing lane the customer-facing download resolves, so the
-    // operator's copy and the customer's copy stay byte-identical.
-    const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
     const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
+    // GATE_ESTIMATE_LAWN_LIMITS: the same "What we can and can't fix" copy the customer's download prints.
+    const lawnLimits = await require('../services/estimate-lawn-limits').lawnLimitsForEstimate(estimate);
     generateEstimateProposalPDF(estimate, res, {
-      ...(await resolveProposalBillingContext(estimate)),
+      ...(await (sentOfferView ? billing.resolveFrozenBillingContext : billing.resolveProposalBillingContext)(estimate)),
+      ...(lawnLimits ? { lawnLimits } : {}),
       // Same recorded acceptance the customer's download carries (strict: an
       // accepted document is never produced without its record).
       acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),
@@ -5844,6 +6065,9 @@ router.delete('/:id', async (req, res, next) => {
 // not a standing route.
 
 router._internals = {
+  perApplicationLinesForRow,
+  perApplicationByEstimateId,
+  acceptanceRecordIdSet,
   clearQuoteRequirementFlags,
   resolveBlockingAutomationForProposal,
   clearStaleProposalDelivery,

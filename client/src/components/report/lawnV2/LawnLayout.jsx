@@ -263,7 +263,7 @@ function WhenToCall({ treated }) {
       <div data-testid="lawn-when-to-call">
         <CardTitle>{LAYOUT_COPY.whenToCallTitle}</CardTitle>
         {whenToCallLines({ treated }).map((line) => (
-          <p key={line} style={{ margin: '0 0 8px', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{line}</p>
+          <p key={line} className="sr-v2-body" style={{ margin: '0 0 8px', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{line}</p>
         ))}
         {treated ? null : (
           <p style={{ margin: 0, fontSize: 16, lineHeight: 1.5 }}>
@@ -309,7 +309,7 @@ function Products({ slots }) {
 }
 
 // The ordered list. Each key names one section; the page prints them top to bottom.
-//   a  done + the next lawn visit    status, reservice, plan, upcoming, nextVisit
+//   a  done + the next lawn visit    status, blog (the Waves blog post), reservice, plan, upcoming, nextVisit
 //   b  Your part                     yourPart
 //   c  what we did + why now         whatWeDid
 //   c  (also)                         the Visit Summary card holds the recorded findings list, as on the standard page
@@ -320,7 +320,7 @@ function Products({ slots }) {
 //   h  rate us                       review, referral
 //   i  products (collapsed)          products
 export const LAYOUT_ORDER = [
-  'status', 'reservice', 'plan', 'upcoming', 'nextVisit',
+  'status', 'blog', 'reservice', 'plan', 'upcoming', 'nextVisit',
   'yourPart', 'newSod',
   'whatWeDid',
   'photos', 'recap', 'treatmentMap',
@@ -333,6 +333,7 @@ export const LAYOUT_ORDER = [
 
 const SECTIONS = {
   status: ({ slots }) => slots.status,
+  blog: ({ slots }) => slots.blog,
   reservice: ({ slots }) => slots.reservice,
   plan: ({ slots }) => slots.plan,
   upcoming: ({ slots }) => slots.upcoming,

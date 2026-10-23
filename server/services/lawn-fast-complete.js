@@ -241,7 +241,23 @@ const MAX_PREVIEW_PRODUCTS = 20;
 //     buildReportWeekPlan, the report's own builder.
 // Validates what the client sent before any query: products_catalog.id and
 // scheduled_services.id are uuid columns, so a malformed value would raise 22P02.
-function parsePreviewRequest(serviceId, productIds) {
+// targets (optional): { [productId]: [target, ...] }, the targets the completion
+// will log for each product, so a product whose label splits by target
+// (GATE_LAWN_WATERING_EVERY_VISIT) previews the instruction the report prints.
+const MAX_PREVIEW_TARGETS = 12;
+function parsePreviewTargets(targets) {
+  if (targets == null) return { ok: true, byId: new Map() };
+  if (typeof targets !== 'object' || Array.isArray(targets)) return { ok: false };
+  const byId = new Map();
+  for (const [id, list] of Object.entries(targets)) {
+    if (!isUuid(String(id).trim()) || !Array.isArray(list) || list.length > MAX_PREVIEW_TARGETS
+      || list.some((target) => typeof target !== 'string' || !target.trim() || target.length > 120)) return { ok: false };
+    byId.set(String(id).trim().toLowerCase(), list.map((target) => target.trim()));
+  }
+  return { ok: true, byId };
+}
+
+function parsePreviewRequest(serviceId, productIds, targets) {
   if (!Array.isArray(productIds) || productIds.some((id) => typeof id !== 'string' || !isUuid(id.trim()))) {
     return { ok: false, reason: 'invalid_product_ids' };
   }
@@ -249,8 +265,10 @@ function parsePreviewRequest(serviceId, productIds) {
   // lowercased before dedupe and map lookup: an uppercase id must find its row.
   const ids = [...new Set(productIds.map((id) => id.trim().toLowerCase()))];
   if (ids.length > MAX_PREVIEW_PRODUCTS) return { ok: false, reason: 'too_many_products' };
+  const parsedTargets = parsePreviewTargets(targets);
+  if (!parsedTargets.ok) return { ok: false, reason: 'invalid_targets' };
   if (!isUuid(serviceId)) return { ok: false, reason: 'not_found' };
-  return { ok: true, ids };
+  return { ok: true, ids, targetsById: parsedTargets.byId };
 }
 
 // ANY failure of a read that feeds the move guard (preferences, turf profile,
@@ -327,10 +345,10 @@ async function loadReportWateringContext(svc, knex) {
  * report's own guards might withhold or word differently.
  * `{ ok: false, reason }` for a bad request.
  */
-async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, now = new Date() }) {
-  const request = parsePreviewRequest(serviceId, productIds);
+async function buildLawnFastWateringPreview({ serviceId, productIds, targets = null, knex = db, now = new Date() }) {
+  const request = parsePreviewRequest(serviceId, productIds, targets);
   if (!request.ok) return request;
-  const { ids } = request;
+  const { ids, targetsById } = request;
   const svc = await require('./pest-recap').loadServiceWithCustomer(serviceId, knex);
   if (!svc) return { ok: false, reason: 'not_found' };
 
@@ -368,7 +386,7 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
     // A product the catalog does not have is an unknown rule, exactly as a report
     // product with no frozen facts: no claim.
     instruction = await reportData.buildReportWateringInstruction({
-      products: entries.map((entry) => ({ product_name: entry.name, approved_report_product_facts: entry.facts })),
+      products: entries.map((entry) => ({ product_id: entry.productId, product_name: entry.name, approved_report_product_facts: entry.facts, targets: targetsById.get(entry.productId) || [] })),
       service: { customer_id: svc.customer_id },
       completionTime: now,
       lawnAssessment: { waterContext: { scheduleUnconfirmed: context.scheduleUnconfirmed } },
@@ -887,6 +905,15 @@ function reportFactsContextKeys() {
   return Object.fromEntries(REPORT_FACTS_CONTEXT_KEYS.filter(([, live]) => live()).map(([key]) => [key, true]));
 }
 
+// GATE_ESTIMATE_LAWN_LIMITS: `{ carpetgrassCelsiusWarning }` when the customer's turf profile lists carpetgrass, else `{}`.
+// Advisory text for a product row, never a block and never a required tap; a failed read adds nothing.
+async function carpetgrassCelsiusWarningKey(svc, knex) {
+  if (featureGates.estimateLawnLimitsLive?.() !== true) return {};
+  const lawnLimits = require('./estimate-lawn-limits');
+  const { otherGrasses } = await lawnLimits.loadLawnLimitFlags(svc.customer_id, svc.property_id, knex);
+  return otherGrasses.includes('carpetgrass') ? { carpetgrassCelsiusWarning: lawnLimits.CARPETGRASS_CELSIUS_WARNING } : {};
+}
+
 /**
  * The sheet's context for one scheduled service. `{ ok: false, reason }` for a
  * missing visit; an ineligible visit answers `eligible: false` with the reason
@@ -961,6 +988,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     ...(featureGates.fastCompleteWrapUpLive() ? { wrapUp: true } : {}),
     // GATE_REPORT_CLEANUP_1020: the sheet's granular method default is on. The key exists only while the gate is live.
     ...require('./service-report/report-cleanup-1020').methodCorrectionKey(),
+    // GATE_ESTIMATE_LAWN_LIMITS: the turf profile lists carpetgrass, so a Celsius WG row on the sheet shows
+    // this line. The key exists only while the gate is live AND the flag is set, so gate off is byte-identical.
+    ...await carpetgrassCelsiusWarningKey(svc, knex),
     // GATE_LAWN_REPORT_FACTS context keys (the standing chinch find, the recorded spot areas), present only while live.
     ...reportFactsContextKeys(),
     // Why the planned list is empty when it is empty because a read failed

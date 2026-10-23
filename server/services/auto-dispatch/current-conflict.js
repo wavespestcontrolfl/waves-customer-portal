@@ -92,9 +92,41 @@ async function samePlaceIds(db, service, rows) {
     .whereIn('scheduled_services.id', [String(service.id), ...ids])
     .select(...PLACE_COLUMNS);
   const byId = new Map(places.map((p) => [String(p.id), p]));
-  const own = byId.get(String(service.id));
-  // A row that cannot be read is treated as a different place (a conflict).
+  return idsAtPlace(byId.get(String(service.id)), ids, byId);
+}
+
+// The ids whose place row (`byId`) is `own`'s place. A row that cannot be
+// read is treated as a different place (a conflict).
+function idsAtPlace(own, ids, byId) {
   return new Set(ids.filter((id) => own && byId.has(id) && samePlace(own, byId.get(id))));
+}
+
+// samePlaceIds for a visit not stored yet, whose place is its own fields
+// (property_id and the stamped service_address_*; an unstamped one inherits
+// its customer's address, read here) — the plan writers' new visits
+// (scheduling/plan-taken-hour.js), whose place can differ from any stored row
+// of their plan (a template address override, a newly anchored property).
+async function samePlaceIdsAt(db, place, rows) {
+  const ids = rows.filter((r) => sameCustomer(r, place)).map((r) => String(r.id));
+  if (!ids.length) return new Set();
+  const places = await db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.id', ids)
+    .select(...PLACE_COLUMNS);
+  const customer = await db('customers').where({ id: place.customer_id }).first('address_line1', 'address_line2', 'city', 'state', 'zip');
+  const own = {
+    property_id: place.property_id || null,
+    service_address_line1: place.service_address_line1 || null,
+    service_address_line2: place.service_address_line2 || null,
+    service_address_city: place.service_address_city || null,
+    service_address_zip: place.service_address_zip || null,
+    customer_address_line1: customer?.address_line1 || null,
+    customer_address_line2: customer?.address_line2 || null,
+    customer_city: customer?.city || null,
+    customer_state: customer?.state || null,
+    customer_zip: customer?.zip || null,
+  };
+  return idsAtPlace(own, ids, new Map(places.map((p) => [String(p.id), p])));
 }
 
 async function overlappingStopIds(service, ctx, excludeIds, dateStr) {
@@ -149,4 +181,6 @@ async function currentConflict(service, ctx, excludeIds) {
   return ids.length ? { kind: 'overlap', date: dateStr, with: ids } : null;
 }
 
-module.exports = { currentConflict, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds } };
+// isOtherStop and samePlaceIdsAt are also the plan writers' taken-hour rule
+// (scheduling/plan-taken-hour.js).
+module.exports = { currentConflict, isOtherStop, samePlaceIdsAt, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds } };

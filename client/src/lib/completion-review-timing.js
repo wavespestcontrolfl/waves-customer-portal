@@ -34,7 +34,7 @@ export function reviewTimingHint(options) {
   }
   return hint;
 }
-function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
+function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false, reportTextExpected }) {
   // An unpaid completion invoice holds the ask until payment lands (the
   // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
   // relative timing is re-derived from the payment time; an absolute one is
@@ -54,34 +54,42 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
   // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
   // Customer requested stores a zero delay, so it goes at the next tick.
   if (awaitsPayment && reviewTiming === "auto") {
+    const afterReport = afterReportHint(preview, reportTextExpected, { afterPayment: true });
+    if (afterReport) return afterReport;
     return preview?.reviewSequencesEnabled
       ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
       : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
   }
   if (awaitsPayment && reviewTiming === "customer_requested") return "The request is recorded on this visit. New review enrollment waits for invoice payment and visit eligibility. An existing cadence keeps its schedule.";
-  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
+  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected });
   return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
 }
-export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
-  if (reviewTiming === "auto") {
-    if (!preview?.at) return "Review text goes out separately at the smart send window.";
-    // In cadence mode `at` is a jitter-free eligibility time: enrollment
-    // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
-    // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
-    // The legacy path has no jitter but its own worker ticks (the */15
-    // scheduler): the row is eligible just after `at` and texts at the next
-    // tick, so name that tick too (codex #4140 r18 P2).
-    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
-    const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
-    if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
-    // The legacy +120 lands wherever the completion did — an evening visit's
-    // 9:15 PM tick is refused by the send window and the row is re-queued for
-    // the next 8 AM (codex #4140 r19 P2). Cadence mode's plan is already
-    // fenced inside the window by the server.
-    const legacyHeld = !preview.reviewSequencesEnabled && preview.smsSendWindowEnabled === true ? heldToWindowOpenISO(hi || preview.at, preview) : null;
-    if (legacyHeld) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after about ${fmtReviewTime(preview.at)}, about ${fmtReviewTime(legacyHeld)}.`;
-    return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
-  }
+// GATE_REVIEW_ASK_AFTER_REPORT: with no completion text to follow (texting off,
+// no phone, email only) the server passes no anchor and keeps the smart window.
+// Null when the server did not name the after-report rule (the smart window wording applies).
+function afterReportHint(preview, reportTextExpected, { afterPayment = false } = {}) {
+  if (preview?.afterReport !== true) return null;
+  const lead = afterPayment ? "Review text waits for the invoice to be paid, then goes out" : "Review text goes out separately";
+  if (reportTextExpected === false) return `${lead} at the smart send window, because no report text goes out to follow.`;
+  // The ask is eligible 10 minutes after the report text (or the payment) and goes at the next
+  // :14/:44 review send; a target outside the 8 AM–8 PM window waits for the morning. A report
+  // held for the morning pulls the ask to 10 minutes after its replay goes out as a text
+  // (pullAskAfterHeldReport); the Waves app, opted-out and failed reports keep the smart window,
+  // which the panel cannot know ahead of time.
+  const after = afterPayment ? "payment" : "the report text";
+  const tickList = preview.cadenceTickMinutesOfHour || [14, 44];
+  // GATE_REVIEW_SENDER_EVERY_5_MIN names twelve minutes; say it in words.
+  const ticks = tickList.length > 2 ? "every 5 minutes" : `${tickList.map((m) => `:${String(m).padStart(2, "0")}`).join(" and ")} each hour`;
+  const windowNote = preview.smsSendWindowEnabled ? " A target after 8 PM waits for the next morning." : "";
+  const held = afterPayment
+    ? " If the report was held for the morning: about 10 minutes after that report text or the payment, whichever is later (a single visit's held report that went out before the payment keeps the smart send window)."
+    : " If the report is held for the morning, it goes about 10 minutes after that report text goes out.";
+  return `${lead} at the first review send (${ticks}) at least ${afterReportMinutes(preview)} minutes after ${after}.${windowNote}${held} If the report goes by the Waves app, or texts are turned off for this customer, it goes at the smart send window.`;
+}
+export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected }) {
+  // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel
+  // words it, never a client-side approximation of either rule.
+  if (reviewTiming === "auto") return afterReportHint(preview, reportTextExpected) || smartWindowReviewHint(preview);
   if (reviewTiming === "customer_requested") {
     // `bundled` is the panel's own bundling condition (legacy path, completion
     // text going out) — the same shape as dispatch's shouldBundleReview. No
@@ -103,6 +111,27 @@ export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled
   if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
   return "";
 }
+// Automatic outside the after-report rule: the smart send window as the server previewed it.
+function smartWindowReviewHint(preview) {
+  if (!preview?.at) return "Review text goes out separately at the smart send window.";
+  // In cadence mode `at` is a jitter-free eligibility time: enrollment
+  // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
+  // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
+  // The legacy path has no jitter but its own worker ticks (the */15
+  // scheduler): the row is eligible just after `at` and texts at the next
+  // tick, so name that tick too (codex #4140 r18 P2).
+  const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
+  const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
+  if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
+  // The legacy +120 lands wherever the completion did — an evening visit's
+  // 9:15 PM tick is refused by the send window and the row is re-queued for
+  // the next 8 AM (codex #4140 r19 P2). Cadence mode's plan is already
+  // fenced inside the window by the server.
+  const legacyHeld = !preview.reviewSequencesEnabled && preview.smsSendWindowEnabled === true ? heldToWindowOpenISO(hi || preview.at, preview) : null;
+  if (legacyHeld) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after about ${fmtReviewTime(preview.at)}, about ${fmtReviewTime(legacyHeld)}.`;
+  return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
+}
+const afterReportMinutes = (preview) => (Number(preview?.afterReportMinutes) > 0 ? Math.round(Number(preview.afterReportMinutes)) : 10);
 const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
 // The server's MAX_REVIEW_DELAY_MINUTES (complete-scheduled-service.js).
 export const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60000;
@@ -335,7 +364,9 @@ export function customReviewTimeProblem(reviewCustomAt) {
 // (`shown`): null to go on, else { message, noticed, dropShown }. A bucket change of an Automatic
 // time needs the operator's second look; a failed re-check stops ONCE (`failureNoticed`), after
 // which the submit proceeds and the server computes the window itself (codex #4140 r3, r13, r18).
-export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed }) {
+// `reportTextExpected` false (texting off, no phone): no report text anchors the ask, so the
+// server uses the smart window even when the preview offered the after-report time.
+export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed, reportTextExpected = true }) {
   if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
     return { message: `The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.` };
   }
@@ -344,11 +375,17 @@ export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failure
       noticed: true,
       dropShown: !!shown,
       message: reviewTiming === "auto" && shown
-        ? "The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue."
+        ? `The automatic review time could not be re-checked. The server will pick the ${shown.afterReport === true && reportTextExpected ? "time after the report text" : "smart send window"} — submit again to continue.`
         : "Whether automated review texts can send could not be checked. If the scheduler is off nothing sends; the choice is still recorded on this visit. Submit again to continue.",
     };
   }
   return null;
+}
+
+// Whether the completion can send a report text at all: texting on and a phone that is not
+// known to be missing (undefined reads as yes).
+export function completionReportTextExpected({ effectiveSendSms, customerPhone }) {
+  return !!effectiveSendSms && customerPhone !== "" && customerPhone !== null;
 }
 
 // The hint under the review timing, and whether the review link rides inside the completion
@@ -356,7 +393,9 @@ export function reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failure
 // An unpaid invoice holds the customer-requested ask server-side (invoiceBlocksReview), so the
 // preview must not promise the link the timing hint says waits for payment (codex #4140 r22 P2).
 // The one-time recap path is exempt server-side (recapReviewOnly) and stays exempt here.
-export function completionReviewHint({ willReview, oneTimeRecapOnly = false, effectiveSendSms, reviewTiming, reviewCustomAt, preview, reviewAwaitsPayment }) {
+// `customerPhone` (the schedule payload's) tells whether a report text can go at all;
+// unknown (undefined) reads as yes, as before.
+export function completionReviewHint({ willReview, oneTimeRecapOnly = false, effectiveSendSms, reviewTiming, reviewCustomAt, preview, reviewAwaitsPayment, customerPhone }) {
   const bundled = willReview
     && effectiveSendSms
     && (oneTimeRecapOnly
@@ -364,7 +403,7 @@ export function completionReviewHint({ willReview, oneTimeRecapOnly = false, eff
         && preview?.bundlesImmediateAsk === true
         && !reviewAwaitsPayment));
   const text = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment: reviewAwaitsPayment })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment: reviewAwaitsPayment, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone }) })
     : "";
   return { text, bundled };
 }

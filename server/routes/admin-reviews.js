@@ -8,7 +8,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const { WAVES_LOCATIONS, resolveReviewLocationId } = require('../config/locations');
 const logger = require('../services/logger');
 const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
-const { getServiceContact, getServiceContactSmsRecipient } = require('../services/customer-contact');
+const { getServiceContact, getServiceContactSmsRecipient, phoneKeyOf } = require('../services/customer-contact');
 const { runExclusive } = require('../utils/cron-lock');
 const OUTREACH = require('../services/review-outreach-templates');
 const { isEnabled } = require('../config/feature-gates');
@@ -122,9 +122,19 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
     // below is only for the plan the panel previews (codex #4140 r17 P2).
     const reviewCadenceGate = isEnabled('reviewSequences');
     const reviewSequencesEnabled = reviewCadenceGate && schedulerEnabled;
-    const plan = reviewSequencesEnabled
-      ? ReviewService.__private.calculateReviewSendPlan(new Date(), serviceType, { jitter: false })
-      : null;
+    // GATE_REVIEW_ASK_AFTER_REPORT (owner 2026-10-22): Automatic = about
+    // REVIEW_AFTER_REPORT_DELAY_MINUTES after the report text, every service
+    // line — the same rule enrollPostService applies, so the panel previews
+    // the decision dispatch will make. Explicit timings never reach this.
+    // Cadence mode only: the legacy path ignores the gate.
+    const afterReport = reviewSequencesEnabled && require('../config/feature-gates').reviewAskAfterReportLive();
+    const afterReportMinutes = ReviewService.REVIEW_AFTER_REPORT_DELAY_MINUTES;
+    const afterReportAt = new Date(Date.now() + afterReportMinutes * 60000);
+    const plan = afterReport
+      ? { at: afterReportAt, bucket: `after_report:+${afterReportMinutes}m`, earliestAt: afterReportAt, latestAt: afterReportAt }
+      : reviewSequencesEnabled
+        ? ReviewService.__private.calculateReviewSendPlan(new Date(), serviceType, { jitter: false })
+        : null;
     const at = plan ? plan.at : new Date(Date.now() + ReviewService.LEGACY_REVIEW_DELAY_MINUTES * 60000);
     const serviceReportV1Delivery = await serviceRecordsHaveReportTemplateColumn();
     res.json({
@@ -132,6 +142,10 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // Names the rule behind `at`; the panel compares buckets, not instants
       // (a relative answer moves with every request) — codex #4140 r4 P1.
       bucket: plan ? plan.bucket : `legacy:+${ReviewService.LEGACY_REVIEW_DELAY_MINUTES}m`,
+      // GATE_REVIEW_ASK_AFTER_REPORT: the panel words Automatic as "about N
+      // minutes after the report text" instead of the smart send window.
+      afterReport,
+      afterReportMinutes: afterReport ? afterReportMinutes : null,
       // The eligibility range live enrollment's jitter can land in; the
       // panel names the cadence ticks either end reaches (codex #4140 r14 P2).
       earliestAt: plan ? plan.earliestAt.toISOString() : null,
@@ -150,10 +164,11 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // and enrolls a sequence nothing ticks — the panel must say "paused",
       // not "[review link inserted]" (r17 P2).
       bundlesImmediateAsk: !reviewCadenceGate && serviceReportV1Delivery === false,
-      // processReviewSequences runs on fixed minutes of the hour (:14/:44);
+      // processReviewSequences runs on fixed minutes of the hour (:14/:44, or
+      // every 5 minutes with GATE_REVIEW_SENDER_EVERY_5_MIN);
       // the panel uses them to say when a custom time actually goes out
       // (codex #4140 r5 P2).
-      cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
+      cadenceTickMinutesOfHour: ReviewService.__private.reviewCadenceTickMinutes(),
       // The legacy path's worker (processScheduled, the */15 cron) has ticks
       // of its own; with cadences off the panel names those, not the
       // requested eligibility minute (codex #4140 r18 P2).
@@ -757,6 +772,14 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
       : [];
     const suppressedSet = new Set(suppressedRows.map(r => r.phone));
 
+    // The sender's email identity is the service contact as themselves, and
+    // their OWN email master switch (contact login) blocks the email leg
+    // (review-request.js sendOutreachTouch) — so a contact who turned email
+    // off is not offered a cadence that cannot deliver (codex #6363 r20 P2).
+    const { contactEmailOffPhoneKeys } = require('../services/contact-notification-prefs');
+    const emailOffByCustomer = await contactEmailOffPhoneKeys(customerIds);
+    const contactEmailOff = (c, emailContact) => !!emailOffByCustomer.get(String(c.id))?.has(phoneKeyOf(emailContact.phone));
+
     const sequenceMap = await ReviewService.getActiveSequencesForCustomers(customerIds).catch(() => ({}));
 
     const satRows = customerIds.length
@@ -783,7 +806,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         // unstamped contact's email still counts as cadenceable.
         const contact = smsRecipient(c);
         const phone = contact.phone || c.phone || null;
-        const email = getServiceContact(c).email || c.email || null;
+        const emailContact = getServiceContact(c);
+        const email = emailContact.email || c.email || null;
+        const emailOff = contactEmailOff(c, emailContact);
         const ls = lastSvcMap[c.id];
         const ask = askMap[c.id] || { askCount: 0, lastAsked: null };
         const prefs = prefsMap[c.id];
@@ -800,7 +825,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         const smsable = !!phone && !reviewOptedOut && !smsPrefOff && !suppressed && !emailPreferred;
         // Email fails closed like the sender: requires an existing prefs row
         // (parity with SMS's NO_CONSENT_RECORD on a missing row).
-        const emailable = !!email && !!prefs && !reviewOptedOut && !emailPrefOff;
+        const emailable = !!email && !!prefs && !reviewOptedOut && !emailPrefOff && !emailOff;
         const sequence = sequenceMap[c.id] || null;
         // `sendable` gates the SMS-only manual Send; `cadenceable` gates
         // Start-Cadence (can use email). A customer who turned OFF review SMS but
@@ -814,6 +839,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         if (!smsable && !emailable) {
           if (reviewOptedOut) eligibilityReasons.push('opted_out');
           else if (suppressed) eligibilityReasons.push('suppressed');
+          // The contact's email switch is the opt-out the sender reports
+          // (blocked: true, reason 'opted_out').
+          else if (emailOff) eligibilityReasons.push('opted_out');
           else eligibilityReasons.push('no_contact');
         } else if (!smsable && emailable) {
           eligibilityReasons.push(

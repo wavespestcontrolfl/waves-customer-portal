@@ -2219,4 +2219,44 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     await accept(database, converter, { noLinkedVisits: true });
     expect(converter.convertEstimate).toHaveBeenCalled();
   });
+
+  describe('GATE_ESTIMATE_LAWN_LIMITS: the block is frozen onto the estimate at accept', () => {
+    const lawn = () => ({
+      id: 'estimate-lawn-limits',
+      status: 'viewed',
+      customer_id: 'customer-1',
+      sent_at: '2026-10-10T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: '60.00',
+      onetime_total: '0.00',
+      estimate_data: JSON.stringify({ result: { oneTime: { items: [] }, recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6 }] } } }),
+    });
+    const accept = async (estimate) => {
+      const { database, updates } = makeDb(estimate);
+      await markEstimateManuallyAccepted({
+        estimateId: estimate.id, adminUserId: 'admin-1', database,
+        leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+        estimateConverter: { convertEstimate: jest.fn() },
+      });
+      return updates.filter((u) => u.table === 'estimates' && String(u.patch?.estimate_data?.__raw || '').includes('lawnLimitsAtAccept'));
+    };
+    afterEach(() => { delete process.env.GATE_ESTIMATE_LAWN_LIMITS; });
+
+    test('gate on, lawn estimate: one stamp write, after the claim, carrying the block', async () => {
+      process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+      const stamps = await accept(lawn());
+      expect(stamps).toHaveLength(1);
+      expect(stamps[0].clause).toEqual({ id: 'estimate-lawn-limits' });
+    });
+
+    test('gate off: no stamp and no extra read', async () => {
+      expect(await accept(lawn())).toHaveLength(0);
+    });
+
+    test('gate on, not a lawn estimate: no stamp', async () => {
+      process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+      const estimate = { ...lawn(), estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4 }] } } }) };
+      expect(await accept(estimate)).toHaveLength(0);
+    });
+  });
 });

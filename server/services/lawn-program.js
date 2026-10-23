@@ -126,10 +126,11 @@ function visitProtocolQuery({ serviceDate, grassTrack, scheduledService }) {
   };
 }
 
-// A recipe visit can carry `cadenceVariants`: { "<applications a year>": { primary } },
+// A recipe visit can carry `cadenceVariants`: { "<applications a year>": { primary, secondary?, notes? } },
 // the whole-lawn step a plan of that many applications runs INSTEAD of the visit's
 // own step (the 12x one, also the default). v13 has one: April on the 9x plan
-// (LESCO Dimension 0.21% 18-0-10 in place of the 24-0-11). This is the one
+// (LESCO Dimension 0.21% 18-0-10, 0.5 lb N, in place of the 12x plan's LESCO 44-0-0
+// polymer bag, 1.0 lb N; the variant's own notes carry its N rate). This is the one
 // decision of which step a visit runs; the plan, the tank sheet and the
 // completion defaults all read it. `visitsPerYear` is the plan's count, or null
 // when unknown: the visit keeps its own step and `unknownCadence` names the
@@ -139,7 +140,9 @@ function visitForCadence(visit, visitsPerYear) {
   if (!variants || typeof variants !== 'object') return { visit, branch: null, unknownCadence: null };
   const variant = variants[String(Number(visitsPerYear))];
   if (visitsPerYear != null && variant) {
-    return { visit: { ...visit, primary: variant.primary, ...(variant.secondary ? { secondary: variant.secondary } : {}) }, branch: String(Number(visitsPerYear)), unknownCadence: null };
+    // A variant may state its own notes: the visit's N rate is read from the notes, so a variant whose
+    // bag has another nitrogen target (v13 April: 12x 1.0 lb N, 9x 0.5 lb N) carries its own.
+    return { visit: { ...visit, primary: variant.primary, ...(variant.secondary ? { secondary: variant.secondary } : {}), ...(variant.notes ? { notes: variant.notes } : {}) }, branch: String(Number(visitsPerYear)), unknownCadence: null };
   }
   if (visitsPerYear != null) return { visit, branch: null, unknownCadence: null };
   const names = Object.values(variants).flatMap((entry) => String(entry.primary || '').split('\n').map((line) => line.split(' \u2014 ')[0].trim()).filter(Boolean));

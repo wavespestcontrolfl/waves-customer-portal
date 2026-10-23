@@ -38,7 +38,7 @@ const { sendCustomerMessage, normalizeRecipient } = require('./messaging/send-cu
 const { isStreetLevelHoldVisit } = require('./street-level-hold');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { resolveProjectEmailRecipient, ensureServicePrepToken } = require('./project-email');
+const { resolveProjectEmailRecipientForSend, ensureServicePrepToken } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
@@ -786,13 +786,15 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
 }
 
 // Who each channel greets: the email goes to the resolved recipient (which
-// may be a service contact); the text goes to customer.phone — the primary's
-// line — so it greets the customer's own first name, never the contact's.
-// A chosen channel with nothing on file is an operator-facing refusal.
-function resolvePrepContacts(customer, channel, config) {
+// may be a service contact — one who turned their email off is skipped for
+// the holder, project-email.js resolveProjectEmailRecipientForSend); the
+// text goes to customer.phone — the primary's line — so it greets the
+// customer's own first name, never the contact's. A chosen channel with
+// nothing on file is an operator-facing refusal.
+async function resolvePrepContacts(customer, channel, config) {
   const recipient = config.guide
     ? { email: customer.email || '', name: customer.first_name || '' }
-    : resolveProjectEmailRecipient(customer);
+    : await resolveProjectEmailRecipientForSend(customer);
   const firstWord = (v) => String(v || '').trim().split(/\s+/)[0] || 'there';
   const contacts = {
     recipient,
@@ -1104,7 +1106,7 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
   if (!customer) return { ok: false, reason: 'customer_not_found', pestType };
 
-  const contacts = resolvePrepContacts(customer, channel, config);
+  const contacts = await resolvePrepContacts(customer, channel, config);
   const result = {
     ok: false,
     pestType,

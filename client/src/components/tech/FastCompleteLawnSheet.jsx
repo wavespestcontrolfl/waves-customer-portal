@@ -153,8 +153,7 @@ export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Rec
 
 // THE table of what /complete requires per application method for a lawn
 // product (complete-scheduled-service.js, the service_products loop):
-//  - perimeter_spray: positive linear feet, areaUnit 'linear_ft'
-//    (requiresLinearFtForReportApplication, error linear_ft_required);
+//  - perimeter_spray: linear feet, areaUnit 'linear_ft' — OPTIONAL since 2026-10-22 (owner: "make feet optional");
 //  - broadcast_spray, granular_broadcast: positive square feet, areaUnit 'sqft'
 //    (requiresSqftForReportApplication on the lawn line, error area_sqft_required);
 //  - every other method (spot_treatment, soil_drench, foliar_spray, bait_placement,
@@ -198,7 +197,6 @@ const REFUSAL_MESSAGES = {
   typed_findings_required: NOT_ON_THIS_SHEET_MESSAGE,
   area_sqft_required: 'The lawn area is missing for a sprayed or spread product. Tell the office.',
   property_service_area_changed: 'This property\u2019s lawn area changed. We reloaded it. Tap Complete again.',
-  linear_ft_required: 'A perimeter product needs linear feet, which this sheet does not take. Tell the office.',
   waveguard_inventory_lockout: STOCK_LOCKOUT_MESSAGE,
 };
 
@@ -238,7 +236,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, wrapUp: false, spotRules: false, methodCorrection: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null, newSod: null,
+  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, methodCorrection: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null, newSod: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -251,6 +249,8 @@ function blockedReasonFor(data, service) {
 
 const plannedItemsOf = (data) => (Array.isArray(data?.plannedProducts?.items) ? data.plannedProducts.items.filter((item) => item?.productId) : []);
 const addOnsOf = (data) => (Array.isArray(data?.plannedProducts?.addOns) ? data.plannedProducts.addOns.filter((item) => item?.productId) : []);
+// GATE_ESTIMATE_LAWN_LIMITS: the line a Celsius WG row shows when carpetgrass is on the turf profile, or ''.
+const carpetgrassWarningOf = (data) => (typeof data?.carpetgrassCelsiusWarning === 'string' ? data.carpetgrassCelsiusWarning : '');
 // The server's weed-spot decision (GATE_LAWN_SPOT_RULES), or null: an older or dark server sends none.
 const weedMixOf = (data) => {
   const mix = data?.spotRules === true ? data?.plannedProducts?.weedMix : null;
@@ -334,6 +334,8 @@ const optionalContextFields = (data) => ({
   stockAdvisory: typeof data?.stockAdvisory === 'boolean' ? data.stockAdvisory : undefined,
   // The Wrap-up section is on (GATE_FAST_COMPLETE_WRAP_UP); an older server sends none.
   wrapUp: data?.wrapUp === true,
+  // GATE_ESTIMATE_LAWN_LIMITS: carpetgrass is on the turf profile; a Celsius WG row shows this line. An older server sends none.
+  carpetgrassCelsiusWarning: carpetgrassWarningOf(data),
   // Spot-area rules: only while the server says so, so an older server renders as before.
   spotRules: data?.spotRules === true,
   // GATE_REPORT_CLEANUP_1020: a granular product starts on Granular broadcast, never a spray method.
@@ -1143,7 +1145,8 @@ const noProductNoteJoined = (note, rows, newSod) => {
 
 function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
-  const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
+  // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
+  const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
   // GATE_LAWN_TROUBLE_AREAS: a spot row goes where the yearly limits allow, and names its place.
   const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
@@ -1163,9 +1166,7 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
     [guideHold, guideHold],
     [areaHold, areaHold],
-    [missingArea, missingArea && (requirementOf(missingArea).unit === 'linear_ft'
-      ? `${missingArea.name} needs linear feet, which this sheet does not take. Tell the office.`
-      : `The lawn area is not on file for ${missingArea.name}. Tell the office.`)],
+    [missingArea, missingArea && `The lawn area is not on file for ${missingArea.name}. Tell the office.`],
     // A spot row needs the area treated or a typed amount (spot rules).
     [missingSpot, missingSpot && `Enter the area treated for ${missingSpot.name}.`],
     [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
@@ -1912,6 +1913,7 @@ function ProductsSection({ mix = null, ctx, newSod = null, weedMix, chinch, area
               surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : takeAllRowNote(gov, row.productId),
               row.sodSwap?.reason,
               sodRowNote(newSod, row.productId),
+              /\bcelsius\b/i.test(String(row.name || '')) ? ctx.carpetgrassCelsiusWarning : '',
             ].filter(Boolean).join(' ') || null}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}

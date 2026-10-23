@@ -224,13 +224,13 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
   },
   {
     name: 'list_queued_messages',
-    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (e.g. a text held past 8PM-8AM quiet hours). Only texts a staff member scheduled from the inbox are cancelable; automated texts, anything a send worker already picked up, and replies tied to an Agent Review suggestion are left out (counted in excluded_count) — the office handles those. Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
+    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (e.g. a text held past 8PM-8AM quiet hours). Only texts a staff member scheduled from the inbox are cancelable; automated texts, anything a send worker already picked up, and replies tied to an Agent Review suggestion are left out (counted in excluded_count) — the office handles those. Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. Emails are not listed here: automated emails go to the delivery provider within seconds of being queued. An email an office user scheduled with Schedule send (when that feature is on) is listed and cancelled in Communications > Email > Scheduled — point the user there; this tool cannot see or cancel it.
 Use for: "what's queued to send Henderson?", "is there a text scheduled for this customer?"`,
     input_schema: {
       type: 'object',
       properties: {
         customer_id: { type: 'string', format: 'uuid', description: 'The customer to check' },
-        channel: { type: 'string', enum: ['sms'], description: 'Scheduled texts only — there is no scheduled-email store to check.' },
+        channel: { type: 'string', enum: ['sms'], description: 'Scheduled texts only; scheduled emails live in Communications > Email > Scheduled.' },
         cursor: { type: 'string', description: 'Continue from next_cursor in the previous result' },
         limit: { type: 'number', description: 'Max results (default 25, max 100)' },
       },
@@ -239,7 +239,7 @@ Use for: "what's queued to send Henderson?", "is there a text scheduled for this
   },
   {
     name: 'cancel_queued_message',
-    description: `Cancel ONE customer text that is still SCHEDULED — before it sends. Resolve message_id with list_queued_messages first. A text that has already started sending, was already sent, or is managed by another workflow (an invoice send, a recruiting reply, a completion report, …) can never be recalled here and this refuses it. Cancelling sends nothing to the customer — it only stops a text that has not gone out yet. EMAILS CANNOT BE CANCELLED THIS WAY OR ANY WAY: sendTemplate hands a queued email to the delivery provider within seconds, so by the time this tool could act, it has already sent.
+    description: `Cancel ONE customer text that is still SCHEDULED — before it sends. Resolve message_id with list_queued_messages first. A text that has already started sending, was already sent, or is managed by another workflow (an invoice send, a recruiting reply, a completion report, …) can never be recalled here and this refuses it. Cancelling sends nothing to the customer — it only stops a text that has not gone out yet. EMAILS CANNOT BE CANCELLED HERE: an automated email goes to the delivery provider within seconds. An email an office user scheduled with Schedule send is cancelled in Communications > Email > Scheduled (Cancel send) — point the user there.
 Use for: "cancel that scheduled text", "stop the reminder we just queued for them"`,
     input_schema: {
       type: 'object',
@@ -801,7 +801,7 @@ async function cancelQueuedMessage(input, actionContext = {}) {
   }
   const channel = String(input.channel || '').toLowerCase();
   if (channel !== 'sms') {
-    return { error: 'channel must be "sms". Scheduled texts are the only cancelable message — emails send within seconds and cannot be recalled.' };
+    return { error: 'channel must be "sms". This tool cancels scheduled texts only. An email scheduled with Schedule send is cancelled in Communications > Email > Scheduled.' };
   }
 
   let preview;
@@ -1507,19 +1507,23 @@ async function smsConsentVerdict({ customerId, phone, message, messageType }) {
 // bearer to — Gmail answers the sender's address, which attribution does not
 // prove is the customer's — so it refuses EVERY owned portal link (the
 // verify-only bearers, unknown short codes, all of it) and runs no seam check.
-const COMPOSER_ONLY_LINK_REFUSAL = 'This text carries a customer link the Communications composer must send (card request, contract signing, prep guide, statement, project report or consultation) — the composer\'s send verifies and records it. Text it from the composer. Nothing was sent.';
+const COMPOSER_ONLY_LINK_REFUSAL = 'This text carries a customer link the Communications composer must send (card request, contract signing, prep guide, statement, project report or consultation) — the composer\'s send verifies and records it, so the bar can\'t send this text from here. Nothing was sent.';
 const EMAIL_BEARER_REFUSAL = 'An email reply cannot carry a portal link (appointment page, report, receipt, pay, estimate, card request, contract, prep guide, statement, project report, consultation, or a short link) — the reply goes to the sender\'s address, which may not be the customer\'s. Text it to the customer\'s own number instead (send_sms, or the Communications composer). Nothing was sent.';
-const AUTOPAY_LINK_REFUSAL = 'This text carries an Auto Pay setup link — send it from the Customers page Auto Pay button or the Communications composer, which verifies the link at send time. Nothing was sent.';
+const AUTOPAY_LINK_REFUSAL = 'This text carries an Auto Pay setup link — the bar can\'t send it from here; the Auto Pay link is verified at send time by the Communications composer. Nothing was sent.';
 const links = () => require('../composer-customer-links');
+// The email path refuses an owned portal link as a recipient-identity safety
+// rule (the sender's address is not proof of the customer); the text path is a
+// missing capability. Separate codes keep the first out of the gap list (Codex #6371 r14).
+const linkRefusalCode = (email) => (email ? 'email_link_identity_refused' : 'customer_link_composer_only');
 // The checks, in order; the first refusal wins. Each is read-only except the
 // seam's own verification, which only the 'commit' phase runs.
 async function composerOnlyLinkCheck({ body, email }) {
   const found = await links().composerOnlyLinkPresence(body, { includeVerifyOnly: email });
-  return found.present ? { error: email ? EMAIL_BEARER_REFUSAL : COMPOSER_ONLY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
+  return found.present ? { error: email ? EMAIL_BEARER_REFUSAL : COMPOSER_ONLY_LINK_REFUSAL, code: linkRefusalCode(email) } : null;
 }
 async function autopayLinkCheck({ body, toLast10, customerId, email }) {
   const autopay = await links().autopayLinkSendCheck(body, toLast10, { trustedCustomerId: customerId });
-  return autopay.present ? { error: email ? EMAIL_BEARER_REFUSAL : AUTOPAY_LINK_REFUSAL, code: 'customer_link_composer_only' } : null;
+  return autopay.present ? { error: email ? EMAIL_BEARER_REFUSAL : AUTOPAY_LINK_REFUSAL, code: linkRefusalCode(email) } : null;
 }
 // Every generated bearer the seam does not verify itself (reschedule, track,
 // re-service, pay, estimate, referral) must belong to the recipient's account

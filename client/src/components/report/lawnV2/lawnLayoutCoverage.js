@@ -12,6 +12,7 @@
 
 export const STANDARD_BODY_COVERAGE = Object.freeze({
   LawnStatusCard: { how: 'slot', key: 'status', note: 'the status card (GATE_LAWN_REPORT_POLISH wrapper): the layout slot is the same wrapper' },
+  BlogPostCard: { how: 'slot', key: 'blog', note: 'the Waves blog post, right under the status card (owner 2026-10-22)' },
   LawnWateringBanner: { how: 'yourPart', note: 'printed once inside the Your part card' },
   LawnLeadCard: { how: 'split', note: 'next visit, Your part, what we did, score, what to expect, watching' },
   ReserviceReportCard: { how: 'slot', key: 'reservice' },

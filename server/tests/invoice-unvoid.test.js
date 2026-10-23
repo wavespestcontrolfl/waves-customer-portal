@@ -622,6 +622,18 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
     }));
   }
 
+  test('an invoice linked only through its service record gets every visit guard (a cancelled visit refuses); an unreadable record refuses', async () => {
+    const conn = makeConn({
+      service_records: { scheduled_service_id: 'svc-9' },
+      scheduled_services: { id: 'svc-9', status: 'cancelled', is_callback: false, estimated_price: 120, primary_line_price: 120 },
+    });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { scheduled_service_id: null, service_record_id: 'sr-1' })).rejects.toThrow(/cancel/i);
+    const broken = makeConn({ service_records: new Error('db down'), scheduled_services: { id: 'svc-9', status: 'confirmed' } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(broken, { scheduled_service_id: null, service_record_id: 'sr-1' })).rejects.toThrow(/Could not verify the linked service visit/);
+    const noVisit = makeConn({ service_records: { scheduled_service_id: null } });
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(noVisit, { scheduled_service_id: null, service_record_id: 'sr-1' })).resolves.toBeUndefined();
+  });
+
   test('off: a bare stamped 0 (no primaryLinePrice) does not refuse — narrow, byte-identical to today', async () => {
     const conn = makeConn({ scheduled_services: { id: 'svc-1', status: 'confirmed', is_callback: false, estimated_price: 0, primary_line_price: null } });
     await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { scheduled_service_id: 'svc-1' })).resolves.toBeUndefined();
@@ -811,11 +823,16 @@ describe('assertUnvoidableLinkedVisit — GATE_STAMPED_ZERO_FREE', () => {
       .resolves.toBeUndefined();
   });
 
-  test('off: no scheduled_service_id and no packet — never queries service_records, and never refuses', async () => {
+  test('off: a service-record-only invoice still resolves its visit (the visit guards apply with the gate off); a live visit passes', async () => {
     process.env.GATE_STAMPED_ZERO_FREE = '';
-    const conn = withSchema(jest.fn(() => { throw new Error('conn should not be called at all when the gate is off'); }));
-    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { id: 'inv-1', scheduled_service_id: null, service_record_id: 'sr-1' }))
+    const conn = makeConn({
+      service_records: { scheduled_service_id: 'svc-1' },
+      scheduled_services: { id: 'svc-1', status: 'confirmed', is_callback: false, estimated_price: 120, primary_line_price: 120 },
+    });
+    // (No invoice id: the combined-visit packet read keys on it and is covered by its own cases.)
+    await expect(InvoiceService._assertUnvoidableLinkedVisit(conn, { scheduled_service_id: null, service_record_id: 'sr-1' }))
       .resolves.toBeUndefined();
+    expect(conn.mock.calls.map(([t]) => String(t).split(' ')[0])).toEqual(expect.arrayContaining(['service_records', 'scheduled_services']));
   });
 
   test('on: the service-record fallback read failing closed refuses to unvoid', async () => {

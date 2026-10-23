@@ -32,11 +32,12 @@ const CATALOG = [
   { id: 'rec', name: REC, aliases: [], default_rate_per_1000: 0.03, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'fus', name: FUS, aliases: [], default_rate_per_1000: 0.55, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'nis', name: NIS, aliases: [], default_rate_per_1000: 0.25, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
-  { id: 'f24', name: 'LESCO 24-0-11 with PolyPlus OPTI', aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
+  // April on the 12x plan is the LESCO 44-0-0 polymer bag (20261022195000), unpriced until SiteOne quotes it.
+  { id: 'f44', name: 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', aliases: [], analysis_n: 44, analysis_p: 0, analysis_k: 0, default_rate_per_1000: 2.27, rate_unit: 'lb', needs_pricing: true },
 ];
 const GATES = { bermudaRemoval: true, activelyGrowingOnly: true, noRainOrIrrigationHours: 3, noMowDaysBeforeAfter: 2, skipCelsiusInBermudaArea: true };
 const ROWS = {
-  f24: { productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
+  f44: { productId: 'f44', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
   rec: { productId: 'rec', protocolProductName: REC, applicationMode: 'spot', ratePer1000: 0.03, rateUnit: 'oz', gates: { ...GATES, tankMixWith: FUS } },
   fus: { productId: 'fus', protocolProductName: FUS, applicationMode: 'spot', ratePer1000: 0.55, rateUnit: 'fl oz', gates: { ...GATES, requiresProduct: 'Recognition' } },
   nis: { productId: 'nis', protocolProductName: NIS, applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { ...GATES, concentration: '0.25% of the spray volume' } },
@@ -177,7 +178,7 @@ describe('an error reading the account is an explicit unavailable state, never a
     const sheet = await lawnMix({ scheduledServiceId: SERVICE_ID });
     expect(sheet.items.filter((item) => item.bermudaStep)).toEqual([]);
     expect(sheet.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'lawn_bermuda_eligibility_unavailable', message: MESSAGE })]));
-    expect(sheet.items.some((item) => item.product?.name === 'LESCO 24-0-11 with PolyPlus OPTI')).toBe(true);
+    expect(sheet.items.some((item) => item.product?.name === 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer')).toBe(true);
     const actions = await actionsFor();
     expect(actions.actions.filter((a) => a.group)).toEqual([]);
     expect(actions.warnings).toEqual([expect.objectContaining({ code: 'lawn_bermuda_eligibility_unavailable' })]);
@@ -256,7 +257,7 @@ test.each([['fus'], ['rec'], ['nis']])('selecting only %s selects all three line
 
 describe('a step that cannot be applied', () => {
   const warningCodes = (body) => body.warnings.map((w) => w.code);
-  const f24 = (body) => itemFor(body, 'LESCO 24-0-11 with PolyPlus OPTI');
+  const f44 = (body) => itemFor(body, 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer');
 
   test.each([['rec'], ['fus'], ['nis']])('%s has no staged row, nothing selected: the three lines leave with a warning; base quantities and mixing order stay', async (missing) => {
     stage(Object.entries(ROWS).filter(([key]) => key !== missing).map(([, row]) => row));
@@ -265,8 +266,8 @@ describe('a step that cannot be applied', () => {
     expect(warningCodes(body)).toContain('lawn_bermuda_step_unavailable');
     expect(blockCodes(body)).not.toContain('lawn_bermuda_step_unavailable');
     expect(body.blocks).toEqual([]);
-    expect(f24(body).jobMix).toMatchObject({ amountUnit: 'lb' });
-    expect(f24(body).jobMix.amount).toBeGreaterThan(0);
+    expect(f44(body).jobMix).toMatchObject({ amountUnit: 'lb' });
+    expect(f44(body).jobMix.amount).toBeGreaterThan(0);
   });
 
   test.each([['rec'], ['fus'], ['nis']])('%s has no staged row, the step selected: the three lines stay unavailable with product-scoped blocks, and base quantities and mixing order still stand', async (missing) => {
@@ -276,7 +277,7 @@ describe('a step that cannot be applied', () => {
     expect(lines).toHaveLength(3);
     for (const line of lines) { expect(line.unavailable.reason).toMatch(/Bermuda removal is blocked/); expect(line.spot).toBeNull(); }
     expect(body.blocks.filter((b) => b.code === 'lawn_bermuda_step_unavailable')).toHaveLength(3);
-    expect(f24(body).jobMix.amount).toBeGreaterThan(0);
+    expect(f44(body).jobMix.amount).toBeGreaterThan(0);
     expect(body.mixingOrder.length).toBeGreaterThan(0);
   });
 });

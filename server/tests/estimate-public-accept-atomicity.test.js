@@ -4653,3 +4653,85 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
     expect(parkedAlertCalls()).toHaveLength(0);
   });
 });
+
+// GATE_ESTIMATE_LAWN_LIMITS: render-bound attestation of the "What we can and can't fix" block.
+// The tab echoes the hash /data served with its block; the accept recomputes the live block and
+// refuses a difference with a reloadable 409 before any write. No block on both sides matches;
+// gate off = no check.
+describe('accept — lawn limits attestation (GATE_ESTIMATE_LAWN_LIMITS)', () => {
+  const lawnLimits = require('../services/estimate-lawn-limits');
+  const LIVE_HASH = lawnLimits.lawnLimitsHash(lawnLimits.buildLawnLimits());
+  const lawnEstimate = (overrides = {}) => recurringPestEstimate({
+    estimate_data: JSON.stringify({
+      result: {
+        recurring: { discount: 0, services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 60, visitsPerYear: 9, frequency: 'monthly', cadence: 'monthly' }] },
+        oneTime: { items: [], membershipFee: 0 },
+      },
+    }),
+    ...overrides,
+  });
+  const conversionOk = () => EstimateConverter.convertEstimate.mockResolvedValueOnce({
+    customerId: 'cust-1', tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null,
+    recurringConversionSkipped: false, welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [],
+  });
+  const refused = (res) => {
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('LAWN_LIMITS_STALE');
+    expect(res.data.error).toMatch(/reload the page/i);
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  };
+  // The accept route rate-limits per token (10 an hour): a fresh token per seed.
+  let tokenCount = 0;
+  const seedWith = (build) => {
+    const token = `tok-lawnlim-${tokenCount += 1}-x0123456789`;
+    resetStore(build({ token }));
+    return token;
+  };
+  afterEach(() => { delete process.env.GATE_ESTIMATE_LAWN_LIMITS; });
+
+  test('gate on, the tab echoes the hash of the block it rendered: the accept goes through', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const token = seedWith(lawnEstimate);
+    conversionOk();
+    const res = await putAccept(token, { lawnLimitsHash: LIVE_HASH });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  test('gate on, the tab rendered a different block: 409 LAWN_LIMITS_STALE before any write', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const token = seedWith(lawnEstimate);
+    const other = lawnLimits.lawnLimitsHash(lawnLimits.buildLawnLimits({ otherGrasses: ['carpetgrass'], virusStreaksSuspected: true }));
+    expect(other).not.toBe(LIVE_HASH);
+    refused(await putAccept(token, { lawnLimitsHash: other }));
+  });
+
+  test('gate on, an old tab that sends no hash beside a block that exists now: 409 reload', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const token = seedWith(lawnEstimate);
+    refused(await putAccept(token, {}));
+  });
+
+  test('gate on, no block on either side (not a lawn estimate, no hash sent): accepts', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const token = seedWith(recurringPestEstimate);
+    conversionOk();
+    expect((await putAccept(token, {})).status).toBe(200);
+  });
+
+  test('gate on, the tab rendered a block but none exists now: 409 reload', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const token = seedWith(recurringPestEstimate);
+    refused(await putAccept(token, { lawnLimitsHash: LIVE_HASH }));
+  });
+
+  test('gate off: no check, whatever the tab sends', async () => {
+    const token = seedWith(lawnEstimate);
+    conversionOk();
+    expect((await putAccept(token, { lawnLimitsHash: 'stale-hash' })).status).toBe(200);
+    const again = seedWith(lawnEstimate);
+    conversionOk();
+    expect((await putAccept(again, {})).status).toBe(200);
+  });
+});

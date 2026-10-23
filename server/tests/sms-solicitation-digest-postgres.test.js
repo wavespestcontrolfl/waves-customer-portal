@@ -8,7 +8,6 @@ jest.mock('../services/ops-digest', () => ({
 }));
 
 const { _private: { loadUnansweredThreads } } = require('../services/unworked-comms-watcher');
-const { findOpenCommsExceptions } = require('../services/completion-comms-guard');
 const { randomUUID } = require('node:crypto');
 const connection = process.env.SMS_SOLICITATION_QA_URL;
 const postgres = connection ? describe : describe.skip;
@@ -371,45 +370,5 @@ postgres('solicitation evidence in the unanswered digest (PostgreSQL)', () => {
     await seed('2025550199', null, 31 * 24 * 60 * 60 * 1000);
     expect(await loadUnansweredThreads(new Date(now))).toEqual([]);
     expect(await loadUnansweredThreads(new Date(now), { includeExpired: true })).toHaveLength(1);
-  });
-
-  test('completion Leg B lateral projection enforces the same exact legacy anchor', async () => {
-    const customerId = randomUUID();
-    const serviceId = randomUUID();
-    const inboundId = randomUUID();
-    const draftId = randomUUID();
-    const legacyDraftId = randomUUID();
-    const sid = 'SM-completion-exact-anchor';
-    await mockPg('sms_log').insert([
-      { id: inboundId, customer_id: customerId, direction: 'inbound', from_phone: '+12025550123',
-        to_phone: '+12025550199', message_body: 'Latest completion question',
-        created_at: new Date(now - 2000), message_type: 'inbound', status: 'received' },
-      { id: randomUUID(), customer_id: customerId, direction: 'outbound', from_phone: '+12025550199',
-        to_phone: '+12025550123', message_body: 'Approved answer', twilio_sid: sid,
-        metadata: { draft_id: legacyDraftId }, created_at: new Date(now - 1000),
-        message_type: 'ai_approved', status: 'delivered' },
-    ]);
-    await mockPg('message_drafts').insert([
-      { id: draftId, sms_log_id: inboundId, intent: 'reply' },
-      { id: legacyDraftId, sms_log_id: randomUUID(), intent: 'reply' },
-    ]);
-    await mockPg('messaging_audit_log').insert({
-      provider_message_id: sid, channel: 'sms', metadata: { draft_id: draftId },
-      created_at: new Date(now),
-    });
-
-    const exact = await findOpenCommsExceptions({ customerId, serviceId, knex: mockPg });
-    expect(exact.unansweredInbound).toBeNull();
-    await mockPg('message_drafts').where({ id: draftId }).update({ sms_log_id: randomUUID() });
-    const wrong = await findOpenCommsExceptions({ customerId, serviceId, knex: mockPg });
-    expect(wrong.unansweredInbound?.id).toBe(inboundId);
-    await mockPg('message_drafts').where({ id: draftId }).update({ sms_log_id: inboundId });
-    await mockPg('sms_log').where({ twilio_sid: sid }).update({ metadata: { draft_id: draftId } });
-    await mockPg('messaging_audit_log').insert({
-      provider_message_id: sid, channel: 'sms', metadata: { draft_id: 'malformed' },
-      created_at: new Date(now + 1000),
-    });
-    const malformed = await findOpenCommsExceptions({ customerId, serviceId, knex: mockPg });
-    expect(malformed.unansweredInbound?.id).toBe(inboundId);
   });
 });

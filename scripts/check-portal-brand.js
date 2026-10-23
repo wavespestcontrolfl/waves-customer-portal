@@ -102,7 +102,6 @@ const EXCLUDED_DIR_HINTS = [
 //   the comment describing that sweep, which the comment skip above retires.)
 const LEGACY_BASELINE = {
   'client/src/App.jsx': { 'banned-font-size': 2 },
-  'client/src/components/ActivityCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
   'client/src/components/GlassNewsletterCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2 },

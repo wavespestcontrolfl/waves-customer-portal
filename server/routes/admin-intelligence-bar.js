@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive, ibTargetRulesV2Live } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const { dictatedAmountsNote } = require('../utils/spoken-money');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
@@ -88,10 +88,11 @@ const { outsideWritePins } = require('../services/intelligence-bar/outside-write
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
-const { isToolFailure, recordToolOutcome, executionOutcome } = require('../services/intelligence-bar/outcomes');
+const { isToolFailure, recordToolOutcome, executionOutcome, TRANSIENT_FROZEN_REASONS } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
 const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
+const ModelContext = require('../services/intelligence-bar/model-context');
 const MultiCard = require('../services/intelligence-bar/multi-card');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
@@ -323,7 +324,7 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/web
 // payload is the CI-only 500 flake; see server/utils/base64-validate.js.
 const { isValidBase64 } = require('../utils/base64-validate');
 // The persisted-turn markers are defined once, with the thread store.
-const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER } = IbThreads;
+const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER, UNTRUSTED_READ_V2_MARKER, SAME_NAME_CHOICE_MARKER } = IbThreads;
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 // Validate attachments server-side — never trust the client downscaler. Drop
@@ -439,7 +440,7 @@ function stripInternalHistoryMarkers(message) {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER].includes(line.trim()))
+      .filter((line) => ![IMAGE_TAINT_MARKER, PII_TAINT_MARKER, UNTRUSTED_READ_MARKER, UNTRUSTED_READ_V2_MARKER, SAME_NAME_CHOICE_MARKER].includes(line.trim()))
       .join('\n')
       .trim(),
   };
@@ -592,12 +593,12 @@ function withCacheBreakpoint(messages) {
 // proposal and confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE,
 // and cancels happen from the Dispatch screen, which owns the waiver and
 // review controls.
-const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
+const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly, so the bar can\'t cancel this visit from here yet. Nothing was changed.';
 
 function ibWritesDisabled() {
   return process.env.IB_WRITES_DISABLED === 'true';
 }
-const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work; make the change on the normal admin screen.';
+const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work, but the bar can\'t make changes from here until writes are switched back on.';
 
 // tool_health_events.error_message is a separate telemetry sink from
 // intelligence_bar_queries (the redacted prompt/response above) — a PII or
@@ -853,6 +854,10 @@ function deleteDuplicatePins(livePreview) {
   return pins;
 }
 
+// Where a resumed reminder sequence lands (resume_invoice_reminders' preview.resumes_to), in the card summary's words. Held for
+// Auto Pay and finished are not "active": the card must not promise reminders that resumeSequence() will not start.
+const RESUME_LANDING_WORDS = { active: 'active', autopay_hold: 'held for Auto Pay', completed: 'finished' };
+
 const PINNED_DISPLAY_BUILDERS = {
   delete_duplicate_customer: (params, preview) => (preview?.preview === true && preview.card ? preview.card : null),
   trigger_review_request: pinnedRecipientDisplay,
@@ -950,9 +955,48 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // The invoice edit cards (GATE_IB_INVOICE_EDITS): the invoice, the customer and the headline; the lines ride the contract.
+  edit_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'edit_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, total: `${preview.amount} (unchanged)`, changes: (preview.changes || []).map((c) => `${c.field}: ${c.before} -> ${c.after}`), sends_to_customer: 'nothing' }
+    : null),
+  archive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'archive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unarchive_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unarchive_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, status: preview.status, sends_to_customer: 'nothing' }
+    : null),
+  unvoid_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'unvoid_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name, amount: preview.amount, becomes: preview.becomes, reminders_restart: 'only when it is sent again', sends_to_customer: 'nothing' }
+    : null),
+  // The invoice reminder and payment-plan cards: each names the invoice and the customer; the lines ride the contract.
+  pause_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'pause_invoice_reminders'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> paused`, sends_to_customer: 'nothing' }
+    : null),
+  resume_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'resume_invoice_reminders'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> ${RESUME_LANDING_WORDS[preview.resumes_to] || 'active'}`, sends_to_customer: 'nothing now' }
+    : null),
+  stop_invoice_reminders: (params, preview) => (preview?.preview === true && preview.tool === 'stop_invoice_reminders'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, reminders: `${preview.reminder_status} -> stopped`, sends_to_customer: 'nothing' }
+    : null),
+  send_invoice_reminder_now: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice_reminder_now'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, step: preview.step, send_by: preview.channels, text: preview.text_line, email: preview.email_line }
+    : null),
+  schedule_invoice_send: (params, preview) => (preview?.preview === true && preview.tool === 'schedule_invoice_send'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_at: preview.send_at_text, send_by: preview.channels }
+    : null),
+  create_payment_plan: (params, preview) => (preview?.preview === true && preview.tool === 'create_payment_plan'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, total_balance: preview.amount_due, schedule: `${preview.installment_count} ${preview.frequency} installments, first ${preview.next_payment_date} (each one is listed below)`, charges_card: 'no', emails_customer: preview.emails_customer ? 'yes' : 'no' }
+    : null),
+  cancel_payment_plan: (params, preview) => (preview?.preview === true && preview.tool === 'cancel_payment_plan'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, plan: preview.plan_summary }
+    : null),
   // create_invoice: the card names the customer, the total and the lines; the details ride the contract.
   create_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'create_invoice'
     ? { customer: preview.customer_name || preview.customer_id, total: preview.total, lines: (preview.lines || []).length, notes: preview.notes || 'none', due_date: preview.due_date || 'in 30 days', status: 'draft', sends_to_customer: 'nothing' }
+    : null),
+  // set_customer_bill_to: the card names the customer and the payer; the lines ride the contract.
+  set_customer_bill_to: (params, preview) => (preview?.preview === true && preview.tool === 'set_customer_bill_to'
+    ? { customer: preview.customer_name || preview.customer_id, bill_to_now: preview.bill_to_now, new_bill_to: preview.payer_name, invoices_moving: 'none', sends_to_customer: 'nothing' }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
@@ -999,8 +1043,24 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // The invoice edit cards bind the invoice version (and, per card, the body, credit balance or visit) they showed.
+  edit_invoice: '_verified_invoice_edit_version',
+  archive_invoice: '_verified_invoice_archive_version',
+  unarchive_invoice: '_verified_invoice_unarchive_version',
+  unvoid_invoice: '_verified_invoice_unvoid_version',
+  // The reminder cards bind the invoice, its reminder row, the recipients and the message the card showed; the payment-plan
+  // cards bind the invoice, the plan terms (every installment) and the reminder row.
+  pause_invoice_reminders: '_verified_invoice_reminder_version',
+  resume_invoice_reminders: '_verified_invoice_reminder_version',
+  stop_invoice_reminders: '_verified_invoice_reminder_version',
+  send_invoice_reminder_now: '_verified_invoice_reminder_version',
+  schedule_invoice_send: '_verified_invoice_reminder_version',
+  create_payment_plan: '_verified_payment_plan_version',
+  cancel_payment_plan: '_verified_payment_plan_version',
   // create_invoice binds the customer, every line, the dates, the tax and the server-computed total the card showed.
   create_invoice: '_verified_invoice_create_version',
+  // set_customer_bill_to binds the current Bill-To, the payer and the invoices that move and stay.
+  set_customer_bill_to: '_verified_bill_to_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -1250,6 +1310,30 @@ function confirmationDisplayParams(toolName, params, preview) {
   };
 }
 
+// The proposal refusals for moving a visit that is frozen or has a package
+// visit 2. A wait (being finalized or completed) is its own unrecorded code; a
+// structural freeze and a linked visit 2 are capability gaps (Codex #6371 r19).
+function frozenMoveRefusal(reason) {
+  if (TRANSIENT_FROZEN_REASONS.has(reason)) {
+    return { error: 'This visit is busy right now (being finalized, completed, or sending a reminder), so nothing was proposed. Try again in a moment.', code: 'visit_busy_move' };
+  }
+  return { error: 'This visit already has an issued link, records or a payment in progress — the bar can\'t move it from here. Nothing was proposed.', code: 'frozen_visit_move_unsupported' };
+}
+// The visit a reschedule card would move, or the refusal that stops the card
+// before it exists: no such visit, or a live package visit 1 whose visit 2 the
+// card would not show (Codex #6371 r19). A finished visit keeps its own
+// "already completed" refusal at the caller.
+async function loadMovePin(appointmentId) {
+  const pin = await loadAppointmentPin(String(appointmentId));
+  if (!pin) return { refusal: { error: 'Appointment not found — nothing was proposed.' } };
+  const refusal = TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(pin.status)) ? null : await packageChildMoveRefusal(appointmentId);
+  return refusal ? { refusal } : { pin };
+}
+async function packageChildMoveRefusal(appointmentId) {
+  if (!(await require('../services/package-followup-booking').hasLivePackageChild(db, [String(appointmentId)]))) return null;
+  return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was proposed.', code: 'package_visit_two_linked' };
+}
+
 /**
  * Propose a gated write as a pending action instead of executing it.
  *
@@ -1412,12 +1496,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           // The redemption is claimed post-commit by the executor (and the
           // hourly sweep) — not pinnable to this card. Credit-bearing
           // bookings are made where that money flow is visible.
-          return { failed: true, modelResult: { error: `This customer has $${amount.toFixed(2)} of open inspection-credit offer(s) (redemption may be gate-paused) that the confirmation card cannot pin exactly. Book it from the Schedule screen. Nothing was changed.` } };
+          return { failed: true, modelResult: { error: `This customer has $${amount.toFixed(2)} of open inspection-credit offer(s) (redemption may be gate-paused) that the confirmation card cannot pin exactly, so the bar can't book this visit from here yet. Nothing was changed.`, code: 'booking_with_credit_unsupported' } };
         }
         params._inspection_credit_amount = 0;
         preview = { ...preview, inspection_credit: { amount: 0 } };
       } catch (err) {
-        return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit — book from the Schedule screen instead.' } };
+        return { failed: true, modelResult: { error: 'Could not verify the customer\'s inspection credit, so nothing was booked. Try again in a moment.' } };
       }
     }
     if ((toolUse.name === 'update_customer' || toolUse.name === 'bulk_update_customers')
@@ -1670,8 +1754,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // service, and current date/window it is approving a move FROM, and
       // /confirm-action refuses if the visit changed during the pending
       // window (the executor's own read happens only after Confirm).
-      const pin = await loadAppointmentPin(String(params.appointment_id));
-      if (!pin) return { failed: true, modelResult: { error: 'Appointment not found — nothing was proposed.' } };
+      const { pin, refusal: pinRefusal } = await loadMovePin(params.appointment_id);
+      if (!pin) return { failed: true, modelResult: pinRefusal };
       if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(pin.status))) {
         return { failed: true, modelResult: { error: `This appointment is already ${pin.status} and can't be moved.` } };
       }
@@ -1693,18 +1777,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (pin.is_recurring
         && params.new_date && String(params.new_date) !== String(pin.scheduled_date)
         && require('../services/rebooker').collectiveMoveGateOn()) {
-        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. Move it from Dispatch or the Edit appointment modal for now; Intelligence Bar series moves arrive in a follow-up. Nothing was proposed.', code: 'COLLECTIVE_MOVE_REQUIRED' } };
+        return { failed: true, modelResult: { error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. The bar can\'t move a series from here yet. Nothing was proposed.', code: 'collective_move_unsupported' } };
       }
       if (pin.visit_id) {
         const VisitGroups = require('../services/visit-groups');
         const members = await VisitGroups.openMembers(db, pin.visit_id);
         if (members.length >= 2) {
-          return { failed: true, modelResult: { error: 'This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first. Nothing was proposed.' } };
+          return { failed: true, modelResult: { error: 'This appointment is grouped with another service at the same stop, and the bar can\'t move one of them alone from here yet. Nothing was proposed.', code: 'grouped_visit_move_unsupported' } };
         }
         const verdict = await VisitGroups.frozenVisitVerdict(db, pin.visit_id);
-        if (verdict.frozen) {
-          return { failed: true, modelResult: { error: 'This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it. Nothing was proposed.' } };
+        // An unreadable check is an outage, not a policy refusal: no code, so
+        // Tool Health counts it as a fault and no gap is filed (Codex #6371 r4).
+        if (verdict.frozen && verdict.reason === 'unreadable') {
+          return { failed: true, modelResult: { error: 'The visit\'s status could not be read just now, so nothing was proposed. Try again in a moment.' } };
         }
+        if (verdict.frozen) return { failed: true, modelResult: frozenMoveRefusal(verdict.reason) };
       }
       params._appointment_fingerprint = appointmentPinFingerprint(pin);
       preview = { ...preview, pinned_appointment: pin };
@@ -1839,7 +1926,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     }
     if (toolUse.name === 'cancel_appointment') {
       if (!ibCancelAppointmentLive()) {
-        return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
+        // Gate off is a switch, not a missing capability: an unrecorded code
+        // (agent-gap-reports UNRECORDED_DECLINE_CODES), so no gap row.
+        return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: 'cancel_gate_off' } };
       }
       // Gate on: compute the SAME deterministic pre-commit impact the
       // commit path (tools.js cancelAppointment) recomputes and compares
@@ -1851,10 +1940,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // the SAME id the commit-time recheck passes as its own confirming
       // actor in the common case (propose then immediately confirm), so
       // technician_notice reads the same at both points.
-      const { computeCancelAppointmentImpact } = require('../services/appointment-cancel-impact');
+      // The no-text option is carried only by the replay (GATE_IB_CANCEL_WITH_EFFECTS). The bare-visit path cannot
+      // suppress the shared notice hook, so an explicit "no text" is refused rather than silently ignored.
+      if (!ibCancelWithEffectsLive() && params.notify_customer === false) {
+        return { failed: true, modelResult: { error: "Cancelling without a customer text is not enabled (GATE_IB_CANCEL_WITH_EFFECTS), so the bar can't cancel this visit without a text from here yet. Nothing was changed.", code: 'gate_off' } };
+      }
+      const { computeCancelAppointmentImpact, cancelWithEffectsRefusal } = require('../services/appointment-cancel-impact');
+      // GATE_IB_CANCEL_WITH_EFFECTS: the card also carries the invoice, credit and linked-visit effects and the
+      // customer text, and Confirm replays the Dispatch cancel. notify_customer (default true) is the card's choice.
+      const withEffects = ibCancelWithEffectsLive();
       let impact;
       try {
-        impact = await computeCancelAppointmentImpact(params.appointment_id, { actorId: getAdminActorId(req) });
+        impact = await computeCancelAppointmentImpact(params.appointment_id, {
+          actorId: getAdminActorId(req),
+          ...(withEffects ? { withEffects: true, notifyCustomer: params.notify_customer !== false } : {}),
+        });
       } catch (err) {
         logger.warn(`[intelligence-bar] cancel proposal impact unavailable for ${params.appointment_id}: ${err.message}`);
         return { failed: true, modelResult: { error: 'The cancellation effects could not be verified right now — nothing was proposed.' } };
@@ -1880,8 +1980,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with the
       // commit-side refusal (tools.js) rather than a second copy.
       if ((impact.card_cancel_refusals || []).length) {
-        return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE } };
+        if (withEffects) return { failed: true, modelResult: cancelWithEffectsRefusal(impact) };
+        return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' } };
       }
+      if (withEffects) params.notify_customer = params.notify_customer !== false;
       params._frozen_cancellation_impact = impact;
       preview = { ...preview, cancellation: impact };
     }
@@ -2133,7 +2235,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // send_invoice: the stored approval names the invoice the preview resolved,
   // never the number the model sent.
-  if (['send_invoice', 'record_payment'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
+  if (['send_invoice', 'record_payment', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan'].includes(toolUse.name) && preview?.preview === true && preview.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
@@ -3391,7 +3493,10 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
-- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoices: send_invoice (when it is in your tools) acts only on an EXISTING invoice — it texts the customer one pay-link text (no email). void_invoice (when it is in your tools) voids ONE invoice that has collected nothing and never deletes it; "delete" or "cancel" an invoice means void. create_invoice (when it is in your tools) creates ONE new DRAFT invoice for a named customer and never sends it; the operator uses send_invoice to send. Never change an amount on an existing invoice, apply account credit, charge a card or refund from the bar; for those, say so and point the operator to that invoice on the Invoices page.
+- Invoice edits (each only when it is in your tools, each its own confirmation card; none sends a message, charges a card or refunds): edit_invoice changes an unpaid invoice's title, notes or due date only (never a line item, the tax rate or the total: those stay on the Invoices page; it does not resend the invoice); archive_invoice / unarchive_invoice hide or restore a voided invoice in the list; unvoid_invoice turns a voided invoice back into a draft. Anything else on an invoice stays on the Invoices page.
+- Bill-To: set_customer_bill_to (when it is in your tools) sets the Bill-To payer for FUTURE billing on a customer who pays for themselves today and has no open unpaid invoice or checkout; no existing invoice moves. A customer with open invoices, moving existing invoices to a payer, changing or removing an existing payer, or adding a new payer stays on the customer page. There is no per-invoice Bill-To: the payer is set on the account.
+- Invoice reminders and payment plans (when they are in your tools): pause_invoice_reminders, resume_invoice_reminders and stop_invoice_reminders change one invoice's automatic reminders and send nothing; send_invoice_reminder_now texts and emails the customer the next reminder, and schedule_invoice_send sends the invoice later at a set Eastern time (give send_at_et as YYYY-MM-DDTHH:MM); create_payment_plan records a plan of equal installments and emails the customer the plan confirmation but never charges a card; cancel_payment_plan cancels the active plan. Each shows a confirmation card first. Never promise a plan collects money on its own.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
@@ -3532,7 +3637,7 @@ async function runQuery(req, res, next) {
       activeTask = started.task;
       if (!started.created) return res.status(activeTask.state === 'running' ? 202 : 200)
         .json(await IbTasks.snapshot(activeTask, getAdminActorId(req)));
-      taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target });
+      taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target, ownerDirectScope: ownerDirect });
       // A task that already wrote may have changed its own target's identity
       // (a confirmed update_customer renaming the customer), so the original
       // prompt no longer resolves to the saved customer. Post-receipt, the
@@ -3640,8 +3745,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Last, so every shared prefix above stays cacheable across logins. With
     // the platform off nothing commits directly, so the owner block must
     // stay card-aware (Codex r2 P1 on #5563).
-    if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
+    if (ownerDirectCommits) systemPrompt += OwnerDirect.ownerDirectPrompt();
     else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
+    if (ownerDirectCommits && ibTargetRulesV2Live()) systemPrompt += OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
     // GATE_DICTATION_MONEY_NORMALIZE: a dictated message's amounts are read back (clear) or asked ($61.33 or $6,133).
     if (dictationMoneyNormalizeLive() && req.body.dictation_used === true) systemPrompt += dictatedAmountsNote(prompt);
     // Live page data (current date, schedule stats, etc.) is injected on the
@@ -3669,7 +3775,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const messages = [
       ...conversationHistory.slice(-10).map(stripInternalHistoryMarkers),
       { role: 'user', content: buildUserMessageContent(`Current Eastern date: ${etDateString()}\n\n${prompt}`,
-        images, taskContext ? { ...pageData, validated_task_context: taskContext } : pageData) },
+        images, taskContext ? { ...pageData, validated_task_context: ModelContext.modelContext(taskContext) } : pageData) },
     ];
 
     let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...ToolSearch.stripServerSearchBlocks(req.ibResumedTask.checkpoint)] : messages;
@@ -3677,14 +3783,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // stripped on load and the request runs on the ordinary list (tool-search.js).
     const searchQueries = new Map();
     if (req.ibResumedTask) {
-      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
+      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext: ModelContext.modelContext(taskContext) })}` });
     }
     // Once the general admin read returned data, nothing after it runs without
     // a card (owner-direct.js, UNTRUSTED READS). Seeded from the saved history.
     const requestTaint = await OwnerDirect.loadRequestTaint({
       history: currentMessages, threadId: priorThread.threadId, actorId: getAdminActorId(req), needed: ownerDirectCommits,
-      fullAccess: actionScope.fullAccess, conversationHistory,
+      fullAccess: actionScope.fullAccess, conversationHistory, prompt,
     });
+    OwnerDirect.noteSameNameContext(requestTaint, taskContext);
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the
       // ones a completed discovery round loaded but never reached (the
@@ -3728,6 +3835,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Owner-direct bulk cap: direct commits this task already made, by tool
     // (seeded so a resumed task keeps its count; Codex r1 on #5675).
     const directCommitsByTool = ownerDirectCommits ? await OwnerDirect.seedDirectCounts(activeTask) : new Map();
+    // Whom the message names and what the page shows (GATE_IB_TARGET_RULES_V2); null while the gate is off.
+    const directGrounding = ownerDirectCommits ? OwnerDirect.targetGrounding(taskContext) : null;
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
@@ -3810,7 +3919,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // runs, so three parallel same-tool edits never land two first.
       const directCapped = ownerDirectCommits
         ? OwnerDirect.cappedTools(directCommitsByTool, OwnerDirect.messageDirectPlan(toolUses,
-          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope)), requestTaint))
+          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope)), requestTaint, directGrounding))
         : new Set();
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
@@ -3921,7 +4030,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             failed = true;
             errorMessage = result.error;
           } else if (ibWritesDisabled()) {
-            result = { error: IB_WRITES_DISABLED_MESSAGE };
+            result = { error: IB_WRITES_DISABLED_MESSAGE, code: 'writes_disabled' };
             failed = true;
             errorMessage = result.error;
           } else {
@@ -3941,15 +4050,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // its card (Codex r2), and before the approval is stored, so
               // the bulk card that follows is not blocked (pre-push P1).
               ownerDirectVerdict: ownerDirectCommits ? (preview) => {
-                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint)) return null;
-                return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.BULK_LIMIT_RESULT } } : { direct: true };
+                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview, requestTaint, directGrounding)) return null;
+                return directCapped.has(toolUse.name) || OwnerDirect.dynamicCapReached(directCommitsByTool, toolUse.name) ? { refuse: { ...OwnerDirect.bulkLimitResult(toolUse.name) } } : { direct: true };
               } : null,
             });
             result = proposed.modelResult;
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult, requestTaint)) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult, requestTaint, directGrounding)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.
@@ -4173,11 +4282,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       piiTainted,
       PII_TAINT_MARKER,
     );
-    const persistedAssistantTurn = appendTaintMarker(
+    // Same-name buttons count only when they are really in the reply (no card or direct action suppressed them).
+    OwnerDirect.markSameNameChoices(requestTaint, taskContext, offeredChoices, pendingProposals.length + directActionIds.length);
+    const persistedAssistantTurn = appendTaintMarker(appendTaintMarker(appendTaintMarker(
       appendTaintMarker(appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER), piiTainted, PII_TAINT_MARKER),
-      requestTaint.untrustedRead,
+      requestTaint.untrustedGeneral,
       UNTRUSTED_READ_MARKER,
-    );
+    ), OwnerDirect.sameNameMarkerNeeded(requestTaint), SAME_NAME_CHOICE_MARKER), requestTaint.untrustedV2, UNTRUSTED_READ_V2_MARKER);
 
     // Server-persisted threads (GATE_IB_THREADS, owner-ratified 2026-08-31):
     // admin actors only, never tech or the isolated agent_estimate rail.
@@ -4511,7 +4622,9 @@ router.post('/tasks/:id/select-target', async (req, res, next) => {
     const customerId = req.body.customer_id;
     if (!UUID_RE.test(String(customerId || ''))) return res.status(400).json({ error: 'A valid customer is required' });
     const selectedTarget = { customer_id: customerId };
-    const resolved = await TaskContext.resolve({ prompt: task.request.prompt, pageData: task.request.pageData, selectedTarget });
+    const taskContextKind = task.request.context;
+    const resolved = await TaskContext.resolve({ prompt: task.request.prompt, pageData: task.request.pageData, selectedTarget,
+      ownerDirectScope: OwnerDirect.ownerDirectLive(req) && taskContextKind !== 'tech' && taskContextKind !== 'agent_estimate' });
     if (resolved.error) return res.status(409).json(resolved);
     const claimed = await IbTasks.claimResume(task.id, getAdminActorId(req), task.session_id, { selectedTarget });
     if (claimed.error) return res.status(409).json(claimed);
@@ -4665,6 +4778,24 @@ const CLAIM_REFUSALS = {
 };
 const CLAIM_REFUSAL_FACTS = { product_choice_required: { code: 'product_choice_required', written: false } };
 
+// /confirm-action builds no tool loop, so its refusals never met the gap
+// collector. The confirmed tool's result goes through the same collector as the
+// query path: blocked rows only (no search or ask signals), best effort
+// (Codex #6371 r19).
+async function recordConfirmedGaps(toolName, result) {
+  // Only a refused (failed) result, by its top-level code: the preview that made
+  // the card already counted any skipped-stop gaps, so a confirmed success or a
+  // nested list would count them twice (Codex #6371 r20).
+  if (!isToolFailure(result)) return;
+  try {
+    const collector = createGapCollector({ source: 'intelligence-bar', isRegisteredTool: (name) => ActionRegistry.actions.has(name) });
+    collector.toolResult(toolName, { ...result, capability_gaps: undefined }, true, { round: 0, wrote: false });
+    await collector.flush({});
+  } catch (err) {
+    logger.warn(`[intelligence-bar] confirm-path gap record failed (${err.code || err.name || 'error'})`);
+  }
+}
+
 async function commitPendingAction(req, { id, contractHash }) {
   let claimedAction = null;
   const reply = (status, body) => ({ status, body, claimed: claimedAction !== null });
@@ -4701,10 +4832,13 @@ async function commitPendingAction(req, { id, contractHash }) {
     // A gate-on row that DOES carry the pin falls through to the normal
     // claim/dispatch path below; tools.js cancelAppointment re-verifies the
     // pin against a fresh impact read and refuses on drift.
+    // A card proposed with effects (GATE_IB_CANCEL_WITH_EFFECTS) also needs that gate still on.
     if (action.tool_name === 'cancel_appointment'
-      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
-      const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
+      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact
+        || (action.params._frozen_cancellation_impact.with_effects === true && !ibCancelWithEffectsLive()))) {
+      const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, code: ibCancelAppointmentLive() ? 'cancel_with_effects_unsupported' : 'cancel_gate_off' };
       await PendingActions.recordResult(action.id, result);
+      await recordConfirmedGaps(action.tool_name, result);
       return reply(409, result);
     }
 
@@ -5008,6 +5142,7 @@ async function commitPendingAction(req, { id, contractHash }) {
         : {}),
     });
     let receiptSaved = await PendingActions.recordResult(action.id, result);
+    await recordConfirmedGaps(action.tool_name, result);
     if (receiptSaved === false) {
       // Some domains save the receipt atomically with their mutation.
       receiptSaved = !!(await PendingActions.getActionReceipt(action.id, getAdminActorId(req)).catch(() => null))?.result;

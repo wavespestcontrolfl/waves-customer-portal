@@ -89,6 +89,23 @@ describe('autonomous blog monitor', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     await waitFor(() => expect(fetch.mock.calls.some(([url, opts]) => url.includes('/blog-1/decision') && opts?.method === 'POST' && JSON.parse(opts.body).decision === 'dismiss')).toBe(true));
   });
+  it('a blog that never published says so, offers Dismiss only, and submits it (Codex #6486 r1)', async () => {
+    const parked = (id) => ({ ...item(id), skip_reason: 'attempts_exhausted',
+      review_actions: { can_requeue: false, can_dismiss: true, can_approve_named_competitor: false, never_published: true } });
+    fetch.mockImplementation(async (url, opts) => {
+      let data = { items: [], counts: {}, totals: {} };
+      if (opts?.method === 'POST') data = { item: { ...parked('blog-2'), status: 'skipped', review_actions: {} } };
+      else if (url.includes('/autonomous/review?')) data = { items: [parked('blog-2')], counts: { pending_review: 1 }, total: 1 };
+      else if (url.includes('/autonomous/review/')) data = { item: parked('blog-2') };
+      return { ok: true, json: async () => data };
+    });
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText(/never published/);
+    expect(screen.queryByText(/may already be on GitHub/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Requeue' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    await waitFor(() => expect(fetch.mock.calls.some(([url, opts]) => url.includes('/blog-2/decision') && opts?.method === 'POST' && JSON.parse(opts.body).decision === 'dismiss')).toBe(true));
+  });
   it('refreshes the selected detail even when its opportunity id is unchanged', async () => {
     render(<AutonomousContentReviewPage embedded />);
     await screen.findByText('Full draft revision 1');

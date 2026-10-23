@@ -677,7 +677,19 @@ const REGISTRY = {
     },
     async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      return finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
+      const ReviewService = require('../review-request');
+      // The replay's channel: the first pass knows it; a finalize-only retry
+      // reads it from the accepted provider id (a Twilio SID = a text).
+      const channel = ReviewService.heldReportReplayChannel({ channel: ctx.channel, providerMessageId: ctx.providerMessageId || meta.provider_message_id });
+      // A finalize-only retry carries the delivery time markScheduledSmsSent
+      // stored (sms_log.created_at); the first pass runs at delivery.
+      const deliveredAt = ctx.deliveredAt || undefined;
+      const result = await finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true, channel, deliveredAt });
+      // GATE_REVIEW_ASK_AFTER_REPORT: when the held report went out as a TEXT,
+      // its review ask is re-planned to 10 minutes after it. Idempotent; never
+      // throws, never changes this finalize's outcome.
+      await ReviewService.pullAskAfterHeldReport(meta.service_record_id, { channel, deliveredAt });
+      return result;
     },
     async onTerminal(meta) {
       // Reset the record's 'deferred' status to 'failed' FIRST — the
@@ -1862,8 +1874,12 @@ async function contactSlotStillAuthorized(meta, label) {
     const { getAppointmentContacts } = require('../customer-contact');
     const { filterRecipientsByOptin } = require('../recipient-optin');
     const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-    const stillAuthorized = (await filterRecipientsByOptin(
-      getAppointmentContacts(customer, prefsRow), meta.customer_id
+    // The contact's own choices (contact login, GATE_CONTACT_LOGIN) are
+    // re-read at replay too, for the purpose this row carries.
+    const replayColumn = require('./policy').PURPOSE_POLICY[String(meta.replay_purpose || '')]?.prefsColumn || null;
+    const stillAuthorized = (await require('../contact-notification-prefs').filterContactsByOwnPrefs(
+      await filterRecipientsByOptin(getAppointmentContacts(customer, prefsRow), meta.customer_id),
+      meta.customer_id, replayColumn, { channel: 'sms' },
     )).some((c) => digits(c.phone) === digits(meta.to_phone));
     if (!stillAuthorized) return { eligible: false, reason: 'contact-removed' };
     // Channel pin (codex r27): a customer who flips the relevant

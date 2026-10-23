@@ -36,6 +36,8 @@ jest.mock('../config/twilio-numbers', () => ({
 jest.mock('../utils/customer-comms-lock', () => ({
   withCustomerCommsLock: jest.fn(async (database, _customerId, fn) => fn(database)),
 }));
+// The live Bill-To resolver (invoice-payer-ownership asks it for an invoice whose payer_id is still null).
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
 let mockChangeEmailsGate = true;
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (name) => (name === 'paymentMethodChangeEmails' ? mockChangeEmailsGate : false),
@@ -125,6 +127,8 @@ function invoice(overrides = {}) {
     id: 'inv-1',
     customer_id: 'cust-1',
     invoice_number: 'INV-1001',
+    // A full invoices row: no record link (invoice-payer-ownership re-reads a row read without the column).
+    service_record_id: null,
     title: 'Quarterly Pest Control',
     token: 'pay-token',
     total: '129.00',
@@ -784,6 +788,25 @@ describe('payment lifecycle email sender', () => {
     }));
   });
 
+  test('a plan confirmation pinned to a recipient digest sends only to that recipient', async () => {
+    const { approvalDigest } = require('../utils/approval-digest');
+    const args = { customerId: 'cust-1', paymentPlanId: 'plan-1', paymentMethodId: 'pm-1',
+      plan: { total_balance: '390.00', payment_amount: '130.00', payment_frequency: 'monthly', next_payment_date: '2026-06-20' } };
+    setDbQueues({ payment_methods: [chain({ first: paymentMethod() })], ...lifecycleQueues() });
+    await PaymentLifecycleEmail.sendPaymentPlanConfirmed({ ...args, expectedRecipientDigest: approvalDigest('billing@example.com') });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+
+    EmailTemplates.sendTemplate.mockClear();
+    setDbQueues({ payment_methods: [chain({ first: paymentMethod() })], ...lifecycleQueues() });
+    // The card said no email goes out (digest of null), but an address has since been added.
+    const added = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({ ...args, expectedRecipientDigest: approvalDigest(null) });
+    expect(added).toMatchObject({ ok: false, skipped: true, reason: 'recipient_changed', deliveryOutcome: 'not_sent' });
+    setDbQueues({ payment_methods: [chain({ first: paymentMethod() })], ...lifecycleQueues() });
+    const changed = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({ ...args, expectedRecipientDigest: approvalDigest('old.address@example.com') });
+    expect(changed).toMatchObject({ ok: false, skipped: true, reason: 'recipient_changed' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('sends refund issued notice without exposing processor identifiers', async () => {
     setDbQueues({
       payments: [chain({ first: payment({ stripe_refund_id: 're_sensitive', refund_amount: '49.00' }) })],
@@ -842,6 +865,73 @@ describe('payment lifecycle email sender', () => {
 
     expect(result).toMatchObject({ ok: false, skipped: true, reason: 'payer_billed' });
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  describe('payment plan confirmation re-judges Bill-To ownership at the provider handoff', () => {
+    const planArgs = { customerId: 'cust-1', paymentPlanId: 'plan-1', plan: { invoice_id: 'inv-1', total_balance: '390.00' } };
+    // The library mock runs the caller's handoff and reports whether the provider request was dispatched.
+    function runHandoff() {
+      const state = { dispatched: false };
+      EmailTemplates.sendTemplate.mockImplementationOnce(async (args) => {
+        await args.withProviderHandoff(async () => { state.dispatched = true; });
+        return state.dispatched
+          ? { sent: true, message: { provider_message_id: 'sg-123' } }
+          : { sent: false, blocked: true, reason: 'provider_handoff_aborted' };
+      });
+      return state;
+    }
+    const queues = () => setDbQueues({
+      // First read: the up-front payer_id check; second read: the handoff.
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() })],
+      ...lifecycleQueues(),
+    });
+
+    test('a payer assigned through the customer default or scheduled service (payer_id still null) sends nothing', async () => {
+      const { resolveForInvoice } = require('../services/payer');
+      resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
+      queues();
+      const state = runHandoff();
+
+      const result = await PaymentLifecycleEmail.sendPaymentPlanConfirmed(planArgs);
+
+      expect(result).toMatchObject({ ok: false, skipped: true, reason: 'payer_billed' });
+      expect(state.dispatched).toBe(false);
+    });
+
+    test('an invoice withdrawn from the customer sends nothing', async () => {
+      setDbQueues({
+        invoices: [chain({ first: invoice() }), chain({ first: invoice({ scheduled_send_error: 'payer_billed:payer-9' }) })],
+        ...lifecycleQueues(),
+      });
+      const state = runHandoff();
+
+      const result = await PaymentLifecycleEmail.sendPaymentPlanConfirmed(planArgs);
+
+      expect(result).toMatchObject({ ok: false, skipped: true, reason: 'payer_billed' });
+      expect(state.dispatched).toBe(false);
+    });
+
+    test('ownership that cannot be verified fails closed', async () => {
+      const { resolveForInvoice } = require('../services/payer');
+      resolveForInvoice.mockRejectedValueOnce(new Error('resolver down'));
+      queues();
+      const state = runHandoff();
+
+      const result = await PaymentLifecycleEmail.sendPaymentPlanConfirmed(planArgs);
+
+      expect(result).toMatchObject({ ok: false, skipped: true, reason: 'payer_billed' });
+      expect(state.dispatched).toBe(false);
+    });
+
+    test('a verifiably self-pay invoice sends', async () => {
+      queues();
+      const state = runHandoff();
+
+      const result = await PaymentLifecycleEmail.sendPaymentPlanConfirmed(planArgs);
+
+      expect(result).toMatchObject({ ok: true });
+      expect(state.dispatched).toBe(true);
+    });
   });
 
   test('sends ACH processing acknowledgment with invoice metadata and explicit idempotency key', async () => {

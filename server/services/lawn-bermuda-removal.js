@@ -169,13 +169,13 @@ async function profilePropertyScope(knex, customerId, visitPropertyId, strict) {
     props = await savepointRead(knex, (k) => k('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'is_primary'));
   } catch (err) {
     if (strict) throw err;
-    return { ok: false, effective: null, sole: null };
+    return { ok: false, effective: null, sole: null, count: null };
   }
   const sole = props.length === 1 ? String(props[0].id) : null;
   const primary = props.find((row) => row.is_primary === true);
   const profileProperty = sole || (primary ? String(primary.id) : null);
   const effective = visitPropertyId ? String(visitPropertyId) : sole;
-  return { ok: !!effective && effective === profileProperty, effective, sole };
+  return { ok: !!effective && effective === profileProperty, effective, sole, count: props.length };
 }
 
 // Is the visit's lawn a bermuda removal lawn? The ACTIVE turf profile's grass is the
@@ -998,7 +998,7 @@ module.exports = {
   visitMonthOf, stepMonthOf, isStepRow, rowsByProduct, rowFor, productRowFor, withStepProducts,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
-  bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
+  bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, profilePropertyScope, stepAddOn, cultivarState,
   markStepLines, isStepLine,
   selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, effectivePropertyId, stepProductIds, inMixingOrder, mixOrderField, optionNotes, stepOptionFields, EXCLUDED_CULTIVAR_WARNING,
   excludedCultivarSql, stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, rateAdvisories,

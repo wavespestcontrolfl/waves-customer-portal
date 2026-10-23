@@ -22,6 +22,12 @@ const { celsiusYtdCap } = require('../config/lawn-v13-count-caps');
 const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
 const applicationLimits = require('../services/application-limits');
 const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+// Contact session (GATE_CONTACT_LOGIN): a contact the report rule withholds
+// from (a tenant, an occupant on a managed account) reads the visit list and
+// detail without report artifacts — the same verdict /api/documents applies.
+const {
+  contactSessionReportsWithheld, withholdReportArtifacts, contactSafeReportLinks, contactRecordScope, scopeContactRecords,
+} = require('../services/contact-session-projection');
 
 router.use(authenticate);
 
@@ -44,15 +50,25 @@ router.get('/', async (req, res, next) => {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { limit, offset, type, propertyScoped } = value;
-    const scope = propertyScoped ? await resolveSessionScope(req) : null;
+    // A contact's list is always scoped to the primary property, whatever
+    // the holder's property gate says (codex #6363 r16 P1 + security P1);
+    // the holder's stays customer-wide unless asked.
+    const scope = req.contactSession ? await contactRecordScope(req) : (propertyScoped ? await resolveSessionScope(req) : null);
 
-    const { services: enriched, total } = await listPortalServiceHistory(req.customerId, { limit, offset, type, scope });
+    const { services: listed, total } = await listPortalServiceHistory(req.customerId, { limit, offset, type, scope });
+    // A contact the rule withholds from gets no artifact; an allowed contact
+    // gets the visit without the public report bearers (the authenticated
+    // contact-safe PDF route carries the report).
+    const projectRow = await contactSessionReportsWithheld(req)
+      ? withholdReportArtifacts
+      : (req.contactSession ? contactSafeReportLinks : null);
+    const enriched = projectRow ? listed.map(projectRow) : listed;
 
     res.json({
       // The selection this read was scoped to (propertyScoped only): Home
       // compares it with the house it shows and withholds the Last Visit card
       // on a mismatch (uncapped codex r1v P1) — same echo as /schedule.
-      ...(scope ? { propertyScope: resolvedScopePayload(scope) } : {}),
+      ...(propertyScoped && scope ? { propertyScope: resolvedScopePayload(scope) } : {}),
       services: enriched,
       total,
       limit: parseInt(limit),
@@ -68,24 +84,35 @@ router.get('/', async (req, res, next) => {
 // =========================================================================
 router.get('/:id', async (req, res, next) => {
   try {
-    const service = await db('service_records')
-      .where({ 'service_records.id': req.params.id, 'service_records.customer_id': req.customerId })
-      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
-      .select(
-        'service_records.*',
-        'technicians.name as technician_name',
-        db.raw('COALESCE(scheduled_services.check_in_time, scheduled_services.actual_start_time) as effective_check_in_time'),
-        db.raw('COALESCE(scheduled_services.check_out_time, scheduled_services.actual_end_time) as effective_check_out_time')
-      )
-      .first();
+    // A contact reaches only the primary property's records (codex #6363
+    // r16 P1): a record id of the holder's other home answers 404 here.
+    const service = await scopeContactRecords(
+      db('service_records')
+        .where({ 'service_records.id': req.params.id, 'service_records.customer_id': req.customerId })
+        .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+        .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
+        .select(
+          'service_records.*',
+          'technicians.name as technician_name',
+          db.raw('COALESCE(scheduled_services.check_in_time, scheduled_services.actual_start_time) as effective_check_in_time'),
+          db.raw('COALESCE(scheduled_services.check_out_time, scheduled_services.actual_end_time) as effective_check_out_time')
+        ),
+      await contactRecordScope(req),
+    ).first();
 
     if (!service) {
       return res.status(404).json({ error: 'Service record not found' });
     }
 
     const structuredNotes = parseJsonObject(service.structured_notes);
-    const suppressCustomerArtifacts = suppressesCustomerArtifacts(structuredNotes);
+    // Notes, products and photos are withheld from the customer surface for
+    // an internal-only completion, and from a contact session the report
+    // rule withholds from (one verdict, no product/photo reads either way).
+    // The withheld contact's payload also loses the visit's measurements
+    // (withholdReportArtifacts below); the holder's internal-only completion
+    // keeps them, as today.
+    const contactWithheld = await contactSessionReportsWithheld(req);
+    const suppressCustomerArtifacts = suppressesCustomerArtifacts(structuredNotes) || contactWithheld;
 
     const products = suppressCustomerArtifacts
       ? []
@@ -110,7 +137,7 @@ router.get('/:id', async (req, res, next) => {
       url: await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS),
     })));
 
-    res.json({
+    const detail = {
       id: service.id,
       date: service.service_date,
       type: service.service_type,
@@ -127,7 +154,8 @@ router.get('/:id', async (req, res, next) => {
       },
       products,
       photos: photosWithUrls,
-    });
+    };
+    res.json(contactWithheld ? withholdReportArtifacts(detail) : detail);
   } catch (err) {
     next(err);
   }
@@ -141,34 +169,59 @@ router.get('/stats/summary', async (req, res, next) => {
     // ET calendar year — service_date is a DATE in ET terms; UTC's year
     // flips 5 hours early on New Year's Eve.
     const etYearStart = `${etDateString().slice(0, 4)}-01-01`;
-    const servicesYTD = await db('service_records')
-      .where({ customer_id: req.customerId })
-      .where('service_date', '>=', etYearStart)
-      .count('id as count')
+    const celsiusWindow = applicationLimits.windowForName('Celsius WG', etDateString());
+    // A contact the report rule withholds from reads no findings here either
+    // (codex #6363 r16 P2): the thatch readings and the program counts are
+    // the visit findings the list and detail already withhold. Same shape,
+    // every figure null — the portal prints its dashes.
+    if (await contactSessionReportsWithheld(req)) {
+      return res.json({
+        servicesYTD: null,
+        celsiusApplicationsThisYear: null,
+        celsiusWindow: celsiusWindow.rolling ? 'rolling365' : 'calendar_year',
+        celsiusMaxPerYear: null,
+        thatch: { current: null, initial: null, currentDate: null, initialDate: null },
+        withheld: true,
+      });
+    }
+    // Per lawn like the cap below: the selected property's when the session is scoped to one. A contact's reads are scoped
+    // to the primary property whatever the holder's gate says (codex #6363 r16 P1 + security P1), so its counts and
+    // readings never carry the holder's other homes.
+    const scope = req.contactSession ? await contactRecordScope(req) : await resolveSessionScope(req);
+    const records = () => {
+      const q = db('service_records').where({ 'service_records.customer_id': req.customerId });
+      return req.contactSession
+        ? scopeContactRecords(q.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'), scope)
+        : q;
+    };
+    const servicesYTD = await records()
+      .where('service_records.service_date', '>=', etYearStart)
+      .count('service_records.id as count')
       .first();
 
-    const latestThatch = await db('service_records')
-      .where({ customer_id: req.customerId })
-      .whereNotNull('thatch_measurement')
-      .orderBy('service_date', 'desc')
-      .select('thatch_measurement', 'service_date')
+    const latestThatch = await records()
+      .whereNotNull('service_records.thatch_measurement')
+      .orderBy('service_records.service_date', 'desc')
+      .select('service_records.thatch_measurement', 'service_records.service_date')
       .first();
 
-    const firstThatch = await db('service_records')
-      .where({ customer_id: req.customerId })
-      .whereNotNull('thatch_measurement')
-      .orderBy('service_date', 'asc')
-      .select('thatch_measurement', 'service_date')
+    const firstThatch = await records()
+      .whereNotNull('service_records.thatch_measurement')
+      .orderBy('service_records.service_date', 'asc')
+      .select('service_records.thatch_measurement', 'service_records.service_date')
       .first();
 
     // Celsius applications in the cap's window (cap tracking): the last 365 days under the v13 program, the calendar year before it
     // (application-limits windowForName, the one window the cap itself counts). Per lawn like the cap: the selected property's
     // when the session is scoped to one, else the busiest lawn's.
-    const scope = await resolveSessionScope(req);
-    const celsiusWindow = applicationLimits.windowForName('Celsius WG', etDateString());
-    const celsiusCount = await celsiusApplicationsThisYear(req.customerId, celsiusWindow.start, {
-      propertyId: scope && scope.scoped && scope.property ? scope.property.id : null,
-    });
+    // A contact whose scope is CLOSED (every saved property retired) counts
+    // nothing (codex #6363 r18 P2): the helper's null propertyId means "the
+    // busiest lawn", a property this contact cannot see.
+    const celsiusCount = req.contactSession && scope?.closed
+      ? 0
+      : await celsiusApplicationsThisYear(req.customerId, celsiusWindow.start, {
+        propertyId: scope && scope.scoped && scope.property ? scope.property.id : null,
+      });
 
     res.json({
       servicesYTD: parseInt(servicesYTD.count),

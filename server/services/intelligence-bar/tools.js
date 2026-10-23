@@ -375,12 +375,13 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'cancel_appointment',
-    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason and point the operator to the Dispatch screen; never say a visit was cancelled until the card is confirmed.',
+    description: 'Cancel ONE appointment (this visit only, never the series) through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. A BARE visit qualifies: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit. When the cancel-with-effects switch is on, a visit with an unpaid invoice, an inspection credit or a linked follow-up visit also qualifies: the card lists each invoice voided or kept, each credit restored and each linked visit cancelled, plus the cancellation text the customer would get. The customer is texted by default; set notify_customer false ONLY when the operator asks to cancel without a text. A visit with a fee due, a paid invoice, a prepayment or a saved card stays out of reach (refunds and card charges are closed to the bar). When the tool refuses, relay the reason and do not send the operator to another screen; never say a visit was cancelled until the card is confirmed.',
     input_schema: {
       type: 'object',
       properties: {
         appointment_id: { type: 'string' },
         reason: { type: 'string' },
+        notify_customer: { type: 'boolean', description: 'Text the customer the cancellation notice. Default true. Set false ONLY when the operator asks to cancel without a text.' },
       },
       required: ['appointment_id'],
     },
@@ -2860,9 +2861,21 @@ async function cancelPlan(input, actionContext = {}) {
       const why = preview.scopeError === 'scope_not_owned'
         ? 'That service is not on the plan any more.'
         : preview.scopeError === 'scoped_covers_prepaid'
-          ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan, or leave the covered service in place.'
+          ? (preview.prepayRefund90Day === true
+            ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (refunded only within 90 days of its start; after that it ends at the end of paid coverage with no refund), or leave the covered service in place.'
+            : 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan, or leave the covered service in place.')
           : 'The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first.';
       return { error: why, code: preview.scopeError || 'scoped_unsupported' };
+    }
+    // GATE_PREPAY_REFUND_90_DAY: past day 90 "end now" is not offered (no
+    // refund is owed, the customer keeps the paid coverage). A card for it
+    // would fail on Confirm, so it is a tool failure here, like the other
+    // unexecutable previews above.
+    if (preview.prepay && preview.prepay.endNowAvailable === false && preview.prepay.disposition === 'end_now_refund') {
+      return {
+        error: 'Ending now is not offered: this plan started more than 90 days ago, so no refund is owed and the paid visits stay (owner rule). Propose End of paid coverage (effective_date end_of_coverage) instead.',
+        code: 'end_now_past_refund_window',
+      };
     }
     const impact = preview.impact || {};
     return {
@@ -3296,7 +3309,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // An area add-on is priced, sized and limit-checked from an estimate (its sold area, its yearly limit, its price tier): the
   // bar books one service by name with none of that, so it never books one. Same rule as the Schedule screen's hand-made line.
   if (catalogRow && String(catalogRow.service_key || '').startsWith('area_addon_')) {
-    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate. Build an estimate that sells it, then book from that estimate on the Schedule screen. Nothing was booked.` };
+    return { error: `"${catalogRow.name}" is an add-on treatment that is priced and limited from an estimate, so the bar can't book it by name from here yet. Nothing was booked.`, code: 'addon_by_name_unsupported' };
   }
   const stated = statedPrice !== undefined && statedPrice !== null;
   if (isAlwaysFreeServiceType(bookedType)) {
@@ -3532,7 +3545,7 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
-  if (booking.error) return { error: booking.error };
+  if (booking.error) return { error: booking.error, ...(booking.code ? { code: booking.code } : {}) };
   const refusal = ibBookingBillingRefusal(customer, bookedServiceTypeFor(booking, serviceType), booking.price);
   if (refusal) return { error: refusal };
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
@@ -3725,7 +3738,7 @@ async function createAppointment(input, actionContext = {}) {
   // never carries a price the operator did not approve. A call with no pins
   // (never proposed through a card) may only book unpriced.
   const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
-  if (booking.error) return { error: booking.error };
+  if (booking.error) return { error: booking.error, ...(booking.code ? { code: booking.code } : {}) };
   // A close or colloquial name books as the exact catalog name it resolved to.
   service_type = bookedServiceTypeFor(booking, service_type);
   // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
@@ -3939,11 +3952,6 @@ async function createAppointment(input, actionContext = {}) {
       updated_at: new Date(),
     }).returning('*');
     appointment = created;
-    // Visit groups (visit-group-scope.md §2): stamp at scheduling —
-    // gate-checked + best-effort + self-refusing inside maybeGroupRow
-    // (savepoint on the trx; a grouping failure never poisons the booking;
-    // the IB write-gate confirm boundary is upstream and unaffected).
-    await require('../visit-groups').maybeGroupRow(created.id, { database: trx, createdBy: 'dispatch' });
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the
@@ -4223,8 +4231,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
     const oldDateStr = oldDate instanceof Date ? oldDate.toISOString().slice(0, 10) : String(oldDate || '').slice(0, 10);
     if (collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr) {
       return {
-        error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. Move it from Dispatch or the Edit appointment modal for now; Intelligence Bar series moves arrive in a follow-up. Nothing was changed.',
-        code: 'COLLECTIVE_MOVE_REQUIRED',
+        error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move, and the bar can\'t move a series from here yet. Nothing was changed.',
+        code: 'collective_move_unsupported',
       };
     }
   }
@@ -4343,8 +4351,9 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // bar does not move it (ib-write-tools: the card shows everything the
   // commit does). The Schedule screen moves both.
   if (await require('../package-followup-booking').hasLivePackageChild(db, [appt.id])) {
-    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.' };
+    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   }
+  let thrownRefusal = null;
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -4370,7 +4379,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // Package visit 2 recheck, atomic with this write (the preflight
       // above is only a fast refusal).
       await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
-        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
+        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.');
       // A visit carrying a limited area add-on is judged for the new day at its place (a limit reached refuses the move; nothing
       // is changed). A same-day change and a visit with no limited add-on cost nothing.
       await require('../area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: appointment_id, visit: appt, scheduledDate: dateStr, staff: true });
@@ -4437,7 +4446,12 @@ async function rescheduleAppointment(input, actionContext = {}) {
         .returning(['id', 'technician_id']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
+  }).catch((err) => {
+    // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
+    thrownRefusal = require('./outcomes').moveRefusalFromThrown(err);
+    if (!thrownRefusal) throw err;
   });
+  if (thrownRefusal) return thrownRefusal;
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
   }
@@ -4545,7 +4559,173 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // invoice, no inspection-credit offer, and is neither a follow-up child nor
 // grouped — nothing this card would need to void, reverse, or disclose a
 // group/follow-up side effect for. Anything else cancels from Dispatch.
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so the bar can\'t cancel this visit from here yet (a visit with an invoice, credit or linked visit). Nothing was changed.';
+
+// Confirm of a cancel card proposed with effects (GATE_IB_CANCEL_WITH_EFFECTS, owner decision 2026-10-12): the visit
+// is cancelled by the Dispatch screen's own handler (admin-dispatch.js cancelServiceFromBar), not by a copy of it, so
+// the invoice void, credit restore, linked-visit cascade, customer text and tracker follow the Dispatch cancel exactly.
+// The carded body is all it sends: this visit only (scope this_only), the operator's reason, and notifyCustomer as the
+// card showed it. The effects are recomputed twice and must match the card: here before the handler runs, and again
+// inside the handler's own cancel transaction right after it locks the visit (nothing new can be minted against a
+// locked visit), so a visit that changed since the card returns preview_changed and nothing is cancelled.
+const CANCEL_CUSTOMER_BUSY_MESSAGE = "This customer's record is busy right now (being edited or merged), so nothing was cancelled. Try again in a moment.";
+
+async function cancelWithEffects(input, actionContext, appt) {
+  const { appointment_id, reason } = input;
+  const frozen = input._frozen_cancellation_impact;
+  const { ibCancelWithEffectsLive } = require('../../config/feature-gates');
+  if (!ibCancelWithEffectsLive()) {
+    return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
+  }
+  if (actionContext.isAdmin !== true) {
+    return { error: 'Admin access required for this action', code: 'permission_denied' };
+  }
+  const { computeCancelAppointmentImpact, cancelImpactsMatch, cancelWithEffectsRefusal, lockLinkedFollowUps } = require('../appointment-cancel-impact');
+  const changed = { error: 'The cancellation effects (invoices, credit, linked visits, customer text or fee) changed since this card was shown — nothing was changed. Ask again for a fresh preview.', preview_changed: true };
+  // PaymentIntent lookups made before the lock are reused under it, so the lock-time check makes no Stripe call.
+  const piCache = new Map();
+  const recompute = (extra = {}) => computeCancelAppointmentImpact(appointment_id, {
+    actorId: actionContext.technicianId || null, withEffects: true, notifyCustomer: frozen.notify_customer,
+    approvedText: frozen.customer_text, piCache, ...extra,
+  });
+  let fresh;
+  try {
+    fresh = await recompute();
+  } catch (err) {
+    logger.warn(`[intelligence-bar] cancel impact unavailable for ${appointment_id}: ${err.message}`);
+    return { error: 'The cancellation effects could not be verified right now — nothing was changed. Try again in a moment.' };
+  }
+  if (!cancelImpactsMatch(fresh, frozen)) return changed;
+  const refusal = cancelWithEffectsRefusal(fresh);
+  if (refusal) return refusal;
+
+  // What the card approved goes to the handler: the exact text per recipient (only when a text is carded) and the
+  // linked visits. A text the card could not compose is not sent at all.
+  const text = frozen.customer_text || {};
+  const sendText = frozen.notify_customer === true && text.would_send === true;
+  const { cancelServiceFromBar } = require('../../routes/admin-dispatch');
+  let replay;
+  try {
+    replay = await cancelServiceFromBar({
+      serviceId: appointment_id,
+      notifyCustomer: sendText,
+      approvedNotice: sendText ? (text.recipients || []).map(({ recipient_key, body }) => ({ recipient_key, body })) : null,
+      linkedChildren: frozen.linked_visits || [],
+      // The money the card showed: only these invoices (at these amounts and PaymentIntents) are voided and only
+      // these credit reversals run; no card fee rail is run. Anything that changed is skipped and reported.
+      approvedMoney: {
+        invoices: frozen.invoices || [],
+        creditReversalOfferIds: (frozen.inspection_credit_reversal || []).filter((o) => o.would_reverse).map((o) => o.id),
+      },
+      notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
+      actor: { technicianId: actionContext.technicianId || null },
+      // Under the visit lock: lock the linked visits too, then compare cheap DB fields only (PaymentIntents were
+      // looked up before the lock; one that appeared since cannot be checked here and counts as a change).
+      beforeCommit: async (trx) => {
+        let inLock;
+        try {
+          // A legacy visit with no stamped service address shows (and fingerprints) the customer's primary address.
+          // That address lives on the customers row, which the visit lock does not cover, so hold it FOR SHARE (as the
+          // bare cancel does) BEFORE the recheck reads it: a concurrent address edit then waits for this cancel to commit.
+          // NOWAIT: this transaction already holds the visit row, and a customer merge locks the customer and then its
+          // visits, so waiting here could deadlock (ABBA). A busy customer fails closed with a try-again result.
+          if (frozen.legacy_address_fingerprint && appt.customer_id) {
+            try {
+              await trx('customers').where('id', appt.customer_id).forShare().noWait().first('id');
+            } catch (lockErr) {
+              if (lockErr && lockErr.code === '55P03') throw Object.assign(new Error(CANCEL_CUSTOMER_BUSY_MESSAGE), { status: 409, code: 'customer_busy_cancel', busy: true });
+              throw lockErr;
+            }
+          }
+          await lockLinkedFollowUps(trx, appointment_id);
+          // conn: the handler's cancel transaction, so the estimate deposit ledger lock is held to the commit.
+          inLock = await recompute({ piCacheOnly: true, conn: trx });
+        } catch (err) {
+          if (err && err.busy) throw err;
+          throw Object.assign(new Error(changed.error), { status: 409, code: 'preview_changed', cause: err });
+        }
+        if (!cancelImpactsMatch(inLock, frozen) || cancelWithEffectsRefusal(inLock)) {
+          throw Object.assign(new Error(changed.error), { status: 409, code: 'preview_changed' });
+        }
+      },
+    });
+  } catch (err) {
+    logger.error(`[intelligence-bar] Dispatch cancel replay failed for ${appointment_id}: ${err.message}`);
+    return { error: 'The Dispatch cancel failed before finishing — check the visit before trying again.' };
+  }
+  return cancelReplayResult(replay, { appointment_id, appt, frozen, changed, sendText });
+}
+
+// The receipt name is decoration: the visit is already cancelled, so a failed lookup must never turn that success into
+// a failed action (the operator would lose the receipt and its warnings). Falls back to the name the card carried.
+async function cancelReceiptName(appt, frozen, appointment_id) {
+  try {
+    const customer = await db('customers').where('id', appt.customer_id).first('first_name', 'last_name');
+    if (customer) return `${customer.first_name} ${customer.last_name}`;
+  } catch (err) {
+    logger.warn(`[intelligence-bar] cancel receipt name lookup failed for ${appointment_id}: ${err.message}`);
+  }
+  return frozen?.appointment?.customer_name || 'Unknown';
+}
+
+// What the Dispatch handler did NOT finish, in the operator's words (the receipt shows result.warning only).
+function cancelReplayWarnings(json, sendText) {
+  const warnings = [];
+  // A step after the cancel committed failed (activity log, settlement bookkeeping...): the visit IS cancelled and the
+  // text / money steps before it may have run, so this is a success with a warning, never a failed action.
+  if (json.postCommitFailure) {
+    warnings.push(`The visit is cancelled, but a step after the cancel did not finish (${json.postCommitFailure}). Nothing was undone: check the visit's invoices and credit and the customer's message history${sendText && json.notificationSent === undefined ? ' (the customer text may or may not have gone out)' : ''} before doing anything again.`);
+  }
+  // Delivery unproven (the provider may have accepted it): never advise a resend, whatever else is true.
+  if (sendText && json.notificationUncertain === true) {
+    warnings.push(`The visit is cancelled, but the customer text may have gone out (${json.notificationError || 'delivery could not be confirmed'}). Check the customer's message history before sending it again.`);
+  } else if (sendText && json.notificationSent === false) {
+    warnings.push(`The visit is cancelled, but the customer text did not go out (${json.notificationError || 'no reason given'}) and will not be retried automatically — send it by hand.`);
+  }
+  // Some recipients got the text and another did not: say so, and say NOT to resend to those already reached.
+  if (sendText && json.notificationUncertain !== true && json.notificationSent === true && json.notificationPartial === true) {
+    warnings.push(`The visit is cancelled and the customer text went to some recipients, but not all (${json.notificationError || 'no reason given'}). Do not send it again to those already reached.`);
+  }
+  // A money effect that changed since the card (an invoice, a payment attempt, a credit) was NOT acted on.
+  const moneySkipped = json.moneySkipped || [];
+  if (moneySkipped.length) {
+    warnings.push(`${moneySkipped.length} billing effect(s) changed since the card and were NOT carried out (${moneySkipped.map((m) => `${m.kind}${m.id ? ` ${m.id}` : ''}: ${m.reason}`).join('; ')}) — the office reviews them.`);
+  }
+  // A linked visit that changed since the card (or was not on it) is left alone, never cancelled unseen.
+  const skipped = json.linkedVisitsSkipped || [];
+  if (skipped.length) {
+    warnings.push(`${skipped.length} linked visit(s) were NOT cancelled because they changed since the card (${skipped.map((v) => `${v.id}: ${v.reason}`).join('; ')}) — check them.`);
+  }
+  return warnings;
+}
+
+// The bar's reply for the Dispatch handler's reply: a refusal passes through (a 409 is a stale card), a success names
+// the customer and says honestly whether the cancellation text went out.
+async function cancelReplayResult({ status, json = {} }, { appointment_id, appt, frozen, changed, sendText }) {
+  if (status >= 400 || json.success !== true) {
+    if (json.code === 'preview_changed') return changed;
+    return { error: json.error || 'The Dispatch cancel was refused — nothing was changed.', ...(json.code ? { code: json.code } : {}), ...(status === 409 && json.code !== 'customer_busy_cancel' ? { preview_changed: true } : {}) };
+  }
+  const customerName = await cancelReceiptName(appt, frozen, appointment_id);
+  logger.info(`[intelligence-bar] Cancelled appointment ${appointment_id} via the Dispatch cancel handler`);
+  const warnings = cancelReplayWarnings(json, sendText);
+  const moneySkipped = json.moneySkipped || [];
+  const skipped = json.linkedVisitsSkipped || [];
+  return {
+    success: true,
+    appointment_id,
+    customer_name: customerName,
+    date: appt.scheduled_date,
+    service_type: appt.service_type,
+    ran_dispatch_cancel: true,
+    customer_text_sent: sendText && json.notificationSent === true,
+    ...(sendText && json.notificationPartial === true ? { customer_text_partial: true } : {}),
+    ...(sendText && json.notificationUncertain === true ? { customer_text_uncertain: true } : {}),
+    ...(skipped.length ? { linked_visits_skipped: skipped } : {}),
+    ...(moneySkipped.length ? { money_skipped: moneySkipped } : {}),
+    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
+  };
+}
 
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
@@ -4651,6 +4831,11 @@ async function cancelAppointment(input, actionContext = {}) {
     return { error: `This appointment is already ${appt.status} and can't be cancelled.` };
   }
 
+  // A card proposed WITH effects (GATE_IB_CANCEL_WITH_EFFECTS) commits by replaying the Dispatch cancel handler.
+  if (input._frozen_cancellation_impact?.with_effects) {
+    return cancelWithEffects(input, actionContext, appt);
+  }
+
   // Exact-effect confirm (W0B / PR A of the cancel-pinned-effects lane): a
   // pending action proposed against a frozen impact snapshot (fee, invoices,
   // inspection-credit — see appointment-cancel-impact.js) pins it on
@@ -4675,7 +4860,7 @@ async function cancelAppointment(input, actionContext = {}) {
     }
     // Owner ruling 2026-09-28: the bar cancels bare visits only.
     if ((freshImpact?.card_cancel_refusals || []).length) {
-      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
     }
   }
 
@@ -4879,7 +5064,7 @@ async function cancelAppointment(input, actionContext = {}) {
       return { error: 'Appointment not found — nothing was changed.' };
     }
     if (err && err.message === '__cancel_card_refused__') {
-      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+      return { error: CARD_CANCEL_REFUSED_MESSAGE, code: 'cancel_with_effects_unsupported' };
     }
     // The visit went cancelled / no_show / skipped between the initial read
     // and the lock chain, which refuses a never-ran visit (Codex round-10

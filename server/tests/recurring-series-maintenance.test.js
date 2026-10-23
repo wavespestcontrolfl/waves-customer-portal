@@ -316,7 +316,11 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     const alertLegs = src.match(/copyBillToFields\(data, parent, cols\);\n\s*copyStampedServiceAddressFields\(data, parent, cols\);/g) || [];
     expect(alertLegs.length).toBe(3);
     expect(src).toContain('copyBillToFields(nextData, parent, cols);');
-    expect(src).toContain('copyStampedServiceAddressFields(nextData, parent, cols);');
+    // The extension insert's address stamp is resolved once in the cadence
+    // walk (its placement, shared with the taken-hour probe) and applied to
+    // the insert row.
+    expect(src).toContain('copyStampedServiceAddressFields(placement, parent, cols);');
+    expect(src).toContain('Object.assign(nextData, placement);');
   });
 
   test('P1: a series cancel landing between the refill commit and the reminder registration cannot leave an armed reminder', async () => {
@@ -670,10 +674,8 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // lane edit asks the top-up's own billable verdict for the next
     // occurrences) anchors its cadence walk on the same helper, read-only.
     expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(7);
-    // The occupied-dates preload is shared the same way — same 4th
-    // consumer; the 5th is seriesWalkWithRide (the verdict asks the top-up's own
-    // rideLawnCandidate, which excludes dates the series already holds).
-    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(5);
+    // The occupied-dates preload is shared the same way — same 4th consumer.
+    expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
 
   test('rolls back when the series was stopped while processing (race re-check)', async () => {

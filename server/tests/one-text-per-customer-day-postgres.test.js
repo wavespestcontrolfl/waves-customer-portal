@@ -92,14 +92,12 @@ postgres('one text per customer, address and day', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY;
-    gates.visitGroups = false;
   });
 
   afterEach(() => {
     mockDb.override = null;
     mockDb.onTechnicians = null;
     delete process.env.GATE_ONE_TEXT_PER_CUSTOMER_DAY;
-    gates.visitGroups = false;
   });
 
   afterAll(async () => {
@@ -227,17 +225,20 @@ postgres('one text per customer, address and day', () => {
 
     test('gate on: a grouped stop still sends exactly ONE on-the-way text (the visit claim decides; the day rule adds nothing)', async () => {
       gateOn();
-      gates.visitGroups = true;
       const f = await fixture({ date: etDateString(), specs: [
         { start: '09:00', end: '10:00', name: 'Quarterly Pest Control', serviceIndex: 0 },
         { start: '09:30', end: '10:30', name: 'Lawn Care', serviceIndex: 1 },
       ] });
-      const { maybeGroupRow } = require('../services/visit-groups');
-      await maybeGroupRow(f.rows[0].id);
-      await maybeGroupRow(f.rows[1].id);
-      const grouped = await mockPg('scheduled_services').whereIn('id', f.rows.map((r) => r.id)).select('visit_id');
-      expect(grouped[0].visit_id).toBeTruthy();
-      expect(grouped[0].visit_id).toBe(grouped[1].visit_id);
+      // A stop grouped before grouping was retired (2026-10-22): one open
+      // visit with both rows attached.
+      const { stopBaseKey } = require('../services/visit-groups');
+      const [visit] = await mockPg('service_visits').insert({
+        customer_id: f.customerId, property_id: f.rows[0].property_id, technician_id: f.rows[0].technician_id,
+        scheduled_date: f.date, window_start: '09:00', window_end: '10:30',
+        stop_base_key: stopBaseKey({ propertyId: f.rows[0].property_id, customerId: f.customerId, scheduledDate: f.date }),
+        stop_seq: 1, behavior_version: 1, status: 'open', created_by: 'test',
+      }).returning('*');
+      await mockPg('scheduled_services').whereIn('id', f.rows.map((r) => r.id)).update({ visit_id: visit.id });
       await enRoute(f.rows[0].id);
       expect(texted(TwilioService.sendTechEnRoute)).toBe(1);
       await enRoute(f.rows[1].id);

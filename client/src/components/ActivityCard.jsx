@@ -58,7 +58,7 @@ export default function ActivityCard({ data, sectionId = 'activity' }) {
     >
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 600 }}>
+          <div style={{ fontSize: 14, letterSpacing: '0.06em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 600 }}>
             {data.label}
           </div>
           <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>

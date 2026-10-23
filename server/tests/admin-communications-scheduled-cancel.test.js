@@ -137,7 +137,7 @@ jest.mock('../services/sms-auto-send', () => ({
   isRealProviderSend: jest.fn(() => false),
   isAmbiguousProviderOutcome: jest.fn(() => false),
 }));
-jest.mock('../services/review-request', () => ({
+jest.mock('../services/review-request', () => ({ pullAskAfterHeldReport: jest.fn(async () => ({ pulled: 0 })), heldReportReplayChannel: jest.fn(() => undefined),
   claimInlineForSend: jest.fn(async () => null),
   inlineClaimStillHeld: jest.fn(async () => true),
   releaseInlineClaim: jest.fn(async () => {}),
@@ -163,7 +163,7 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(() => 'wpc'),
   shortLinkBaseUrl: () => 'https://wavespest.co',
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => true, gates: {}, logGateStatus: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, isEnabled: () => true, gates: {}, logGateStatus: jest.fn() }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: jest.fn() } })));
 
 const express = require('express');

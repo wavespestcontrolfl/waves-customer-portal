@@ -1276,11 +1276,12 @@ describe('products', () => {
     expect(screen.queryByLabelText('Area treated today (sq ft)')).toBeNull();
   });
 
-  test('a perimeter product is held in words: this sheet has no linear-feet entry', async () => {
+  // Linear feet are optional (owner 2026-10-22): a perimeter product no longer holds the sheet.
+  test('a perimeter product holds nothing: linear feet are optional', async () => {
     await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray', { treatedSqft: 6000, areaUnit: 'sqft' }) }) });
-    await analyze();
-    await waitFor(() => expect(footerNote()).toBe('Talak 7.9% needs linear feet, which this sheet does not take. Tell the office.'));
-    expect(completeButton().disabled).toBe(true);
+    await analyzeAndComplete();
+    expect(screen.queryByText(/needs linear feet/)).toBeNull();
+    expect(completeCalls()).toHaveLength(1);
   });
 
   // [method as the plan or catalog spells it, the unit the server wants or null]
@@ -1309,7 +1310,6 @@ describe('products', () => {
 
   test('the server\'s area refusals get plain words with no button to follow', () => {
     expect(plainRefusalMessage({ code: 'area_sqft_required' })).toBe('The lawn area is missing for a sprayed or spread product. Tell the office.');
-    expect(plainRefusalMessage({ code: 'linear_ft_required' })).toBe('A perimeter product needs linear feet, which this sheet does not take. Tell the office.');
   });
 });
 
@@ -1714,9 +1714,12 @@ describe('the note box', () => {
     const note = screen.getByLabelText('Tell me about the visit');
     const row = note.closest('.tech-visit-note-row');
     expect(row.classList.contains('tech-visit-note-row--inside')).toBe(true);
-    expect(row.querySelector('.tech-visit-note-mic')).not.toBeNull();
-    // The textarea is the row's first child: nothing to its left.
-    expect(row.firstElementChild).toBe(note);
+    // The mic shares the textarea's own wrapper, so it sits in the text area's corner.
+    const field = note.closest('.tech-visit-note-field');
+    expect(field.querySelector('.tech-visit-note-mic')).not.toBeNull();
+    // The textarea leads its wrapper, and the wrapper leads the row: nothing to its left.
+    expect(field.firstElementChild).toBe(note);
+    expect(row.firstElementChild).toBe(field);
   });
 });
 
@@ -4004,5 +4007,47 @@ describe('prepare mode (a part of a grouped stop)', () => {
     await screen.findByText('Could not save this on the device');
     expect(screen.queryByText('Saved for this stop')).toBeNull();
     expect(completeCalls()).toHaveLength(0);
+  });
+});
+
+// GATE_ESTIMATE_LAWN_LIMITS: carpetgrass on the turf profile puts one line under a Celsius WG
+// row (the context's carpetgrassCelsiusWarning). No new tap and no new step; other products and
+// a context without the key are unchanged.
+describe('carpetgrass warning on a Celsius WG row', () => {
+  const P_CELSIUS = 'aaaaaaaa-0000-4000-8000-0000000000c1';
+  const WARNING = 'Carpetgrass on this lawn: Celsius kills it. Spot only, off the carpetgrass.';
+  const CELSIUS_CATALOG = [...CATALOG, { id: P_CELSIUS, name: 'Celsius WG', category: 'herbicide', formulation: 'WDG', service_lines: ['lawn'] }];
+  const CELSIUS = { productId: P_CELSIUS, name: 'Celsius WG', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'oz', approvedForReport: true, wateringRule: null, wateringSummary: 'No rule', mowHoldDays: null };
+  const withCelsius = (extra = {}) => context({
+    plannedProducts: { source: 'plan', items: [...PLANNED, CELSIUS] },
+    ...extra,
+  });
+  const open = (ctx) => openSheet({ request: makeRequest({ ctx }), props: { catalog: CELSIUS_CATALOG } });
+
+  test('flagged: the Celsius row shows the line, the other rows do not', async () => {
+    await open(withCelsius({ carpetgrassCelsiusWarning: WARNING }));
+    expect(within(await screen.findByRole('group', { name: 'Celsius WG' })).getByText(WARNING)).toBeTruthy();
+    expect(within(editorFor('Talak 7.9%')).queryByText(WARNING)).toBeNull();
+    expect(within(editorFor('Iron Plus')).queryByText(WARNING)).toBeNull();
+    expect(screen.getAllByText(WARNING)).toHaveLength(1);
+  });
+
+  test('no key in the context (gate off, no carpetgrass, or an older server): no line anywhere', async () => {
+    await open(withCelsius());
+    await screen.findByRole('group', { name: 'Celsius WG' });
+    expect(screen.queryByText(WARNING)).toBeNull();
+  });
+
+  test('flagged, no Celsius on the sheet: no line', async () => {
+    await open(context({ carpetgrassCelsiusWarning: WARNING }));
+    await screen.findByRole('group', { name: 'Talak 7.9%' });
+    expect(screen.queryByText(WARNING)).toBeNull();
+  });
+
+  test('flagged: a Celsius WG added by hand shows the line too, and Complete is not held by it', async () => {
+    await open(context({ carpetgrassCelsiusWarning: WARNING }));
+    await addProductByName('Celsius WG');
+    expect(within(await screen.findByRole('group', { name: 'Celsius WG' })).getByText(WARNING)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /acknowledge|confirm carpetgrass/i })).toBeNull();
   });
 });

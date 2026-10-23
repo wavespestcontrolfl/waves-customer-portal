@@ -3283,3 +3283,41 @@ flag button reads "Flag opportunity". Section labels (Access, Quoted, Money,
 Actions) are 14px / 500 sentence case like an admin card title, and amber
 stays only on a real warning (no card on file). The install hint card takes
 the admin palette. Visual only: same data, same actions.
+
+## 2026-10-22 — Complete Service screens and the web report: owner UI pass
+
+Owner 2026-10-22, reviewing both in Vite and Chrome DevTools. On the tech
+Complete Service screens: the note box's mic sits inside the box on every
+sheet; the header puts the customer's name and the service on their own lines,
+and the pest sheet adds the customer's phone and email as call and email
+links; "Trace where we sprayed" is offered on the visit step as Optional and
+the satellite tracer opens in the page under it, not over the sheet ("trace
+should not be required for any service and should be on the same page"); the
+linear-feet box is optional ("make feet optional"). On the customer web
+report: Ask Waves shows exactly three questions on every report; the pest
+pressure pill reads "1.4/5" as one unit; and the rating card ("How did we do
+today?") is one row on desktop, headline left and button right, because the
+centered stack "renders funny on desktop". This narrows the 2026-08-13
+center-stack ruling for that card to phones; the cross-sell and referral
+cards keep it everywhere.
+
+## 2026-10-22 — Riders retired with appointment grouping
+
+Owner ruling 2026-10-22: appointments are no longer grouped ("we are not
+grouping appts anymore"), and accepting an estimate adds no rider services.
+Riders only worked through visit grouping, so the rider code is removed:
+accept-time seeding, the series-extension ride, the read-only preview, its
+candidate finder, both rider scripts, and `GATE_PEST_RIDES_LAWN_AT_ACCEPT` /
+`GATE_RIDER_PAIRS_MONTHLY_LAWN`. Every series walks its own cadence.
+`scheduled_services.rides_parent_id` stays in the schema, unread. This
+supersedes the 2026-09-28 rider entries above.
+
+## 2026-10-22 — Visit groups: nothing creates a group any more
+
+Same owner ruling ("we are not grouping appts anymore"). The code that formed
+groups is removed: the stamping call on every booking and scheduling path,
+the office Combine action on the dispatch day view, the nightly regroup sweep,
+and the series extension's join into the customer's own stop (an own visit on
+the candidate date is now an ordinary clash). `GATE_VISIT_GROUPS` had no
+other reader, so it is removed too. Visits created before this keep working:
+Separate, closeout, the live fan-out, unit moves and the /visit links.

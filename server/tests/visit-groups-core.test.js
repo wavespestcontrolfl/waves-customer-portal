@@ -1,29 +1,18 @@
 /**
  * Visit groups Phase 1 — pure decision helpers (visit-group-scope.md rev 5).
  * DB paths (locking, seq allocation) are exercised by the migration in the
- * from-empty gates CI job; these tests pin the join/dissolve/split/guard
+ * from-empty gates CI job; these tests pin the dissolve/split/guard
  * contracts the doc rules.
  */
 const {
   _test: {
-    stopBaseKey, windowsOverlap, familiesCompatible, canJoin, canDissolve,
+    stopBaseKey, windowsOverlap, familiesCompatible, canDissolve,
     canSplit, isRowVisitBlocked, toMinutes, windowedMembersConnected,
   },
 } = require('../services/visit-groups');
 
 const CUST = 'c1';
 const PROP = 'p1';
-const baseRow = {
-  customer_id: CUST,
-  property_id: PROP,
-  scheduled_date: '2026-08-30',
-  window_start: '09:00',
-  window_end: '11:00',
-  technician_id: null,
-  groupable: true,
-  group_family: 'recurring_property_service',
-};
-const baseVisit = { ...baseRow, status: 'open' };
 
 describe('stopBaseKey', () => {
   test('normalizes pg Date instances (UTC calendar day), not toString', () => {
@@ -62,37 +51,9 @@ describe('windowsOverlap (rev 5f: window lives on the visit, not the key)', () =
   });
 });
 
-describe('canJoin', () => {
-  test('happy path joins', () => {
-    expect(canJoin(baseRow, baseVisit).ok).toBe(true);
-  });
-  test.each([
-    ['row_terminal', { status: 'completed' }],
-    ['row_terminal', { status: 'cancelled' }],
-    ['row_terminal', { status: 'skipped' }],
-    ['row_terminal', { status: 'no_show' }],
-    ['customer', { customer_id: 'other' }],
-    ['property', { property_id: 'other' }],
-    ['date', { scheduled_date: '2026-08-31' }],
-    ['not_groupable', { groupable: false }],
-    ['family', { group_family: 'lawn_tree_shrub' }],
-    ['technician', { technician_id: 't2' }],
-    ['window', { window_start: '14:00', window_end: '16:00' }],
-    ['office_review', { status: 'pending', source_action: 'ai_call_outbound_review', customer_confirmed: false }],
-  ])('%s mismatch refuses', (reason, patch) => {
-    const visit = { ...baseVisit, technician_id: 't1' };
-    const row = { ...baseRow, technician_id: 't1', ...patch };
-    expect(canJoin(row, visit)).toEqual({ ok: false, reason });
-  });
-  test('null technician on the row joins an assigned visit', () => {
-    expect(canJoin({ ...baseRow, technician_id: null }, { ...baseVisit, technician_id: 't1' }).ok).toBe(true);
-  });
-  test('closed visit refuses', () => {
-    expect(canJoin(baseRow, { ...baseVisit, status: 'closed' })).toEqual({ ok: false, reason: 'visit_not_open' });
-  });
-  test('missing families never join (fail closed)', () => {
+describe('familiesCompatible', () => {
+  test('missing families never match (fail closed)', () => {
     expect(familiesCompatible(null, 'pest_rodent')).toBe(false);
-    expect(canJoin({ ...baseRow, group_family: null }, baseVisit).ok).toBe(false);
   });
 });
 
@@ -264,61 +225,3 @@ describe('effectTypeForKind / dedupeKeyFor (reminder rails, spec §4)', () => {
       .toBe('v1:reminder_72h:2026-08-30');
   });
 });
-
-describe('customerExcludedByAutopay (spec rev-2: autopay customers are not grouped)', () => {
-  // Enrollment signals only — the chargeability predicate is deliberately
-  // never consulted (GH r2/r3/r4 P0+P1s: pauses, expired cards, and
-  // pending ACH all read as "not on autopay" to customerOnAutopay while
-  // still representing enrollment).
-  const knexFor = (customerRow, methodRow) => (table) => ({
-    where: () => ({
-      first: async () => (table === 'customers' ? customerRow
-        : table === 'payment_methods' ? methodRow : undefined),
-    }),
-  });
-
-  afterEach(() => { jest.dontMock('../services/autopay-eligibility'); jest.resetModules(); });
-
-  const freshVG = (isPausedImpl = () => false) => {
-    jest.doMock('../services/autopay-eligibility', () => ({
-      isPaused: isPausedImpl,
-      customerOnAutopay: jest.fn(() => { throw new Error('chargeability predicate must not be consulted'); }),
-    }));
-    jest.resetModules();
-    return require('../services/visit-groups');
-  };
-
-  test('explicit enrollment flag decides first: true excludes, false admits (stale pause ignored)', async () => {
-    const vg = freshVG();
-    expect(await vg.customerExcludedByAutopay('c-auto', knexFor({ id: 'c-auto', autopay_enabled: true }))).toBe(true);
-    expect(await vg.customerExcludedByAutopay('c-off', knexFor({ id: 'c-off', autopay_enabled: false, autopay_paused_until: '2099-01-01' }))).toBe(false);
-  });
-
-  test('a PAUSED legacy enrollment (NULL flag) is excluded — only enrolled accounts pause', async () => {
-    const vg = freshVG((c) => Boolean(c.autopay_paused_until));
-    expect(await vg.customerExcludedByAutopay('c-legacy', knexFor({
-      id: 'c-legacy', autopay_enabled: null, autopay_paused_until: '2099-01-01',
-    }))).toBe(true);
-  });
-
-  test('a legacy enrollment with ANY autopay-enabled method is excluded, chargeable or not (GH r4 P1)', async () => {
-    const vg = freshVG();
-    // An expired card / pending ACH row still carries autopay_enabled=true.
-    expect(await vg.customerExcludedByAutopay('c-legacy', knexFor(
-      { id: 'c-legacy', autopay_enabled: null },
-      { id: 'pm-expired' },
-    ))).toBe(true);
-    // No autopay-enabled method at all ⇒ not enrolled.
-    expect(await vg.customerExcludedByAutopay('c-plain', knexFor(
-      { id: 'c-plain', autopay_enabled: null },
-      undefined,
-    ))).toBe(false);
-  });
-
-  test('fail closed: unreadable customer or a throwing read refuses grouping', async () => {
-    const vg = freshVG();
-    expect(await vg.customerExcludedByAutopay('c-missing', knexFor(undefined))).toBe(true);
-    expect(await vg.customerExcludedByAutopay('c-err', () => { throw new Error('db down'); })).toBe(true);
-  });
-});
-

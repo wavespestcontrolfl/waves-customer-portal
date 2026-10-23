@@ -1731,6 +1731,8 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
   if (resumed) return { enrolled: true, resumed };
   const first = members[0];
   const result = await require('./review-request').enrollPostService({
+    // GATE_REVIEW_ASK_AFTER_REPORT: the combined summary text anchors the ask.
+    reportTextAnchor: await require('./review-request').reportTextAnchorForVisit(packet.visit_id, database),
     customerId: visit.customer_id, serviceRecordId: first.record_id, scheduledServiceId: first.id,
     serviceType: first.service_type, technicianId: visit.technician_id,
     completedAt: visit.completion_submitted_at, triggeredBy: 'auto',

@@ -24,6 +24,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
 const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
+const { assertScoredStartPoints } = require('./start-point-fence');
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
 // backlog item 3): total placements tried per visit, including the first —
@@ -347,6 +348,8 @@ function makeMoveGuard({ service, best, config = {} }) {
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
+    // GATE_TECH_START_POINTS: the start points the move was scored from still stand.
+    await assertScoredStartPoints(trx, [service.technician_id, receiving], config.startPointFor);
     // A person may have placed this visit since pass 1 (even back onto the
     // same slot, which the field CAS cannot see). The row handed in is the
     // pre-transaction snapshot, so the check re-reads the row's own lock and

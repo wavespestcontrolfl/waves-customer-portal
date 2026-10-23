@@ -666,8 +666,7 @@ async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 }
  * Inside a caller transaction the read runs in a SAVEPOINT (knex nested
  * transaction): a failed statement aborts a PostgreSQL transaction, so a
  * swallowed error here would otherwise fail every later scheduling write
- * with 25P02 (pre-push audit #3837 r3 P1; same shape as
- * visit-groups.maybeGroupRow).
+ * with 25P02 (pre-push audit #3837 r3 P1).
  */
 async function soleActivePropertyId(customerId, conn = db) {
   if (!customerId) return null;
@@ -712,9 +711,8 @@ async function soleActivePropertyId(customerId, conn = db) {
 /**
  * Sole-property anchor for a SPAWNED row (recurring follow-ups, series
  * extensions, next-visit rolls): when the row copied from its parent carries
- * no property_id, stamp the customer's sole active property so the visit-group
- * seam (visit-groups.js groupRowOn) can see it — a null-property row never
- * groups automatically. Prod 2026-09-03: 11 of 23 admin-created rows since
+ * no property_id, stamp the customer's sole active property. Prod 2026-09-03:
+ * 11 of 23 admin-created rows since
  * Sep 1 inherited a parent's empty value this way. Rules: never overrides an
  * explicit stamp; only an UNSTAMPED row (no service_address_line1) — an
  * unstamped row resolves to the customer's address by every reader's

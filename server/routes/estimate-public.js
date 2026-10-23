@@ -156,6 +156,10 @@ const {
 const featureGates = require('../config/feature-gates');
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
+const {
+  lawnLimitsBlock, lawnLimitsForEstimate, lawnLimitsToStampAtAccept, stampLawnLimitsAtAccept,
+  lawnLimitsHash, lawnLimitsAttestationStale,
+} = require('../services/estimate-lawn-limits');
 
 function lawnCalendarBlock(services) {
   if (!featureGates.isEnabled('estimateLawnCalendar')) return {};
@@ -632,15 +636,67 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     && await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true })) {
     contradicted = false;
   }
-  const verdict = {
+  const verdict = acceptVerdictFromCandidates(estimate, candidates, { typedPhone, contradicted });
+  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
+  return verdict;
+}
+
+// The matcher's verdict once its candidates and the two flags are known (pure). Shared by
+// matchAcceptCustomerByPhone and the batch read below so the two can never pick differently.
+function acceptVerdictFromCandidates(estimate, candidates, { typedPhone, contradicted }) {
+  return {
     match: typedPhone && contradicted
       ? null
       : candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
     candidateCount: candidates.length,
     ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
-  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
-  return verdict;
+}
+
+// READ-ONLY batch form of matchAcceptCustomerByPhone for LIST views (the admin Pipeline cards): the
+// candidates of every estimate come from one customers query per 500 phones instead of one per row, and
+// each row then gets the SAME verdict (same candidate rule, same typed-phone and contradiction rules,
+// same pickAcceptCustomerMatch) as the per-row matcher gives it.
+// Returns Map(estimate.id -> verdict) for rows it could judge. A row is left OUT (unresolved; callers
+// must treat its answer as unknown) when the per-row matcher would need a lookup this read does not
+// make: a phone-typed mark the row did not carry, or a contradicted lone candidate on a GROUPED
+// estimate (the matcher then asks the group-owner resolver). `database` must be the root handle.
+async function matchAcceptCustomersByPhoneBatch(estimates, database = db) {
+  const verdicts = new Map();
+  const rows = (Array.isArray(estimates) ? estimates : []).filter((e) => e && e.id);
+  const withPhone = rows.filter((e) => e.customer_phone);
+  for (const e of rows) if (!e.customer_phone) verdicts.set(e.id, { match: null, candidateCount: 0 });
+  const CHUNK = 500;
+  for (let i = 0; i < withPhone.length; i += CHUNK) {
+    const chunk = withPhone.slice(i, i + CHUNK);
+    const exact = [...new Set(chunk.map((e) => e.customer_phone))];
+    const digits = [...new Set(chunk.map((e) => phoneLast10(e.customer_phone)).filter(Boolean))];
+    const candidateRows = await database('customers')
+      .where((q) => {
+        q.whereIn('phone', exact);
+        // phoneLast10 yields digits only, so the alternation is safe to bind as one pattern.
+        if (digits.length) q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') ~ ?", [`(${digits.join('|')})$`]);
+      })
+      .whereNull('deleted_at')
+      .select('id', 'phone', 'email', 'address_line1', 'address_line2', 'city', 'zip',
+        'pipeline_stage', 'monthly_rate', 'billing_mode', 'updated_at');
+    for (const e of chunk) {
+      const last10 = phoneLast10(e.customer_phone);
+      const candidates = candidateRows
+        .filter((c) => c.phone === e.customer_phone
+          || (last10 && String(c.phone || '').replace(/\D/g, '').endsWith(last10)))
+        .sort((a, b) => (Number(b.phone === e.customer_phone) - Number(a.phone === e.customer_phone))
+          || (new Date(b.updated_at || 0) - new Date(a.updated_at || 0)));
+      if (e.customer_phone_typed === undefined) continue;
+      const typedPhone = phoneTypedByCustomer({ customer_phone: e.customer_phone, customer_phone_typed: e.customer_phone_typed });
+      const contradicted = typedPhone
+        ? candidates.length > 0
+        : candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], e);
+      if (contradicted && !typedPhone && e.estimate_group_id) continue;
+      verdicts.set(e.id, acceptVerdictFromCandidates(e, candidates, { typedPhone, contradicted }));
+    }
+  }
+  return verdicts;
 }
 
 // The ids of these rows (null and id-less rows skipped).
@@ -7626,6 +7682,11 @@ ${shellTopBar()}
   </section>
   `}
 
+  ${opts.lawnLimits?.heading && Array.isArray(opts.lawnLimits.paragraphs) && opts.lawnLimits.paragraphs.length ? `<div class="card" data-lawn-limits="true">
+    <h2>${escapeHtml(opts.lawnLimits.heading)}</h2>
+    ${opts.lawnLimits.paragraphs.map((p) => `<p class="ai-blurb" data-lawn-limit="${escapeHtml(p.key)}">${escapeHtml(p.text)}</p>`).join('\n    ')}
+  </div>` : ''}
+
   ${quoteRequired || isOneTimeOnly || commercialManualAccept ? '' : `<div class="card" data-mode-only="recurring">
     <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
     <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
@@ -7748,6 +7809,7 @@ ${shellQuestionsBar()}
   const TOKEN = ${JSON.stringify(token)};
   const API = '/api/estimates/' + TOKEN;
   const ESTIMATE_ASK_TOKEN = ${JSON.stringify(estimateAskToken)};
+  const LAWN_LIMITS_HASH = ${JSON.stringify(lawnLimitsHash(opts.lawnLimits || null))};
   const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
   const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
   const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = ${JSON.stringify(requirePaymentSetupBeforeSlots)};
@@ -8378,6 +8440,7 @@ ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is comput
     try {
       const payload = { serviceMode: 'recurring' };
       if (isPrepay) payload.paymentMethodPreference = 'prepay_annual';
+      if (LAWN_LIMITS_HASH) payload.lawnLimitsHash = LAWN_LIMITS_HASH;
       const r = await fetch(API + '/accept', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -8837,6 +8900,7 @@ ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is comput
         payload.selectedFrequency = DEFAULT_RECURRING_FREQUENCY;
       }
       if (setupFeePromiseShown()) payload.setupFeeAfterFirstVisitShown = true;
+      if (LAWN_LIMITS_HASH) payload.lawnLimitsHash = LAWN_LIMITS_HASH;
       const r = await fetch(API + '/accept', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -8860,6 +8924,13 @@ ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is comput
         toast(data.error || 'This account already has an active annual prepay plan. Please call or text us to adjust your coverage.');
         if (btn) btn.disabled = false;
         setBookingChoiceControlsDisabled(false);
+        return;
+      }
+      if (r.status === 409 && data.code === 'LAWN_LIMITS_STALE') {
+        // The lawn limits copy moved since this page loaded: nothing was booked. Reload so the
+        // page shows what the accept will record.
+        toast(data.error || 'This estimate was refreshed. Please reload the page and review it before accepting.');
+        setTimeout(() => location.reload(), 1200);
         return;
       }
       if (r.status === 409 && data.code === 'SETUP_FEE_TERMS_REFRESH') {
@@ -9892,6 +9963,8 @@ async function handleEstimateView(req, res, next) {
 
     let rateReviewTermsRendered = false;
     const legacyGreetingFirstName = await resolveEstimateGreetingFirstName(estimate, contact);
+    // GATE_ESTIMATE_LAWN_LIMITS: the same "What we can and can't fix" copy as /data (null = nothing printed).
+    const legacyLawnLimits = await lawnLimitsForEstimate(estimate);
     const renderLegacyPage = (renderOpts = {}) => renderEstimatePageHtml(req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
@@ -9953,6 +10026,7 @@ async function handleEstimateView(req, res, next) {
       committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
     }), {
       showYourWork,
+      ...(legacyLawnLimits ? { lawnLimits: legacyLawnLimits } : {}),
       prepayBaseRate,
       monthlyBilledEstimate,
       payAfterFirstVisitCopy,
@@ -10758,6 +10832,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(409).json({
         error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
         code: 'TERMS_VERSION_STALE',
+      });
+    }
+
+    // GATE_ESTIMATE_LAWN_LIMITS: the "What we can and can't fix" block as it reads at acceptance
+    // (null = none). Two uses: the render-bound attestation below, and the copy frozen onto the
+    // estimate in the accept transaction (terminal rows print only that stored block). Read before
+    // the transaction opens. The tab echoes the hash /data served with its block; a different
+    // block now (flags edited, copy changed, an old tab with no hash beside a block) is the same
+    // reloadable 409 as a stale terms version, before any write. Gate off: no check.
+    const lawnLimitsAtAccept = await lawnLimitsToStampAtAccept(estimate);
+    if (lawnLimitsAttestationStale(lawnLimitsAtAccept, req.body?.lawnLimitsHash)) {
+      return res.status(409).json({
+        error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
+        code: 'LAWN_LIMITS_STALE',
       });
     }
 
@@ -12788,6 +12876,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ),
         });
       }
+      await stampLawnLimitsAtAccept(trx, estimate.id, lawnLimitsAtAccept);
       if (recordAcceptanceTerms) {
         const [acceptanceRow] = await trx('estimate_acceptances').insert({
           estimate_id: estimate.id,
@@ -15930,6 +16019,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         logger.warn(`[estimate-accept] accept SMS phone resolution failed for customer ${customerId}: ${phoneErr.message}`);
       }
     }
+    // The accept texts go to the ESTIMATE's phone, which may be an
+    // on-location contact's (the tenant who requested it under the
+    // landlord's row). That contact's own text choices (contact login,
+    // GATE_CONTACT_LOGIN) hold them as every other seam does (codex #6363
+    // r10 P2): the master switch for the booking link, the appointment-
+    // confirmation choice for the confirmation. The holder's own number
+    // never declines.
+    const contactDeclinesText = async (column) => !!(acceptSmsPhone && customerId
+      && await require('../services/contact-notification-prefs').contactPhoneDeclinesText(customerId, acceptSmsPhone, column));
     // Gated on the accept SHAPE, not on a phone (pre-push Codex P1): a
     // phoneless one-time accept with an email on the account (or its
     // primary) still owes the appointment confirmation — the SMS legs
@@ -15946,6 +16044,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Booking link rides SMS only; the onboarding email above
             // carries the customer's next steps.
             logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; skipping booking-link SMS`);
+          } else if (bookingUrl && await contactDeclinesText(null)) {
+            logger.info(`[estimate-accept] the contact at the estimate phone declines texts; skipping booking-link SMS for estimate ${estimate.id}`);
           } else if (bookingUrl) {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
@@ -15964,7 +16064,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 purpose: 'estimate_followup',
                 customerId: customerId || undefined,
                 estimateId: estimate.id,
-                identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+                // A slot contact's number is classified as such (codex
+                // #6363 r35 P2) so the sender re-reads their master switch
+                // at the provider handoff, as the confirmation leg does.
+                identityTrustLevel: customerId
+                  ? await require('../services/contact-notification-prefs').contactPhoneSmsTrust(customerId, acceptSmsPhone)
+                  : 'estimate_token_verified',
                 consentBasis: customerId ? undefined : {
                   status: 'transactional_allowed',
                   source: 'estimate_token_acceptance',
@@ -16058,6 +16163,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               smsAttempt: async () => {
                 if (!acceptSmsPhone) {
                   logger.info(`[estimate-accept] no phone for estimate ${estimate.id}; confirmation goes by email`);
+                  return false;
+                }
+                if (await contactDeclinesText('appointment_confirmation')) {
+                  logger.info(`[estimate-accept] the contact at the estimate phone declines confirmation texts for estimate ${estimate.id}`);
                   return false;
                 }
                 const customerBody = await renderCustomerConfirmationBody();
@@ -28567,6 +28676,42 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
     : addMissingBilledPerApplicationFlags(bundle);
 }
 
+// Whether the page serves the frozen send snapshot AS IS (the fast path in
+// buildPricingBundleInner) instead of rebuilding the offer from live pricing.
+// Pure; also read by the admin Pipeline card, which shows an open offer's
+// per-application price only when the page would sell exactly that snapshot.
+function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
+  return Boolean(snapshotBundle)
+    && Array.isArray(snapshotBundle.frequencies)
+    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
+    // Snapshots that violate the lawn program policy (retired Quarterly
+    // cadence, or an itemized lawn price below the program minimum) must NOT
+    // short-circuit — they re-derive through the clamped ladder builders so
+    // outstanding links can't sell the retired/below-floor plan. A snapshot
+    // for an estimate with a recurring LAWN service that carries no
+    // lawn-identifiable element at all can't be policy-checked — those
+    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
+    // not fast-path just because its lawn slice is unitemized).
+    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
+    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
+    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
+    // generic pre-ladder entry) recomputes so the customer picks a real tier
+    // and accept stamps it — see pricingBundleHasLawnTierLadder /
+    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
+    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
+    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
+    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
+    // path will invoice) recompute instead of fast-pathing.
+    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
+    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
+    // Snapshots whose rows never netted the estimate's manual discount
+    // (evidenced by the persisted totals disagreeing with the blob's own
+    // discounted figures) re-derive through the live (discount-aware)
+    // builders — fast-pathing them would bill the undiscounted row a
+    // discounted quote displayed. Already-netted legacy snapshots pass.
+    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate);
+}
+
 async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
@@ -28651,37 +28796,7 @@ async function buildPricingBundleInner(estimate) {
       : payload;
   };
   const snapshotBundle = estData?.sendSnapshot?.pricingBundle;
-  if (
-    snapshotBundle
-    && Array.isArray(snapshotBundle.frequencies)
-    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
-    // Snapshots that violate the lawn program policy (retired Quarterly
-    // cadence, or an itemized lawn price below the program minimum) must NOT
-    // short-circuit — they re-derive through the clamped ladder builders so
-    // outstanding links can't sell the retired/below-floor plan. A snapshot
-    // for an estimate with a recurring LAWN service that carries no
-    // lawn-identifiable element at all can't be policy-checked — those
-    // legacy shapes recompute too (a pre-floor $34/mo lawn snapshot must
-    // not fast-path just because its lawn slice is unitemized).
-    && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
-    && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
-    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
-    // generic pre-ladder entry) recomputes so the customer picks a real tier
-    // and accept stamps it — see pricingBundleHasLawnTierLadder /
-    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
-    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
-    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
-    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
-    // path will invoice) recompute instead of fast-pathing.
-    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
-    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
-    // Snapshots whose rows never netted the estimate's manual discount
-    // (evidenced by the persisted totals disagreeing with the blob's own
-    // discounted figures) re-derive through the live (discount-aware)
-    // builders — fast-pathing them would bill the undiscounted row a
-    // discounted quote displayed. Already-netted legacy snapshots pass.
-    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
-  ) {
+  if (sentSnapshotServesAsIs(snapshotBundle, estimate, estData)) {
     // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
     // attachPublicPricingContract rebuilds services[] split cards there and
     // would drop an earlier stamp. Never a price field, never written back;
@@ -29301,9 +29416,12 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
+    // GATE_ESTIMATE_LAWN_LIMITS: the same "What we can and can't fix" copy the page prints (null = nothing printed).
+    const lawnLimits = await lawnLimitsForEstimate(documentEstimate);
     generateEstimateProposalPDF(documentEstimate, res, {
       ...documentBilling,
       ...(withholdRateReviewTerms ? { withholdRateReviewTerms: true } : {}),
+      ...(lawnLimits ? { lawnLimits } : {}),
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
       acceptance: await acceptanceRecordForEstimate(documentEstimate, { strict: true }),
@@ -30709,6 +30827,12 @@ async function composeEstimateDataPayload(estimate, {
       // an interval itself. A frequency with no catalog plan is omitted and
       // renders nothing; the key is absent when nothing resolves.
       ...lawnCalendarBlock(pricingBundle.services),
+      // "What we can and can't fix" (GATE_ESTIMATE_LAWN_LIMITS): the owner's fixed lawn
+      // paragraph plus one line per flag on the customer's turf profile, from the one
+      // copy module the PDF fallback also prints. Recurring lawn estimates only; the
+      // key is absent otherwise (and with the gate off), so those responses stay
+      // byte-identical. Copy only: no prices.
+      ...(await lawnLimitsBlock(estimate)),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.
@@ -31749,6 +31873,8 @@ module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequir
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
+module.exports.matchAcceptCustomersByPhoneBatch = matchAcceptCustomersByPhoneBatch;
+module.exports.sentSnapshotServesAsIs = sentSnapshotServesAsIs;
 module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
 module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
 module.exports.retireOrDenyDroppedCapture = retireOrDenyDroppedCapture;

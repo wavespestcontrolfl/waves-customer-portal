@@ -140,10 +140,16 @@ payload (`/api/reports/:token/data` and the renders that share
 blog post the technician or the office picked at completion, frozen on the
 record (`structured_notes.blogPost`) with its live URL and re-checked at read
 to be on the marketing site's own host
-(`server/services/service-report/report-blog-post.js`). The web report
-renders it in live mode only, above the footer. Off, or nothing frozen, the
-field is `null` (the switch hides frozen posts too). Auth, headers and routes
-are unchanged.
+(`server/services/service-report/report-blog-post.js`). Owner 2026-10-22: the
+object may also carry `imageUrl`, the post's main image, read when the
+report loads from the content registry row the pick froze (its deployed
+frontmatter `hero_image.src`, else `og_image`), made absolute on the
+marketing site's host and kept only when it is on that host. A pick with no
+registry id, a row with no image, an off-host image or a failed read leaves
+`imageUrl` out; the rest of the object is unchanged. The web report renders
+it in live mode only, right under the status card, with the image and
+without the raw URL. Off, or nothing frozen, the field is `null` (the switch
+hides frozen posts too). Auth, headers and routes are unchanged.
 
 Pest Pressure technician direct score (owner ruling 2026-09-24): on the
 service-report payload (`/api/reports/:token/data` and the renders that share
@@ -2556,6 +2562,24 @@ frozen block is malformed, and once rain has covered the water-in
 completion through the LONG deadline against the larger amount, so rain after
 the short deadline still closes the later phase). No new route, token, privacy or
 rate-limit surface; `reportV2.aftercare` is unchanged by it.
+`GATE_LAWN_WATERING_EVERY_VISIT` (dark, owner 2026-10-22; needs
+`GATE_LAWN_WATERING_RULE`; gate off leaves this payload unchanged, key for key)
+changes only which instruction the same `reportV2.banner` fields carry, for an
+UNFROZEN build (a completion, or a visit that froze nothing); a frozen visit
+replays what it froze in either gate state. (1) A catalog rule with `by_target`
+entries picks the direction per logged target (`service_products.targets`), so
+one product can add a hold and a water-in; no covered target reads the product's
+top-level rule, or the first entry of a target-only rule. (2) A same-day water-in
+the label requires beside a hold that leaves it no deadline shortens each hold
+that carries a `label_minimum` to that minimum ("Skip your turf watering until
+today’s treatment has dried." or a nearer clock time), judged with a 2-hour
+drying allowance; a hold without one stays and the visit is no claim, as before.
+(3) A hold's `then_water_in` adds the long-window sentences ("Today’s treatment
+then needs about ½ inch of water by <date>." / "Rain and your regular watering
+both count.") whatever the window's length. No new key, state or route; the
+no-claim reason the office alert uses never enters the payload. The unfrozen PDF
+cache key adds the gate state and the logged targets (`:wr=1e:`); off, it is the
+same key as before. Rollback: unset the variable (frozen visits keep their text).
 `reportV2.aftercare` is a record of the visit and never changes by the clock
 (owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
 `wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
@@ -3201,14 +3225,17 @@ key to `GET /api/reports/:token/data`; it only removes or never writes color
 wording (the one added key is `initialScores.colorHidden` on the portal route,
 effect 6). A visit assessed before the gate
 has no light read, so its light is `unknown` and its color is never compared.
-Compatible light: full sun with full sun; overcast and open shade with each other;
-mixed sun and shade, low light and unknown are never compatible. A visit's light
+Compatible light: full sun and sun with shadows (`mixed_sun_shade`) with each other
+(owner 2026-10-22, option B: under the lighting prompt the model reads sunlit and
+shadowed turf each against its own light); overcast and open shade with each other;
+sun never with overcast or open shade; low light, mixed light (`mixed_light`) and
+unknown are never compatible. A visit's light
 comes from its usable photos whose shot has positive color weight in
 `shared/lawn-photo-shots.json` (front, back, side, untagged, and the half-weight
 shade and hot-edge shots; detail shots do not count) when the visit was read under
 the shot-list prompt, and from EVERY usable photo when it was read under the legacy
 prompt (one whole-visit color score from all photos); which prompt is decided from
-the run's own stored prompt version, never from today's gate. A mix is mixed light. Any prompt position with no stored photo row (its insert failed) or no
+the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
 Every code path that reads the gate (`lawnLightingLive()` in
@@ -3720,7 +3747,19 @@ or that widens the hold beyond `missing_token`, is a P0),
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
 records one deduped analytics row then 302s to the DB-locked event
-URL; unknown token = untracked redirect, never blocks the reader)
+URL; unknown token = untracked redirect, never blocks the reader.
+With `GATE_NEWSLETTER_CLICK_BOUND=true` the event URL is honoured only
+when the token is a real delivery AND the event is in that send's
+`event_ids` or `alternate_event_ids`; the target is the URL the send
+carried (`newsletter_sends.event_url_snapshot`, written at send time),
+or the live `event_url` for a send made before snapshots existed. An
+unknown token, an event outside the lineup, a send whose snapshot lacks
+the event or its URL, or a membership lookup that fails goes to the homepage
+(`https://www.wavespestcontrol.com/`); a non-uuid token goes home before
+any query. A click-row write that fails AFTER membership was verified
+still sends the reader to the event. The per-IP over-budget path records
+nothing and applies the same rules. Gate off = the behaviour
+above this note, unchanged)
 — rate-limited, read-only for posts/rss,
 double-opt-in for subscribe (the response is unchanged and uniform; `source` is free text,
 and ONLY `source: "out_of_area_waitlist"` also reads the optional body `zip` / `city`
@@ -5374,6 +5413,21 @@ season copy from it and never derives an interval itself. The `cadence`
 interval line and projected `months` the entry carried from #3755 were
 dropped on 2026-09-06 once the page stopped reading them (owner
 2026-09-05: education, not a schedule).
+`/data` carries an optional top-level `lawnLimits` block behind
+`GATE_ESTIMATE_LAWN_LIMITS` (prod dark): `{ heading, paragraphs: [{ key,
+text }] }` on a recurring lawn estimate only. `key` is `always`, one grass
+name (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) or
+`virus_streaks`, from the customer's turf profile flags. Fixed owner copy
+(`services/estimate-lawn-limits.js`), no prices, no customer data. The key is
+ABSENT with the gate off and on any non-lawn estimate. The React page and the
+browser-rendered PDF print it as given; the legacy server page and the pdfkit
+PDF print the same module's text.
+An accepted, declined, expired or otherwise terminal estimate carries only the
+block stored in `estimate_data.lawnLimitsAtAccept` when it was accepted (absent
+if none was stored), never the live profile.
+`/data` also carries `lawnLimitsHash` beside the block; `PUT /:token/accept` takes it back as
+`lawnLimitsHash` and answers 409 `LAWN_LIMITS_STALE` when the live block's hash differs
+(gate on only; no block on both sides matches).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that
@@ -5462,6 +5516,41 @@ send runs only when the number matches an active customer), so a timing
 observer can still distinguish known numbers — do not widen the claim
 beyond the body, and do not add a second observable difference. `/me`, `/properties`, `/select-property`
 require the customer JWT.
+Contact login on the same routes (`GATE_CONTACT_LOGIN`, dark; strict
+`=== 'true'`, read at call time — `contactLoginLive()`): when live, send-code
+and verify-code also serve an ON-LOCATION CONTACT — a number stored in a
+customer's `service_contact*_phone` slot whose holder attestation
+(`service_contacts_consent_at`) covers it (`contactSlotMayLogIn`; the
+`DISABLE_CONTACT_CONSENT_GATE` SMS rollback switch never opens the login) —
+resolved ONLY when no active account-holder row carries the number
+(`resolveLoginIdentity`: the holder first; a contact on several rows lands
+on the primary profile, then the oldest). send-code then sends that contact
+the OTP under the same uniform body; verify-code mints a session whose
+access AND refresh tokens carry `contactKey` (the last-10 phone key, also
+`customer_refresh_tokens.contact_key`) and returns `actor { kind:
+'contact', slot, name, phone, email }` — a holder's response carries `actor
+{ kind: 'holder' }` — with the contact's own name, phone and email in
+`customer`, never the holder's identity, referral code, credits, prepay,
+rate or tier (the `/me` payload is projected the same way, its `address`
+the house the contact's reads are scoped to and `notificationPrefs: null`).
+The App Store reviewer bypass (`REVIEW_LOGIN_PHONE` + `REVIEW_LOGIN_CODE`)
+resolves the demo HOLDER row only — never a contact — and send-code skips
+Twilio only while the review number resolves to it. refresh rotates a
+contact family only while the gate is on, the row is `active` (the
+cancelled read-only allowance does not apply to contacts) and the number
+still occupies a slot; otherwise it answers the same 401
+`INVALID_REFRESH_TOKEN` and REVOKES the family (`contact_removed`), a
+profile switch is refused, and the holder's contact save revokes the
+families of the phones it removed — re-adding a number never revives a
+removed device's session. A contact bearer reaches only
+`CONTACT_SESSION_ROUTES` (`server/middleware/auth.js`: `/auth/me`,
+`/auth/properties`, schedule and visit-history reads, tracking, documents
+reads, activity beacons, GET/PUT `/notifications/contact-preferences`, the
+token-scoped push release); every other authenticated route answers 403
+`ACCOUNT_HOLDER_ONLY` (never a 401 the client would read as a dead session).
+Gate off: a contact number is unknown at send-code (uniform body, no OTP),
+refused at verify-code, and an existing contact bearer or refresh family is
+refused (401) — byte-identical to before.
 Staff authentication (`server/routes/admin-auth.js`, mounted at
 `/api/admin/auth`): `POST /login` sits behind the same `authLimiter` (10 per
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
