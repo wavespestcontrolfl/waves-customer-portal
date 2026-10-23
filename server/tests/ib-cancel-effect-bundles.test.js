@@ -340,7 +340,7 @@ describe('the sweep finishes a stale bundle through the pinned paths', () => {
     expect(mockHandleCancellation.mock.calls[0][1]).toMatchObject({ sendNotification: true, approvedNotice: NOTICE });
     // The claim itself is bound to this cancellation (one statement), and the delivery proof counts every approved recipient.
     expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toEqual({ visitId: SERVICE, restorations: 0, hits: [] });
-    expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, { recipients: 1 });
+    expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, { recipientKeys: ['abc123abc123abc1'] });
     expect(mockStore.bundles[0]).toMatchObject({ status: 'recovered', finish_note: 'sweep', lease_owner: null });
     expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'sent', by: 'sweep' });
   });

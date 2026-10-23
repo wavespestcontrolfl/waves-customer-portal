@@ -354,7 +354,7 @@ async function recoverNotice(bundle, svc) {
     return { done: true, outcome: { state: 'not_sent', note: 'The approved text was not saved with the card, so nothing was sent.' } };
   }
   const AppointmentReminders = require('./appointment-reminders');
-  const status = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, { recipients: bundle.approved_notice.length });
+  const status = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, { recipientKeys: bundle.approved_notice.map((entry) => entry.recipient_key) });
   if (status !== 'ready') return { done: true, outcome: NOTICE_TERMINAL_BY_STATUS[status] || NOTICE_TERMINAL_BY_STATUS.other };
   // The money steps just ran and a restore may have landed since: re-prove the cancel before any customer text. (The
   // send's own stamp is conditional on status 'cancelled', and a restore sheds the approved marker.)

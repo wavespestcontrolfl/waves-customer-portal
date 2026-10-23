@@ -46,6 +46,7 @@ const mockSendCustomerMessage = jest.fn();
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...a) => mockSendCustomerMessage(...a),
   classifyDeliveryCertainty: () => 'certain',
+  normalizeRecipient: (phone) => (phone ? `+1${String(phone).replace(/\D/g, '').slice(-10)}` : null),
 }));
 jest.mock('../services/messaging/push-channel-routing', () => ({ wantsAppFirst: async () => false }));
 jest.mock('../services/messaging/validators/line-type', () => ({ readCachedLineType: async () => null, cacheLineType: async () => {}, NON_SMS_LINE_TYPES: [] }));
@@ -358,8 +359,10 @@ describe('the approved send owns a pending_approved marker', () => {
 // only an untouched 'pending_approved' marker is 'ready'; a 'sent' marker with no accepted audit row means the provider
 // handoff may have begun, so it is 'uncertain' and is never sent again.
 describe('approvedCancellationNoticeStatus', () => {
+  const sha = (value) => require('crypto').createHash('sha256').update(value, 'utf8').digest('hex');
+  const KEY = (phone) => require('crypto').createHash('sha256').update(phone.replace(/\D/g, '').slice(-10), 'utf8').digest('hex').slice(0, 16);
   const statusFor = async (state, auditRows = [], options) => {
-    mockState.reminder = { id: 'rem-1', cancellation_notice_state: state };
+    mockState.reminder = { id: 'rem-1', customer_id: 'cust-1', cancellation_notice_state: state };
     mockState.auditRows = auditRows;
     return AppointmentReminders.approvedCancellationNoticeStatus('svc-1', options);
   };
@@ -372,16 +375,32 @@ describe('approvedCancellationNoticeStatus', () => {
     ['pending', [], 'other'],
     ['pending_notify', [], 'other'],
     [null, [], 'other'],
-  ])('marker %s with audit rows %j is %s', async (state, rows, expected) => {
+  ])('marker %s with audit rows %j is %s (no recipient list: any accepted send)', async (state, rows, expected) => {
     expect(await statusFor(state, rows)).toBe(expected);
   });
 
-  test('delivered needs an accepted audit row for EVERY approved recipient; fewer is partial, never delivered', async () => {
-    expect(await statusFor('sent', [{ to_hash: 'h1' }], { recipients: 2 })).toBe('partial');
-    // Two rows for the same recipient (app + sms legs) are still one recipient.
-    expect(await statusFor('sent', [{ to_hash: 'h1' }, { to_hash: 'h1' }], { recipients: 2 })).toBe('partial');
-    expect(await statusFor('sent', [{ to_hash: 'h1' }, { to_hash: 'h2' }], { recipients: 2 })).toBe('delivered');
-    expect(await statusFor('sent', [], { recipients: 2 })).toBe('uncertain');
+  // Delivery is proven PER APPROVED RECIPIENT, by that recipient's own phone: a count of destinations proves nothing (an
+  // accepted SMS followed by an email fallback to the same person is two destinations and one person).
+  test('delivered needs an accepted audit row for the phone of EVERY approved recipient', async () => {
+    const primary = '+19415550101';
+    const keys = [KEY(primary)];
+    expect(await statusFor('sent', [{ to_hash: sha(primary) }], { recipientKeys: keys })).toBe('delivered');
+  });
+
+  test('an email-fallback destination or another recipient\'s phone is not proof for this recipient: partial, never delivered', async () => {
+    const keys = [KEY('+19415550101')];
+    expect(await statusFor('sent', [{ to_hash: sha('someone@example.test') }], { recipientKeys: keys })).toBe('partial');
+    expect(await statusFor('sent', [{ to_hash: sha('+19415550199') }], { recipientKeys: keys })).toBe('partial');
+  });
+
+  test('two approved recipients with one of them proven, or one that is no longer a contact, is partial', async () => {
+    const keys = [KEY('+19415550101'), KEY('+19415550177')];
+    expect(await statusFor('sent', [{ to_hash: sha('+19415550101') }], { recipientKeys: keys })).toBe('partial');
+    expect(await statusFor('sent', [{ to_hash: sha('+19415550101') }, { to_hash: sha('+19415550177') }], { recipientKeys: keys })).toBe('partial'); // 0177 is not on the customer
+  });
+
+  test('no accepted audit rows at all is uncertain whatever the recipient list', async () => {
+    expect(await statusFor('sent', [], { recipientKeys: [KEY('+19415550101')] })).toBe('uncertain');
   });
 
   test('no reminder row at all', async () => {

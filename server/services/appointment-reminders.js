@@ -2661,35 +2661,53 @@ const acceptedCancellationAuditQuery = (scheduledServiceId) => db('messaging_aud
     );
 const cancellationAuditAccepted = async (scheduledServiceId) => Boolean(await acceptedCancellationAuditQuery(scheduledServiceId).first('id'));
 
-// How many DIFFERENT recipients the provider accepted this cycle's cancellation text for. One accepted recipient is not
-// proof the others were texted (a crash can fall between contacts), so a multi-recipient notice is only 'delivered' when
-// every approved recipient has an accepted audit row.
-async function cancellationAcceptedRecipientCount(scheduledServiceId) {
+// The destinations (sha256 of the normalized address, the audit's to_hash) the provider accepted this cycle's cancellation
+// text for. An email fallback to the same person is a DIFFERENT destination, so a count of these proves nothing about WHO was
+// reached; approvedRecipientsReached matches them to the approved recipients by phone.
+async function cancellationAcceptedDestinations(scheduledServiceId) {
   const rows = await acceptedCancellationAuditQuery(scheduledServiceId).select('to_hash');
-  return new Set((rows || []).map((row) => row.to_hash)).size;
+  return new Set((rows || []).map((row) => row.to_hash));
+}
+
+// True only when EVERY approved recipient (by recipient_key) resolves to a contact on the visit's customer and has an
+// accepted audit row for that contact's own phone. A recipient who is gone from the contacts, one reached only through an
+// email fallback, or unreadable preferences are all unproven (false): the caller then reports partial and sends nothing.
+async function approvedRecipientsReached(record, scheduledServiceId, destinations, recipientKeys) {
+  const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
+  if (!customer) return false;
+  const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
+  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true) return false;
+  const { normalizeRecipient } = require('./messaging/send-customer-message');
+  const contacts = getAppointmentContacts(customer, prefs || {});
+  return recipientKeys.every((key) => {
+    const contact = contacts.find((c) => noticeRecipientKey(c.phone) === key);
+    const to = contact && normalizeRecipient(contact.phone);
+    return Boolean(to) && destinations.has(require('crypto').createHash('sha256').update(String(to)).digest('hex'));
+  });
 }
 
 // Read-only: where the card-approved cancellation text of a visit stands, for the Intelligence Bar cancel recovery sweep
 // (services/ib-cancel-effect-bundles.js). That sweep may call handleCancellation with the approved text ONLY for 'ready'.
 // 'ready' = the cancel transaction's approved marker is still untouched, so no send reached the provider handoff (the
-// pre-dispatch 'sent' stamp comes before the handoff). 'delivered' = marker 'sent' with a provider-accepted audit row for
-// EVERY approved recipient (`recipients`, default 1). 'partial' = accepted for some recipients but not all: the rest may not
-// have been texted, and nothing is sent again. 'uncertain' = marker 'sent' with NO audit evidence: the handoff may have
-// happened, so it is never sent again. 'suppressed' = terminal (the approved send failed or was blocked, or the card chose
-// no text). 'no_reminder' = no reminder row. 'other' = any other marker, which the approved send does not own. Lives with
-// the approved-send helpers (cancel-notice-approved-marker.test.js keeps that marker out of every sweep); it claims and
-// sends nothing.
-async function approvedNoticeStatus(scheduledServiceId, { recipients = 1 } = {}) {
+// pre-dispatch 'sent' stamp comes before the handoff). 'delivered' = marker 'sent' and every approved recipient
+// (`recipientKeys`) has a provider-accepted audit row for their own phone. 'partial' = accepted for some destinations but
+// not provably for every approved recipient: the rest may not have been texted, and nothing is sent again. 'uncertain' =
+// marker 'sent' with NO audit evidence: the handoff may have happened, so it is never sent again. 'suppressed' = terminal
+// (the approved send failed or was blocked, or the card chose no text). 'no_reminder' = no reminder row. 'other' = any
+// other marker, which the approved send does not own. Lives with the approved-send helpers
+// (cancel-notice-approved-marker.test.js keeps that marker out of every sweep); it claims and sends nothing.
+async function approvedNoticeStatus(scheduledServiceId, { recipientKeys = null } = {}) {
   const record = await db('appointment_reminders')
     .where({ scheduled_service_id: scheduledServiceId })
-    .first('id', 'cancellation_notice_state');
+    .first('id', 'customer_id', 'cancellation_notice_state');
   if (!record) return 'no_reminder';
   const state = record.cancellation_notice_state;
   if (state === 'pending_approved') return 'ready';
   if (state === 'sent') {
-    const accepted = await cancellationAcceptedRecipientCount(scheduledServiceId);
-    if (accepted === 0) return 'uncertain';
-    return accepted >= Math.max(1, recipients) ? 'delivered' : 'partial';
+    const destinations = await cancellationAcceptedDestinations(scheduledServiceId);
+    if (destinations.size === 0) return 'uncertain';
+    if (!recipientKeys || !recipientKeys.length) return 'delivered';
+    return (await approvedRecipientsReached(record, scheduledServiceId, destinations, recipientKeys)) ? 'delivered' : 'partial';
   }
   if (state === 'suppressed') return 'suppressed';
   return 'other';
