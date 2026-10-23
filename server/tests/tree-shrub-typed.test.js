@@ -522,6 +522,26 @@ describe('ported closeout compliance (typed path)', () => {
     expect(summerSafe.blocks.map((b) => b.code)).not.toContain('tree_shrub_np_blackout');
   });
 
+  test('the N/P blackout zone comes from the visit stamped address, the customer city only when unstamped', () => {
+    const run = (service) => validateTreeShrubTypedCompliance({
+      service,
+      serviceDate: '2026-07-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Palm fertilizer' },
+      products: [product('p1', 'Palm Fertilizer 8-2-12')],
+      productRows: [row('p1', 'Palm Fertilizer 8-2-12')],
+      completionPhotos: photos,
+    }).blocks.map((b) => b.code);
+    // A Manatee customer whose visit is at a North Port property: no blackout there.
+    expect(run({ city: 'Bradenton', service_address_line1: '1 Test St', service_address_city: 'North Port' })).not.toContain('tree_shrub_np_blackout');
+    // A North Port customer whose visit is at a Bradenton property: blackout.
+    expect(run({ city: 'North Port', service_address_line1: '1 Test St', service_address_city: 'Bradenton' })).toContain('tree_shrub_np_blackout');
+    // A stamp with no city of its own keeps the customer city.
+    expect(run({ city: 'Bradenton', service_address_line1: '1 Test St' })).toContain('tree_shrub_np_blackout');
+    // No stamp at all: the customer city, as before.
+    expect(run({ city: 'Bradenton' })).toContain('tree_shrub_np_blackout');
+    expect(run({ city: 'North Port' })).not.toContain('tree_shrub_np_blackout');
+  });
+
   test('"No insecticide applied" contradicts a recorded insect product (Codex P1)', () => {
     const contradiction = validateTreeShrubTypedCompliance({
       service: manateeService,

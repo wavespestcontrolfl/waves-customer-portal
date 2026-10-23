@@ -160,16 +160,23 @@ function normalizeOrdinanceZone(value) {
   return '';
 }
 
+// The N/P fertilizer blackout belongs to the property treated, not to the customer's mailing city. A visit row stamps
+// its own service address (service_address_city / service_address_line1), field by field like resolveVisitAddress:
+// the stamped city wins, then the customer city the row carries. A row with no stamp reads as before.
 function inferTreeShrubOrdinanceZone(service = {}) {
-  const location = combinedText(
-    service.city,
-    service.municipality,
-    service.county,
-    service.address,
-    service.address_line1,
-    service.property_address,
-    service.service_address,
-  );
+  const stampedCity = text(service.service_address_city);
+  const stampedLine1 = text(service.service_address_line1);
+  const location = stampedCity || stampedLine1
+    ? combinedText(stampedCity || service.city, stampedLine1)
+    : combinedText(
+      service.city,
+      service.municipality,
+      service.county,
+      service.address,
+      service.address_line1,
+      service.property_address,
+      service.service_address,
+    );
   if (/\bnorth\s*port\b/.test(location)) return 'north_port';
   if (/\b(parrish|manatee|bradenton|palmetto|ellenton|lakewood\s*ranch)\b/.test(location)) {
     return 'manatee_parrish';

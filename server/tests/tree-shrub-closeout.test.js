@@ -50,6 +50,14 @@ describe('Tree/Shrub closeout validation', () => {
     expect(inferTreeShrubOrdinanceZone({ city: 'Unknown' })).toBe('other_unknown');
   });
 
+  test('the ordinance zone follows the visit stamped address, then the customer city', () => {
+    expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', service_address_city: 'North Port' })).toBe('north_port');
+    expect(inferTreeShrubOrdinanceZone({ city: 'North Port', service_address_city: 'Venice', service_address_line1: '1 Test St' })).toBe('sarasota_venice');
+    expect(inferTreeShrubOrdinanceZone({ city: 'Parrish', service_address_line1: '1 Test St' })).toBe('manatee_parrish');
+    expect(inferTreeShrubOrdinanceZone({ city: 'Parrish', service_address_city: '  ', service_address_line1: null })).toBe('manatee_parrish');
+    expect(inferTreeShrubOrdinanceZone({ city: 'Venice', county: 'Sarasota', service_address_city: 'Unknown Town' })).toBe('other_unknown');
+  });
+
   test('blocks N/P fertilizer during Sarasota and Manatee landscape blackout', () => {
     const result = validate({
       products: [{ productId: 'fert-1', name: '8-2-12 Palm Fertilizer', totalAmount: 6, amountUnit: 'lb' }],

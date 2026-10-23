@@ -154,15 +154,41 @@ function nameRelation(product, name, normalizedLine, spelledName) {
   return { nameMatch, aliasMatch };
 }
 
+// Words that say what KIND of product a name is, or who sells it, not WHICH product it is. A fuzzy match that rests
+// only on these is not a match: "Reliant Systemic Fungicide" is not "Headway Fungicide" because both say
+// "fungicide", and "Manganese sulfate (Southern Ag)" is not "SpeedZone Southern" because both say "southern".
+const GENERIC_NAME_WORDS = new Set([
+  'fungicide', 'insecticide', 'herbicide', 'miticide', 'nematicide', 'fertilizer', 'bait', 'systemic', 'liquid',
+  'granular', 'granules', 'soluble', 'concentrate', 'professional', 'southern', 'ag',
+]);
+// The seller of the LESCO line: part of the name, so "lesco 24" still identifies a product by its analysis, but not a
+// word that identifies it alone or in a pair.
+const SELLER_NAME_WORDS = new Set(['lesco']);
+
+function hasDistinctiveWord(text) {
+  return String(text || '').split(' ').some((token) => token && !GENERIC_NAME_WORDS.has(token));
+}
+
+// The words that identify a product: its name without numbers (NPK, rates), kind words and the seller. A line that
+// spells every one of at least two of them names the product even when it orders or brackets them differently
+// ("Manganese sulfate (Southern Ag)" for "Southern Ag Manganese Sulfate").
+function distinctiveWords(name) {
+  return name.split(' ').filter((token) => token.length > 2 && /[a-z]/.test(token) && !GENERIC_NAME_WORDS.has(token) && !SELLER_NAME_WORDS.has(token));
+}
+
 // The legacy fuzzy match: any alias of the product inside the line (direct), the line inside an alias (reverse), or
-// the product's first two words inside the line.
+// the product's first two words inside the line. Each needs a distinctive word, and so does the fourth route:
+// every distinctive word of the product inside the line, in any order.
 function fuzzyNameMatch(product, name, normalizedLine) {
   const aliases = productAliases(product);
-  const direct = aliases.some((alias) => normalizedLine.includes(alias));
-  const reverse = aliases.some((alias) => alias.includes(normalizedLine));
+  const direct = aliases.some((alias) => normalizedLine.includes(alias) && hasDistinctiveWord(alias));
+  const reverse = hasDistinctiveWord(normalizedLine) && aliases.some((alias) => alias.includes(normalizedLine));
   const firstTwo = name.split(' ').slice(0, 2).join(' ');
-  const tokenMatch = firstTwo.length > 5 && normalizedLine.includes(firstTwo);
-  return { direct, tokenMatch, matched: direct || reverse || tokenMatch };
+  const tokenMatch = firstTwo.length > 5 && normalizedLine.includes(firstTwo) && hasDistinctiveWord(firstTwo);
+  const lineWords = new Set(normalizedLine.split(' '));
+  const words = distinctiveWords(name);
+  const allWords = words.length >= 2 && words.every((word) => lineWords.has(word));
+  return { direct: direct || allWords, tokenMatch, matched: direct || reverse || tokenMatch || allWords };
 }
 
 // Ranking: a longer name, a direct alias hit, a priced product and a matching NPK analysis rank higher; a product
