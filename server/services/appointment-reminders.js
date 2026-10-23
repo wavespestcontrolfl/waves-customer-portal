@@ -2533,7 +2533,7 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
     // (codex r19): a shared series token is the series/sweep's — a
     // single-visit suppress must not swallow the whole group's notice.
     noticeToken = require('./job-status').nextClaimTs();
-    claimed = await db('appointment_reminders')
+    const suppress = (conn) => conn('appointment_reminders')
       .where({ id: record.id })
       // Still-cancelled guard (codex r25): a restoration after the
       // guarded close must not be stamped suppressed.
@@ -2556,6 +2556,16 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
           });
       })
       .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'suppressed', updated_at: noticeToken });
+    // The Intelligence Bar request's no-text cancel runs under the bundle fence too: the proof (this request still owns its bundle,
+    // the visit is still the approved cancel) and the reminder close + suppression share ONE transaction, so a delayed request
+    // can never suppress the marker of a newer cancellation (restore, then cancel again). A refusal rethrows (nothing written).
+    claimed = options.cancelGeneration
+      ? await db.transaction(async (trx) => {
+        await require('./cancel-generation-fence').assertCancelGeneration(trx, options.cancelGeneration);
+        await trx('appointment_reminders').where({ id: record.id }).update({ cancelled: true, updated_at: new Date() });
+        return suppress(trx);
+      })
+      : await suppress(db);
   } else if (options.cancelGeneration) {
     // The recovery sweep's approved text: claimed under the visit's cancel generation (see the helper).
     return claimApprovedNoticeForGeneration(record, options.cancelGeneration);

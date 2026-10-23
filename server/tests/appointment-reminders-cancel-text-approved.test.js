@@ -611,6 +611,40 @@ describe('handleCancellation with cancelGeneration (the cancel recovery sweep)',
     expect(fence.windowHeld).toBeUndefined();
   });
 
+  // The Intelligence Bar request's no-text cancel is a marker write too (terminal suppression): it runs under the same fence.
+  test('a no-text cancel under the fence proves bundle + generation, closes the reminder and suppresses in ONE transaction', async () => {
+    const dbMock = require('../models/db');
+    const order = [];
+    const original = dbMock.transaction.getMockImplementation();
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    dbMock.transaction.mockImplementationOnce(async (fn) => { order.push('begin'); const out = await fn(dbMock); order.push('end'); return out; });
+    mockFence.mockImplementationOnce(async (_trx, f) => { order.push(['proof', f === fence]); });
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: false, cancelGeneration: fence, outcome: {} });
+    dbMock.transaction.mockImplementation(original);
+    expect(order).toEqual(['begin', ['proof', true], 'end']);
+    const writes = mockState.updates;
+    expect(writes.findIndex((u) => u.cancelled === true)).toBeGreaterThanOrEqual(0);
+    expect(writes.findIndex((u) => u.cancelled === true)).toBeLessThan(writes.findIndex((u) => u.cancellation_notice_state === 'suppressed'));
+  });
+
+  test.each(['lease_lost', 'visit_restored_since'])('a delayed no-text cancel refused by the fence (%s) closes and suppresses nothing', async (reason) => {
+    const fence = { visitId: 'svc-1', restorations: 2, bundleId: 'b-1', leaseToken: 'tok', hits: [] };
+    mockFence.mockRejectedValueOnce(Object.assign(new Error(`cancellation fence: ${reason}`), { code: 'CANCEL_FENCE', fenceReason: reason }));
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: false, cancelGeneration: fence, outcome: {} }).catch(() => {});
+    expect(mockState.updates.some((u) => u.cancelled === true || u.cancellation_notice_state === 'suppressed')).toBe(false);
+  });
+
+  test('without a fence the no-text suppression is the single statement it always was', async () => {
+    const dbMock = require('../models/db');
+    dbMock.transaction.mockClear();
+    mockState.updates.length = 0;
+    await AppointmentReminders.handleCancellation('svc-1', { sendNotification: false, outcome: {} });
+    expect(dbMock.transaction).not.toHaveBeenCalled();
+    expect(mockState.updates.some((u) => u.cancellation_notice_state === 'suppressed')).toBe(true);
+  });
+
   test('a window hold on the first recipient followed by a blocked second recipient still parks (nobody reached)', async () => {
     mockState.customer = {
       ...mockState.customer, service_contact_name: 'Sam', service_contact_phone: '+19415550202', service_contacts_consent_at: '2026-07-23T00:00:00Z',

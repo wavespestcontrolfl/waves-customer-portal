@@ -2587,7 +2587,8 @@ async function runCancelPostCommitEffects({ req, svc, notifyCustomer, notes, can
       ...(outcome ? { outcome } : {}),
       // Set only by cancelServiceFromBar: the text the Intelligence Bar card approved, per recipient.
       ...(req.ibApprovedCancelNotice ? { approvedNotice: req.ibApprovedCancelNotice } : {}),
-      ...(fence && req.ibApprovedCancelNotice ? { cancelGeneration: fence } : {}),
+      // The approved text AND the no-text choice both run under the fence (the no-text suppression is a marker write too).
+      ...(fence && (req.ibApprovedCancelNotice || notifyCustomer === false) ? { cancelGeneration: fence } : {}),
     });
   } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
   // The text outcome is recorded FIRST, under the request's ownership protection (it never overwrites a sweep's): when a restore

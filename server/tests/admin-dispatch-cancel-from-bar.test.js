@@ -366,10 +366,11 @@ describe('the recovery bundle rides the cancel transaction', () => {
     expect(opts.approvedNotice).toEqual(approvedNotice);
     // The follow-through shares the fence object (one set of hits for the whole request).
     expect(mockRunFollowThrough.mock.calls[0][0].cancelFence).toBe(opts.cancelGeneration);
-    // A card that chose no text sends nothing and passes no generation to the text step.
+    // A card that chose no text sends nothing.
     mockHandleCancellation.mockClear();
     await run({ notifyCustomer: false, approvedNotice: null });
-    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toBeUndefined();
+    // ...but the no-text suppression is fenced too: it is a marker write a delayed request must not land on a newer cancel.
+    expect(mockHandleCancellation.mock.calls[0][1].cancelGeneration).toMatchObject({ bundleId: 'x', leaseToken: 'request' });
   });
 
   test.each([
