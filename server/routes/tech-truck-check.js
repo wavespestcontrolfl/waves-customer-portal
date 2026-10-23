@@ -33,7 +33,7 @@ router.get('/', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   if (!truckKit.truckKitEnabled()) return res.status(404).json({ enabled: false });
   try {
-    const result = await truckKit.recordTruckCheck({ technicianId: req.technicianId, results: req.body?.results });
+    const result = await truckKit.recordTruckCheck({ technicianId: req.technicianId, results: req.body?.results, clientKey: req.body?.clientKey ?? null });
     res.status(201).json(result);
   } catch (err) {
     const status = ERROR_STATUS[err.code];

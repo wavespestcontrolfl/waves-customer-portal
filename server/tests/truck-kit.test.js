@@ -221,6 +221,16 @@ describe('recordTruckCheck', () => {
     expect(db.__state.equipment_checks).toHaveLength(0);
   });
 
+  test('a retry with the same client key replays the saved check: one row, one bell', async () => {
+    const first = await truckKit.recordTruckCheck({ technicianId: TECH, results: results('missing', 'present'), clientKey: 'page-key-0001', now: NOW });
+    const again = await truckKit.recordTruckCheck({ technicianId: TECH, results: results('missing', 'present'), clientKey: 'page-key-0001', now: NOW });
+    expect(again).toEqual({ check: first.check, replayed: true });
+    expect(db.__state.equipment_checks).toHaveLength(1);
+    expect(db.__state.equipment_checks[0].client_key).toBe('page-key-0001');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: results('present', 'present'), clientKey: 'bad key!' })).rejects.toMatchObject({ code: 'invalid_results' });
+  });
+
   test('a truck handed to someone else while the check was open writes nothing', async () => {
     // The lock is where the office's handover lands: once taken, the truck is no longer this technician's.
     db.raw.mockImplementationOnce(async () => { db.__state.equipment.find((e) => e.id === TRUCK).assigned_to = 'someone-else'; return { rows: [] }; });
@@ -400,6 +410,10 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Termite Bond (1-Year Term)', { serviceKey: 'termite_bond_1yr' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Termite Warranty Renewal', { serviceKey: 'termite_renewal' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Waves Pest Control Appointment', { serviceKey: 'general_appointment' })).toEqual([]);
+    // The WaveGuard onboarding visit shares that lane but treats: it keeps its tools.
+    expect(truckKit.serviceLinesFor('WaveGuard Initial Setup', { serviceKey: 'waveguard_initial_setup', serviceCategory: 'pest_control' })).toEqual(['pest']);
+    // Bed bug work has no keyed kit represented: no hold.
+    expect(truckKit.serviceLinesFor('Bed Bug Treatment', { serviceKey: 'bed_bug_treatment' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Palm Injection Service', { serviceKey: 'palm_injection' })).toEqual([]);
     expect(truckKit.serviceLinesFor('Semiannual Palm Injection Service')).toEqual([]);
     // An unknown legacy key is NOT a lane: it still reads by name.

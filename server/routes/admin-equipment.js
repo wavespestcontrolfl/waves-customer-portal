@@ -279,6 +279,13 @@ async function applyAssetUpdate(trx, id, updates) {
 // Why the write is refused under the locks, or null.
 async function writeRefusal(trx, id, updates, before) {
   const truckKit = require('../services/truck-kit');
+  // A truck with tools still riding on it cannot stop being a vehicle (the
+  // riders would point at a non-vehicle): checked under the vehicle's own
+  // lock, so a rider assigned meanwhile is seen.
+  if (updates.category !== undefined && updates.category !== 'vehicle' && before.category === 'vehicle') {
+    const rider = await trx('equipment').where({ assigned_vehicle_id: id }).first('id');
+    if (rider) return 'riders';
+  }
   // The target truck is re-validated under its lock: a writer that retired
   // or recategorized it while this save waited loses the race.
   if (updates.assigned_vehicle_id) {
@@ -328,12 +335,6 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     const custody = await custodyFields(req.body, { selfId: req.params.id });
     if (custody.error) return res.status(400).json({ error: custody.error });
     Object.assign(updates, custody.values);
-    // A truck with tools still riding on it cannot stop being a vehicle:
-    // the riders would point at a non-vehicle and fail every later save.
-    if (updates.category !== undefined && updates.category !== 'vehicle') {
-      const rider = await db('equipment').where({ assigned_vehicle_id: req.params.id }).first('id');
-      if (rider) return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
-    }
 
     // A tool that leaves a truck (moved or unassigned) takes its open tool
     // alerts with it, so the old truck's bell must be re-judged: under both
@@ -341,6 +342,7 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     const record = await db.transaction((trx) => applyAssetUpdate(trx, req.params.id, updates));
     if (record === 'moved') return res.status(409).json({ error: 'Another save changed this item (its truck, category or status). Reload and try again.' });
     if (record === 'vehicle-cargo') return res.status(409).json({ error: 'This item is now a vehicle; a vehicle cannot ride on a truck. Reload and try again.' });
+    if (record === 'riders') return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
     if (record === 'target-gone') return res.status(409).json({ error: 'That truck is no longer a live vehicle. Reload and pick another.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
     if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });

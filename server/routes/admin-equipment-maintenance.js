@@ -773,8 +773,15 @@ router.put('/alerts/:id', async (req, res, next) => {
     const record = await db.transaction(async (trx) => {
       let item = null;
       if (toolAlert) {
+        // Same lock order as an asset save: the item row first, then its
+        // truck, then the assignment re-read under both.
+        await truckKit.lockTruck(trx, existing.equipment_id);
         item = await trx('equipment').where('id', existing.equipment_id).first('assigned_vehicle_id');
-        if (item?.assigned_vehicle_id) await truckKit.lockTruck(trx, item.assigned_vehicle_id);
+        if (item?.assigned_vehicle_id) {
+          await truckKit.lockTruck(trx, item.assigned_vehicle_id);
+          const again = await trx('equipment').where('id', existing.equipment_id).first('assigned_vehicle_id');
+          if ((again?.assigned_vehicle_id || null) !== (item.assigned_vehicle_id || null)) return 'moved';
+        }
       }
       // A stale office button never re-closes a tool alert a truck check
       // already closed (it would mark a found tool lost): resolve only an
@@ -802,6 +809,7 @@ router.put('/alerts/:id', async (req, res, next) => {
     });
 
     if (record === 'closed') return res.status(409).json({ error: 'That alert is already closed (the truck check found the tool, or the office resolved it). Reload the list.' });
+    if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload the list.' });
     if (!record) return res.status(404).json({ error: 'Alert not found' });
     res.json({ alert: record });
   } catch (err) {

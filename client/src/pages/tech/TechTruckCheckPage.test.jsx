@@ -58,7 +58,9 @@ describe('TechTruckCheckPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save check (1 issue)' }));
 
     await waitFor(() => expect(posts).toHaveLength(1));
-    expect(posts[0]).toEqual({ results: [
+    // One idempotency key per loaded list rides with the results.
+    expect(posts[0].clientKey).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
+    expect({ results: posts[0].results }).toEqual({ results: [
       { equipmentId: 'e1', state: 'damaged', note: 'Cracked screen' },
       { equipmentId: 'e2', state: 'present', note: '' },
     ] });

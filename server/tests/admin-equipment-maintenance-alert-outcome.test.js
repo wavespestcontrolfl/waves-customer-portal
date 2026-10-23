@@ -119,7 +119,8 @@ test('Lost resolves the alert, marks the item lost and closes the truck bell', a
   expect(db.__state.equipment[TOOL].status).toBe('lost');
   // All three writes ride one transaction, under the truck's lock, and the bell close runs on it.
   expect(db.transaction).toHaveBeenCalledTimes(1);
-  expect(truckKit.lockTruck).toHaveBeenCalledWith(db, TRUCK);
+  // Same order as an asset save: the item first, then its truck.
+  expect(truckKit.lockTruck.mock.calls.map(([, id]) => id)).toEqual([TOOL, TRUCK]);
   expect(truckKit.closeTruckBellIfClear).toHaveBeenCalledWith(TRUCK, expect.any(Date), db);
   const lockAt = truckKit.lockTruck.mock.invocationCallOrder[0];
   const updateAt = db.mock.invocationCallOrder.find((n) => n > lockAt);

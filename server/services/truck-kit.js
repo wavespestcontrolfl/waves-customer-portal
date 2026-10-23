@@ -82,7 +82,10 @@ const lockTechnician = (conn, technicianId) => conn.raw('SELECT pg_advisory_xact
 // the property and recommend services), a consultation by another name.
 // pest_inspection is the same: identify conditions and recommend a plan, no
 // treatment. The misting design visit uses the repository's shared predicate.
-const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link', 'consultation', 'new_customer_inspection', 'pest_inspection']);
+// general_appointment is the catalog's "service not assigned yet" placeholder
+// (the one appointment-lane row with no work; waveguard_initial_setup shares
+// that lane but is a treatment visit, rain-fit.js says the same).
+const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link', 'consultation', 'new_customer_inspection', 'pest_inspection', 'general_appointment']);
 const CONSULTATION_NAME = /\b(assessment|consultation|walk-?through|new customer property inspection|pest inspection service)\b/i;
 // A known diagnostic identity (the lawn assessment is the lawn_inspection
 // row, renamed) needs its instruments whatever its name says.
@@ -102,10 +105,11 @@ const CATEGORY_LINE = { lawn_care: 'lawn', pest_control: 'pest', tree_shrub: 'tr
 // work with tools (billing riders, the appointment placeholder, trunk
 // injection, compliance projects, sanitation), and the protocol matcher
 // resolves the program and the visit kind (bait monitoring, foam drill).
-const NO_TOOL_LANES = new Set(['billing_rider', 'appointment_lane', 'injection_lane', 'compliance_project_lane', 'sanitation_lane']);
+const NO_TOOL_LANES = new Set(['billing_rider', 'injection_lane', 'compliance_project_lane', 'sanitation_lane']);
 const PROGRAM_LINE = { lawn: 'lawn', pest: 'pest', cockroach: 'pest', bed_bug: 'pest', mosquito: 'mosquito', rodent: 'rodent', termite: 'termite', tree_shrub: 'tree_shrub' };
-// A program with no keyed kit (the Arborjet injection gear is not keyed).
-const PROGRAM_NO_KIT = new Set(['palm_injection']);
+// Programs with no keyed kit: the Arborjet injection gear is not keyed, and
+// bed bug work (chemical, heat or both) has no kit of its own represented.
+const PROGRAM_NO_KIT = new Set(['palm_injection', 'bed_bug']);
 const REASON_PROMOTES = { bait_monitoring: ['bait_station_key'], foam_drill: ['foam_drill_kit'] };
 const laneOf = (serviceType, serviceKey) => resolveTraceEligibility({ serviceKey: serviceKey || null, displayName: serviceType || '' }).reason;
 const matchOf = (serviceType, serviceKey) => matchServiceProtocol(PROTOCOLS, serviceType, { serviceKey: serviceKey || null });
@@ -617,12 +621,21 @@ async function closeTruckBellIfClear(vehicleId, now = new Date(), conn = db) {
 // check must never read as done while the office was not told. One
 // transaction, serialized per truck by an advisory lock, so two devices (or a
 // retry after a timeout) can never open the same item's alert twice.
-async function recordTruckCheck({ technicianId, results, now: nowOverride = null }) {
+const CLIENT_KEY_RE = /^[A-Za-z0-9_-]{8,64}$/;
+async function recordTruckCheck({ technicianId, results, clientKey = null, now: nowOverride = null }) {
   const wanted = normalizeResults(results);
+  const key = clientKey == null || clientKey === '' ? null : String(clientKey);
+  if (key !== null && !CLIENT_KEY_RE.test(key)) throw new TruckCheckError('invalid_results', 'clientKey must be 8 to 64 url-safe characters');
   return db.transaction(async (trx) => {
     const found = await truckForTechnician(technicianId, trx);
     if (!found) throw new TruckCheckError('no_truck', 'No truck is assigned to you');
     await lockTruck(trx, found.id);
+    // Idempotent: a retry after a lost response (same page key) gets the
+    // check that already committed, writes nothing and rings nothing.
+    if (key) {
+      const done = await trx('equipment_checks').where({ vehicle_id: found.id, client_key: key }).first('id', 'checked_at', 'item_count', 'missing_count', 'damaged_count');
+      if (done) return { check: { id: done.id, checked_at: done.checked_at, item_count: done.item_count, missing_count: done.missing_count, damaged_count: done.damaged_count }, replayed: true };
+    }
     // The check's time is taken AFTER the lock, so checks serialized on the
     // truck carry timestamps in commit order (the latest check is the latest).
     const now = nowOverride || new Date();
@@ -651,6 +664,7 @@ async function recordTruckCheck({ technicianId, results, now: nowOverride = null
       item_count: lines.length,
       missing_count: missing.length,
       damaged_count: damaged.length,
+      client_key: key,
     }).returning('*');
 
     for (const line of [...missing, ...damaged]) await openToolAlert({ line, technician, now, conn: trx });

@@ -56,6 +56,12 @@ test('GET reads the status of the signed-in technician and never caches it', asy
   expect(res.headers['Cache-Control']).toBe('private, no-store');
 });
 
+test('POST passes the page\'s idempotency key through', async () => {
+  truckKit.truckKitEnabled.mockReturnValue(true);
+  await run('post', { body: { results: [], clientKey: 'page-key-0001' } });
+  expect(truckKit.recordTruckCheck).toHaveBeenCalledWith(expect.objectContaining({ clientKey: 'page-key-0001' }));
+});
+
 test('POST records a check for the signed-in technician and answers 201', async () => {
   truckKit.truckKitEnabled.mockReturnValue(true);
   truckKit.recordTruckCheck.mockResolvedValue({ check: { id: 'k1' } });
@@ -63,7 +69,7 @@ test('POST records a check for the signed-in technician and answers 201', async 
   const res = await run('post', { body: { results } });
   expect(res.statusCode).toBe(201);
   expect(res.body).toEqual({ check: { id: 'k1' } });
-  expect(truckKit.recordTruckCheck).toHaveBeenCalledWith({ technicianId: 'tech-1', results });
+  expect(truckKit.recordTruckCheck).toHaveBeenCalledWith({ technicianId: 'tech-1', results, clientKey: null });
 });
 
 test('POST maps the service errors: no truck 404, bad results 400, changed kit 409 with the kit', async () => {

@@ -41,6 +41,9 @@ export default function TechTruckCheckPage() {
   const [saved, setSaved] = useState(null);
 
   const kit = data?.kit || [];
+  // One idempotency key per loaded list: a retry after a lost answer sends the
+  // same key and the server returns the check it already saved.
+  const clientKey = useMemo(() => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`), [data]);
   const groups = useMemo(() => groupKit(kit), [kit]);
   const stateOf = (item) => marks[item.id]?.state || item.open_issue || 'present';
   const noteOf = (item) => marks[item.id]?.note || '';
@@ -58,7 +61,7 @@ export default function TechTruckCheckPage() {
         headers: { Authorization: `Bearer ${getAdminAuthToken()}`, 'Content-Type': 'application/json' },
         // A note typed for a missing or damaged item and then switched back
         // to Here never rides along on a present result.
-        body: JSON.stringify({ results: kit.map((item) => ({ equipmentId: item.id, state: stateOf(item), note: stateOf(item) === 'present' ? '' : noteOf(item) })) }),
+        body: JSON.stringify({ clientKey, results: kit.map((item) => ({ equipmentId: item.id, state: stateOf(item), note: stateOf(item) === 'present' ? '' : noteOf(item) })) }),
       });
       const body = await res.json().catch(() => ({}));
       if (res.status === 409 && body.code === 'kit_changed') {
