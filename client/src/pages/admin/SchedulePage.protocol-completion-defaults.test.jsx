@@ -160,6 +160,8 @@ it('the 13-0-13 line reads the rate from total over treated area when no rate is
   expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '9', amountUnit: 'lb', areaValue: 1200 }, 'Tree & Shrub Care')).toBeNull();
   expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '192', amountUnit: 'oz', areaValue: 1200 }, 'Tree & Shrub Care')).toMatch(/rate 10 lb/);
   expect(treeShrubHighRateAdvisory({ ...base, totalAmount: '12', amountUnit: 'lb', areaValue: '' }, 'Tree & Shrub Care')).toBeNull();
+  // An overridden total above an entered at-cap rate still warns: the higher reading wins.
+  expect(treeShrubHighRateAdvisory({ ...base, rate: '7.5', totalAmount: '12', amountUnit: 'lb', areaValue: 1200 }, 'Tree & Shrub Care')).toMatch(/rate 10 lb/);
 });
 
 it('seeds Alpine WSG + Gentrol IGR + Advion Cockroach Gel Bait on a completed, typed cockroach visit', async () => {

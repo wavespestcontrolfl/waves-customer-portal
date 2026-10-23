@@ -10267,13 +10267,17 @@ const LB_PER_UNIT = { lb: 1, lbs: 1, oz: 1 / 16, g: 1 / 453.592, kg: 2.20462 };
 export function bedFeedRatePer1000(product) {
   const rate = Number(product?.rate);
   const rateUnit = String(product?.rateUnit || "lb").toLowerCase().replace(/\/.*$/, "");
-  if (product?.rate !== "" && product?.rate != null && Number.isFinite(rate) && rate > 0 && LB_PER_UNIT[rateUnit]) return rate * LB_PER_UNIT[rateUnit];
+  const fromRate = product?.rate !== "" && product?.rate != null && Number.isFinite(rate) && rate > 0 && LB_PER_UNIT[rateUnit]
+    ? rate * LB_PER_UNIT[rateUnit] : null;
   const total = Number(product?.totalAmount);
   const area = Number(product?.areaValue);
   const amountUnit = String(product?.amountUnit || "lb").toLowerCase();
-  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(area) || area <= 0 || !LB_PER_UNIT[amountUnit]) return null;
-  if (product?.areaUnit && product.areaUnit !== "sqft") return null;
-  return (total * LB_PER_UNIT[amountUnit] * 1000) / area;
+  const fromTotal = Number.isFinite(total) && total > 0 && Number.isFinite(area) && area > 0 && LB_PER_UNIT[amountUnit]
+    && (!product?.areaUnit || product.areaUnit === "sqft")
+    ? (total * LB_PER_UNIT[amountUnit] * 1000) / area : null;
+  // Both readings, the higher one wins (an overridden total can exceed the entered rate), as the server's ratePer1000 does.
+  if (fromRate === null) return fromTotal;
+  return fromTotal === null ? fromRate : Math.max(fromRate, fromTotal);
 }
 
 export function treeShrubHighRateAdvisory(product, serviceType = "") {
