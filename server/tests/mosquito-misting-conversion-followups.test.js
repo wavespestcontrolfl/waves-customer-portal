@@ -619,3 +619,71 @@ describe('audit 8: the install resolves for an inputs-only estimate and fails cl
     expect(refill).toMatchObject({ customer_visible: false, booking_enabled: false, public_quote_selectable: false });
   });
 });
+
+describe('audit 9: the manual annual-prepay lane accepts a real misting quote', () => {
+  const manual = require('../services/estimate-manual-acceptance');
+  const withPest = () => estimateData(undefined, { pest: { frequency: 'quarterly' } });
+
+  test('a mapped misting + pest quote: the install row is invoiced on the prepay invoice, so it does not block the manual lane', () => {
+    const data = withPest();
+    // the quote really carries a positive install row (durable identity), plus the engine one-time total
+    const items = data.result.oneTime.items;
+    expect(items.some((item) => item.service === 'mosquito_misting_installation' && item.price > 0)).toBe(true);
+    const estimate = { id: 'est-manual-1', estimate_data: data, onetime_total: data.result.oneTime.total, annual_total: 1200, monthly_total: 100 };
+    expect(manual._private.manualPrepayBlockingOneTimeCharge(estimate)).toBe(false);
+    // the prepay converter bills exactly the row the exemption matched, as a marked line
+    const install = converter.frozenMistingInstall(data);
+    expect(misting.mistingInstallInvoiceLines(install)).toHaveLength(1);
+    expect(read('services/estimate-converter.js')).toContain('...mistingInstallInvoiceLines(mistingInstall)],');
+  });
+
+  test('matching is by durable identity, never description: a renamed non-install row still blocks, an unpriced install does not exempt', () => {
+    const data = withPest();
+    const renamed = JSON.parse(JSON.stringify(data));
+    renamed.result.oneTime.items = renamed.result.oneTime.items.map((item) => (item.service === 'mosquito_misting_installation'
+      ? { ...item, name: 'Smart system Installation' } : item));
+    expect(manual._private.manualPrepayBlockingOneTimeCharge({ id: 'e2', estimate_data: renamed, onetime_total: data.result.oneTime.total })).toBe(false);
+    // a genuine one-time charge named like an installation but with another service identity still blocks
+    const fake = JSON.parse(JSON.stringify(data));
+    fake.result.oneTime.items.push({ service: 'flea_treatment', name: 'Mosquito Misting System Installation', price: 249 });
+    fake.result.oneTime.total = (Number(fake.result.oneTime.total) || 0) + 249;
+    expect(manual._private.manualPrepayBlockingOneTimeCharge({ id: 'e3', estimate_data: fake, onetime_total: fake.result.oneTime.total })).toBe(true);
+    // an install the converter cannot resolve (quote-required) is not exempt
+    const unpriced = JSON.parse(JSON.stringify(data));
+    unpriced.result.oneTime.items = unpriced.result.oneTime.items.map((item) => (item.service === 'mosquito_misting_installation'
+      ? { ...item, quoteRequired: true } : item));
+    expect(manual._private.manualPrepayBlockingOneTimeCharge({ id: 'e4', estimate_data: unpriced, onetime_total: data.result.oneTime.total })).toBe(true);
+  });
+
+  test('a quote with a genuine other one-time item still blocks, with or without the install', () => {
+    const data = withPest();
+    const withFlea = JSON.parse(JSON.stringify(data));
+    withFlea.result.oneTime.items.push({ service: 'flea_treatment', name: 'Flea treatment', price: 249 });
+    withFlea.result.oneTime.total = (Number(withFlea.result.oneTime.total) || 0) + 249;
+    expect(manual._private.manualPrepayBlockingOneTimeCharge({ id: 'e5', estimate_data: withFlea, onetime_total: withFlea.result.oneTime.total })).toBe(true);
+    const fleaOnly = { result: { ...data.result, oneTime: { items: [{ service: 'flea_treatment', name: 'Flea treatment', price: 249 }], total: 249 } } };
+    expect(manual._private.manualPrepayBlockingOneTimeCharge({ id: 'e6', estimate_data: fleaOnly, onetime_total: 249 })).toBe(true);
+  });
+
+  test('prepayBookingEligibility: a misting quote is eligible and the previewed total is the plan annual plus the install (the invoice the converter mints)', async () => {
+    const data = estimateData();
+    const recurring = data.result.recurring.services.find((row) => row.service === 'mosquito_misting');
+    const estimate = {
+      id: 'est-manual-2', status: 'sent', estimate_data: data, onetime_total: data.result.oneTime.total,
+      annual_total: recurring.annual, monthly_total: recurring.mo || recurring.monthly,
+    };
+    const q = { where: () => q, first: async () => null, select: async () => [], whereIn: () => q, whereNull: () => q, orderBy: () => q, limit: () => q, then: (resolve) => resolve([]) };
+    const out = await manual.prepayBookingEligibility(estimate, jest.fn(() => q));
+    expect(out).toMatchObject({ eligible: true, reason: null });
+    expect(out.invoiceTotal).toBe(Math.round((Number(recurring.annual) + INSTALL) * 100) / 100);
+    // without the exemption this was ineligible with reason one_time_items; the one-coverage-service rule still applies to a pest + misting pair
+    const pair = withPest();
+    const pairEstimate = { id: 'est-manual-3', status: 'sent', estimate_data: pair, onetime_total: pair.result.oneTime.total, annual_total: 1200, monthly_total: 100 };
+    expect((await manual.prepayBookingEligibility(pairEstimate, jest.fn(() => q))).reason).toBe('multi_service');
+  });
+
+  test('a non-misting quote is unchanged', () => {
+    const pest = { result: mapper.mapV1ToLegacyShape(generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } })) };
+    expect(manual._private.manualPrepayBlockingOneTimeCharge({ id: 'e7', estimate_data: pest, onetime_total: pest.result.oneTime ? pest.result.oneTime.total : 0 })).toBe(false);
+  });
+});

@@ -2544,9 +2544,10 @@ const MOSQUITO_MISTING = {
 
 // ACCEPTANCE of a priced misting estimate was blocked (fail closed, even with the gate on) until misting PR 2 shipped the conversion:
 // the recurring series (catalog row mosquito_misting_service, monthly cadence, 12 applications), the install on the acceptance
-// invoice and its install visit, and the refill catalog row. PR 2a (this change) ships them, so it is true. Code-owned on
-// purpose (no env var, no pricing_config): flipping it back is a code change, not a toggle, and the gate-off refusal
-// (GATE_MOSQUITO_MISTING) is separate and unchanged. Read at call time by v1-legacy-mapper#estimateMistingAcceptBlocked.
+// invoice with one office bell, and the dormant refill catalog row (refill billing: misting PR 2c). Misting PR 2a (#6543) ships them,
+// so it is true. Code-owned on purpose (no env var, no pricing_config): flipping it back is a code change, not a toggle, and the
+// gate-off refusal (GATE_MOSQUITO_MISTING) is separate and unchanged. Read at call time by
+// v1-legacy-mapper#estimateMistingAcceptBlocked.
 const MOSQUITO_MISTING_CONVERSION_READY = true;
 
 // The DB-editable prices of MOSQUITO_MISTING (pricing_config row `mosquito_misting_pricing`, mosquito-misting-config.js), frozen

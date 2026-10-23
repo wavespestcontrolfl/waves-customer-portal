@@ -1994,7 +1994,7 @@ endpoints: `PUT /:token/accept` (pre-transaction check and the locked in-transac
 `"code": "MOSQUITO_MISTING_GATED"` (reason `mosquito_misting_disabled`). Precedence among gated add-ons: Bermuda, then misting,
 then area add-ons. A gated misting estimate is never priced for the park check (its replay throws a fail-closed 400 carrying the
 same code); the deposit webhook records nothing for it (reason `mosquito_misting_disabled`). `GET /:token/data` is unchanged.
-**Misting acceptance pending (code-owned `MOSQUITO_MISTING_CONVERSION_READY`; lifted by misting PR 2a, #<this PR>).** Misting PR 1
+**Misting acceptance pending (code-owned `MOSQUITO_MISTING_CONVERSION_READY`; lifted by misting PR 2a, #6543).** Misting PR 1
 refused, even with the gate ON, any estimate that carries a PRICED misting system (the mapped plan row, the install item, the raw
 engine line, an itemized proposal line, or a selected stored input when no stored row exists; an unpriced quote-required-only row, such
 as an oversize layout, does not count) because the conversion was not built. Misting PR 2a ships the conversion (catalog rows

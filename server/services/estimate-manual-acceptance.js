@@ -238,6 +238,14 @@ function isTermiteAnnualSetupRow(row = {}, { requireKind = true } = {}) {
     && (!requireKind || String(row?.kind || '').toLowerCase() === 'setup');
 }
 
+// The mosquito misting installation (misting PR 2a): a one-time row by durable identity (service mosquito_misting_installation, or the
+// invoice line kind misting_installation), never by description. The annual-prepay converter bills it as its own marked line on the
+// prepay invoice, so it is not a dropped charge. Only a row frozenMistingInstall actually resolves is exempt (priced, not quote-required).
+function isMistingInstallRow(row = {}) {
+  return String(row?.service || '').toLowerCase() === 'mosquito_misting_installation'
+    || String(row?.kind || '').toLowerCase() === 'misting_installation';
+}
+
 function manualPrepayBlockingOneTimeCharge(estimate = {}) {
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
   try {
@@ -266,8 +274,18 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
       }
       return termiteAnnualSetupInvoiced;
     };
+    // The misting install is invoiced on the prepay invoice the same way (resolved lazily, only for a misting row).
+    let mistingInstallInvoiced;
+    const mistingInstallExempt = (row) => {
+      if (!isMistingInstallRow(row)) return false;
+      if (mistingInstallInvoiced === undefined) {
+        mistingInstallInvoiced = typeof EstimateConverter.frozenMistingInstall === 'function'
+          && !!EstimateConverter.frozenMistingInstall(data);
+      }
+      return mistingInstallInvoiced && row.quoteRequired !== true;
+    };
     const blocksPrepay = (row) => !isNonBillableOneTimeRow(row) && !isRodentBaitSetupRow(row)
-      && !termiteAnnualSetupExempt(row);
+      && !termiteAnnualSetupExempt(row) && !mistingInstallExempt(row);
     const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
     if (oneTimeRows.some(blocksPrepay)) return true;
     // The raw-rows list masks the residual: when ANY raw one-time row exists,
