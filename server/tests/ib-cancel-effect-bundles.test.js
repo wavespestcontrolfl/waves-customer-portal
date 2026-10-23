@@ -700,6 +700,78 @@ describe('a text claim the fence refused', () => {
   });
 });
 
+describe('delivery evidence found when the text step stops because the visit changed', () => {
+  // One approved recipient was accepted by the provider; the next recipient's proof then sees the visit restored.
+  const restoredMidSend = (reported) => mockHandleCancellation.mockImplementationOnce(async (_id, opts) => {
+    opts.cancelGeneration.hits.push('visit_is_confirmed');
+    Object.assign(opts.outcome, reported);
+    mockStore.visits[0].status = 'confirmed';
+    mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
+  });
+
+  test('partial: saved on the bundle, in the receipt and in the alert, with "do not resend to those reached"', async () => {
+    const row = seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    restoredMidSend({ notificationSent: true, notificationPartial: true, notificationError: 'second recipient not reached' });
+    await svc.sweepIbCancelBundles();
+    expect(row.status).toBe('abandoned');
+    expect(row.notice_outcome).toMatchObject({ state: 'partial', by: 'sweep' });
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result).toMatchObject({ customer_text_sent: true, customer_text_partial: true });
+    expect(result.warning).toMatch(/Do not send it again to those reached/);
+    expect(mockRaised[0].opts.detail).toMatch(/Do not send it again to those reached/);
+  });
+
+  test('uncertain: saved and reported, never advising a resend', async () => {
+    const row = seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    restoredMidSend({ notificationSent: false, notificationUncertain: true, notificationError: 'audit row missing' });
+    await svc.sweepIbCancelBundles();
+    expect(row.notice_outcome).toMatchObject({ state: 'uncertain' });
+    expect(mockRecordResult.mock.calls[0][1].customer_text_uncertain).toBe(true);
+    expect(mockRaised[0].opts.detail).toMatch(/Check the message history/);
+  });
+
+  test('nothing reported but the reminder shows one recipient reached: recorded partial', async () => {
+    const row = seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    mockNoticeStatus.mockResolvedValueOnce('ready').mockResolvedValue('partial');
+    restoredMidSend({});
+    await svc.sweepIbCancelBundles();
+    expect(row.notice_outcome).toMatchObject({ state: 'partial' });
+  });
+
+  test('no evidence that anything went out: no text outcome is invented', async () => {
+    const row = seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    mockNoticeStatus.mockResolvedValueOnce('ready').mockResolvedValue('ready');
+    restoredMidSend({ notificationSent: false, notificationError: 'cancellation fence: visit_is_confirmed' });
+    await svc.sweepIbCancelBundles();
+    expect(row.status).toBe('abandoned');
+    expect(row.notice_outcome).toBeNull();
+    expect(mockRecordResult.mock.calls[0][1].customer_text_sent).toBeUndefined();
+  });
+});
+
+describe('sweep outputs stay replaceable until the terminal status is saved', () => {
+  test('a crash after the clean receipt and quiet alert, then a restore: the retry abandons, replaces the receipt and refreshes the alert', async () => {
+    const row = seedBundle();
+    const first = await svc.sweepIbCancelBundles();
+    expect(first.recovered).toBe(1);
+    expect(mockRaised[0].spec.severity).toBe('fyi');
+    // Simulate the process dying right before the terminal update: the bundle is still pending with its steps saved.
+    Object.assign(row, { status: 'pending', finished_at: null, finish_note: null, lease_owner: null, lease_until: null, attempts: 1 });
+    mockStore.visits[0].status = 'confirmed';
+    mockStore.history.push({ id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1 * MIN) });
+    const second = await svc.sweepIbCancelBundles();
+    expect(second.abandoned).toBe(1);
+    expect(row.status).toBe('abandoned');
+    // Both writes are the replaceable kind, for the same bundle's dedupe key.
+    expect(mockRecordResult.mock.calls[1][2]).toEqual({ onlyIfEmpty: true, replaceRecoveryPointer: true });
+    expect(mockRecordResult.mock.calls[1][1].warning).toMatch(/no longer the cancelled visit/);
+    expect(mockRaised).toHaveLength(2);
+    expect(mockRaised[1].opts.dedupeKey).toBe(mockRaised[0].opts.dedupeKey);
+    expect(mockRaised[1].opts.refreshOnDedupe).toBe(true);
+    expect(mockRaised[1].spec.severity).toBe('needs-you');
+  });
+});
+
 describe('races and a lost lease', () => {
   test('the request finishes the bundle while the sweep works: the sweep tells no one and writes nothing', async () => {
     const row = seedBundle();

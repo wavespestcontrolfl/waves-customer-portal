@@ -561,6 +561,11 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(await read(empty)).toEqual({ from: 'sweep' });
       expect(await read(pointer)).toEqual({ from: 'sweep' });
       expect(await read(real)).toEqual({ success: true, from: 'request' });
+      // The sweep's own earlier receipt is provisional until the bundle's terminal status is saved: a later sweep write replaces it.
+      const own = randomUUID();
+      await app('ib_pending_actions').insert({ id: own, result: JSON.stringify({ success: true, recovered_after_interruption: true, from: 'sweep-1' }) });
+      await recordResult(own, { success: true, recovered_after_interruption: true, from: 'sweep-2' }, { onlyIfEmpty: true, replaceRecoveryPointer: true });
+      expect(await read(own)).toMatchObject({ from: 'sweep-2' });
       // The request's pointer save (onlyIfEmpty only) never replaces a sweep receipt or another pointer.
       await recordResult(empty, { recovery_owns_outcome: true }, { onlyIfEmpty: true });
       expect(await read(empty)).toEqual({ from: 'sweep' });

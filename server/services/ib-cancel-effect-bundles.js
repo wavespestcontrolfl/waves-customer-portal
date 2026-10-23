@@ -372,10 +372,12 @@ function followThroughArgs(bundle, linkedChildren, reports, cancelFence = null) 
 
 // The visit changed under the recovery (restored, re-cancelled by another cancel, or gone): nothing more runs.
 class Abandon extends Error {
-  constructor(reason, partial = false) {
+  // `notice`: delivery evidence the run found before it stopped (the text may already have reached some approved recipients).
+  constructor(reason, partial = false, notice = null) {
     super(reason);
     this.reason = reason;
     this.partial = partial;
+    this.notice = notice;
   }
 }
 
@@ -445,7 +447,8 @@ async function sendApprovedNotice(bundle, svc) {
   // The claim was refused by the fence: nothing was claimed or sent. Changed visit: abandon. Only busy: retry next pass.
   if (fence.hits.length) {
     const standing = await cancelStillStands(bundle);
-    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
+    // A later recipient's proof can be refused after an earlier one was already accepted: that evidence goes with the abandon.
+    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true, await noticeEvidence(bundle, classifyNoticeOutcome(reported)));
     throw new Error(`the visit was busy (${fence.hits.join(', ')}); the text will retry`);
   }
   let classified = classifyNoticeOutcome(reported)
@@ -457,10 +460,24 @@ async function sendApprovedNotice(bundle, svc) {
   // instead of recording a send failure.
   if (classified.state === 'not_sent') {
     const standing = await cancelStillStands(bundle);
-    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
+    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true, await noticeEvidence(bundle, null));
     return { done: true, outcome: await reclassifyUnclaimedSend(bundle, classified) };
   }
   return { done: true, outcome: classified };
+}
+
+// What is known about delivery when the text step stops: the state handleCancellation reported if it says anything went out
+// (sent is verified per approved recipient), else the reminder re-read per recipient. null = no evidence that anything went out.
+async function noticeEvidence(bundle, reportedState) {
+  if (reportedState && ['partial', 'uncertain'].includes(reportedState.state)) return reportedState;
+  if (reportedState && reportedState.state === 'sent') return verifySentCoverage(bundle, reportedState);
+  const status = await require('./appointment-reminders').approvedCancellationNoticeStatus(bundle.scheduled_service_id, {
+    recipientKeys: bundle.approved_notice.map((entry) => entry.recipient_key),
+  });
+  if (status === 'delivered') return { state: 'sent', note: NOTICE_TERMINAL_BY_STATUS.delivered.note };
+  if (status === 'partial') return { ...NOTICE_TERMINAL_BY_STATUS.partial };
+  if (status === 'uncertain') return { ...NOTICE_TERMINAL_BY_STATUS.uncertain };
+  return null;
 }
 
 async function verifySentCoverage(bundle, classified) {
@@ -514,6 +531,15 @@ function followThroughLines(ft) {
   return lines;
 }
 
+// The text step's state in the receipt's own field names.
+function noticeFlags(notice) {
+  return {
+    customer_text_sent: Boolean(notice && ['sent', 'partial'].includes(notice.state)),
+    ...(notice && notice.state === 'partial' ? { customer_text_partial: true } : {}),
+    ...(notice && notice.state === 'uncertain' ? { customer_text_uncertain: true } : {}),
+  };
+}
+
 function noticeLines(bundle, notice) {
   if (!notice || notice.state === 'no_text') return [];
   if (notice.state === 'sent') return ['The approved customer text went out.'];
@@ -532,7 +558,6 @@ function buildReceipt(bundle, ft, notice, { receiptOnly = false } = {}) {
   const linked = (ft && ft.linked_skipped) || [];
   const noticeProblems = notice && notice.state !== 'sent' ? noticeLines(bundle, notice) : [];
   const problems = [...followThroughLines(ft), ...noticeProblems];
-  const sent = notice && ['sent', 'partial'].includes(notice.state);
   return {
     needsReview: problems.length > 0,
     lines: [...followThroughLines(ft), ...noticeLines(bundle, notice)],
@@ -541,9 +566,7 @@ function buildReceipt(bundle, ft, notice, { receiptOnly = false } = {}) {
       appointment_id: bundle.scheduled_service_id,
       ran_dispatch_cancel: true,
       recovered_after_interruption: true,
-      customer_text_sent: Boolean(sent),
-      ...(notice && notice.state === 'partial' ? { customer_text_partial: true } : {}),
-      ...(notice && notice.state === 'uncertain' ? { customer_text_uncertain: true } : {}),
+      ...noticeFlags(notice),
       ...(linked.length ? { linked_visits_skipped: linked } : {}),
       ...(money.length ? { money_skipped: money } : {}),
       ...(problems.length ? { warning: `${receiptOnly ? 'The cancel finished, but the app stopped before it saved this result.' : 'The cancel was finished in the background after an interruption.'} ${problems.join(' ')}` } : {}),
@@ -623,6 +646,9 @@ async function tellOffice(bundle, info, { review, action, why, lines }) {
     detail: [`Visit: ${[info.name, info.service, info.day].filter(Boolean).join(', ') || 'a cancelled visit'}.`, ...lines].join('\n'),
     bell: review,
     fyiRow: true,
+    // The bundle's outcome can change between the alert and the bundle's terminal status (a crash, then a restore): a retry
+    // rewrites the standing row (and rings it if it now needs a look) instead of leaving the earlier text.
+    refreshOnDedupe: true,
     metadata: { bundleId: bundle.id, scheduledServiceId: bundle.scheduled_service_id, source: 'ib-cancel-recovery' },
   });
   if (!raised) throw new Error('the office alert could not be saved');
@@ -682,6 +708,7 @@ async function finishAbandoned(bundle, token, reason, partial = false) {
     ran_dispatch_cancel: true,
     recovered_after_interruption: true,
     ...savedSkips(bundle),
+    ...(bundle.notice_outcome ? noticeFlags(bundle.notice_outcome) : {}),
     warning: `The visit is no longer the cancelled visit the card approved (${plain(reason)}), so the recovery stopped. ${lines.join(' ')}`,
   }, info));
   await tellOffice(bundle, info, {
@@ -727,6 +754,12 @@ async function runBundle(bundle, token) {
     return 'recovered';
   } catch (err) {
     if (!(err instanceof Abandon)) throw err;
+    // Delivery evidence found before the stop is saved first (a retry of this abandonment then reports it too).
+    if (err.notice) {
+      const notice = { ...err.notice, by: 'sweep' };
+      await ownedUpdate(bundle.id, token, { notice_outcome: JSON.stringify(notice) });
+      known = { ...known, notice_outcome: notice };
+    }
     await finishAbandoned(known, token, err.reason, err.partial);
     return 'abandoned';
   }
