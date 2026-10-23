@@ -3307,3 +3307,177 @@ describe('GATE_PREPAY_REFUND_90_DAY (owner R7: no end-now, no refund after 90 da
     });
   });
 });
+
+// A cancel request belongs to the prepay term it acted on (metadata.cancel_plan
+// .prepayTermId). A stale open request from an EARLIER term must not donate its
+// boundary/disposition to a later term's cancel, grandfather end-now past day
+// 90, or stand in for the new term in the upkeep skip. Legacy rows that record
+// no term keep today's reach. The suite clock is frozen at 2026-08-31 (ET).
+describe('cancel request is bound to its prepay term', () => {
+  const adminCancellation = require('../services/admin-cancellation');
+  const { acceptanceMatchesTerm } = adminCancellation._private;
+  const seedTerm = (over = {}) => {
+    mockState.annual_prepay_terms = [{
+      id: 'term-new', customer_id: 'cust-1', term_start: '2026-03-01', term_end: '2027-02-28', plan_label: 'Annual Pest',
+      prepay_amount: '480.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', status: 'active', renewal_decision: null,
+      ...over,
+    }];
+    const starts = ['2026-04-01', '2026-10-01', '2026-12-01', '2027-02-01'];
+    mockState.scheduled_services = starts.map((d, i) => ({
+      id: `tv${i + 1}`, customer_id: 'cust-1', status: i === 0 ? 'completed' : 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: d,
+    }));
+  };
+  const openRequest = (id, plan, createdAt) => ({
+    id, customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+    subject: 'Cancel plan (Admin (user admin-1))', description: '',
+    metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: false, ...plan } }),
+    created_at: new Date(createdAt),
+  });
+  const STALE_END_NOW = { effectiveDate: 'now', prepayDisposition: 'end_now_refund' };
+  const previewOf = async (baseUrl, body = {}) => (await post(baseUrl, '/cancel-plan/preview', body)).json();
+  afterEach(() => { delete process.env.GATE_PREPAY_REFUND_90_DAY; });
+
+  test('acceptanceMatchesTerm: a recorded id binds to that term only; no id, or no term, keeps the old reach', () => {
+    const row = (plan) => ({ metadata: JSON.stringify({ cancel_plan: plan }) });
+    expect(acceptanceMatchesTerm(row({ prepayTermId: 'term-a' }), { id: 'term-a' })).toBe(true);
+    expect(acceptanceMatchesTerm(row({ prepayTermId: 'term-a' }), 'term-b')).toBe(false);
+    expect(acceptanceMatchesTerm(row({ prepayTermId: 'term-a' }), null)).toBe(true);
+    expect(acceptanceMatchesTerm(row({ scope: [] }), { id: 'term-b' })).toBe(true);
+    expect(acceptanceMatchesTerm({ metadata: 'not json' }, { id: 'term-b' })).toBe(true);
+  });
+
+  test('the new request records the term it acts on; an account with no live term records none', () => withServer(async (baseUrl) => {
+    seedTerm();
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    expect((await postCancel(baseUrl, { effectiveDate: 'end_of_coverage' })).status).toBe(200);
+    const row = mockState.inserted.find((i) => i.table === 'service_requests').row;
+    expect(JSON.parse(row.metadata).cancel_plan.prepayTermId).toBe('term-new');
+  }));
+
+  test('no live term: the request records no term id', () => withServer(async (baseUrl) => {
+    expect((await postCancel(baseUrl, {})).status).toBe(200);
+    const row = mockState.inserted.find((i) => i.table === 'service_requests').row;
+    expect(JSON.parse(row.metadata).cancel_plan).not.toHaveProperty('prepayTermId');
+  }));
+
+  test('a stale open request from an EARLIER term: preview and commit treat the cancel as fresh, nothing is inherited, the stale row is untouched', () => withServer(async (baseUrl) => {
+    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+    seedTerm();
+    const stale = openRequest('req-old', { ...STALE_END_NOW, prepayTermId: 'term-old' }, '2026-02-01T12:00:00Z');
+    const before = JSON.stringify(stale);
+    mockState.service_requests = [stale];
+    const preview = await previewOf(baseUrl, { effectiveDate: 'end_of_coverage' });
+    expect(preview.repairRetry).toBe(false);
+    expect(preview.effectiveDate).toBe('end_of_coverage');
+    expect(preview.prepay).toEqual(expect.objectContaining({ termId: 'term-new', disposition: 'end_at_term', endNowAvailable: false }));
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', previewFingerprint: preview.previewFingerprint });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.requestId).not.toBe('req-old');
+    expect(body).toEqual(expect.objectContaining({ prepayDisposition: 'end_at_term', prepayTermOutcome: 'ends_at_term' }));
+    expect(JSON.stringify(mockState.service_requests.find((r) => r.id === 'req-old'))).toBe(before);
+    const fresh = mockState.service_requests.find((r) => r.id === body.requestId);
+    expect(JSON.parse(fresh.metadata).cancel_plan).toEqual(expect.objectContaining({ prepayTermId: 'term-new', effectiveDate: 'end_of_coverage' }));
+    expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ requestId: body.requestId, keepThrough: '2027-02-28' }));
+  }));
+
+  test('a stale end-now request does not grandfather end-now for the new term past day 90 (gate ON)', () => withServer(async (baseUrl) => {
+    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+    seedTerm();
+    mockState.service_requests = [openRequest('req-old', { ...STALE_END_NOW, prepayTermId: 'term-old' }, '2026-02-01T12:00:00Z')];
+    const preview = await previewOf(baseUrl, { effectiveDate: 'now' });
+    expect(preview.repairRetry).toBe(false);
+    expect(preview.prepay).toEqual(expect.objectContaining({ endNowAvailable: false, refund: null }));
+    const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', prepayDisposition: 'end_now_refund' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('end_now_past_refund_window');
+    expect(mockState.inserted).toBeUndefined();
+    expect(mockProcess).not.toHaveBeenCalled();
+  }));
+
+  test('a LEGACY open request (no term id) keeps today\'s behavior: it is still the account\'s acceptance and still grandfathers end-now', () => withServer(async (baseUrl) => {
+    process.env.GATE_PREPAY_REFUND_90_DAY = 'true';
+    seedTerm();
+    mockState.service_requests = [openRequest('req-legacy', STALE_END_NOW, '2026-02-01T12:00:00Z')];
+    const preview = await previewOf(baseUrl, { effectiveDate: 'end_of_coverage' });
+    expect(preview.repairRetry).toBe(true);
+    expect(preview.effectiveDate).toBe('now');
+    expect(preview.prepay).toEqual(expect.objectContaining({ endNowAvailable: true, disposition: 'end_now_refund' }));
+    const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', previewFingerprint: preview.previewFingerprint });
+    expect(res.status).toBe(200);
+    expect((await res.json()).requestId).toBe('req-legacy');
+  }));
+
+  test('a request recording the CURRENT term is its acceptance (repair retry inherits the accepted plan)', () => withServer(async (baseUrl) => {
+    seedTerm();
+    mockState.service_requests = [openRequest('req-same', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term', prepayTermId: 'term-new' }, '2026-08-30T12:00:00Z')];
+    const preview = await previewOf(baseUrl, {});
+    expect(preview.repairRetry).toBe(true);
+    expect(preview.effectiveDate).toBe('end_of_coverage');
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    const body = await (await post(baseUrl, '/cancel-plan', {})).json();
+    expect(body.requestId).toBe('req-same');
+  }));
+
+  test('two open requests: the live term\'s own wins over a NEWER stale one (ordering + term filter), and over a legacy one', () => withServer(async (baseUrl) => {
+    seedTerm();
+    mockState.service_requests = [
+      openRequest('req-stale-newer', { ...STALE_END_NOW, prepayTermId: 'term-old' }, '2026-08-30T12:00:00Z'),
+      openRequest('req-legacy-newer', STALE_END_NOW, '2026-08-30T13:00:00Z'),
+      openRequest('req-own-older', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term', prepayTermId: 'term-new' }, '2026-08-01T12:00:00Z'),
+    ];
+    const preview = await previewOf(baseUrl, {});
+    expect(preview.repairRetry).toBe(true);
+    expect(preview.effectiveDate).toBe('end_of_coverage');
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+    const body = await (await post(baseUrl, '/cancel-plan', {})).json();
+    expect(body.requestId).toBe('req-own-older');
+  }));
+
+  describe('a FUTURE paid term (starts after today)', () => {
+    const futureTerm = () => seedTerm({ id: 'term-future', term_start: '2026-09-15', term_end: '2027-09-14' });
+    const seedFutureCoverage = () => {
+      mockState.scheduled_services = ['2026-10-01', '2027-01-01', '2027-04-01', '2027-07-01'].map((d, i) => ({
+        id: `fv${i + 1}`, customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: d,
+      }));
+    };
+
+    test('a request accepted BEFORE the term starts, recording that term id, still matches it', () => withServer(async (baseUrl) => {
+      futureTerm(); seedFutureCoverage();
+      // Created 2026-08-30, two weeks before the term's 2026-09-15 start.
+      mockState.service_requests = [openRequest('req-future', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term', prepayTermId: 'term-future' }, '2026-08-30T12:00:00Z')];
+      const preview = await previewOf(baseUrl, {});
+      expect(preview.repairRetry).toBe(true);
+      expect(preview.effectiveDate).toBe('end_of_coverage');
+      expect(preview.prepay.termId).toBe('term-future');
+    }));
+
+    test('…while a request recording another term is not its acceptance, whatever its date', () => withServer(async (baseUrl) => {
+      futureTerm(); seedFutureCoverage();
+      mockState.service_requests = [openRequest('req-other', { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term', prepayTermId: 'term-old' }, '2026-09-30T12:00:00Z')];
+      const preview = await previewOf(baseUrl, {});
+      expect(preview.repairRetry).toBe(false);
+      expect(preview.effectiveDate).toBe('now');
+    }));
+  });
+
+  describe('hasOpenEndNowCancellation (annual-prepay upkeep skip)', () => {
+    const connOf = (rows) => {
+      const conn = jest.fn(() => ({ where: () => ({ select: async () => rows }) }));
+      return conn;
+    };
+    const rowOf = (plan) => ({ id: 'r', metadata: JSON.stringify({ cancel_plan: { scope: [], ...plan } }) });
+
+    test('only a request for THIS term (or a legacy one) skips the upkeep', async () => {
+      const { hasOpenEndNowCancellation } = adminCancellation;
+      const stale = rowOf({ ...STALE_END_NOW, prepayTermId: 'term-old' });
+      expect(await hasOpenEndNowCancellation('cust-1', connOf([stale]), 'term-new')).toBe(false);
+      expect(await hasOpenEndNowCancellation('cust-1', connOf([rowOf({ ...STALE_END_NOW, prepayTermId: 'term-new' })]), 'term-new')).toBe(true);
+      expect(await hasOpenEndNowCancellation('cust-1', connOf([rowOf(STALE_END_NOW)]), 'term-new')).toBe(true);
+      expect(await hasOpenEndNowCancellation('cust-1', connOf([stale]))).toBe(true);
+      // A stale row beside the term's own open one: the own one still skips.
+      expect(await hasOpenEndNowCancellation('cust-1', connOf([stale, rowOf({ ...STALE_END_NOW, prepayTermId: 'term-new' })]), 'term-new')).toBe(true);
+    });
+  });
+});
