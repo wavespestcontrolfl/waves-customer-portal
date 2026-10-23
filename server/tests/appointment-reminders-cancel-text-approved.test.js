@@ -13,7 +13,7 @@ const mockState = {
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const q = {
-      where: (...a) => { mockState.wheres.push([table, ...a]); return q; }, whereNull: () => q, whereIn: () => q, whereNotNull: () => q,
+      where: (...a) => { mockState.wheres.push([table, ...a]); return q; }, whereNull: () => q, whereIn: () => q, whereNotNull: (...a) => { (mockState.notNulls ||= []).push([table, ...a]); return q; },
       whereRaw: (...a) => { mockState.raws.push([table, ...a]); return q; }, whereNot: () => q,
       leftJoin: () => q, select: () => q, orderBy: (...a) => { (mockState.orders ||= []).push([table, ...a]); return q; },
       first: async () => {
@@ -417,6 +417,16 @@ describe('approvedCancellationNoticeStatus', () => {
       mockState.reminders = null;
       await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: [{ recipient_key: 'x', body: 'b' }], cancelGeneration: { visitId: 'svc-1', restorations: 0, hits: [] }, outcome: {} });
       expect(mockState.orders).toContainEqual(['appointment_reminders', 'id']);
+    });
+
+    test('the approved send selects among the rows that carry a marker, so a never-marked lower-id sibling cannot hide the marked one', async () => {
+      mockState.notNulls = [];
+      mockState.reminders = null;
+      await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, approvedNotice: [{ recipient_key: 'x', body: 'b' }], cancelGeneration: { visitId: 'svc-1', restorations: 0, hits: [] }, outcome: {} });
+      expect(mockState.notNulls).toContainEqual(['appointment_reminders', 'cancellation_notice_state']);
+      mockState.notNulls = [];
+      await AppointmentReminders.handleCancellation('svc-1', { sendNotification: true, outcome: {} });
+      expect(mockState.notNulls).not.toContainEqual(['appointment_reminders', 'cancellation_notice_state']);
     });
 
     test('the fenced claim adopts nothing while a sibling row was touched, and adopts when every row is untouched', async () => {

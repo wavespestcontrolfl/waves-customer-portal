@@ -2997,6 +2997,21 @@ async function parkWindowHeldApprovedNotice({ record, noticeToken, options, send
   return true;
 }
 
+// Which of a visit's reminder rows the cancellation notice works on: the lowest id, so the live send and the sweep meet on one
+// row. The approved send prefers the lowest-id row that carries a marker (a never-marked sibling with a lower id must not hide
+// the row the cancel marked); with no marked row it falls back to the lowest id, as before.
+async function pickCancellationReminderRow(scheduledServiceId, approvedSend) {
+  if (approvedSend) {
+    const marked = await db('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .whereNotNull('cancellation_notice_state')
+      .orderBy('id')
+      .first();
+    if (marked) return marked;
+  }
+  return db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId }).orderBy('id').first();
+}
+
 // handleCancellation's send step: fans the notice out to the contacts and settles the claim.
 async function sendCancellationNotice({ record, scheduledServiceId, options, noticeToken, claimStatesWithSent, finalizeClaim, reportOutcome }) {
   const sendOutcome = {};
@@ -5211,10 +5226,7 @@ const AppointmentReminders = {
       const claimStatesWithSent = [...claimStates, 'sent'];
       // Deterministic: a visit can carry several reminder rows, and the live send and the recovery sweep must pick the SAME one, so
       // their claims meet on one row (a later claim replaces the token, which fails the earlier sender's pre-dispatch check).
-      const record = await db('appointment_reminders')
-        .where({ scheduled_service_id: scheduledServiceId })
-        .orderBy('id')
-        .first();
+      const record = await pickCancellationReminderRow(scheduledServiceId, approvedSend);
 
       if (!record) {
         logger.info(`[appt-remind] Cancellation: no reminder record for ${scheduledServiceId}`);
