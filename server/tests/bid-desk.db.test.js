@@ -578,14 +578,16 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const { bidId } = await service.ingestEmail(await storeEmail());
       await mockPg('bid_opportunities').where({ id: bidId }).update({ source: 'sam_gov', external_id: `c-${bidId}`, source_active: false, needs_date_confirmation: true });
       const closedKey = `bid-desk:addendum:${bidId}:sam:inactive`;
+      // A deadline moved on a notice already closed is still a closure bell (addendumSpec), so it stays too.
       const movedKey = `bid-desk:addendum:${bidId}:sam:2026-11-05T19:00:00.000Z`;
-      for (const key of [closedKey, movedKey]) {
+      const emailKey = `bid-desk:addendum:${bidId}:${randomUUID()}`;
+      for (const key of [closedKey, movedKey, emailKey]) {
         await mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: key }) });
       }
       const open = async () => (await mockPg('notifications').whereRaw("metadata->>'dedupeKey' like ?", [`bid-desk:addendum:${bidId}:%`])
         .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'").select('metadata')).map((r) => r.metadata.dedupeKey);
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: await version(bidId) })).status).toBe(200);
-      expect(await open()).toEqual([closedKey]);
+      expect((await open()).sort()).toEqual([closedKey, movedKey].sort());
       expect((await call('PATCH', `/${bidId}`, { status: 'no_bid' })).status).toBe(200);
       expect(await open()).toEqual([]);
     });

@@ -438,4 +438,20 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(await cursor()).toBe('2026-10-10');
     expect(await samBids()).toHaveLength(0);
   });
+
+  test('discovery never goes past the call budget: the run fails and the cursor stays', async () => {
+    await mockPg('system_settings').insert({ key: sam.CURSOR_KEY, value: JSON.stringify({ from: '2026-10-10' }), category: 'bid_desk' });
+    // The lowest budget (2, one call per code) with a first code that needs three full pages.
+    process.env.SAM_GOV_DAILY_CALLS = '2';
+    try {
+      const page = Array.from({ length: sam.PAGE_LIMIT }, (_, i) => ({ noticeId: `b-${i}`, type: 'Solicitation', active: 'Yes' }));
+      const fetchImpl = jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ totalRecords: 3 * sam.PAGE_LIMIT, opportunitiesData: page }) }));
+      await expect(sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'test-key' })).rejects.toThrow('HTTP call_budget');
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(await samBids()).toHaveLength(0);
+      expect(await cursor()).toBe('2026-10-10');
+    } finally {
+      delete process.env.SAM_GOV_DAILY_CALLS;
+    }
+  });
 });

@@ -169,6 +169,7 @@ async function fetchPage({ apiKey, filter, postedFrom, postedTo, offset, fetchIm
     try {
       res = await fetchImpl(`${API_URL}?${params}`, { headers: { Accept: 'application/json' }, signal: controller.signal });
     } catch (err) {
+      if (err instanceof SamApiError) throw err;
       throw new SamApiError(err?.name === 'AbortError' ? 'timeout' : 'network');
     }
     // The API answers 404 "No Data found" for an empty window (its documented response codes): that is an empty page.
@@ -331,9 +332,15 @@ async function collectNotices({ apiKey, postedFrom, postedTo, refreshFrom, refre
       if (id && (!onlyId || id === onlyId)) seen.set(id, notice);
     }
   };
-  // Every request counts against the run's call budget (the key's daily quota).
+  // Every request counts against the run's call budget (the key's daily quota). Discovery past the budget fails the run
+  // before the cursor moves, so the next run reads the same window again.
+  const budget = dailyCallBudget();
   let calls = 0;
-  const counted = (...args) => { calls += 1; return fetchImpl(...args); };
+  const counted = (...args) => {
+    if (calls >= budget) throw new SamApiError('call_budget');
+    calls += 1;
+    return fetchImpl(...args);
+  };
   for (const ncode of NAICS_CODES) {
     add(await fetchAll({ apiKey, filter: { ncode, state: 'FL' }, postedFrom, postedTo, fetchImpl: counted }));
   }
@@ -341,7 +348,7 @@ async function collectNotices({ apiKey, postedFrom, postedTo, refreshFrom, refre
   // been posted long before it was filed here, so it uses the API's whole one-year range. A refused or failed read
   // (quota, outage) stops the re-read for this run without losing the discovery results; the next run resumes after the
   // last bid read.
-  const limit = Math.min(REFRESH_LIMIT, dailyCallBudget() - calls);
+  const limit = Math.min(REFRESH_LIMIT, budget - calls);
   const batch = await openSamBids(refreshAfter, limit);
   const missing = [];
   let lastRead = refreshAfter;

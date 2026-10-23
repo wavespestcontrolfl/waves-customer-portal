@@ -103,12 +103,13 @@ function buildPatch(bid, value) {
 async function closeDoneAlerts(conn, bidId, before, after) {
   const prefixes = [];
   const reason = [];
-  // A closed SAM.gov notice's bell asks for a decision, not a date, so confirming a date leaves it open.
+  // Every bell on a closed SAM.gov notice asks for a decision, not a date (addendumSpec), so confirming a date leaves
+  // them open.
   const keep = [];
   if (after.due_confirmed && (before.needs_date_confirmation || !before.due_confirmed) && !after.needs_date_confirmation) {
     prefixes.push(`bid-desk:addendum:${bidId}:`);
     reason.push('due_date_confirmed');
-    if (after.source_active === false) keep.push(`bid-desk:addendum:${bidId}:sam:inactive`, `bid-desk:addendum:${bidId}:sam:unreachable`);
+    keep.push(...(after.source_active === false ? [`bid-desk:addendum:${bidId}:sam:`] : []));
   }
   // A changed or cleared date retires the reminders sent for the old one.
   const dateOf = (row) => (row.due_at ? new Date(row.due_at).getTime() : null);
@@ -127,7 +128,7 @@ async function closeDoneAlerts(conn, bidId, before, after) {
   }
   if (!prefixes.length) return 0;
   const keys = (await Promise.all([...new Set(prefixes)].map((prefix) => openAdminAlertKeys(conn, prefix)))).flat()
-    .filter((key) => !keep.includes(key));
+    .filter((key) => !keep.some((prefix) => key.startsWith(prefix)));
   return closeAdminAlertKeys(conn, keys, reason.join(','));
 }
 
