@@ -12,8 +12,13 @@
  * view until it is recorded as a sale; no seed uses it) | review (the
  * owner decides; an optional category pre-fills the picker).
  *
- * Priority: lower runs first. Seed rules run at 100; a rule the owner writes
- * from the Inbox runs at 10 so it always wins over a seed.
+ * Priority: lower runs first. A rule the owner writes from the Inbox runs
+ * at 10 and always wins. Seeds: 80 = a specific review exception (usps po,
+ * walmart.com, amazon, temu) that must beat the merchant rule it overlaps;
+ * 90 = business merchants and transfers; 95 = card fees; 100 = the broad
+ * personal lists (food, stores, health) and the "a person paid / was paid"
+ * reviews, so TARGET SPECIALTY (supplies) beats TARGET (store) and USPS PO
+ * (review) beats USPS (office).
  */
 
 const A = 'Advertising & Marketing';
@@ -51,37 +56,37 @@ const SEED_RULES = [
   x('zelle money received from|check deposit|mobile deposit|cash added|deposit from venmo|deposit from cash app|deposit from paypal', 'review', null, 'customer payment not in the books, or personal money?'),
   x('zelle money sent to|cash app \\*|venmo payment|withdrawal from wise|wise us inc', 'review', L, 'a helper (contract labor, 1099-NEC at $600) or personal?'),
   // ── advertising (line 8)
-  x('google\\W*ads|facebk|meta ads|sticker mule|beehiiv|vistaprint|whitespark|yelp|nextdoor|thumbtack|\\bangi\\b|homeadvisor|semrush|canva|brightlocal|moz\\.com|ahrefs|mamo\\W*social|otc brands|age graphics|indexsy|loominost|kev s best|buylinks|useviral|help-a-marketer|aidirectori|outscraper|peoplefinders|content at scale|gmass|ein presswire|super cheap signs|onlineprintus|dri\\W*printplace|craigslist|serp empire|fatjoe|proxy-seller|linkedin|indeed jobs|onlinejobs\\.ph|the-qrcode-generator|adaired|madwire|usps\\.com every door', 'expense', A),
-  x('usps po\\b', 'review', A, 'an EDDM postcard drop (advertising) or stamps (office)?'),
+  x('google\\W*ads|facebk|meta ads|sticker mule|beehiiv|vistaprint|whitespark|yelp|nextdoor|thumbtack|\\bangi\\b|homeadvisor|semrush|canva|brightlocal|moz\\.com|ahrefs|mamo\\W*social|otc brands|age graphics|indexsy|loominost|kev s best|buylinks|useviral|help-a-marketer|aidirectori|outscraper|peoplefinders|content at scale|gmass|ein presswire|super cheap signs|onlineprintus|dri\\W*printplace|craigslist|serp empire|fatjoe|proxy-seller|linkedin|indeed jobs|onlinejobs\\.ph|the-qrcode-generator|adaired|madwire|usps\\.com every door', 'expense', A, null, 90),
+  x('usps po\\b', 'review', A, 'an EDDM postcard drop (advertising) or stamps (office)?', 80),
   // ── vehicle (line 9): actual costs, business share decided at year end
-  x('costco gas|wawa|shell oil|shell service|speedway|racetrac|exxon|circle k|7-eleven|-eleven|\\bbp\\b|bpqr|marathon|sunoco|chevron|mobil\\b|murphy|citgo|love.s|flying j|samsclub.*gas|king soopers fuel', 'expense', V, 'fuel'),
-  x('carfax|autozone|o.?reilly auto|advance auto|jiffy lube|take 5|discount tire|\\btire\\b|napa auto|pep boys|car wash|sunpass|\\btoll\\b|parking|pmt\\W*fl license/tag|\\bdmv\\b|mavis|thorntons|bpc\\W*bumper', 'expense', V, 'repair, registration, tolls'),
+  x('costco gas|wawa|shell oil|shell service|speedway|racetrac|exxon|circle k|7-eleven|-eleven|\\bbp\\b|bpqr|marathon|sunoco|chevron|mobil\\b|murphy|citgo|love.s|flying j|samsclub.*gas|king soopers fuel', 'expense', V, 'fuel', 90),
+  x('carfax|autozone|o.?reilly auto|advance auto|jiffy lube|take 5|discount tire|\\btire\\b|napa auto|pep boys|car wash|sunpass|\\btoll\\b|parking|pmt\\W*fl license/tag|\\bdmv\\b|mavis|thorntons|bpc\\W*bumper', 'expense', V, 'repair, registration, tolls', 90),
   // ── contract labor (line 11): platforms file their own 1099-K
-  x('fiverr|upwork|taskrabbit', 'expense', L),
+  x('fiverr|upwork|taskrabbit', 'expense', L, null, 90),
   // ── insurance (line 15)
-  x('next insurance|hiscox|thimble|biberk|simply business|florida heritage', 'expense', I, 'business liability policy'),
+  x('next insurance|hiscox|thimble|biberk|simply business|florida heritage', 'expense', I, 'business liability policy', 90),
   x('progressive ins|geico|state farm|allstate', 'review', I, 'business policy or personal auto?'),
   // ── office, postage, shipping (line 18)
-  x('the ups store|office depot|staples|fedex office|\\busps\\b|stamps\\.com|pirate ship', 'expense', O),
-  x('walmart\\.com|best buy', 'review', O, 'office or equipment, or personal?'),
+  x('the ups store|office depot|staples|fedex office|\\busps\\b|stamps\\.com|pirate ship', 'expense', O, null, 90),
+  x('walmart\\.com|best buy', 'review', O, 'office or equipment, or personal?', 80),
   // ── supplies, chemicals, hardware (line 22)
-  x('siteone|site one|veseris|propest|sprayer depot|do my own|domyown|solutions pest|forestry supp|\\bewing\\b|pestrong|univar|target specialty|nisus|bell labs|catchmaster|tractor supply|harbor freight|northern tool|rural king|ace hardware|home depot|homedepot|lowe.?s|gulf coast hardware|crowder bros|menards|invatechitalia', 'expense', S),
-  x('amazon|amzn', 'review', S, 'mixed orders: confirm it is a business item'),
-  x('\\btemu\\b', 'review', S, 'mixed: confirm it is a business item'),
+  x('siteone|site one|veseris|propest|sprayer depot|do my own|domyown|solutions pest|forestry supp|\\bewing\\b|pestrong|univar|target specialty|nisus|bell labs|catchmaster|tractor supply|harbor freight|northern tool|rural king|ace hardware|home depot|homedepot|lowe.?s|gulf coast hardware|crowder bros|menards|invatechitalia', 'expense', S, null, 90),
+  x('amazon|amzn', 'review', S, 'mixed orders: confirm it is a business item', 80),
+  x('\\btemu\\b', 'review', S, 'mixed: confirm it is a business item', 80),
   // ── taxes and licences (line 23)
-  x('nic\\W*-?\\s*fl|sunbiz|fdacs|fl dept of agri|myfloridalicense|dept of revenue|business tax receipt|tax collector', 'expense', T),
+  x('nic\\W*-?\\s*fl|sunbiz|fdacs|fl dept of agri|myfloridalicense|dept of revenue|business tax receipt|tax collector', 'expense', T, null, 90),
   x('manatee county|sarasota county|charlotte county', 'review', T, 'business tax receipt (deductible) or a utility bill?'),
   // ── utilities (line 25) and home office (line 30): business share decided at year end
   x('verizon|vzwrlss|t-mobile|at&t', 'review', U, 'phone: business share'),
   x('spectrum|frontier comm|comcast|xfinity', 'review', U, 'internet: home office share'),
   x('peace river|\\bfpl\\b|\\bteco\\b|duke energy', 'review', H, 'electric: home office share (Form 8829)'),
   // ── software and services (line 27a)
-  x('openai|chatgpt|anthropic|claude\\.ai|railway|github|google\\W*gsuite|google workspace|gsuite|name.?cheap|pipedream|intuit|qbooks|quickbooks|transcriptapi|open-meteo|bouncie|zernio|dropbox|notion|slack|zoom|calendly|godaddy|cloudflare|vercel|heroku|digitalocean|\\baws\\b|microsoft|adobe|grammarly|1password|lastpass|wix|mailchimp|constant contact|jobber|housecall|fieldroutes|pestpac|gorilladesk|yardbook|elevenlabs|paddle\\.(net|com)|proxysell|stealth code|midjourney|x corp\\.? paid|pageoptimizer|local dominator|qi.addons|hix\\.ai|cuppa|themeisle|visualcomposer|wp rocket|gptzero|wordpress|webflow|hostinger|wp all import|wp media|shapedplugin|freemius|aycd\\.io|pingproxies|perplexity|hugedomains|nodemaven|gumrd|geoimgr|justdoneai|leapworx|numerous\\.ai|openweather|pdfsimpli|chaty|gptforwork|flexinput|twilio|sendgrid', 'expense', W),
-  x('fl pest mgmt assoc|npma\\b', 'expense', E, 'association dues'),
+  x('openai|chatgpt|anthropic|claude\\.ai|railway|github|google\\W*gsuite|google workspace|gsuite|name.?cheap|pipedream|intuit|qbooks|quickbooks|transcriptapi|open-meteo|bouncie|zernio|dropbox|notion|slack|zoom|calendly|godaddy|cloudflare|vercel|heroku|digitalocean|\\baws\\b|microsoft|adobe|grammarly|1password|lastpass|wix|mailchimp|constant contact|jobber|housecall|fieldroutes|pestpac|gorilladesk|yardbook|elevenlabs|paddle\\.(net|com)|proxysell|stealth code|midjourney|x corp\\.? paid|pageoptimizer|local dominator|qi.addons|hix\\.ai|cuppa|themeisle|visualcomposer|wp rocket|gptzero|wordpress|webflow|hostinger|wp all import|wp media|shapedplugin|freemius|aycd\\.io|pingproxies|perplexity|hugedomains|nodemaven|gumrd|geoimgr|justdoneai|leapworx|numerous\\.ai|openweather|pdfsimpli|chaty|gptforwork|flexinput|twilio|sendgrid', 'expense', W, null, 90),
+  x('fl pest mgmt assoc|npma\\b', 'expense', E, 'association dues', 90),
   // ── card interest (line 16b): business share decided at year end
   x('interest charge', 'review', N, 'card interest: business share of the card'),
   // ── bank fees
-  x('wire transfer fee|wire fee|wire convenience charge|overdraft fee|monthly service fee', 'expense', F, 'bank fee'),
+  x('wire transfer fee|wire fee|wire convenience charge|overdraft fee|monthly service fee', 'expense', F, 'bank fee', 90),
   // ── travel: the owner decides (no category: travel is line 24a)
   x('delta air|breeze air|airline|airfare|southwest|spirit air|frontier ai\\b|frontier denver|united air|american air|jetblue|hotel|\\binn\\b|marriott|hilton|airbnb|vrbo|expedia|booking\\.com|amtrak|\\buber\\b|\\blyft\\b', 'review', null, 'business trip, or personal?'),
   // ── personal (groceries, pharmacy, gyms, streaming, meals, cash)

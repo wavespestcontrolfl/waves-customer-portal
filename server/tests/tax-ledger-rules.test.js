@@ -199,7 +199,7 @@ describe('seed rules', () => {
       expect(svc.KINDS).toContain(r.kind);
       if (r.kind === 'expense') expect(SEEDED_CATEGORY_NAMES).toContain(r.category);
       if (r.category) expect(SEEDED_CATEGORY_NAMES).toContain(r.category);
-      expect(Number.isFinite(r.priority) && r.priority > svc.OWNER_PRIORITY).toBe(true);
+      expect([80, 90, 95, 100]).toContain(r.priority);
       expect(seen.has(r.pattern)).toBe(false);
       seen.add(r.pattern);
     }
@@ -216,6 +216,14 @@ describe('seed rules', () => {
     ['Zelle money received from SOMEONE', 'review', null],
     ['AMAZON.COM*1A2B3C', 'review', 'Supplies'],
     ['CAPITAL ONE MEMBER FEE', 'personal', null],
+    // overlaps: the specific rule wins over the broad personal list or the broad merchant rule
+    ['TARGET SPECIALTY PRODUCTS 0042', 'expense', 'Supplies'],
+    ['TARGET 00012345 BRADENTON', 'personal', null],
+    ['WALMART.COM 8009256278', 'review', 'Office Expenses'],
+    ['WAL-MART #1234', 'personal', null],
+    ['USPS PO 1130440123', 'review', 'Advertising & Marketing'],
+    ['USPS STAMPS 123', 'expense', 'Office Expenses'],
+    ['TEMU.COM', 'review', 'Supplies'],
   ])('%s → %s / %s', (description, kind, category) => {
     const compiled = svc.compileRules(seeds.SEED_RULES.map((r, i) => ({ ...r, id: `s${i}`, created_at: '2026-01-01' })));
     const hit = svc.matchRule(description, compiled);
@@ -233,7 +241,7 @@ describe('ensureSeedRules (runtime seed)', () => {
     const rows = state.seeded[0];
     expect(rows).toHaveLength(seeds.SEED_RULES.length);
     const gas = rows.find((r) => /costco gas/.test(r.pattern));
-    expect(gas).toEqual(expect.objectContaining({ kind: 'expense', category_id: 'cat-v', irs_line: '9', enabled: true, source: 'seed', priority: 100 }));
+    expect(gas).toEqual(expect.objectContaining({ kind: 'expense', category_id: 'cat-v', irs_line: '9', enabled: true, source: 'seed', priority: 90 }));
     const unknownCat = rows.find((r) => /google\\W\*ads/.test(r.pattern));
     expect(unknownCat.category_id).toBeNull();
     expect(unknownCat.irs_line).toBe('8');
