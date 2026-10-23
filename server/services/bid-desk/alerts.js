@@ -13,6 +13,7 @@ const { daysLeft } = require('./rules');
 const AREA = 'Estimates';
 const CATEGORY = 'lead';
 const STATUS_LABEL = { new: 'no decision yet', bid: 'marked as bid' };
+const WINDOW_LABEL = { '14d': '14-day', '7d': '7-day', '2d': '2-day' };
 
 const linkFor = (bid) => `/admin/bid-desk?bid=${bid.id}`;
 const subjectFor = (bid) => ({ type: 'lead', id: bid.id });
@@ -124,7 +125,53 @@ function reminderSpec(bid, window, now = new Date()) {
       doneWhen: 'bid_decided',
       who: 'person',
     },
-    detail: `Bid reminder (${window === '2d' ? '2-day' : '7-day'}): ${title} is due ${shortDateET(bid.due_at)}${etTimeWords(bid.due_at)}. Status: ${bid.status}.`,
+    detail: `Bid reminder (${WINDOW_LABEL[window] || '7-day'}): ${title} is due ${shortDateET(bid.due_at)}${etTimeWords(bid.due_at)}. Status: ${bid.status}.`,
+  };
+}
+
+// "in 2 days" / "tomorrow" / "today" for a date, from the date itself (a reminder can fire late).
+function inWords(value, now) {
+  const days = daysLeft(value, now);
+  if (days == null || days <= 0) return 'today';
+  return days === 1 ? 'tomorrow' : `in ${days} days`;
+}
+
+// GATE_BID_CHECKLIST: the last day to send questions to the buyer. The reminder is for the office only.
+function questionsReminderSpec(bid, now = new Date()) {
+  const title = titleOf(bid, null);
+  const when = inWords(bid.questions_due_at, now);
+  return {
+    spec: {
+      area: AREA,
+      action: fitAction(AREA, title, [(n) => `questions due ${when}: ${n}`, (n) => `questions due ${when}, ${n}`]),
+      why: cutAtWord(`Questions due ${shortDateET(bid.questions_due_at)}${etTimeWords(bid.questions_due_at)}; ${STATUS_LABEL[bid.status] || bid.status}.`, MAX_WHY_CHARS),
+      severity: 'needs-you',
+      link: linkFor(bid),
+      subject: subjectFor(bid),
+      doneWhen: 'bid_decided',
+      who: 'person',
+    },
+    detail: `Bid reminder (questions): ${title} questions are due ${shortDateET(bid.questions_due_at)}${etTimeWords(bid.questions_due_at)}. Status: ${bid.status}.`,
+  };
+}
+
+// GATE_BID_CHECKLIST: the job walk (site visit). A mandatory walk is named as such: missing it can disqualify the bid.
+function jobWalkReminderSpec(bid, now = new Date()) {
+  const title = titleOf(bid, null);
+  const when = inWords(bid.job_walk_at, now);
+  const kind = bid.job_walk_mandatory ? 'mandatory job walk' : 'job walk';
+  return {
+    spec: {
+      area: AREA,
+      action: fitAction(AREA, title, [(n) => `${kind} ${when}: ${n}`, (n) => `${kind} ${when}, ${n}`]),
+      why: cutAtWord(`${bid.job_walk_mandatory ? 'Mandatory job walk' : 'Job walk'} ${shortDateET(bid.job_walk_at)}${etTimeWords(bid.job_walk_at)}; ${STATUS_LABEL[bid.status] || bid.status}.`, MAX_WHY_CHARS),
+      severity: 'needs-you',
+      link: linkFor(bid),
+      subject: subjectFor(bid),
+      doneWhen: 'bid_decided',
+      who: 'person',
+    },
+    detail: `Bid reminder (${kind}): ${title} ${kind} is ${shortDateET(bid.job_walk_at)}${etTimeWords(bid.job_walk_at)}. Status: ${bid.status}.`,
   };
 }
 
@@ -143,4 +190,4 @@ async function raiseReopening({ spec, detail }, dedupeKey, trx) {
   });
 }
 
-module.exports = { newBidSpec, addendumSpec, reminderSpec, raise, raiseReopening, linkFor };
+module.exports = { newBidSpec, addendumSpec, reminderSpec, questionsReminderSpec, jobWalkReminderSpec, raise, raiseReopening, linkFor };
