@@ -27,16 +27,25 @@ describe('classify', () => {
     expect(classify({ ...base, primary: null, estimates: [quoteEstimate(2614, { property_id: null })] })).toMatchObject({ class: 'house_in_lawn_mirror', primaryMatches: false });
   });
 
-  test('only a quote-wizard estimate for the customer\'s own primary, on a public-quote lead, can prove the house (codex #6520 r1 P1)', () => {
+  test('only a quote-wizard estimate for the customer\'s own primary can prove the house (codex #6520 r1 P1)', () => {
     // Same number, but the estimate came from another flow: a legacy lawn mirror with a coincidental home size stays.
     expect(classify({ ...base, estimates: [quoteEstimate(2614, { source: 'admin_tool' })] }).class).toBe('unproven');
     // Quote estimate for ANOTHER property (linked elsewhere, or a different address).
     expect(classify({ ...base, estimates: [quoteEstimate(2614, { property_id: 'p9' })] }).class).toBe('unproven');
     expect(classify({ ...base, estimates: [quoteEstimate(2614, { property_id: null, address: '9 Other Rd, Bradenton, FL 34205' })] }).class).toBe('unproven');
-    // Not a public-quote lead at all: never a candidate, whatever the estimates say.
-    expect(classify({ ...base, customer: { ...base.customer, lead_source: 'google_ads' } }).class).toBe('not_a_quote_lead');
-    // The existing-customer update path marks lead_source_detail when lead_source was already taken.
-    expect(classify({ ...base, customer: { ...base.customer, lead_source: 'referral', lead_source_detail: 'quote_wizard' } }).class).toBe('house_in_lawn_mirror');
+    // No customer-row marker is consulted: the old route kept an existing lead_source and copied attribution text
+    // into lead_source_detail, so an existing customer quoted later still qualifies on the estimate alone (r2 P1).
+    expect(classify({ ...base, customer: { ...base.customer, lead_source: 'referral', lead_source_detail: 'Landing: /lawn' } }).class).toBe('house_in_lawn_mirror');
+  });
+
+  test('the quote\'s own lead row proves the house when the estimate upsert failed after the customer update (codex #6520 r2 P2)', () => {
+    const lead = (homeSqFt, over = {}) => ({ id: 'l1', lead_type: 'quote_wizard', extracted_data: JSON.stringify({ stage: 'quote_calculated', homeSqFt }), ...over });
+    expect(classify({ ...base, estimates: [], leads: [lead(2614)] })).toMatchObject({ class: 'house_in_lawn_mirror', houseField: 'lead.extracted_data.homeSqFt', leadId: 'l1' });
+    expect(classify({ ...base, estimates: [], leads: [lead(2614, { extracted_data: { homeSqFt: 2614 } })] }).class).toBe('house_in_lawn_mirror');
+    expect(classify({ ...base, estimates: [], leads: [lead(1900)] }).class).toBe('unproven');
+    expect(classify({ ...base, estimates: [], leads: [lead(2614, { lead_type: 'call' })] }).class).toBe('unproven');
+    // The estimate is consulted first; a lead never outranks a lawn write.
+    expect(classify({ ...base, turf: { lawn_sqft: 3000 }, estimates: [], leads: [lead(2614)] }).class).toBe('has_turf_lawn');
   });
 
   test('a real lawn size is never cleared: turf lawn_sqft, a reviewed lawn, or a value no estimate explains', () => {
