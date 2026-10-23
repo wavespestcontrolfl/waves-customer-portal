@@ -344,7 +344,7 @@ describe('applyEstimateLawnSqft', () => {
 });
 
 describe('lawn-area confirmation for the weekly plan (codex #6498 r1 P2)', () => {
-  test('a turf write stamps turf_lawn_sqft in the same transaction; a refused or unchanged write stamps nothing', async () => {
+  test('every confirmed positive size stamps turf_lawn_sqft in the same transaction, changed or not (a post-move estimate may equal the old number); a refused write stamps nothing', async () => {
     const written = fakeDb({ turf: { lawn_sqft: 4000 } });
     const trx = written.__trx;
     const r = await sync.applyEstimateLawnSqft(written, { customerId: 'c1', estimate: { id: 'e1', property_id: null, address: '100 Main St, Bradenton, FL 34205' }, estimateData: adminEstimate() });
@@ -354,6 +354,12 @@ describe('lawn-area confirmation for the weekly plan (codex #6498 r1 P2)', () =>
     mockConfirm.mockClear();
     const same = fakeDb({ turf: { lawn_sqft: 5200 }, customer: { property_sqft: 5200 }, primary: { property_sqft: 5200 } });
     expect((await sync.applyEstimateLawnSqft(same, { customerId: 'c1', estimate: { id: 'e1', property_id: null, address: '100 Main St, Bradenton, FL 34205' }, estimateData: adminEstimate() })).status).toBe('unchanged');
+    expect(mockConfirm).toHaveBeenCalledWith(same.__trx, 'c1', ['turf_lawn_sqft']);
+    mockConfirm.mockClear();
+    // Refused (a guess against an existing size): no write, no stamp.
+    const refused = fakeDb({ turf: { lawn_sqft: 4000 } });
+    const out = await sync.applyEstimateLawnSqft(refused, { customerId: 'c1', estimate: { id: 'e1', property_id: null, address: '100 Main St, Bradenton, FL 34205' }, estimateData: adminEstimate({ turfBasis: 'estimatedTurfSf', turfEstimated: true, lawnSqFt: 4793 }), trigger: 'backfill_unconfirmed', allowUnconfirmedWhenEmpty: true });
+    expect(out.status).toBe('skipped');
     expect(mockConfirm).not.toHaveBeenCalled();
   });
 });

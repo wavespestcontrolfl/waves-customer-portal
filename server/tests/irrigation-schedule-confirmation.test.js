@@ -113,7 +113,9 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
       expect(src(file)).toMatch(/confirmIrrigationFields\([^)]*\[LAWN_SQFT_CONFIRMED_FIELD\]\)/);
     }
     expect(src('routes/admin-customer-turf-profile.js')).toMatch(/nextLawnSqft > 0 && nextLawnSqft !== \(priorRow\?\.lawn_sqft \?\? null\) && requestFresh/);
-    expect(src('services/lawn-size-sync.js')).toMatch(/if \(Number\(sqft\) > 0\) \{\n\s+const \{ confirmIrrigationFields, LAWN_SQFT_CONFIRMED_FIELD \}/);
+    // ...and in writeLawnSqft BEFORE the unchanged early return: a post-move size equal to the old number still confirms.
+    const sync = src('services/lawn-size-sync.js');
+    expect(sync.indexOf('[LAWN_SQFT_CONFIRMED_FIELD]')).toBeLessThan(sync.indexOf('if (!turfChanged && !mirrorDiffers) return'));
     // The primary-flip writer stamps AFTER the move marker that clears the ledger.
     const flip = src('services/property-role-proposals.js');
     expect(flip.indexOf('markSprinklerSettingsMoved(customerId, trx')).toBeLessThan(flip.indexOf('[LAWN_SQFT_CONFIRMED_FIELD]'));
