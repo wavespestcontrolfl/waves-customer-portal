@@ -27,6 +27,9 @@ const STW_4FL = 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbic
 const STW_15 = 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer';
 const WDG = 'Prodiamine 65 WDG';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+// April on the 12x plan after 20261022195000: the 44-0-0 polymer bag (1.0 lb N, 22.727 lb on 10,000 sq ft).
+const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
+const F44 = aprilPolymerMigration.NEW_NAME;
 const DIMENSION = aprilMigration.DIMENSION;
 const DIM_2EW = octoberMigration.NAME_2EW;
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
@@ -511,7 +514,10 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
   });
 
   describe('the April step by the visit\'s plan', () => {
-    test.each([['Every 6 Weeks Lawn Care Service', DIMENSION, 27.778, F24], ['Monthly Lawn Care Service', F24, 20.833, DIMENSION]])(
+    // The 12x April row is the 44-0-0 polymer bag from here on (the migrations above ran over the 24-0-11 row).
+    beforeAll(async () => { await aprilPolymerMigration.up(knex); });
+
+    test.each([['Every 6 Weeks Lawn Care Service', DIMENSION, 27.778, F44], ['Monthly Lawn Care Service', F44, 22.727, DIMENSION]])(
       '%s: plans %s (%s lb on 10,000 sq ft) and not %s',
       async (serviceType, expected, amount, other) => {
         setGates();
@@ -547,15 +553,15 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       setGates();
       const { scheduled } = await visit('2026-04-14', { service_type: 'Lawn Care', is_recurring: true, recurring_pattern: 'monthly' });
       const result = await plan(scheduled);
-      expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([F24]);
+      expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([F44]);
       expect(warningCodes(result)).not.toContain('lawn_v13_plan_cadence_unknown');
     });
 
-    test('an unknown plan keeps the 12x step (24-0-11) and the plan says so, naming the 9x product', async () => {
+    test('an unknown plan keeps the 12x step (44-0-0) and the plan says so, naming the 9x product', async () => {
       setGates();
       const { scheduled } = await visit('2026-04-14', { service_type: 'Lawn fixture' });
       const result = await plan(scheduled);
-      expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([F24]);
+      expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([F44]);
       const warning = result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_plan_cadence_unknown');
       expect(warning.message).toContain(DIMENSION);
       expect(warning.message).toMatch(/keeps the 12x step/);
@@ -565,7 +571,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       setGates();
       const { scheduled } = await visit('2026-04-14', { service_type: 'Bi-Monthly Lawn Care Service' });
       const result = await plan(scheduled);
-      expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([F24]);
+      expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([F44]);
       expect(warningCodes(result)).not.toContain('lawn_v13_plan_cadence_unknown');
     });
 
@@ -575,9 +581,9 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(warningCodes(await plan(scheduled))).not.toContain('lawn_v13_plan_cadence_unknown');
     });
 
-    test('completion defaults prefill the plan\'s own product: Dimension on 9x, 24-0-11 on 12x', async () => {
+    test('completion defaults prefill the plan\'s own product: Dimension on 9x, 44-0-0 on 12x', async () => {
       setGates({ completion: 'on', history: 'on' });
-      for (const [serviceType, expected] of [['Every 6 Weeks Lawn Care Service', DIMENSION], ['Monthly Lawn Care Service', F24]]) {
+      for (const [serviceType, expected] of [['Every 6 Weeks Lawn Care Service', DIMENSION], ['Monthly Lawn Care Service', F44]]) {
         const { scheduled } = await visit('2026-04-14', { service_type: serviceType });
         const result = await plan(scheduled);
         expect(result.completionDefaults.items.map((entry) => entry.product.name)).toEqual([expected]);
@@ -926,13 +932,13 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         }
       });
 
-      test('the 12x April step (24-0-11, no dithiopyr) is not capped by dithiopyr history', async () => {
+      test('the 12x April step (44-0-0, no dithiopyr) is not capped by dithiopyr history', async () => {
         setGates();
         const { scheduled, customerId } = await visit('2026-04-14', { service_type: 'Monthly Lawn Care Service' });
         await applied(customerId, DIM_2EW, '2026-03-10', 2.2, 'fl oz');
         const result = await plan(scheduled);
         expect(codes(result)).not.toContain('lawn_v13_annual_limit');
-        expect(item(result, F24).mix).toMatchObject({ amount: 20.833 });
+        expect(item(result, F44).mix).toMatchObject({ amount: 22.727 });
       });
 
       test('a plan for property B ignores the Dimension applications at property A', async () => {

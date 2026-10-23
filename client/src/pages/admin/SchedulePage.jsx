@@ -25330,6 +25330,8 @@ const PRODUCT_DESCRIPTIONS_V13 = {
   celsius: "selective weed killer for warm-season grass (max 2x/year)",
   "lesco 10-0-22":
     "slow-release fertilizer with extra potassium for winter hardiness",
+  "lesco 44-0-0":
+    "slow-release nitrogen fertilizer that feeds the lawn for 3 to 4 months",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

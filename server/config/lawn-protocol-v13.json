@@ -83,7 +83,7 @@
       {
         "visit": 4,
         "month": "Apr",
-        "primary": "LESCO 24-0-11 with PolyPlus OPTI — 2.1 lb per 1,000 sq ft (0.5 lb N), spreader",
+        "primary": "LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer — 2.27 lb per 1,000 sq ft (1.0 lb N), spreader",
         "secondary": "Headway Fungicide — mapped take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 2 to 4 gal of water, 30 days after the first application\nArena 50 WDG — chinch bugs found at the edge of a damaged patch (float test only if unsure), 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later (SiteOne: Arena S.E., Florida only)\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days\nTopchoice Granular Insecticide — optional add-on, office prices it: fire ant granule broadcast at 2 lb per 1,000 sq ft (87 lb per acre) with a spreader, as its own pass, never blended with the month's granular (the label says not to apply it in combination with other materials); one application per lawn per year, so April or October, not both; water in after application, within 24 hours; not when rain is predicted in the next 24 hours; not within 15 ft of fresh water or 60 ft of tidal water; restricted use product, a certified applicator applies or supervises; on request only",
         "tiers": {
           "bronze": true,
@@ -91,10 +91,11 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "notes": "N rate: 1.0 lb N. Spreader visit. This is a 100% polymer-coated nitrogen bag that releases over about 3 to 4 months, so it carries the lawn into the June 1 to Sept 30 nitrogen ban. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of this bag. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
-            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader",
+            "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 12x plan's 44-0-0 bag. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
           }
         },
         "addOns": {
@@ -306,7 +307,7 @@
       {
         "visit": 4,
         "month": "Apr",
-        "primary": "LESCO 24-0-11 with PolyPlus OPTI — 2.1 lb per 1,000 sq ft (0.5 lb N), spreader",
+        "primary": "LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer — 2.27 lb per 1,000 sq ft (1.0 lb N), spreader",
         "secondary": "Headway Fungicide — mapped take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 2 to 4 gal of water, 30 days after the first application\nArena 50 WDG — chinch bugs found at the edge of a damaged patch (float test only if unsure), 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later (SiteOne: Arena S.E., Florida only)\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days\nTopchoice Granular Insecticide — optional add-on, office prices it: fire ant granule broadcast at 2 lb per 1,000 sq ft (87 lb per acre) with a spreader, as its own pass, never blended with the month's granular (the label says not to apply it in combination with other materials); one application per lawn per year, so April or October, not both; water in after application, within 24 hours; not when rain is predicted in the next 24 hours; not within 15 ft of fresh water or 60 ft of tidal water; restricted use product, a certified applicator applies or supervises; on request only",
         "tiers": {
           "bronze": true,
@@ -314,10 +315,11 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "notes": "N rate: 1.0 lb N. Spreader visit. This is a 100% polymer-coated nitrogen bag that releases over about 3 to 4 months, so it carries the lawn into the June 1 to Sept 30 nitrogen ban. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of this bag. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
-            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader",
+            "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 12x plan's 44-0-0 bag. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
           }
         }
       },
@@ -511,7 +513,7 @@
       {
         "visit": 4,
         "month": "Apr",
-        "primary": "LESCO 24-0-11 with PolyPlus OPTI — 2.1 lb per 1,000 sq ft (0.5 lb N), spreader",
+        "primary": "LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer — 2.27 lb per 1,000 sq ft (1.0 lb N), spreader",
         "secondary": "Headway Fungicide — mapped take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 2 to 4 gal of water, 30 days after the first application\nArena 50 WDG — chinch bugs found at the edge of a damaged patch (float test only if unsure), 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later (SiteOne: Arena S.E., Florida only)\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 to 21 days (at 0.3 oz, tank mix a different group); rust on zoysia, 0.3 to 0.5 oz per 1,000 sq ft every 14 days; leaf spot or melting out on bermuda, 0.3 to 0.5 oz per 1,000 sq ft every 14 days\nGravex 20 EW — dollar spot on bermuda and zoysia, 1.2 fl oz per 1,000 sq ft every 14 days, no more than 3 in a row; rust on zoysia, 1.2 fl oz per 1,000 sq ft every 14 to 28 days\nTopchoice Granular Insecticide — optional add-on, office prices it: fire ant granule broadcast at 2 lb per 1,000 sq ft (87 lb per acre) with a spreader, as its own pass, never blended with the month's granular (the label says not to apply it in combination with other materials); one application per lawn per year, so April or October, not both; water in after application, within 24 hours; not when rain is predicted in the next 24 hours; not within 15 ft of fresh water or 60 ft of tidal water; restricted use product, a certified applicator applies or supervises; on request only",
         "tiers": {
           "bronze": true,
@@ -519,10 +521,11 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
+        "notes": "N rate: 1.0 lb N. Spreader visit. This is a 100% polymer-coated nitrogen bag that releases over about 3 to 4 months, so it carries the lawn into the June 1 to Sept 30 nitrogen ban. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of this bag. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
-            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader",
+            "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 12x plan's 44-0-0 bag. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
           }
         },
         "addOns": {

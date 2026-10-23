@@ -19,6 +19,7 @@ const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gate
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
+const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 const finalPassMigration = require('../models/migrations/20261009150000_lawn_v13_final_pass');
@@ -89,8 +90,11 @@ describe('the v13 recipe', () => {
     const n = MONTHS.map((m) => engine.parseVisitNutrientTargets(visitFor(m).notes).targetNPer1000);
     // October is Dimension 18-0-10 at 4.04 lb per 1,000 sq ft (commercial label, Coastal South): 0.73 lb N, 0.40 lb K2O.
     // December is LESCO 10-0-22 at 4.5 lb per 1,000 sq ft (owner 2026-10-08): 0.45 lb N, 0.99 lb K2O.
-    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.73, 0.75, 0.45]);
-    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.18);
+    // April on the 12x plan is LESCO 44-0-0 polymer bag at 2.27 lb per 1,000 sq ft (owner 2026-10-22): 1.0 lb N. The year was 3.18 lb N.
+    expect(n).toEqual([0, 0.75, 0, 1, 0, 0, 0, 0, 0, 0.73, 0.75, 0.45]);
+    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.68);
+    // Under the 4 lb a year every ordinance row carries.
+    expect(n.reduce((a, b) => a + b, 0)).toBeLessThan(4);
     expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.4);
     expect(engine.parseVisitNutrientTargets(visitFor(12).notes).targetKPer1000).toBe(0.99);
     // No N or P in Jun-Sep.
@@ -101,7 +105,7 @@ describe('the v13 recipe', () => {
     const tools = MONTHS.map((m) => lines(visitFor(m).primary).filter((l) => / — /.test(l)).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [decemberMigration.NEW_NAME],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [aprilPolymerMigration.NEW_NAME], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [decemberMigration.NEW_NAME],
     ]);
   });
 });
@@ -128,13 +132,20 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
     const [april12] = engine.parseProtocolLines(visitFor(4).primary, 'base', { exactName: true });
     const [april9] = engine.parseProtocolLines(visitFor(4).cadenceVariants['9'].primary, 'base', { exactName: true });
     expect(april9).toMatchObject({ scope: april12.scope, conditional: false, exactName: true });
-    expect(engine.parseVisitNutrientTargets(visitFor(4).notes).targetNPer1000).toBe(0.5);
+    // Each plan's step states its own N target: the 12x bag is 1.0 lb N, the 9x Dimension 0.5 lb N.
+    expect(engine.parseVisitNutrientTargets(visitFor(4).notes).targetNPer1000).toBe(1);
+    expect(engine.parseVisitNutrientTargets(visitFor(4).cadenceVariants['9'].notes).targetNPer1000).toBe(0.5);
   });
 
   test('visitForCadence: 9 takes the variant, 12 / 6 keep the visit, unknown keeps it and names the variant', () => {
     const visit = visitFor(4);
     expect(visitForCadence(visit, 9)).toMatchObject({ branch: '9', unknownCadence: null });
     expect(visitForCadence(visit, 9).visit.primary).toBe(visit.cadenceVariants['9'].primary);
+    // The variant's own notes replace the visit's: the plan reads the N target from them (9x 0.5 lb N, 12x 1.0 lb N).
+    expect(visitForCadence(visit, 9).visit.notes).toBe(visit.cadenceVariants['9'].notes);
+    expect(engine.parseVisitNutrientTargets(visitForCadence(visit, 9).visit.notes).targetNPer1000).toBe(0.5);
+    expect(engine.parseVisitNutrientTargets(visitForCadence(visit, 12).visit.notes).targetNPer1000).toBe(1);
+    expect(visitForCadence({ ...visit, cadenceVariants: { 9: { primary: 'x' } } }, 9).visit.notes).toBe(visit.notes);
     for (const visits of [12, 6]) expect(visitForCadence(visit, visits)).toEqual({ visit, branch: null, unknownCadence: null });
     expect(visitForCadence(visit, null)).toEqual({ visit, branch: null, unknownCadence: { variantProducts: [april.DIMENSION], cadences: ['9'] } });
     // A visit with no variants is returned as it is, whatever the cadence.
@@ -166,7 +177,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
   test('the 9x April step is untouched: still the derived 2.78 lb from the 0.5 lb N target', () => {
     const [line] = lines(visitFor(4).cadenceVariants['9'].primary);
     expect(line).toMatch(/2\.78 lb per 1,000 sq ft \(0\.5 lb N\), spreader$/);
-    expect(engine.parseVisitNutrientTargets(visitFor(4).notes).targetNPer1000).toBe(0.5);
+    expect(engine.parseVisitNutrientTargets(visitFor(4).cadenceVariants['9'].notes).targetNPer1000).toBe(0.5);
   });
 
   test('the product limits it adds are the label\'s: 3 applications a year, 60 days between, both hard blocks', () => {
@@ -180,7 +191,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -317,7 +328,7 @@ describe('staged migration 20261005120000', () => {
       // 20261009100000 retires the Advion add-on rows and inserts the fire ant granule rows in their place.
       const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => (spec.name === matrixMigration.ADVION ? { ...spec, name: granuleMigration.GRANULE } : spec));
       const after = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
-      const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : s[0]))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
+      const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : (s[0] === aprilPolymerMigration.OLD_NAME && windowKey === aprilPolymerMigration.APRIL_WINDOW ? aprilPolymerMigration.NEW_NAME : s[0])))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
       // 20261009150000 (v13 final pass) inserts the December weed rows into November (Blindside is compared below).
       const finalPass = windowKey === finalPassMigration.WINDOWS.NOV ? finalPassMigration.WEED_NAMES.filter((n) => n !== BLINDSIDE) : [];
       const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name), ...finalPass];
@@ -370,7 +381,7 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
     // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row; 20261008130000 inserts the 10-0-22; 20261009100000 uses the existing Topchoice row.
-    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, granuleMigration.GRANULE];
+    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, granuleMigration.GRANULE];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));
