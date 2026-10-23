@@ -972,7 +972,8 @@ describe('apply-refund (gate on)', () => {
     expect(state.bankUpdates).toHaveLength(1);
     expect(state.bankUpdates[0].patch.status).toBe('unmatched');
     const write = JSON.stringify(state.bankUpdates[0].patch.suggestion);
-    for (const key of ['decision', 'decidedAt', 'personal', 'ignore', 'reason']) expect(write).toContain(key);
+    // the rule's keys go too: no stale rule label, unstamped for the next ordinary pass
+    for (const key of ['decision', 'decidedAt', 'personal', 'ignore', 'reason', 'rule', 'rulesAt', 'examined']) expect(write).toContain(key);
     // the matcher's own flag is a reading, not a decision: the row reopens with it
     state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { ignore: true, reason: 'looks like an internal transfer' } };
     state.bankUpdates = [];
@@ -1285,6 +1286,19 @@ describe('AI suggest eligibility follows the ledger kill switch', () => {
     expect((await res.json()).processed).toBe(1);
     const merged = JSON.parse(state.bankUpdates[0].patch.suggestion.bindings[0]);
     expect(merged).toEqual(expect.objectContaining({ categoryId: 'cat-meals', categorySource: 'ai' }));
+  });
+  test('gate on: the AI write repeats the eligibility (no personal rule, no transfer flag) and reports applied only when it lands', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.listRows = [{ id: 'bt-7', description: 'WAWA 5211', amount: '58.12', suggestion: { noMatch: true } }];
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+    state.bankUpdates = []; state.bankUpdateResult = 0; // a ledger pass marked the row personal during the model call
+    const res = await post('/admin/tax/bank-import/suggest', { ids: ['bt-7'] });
+    const body = await res.json();
+    expect(body.results[0]).toEqual({ id: 'bt-7', applied: false, error: expect.stringMatching(/classified or settled meanwhile/) });
+    expect(state.bankUpdates[0].wheres).toContainEqual([expect.stringContaining("coalesce(suggestion->>'personal','') <> 'true'"), undefined]);
+    state.bankUpdateResult = 1;
+    delete process.env.GATE_TAX_LEDGER;
   });
 
   test('gate on: the stored category and flag count as they are', async () => {

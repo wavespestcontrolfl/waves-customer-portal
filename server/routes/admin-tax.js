@@ -2343,13 +2343,17 @@ router.post('/bank-import/suggest', async (req, res, next) => {
           // or candidates into suggestion DURING the model call — a rebuild
           // from the pre-call snapshot would erase them (same guard the
           // expenses auto-categorize path applies to its post-model write)
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          // the eligibility is repeated at the write: a ledger pass can mark
+          // the row personal or a transfer during the model call, and an AI
+          // category on top of that would recreate the contradiction
+          const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(notIgnored).update({
             // provenance moves to the model: a category a ledger rule wrote
             // before is replaced, and the kill switch no longer owns it
             suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null })]),
             updated_at: new Date(),
           });
-          results.push({ id: row.id, category: ai.categoryName, applied: true });
+          if (landed) results.push({ id: row.id, category: ai.categoryName, applied: true });
+          else results.push({ id: row.id, applied: false, error: 'the row was classified or settled meanwhile' });
         } else {
           results.push({ id: row.id, applied: false, error: 'no matching category' });
         }
@@ -2781,8 +2785,11 @@ router.post('/bank-import/:id/unignore', async (req, res, next) => {
     // would still render as an internal transfer. The matcher's own flag
     // (no decision) stays: it is the matcher's reading, not a decision.
     const patch = { status: 'unmatched', updated_at: new Date() };
+    // The rule's own keys go too (rule, rulesAt, the override marker): the
+    // reopened row shows no stale rule label and is unstamped, so the next
+    // ordinary rule pass reads it again.
     if (['personal', 'transfer'].includes(row.suggestion?.decision)) {
-      patch.suggestion = bankImport.suggestionMerge({}, ['decision', 'decidedAt', 'personal', 'ignore', 'reason']);
+      patch.suggestion = bankImport.suggestionMerge({}, ['decision', 'decidedAt', 'personal', 'ignore', 'reason', 'rule', 'rulesAt', 'examined']);
     }
     const changed = await db('bank_transactions')
       .where({ id: req.params.id, status: 'ignored' })

@@ -1363,7 +1363,17 @@ function hasUnresolvedBankChange(row) {
 // back rather than leaving a card payment as a plain debit. The human
 // actions on the row are still refreshed. The UPDATE repeats the check so a
 // ruling made after the read wins too.
-function transferFlagWanted(sug, ledgerOn) { return !sug || (!sug.ignore && !sug.decision && !(ledgerOn && sug.examined)); }
+function transferFlagWanted(sug, ledgerOn) {
+  if (!sug) return true;
+  if (sug.decision) return false;
+  const matcherIgnore = !!sug.ignore && !sug.rule; // this pass's own flag
+  const ruleIgnore = !!sug.ignore && !!sug.rule;   // a transfer RULE's flag: hidden from Bank Import while the ledger is off
+  return !matcherIgnore && !(ledgerOn && (ruleIgnore || sug.examined));
+}
+// With the ledger off, the matcher's flag REPLACES a transfer rule's: the
+// rule's keys go with it (its stamp too, so the rule pass re-applies the
+// rule when the ledger is on again) and the row reads as matcher-flagged.
+function ruleKeysToDrop(sug, ledgerOn) { return !ledgerOn && sug && sug.rule ? ['rule', 'rulesAt'] : []; }
 const NO_DECISION_SQL = "(suggestion is null or (suggestion -> 'decision') is null)";
 // An Income decision from the ledger Inbox holds against the matcher: the
 // row stays open on its shelf, is never read by a pass, and every per-row
@@ -1533,7 +1543,7 @@ async function runDeterministicMatching({ limit } = {}) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).whereRaw(rulingGuardSql).update({
-          suggestion: suggestionMerge({ ...transfer, ...actionPatch }, hasActions ? ['noMatch'] : []),
+          suggestion: suggestionMerge({ ...transfer, ...actionPatch }, [...(hasActions ? ['noMatch'] : []), ...ruleKeysToDrop(row.suggestion, ledgerOn)]),
           updated_at: new Date(),
         });
         summary.transferFlagged++;
