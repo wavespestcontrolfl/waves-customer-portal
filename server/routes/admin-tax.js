@@ -2421,12 +2421,14 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
       if (err.code === 'CLAIM_LOST') return res.status(409).json({ error: err.message });
       throw err;
     }
+    let propagated = true;
     if (ownerRule) {
-      try { await taxLedgerRules.applyRules({ limit: taxLedgerRules.MAX_EXAMINE, force: true, pattern: ownerRule.pattern }); } catch (err) {
+      try { propagated = (await taxLedgerRules.applyRulesForPattern(ownerRule.pattern)).complete; } catch (err) {
+        propagated = false;
         logger.warn(`[tax-ledger] payee pass after create-expense failed: ${err.message}`);
       }
     }
-    res.json({ success: true, expense, ruleCreated: !!ownerRule });
+    res.json({ success: true, expense, ruleCreated: !!ownerRule, propagated });
   } catch (err) { next(err); }
 });
 

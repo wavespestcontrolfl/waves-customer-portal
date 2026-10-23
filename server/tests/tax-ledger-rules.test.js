@@ -361,6 +361,19 @@ describe('applyRules (suggestion-only)', () => {
     expect(last).toEqual(expect.objectContaining({ examined: 10, more: false, cursor: null }));
   });
 
+  test('applyRulesForPattern follows its cursor to the end of the open rows, bounded by rounds', async () => {
+    state.rules = [{ id: 'r-u', pattern: 'unknown', kind: 'personal', priority: 10, enabled: true }];
+    state.bankRows = Array.from({ length: 500 }, (_, i) => ({ id: `b${i}`, txn_date: '2026-01-01', description: 'UNKNOWN', suggestion: { noMatch: true } }));
+    // the mock always returns a full page: three rounds of 1000 rows, then it stops short
+    const out = await svc.applyRulesForPattern('unknown', { budget: 1000, maxRounds: 3 });
+    expect(out).toEqual({ examined: 3000, suggested: 3000, complete: false });
+    expect(selects()).toHaveLength(6);
+    expect(selects()[2].whereRaw).toHaveBeenCalledWith(expect.stringContaining('(txn_date, id) > (?::date, ?::uuid)'), ['2026-01-01', 'b499']);
+    state.bankRows = state.bankRows.slice(0, 10); mockDb.mockClear();
+    expect(await svc.applyRulesForPattern('unknown', { budget: 1000, maxRounds: 3 })).toEqual({ examined: 10, suggested: 10, complete: true });
+    expect(selects()).toHaveLength(1);
+  });
+
   test('no enabled rules: a plain pass reads nothing; a full forced pass still clears what old rules wrote', async () => {
     state.rules = [];
     expect(await svc.applyRules({})).toEqual({ examined: 0, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null });

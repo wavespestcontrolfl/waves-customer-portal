@@ -332,6 +332,24 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
   return counts;
 }
 
+// The payee pass after an Always decision: force, one pattern, and it
+// follows its own cursor to the end of the open rows (bounded by rounds so
+// a runaway backlog cannot pin a request). complete:false means the pass
+// stopped short and the caller reports propagated:false.
+async function applyRulesForPattern(pattern, { budget = MAX_EXAMINE, maxRounds = 10 } = {}) {
+  let after = null;
+  let rounds = 0;
+  const totals = { examined: 0, suggested: 0 };
+  do {
+    const out = await applyRules({ limit: budget, force: true, pattern, after });
+    totals.examined += out.examined;
+    totals.suggested += out.suggested;
+    after = out.more ? out.cursor : null;
+    rounds += 1;
+  } while (after && rounds < maxRounds);
+  return { ...totals, complete: !after };
+}
+
 // Hook for the CSV upload and the Plaid sync: a rule pass right after the
 // matching pass, only when the gate is on, and never a reason the import fails.
 async function applyAfterImport(where) {
@@ -443,7 +461,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
   // never reported as a failed decision (a retry would meet a 409)
   let propagated = true;
   if (rule) {
-    try { await applyRules({ limit: MAX_EXAMINE, force: true, pattern: rule.pattern }); } catch (err) {
+    try { propagated = (await applyRulesForPattern(rule.pattern)).complete; } catch (err) {
       propagated = false;
       logger.warn(`[tax-ledger] payee pass after a decision failed: ${err.message}`);
     }
@@ -455,5 +473,5 @@ module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON,
   NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
-  ensureSeedRules, applyRules, applyAfterImport, listRules, createRule, updateRule, decide,
+  ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };

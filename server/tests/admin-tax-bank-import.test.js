@@ -196,7 +196,7 @@ jest.mock('../services/bank-import', () => ({
 jest.mock('../services/tax-ledger-rules', () => ({
   ...jest.requireActual('../services/tax-ledger-rules'),
   createRule: jest.fn(() => Promise.resolve({ id: 'rule-new' })),
-  applyRules: jest.fn(() => Promise.resolve({ examined: 0, suggested: 0 })),
+  applyRulesForPattern: jest.fn(() => Promise.resolve({ examined: 0, suggested: 0, complete: true })),
 }));
 const taxLedgerRules = require('../services/tax-ledger-rules');
 
@@ -433,13 +433,13 @@ describe('create-expense (gate on)', () => {
 
   test('fromLedger + always: the owner rule is written inside the claim transaction and the payee pass runs after; a lost claim writes none', async () => {
     process.env.GATE_TAX_LEDGER = 'true';
-    taxLedgerRules.createRule.mockClear(); taxLedgerRules.applyRules.mockClear();
+    taxLedgerRules.createRule.mockClear(); taxLedgerRules.applyRulesForPattern.mockClear();
     state.bankRow.suggestion = { noMatch: true };
     let res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
     expect(res.status).toBe(200);
-    expect((await res.json()).ruleCreated).toBe(true);
+    expect(await res.json()).toEqual(expect.objectContaining({ ruleCreated: true, propagated: true }));
     expect(taxLedgerRules.createRule).toHaveBeenCalledWith(expect.objectContaining({ pattern: '\\bwawa\\b', kind: 'expense', categoryId: 'cat-meals', priority: 10, source: 'owner', conn: mockDb }));
-    expect(taxLedgerRules.applyRules).toHaveBeenCalledWith({ limit: taxLedgerRules.MAX_EXAMINE, force: true, pattern: '\\bwawa\\b' });
+    expect(taxLedgerRules.applyRulesForPattern).toHaveBeenCalledWith('\\bwawa\\b');
     taxLedgerRules.createRule.mockClear();
     state.bankUpdateResult = 0;
     res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
