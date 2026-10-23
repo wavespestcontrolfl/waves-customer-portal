@@ -454,9 +454,9 @@ describe('the proposal editor cannot launder the misting identity away', () => {
       { id: 'commercial', service: 'commercial_pest', originalRequestedService: 'mosquito_misting', description: 'Commercial misting', unitPrice: 9000, frequency: 'one_time' },
       { id: 'plain', description: 'Quarterly pest', unitPrice: 120, frequency: 'quarterly' },
     ] })],
-    programs: normalizePrograms([{ service: 'mosquito', identity: 'mosquito_misting', label: 'Misting plan', frequencyPerYear: 12, pricePerApplication: 59 }]),
+    programs: normalizePrograms([{ id: 'prog-1', service: 'mosquito', identity: 'mosquito_misting', label: 'Misting plan', frequencyPerYear: 12, pricePerApplication: 59 }]),
   });
-  // What an older editor PUTs back: every line with its service / identity fields omitted.
+  // What an older editor PUTs back: every line / program with its service / identity fields omitted (ids kept, as the editors do).
   const stripped = (proposal) => ({
     ...proposal,
     buildings: proposal.buildings.map((b) => ({ ...b, lineItems: b.lineItems.map(({ service, originalRequestedService, quoteRequired, ...rest }) => ({ ...rest, description: rest.description === 'Essential system (drum) Installation' ? 'Install' : rest.description })) })),
@@ -467,7 +467,7 @@ describe('the proposal editor cannot launder the misting identity away', () => {
     return { buildings: carried.buildings.map((b) => normalizeBuilding(b)), programs: normalizePrograms(carried.programs), enabled: true };
   };
 
-  test('a PUT with service / identity omitted still persists the identity (by line id; by label or index for programs)', () => {
+  test('a PUT with service / identity omitted still persists the identity (by line id; by program id)', () => {
     const saved = savedProposal();
     const next = persist(stripped(saved), saved);
     const byId = Object.fromEntries(next.buildings[0].lineItems.map((l) => [l.id, l]));
@@ -503,12 +503,20 @@ describe('the proposal editor cannot launder the misting identity away', () => {
     expect(carried.buildings[0].lineItems[0]).not.toHaveProperty('service');
   });
 
-  test('program identity is carried by index when the counts match and the label changed, never onto a non-matching program', () => {
-    const saved = savedProposal();
-    const sameCount = carryMistingIdentity({ programs: [{ service: 'mosquito', label: 'Renamed', frequencyPerYear: 12, pricePerApplication: 59 }] }, saved);
-    expect(sameCount.programs[0].identity).toBe('mosquito_misting');
-    const different = carryMistingIdentity({ programs: [{ service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 100 }, { service: 'lawn', label: 'Lawn', frequencyPerYear: 6, pricePerApplication: 80 }] }, saved);
-    for (const program of different.programs) expect(program).not.toHaveProperty('identity');
+  test('program identity is carried by STABLE ID only; a same-length array with a replaced program is never stamped by position', () => {
+    const saved = { programs: [{ id: 'm1', service: 'mosquito', identity: 'mosquito_misting', label: 'Misting plan' }, { id: 'p1', service: 'pest', label: 'Pest' }] };
+    const renamed = carryMistingIdentity({ programs: [{ id: 'm1', service: 'mosquito', label: 'Renamed' }, { id: 'p1', service: 'pest', label: 'Pest' }] }, saved);
+    expect(renamed.programs[0].identity).toBe('mosquito_misting');
+    expect(renamed.programs[1]).not.toHaveProperty('identity');
+    // Codex repro: saved [misting, pest], incoming [pest, lawn] (same length) — nothing inherits the identity.
+    const replaced = carryMistingIdentity({ programs: [{ id: 'p1', service: 'pest', label: 'Pest' }, { id: 'l1', service: 'lawn', label: 'Lawn' }] }, saved);
+    for (const program of replaced.programs) expect(program).not.toHaveProperty('identity');
+    // A legacy saved program with no id matches only an exact label, never a position.
+    const legacy = { programs: [{ service: 'mosquito', identity: 'mosquito_misting', label: 'Misting plan' }] };
+    expect(carryMistingIdentity({ programs: [{ service: 'mosquito', label: 'Misting plan' }] }, legacy).programs[0].identity).toBe('mosquito_misting');
+    expect(carryMistingIdentity({ programs: [{ service: 'mosquito', label: 'Renamed' }] }, legacy).programs[0]).not.toHaveProperty('identity');
+    // normalizeProgram keeps the id so the next save can match it.
+    expect(normalizePrograms([{ id: 'm1', service: 'mosquito', identity: 'mosquito_misting', label: 'Misting plan', frequencyPerYear: 12, pricePerApplication: 59 }])[0]).toMatchObject({ id: 'm1', identity: 'mosquito_misting' });
   });
 
   test('text fallback: the install labels the mapper emits are recognized without any service field', () => {

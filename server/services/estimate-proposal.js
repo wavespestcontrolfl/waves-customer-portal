@@ -234,12 +234,16 @@ function carryMistingIdentity(incoming = {}, saved = {}) {
   }
   const savedPrograms = Array.isArray(saved?.programs) ? saved.programs : [];
   if (Array.isArray(incoming.programs) && savedPrograms.some((program) => program?.identity === 'mosquito_misting')) {
+    // Carry by STABLE ID only (pre-push audit P1: a same-length array with a removed misting program and a new one
+    // stamped the identity onto an unrelated program). A legacy saved program with no id matches only an EXACT label.
     const labelOf = (program) => String(program?.label ?? program?.name ?? '').trim().toLowerCase();
-    out.programs = incoming.programs.map((program, index) => {
+    const savedMisting = savedPrograms.filter((program) => program?.identity === 'mosquito_misting');
+    out.programs = incoming.programs.map((program) => {
       if (!program || typeof program !== 'object' || program.identity === 'mosquito_misting') return program;
-      const byLabel = savedPrograms.find((candidate) => candidate?.identity === 'mosquito_misting' && labelOf(candidate) && labelOf(candidate) === labelOf(program));
-      const byIndex = incoming.programs.length === savedPrograms.length ? savedPrograms[index] : null;
-      return byLabel || byIndex?.identity === 'mosquito_misting' ? { ...program, identity: 'mosquito_misting' } : program;
+      const match = program.id
+        ? savedMisting.find((candidate) => candidate?.id && candidate.id === program.id)
+        : savedMisting.find((candidate) => !candidate?.id && labelOf(candidate) && labelOf(candidate) === labelOf(program));
+      return match ? { ...program, identity: 'mosquito_misting' } : program;
     });
   }
   return out;
@@ -274,6 +278,8 @@ function normalizeProgram(raw = {}) {
   // would let the rendered per-visit math contradict the billed total.
   const annual = roundMoney(pricePerApplication * frequencyPerYear);
   return {
+    // A stable id (same shape as a line's) so an editor save can carry a program's identity by identity, never by position.
+    ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
     service: family,
     ...(mistingIdentity ? { identity: 'mosquito_misting' } : {}),
     label: cleanString(raw.label ?? raw.name, 120) || 'Recurring service program',

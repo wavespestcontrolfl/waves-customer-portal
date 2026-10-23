@@ -311,6 +311,7 @@ function CommercialProposalEditor() {
       label: item.label || '', value: item.value || '',
     })));
     setProgramsState((p.programs || []).map((program) => ({
+      id: program.id || crypto.randomUUID(),
       service: program.service || 'other',
       ...(program.identity ? { identity: program.identity } : {}),
       label: program.label || '',
@@ -449,6 +450,7 @@ function CommercialProposalEditor() {
         || (draft?.correctiveWork?.length && live.correctiveWork.length !== 0);
       if (draft?.programs?.length && !monetaryInstallBlocked) {
         setProgramsState(draft.programs.map((program) => ({
+          id: program.id || crypto.randomUUID(),
           service: program.service,
           label: program.label,
           frequencyPerYear: program.frequencyPerYear,
@@ -695,6 +697,7 @@ function CommercialProposalEditor() {
     const programsPayload = f.programsState
       .filter(programRowIsPriced)
       .map((p) => ({
+        ...(p.id ? { id: p.id } : {}),
         service: p.service,
         ...(p.identity ? { identity: p.identity } : {}),
         label: p.label.trim(),
@@ -1325,7 +1328,7 @@ function CommercialProposalEditor() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
+                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
                   <Plus size={14} /> Add program
                 </Button>
               )}
