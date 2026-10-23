@@ -13,7 +13,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const { executeAdminReadTool } = require('../services/intelligence-bar/admin-read-tools');
-const { scrubNote, NOTE_CAP, CUT } = require('../utils/note-secret-scrubber');
+const { scrubNote, maskCardNumbers, NOTE_CAP, CUT } = require('../utils/note-secret-scrubber');
 const { noteUntrustedRead, newRequestTaint } = require('../services/intelligence-bar/owner-direct');
 
 const AUTH = 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJ0ZXN0IjoidG9rZW4ifQ.c2lnbmF0dXJl';
@@ -1042,5 +1042,136 @@ describe('Codex #6375 r18: the estimate list returns reviewNotes under estimator
     const estimate = result.data.estimates[0];
     expect(estimate).not.toHaveProperty('notes');
     expect(JSON.stringify(estimate)).not.toContain('north fence');
+  });
+});
+
+// Follow-ups to the #6375 known limits (redirect depth, CVV= form, card-number span). Synthetic data only.
+describe('#6375 follow-ups', () => {
+  let before;
+  beforeEach(() => {
+    before = { general: process.env.GATE_IB_GENERAL_READ, platform: process.env.GATE_IB_PLATFORM, notes: process.env.GATE_IB_READ_NOTES };
+    process.env.GATE_IB_GENERAL_READ = 'true';
+    process.env.GATE_IB_PLATFORM = 'true';
+    process.env.GATE_IB_READ_NOTES = 'true';
+  });
+  afterEach(() => {
+    for (const [name, key] of [['GATE_IB_GENERAL_READ', 'general'], ['GATE_IB_PLATFORM', 'platform'], ['GATE_IB_READ_NOTES', 'notes']]) {
+      if (before[key] === undefined) delete process.env[name]; else process.env[name] = before[key];
+    }
+  });
+  const INNER = 'https://portal.wavespestcontrol.com/l/abc234def5';
+  const wrap = link => `https://track.example.test/c?u=${encodeURIComponent(link)}`;
+
+  describe('redirect wrappers fail closed past the depth limit', () => {
+    test.each([3, 4, 5])('a customer link under %i wrappers is removed', async (layers) => {
+      let link = INNER;
+      for (let i = 0; i < layers; i += 1) link = wrap(link);
+      const result = await read(ENTRY, { id: 1, notes: `open ${link} now` });
+      expect(result.data.notes).toBe('open [private link removed] now');
+    });
+
+    test('a private link under three wrappers in a fragment or a path is removed', async () => {
+      const cases = [
+        `https://a.example.test/r#${wrap(wrap(INNER))}`,
+        `https://a.example.test/redirect/${encodeURIComponent(wrap(wrap(INNER)))}`,
+      ];
+      for (const link of cases) {
+        const result = await read(ENTRY, { id: 1, notes: `see ${link}` });
+        expect(result.data.notes).toBe('see [private link removed]');
+      }
+    });
+
+    test('one and two wrappers are judged as before: a harmless target stays, a private one goes', async () => {
+      const harmless = 'https://www.example.test/maps?q=1';
+      for (const link of [wrap(harmless), wrap(wrap(harmless))]) {
+        const kept = await read(ENTRY, { id: 1, notes: `see ${link}` });
+        expect(kept.data.notes).toBe(`see ${link}`);
+      }
+      for (const link of [wrap(INNER), wrap(wrap(INNER))]) {
+        const gone = await read(ENTRY, { id: 1, notes: `see ${link}` });
+        expect(gone.data.notes).toBe('see [private link removed]');
+      }
+    });
+
+    test('a plain link at the depth limit with nothing inside it stays', async () => {
+      const link = wrap(wrap('https://www.example.test/maps?q=1&page=2'));
+      const kept = await read(ENTRY, { id: 1, notes: `see ${link}` });
+      expect(kept.data.notes).toBe(`see ${link}`);
+    });
+  });
+
+  describe('card security code with an equals sign', () => {
+    test.each([
+      ['CVV=123', 'CVV=[code removed]'],
+      ['cvc=987', 'cvc=[code removed]'],
+      ['CVV2=4321', 'CVV2=[code removed]'],
+      ['CVV = 123', 'CVV = [code removed]'],
+      ['cvv =123', 'cvv =[code removed]'],
+      ['CSC= 123', 'CSC= [code removed]'],
+      ['card security code=123', 'card security code=[code removed]'],
+      ['verification number = 4321', 'verification number = [code removed]'],
+    ])('%j is removed', (note, expected) => {
+      expect(scrubNote(`call back, ${note}, thanks`)).toEqual({ text: `call back, ${expected}, thanks`, removed: 1 });
+    });
+
+    test.each(['CVV: 123', 'CVV2: 123', 'CVC : 987', 'CSC: 123', 'card security code: 123'])('the colon form %j still matches', (note) => {
+      expect(scrubNote(note).text).toBe(note.replace(/\d+$/, '[code removed]'));
+    });
+
+    test('the equals form keeps the colon form limits: no digits, no keyword, or a long number stay as written', () => {
+      for (const note of ['CVV=', 'CVV=none', 'cv=123', 'gate code=1234', 'cvv=12345678']) {
+        expect(scrubNote(note)).toEqual({ text: note, removed: 0 });
+      }
+    });
+  });
+
+  describe('card number masks only its own span', () => {
+    const OTHER = 'Arrive 9\u201310; unit \uFF11\uFF12\uFF13 \u2014 gate\u200B west';
+
+    test('text around a card keeps its en dash, em dash, full-width digits and invisible character', () => {
+      const note = `${OTHER}; card 4111 1111 1111 1111 on file \u2013 thanks \uFF14\uFF15`;
+      expect(scrubNote(note)).toEqual({
+        text: `${OTHER}; card [card ending 1111] on file \u2013 thanks \uFF14\uFF15`,
+        removed: 1,
+      });
+    });
+
+    test.each([
+      ['en dashes', 'card 4111\u20131111\u20131111\u20131111'],
+      ['no-break spaces', 'card 4111\u00A01111\u00A01111\u00A01111'],
+      ['full-width digits', 'card \uFF14\uFF11\uFF11\uFF11 1111 1111 1111'],
+      ['zero-width spaces', 'card 4111\u200B1111\u200B1111\u200B1111'],
+    ])('a card written with %s is replaced and the text after it is byte-identical', (name, card) => {
+      const after = ' \u2013 ok \uFF11\uFF12 and gate\u200B west';
+      expect(scrubNote(`${OTHER}: ${card}${after}`).text).toBe(`${OTHER}: card [card ending 1111]${after}`);
+    });
+
+    test('two cards in one note are both masked and the text between them is untouched', () => {
+      const note = 'a\u2013b 4111 1111 1111 1111 \u2014 c\uFF11 \u2014 5555 5555 5555 4444 z\u2013';
+      expect(scrubNote(note).text).toBe('a\u2013b [card ending 1111] \u2014 c\uFF11 \u2014 [card ending 4444] z\u2013');
+    });
+
+    test('a card with its expiry and security code beside it, in a note with other typography', () => {
+      const note = `${OTHER}: 4111 1111 1111 1111 12/28 123 \u2013 end`;
+      expect(scrubNote(note).text).toBe(`${OTHER}: [card ending 1111] [code removed] \u2013 end`);
+    });
+
+    test('a card inside a long digit run is masked and the typography elsewhere stays', () => {
+      const note = `\u2013 ref 4111 1111 1111 1111${' 1111'.repeat(27)} end \uFF11`;
+      const { text } = scrubNote(note);
+      expect(text.startsWith('\u2013 ref [card ending 1111]')).toBe(true);
+      expect(text.endsWith(' end \uFF11')).toBe(true);
+      expect(text).not.toContain('4111 1111');
+    });
+
+    test('a note without a card number stays byte-identical and uncounted', () => {
+      expect(scrubNote(OTHER)).toEqual({ text: OTHER, removed: 0 });
+    });
+
+    test('a structured note holding a card is masked over its joined text without changing other characters', () => {
+      expect(maskCardNumbers('x \u2013 4111 1111 1111 1111 \uFF11 ok')).toBe('x \u2013 [card ending 1111] [code removed] ok');
+      expect(maskCardNumbers('x \u2013 4111 1111 1111 1111 ok \uFF11')).toBe('x \u2013 [card ending 1111] ok \uFF11');
+      expect(maskCardNumbers('x \u2013 \uFF11')).toBeNull();
+    });
   });
 });

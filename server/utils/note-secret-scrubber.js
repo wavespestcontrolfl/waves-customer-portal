@@ -19,7 +19,9 @@
  *  - JWTs (three base64url parts, the first starting eyJ)
  *  - the value of a credential-named query parameter inside a URL
  *    (token, signature, sig, key, apikey, X-Amz-*, ...) and user:password@ in a URL
- *  - card numbers (Luhn, utils/pan-scrub.js)
+ *  - card numbers (Luhn, utils/pan-scrub.js) and a card security code named by its label
+ *    ("CVV 123", "CVV: 123", "CVV=123"). Only the card-number span is replaced: the rest of the
+ *    note is returned byte for byte (typographic dashes, spaces and full-width digits elsewhere stay)
  *  - SSN pattern ddd-dd-dddd
  *  - EVERYTHING after a credential key and its separator, to the end of the note string
  *    ("db.password: x", "DB_PASSWORD=x y z", "X-API-Key: x", "Authorization: Token x",
@@ -32,7 +34,7 @@
  *    looks random (10+ distinct characters, no repeat run over 4); UUIDs, ISO
  *    dates and links are kept
  */
-const { scrubPans, luhnValid } = require('./pan-scrub');
+const { luhnValid, createEditTracker, applyTrackedEdits, trackedEditList, scrubPansTracked } = require('./pan-scrub');
 const { isCredentialName, nameWords } = require('./credential-fields');
 
 const REMOVED = '[removed]';
@@ -134,12 +136,27 @@ const isAlreadyRemoved = value => ALREADY_REMOVED_RE.test(value);
 
 // Typographic dashes and spaces become plain ones, full-width digits become ASCII
 // and invisible format characters go, so a card number written with them is
-// still found (Codex #6375 security r23).
-const plainDigitsAndSeparators = text => text
-  .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
-  .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
-  .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
-  .replace(/[\uFF10-\uFF19]/g, digit => String.fromCharCode(digit.charCodeAt(0) - 0xFF10 + 48));
+// still found (Codex #6375 security r23). The normalized text is only used to FIND card numbers: the
+// result keeps, for every character of it, the index of the character it came from, so the mask can be
+// written into the original note and the rest of the note stays byte for byte.
+const INVISIBLE_RE = /[\u200B-\u200D\u2060\uFEFF]/;
+const DASH_RE = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/;
+const SPACE_RE = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/;
+const FULL_WIDTH_DIGIT_RE = /[\uFF10-\uFF19]/;
+function plainDigitsAndSeparators(text) {
+  let plain = '';
+  const origin = [];
+  for (let at = 0; at < text.length; at += 1) {
+    const ch = text[at];
+    if (INVISIBLE_RE.test(ch)) continue;
+    if (DASH_RE.test(ch)) plain += '-';
+    else if (SPACE_RE.test(ch)) plain += ' ';
+    else if (FULL_WIDTH_DIGIT_RE.test(ch)) plain += String.fromCharCode(ch.charCodeAt(0) - 0xFF10 + 48);
+    else plain += ch;
+    origin.push(at);
+  }
+  return { plain, origin };
+}
 
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g;
 // A JSON-escaped link (https:\/\/user:pw@host\/path) is a link too: the scheme slashes
@@ -192,9 +209,8 @@ const PAN_LENGTHS = [16, 15, 19, 14, 13, 18, 17];
 function maskPansInRun(run) {
   const groups = [];
   for (const m of run.matchAll(/\d+/g)) groups.push({ digits: m[0], start: m.index, end: m.index + m[0].length });
-  let out = '';
+  const edits = [];
   let cursor = 0;
-  let count = 0;
   for (let i = 0; i < groups.length; i += 1) {
     if (groups[i].start < cursor) continue;
     let sum = 0;
@@ -208,23 +224,44 @@ function maskPansInRun(run) {
       const j = endByLength.get(len);
       const digits = groups.slice(i, j + 1).map(group => group.digits).join('');
       if (!/^[2-6]/.test(digits) || !luhnValid(digits)) continue;
-      out += `${run.slice(cursor, groups[i].start)}[card ending ${digits.slice(-4)}]`;
+      edits.push({ start: groups[i].start, end: groups[j].end, text: `[card ending ${digits.slice(-4)}]` });
       cursor = groups[j].end;
-      count += 1;
       break;
     }
   }
-  return { text: out + run.slice(cursor), count };
+  return edits;
 }
-function scrubLongDigitRuns(text) {
-  let count = 0;
-  const out = text.replace(LONG_DIGIT_RUN_RE, (run) => {
-    if ((run.match(/\d/g) || []).length <= 120) return run;
-    const masked = maskPansInRun(run);
-    count += masked.count;
-    return masked.text;
-  });
-  return { text: out, count };
+// The card numbers inside long digit runs, as edits ({ start, end, text }) in `text` offsets.
+function longDigitRunEdits(text) {
+  const edits = [];
+  for (const match of text.matchAll(LONG_DIGIT_RUN_RE)) {
+    if ((match[0].match(/\d/g) || []).length <= 120) continue;
+    for (const edit of maskPansInRun(match[0])) edits.push({ ...edit, start: edit.start + match.index, end: edit.end + match.index });
+  }
+  return edits;
+}
+
+// Masks the card numbers in `text` and nothing else: returns the text with ONLY the card-number spans
+// replaced ("[card ending 1111]", plus the expiry and security code written beside the number), and
+// `pans` (scrubPans found something) and `longRuns` (cards found inside runs of more than 120 digits).
+// The search reads a normalized copy (typographic dashes and spaces, full-width digits, invisible
+// characters), but every edit is mapped back to the original characters, so a note's other dashes,
+// spaces and digits come back byte for byte (Codex #6375 r24; follow-up to #6375 known limit).
+function maskCardSpans(text) {
+  const { plain, origin } = plainDigitsAndSeparators(text);
+  const pans = scrubPansTracked(createEditTracker(plain));
+  const panEdits = trackedEditList(pans.tracker);
+  const longEdits = longDigitRunEdits(pans.tracker.text);
+  const tracker = applyTrackedEdits(pans.tracker, longEdits);
+  const edits = trackedEditList(tracker);
+  let out = '';
+  let cursor = 0;
+  for (const edit of edits) {
+    const from = origin[edit.start];
+    out += text.slice(cursor, from) + edit.text;
+    cursor = origin[edit.end - 1] + 1;
+  }
+  return { text: out + text.slice(cursor), pans: panEdits.length > 0, longRuns: longEdits.length };
 }
 
 // Structural backstop for secret formats no rule names (Codex #6375 r10): a token
@@ -304,15 +341,12 @@ function scrubNoteText(input) {
   text = assigned.text;
   for (const pattern of PREFIXED_RES) text = text.replace(pattern, swap);
   // The card-number check reads a normalized COPY (typographic dashes and spaces, full-width digits, invisible
-  // characters); the text is replaced by the masked copy only when a card number was really found, so a
-  // note without one comes back byte for byte and is not counted (Codex #6375 r24).
-  const detection = plainDigitsAndSeparators(text);
-  const masked = scrubPans(detection);
-  const noPans = masked === detection ? text : masked;
-  if (masked !== detection) removed += 1;
-  const longRuns = scrubLongDigitRuns(noPans);
-  removed += longRuns.count;
-  text = longRuns.text.replace(SSN_RE, swap);
+  // characters); only the card-number spans of the note are replaced, so the rest of the note, and a note
+  // without a card number, come back byte for byte (Codex #6375 r24; span-only mask in the follow-up).
+  const cards = maskCardSpans(text);
+  if (cards.pans) removed += 1;
+  removed += cards.longRuns;
+  text = cards.text.replace(SSN_RE, swap);
   // A rule line ("--------", "======") is not a secret: the run needs 16 letters or digits. A UUID is a record id and a readable run (words and short numbers) stays, as in the backstop below.
   text = text.replace(LONG_RUN_RE, run => (!UUID_RE.test(run) && !isReadableToken(run) && (run.match(/[A-Za-z0-9]/g) || []).length >= 16 ? swap() : run));
   const backstop = scrubRandomTokens(text);
@@ -324,10 +358,9 @@ function scrubNoteText(input) {
 // The masked text when `text` holds a card number (read on the normalized copy), else null. Used for a
 // structured note, whose items are joined before the check (Codex #6375 r24).
 function maskCardNumbers(text) {
-  const detection = plainDigitsAndSeparators(text);
   // The long-run pass too: a card number inside more than 120 joined digits (pre-push audit).
-  const masked = scrubLongDigitRuns(scrubPans(detection)).text;
-  return masked === detection ? null : masked;
+  const masked = maskCardSpans(text).text;
+  return masked === text ? null : masked;
 }
 
 // A scrubbed note, cut to NOTE_CAP characters with "[cut]" at the end.

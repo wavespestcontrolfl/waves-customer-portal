@@ -30,7 +30,8 @@
  *  - Both gate on Luhn AND an issuer-prefix check (first digit 2–6 — Visa/
  *    MC/Amex/Discover/JCB space) before masking. Runs over 40 digits are
  *    ignored (bulk ID dumps, not readbacks).
- *  - CVV CONTEXT: "cvv/cvc/security code …" followed by 3–4 digits (or
+ *  - CVV CONTEXT: "cvv/cvc/security code …" (a space, ":" or "=" may sit
+ *    between) followed by 3–4 digits (or
  *    digit words) is masked to "[code removed]" — a read-aloud CVV must not
  *    outlive the call even when no PAN is nearby. 3–4 digit runs WITHOUT
  *    that context are untouched (unmatchable noise otherwise).
@@ -167,13 +168,16 @@ function scrubNumericRun(run) {
     groups.push({ digits: g[0], start: g.index, end: g.index + g[0].length });
   }
   const totalDigits = groups.reduce((n, grp) => n + grp.digits.length, 0);
-  if (totalDigits < 13 || totalDigits > MAX_RUN_DIGITS) return { text: run, count: 0 };
+  if (totalDigits < 13 || totalDigits > MAX_RUN_DIGITS) return { text: run, count: 0, spans: [] };
   const locked = lockPhoneGroups(groups);
 
   let count = 0;
   let out = '';
   let cursor = 0;
   let i = 0;
+  // Each masked card (with the expiry/CVV it absorbed) as { start, end, text } in run offsets: the
+  // text between spans is copied from the run unchanged (see scrubPansTracked).
+  const spans = [];
   while (i < groups.length) {
     if (locked[i]) { i += 1; continue; }
     // Candidate spans from group i (sum capped at 19, never crossing a
@@ -286,7 +290,10 @@ function scrubNumericRun(run) {
     }
     if (matched) {
       const maskDigits = matched.prefixMask || matched.digits;
-      out += run.slice(cursor, groups[i].start) + maskFor(maskDigits) + (matched.prefixMask ? ' [code removed]' : '');
+      out += run.slice(cursor, groups[i].start);
+      const spanStart = groups[i].start;
+      const spanOutStart = out.length;
+      out += maskFor(maskDigits) + (matched.prefixMask ? ' [code removed]' : '');
       cursor = groups[matched.endGroup].end;
       i = matched.endGroup + 1;
       count += 1;
@@ -343,12 +350,13 @@ function scrubNumericRun(run) {
         absorbedGroups += 1;
       }
       if (absorbedGroups > 0) out += ' [code removed]';
+      spans.push({ start: spanStart, end: cursor, text: out.slice(spanOutStart) });
     } else {
       i += 1;
     }
   }
   out += run.slice(cursor);
-  return { text: out, count };
+  return { text: out, count, spans };
 }
 
 const DIGIT_WORDS = {
@@ -607,10 +615,10 @@ const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|lock\s*box|community|entry|acce
 // Digit separators mirror the PAN path — providers punctuate pauses, so
 // "cvv is 1, 2, 3" must match as readily as "cvv 123" (round-3 P1).
 const CVV_TAIL_NUMERIC = '((?:\\d[\\s,.-]{0,2}){2,3}\\d)(?![\\d])';
-const CVV_NUMERIC_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
-const CVV_SPOKEN_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
-const SEC_NUMERIC_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
-const SEC_SPOKEN_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
+const CVV_NUMERIC_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:=,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
+const CVV_SPOKEN_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:=,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
+const SEC_NUMERIC_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:=,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
+const SEC_SPOKEN_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:=,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
 
 function bareSecurityCodeIsCardCvv(full, offset, matchLength = 0) {
   // The forward window reaches PAST the matched code so trailing card
@@ -620,21 +628,104 @@ function bareSecurityCodeIsCardCvv(full, offset, matchLength = 0) {
   return CARD_CONTEXT_RE.test(windowText);
 }
 
-function scrubCvvContext(text) {
+// EDIT TRACKING. A scrub is a list of edits ({ start, end, text }: the characters start..end are replaced by
+// text) applied one stage after another. The tracker remembers, for every character of the current text,
+// which characters of the INPUT it came from, so the edits of all stages can be handed back in INPUT
+// coordinates. A caller that keeps the rest of the input byte for byte (the Intelligence Bar notes
+// scrubber) replaces only those spans. Characters that no edit touched map to themselves.
+function createEditTracker(text) {
+  const n = text.length;
+  const lo = new Array(n);
+  const hi = new Array(n);
+  for (let k = 0; k < n; k += 1) { lo[k] = k; hi[k] = k + 1; }
+  return { text, lo, hi, edited: new Array(n).fill(false) };
+}
+
+// Edits sorted by start, not overlapping, in the coordinates of tracker.text. Returns a new tracker.
+function applyTrackedEdits(tracker, edits) {
+  if (!edits.length) return tracker;
+  let text = '';
+  const lo = [];
+  const hi = [];
+  const edited = [];
+  let cursor = 0;
+  const copy = (from, to) => {
+    text += tracker.text.slice(from, to);
+    for (let k = from; k < to; k += 1) { lo.push(tracker.lo[k]); hi.push(tracker.hi[k]); edited.push(tracker.edited[k]); }
+  };
+  for (const edit of edits) {
+    copy(cursor, edit.start);
+    let from = Infinity;
+    let to = -Infinity;
+    for (let k = edit.start; k < edit.end; k += 1) { from = Math.min(from, tracker.lo[k]); to = Math.max(to, tracker.hi[k]); }
+    text += edit.text;
+    for (let k = 0; k < edit.text.length; k += 1) { lo.push(from); hi.push(to); edited.push(true); }
+    cursor = edit.end;
+  }
+  copy(cursor, tracker.text.length);
+  return { text, lo, hi, edited };
+}
+
+// The edits so far, in the coordinates of the text the tracker was created from.
+function trackedEditList(tracker) {
+  const edits = [];
+  for (let k = 0; k < tracker.text.length; k += 1) {
+    if (!tracker.edited[k]) continue;
+    const last = edits[edits.length - 1];
+    if (last && last.start === tracker.lo[k] && last.end === tracker.hi[k]) last.text += tracker.text[k];
+    else edits.push({ start: tracker.lo[k], end: tracker.hi[k], text: tracker.text[k] });
+  }
+  return edits;
+}
+
+// Applies `pattern` to the tracker's text; `edit(match)` returns { start, end, text } (text coordinates) or null.
+function replaceTracked(tracker, pattern, edit) {
+  const edits = [];
+  for (const match of tracker.text.matchAll(pattern)) {
+    const e = edit(match, tracker.text);
+    if (e) edits.push(e);
+  }
+  return { tracker: applyTrackedEdits(tracker, edits), count: edits.length };
+}
+
+// A keyword ("cvv", "card security code") keeps its text; only the code after it is replaced.
+const codeEdit = match => ({ start: match.index + match[1].length, end: match.index + match[0].length, text: '[code removed]' });
+
+function scrubCvvContext(tracker) {
+  const bareEdit = (match, full) => (bareSecurityCodeIsCardCvv(full, match.index, match[0].length) ? codeEdit(match) : null);
+  let t = tracker;
   let count = 0;
-  let out = text.replace(CVV_NUMERIC_RE, (m, kw) => { count += 1; return `${kw}[code removed]`; });
-  out = out.replace(CVV_SPOKEN_RE, (m, kw) => { count += 1; return `${kw}[code removed]`; });
-  out = out.replace(SEC_NUMERIC_RE, (m, kw, code, offset, full) => {
-    if (!bareSecurityCodeIsCardCvv(full, offset, m.length)) return m;
-    count += 1;
-    return `${kw}[code removed]`;
-  });
-  out = out.replace(SEC_SPOKEN_RE, (m, kw, code, offset, full) => {
-    if (!bareSecurityCodeIsCardCvv(full, offset, m.length)) return m;
-    count += 1;
-    return `${kw}[code removed]`;
-  });
-  return { text: out, count };
+  for (const [pattern, edit] of [[CVV_NUMERIC_RE, codeEdit], [CVV_SPOKEN_RE, codeEdit], [SEC_NUMERIC_RE, bareEdit], [SEC_SPOKEN_RE, bareEdit]]) {
+    const step = replaceTracked(t, pattern, edit);
+    t = step.tracker;
+    count += step.count;
+  }
+  return { tracker: t, count };
+}
+
+/**
+ * Scrub PANs + context-flagged CVVs from the text held by an edit tracker (see createEditTracker).
+ * Returns { tracker, count }; trackedEditList(tracker) is what was replaced, in input coordinates.
+ */
+function scrubPansTracked(tracker) {
+  let count = 0;
+  let t = tracker;
+  const numeric = [];
+  for (const match of t.text.matchAll(NUMERIC_RUN_RE)) {
+    const r = scrubNumericRun(match[0]);
+    count += r.count;
+    for (const span of r.spans || []) numeric.push({ start: match.index + span.start, end: match.index + span.end, text: span.text });
+  }
+  t = applyTrackedEdits(t, numeric);
+  const spoken = [];
+  for (const match of t.text.matchAll(WORD_RUN_RE)) {
+    const r = scrubSpokenRun(match[0]);
+    count += r.count;
+    if (r.text !== match[0]) spoken.push({ start: match.index, end: match.index + match[0].length, text: r.text });
+  }
+  t = applyTrackedEdits(t, spoken);
+  const cvv = scrubCvvContext(t);
+  return { tracker: cvv.tracker, count: count + cvv.count };
 }
 
 /**
@@ -646,20 +737,8 @@ function scrubPansDetailed(text) {
   if (typeof text !== 'string' || text.length === 0) {
     return { text, count: 0 };
   }
-  let count = 0;
-  let out = text.replace(NUMERIC_RUN_RE, (run) => {
-    const r = scrubNumericRun(run);
-    count += r.count;
-    return r.text;
-  });
-  out = out.replace(WORD_RUN_RE, (run) => {
-    const r = scrubSpokenRun(run);
-    count += r.count;
-    return r.text;
-  });
-  const cvv = scrubCvvContext(out);
-  count += cvv.count;
-  return { text: cvv.text, count };
+  const { tracker, count } = scrubPansTracked(createEditTracker(text));
+  return { text: tracker.text, count };
 }
 
 /** Convenience: scrubbed string only. */
@@ -667,4 +746,4 @@ function scrubPans(text) {
   return scrubPansDetailed(text).text;
 }
 
-module.exports = { luhnValid, scrubPans, scrubPansDetailed, scrubSegments };
+module.exports = { luhnValid, scrubPans, scrubPansDetailed, scrubSegments, createEditTracker, applyTrackedEdits, trackedEditList, scrubPansTracked };
