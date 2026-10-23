@@ -208,8 +208,12 @@ function generateContractPDF(contract, customer, sink, opts = {}) {
   // Footer is drawn on every page that gets ADDED after construction; page 1
   // (created in the constructor) is handled manually below. Continuation
   // pages have no header band, so reset the cursor to the top margin.
+  // While the body prints, a page break (even inside one wrapped line) must
+  // not leave the footer's small pale style on the rest of the body.
+  let bodyFont = null;
   doc.on('pageAdded', () => {
     drawFooter(doc);
+    if (bodyFont) doc.fontSize(10.5).font(bodyFont).fillColor(BODY);
     doc.x = MARGIN_X;
     doc.y = doc.page.margins.top;
   });
@@ -231,19 +235,19 @@ function generateContractPDF(contract, customer, sink, opts = {}) {
   const bodyText = contract.contract_text_snapshot || '';
   const bodyOptions = { width: CONTENT_W, align: 'left', lineGap: 3, paragraphGap: 6 };
   const bodyLines = splitBoldLines(bodyText);
-  doc.fontSize(10.5).font('Helvetica').fillColor(BODY);
+  bodyFont = 'Helvetica';
+  doc.fontSize(10.5).font(bodyFont).fillColor(BODY);
   if (!bodyLines.some((line) => line.bold)) {
     doc.text(bodyText, MARGIN_X, y, bodyOptions);
   } else {
     doc.text('', MARGIN_X, y, bodyOptions);
-    // Size and color every line: a page break draws the small pale footer
-    // and leaves that style set for the next line.
     for (const line of bodyLines) {
-      doc.fontSize(10.5).fillColor(BODY).font(line.bold ? 'Helvetica-Bold' : 'Helvetica')
-        .text(line.text || ' ', MARGIN_X, doc.y, bodyOptions);
+      bodyFont = line.bold ? 'Helvetica-Bold' : 'Helvetica';
+      doc.fontSize(10.5).fillColor(BODY).font(bodyFont).text(line.text || ' ', MARGIN_X, doc.y, bodyOptions);
     }
-    doc.font('Helvetica');
   }
+  bodyFont = null;
+  doc.font('Helvetica');
 
   // View-only documents (requires_signature=false) get no signature block —
   // the signing page labels them "no signature required", and the PDF must

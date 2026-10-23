@@ -78,6 +78,23 @@ describe('contract-pdf', () => {
     expect([...new Set(sizes.values())]).toEqual([10.5]);
   });
 
+  test('a wrapped line that crosses a page break keeps the body size', async () => {
+    const PDFDocument = require('pdfkit');
+    const sizes = new Set();
+    const original = PDFDocument.prototype._fragment;
+    PDFDocument.prototype._fragment = function fragment(text, ...rest) {
+      if (/wordy/.test(text)) sizes.add(this._fontSize);
+      return original.call(this, text, ...rest);
+    };
+    try {
+      const body = ['**HEADING**', 'wordy '.repeat(6000)].join('\n');
+      await isPdf(await buildContractPDFBuffer({ ...baseContract, contract_text_snapshot: body }, customer, { signed: false }));
+    } finally {
+      PDFDocument.prototype._fragment = original;
+    }
+    expect([...sizes]).toEqual([10.5]);
+  });
+
   test('does not throw on a long body that spans multiple pages', async () => {
     const long = { ...baseContract, contract_text_snapshot: 'Section.\n\n'.repeat(400) };
     const buf = await buildContractPDFBuffer(long, customer, { signed: false });
