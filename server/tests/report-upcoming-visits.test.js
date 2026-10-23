@@ -327,6 +327,15 @@ describe('per-visit rescheduleUrl (owner 2026-10-06, GATE_REPORT_PLAN_RESCHEDULE
     expect(buildRescheduleLink).toHaveBeenCalledWith('scheduled-lawn', { customerId: 'customer-1', reuseExisting: true });
   });
 
+  test('admin preview: no URL leaves the server (an existing short link is the live customer flow), only the disabled-button marker', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    const data = await buildReportV1Data(BASE_SERVICE, null, makeKnex(fixtures()), { ...LIVE, preview: true });
+    expect(data.upcomingVisitsCard.visits).toHaveLength(4);
+    expect(data.upcomingVisitsCard.visits.every((v) => v.rescheduleUrl === null && v.reschedulePreview === true)).toBe(true);
+    expect(buildRescheduleLink).not.toHaveBeenCalled();
+  });
+
   test('an in-progress visit (en_route / on_site) gets no link: the reschedule page would refuse it (codex #6088 r1)', async () => {
     process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
     process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';

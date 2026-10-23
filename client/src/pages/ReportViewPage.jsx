@@ -70,6 +70,7 @@ import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { reportGreetingFirstName } from '../lib/reportGreeting';
+import { adminLoginUrl } from '../utils/admin-fetch';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -93,6 +94,14 @@ const sentReportEvents = new Set();
 // Tokens whose /data payload came back flagged staffViewer: trackReportEvent
 // drops every event for them so staff QA never pollutes customer analytics.
 const staffViewTokens = new Set();
+// ADMIN PREVIEW (/admin/report-preview/:serviceId): the report for a visit that is
+// not completed has no record and no token, so the tree below is handed this
+// placeholder instead. It is registered in staffViewTokens for the whole page
+// life, which reuses the existing staff-QA suppression: every event post is
+// dropped, the cross-sell tap reports a bodyless success without posting, and the
+// referral card never enrolls. The few other token-keyed calls (ask, share) check
+// it directly.
+const PREVIEW_REPORT_TOKEN = 'admin-preview';
 const REVIEW_LOCATIONS = [
   {
     key: 'parrish',
@@ -3130,6 +3139,19 @@ export function PlanSummaryCard({ data, mode }) {
                     Reschedule
                   </a>
                 )}
+                {/* Admin preview: the server sends no live link (it would open the customer's real
+                    reschedule flow), only this marker. Same look, not a link, cannot be clicked. */}
+                {visit.reschedulePreview === true && !visit.rescheduleUrl && (
+                  <span
+                    className="plan-visit-reschedule"
+                    aria-disabled="true"
+                    title="Turned off in the preview"
+                    data-glass-accent=""
+                    style={{ ...actionButtonStyle('plain'), minHeight: 44, padding: '0 14px', opacity: 0.55, cursor: 'not-allowed', display: 'inline-flex', alignItems: 'center' }}
+                  >
+                    Reschedule
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -3517,6 +3539,11 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
     if (!q || asking) return;
+    // Preview: there is no report record to ask about, and nothing may be stored.
+    if (token === PREVIEW_REPORT_TOKEN) {
+      setAnswer('Questions are turned off in the preview.');
+      return;
+    }
     setAsking(true);
     setAnswer('');
     // Staff browsers send their portal JWT, as on the /data read, so the
@@ -6684,6 +6711,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // show feedback. Canceling the native share sheet is not an error and
   // records no event.
   const share = async () => {
+    // Preview: /report/admin-preview is not a real link, so there is nothing to share.
+    if (token === PREVIEW_REPORT_TOKEN) return null;
     try {
       if (navigator.share) {
         await navigator.share({ title: 'Waves service report', url: reportUrl });
@@ -10580,8 +10609,38 @@ function reportDataUrl(token, mode, pinnedAssessment) {
 // the map fields, silently, instead of leaving a dead map behind.
 const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
 
-export default function ReportViewPage() {
-  const { token } = useParams();
+// The banner every preview carries: nothing on this page reached the customer.
+function PreviewBanner() {
+  return (
+    <div
+      role="status"
+      data-report-preview-banner=""
+      style={{
+        // viewport-fit=cover: in an installed iOS PWA the status bar / notch sits over top: 0.
+        position: 'sticky', top: 0, zIndex: 1000, padding: 'calc(10px + env(safe-area-inset-top, 0px)) 16px 10px', textAlign: 'center',
+        background: '#FFF4CC', color: '#5C4400', borderBottom: '1px solid #E5C95C',
+        fontSize: 14, fontWeight: 600,
+      }}
+    >
+      Preview — not sent to the customer
+      <div style={{ fontWeight: 400, marginTop: 2 }}>Products, findings and technician notes appear once the visit is completed.</div>
+    </div>
+  );
+}
+
+// 403 codes from adminAuthenticate that the staff sign-in flow resolves.
+const PREVIEW_SIGN_IN_CODES = new Set(['PASSWORD_CHANGE_REQUIRED', 'MFA_ENROLLMENT_REQUIRED', 'MFA_REQUIRED', 'TOKEN_REVOKED', 'TOKEN_EXPIRED']);
+
+// `previewServiceId` (admin route /admin/report-preview/:serviceId) renders the
+// report for a visit that is NOT completed from the admin preview endpoint
+// instead of a report token. Read-only: the page makes no token-keyed call.
+export default function ReportViewPage({ previewServiceId = null } = {}) {
+  const { token: routeToken } = useParams();
+  const isPreview = Boolean(previewServiceId);
+  const token = isPreview ? PREVIEW_REPORT_TOKEN : routeToken;
+  // The server's refusal for a visit that cannot be previewed (already
+  // completed, cancelled, or signed out), shown instead of the generic 404.
+  const [previewRefusal, setPreviewRefusal] = useState(null);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -10627,7 +10686,14 @@ export default function ReportViewPage() {
   const mapErrorRefetched = useRef(false);
   // Identity of the report on screen: an in-flight map refresh for a report the
   // reader has since navigated away from must not touch the new one.
-  const reportKey = `${token}|${mode}`;
+  // Every preview shares one placeholder token, so the previewed visit is part of the identity.
+  const reportKey = `${token}|${previewServiceId || ''}|${mode}`;
+  const dataUrlFor = useCallback(
+    () => (isPreview
+      ? `${API_BASE}/admin/report-preview/${encodeURIComponent(previewServiceId)}/data`
+      : reportDataUrl(token, mode, pinnedAssessment)),
+    [isPreview, previewServiceId, token, mode, pinnedAssessment],
+  );
   const currentReportKey = useRef(reportKey);
   currentReportKey.current = reportKey;
   useEffect(() => {
@@ -10637,7 +10703,9 @@ export default function ReportViewPage() {
     let cancelled = false;
     setLoading(true);
     setLoadError(false);
-    const dataUrl = reportDataUrl(token, mode, pinnedAssessment);
+    const dataUrl = dataUrlFor();
+    if (isPreview) staffViewTokens.add(token);
+    setPreviewRefusal(null);
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only. Guarded:
@@ -10656,6 +10724,24 @@ export default function ReportViewPage() {
         // when the truth is "this report does not exist".
         if (r.status === 404 || r.status === 410) {
           return r.json().catch(() => ({ error: 'not_found' }));
+        }
+        // Preview: say WHY there is nothing to preview (already completed, cancelled,
+        // not an admin) rather than the retryable error or a plain not-found.
+        if (isPreview && [401, 403, 409].includes(r.status)) {
+          return r.json().catch(() => ({})).then((b) => {
+            // This page sits outside AdminLayoutV2, so it handles the staff session itself: a
+            // missing/expired/revoked JWT and the password-change / MFA gates go through the normal
+            // staff sign-in (which brings the reader back here), not a dead-end refusal card.
+            if (r.status === 401 || PREVIEW_SIGN_IN_CODES.has(b?.code)) {
+              window.location.assign(adminLoginUrl(window.location));
+              // Stay on the loading state while the browser leaves; no refusal card.
+              return new Promise(() => {});
+            }
+            return {
+              error: 'preview_refused',
+              message: b?.error || 'This visit cannot be previewed.',
+            };
+          });
         }
         if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
         return r.json();
@@ -10679,9 +10765,10 @@ export default function ReportViewPage() {
         // Error sentinels (404/410) never carry the flag, so they decide
         // nothing either way.
         if (d && !d.error) {
-          if (d.staffViewer) staffViewTokens.add(token);
+          if (d.staffViewer || isPreview) staffViewTokens.add(token);
           else staffViewTokens.delete(token);
         }
+        if (d?.error === 'preview_refused') setPreviewRefusal(d.message);
         mapsLoadedAt.current = Date.now();
         setData(d);
       })
@@ -10694,7 +10781,7 @@ export default function ReportViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, mode, pinnedAssessment, loadAttempt]);
+  }, [token, mode, pinnedAssessment, loadAttempt, dataUrlFor, isPreview]);
 
   useEffect(() => {
     if (!data || data.error) return;
@@ -10708,10 +10795,10 @@ export default function ReportViewPage() {
   const refreshReportMaps = useCallback(() => {
     if (mode !== 'live' || mapsRefreshing.current) return;
     mapsRefreshing.current = true;
-    const requestedFor = `${token}|${mode}`;
+    const requestedFor = reportKey;
     let staffToken = null;
     try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
-    fetch(reportDataUrl(token, mode, pinnedAssessment), {
+    fetch(dataUrlFor(), {
       cache: 'no-store',
       headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
     })
@@ -10729,7 +10816,7 @@ export default function ReportViewPage() {
       })
       .catch(() => {})
       .finally(() => { mapsRefreshing.current = false; });
-  }, [token, mode, pinnedAssessment]);
+  }, [reportKey, mode, dataUrlFor]);
   useEffect(() => {
     if (mode !== 'live' || !dataHasMaps) return undefined;
     const onVisible = () => {
@@ -10806,6 +10893,14 @@ export default function ReportViewPage() {
   }, [data]);
 
   if (loading) return <LoadingState glass={glassActive} />;
+  if (isPreview && previewRefusal) return (
+    <>
+      <PreviewBanner />
+      <CustomerColumn>
+        <PublicStateCard state="not-found" contact="none" title="No preview for this visit">{previewRefusal}</PublicStateCard>
+      </CustomerColumn>
+    </>
+  );
   // Was a full-viewport centred grid, which pushed the shell footer below the
   // fold (G-02; DECISIONS 09-04 says page roots use flex:1 so the footer
   // follows the content). The shared column is what every other state uses.
@@ -10815,6 +10910,14 @@ export default function ReportViewPage() {
     </CustomerColumn>
   );
   if (!data || data.error) return <NotFoundState />;
+  if (isPreview) {
+    return (
+      <>
+        <PreviewBanner />
+        <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode="live" />
+      </>
+    );
+  }
   if (data.reportVersion === 'service_report_v1') {
     // The PDF artifact is the work-order document (owner 2026-08-03):
     // the renderer hits ?mode=pdf, so the download, the share sheet, and
@@ -10825,4 +10928,10 @@ export default function ReportViewPage() {
     return <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode={mode} />;
   }
   return <LegacyReport data={data} token={token} glass={glassActive} />;
+}
+
+// Route element for /admin/report-preview/:serviceId.
+export function ReportPreviewPage() {
+  const { serviceId } = useParams();
+  return <ReportViewPage previewServiceId={serviceId} />;
 }
