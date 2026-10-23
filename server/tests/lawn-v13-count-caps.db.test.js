@@ -1593,9 +1593,9 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(limitBlocks(off)).toEqual([]);
       });
 
-      test('the amount caps are Arena, Blindside, Velista and Artavia, and the synthetic row is a hard block in the product\'s own unit', async () => {
+      test('the amount caps are Arena, Blindside, Velista, Artavia and Advion Insect Granule, and the synthetic row is a hard block in the product\'s own unit', async () => {
         const { V13_LIMITS, applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
-        expect(V13_LIMITS.filter((entry) => entry.annualAmount).map((entry) => entry.name)).toEqual([ARENA, BLINDSIDE, 'Velista', 'Artavia 2 SC (Azoxy)']);
+        expect(V13_LIMITS.filter((entry) => entry.annualAmount).map((entry) => entry.name)).toEqual([ARENA, BLINDSIDE, 'Velista', 'Artavia 2 SC (Azoxy)', 'Advion Insect Granule']);
         process.env.GATE_LAWN_V13 = 'true';
         const rows = await applyV13CountCaps(knex, { id: catalog[ARENA].id, name: ARENA }, [], catalog[ARENA].id);
         expect(rows.filter((r) => r.match_type === V13_AMOUNT).map((r) => [r.limit_type, Number(r.limit_value), r.limit_unit, r.severity])).toEqual([['annual_max_rate', 0.294, 'oz/1000sf/year', 'hard_block']]);

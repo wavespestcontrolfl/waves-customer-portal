@@ -1049,6 +1049,27 @@ async function takeAllAreasOn({ svc, knex, offers }) {
   }
 }
 
+// True when the lawn has an active take-all trouble area on file (GATE_LAWN_TROUBLE_AREAS), or when that cannot be read (a failed read or a
+// property that does not resolve). The guide then passes
+// over the large patch Artavia row: Artavia ran in September and Headway in October, both Group 11, and the Headway label allows no more than
+// 2 in a row. A failed read counts as mapped (never as unmapped): the guide then suggests Velista, which works on large patch whether or not
+// take-all is on the lawn, and never the azoxystrobin row for a lawn that may need to skip it. The failure is logged; the guide still answers.
+async function takeAllMappedOn({ svc, knex }) {
+  if (!featureGates.lawnTroubleAreasLive()) return false;
+  try {
+    const areas = require('./lawn-trouble-areas');
+    const propertyId = await areas.propertyOf(knex, svc, { strict: true });
+    if (!propertyId) {
+      logger.warn(`[lawn-fast] visit property unresolved for ${svc.id}: take-all status unknown`);
+      return true;
+    }
+    return (await areas.loadActive(knex, propertyId)).some((area) => area.type === 'take_all');
+  } catch (err) {
+    logger.warn(`[lawn-fast] take-all areas unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return true;
+  }
+}
+
 /**
  * GET /:serviceId/lawn-fast/treatment-guide?assessmentId=: the "Suggested from this lawn" cards for
  * the visit's CONFIRMED assessment (GATE_LAWN_TREATMENT_GUIDE, lawn-treatment-guide.js). The sheet
@@ -1094,7 +1115,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
   const [offers, chinch] = await Promise.all([
-    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex) }),
+    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped: await takeAllMappedOn({ svc, knex }) }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: await limitPlaces(svc, knex) }) : null,
   ]);
   // A read that throws fails the request (the sheet then follows the context's decisions); only a
@@ -1349,6 +1370,7 @@ module.exports = {
   buildLawnFastContext,
   buildLawnFastWateringPreview,
   buildLawnTreatmentGuide,
+  takeAllMappedOn,
   takeAllProductIdsFor,
   troubleTypeIdsFor,
   preflightLawnFastCompletion,

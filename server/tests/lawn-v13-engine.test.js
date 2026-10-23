@@ -267,11 +267,13 @@ const BLINDSIDE = 'Blindside Herbicide';
 const DIMENSION_18 = octoberMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
+// June and July mole cricket nymph spots: the Advion Insect Granule catalog row (20261023140000).
+const advionMigration = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
 // December's whole-lawn bag is the LESCO 10-0-22 row (20261008130000 swaps it in for the staged 24-0-11 line).
 const F10_22 = decemberMigration.NEW_NAME;
 // April's 12x whole-lawn bag is the LESCO 44-0-0 polymer row (20261022195000 swaps it in for the staged 24-0-11 line).
 const F44_0_0 = aprilPolymerMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }

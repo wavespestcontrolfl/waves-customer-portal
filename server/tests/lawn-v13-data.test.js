@@ -23,6 +23,8 @@ const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 const finalPassMigration = require('../models/migrations/20261009150000_lawn_v13_final_pass');
+const advionMigration = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
+const moleCricketRows = require('../models/migrations/20261023141000_lawn_v13_mole_cricket_bait_staged_rows');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 // Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
@@ -191,7 +193,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -331,7 +333,12 @@ describe('staged migration 20261005120000', () => {
       const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : (s[0] === aprilPolymerMigration.OLD_NAME && windowKey === aprilPolymerMigration.APRIL_WINDOW ? aprilPolymerMigration.NEW_NAME : s[0])))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
       // 20261009150000 (v13 final pass) inserts the December weed rows into November (Blindside is compared below).
       const finalPass = windowKey === finalPassMigration.WINDOWS.NOV ? finalPassMigration.WEED_NAMES.filter((n) => n !== BLINDSIDE) : [];
-      const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name), ...finalPass];
+      // 20261023141000 (mole cricket bait): Advion in June and July, Acelepryn in June, Velista in December; the August Talak mole cricket row is deleted.
+      const MC = moleCricketRows.WINDOWS;
+      const moleCricketAdded = { [MC.JUN]: [advionMigration.NAME, migration.NAMES.ACE], [MC.JUL]: [advionMigration.NAME], [MC.DEC]: [migration.NAMES.VEL] }[windowKey] || [];
+      const moleCricketRemoved = windowKey === MC.AUG ? [migration.NAMES.TAL] : [];
+      const spotsBefore = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name), ...finalPass];
+      const spots = [...spotsBefore.filter((n) => !moleCricketRemoved.includes(n)), ...moleCricketAdded.filter((n) => !spotsBefore.includes(n))];
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
@@ -381,7 +388,7 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
     // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row; 20261008130000 inserts the 10-0-22; 20261009100000 uses the existing Topchoice row.
-    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, granuleMigration.GRANULE];
+    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, granuleMigration.GRANULE, advionMigration.NAME];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));

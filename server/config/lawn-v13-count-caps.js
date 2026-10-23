@@ -124,6 +124,18 @@ const V13_MORE_LIMITS = Object.freeze([
       description: `Artavia 2 SC (Azoxy): no more than 7.1 fl oz per 1,000 sq ft (9.6 quarts per acre) a year under the v13 lawn program, all applications on the lawn added up (label). An earlier application with no readable rate counts as 0.77 fl oz. ${FINAL_PASS}.`,
     },
   },
+  {
+    name: 'Advion Insect Granule',
+    // Advion Insect Granule label (EPA 100-1483): "DO NOT exceed 4.6 pounds of Advion Insect Granular Bait per 1000 sq ft per year". The v13 spot rate is
+    // 3 lb, so a second 3 lb pass on a lawn is blocked and a repeat is 1.6 lb or less (owner 2026-10-23). An application the ledger cannot size counts at
+    // the 3 lb program rate.
+    annualAmount: {
+      cap: 4.6,
+      unit: 'lb/1000sf/year',
+      fallbackRate: 3,
+      description: 'Advion Insect Granule: no more than 4.6 lb per 1,000 sq ft a year under the v13 lawn program, all applications on the lawn added up (label EPA 100-1483). An earlier application with no readable rate counts as 3 lb, the program rate.',
+    },
+  },
 ]);
 const V13_LIMITS = Object.freeze([...V13_COUNT_CAPS, ...V13_MORE_LIMITS]);
 

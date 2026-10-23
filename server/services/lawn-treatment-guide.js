@@ -39,7 +39,7 @@ const FUNGICIDE_ROLE = 'fungicide_spot';
 const CATERPILLAR_TRIGGER = 'caterpillars';
 const DRY_SPOT_TRIGGER = 'dry_spots';
 // One entry per rung, in order. The second rung's staged row was renamed by 20261007180000 (it also
-// covers mole cricket nymphs now); a protocol version staged before that still holds the old value.
+// covered mole cricket nymphs) and put back by 20261023141000 (nymphs are Advion's now); either value is the second rung.
 const CHINCH_RUNGS = Object.freeze([
   Object.freeze(['chinch_20_to_25_per_sqft']),
   Object.freeze(['chinch_second_product_caterpillars_or_mole_cricket_nymphs', 'chinch_second_product_or_caterpillars']),
@@ -137,8 +137,8 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  * fungicide in program order is the suggestion; a product that is at a limit, whose limit could not
  * be read, or that the city holds is never suggested (no card, not a fall-through to the next).
  */
-async function addOnOffers({ candidates, rows, svc, knex, places = null }) {
-  const picks = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
+async function addOnOffers({ candidates, rows, svc, knex, places = null, takeAllMapped = false }) {
+  const picks = Object.entries(pickAddOns(candidates, rows, { takeAllMapped })).filter(([, candidate]) => candidate);
   // A take-all row the pick passed over (October's Headway row follows the large patch row) is governed
   // all the same: its limit is read so a forbidden one stays out of the search, and it has no offer.
   const picked = new Set(picks.map(([, candidate]) => idOf(candidate.raw.product.id)));
@@ -197,16 +197,23 @@ async function openSomewhere({ chosen, wide, rows, svc, knex, places, placeBlock
   return new Map([...wide].filter(([id]) => !open.has(id)).map(([id, blocks]) => [id, unread.has(id) ? UNREAD : blocks]));
 }
 
+// A large patch Artavia row (October, December) on a lawn that also has take-all mapped: Artavia already ran in September and
+// Headway in October (both Group 11), and the Headway label allows no more than 2 consecutive Group 11 applications, so the
+// guide passes over the azoxystrobin row and the next fungicide (Velista) is the suggestion (owner 2026-10-23).
+const AZOXYSTROBIN_NAME = /artavia|azoxy/i;
+const LARGE_PATCH_TRIGGER = /large_patch/;
+const isGroup11LargePatchRow = (row, candidate) => AZOXYSTROBIN_NAME.test(row.productName || row.product_name || candidate.raw?.product?.name || '') && LARGE_PATCH_TRIGGER.test(row.gates?.trigger || '');
+
 // The one add-on each kind may suggest: the FIRST fungicide in program order, the others by trigger.
-function pickAddOns(candidates, rows) {
+function pickAddOns(candidates, rows, { takeAllMapped = false } = {}) {
   const order = [...rows.keys()];
   const rank = (candidate) => order.indexOf(idOf(candidate.raw?.substitution?.originalProductId || candidate.raw?.product?.id));
   const withRole = (test) => (candidates || []).filter((candidate) => {
     const row = stagedRowOf(rows, candidate.raw);
-    return row && test(row);
+    return row && test(row, candidate);
   });
   return {
-    fungus: withRole((row) => row.role === FUNGICIDE_ROLE).sort((a, b) => rank(a) - rank(b))[0] || null,
+    fungus: withRole((row, candidate) => row.role === FUNGICIDE_ROLE && !(takeAllMapped && isGroup11LargePatchRow(row, candidate))).sort((a, b) => rank(a) - rank(b))[0] || null,
     caterpillars: withRole((row) => row.gates?.trigger === CATERPILLAR_TRIGGER)[0] || null,
     dry_spots: withRole((row) => row.gates?.trigger === DRY_SPOT_TRIGGER)[0] || null,
   };
@@ -359,8 +366,8 @@ async function resolveChinch({ svc, structured, knex, places = null }) {
 
 /**
  * The chinch rungs that are chinch-only in this program, by the staged rows' triggers (never the name): the ladder's first rung, when
- * every row the protocol stages for that product carries a first-rung trigger. A later rung (Talak) is also the caterpillar and mole
- * cricket product, so a row of it is chinch only when the technician says so (the chinch entry or card, or the place's own decision).
+ * every row the protocol stages for that product carries a first-rung trigger. A later rung (Talak) is also the caterpillar
+ * product, so a row of it is chinch only when the technician says so (the chinch entry or card, or the place's own decision).
  */
 async function chinchOnlyIdsOf({ products, structured, knex }) {
   const first = products.filter((product) => product.rung === 0);

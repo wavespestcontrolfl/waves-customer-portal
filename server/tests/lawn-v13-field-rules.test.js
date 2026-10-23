@@ -40,8 +40,15 @@ describe('recipe text', () => {
     const wait = 'delay watering (irrigation) or mowing for 24 hours after application';
     expect(track.notes.find((line) => line.startsWith('Caterpillars:'))).toContain(wait);
     const acelepryn = track.visits.flatMap((v) => lines(v.secondary)).filter((line) => line.startsWith('Acelepryn'));
-    expect(acelepryn).toHaveLength(3);
-    for (const line of acelepryn) expect(line).toContain(wait);
+    // Four lines: July, August and September carry the caterpillar use, and the June line is the mole cricket use alone (owner
+    // 2026-10-23: soil use, watered in right after application, the opposite of the foliar caterpillar wait).
+    expect(acelepryn).toHaveLength(4);
+    for (const line of acelepryn) {
+      if (/^Acelepryn Insecticide \u2014 mole cricket nymph spots/.test(line)) {
+        expect(line).toMatch(/watered in right after application/);
+        expect(line).not.toMatch(/caterpillar/);
+      } else expect(line).toContain(wait);
+    }
   });
 
   test.each(TRACKS)('%s: the fertilizer safety block is notes only, on the N visits', (grass) => {
@@ -273,9 +280,9 @@ describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
 });
 
 describe('the April customer line', () => {
-  test('keeps the main wording: North Port April still gets a feeding-type pass (Nutra-TECH)', () => {
+  test('says a slow-release feeding (owner 2026-10-23, the April bag is the polymer-coated 44-0-0); North Port April still gets a feeding-type pass (Nutra-TECH)', () => {
     const { PROGRAM_LINES_V13 } = require('../services/service-report/lawn-program-line');
-    expect(PROGRAM_LINES_V13[4].line).toBe('In April the program focuses on a light feeding, plus spot treatment for root disease and chinch bugs where needed.');
-    expect(PROGRAM_LINES_V13[4].claims.feed).toBe('a light feeding');
+    expect(PROGRAM_LINES_V13[4].line).toBe('In April the program focuses on a slow-release feeding, plus spot treatment for root disease and chinch bugs where needed.');
+    expect(PROGRAM_LINES_V13[4].claims.feed).toBe('a slow-release feeding');
   });
 });
