@@ -687,3 +687,81 @@ describe('audit 9: the manual annual-prepay lane accepts a real misting quote', 
     expect(manual._private.manualPrepayBlockingOneTimeCharge({ id: 'e7', estimate_data: pest, onetime_total: pest.result.oneTime ? pest.result.oneTime.total : 0 })).toBe(false);
   });
 });
+
+describe('audit 10: the per-application basis never mistakes the coverage line for setup', () => {
+  const kinds = require('../utils/annual-prepay-line-kinds');
+  const COVERAGE_WAIVED = 'WaveGuard Membership — 12 months prepaid (setup fee waived)'; // the converter's real wording
+  const coverageLine = (amount, description = COVERAGE_WAIVED, withKind = true) => ({
+    description, quantity: 1, unit_price: amount, ...(withKind ? { kind: kinds.ANNUAL_PREPAY_COVERAGE_LINE_KIND } : {}),
+  });
+  const installLine = (amount = 4260) => misting.mistingInstallLine({ description: 'Essential system (drum) Installation', amount });
+  const conn = ({ subtotal, lines, claimAmount = null }) => (table) => ({
+    where: () => ({
+      first: async () => {
+        if (table === 'invoices') return { subtotal, total: subtotal, line_items: lines };
+        if (table === 'setup_fee_claims') return claimAmount == null ? undefined : { amount: claimAmount };
+        return undefined;
+      },
+    }),
+  });
+  const term = { prepay_invoice_id: 'inv-1' };
+  const price = (args, visits) => renewals.seededVisitPriceForTerm(term, conn(args), visits);
+
+  test('misting-only prepay ($708 coverage + $4,260 install): $59 per application, with the coverage kind (direct) and without it (legacy)', async () => {
+    const withKind = [coverageLine(708), installLine()];
+    expect(await price({ subtotal: 4968, lines: withKind }, 12)).toBe(59);
+    // the exact failing case: a legacy coverage line whose "(setup fee waived)" wording used to be read as setup
+    const legacy = [coverageLine(708, COVERAGE_WAIVED, false), installLine()];
+    expect(await price({ subtotal: 4968, lines: legacy }, 12)).toBe(59);
+    expect(await price({ subtotal: 4968, lines: JSON.stringify(legacy) }, 12)).toBe(59);
+  });
+
+  test('the "(setup fee waived)" coverage wording is never subtracted, whatever else is on the invoice', async () => {
+    expect(await price({ subtotal: 708, lines: [coverageLine(708, COVERAGE_WAIVED, false)] }, 12)).toBe(59);
+    expect(kinds.looksLikeLegacyCoverageDescription({ description: COVERAGE_WAIVED })).toBe(true);
+    expect(kinds.looksLikeLegacyCoverageDescription({ description: 'Pest Control — 12 months prepaid (10% prepay discount)' })).toBe(true);
+    expect(kinds.looksLikeLegacyCoverageDescription({ description: 'Bait Station Setup — one-time setup fee' })).toBe(false);
+  });
+
+  test('misting + pest prepay: coverage is the pest and misting annual together, the install is excluded', async () => {
+    const pestAndMisting = 480 + 708;
+    const withKind = [coverageLine(pestAndMisting, 'Pest Control + Mosquito Misting — 12 months prepaid (10% prepay discount)'), installLine()];
+    expect(await price({ subtotal: pestAndMisting + 4260, lines: withKind }, 16)).toBe(Math.round((pestAndMisting / 16) * 100) / 100);
+    const legacy = [coverageLine(pestAndMisting, 'Pest Control + Mosquito Misting — 12 months prepaid (10% prepay discount)', false), installLine()];
+    expect(await price({ subtotal: pestAndMisting + 4260, lines: legacy }, 16)).toBe(Math.round((pestAndMisting / 16) * 100) / 100);
+  });
+
+  test('pest-only prepay with the $99 setup is unchanged (legacy scan, ledger claim, and the kinded direct basis all agree)', async () => {
+    const setup = { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 };
+    const legacy = [coverageLine(1200, 'Pest Control — 12 months prepaid', false), setup];
+    expect(await price({ subtotal: 1299, lines: legacy }, 12)).toBe(100);
+    expect(await price({ subtotal: 1299, lines: legacy, claimAmount: 99 }, 12)).toBe(100);
+    expect(await price({ subtotal: 1299, lines: [coverageLine(1200, 'Pest Control — 12 months prepaid'), setup] }, 12)).toBe(100);
+    const rodent = { description: 'Bait Station Setup — one-time setup fee', quantity: 1, unit_price: 150 };
+    expect(await price({ subtotal: 1350, lines: [coverageLine(1200, 'Rodent Bait — 12 months prepaid', false), rodent] }, 12)).toBe(100);
+  });
+
+  test('a legacy invoice without any kinds or coverage wording is unchanged', async () => {
+    const lines = [{ description: 'Annual prepay — Pest Control', quantity: 1, unit_price: 480 }];
+    expect(await price({ subtotal: 480, lines }, 4)).toBe(120);
+    const withSetup = [...lines, { description: 'Bait Station Setup — one-time setup fee', quantity: 1, unit_price: 150 }];
+    expect(await price({ subtotal: 630, lines: withSetup }, 4)).toBe(120);
+    expect(await price({ subtotal: 480, lines: null }, 4)).toBe(120);
+    expect(await price({ subtotal: 480, lines: 'not json' }, 4)).toBe(120);
+  });
+
+  test('the install is subtracted exactly once even when it equals what is left of the base (no skip shortcut)', async () => {
+    const lines = [{ description: 'Annual prepay', quantity: 1, unit_price: 708 }, installLine(708)];
+    expect(await price({ subtotal: 1416, lines }, 12)).toBe(59);
+  });
+
+  test('the converter mints the coverage line with the durable kind, and the legacy scan skips coverage and marked lines', () => {
+    const conv = read('services/estimate-converter.js');
+    expect(conv).toContain('kind: ANNUAL_PREPAY_COVERAGE_LINE_KIND,');
+    const renewalsSrc = read('services/annual-prepay-renewals.js');
+    expect(renewalsSrc).toContain('!isMistingInstallLine(li) && !looksLikeLegacyCoverageDescription(li)');
+    expect(renewalsSrc).toContain('const coverageLines = (lines || []).filter(isAnnualPrepayCoverageLine);');
+    // the legacy wording the converter builds
+    expect(conv).toContain('WaveGuard Membership — 12 months prepaid (setup fee waived)');
+  });
+});

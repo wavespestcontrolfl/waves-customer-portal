@@ -10,6 +10,7 @@
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { isMistingSystemIdentity, mistingInstallInvoiceLines } = require('../utils/mosquito-misting-system');
+const { ANNUAL_PREPAY_COVERAGE_LINE_KIND } = require('../utils/annual-prepay-line-kinds');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
@@ -8268,6 +8269,9 @@ const EstimateConverter = {
                   : prepayLineDescription,
                 quantity: 1,
                 unit_price: annualAmount,
+                // Durable identity of the coverage line: the readers that slice this invoice across the covered visits
+                // (seededVisitPriceForTerm) take the per-visit basis from it, never from description text.
+                kind: ANNUAL_PREPAY_COVERAGE_LINE_KIND,
               },
               ...(prepayRodentSetupAmount > 0 ? [{
                 description: 'Bait Station Setup — one-time setup fee',
