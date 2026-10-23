@@ -144,6 +144,11 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target }]))).toBeCloseTo(2.0833, 3);
     });
 
+    test('a newer fungicide application with NO target outranks an older large patch one: no cut (the disease is unknown again)', async () => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, daysAgo: 0 }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: '', daysAgo: 5 }] }))).toBeCloseTo(2.0833, 3);
+    });
+
     test('the newest named target at the place decides; a retracted or non-fungicide row is not evidence', async () => {
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Dollar spot', daysAgo: 0 }] }))).toBeCloseTo(3.125, 3);
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: 'Dollar spot' }], { ledger: [{ place: 'front', target: LARGE, daysAgo: 0 }] }))).toBeCloseTo(2.0833, 3);

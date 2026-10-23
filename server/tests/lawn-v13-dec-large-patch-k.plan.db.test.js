@@ -268,6 +268,13 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       expect(await swapped(other)).toBe(true);
     });
 
+    test('a newer fungicide application with NO target outranks an older large patch one: the disease is unknown again, no swap', async () => {
+      await normal(await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, daysAgo: 0 }] }));
+      await normal(await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: '  ', daysAgo: 0 }] }));
+      // An older blank row does not hide a newer large patch one.
+      expect(await swapped(await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, daysAgo: 5 }] }))).toBe(true);
+    });
+
     test('a take-all area with a large patch application at its place is still take-all: no swap', async () => {
       await normal(await decemberVisit([{ type: 'take_all', target: LARGE }]));
     });

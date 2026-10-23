@@ -138,9 +138,9 @@ const isLargePatchTarget = (value) => LARGE_PATCH_TARGET.test(String(value || ''
 
 /**
  * The property's ACTIVE fungus areas that are known to be a LARGE PATCH, as loadActive shows them. The evidence is the newest
- * fungicide application at the area's place (the ledger, retractions left out) that records a target: the area is a large patch only
- * when that target names large patch. An area with no application, with an application that names no target, or whose newest named
- * target is another disease (gray leaf spot, Pythium, dollar spot, fairy ring, rust) is NOT returned: the answer fails closed when the
+ * fungicide application at the area's place (the ledger, retractions left out), whatever it recorded: the area is a large patch only
+ * when THAT application's target names large patch. An area with no application, whose newest application names no target (it
+ * outranks an older large patch one: the disease is unknown again), or whose newest target is another disease (gray leaf spot, Pythium, dollar spot, fairy ring, rust) is NOT returned: the answer fails closed when the
  * disease is unknown. A read failure throws, like loadActive.
  */
 async function loadActiveLargePatch(knex, propertyId) {
@@ -151,7 +151,6 @@ async function loadActiveLargePatch(knex, propertyId) {
     .whereNull('retracted_at')
     .whereIn('treated_place', [...new Set(areas.map((area) => area.place))])
     .whereRaw("lower(category) = 'fungicide'")
-    .whereRaw("btrim(coalesce(target_pest, '')) <> ''")
     .orderByRaw('application_date DESC, created_at DESC')
     .select('treated_place', 'target_pest');
   const newest = new Map();

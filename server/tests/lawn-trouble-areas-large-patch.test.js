@@ -52,7 +52,17 @@ describe('loadActiveLargePatch', () => {
     expect(calls).toEqual(expect.arrayContaining([
       ['table', 'property_application_history'], ['where', { property_id: PROPERTY }], ['whereNull', 'retracted_at'], ['whereIn', 'treated_place', ['front', 'back', 'left_side']],
     ]));
-    expect(calls.filter((call) => call[0] === 'whereRaw').map((call) => call[1])).toEqual(["lower(category) = 'fungicide'", "btrim(coalesce(target_pest, '')) <> ''"]);
+    // Only the category is filtered: a newer fungicide application with NO target outranks an older large patch one.
+    expect(calls.filter((call) => call[0] === 'whereRaw').map((call) => call[1])).toEqual(["lower(category) = 'fungicide'"]);
+  });
+
+  test('the newest application decides even when it names no target: an older large patch row is stale after it', async () => {
+    jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', place: 'front', type: 'fungus' }, { id: 'b', place: 'back', type: 'fungus' }]);
+    const { knex } = ledgerKnex([
+      { treated_place: 'front', target_pest: null }, { treated_place: 'front', target_pest: 'Large patch' },
+      { treated_place: 'back', target_pest: '' }, { treated_place: 'back', target_pest: 'Brown patch' },
+    ]);
+    expect(await areas.loadActiveLargePatch(knex, PROPERTY)).toEqual([]);
   });
 
   test('an area with no ledger row is not a large patch (the disease is unknown), and a failed read throws', async () => {
