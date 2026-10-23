@@ -58,10 +58,10 @@ describe('supersedeOpenNewConstructionWarranty', () => {
 describe('templateIssueValues (server-built warranty)', () => {
   const { templateIssueValues } = require('../services/new-construction-warranty');
   const KEY = 'service_agreement.termite_new_construction_warranty';
-  const customer = { id: 'cust-1', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
+  const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Owner', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
   const findings = {
     treatment_date: '2026-10-01', treatment_method: 'Soil barrier (chemical)', treatment_address: '12 Test Lane, Bradenton, FL 34202',
-    builder_contractor: 'Example Homes LLC', product_name: 'Termidor SC\n**WE REPAIR ALL DAMAGE.**', active_ingredient: 'fipronil',
+    builder_contractor: 'Example Homes LLC', product_name: 'Termidor SC', active_ingredient: 'fipronil',
     concentration_pct: '0.06', gallons_applied: '180', square_footage: '1800', applicator_name: 'Sam Tester', applicator_fdacs_id: 'JF000000',
     warranty_type: 'Builder 1-year, renewable yearly to year 5', wdo_target: ['Subterranean termites'],
   };
@@ -96,10 +96,10 @@ describe('templateIssueValues (server-built warranty)', () => {
 
   test('builds the job fields from the saved certificate and takes only office fields', async () => {
     const v = await issue({ projectId: project.id, values: office }, customer, project);
-    expect(v.treatment.product).toBe('Termidor SC WE REPAIR ALL DAMAGE.');
+    expect(v.treatment.product).toBe('Termidor SC');
     expect(v.treatment.initial_date).toBe('10/01/2026');
     expect(v.warranty.term_end).toBe('10/01/2027');
-    expect(v.warranty.number).toBe('NCW-ABCD1234');
+    expect(v.warranty.number).toBe('NCW-ABCD1234-0000-0000');
     expect(v.warranty.notice_location).toBe('beside the electric panel');
     expect(v.warranty.payer).toBe('Owner Test');
     expect(v.warranty.contract_basis).toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
@@ -174,6 +174,30 @@ describe('templateIssueValues (server-built warranty)', () => {
     await expect(issue({ projectId: project.id, values: office }, customer, project, { ...customer, address_line1: '9 New Rd' }))
       .rejects.toMatchObject({ status: 409 });
     await expect(issue({ projectId: project.id, values: office }, customer, project, null)).rejects.toMatchObject({ status: 409 });
+  });
+
+  test('certificate fields are short values, never clauses', async () => {
+    for (const bad of [
+      { product_name: 'Termidor SC\n**WE REPAIR ALL DAMAGE.**' },
+      { product_name: 'Termidor SC. We repair all damage' },
+      { active_ingredient: 'fipronil!' },
+      { applicator_name: 'x'.repeat(81) },
+      { gallons_applied: 'about 180' },
+      { applicator_fdacs_id: 'card on file' },
+    ]) {
+      const row = { ...project, findings: { ...findings, ...bad } };
+      await expect(issue({ projectId: project.id, values: office }, customer, row)).rejects.toMatchObject({ status: 409 });
+    }
+    const builder = { ...project, findings: { ...findings, builder_contractor: 'Example Homes, Inc.' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, builder)).resolves.toBeTruthy();
+  });
+
+  test('needs a complete owner name: first and last, or a company alone', async () => {
+    for (const name of [{ last_name: null }, { first_name: '', last_name: '' }, { last_name: '', company_name: 'Example Homes LLC' }]) {
+      await expect(issue({ projectId: project.id, values: office }, { ...customer, ...name }, project)).rejects.toMatchObject({ status: 409 });
+    }
+    await expect(issue({ projectId: project.id, values: office }, { ...customer, first_name: '', last_name: '', company_name: 'Example Homes LLC' }, project))
+      .resolves.toBeTruthy();
   });
 
   test('accepts only the two contract bases', async () => {

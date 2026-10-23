@@ -127,7 +127,7 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
       applicator_id: text(findings.applicator_fdacs_id),
     },
     warranty: {
-      number: project.id ? `NCW-${String(project.id).replace(/-/g, '').slice(0, 8).toUpperCase()}` : '',
+      number: project.id ? `NCW-${String(project.id).toUpperCase()}` : '',
       structures: WARRANTY_DEFAULT_STRUCTURES,
       plan: text(findings.warranty_type),
       term_end: termEnd,

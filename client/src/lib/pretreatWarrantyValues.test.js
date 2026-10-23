@@ -34,7 +34,7 @@ describe('pretreatWarrantyValues', () => {
     expect(v.warranty.term_end).toBe('10/01/2027');
     expect(v.warranty.renewal_due).toBe('10/01/2027');
     expect(v.warranty.plan_price).toBe('Included in the treatment price');
-    expect(v.warranty.number).toBe('NCW-ABCD1234');
+    expect(v.warranty.number).toBe('NCW-ABCD1234-EF56');
     expect(v.warranty.issue_date).toBe('10/23/2026');
     expect(v.project).toEqual({ builder: 'Example Homes LLC', address: '12 Test Lane, Bradenton, FL 34202', lot: 'Lot 4, Test Grove', permit: 'BP-0001' });
     expect(v.treatment.linear_ft).toBe('N/A');

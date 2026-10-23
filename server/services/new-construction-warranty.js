@@ -228,7 +228,28 @@ function withoutUnit(value, unit) {
   return number ? number[0] : raw;
 }
 
+// Certificate fields that print inside the treatment description are
+// short values, never clauses: one line, no "**", no second sentence, no
+// "!" or "?". Amounts print as numbers once their unit is removed.
+const SHORT_TEXT_FIELDS = ['product_name', 'product_name_other', 'active_ingredient', 'applicator_name', 'builder_contractor', 'permit_number', 'lot_block', 'subdivision'];
+const AMOUNT_FIELDS = { concentration_pct: 'concentration', gallons_applied: 'gallons', square_footage: 'sq_ft', linear_feet: 'linear_ft' };
+function isShortText(value) {
+  const raw = String(value ?? '');
+  return raw.length <= 80 && !/[\r\n]|\*\*|[!?]|\.\s+\S/.test(raw);
+}
+function assertStructuredCertificate(findings) {
+  const failing = [
+    ...SHORT_TEXT_FIELDS.filter((field) => !isShortText(findings[field])),
+    ...Object.entries(AMOUNT_FIELDS)
+      .filter(([field, unit]) => oneLine(findings[field]) && !/^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?$/.test(withoutUnit(findings[field], unit)))
+      .map(([field]) => field),
+    ...(/^[A-Z0-9-]{3,20}$/i.test(oneLine(findings.applicator_fdacs_id)) ? [] : ['applicator_fdacs_id']),
+  ];
+  if (failing.length) throw bad(`Fix these certificate fields first (a short value, not a sentence): ${failing.join(', ')}.`, 409);
+}
+
 function certificateValues(project, findings) {
+  assertStructuredCertificate(findings);
   // project_date is the certificate's treatment date; a legacy
   // findings.treatment_date must agree with it, never override it.
   const initial = parseIso(project.project_date);
@@ -269,7 +290,8 @@ function certificateValues(project, findings) {
         applicator_id: oneLine(findings.applicator_fdacs_id),
       },
       warranty: {
-        number: `NCW-${String(project.id).replace(/-/g, '').slice(0, 8).toUpperCase()}`,
+        // The whole project id: a shortened one can repeat across jobs.
+        number: `NCW-${String(project.id).toUpperCase()}`,
         plan: oneLine(findings.warranty_type),
         term_end: termEnd,
         renewal_due: termEnd,
@@ -310,6 +332,13 @@ const PRINTED_CUSTOMER_FIELDS = ['first_name', 'last_name', 'company_name', 'add
 function assertCustomerPrintable(customer) {
   if (![customer.address_line1, customer.city, customer.zip].every((part) => oneLine(part))) {
     throw bad("Add the owner's or agent's full mailing address (street, city, ZIP) to the customer first.", 409);
+  }
+  // A complete name: a person's first and last name, or a company with no
+  // partial person name (the contract prints the person's name when given).
+  const first = oneLine(customer.first_name);
+  const last = oneLine(customer.last_name);
+  if (!((first && last) || (!first && !last && oneLine(customer.company_name)))) {
+    throw bad("Add the owner's or agent's full name (first and last), or a company name alone, to the customer first.", 409);
   }
   const failing = PRINTED_CUSTOMER_FIELDS
     .filter((field) => customerCopyViolations(oneLine(customer[field])).length > 0);
