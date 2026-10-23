@@ -276,7 +276,7 @@ const FIELD_LABELS = {
   prep_for_customer: 'Customer prep for follow-up',
   host_activity: 'Host / activity notes',
   treatment_areas: 'Treatment areas',
-  // Pre-treatment Certificate of Compliance fields (FBC 1816.1 / R318.1, 105.10)
+  // Pre-treatment Certificate of Compliance fields (FBC 1816.1 / R318.1)
   treatment_address: 'Treatment address',
   lot_block: 'Lot / Block',
   subdivision: 'Subdivision / Community',
@@ -1036,6 +1036,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
           Building Code 1816 / R318 and rules established by the Florida Department of Agriculture &amp; Consumer Services
           {renewableContract ? ', placed under a retreatment contract renewable by payment of an annual fee.' : '.'}
           {' '}The owner is hereby advised to have the property inspected annually by Waves Pest Control, LLC.
+          {' '}Annual reinspection and renewal of the treatment contract are needed to keep this protection in place.
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, color: B.red, marginTop: 10, lineHeight: 1.45 }}>
           Florida law (s. 482.226, F.S.) protects wood-destroying organism notices. Only the property owner may remove this notice.
@@ -1083,7 +1084,7 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
  * the customer estimate visual language while preserving required certificate
  * fields and statutory language. Stamp ID: WV-002.
  *
- * Required content per FBC 1816.1 / R318.1 and 105.10: company name + phone, treatment address
+ * Required content per FBC 1816.1 / R318.1: company name + phone, treatment address
  * or lot/block, method of treatment, the exact compliance statement, and an
  * authorized applicator signature. Additional fields (product/EPA/A.I./
  * concentration, sq ft, gallons, FDACS ID, warranty) satisfy FDACS Rule
@@ -1479,7 +1480,7 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
           marginTop: 12,
           padding: '0 8px',
         }}>
-          This Certificate must be retained in the building permit file as required by FBC 105.10.
+          Keep this Certificate in the building permit file.
         </div>
         {f.comments && (
           <div style={{
