@@ -100,6 +100,19 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
     expect(rainSensorConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['rain_sensor']) })).toBe(true);
   });
 
+  test('the water-source answer is home-bound with its OWN ledger entry (phase 2): the portal PUT stamps it, a staff change strips it', () => {
+    const { waterSourceConfirmedAfterMove, WATER_SOURCE_CONFIRMED_FIELD, changedSizingFields } = require('../services/irrigation-schedule-confirmation');
+    expect(WATER_SOURCE_CONFIRMED_FIELD).toBe('irrigation_water_source');
+    expect(waterSourceConfirmedAfterMove({})).toBe(true);
+    const moved = { irrigation_home_changed_at: '2026-08-20T00:00:00Z' };
+    expect(waterSourceConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: '[]' })).toBe(false);
+    expect(waterSourceConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['rain_sensor']) })).toBe(false);
+    expect(waterSourceConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['irrigation_water_source']) })).toBe(true);
+    // A staff write that CHANGES the answer is not the customer's re-confirmation (same rule as rain_sensor).
+    expect(changedSizingFields({ irrigation_water_source: 'county' }, { irrigation_water_source: 'well' })).toEqual(['irrigation_water_source']);
+    expect(changedSizingFields({ irrigation_water_source: 'county' }, { irrigation_water_source: 'county' })).toEqual([]);
+  });
+
   test('lawn AREA is home-bound with its OWN ledger entry, tied to the lawn-size writers (codex #6498 r1 P2)', () => {
     const { lawnSqftConfirmedAfterMove, LAWN_SQFT_CONFIRMED_FIELD, grassConfirmedAfterMove } = require('../services/irrigation-schedule-confirmation');
     expect(LAWN_SQFT_CONFIRMED_FIELD).toBe('turf_lawn_sqft');
@@ -133,7 +146,7 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
     const path = require('path');
     const prefsPut = fs.readFileSync(path.join(__dirname, '..', 'routes', 'property.js'), 'utf8');
     // Re-saving the rain-sensor toggle confirms it alongside the sizing fields.
-    expect(prefsPut).toMatch(/\[\.\.\.IRRIGATION_SIZING_FIELDS, 'rain_sensor'\]\.filter\(\(f\) => f in updates\)/);
+    expect(prefsPut).toMatch(/\[\.\.\.IRRIGATION_SIZING_FIELDS, 'rain_sensor', 'irrigation_water_source'\]\.filter\(\(f\) => f in updates\)/);
     const turf = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customer-turf-profile.js'), 'utf8');
     // A CHANGED grass value confirms; an unchanged form re-send does not.
     expect(turf).toMatch(/fields\.grass_type !== \(priorRow \? priorRow\.grass_type : null\)/);

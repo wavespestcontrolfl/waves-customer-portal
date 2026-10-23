@@ -16,7 +16,7 @@ jest.mock('../services/irrigation-weekly-email', () => ({
 }));
 
 const { buildWeekPlan, HEAD_PRECIP_RATE_IN_PER_HR, OWNER_HEAD_RATE_IN_PER_HR } = require('../../packages/irrigation-runtime');
-const { waterSavedForDecision, waterSavedSentence, WATER_SAVED_CONSTANTS } = require('../services/irrigation-water-saved');
+const { waterSavedForDecision, waterSavedSentence, waterSavedSetupSentence, WATER_SAVED_CONSTANTS, WATER_RATES_PER_1000_GAL } = require('../services/irrigation-water-saved');
 const { renderWeekPlanEmail, decideWeekPlan, loadCurrentWeekPlan } = require('../services/irrigation-week-plan');
 const { buildWeeklyEmailDecision, weeklyInputsForCustomer, findEligibleCustomers, replayWeekPlanForCustomer } = require('../services/irrigation-weekly-email');
 const { loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
@@ -26,7 +26,8 @@ const now = new Date('2026-09-07T14:05:00Z');
 const ONE_DAY = { maxDaysPerWeek: 1, label: 'Synthetic test policy', expiresOn: '2099-12-31', hoursNote: 'on your assigned day' };
 const TWO_DAY = { ...ONE_DAY, maxDaysPerWeek: 2 };
 const gateOn = () => { process.env.GATE_IRRIGATION_WATER_SAVINGS = 'true'; };
-const gateOff = () => { delete process.env.GATE_IRRIGATION_WATER_SAVINGS; };
+const gateOff = () => { delete process.env.GATE_IRRIGATION_WATER_SAVINGS; delete process.env.GATE_IRRIGATION_WATER_DOLLARS; };
+const dollarsOn = () => { process.env.GATE_IRRIGATION_WATER_DOLLARS = 'true'; };
 
 afterEach(() => {
   gateOff();
@@ -89,6 +90,45 @@ describe('waterSavedForDecision — the gallons block', () => {
     expect(waterSavedForDecision({ lawnSqft: 3000, rates: HEAD_PRECIP_RATE_IN_PER_HR })).toMatchObject({ gallonsPerRun: 950, gallonsPerWeek: 1900 });
     const four = waterSavedForDecision({ lawnSqft: 3000, runMinutes: 20, wateringDays: ['Mon', 'Tue', 'Thu', 'Sat'], systemType: ['spray'], rates: HEAD_PRECIP_RATE_IN_PER_HR });
     expect(four.gallonsPerWeek).toBe(four.gallonsPerRun * 4);
+  });
+});
+
+describe('phase 2 — the dollar range for county water (GATE_IRRIGATION_WATER_DOLLARS)', () => {
+  const rates = HEAD_PRECIP_RATE_IN_PER_HR;
+  const hold = { action: 'hold', reasons: [] };
+
+  test('gate off, or not county water, or no county rate: the block is exactly phase 1 (no dollars key)', () => {
+    expect(waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'county', county: 'Manatee' })).not.toHaveProperty('dollars');
+    dollarsOn();
+    for (const waterSource of ['well', 'reclaimed', null, '']) {
+      expect(waterSavedForDecision({ lawnSqft: 5000, rates, waterSource, county: 'Manatee' })).not.toHaveProperty('dollars');
+    }
+    expect(waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'county', county: 'Hillsborough' })).not.toHaveProperty('dollars');
+    expect(waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'county', county: null })).not.toHaveProperty('dollars');
+  });
+
+  test('county water in a rated county: whole dollars from the DISPLAYED gallons, irrigation-meter low to house-meter high', () => {
+    dollarsOn();
+    const block = waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'county', county: 'Manatee' });
+    // 1,550 gal × $3.11 = $4.82 → $5; × $10.78 = $16.71 → $17; week 3,100 gal → $10 / $33.
+    expect(block.dollars).toEqual({ county: 'Manatee', perThousandLow: 3.11, perThousandHigh: 10.78, runLow: 5, runHigh: 17, weekLow: 10, weekHigh: 33 });
+    expect(waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'county', county: 'Manatee County' }).dollars.county).toBe('Manatee');
+    expect(waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'county', county: 'sarasota' }).dollars).toMatchObject({ county: 'Sarasota', runLow: 6, runHigh: 20 });
+    expect(waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'county', county: 'Charlotte' }).dollars).toMatchObject({ county: 'Charlotte', runLow: 11, runHigh: 26 });
+    expect(Object.keys(WATER_RATES_PER_1000_GAL).sort()).toEqual(['Charlotte', 'Manatee', 'Sarasota']);
+  });
+
+  test('the sentence: the week\'s money on a whole-week hold, a run\'s money otherwise and on the asks; nothing without the key', () => {
+    dollarsOn();
+    const block = waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'county', county: 'Manatee' });
+    expect(waterSavedSentence(block, hold)).toBe("Each 20-minute run you skip is about 1,550 gallons on your lawn, so skipping both of this week's runs saves about 3,100 gallons. On Manatee County water that is roughly $10 to $33 for the week. That assumes a typical half-inch run over your lawn's size on file; enter your zone minutes and watering days under Irrigation in your portal and we'll use those instead.");
+    expect(waterSavedSentence(block, { action: 'run', reasons: [] })).toMatch(/gallons on your lawn\. On Manatee County water that is roughly \$5 to \$17 a run\. That assumes/);
+    expect(waterSavedSentence(block, { action: 'hold', reasons: ['cool_season_cadence'] })).toMatch(/\$5 to \$17 a run\./);
+    expect(waterSavedSetupSentence(block)).toMatch(/real water saved\. On Manatee County water that is roughly \$5 to \$17 a run\. Once your schedule/);
+    const schedule = waterSavedForDecision({ lawnSqft: 5000, runMinutes: 20, wateringDays: ['Mon', 'Thu'], systemType: ['spray'], rates, waterSource: 'county', county: 'Sarasota' });
+    expect(waterSavedSentence(schedule, hold)).toMatch(/saves about 3,100 gallons\. On Sarasota County water that is roughly \$12 to \$40 for the week\.$/);
+    const phase1 = waterSavedForDecision({ lawnSqft: 5000, rates, waterSource: 'well', county: 'Manatee' });
+    expect(waterSavedSentence(phase1, hold)).not.toMatch(/\$/);
   });
 });
 
@@ -196,6 +236,25 @@ describe('end to end — sweep inputs, the email note, replay and the app card',
     process.env.GATE_IRRIGATION_APP_PLAN = 'true';
     process.env.GATE_IRRIGATION_WEEK_PLAN = 'true';
     process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2099-12-31', label: 'Synthetic test policy', hoursNote: 'on your assigned days', coverage: 'all' });
+  });
+
+  test('phase 2 plumbing: the sweep reads pp.irrigation_water_source, withholds it after a move until re-saved, and the frozen block carries the dollars', () => {
+    expect(inputsFor({ ...customer, irrigation_water_source: 'county' }).waterSource).toBe('county');
+    expect(inputsFor({ ...customer, irrigation_water_source: null }).waterSource).toBeNull();
+    const moved = { ...customer, irrigation_water_source: 'county', irrigation_home_changed_at: '2026-09-01T00:00:00Z' };
+    expect(inputsFor({ ...moved, irrigation_confirmed_fields: '[]' }).waterSource).toBeNull();
+    expect(inputsFor({ ...moved, irrigation_confirmed_fields: JSON.stringify(['irrigation_water_source']) }).waterSource).toBe('county');
+    const sweep = require('fs').readFileSync(require.resolve('../services/irrigation-weekly-email'), 'utf8');
+    expect(sweep).toMatch(/'pp\.irrigation_water_source',/);
+    gateOn(); dollarsOn();
+    const on = decideFor({ ...customer, irrigation_water_source: 'county' });
+    expect(on.weekPlan.action).toBe('hold');
+    expect(on.decisionInputs.waterSaved.dollars).toMatchObject({ county: 'Sarasota', weekLow: 12, weekHigh: 40 });
+    expect(on.payload.plan_note).toContain('On Sarasota County water that is roughly $12 to $40 for the week.');
+    // Well water, or the dollars gate off: phase 1 exactly.
+    expect(decideFor({ ...customer, irrigation_water_source: 'well' }).decisionInputs.waterSaved).not.toHaveProperty('dollars');
+    delete process.env.GATE_IRRIGATION_WATER_DOLLARS;
+    expect(decideFor({ ...customer, irrigation_water_source: 'county' }).payload.plan_note).not.toMatch(/\$/);
   });
 
   test('the sweep reads tp.lawn_sqft and withholds it after a move until a LAWN-SIZE writer re-establishes it (codex #6498 r1 P2)', () => {

@@ -8316,7 +8316,7 @@ const inFlightPropertyPrefSaves = new Set();
 // a successful save of any of these stamps the row's irrigation_system on.
 const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationControllerLocation', 'irrigationZones', 'irrigationInchesPerWeek', 'irrigationRunMinutes',
-  'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationIssues',
+  'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationWaterSource', 'irrigationIssues',
 ]);
 
 function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty }) {
@@ -8860,6 +8860,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
     wateringDayCount ? `${wateringDayCount} watering day${wateringDayCount === 1 ? '' : 's'}` : '',
     irrigationInchesSummary.replace(/^ · /, ''),
     prefs.rainSensor ? 'rain sensor' : '',
+    ({ county: 'county water', reclaimed: 'reclaimed water', well: 'well water' })[prefs.irrigationWaterSource] || '',
   ].filter(Boolean);
   // Any persisted irrigation input is a schedule on file — watering days,
   // head type, controller location or notes alone must not read as empty.
@@ -9302,6 +9303,21 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #E7E2D7', borderRadius: 8, background: subtle }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Rain sensor</div>
             <ToggleSwitch checked={!!prefs.rainSensor} onChange={() => updateField('rainSensor', !prefs.rainSensor)} label="Rain sensor installed" />
+          </div>
+        </div>
+        <div style={{ marginTop: 16 }}>
+          <label style={labelStyle}>Water Source</label>
+          <PillSelector
+            value={prefs.irrigationWaterSource || null}
+            onChange={v => updateField('irrigationWaterSource', prefs.irrigationWaterSource === v ? null : v)}
+            options={[
+              { value: 'county', label: 'County water' },
+              { value: 'reclaimed', label: 'Reclaimed' },
+              { value: 'well', label: 'Private well' },
+            ]}
+          />
+          <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+            Where your sprinklers' water comes from. On county water we can tell you what a skipped run is worth; your water bill says which one you have.
           </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, marginTop: 16 }}>

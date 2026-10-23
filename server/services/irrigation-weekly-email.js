@@ -42,7 +42,7 @@ const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, 
 const IN_PROGRESS_RETRIES = 3;
 const IN_PROGRESS_RETRY_MS = 2000;
 // Sprinkler settings follow the home — one resolver shared with the report.
-const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, lawnSqftConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
+const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, lawnSqftConfirmedAfterMove, waterSourceConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
 const { irrigationWaterSavedLive, waterSavedForDecision, waterSavedSetupSentence } = require('./irrigation-water-saved');
 const { ratesForTable } = require('./irrigation-rates');
 const { resolveRestrictionCounty, currentRestrictionPolicy } = require('../config/irrigation-restrictions');
@@ -429,6 +429,8 @@ function decideWeeklyEmail({
   lawnSqft = null,
   // The frozen "water you saved" block for a replay (null for a row without one); omitted = a NEW decision reads the gate.
   waterSaved = undefined,
+  // Phase 2: the portal's water-source answer ('county' | 'reclaimed' | 'well' | null), withheld after a move until re-saved.
+  waterSource = null,
   now = new Date(),
 } = {}, rawArgs = {}) {
   const table = resolveRateTable(rateTable);
@@ -514,6 +516,8 @@ function decideWeeklyEmail({
       // The same reading of drip as `derived` above (line ~452, no ignoreDrip): a turf head beside drip zones is a
       // mixed system HERE, so the setup ask and the sentence agree (default basis), codex r8 P2.
       ignoreDrip: false,
+      waterSource,
+      county,
     });
   };
 
@@ -751,6 +755,7 @@ function decideWeeklyEmail({
       rateTable: table,
       lawnSqft,
       waterSaved,
+      waterSource,
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
@@ -1111,6 +1116,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
       // balance itself deliberately assumes the full program ran (which runs
       // a sensor skipped is unknowable; never impute).
       'pp.rain_sensor',
+      'pp.irrigation_water_source',
       // Runtime entries — minutes per zone × watering days × head type — the
       // natural-unit schedule @waves/irrigation-runtime converts to inches
       // when the inches column itself is blank.
@@ -1219,6 +1225,8 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
     // scheduleUnconfirmed say nothing about the sensor — codex
     // gh-r40/r41).
     rainSensor: rainSensorConfirmedAfterMove(customer) && (customer.rain_sensor === true || customer.rain_sensor === 't'),
+    // Phase 2: the water source is home-bound too (its own ledger entry): withheld after a move until re-saved.
+    waterSource: waterSourceConfirmedAfterMove(customer) ? (customer.irrigation_water_source || null) : null,
     rainfallInches7d: weekWeather.rainInches,
     et0Inches: weekWeather.et0Inches,
     rainSource: weekWeather.rainSource,

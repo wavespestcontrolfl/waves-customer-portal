@@ -106,6 +106,8 @@ const PREFS_FIELD_SCHEMAS = {
     Joi.string().valid('spray', 'drip', 'rotor', '')
   ).allow(null),
   rainSensor: Joi.boolean(),
+  // Where the sprinklers' water comes from; decides whether the Monday plan may price a skipped run (county only).
+  irrigationWaterSource: enumOrNull(['county', 'reclaimed', 'well']),
   irrigationIssues: longText,
   // Same seven keys the pills emit. A length-only check would persist
   // "Monday" with a 200, and both the portal summary and mowingAlertText
@@ -145,7 +147,7 @@ const ALLOWED_FIELDS = [
   'blackout_start', 'blackout_end',
   'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
   'irrigation_inches_per_week', 'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
-  'rain_sensor', 'irrigation_issues',
+  'rain_sensor', 'irrigation_water_source', 'irrigation_issues',
   'mowing_days', 'mowing_time_of_day', 'mowing_notes',
   'hoa_name', 'hoa_restrictions', 'hoa_company', 'hoa_phone', 'hoa_email',
   'hoa_lawn_height', 'hoa_signage_rules', 'hoa_timing_restrictions',
