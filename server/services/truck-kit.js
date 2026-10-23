@@ -144,18 +144,21 @@ const MECHANICAL_NAME = /\b(dethatch\w*|aerat\w*|plugging|top\s*-?dress\w*)\b/i;
 // The specialized area add-ons (migration 20261008200000) are one-tool jobs
 // too: the keys are the checklist items that carry them (tree & shrub's
 // backpack and hand spreader, the lawn push spreader).
+// `restrict` names, per checklist line, the only keys the job needs.
 const FOCUSED_KITS = [
-  { line: 'pest', keys: ['cobweb_duster'], key: /web_sweep/i, name: /\bweb\s*sweep\b/i },
-  { line: 'tree_shrub', keys: ['backpack_sprayer'], key: /hardscape_weed/i, name: /\b(hardscape\s*weed|paver\s*weed)\b/i },
-  { line: 'tree_shrub', keys: ['backpack_sprayer'], key: /lawn_insect_spot/i, name: /\blawn\s*insect\s*spot\b/i },
-  { line: 'tree_shrub', keys: ['hand_spreader'], key: /bed_pre_emergent/i, name: /\bbed\s*pre-?emergent\b/i },
-  { line: 'lawn', keys: ['push_spreader'], key: /lawn_insect_preventive/i, name: /\blawn\s*insect\s*preventive\b/i },
+  { restrict: { pest: ['cobweb_duster'] }, key: /web_sweep/i, name: /\bweb\s*sweep\b/i },
+  { restrict: { tree_shrub: ['backpack_sprayer'] }, key: /hardscape_weed/i, name: /\b(hardscape\s*weed|paver\s*weed)\b/i },
+  { restrict: { tree_shrub: ['backpack_sprayer'] }, key: /lawn_insect_spot/i, name: /\blawn\s*insect\s*spot\b/i },
+  { restrict: { tree_shrub: ['hand_spreader'] }, key: /bed_pre_emergent/i, name: /\bbed\s*pre-?emergent\b/i },
+  { restrict: { lawn: ['push_spreader'] }, key: /lawn_insect_preventive/i, name: /\blawn\s*insect\s*preventive\b/i },
   // Fire ant work (the catalog's fire_ant service and the yard add-on) is
   // broadcast bait plus a mound drench: the spreader, not the pest kit.
-  { line: 'lawn', keys: ['push_spreader'], key: /^fire_ant$|fire_ant_yard/i, name: /\bfire\s*ant\b/i },
+  { restrict: { lawn: ['push_spreader'] }, key: /^fire_ant$|fire_ant_yard/i, name: /\bfire\s*ant\b/i },
+  // Tick control: granular broadcast plus a perimeter spray, the yard gear.
+  { restrict: { lawn: ['push_spreader'], tree_shrub: ['backpack_sprayer'] }, key: /^tick_control$/i, name: /\btick\s*(control|treatment|service)\b/i },
   // The lawn assessment (catalog lawn_inspection: pH, thatch, moisture, pest
   // pressure, density) is a diagnostic: the instruments, never the spreader.
-  { line: 'lawn', keys: ['soil_probe', 'soil_thermometer'], key: /^lawn_inspection$/i, name: /\blawn\s*(health\s*)?(assessment|inspection)\b/i },
+  { restrict: { lawn: ['soil_probe', 'soil_thermometer'] }, key: /^lawn_inspection$/i, name: /\blawn\s*(health\s*)?(assessment|inspection)\b/i },
 ];
 function focusedKitFor(serviceType, serviceKey) {
   return FOCUSED_KITS.find((kit) => (serviceKey && kit.key.test(String(serviceKey))) || kit.name.test(String(serviceType || ''))) || null;
@@ -212,9 +215,9 @@ function promotedKeysFor(serviceType, serviceKey, lines = [], match = null) {
 function serviceRequirement(svc) {
   const focused = focusedKitFor(svc?.name, svc?.serviceKey);
   const match = matchOf(svc?.name, svc?.serviceKey);
-  const lines = focused ? [focused.line] : linesForService(svc?.name, svc?.serviceKey, svc?.category, match);
+  const lines = focused ? Object.keys(focused.restrict) : linesForService(svc?.name, svc?.serviceKey, svc?.category, match);
   if (!lines.length) return null;
-  return { lines, promote: [...new Set(promotedKeysFor(svc?.name, svc?.serviceKey, lines, match))], restrict: focused ? focused.keys : null };
+  return { lines, promote: [...new Set(promotedKeysFor(svc?.name, svc?.serviceKey, lines, match))], restrict: focused ? focused.restrict : null };
 }
 
 // `restrict` is per LINE: { line: Set(keys) } for a line only focused jobs
@@ -230,7 +233,7 @@ function requirementsFor(serviceType, { serviceKey = null, serviceCategory = nul
   for (const part of parts) {
     for (const line of part.lines) {
       if (!part.restrict) restrict[line] = null;
-      else if (restrict[line] !== null) restrict[line] = new Set([...(restrict[line] || []), ...part.restrict]);
+      else if (restrict[line] !== null) restrict[line] = new Set([...(restrict[line] || []), ...(part.restrict[line] || [])]);
     }
   }
   return { lines, promote, restrict };
@@ -366,17 +369,14 @@ async function kitKeyVocabulary(conn = db) {
 // its status: a truck whose last keyed tool was just marked lost is not
 // unconfigured, it is missing a tool (pre-push P1 on #6497).
 // Durable: a truck stays configured after its last keyed tool moves away,
-// because the latest check's roster still names a keyed row (the next check,
-// on the unkeyed roster, is the explicit new state).
+// because the latest check's results snapshot the keys the items carried
+// then (the next check, on the unkeyed roster, is the explicit new state).
 async function truckHasKeys(vehicleId, conn = db) {
   const row = await conn('equipment').where({ assigned_vehicle_id: vehicleId }).whereNotNull('kit_key').first('id');
   if (row) return true;
   const last = await conn('equipment_checks').where({ vehicle_id: vehicleId }).orderBy('checked_at', 'desc').first('results');
   const results = last ? parseGroups(last.results) : [];
-  const ids = results.map((r) => r?.equipment_id).filter((id) => UUID_RE.test(String(id || '')));
-  if (!ids.length) return false;
-  const keyed = await conn('equipment').whereIn('id', ids).whereNotNull('kit_key').first('id');
-  return Boolean(keyed);
+  return results.some((r) => Boolean(normalizeKitKey(r?.kit_key)));
 }
 
 // The keyed tools a truck carries today: keyed live rows minus any with an open
@@ -663,7 +663,7 @@ async function recordTruckCheck({ technicianId, results, clientKey = null, now: 
       throw new TruckCheckError('kit_changed', 'The truck list changed since it was loaded', { kit });
     }
     const technician = await trx('technicians').where({ id: technicianId }).first('id', 'name');
-    const lines = kit.map((item) => ({ ...wanted.get(item.id), name: item.name, assetTag: item.asset_tag }));
+    const lines = kit.map((item) => ({ ...wanted.get(item.id), name: item.name, assetTag: item.asset_tag, kitKey: item.kit_key || null }));
     const missing = lines.filter((line) => line.state === 'missing');
     const damaged = lines.filter((line) => line.state === 'damaged');
     const present = lines.filter((line) => line.state === 'present');
@@ -673,7 +673,9 @@ async function recordTruckCheck({ technicianId, results, clientKey = null, now: 
       technician_id: technicianId,
       checked_at: now,
       // A JS array into a jsonb column is stringified (waves-db skill 5d).
-      results: JSON.stringify(lines.map(({ equipmentId, state, note }) => ({ equipment_id: equipmentId, state, note }))),
+      // The key each item carried AT the check rides in the row, so the
+      // truck's configured state is history, not a re-read of a mutable row.
+      results: JSON.stringify(lines.map(({ equipmentId, state, note, kitKey }) => ({ equipment_id: equipmentId, state, note, kit_key: kitKey || null }))),
       item_count: lines.length,
       missing_count: missing.length,
       damaged_count: damaged.length,

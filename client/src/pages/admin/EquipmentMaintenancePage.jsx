@@ -434,7 +434,7 @@ function FleetTab({
                 {a.title}
                 {a.description && <span style={{
             display: "block",
-            fontSize: 12,
+            fontSize: 14,
             color: "#71717A"
           }}>{a.description}</span>}
               </span>{" "}

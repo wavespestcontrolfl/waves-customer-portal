@@ -227,6 +227,8 @@ describe('recordTruckCheck', () => {
     expect(again).toEqual({ check: first.check, replayed: true });
     expect(db.__state.equipment_checks).toHaveLength(1);
     expect(db.__state.equipment_checks[0].client_key).toBe('page-key-0001');
+    // Each result line snapshots the key the item carried at the check.
+    expect(JSON.parse(db.__state.equipment_checks[0].results).map((r) => r.kit_key)).toEqual([null, null]);
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
     await expect(truckKit.recordTruckCheck({ technicianId: TECH, results: results('present', 'present'), clientKey: 'bad key!' })).rejects.toMatchObject({ code: 'invalid_results' });
   });
@@ -261,8 +263,8 @@ describe('recordTruckCheck', () => {
     // jsonb takes a string, never a JS array (waves-db 5d).
     expect(typeof row.results).toBe('string');
     expect(JSON.parse(row.results)).toEqual([
-      { equipment_id: SPRAYER, state: 'present', note: '' },
-      { equipment_id: METER, state: 'present', note: '' },
+      { equipment_id: SPRAYER, state: 'present', note: '', kit_key: null },
+      { equipment_id: METER, state: 'present', note: '', kit_key: null },
     ]);
     expect(reportEquipmentIssue).not.toHaveBeenCalled();
     expect(raiseAdminAlert).not.toHaveBeenCalled();
@@ -462,8 +464,11 @@ describe('tool gaps by kit key', () => {
 
   test('a truck stays configured after its last keyed tool moves away: the latest check named a keyed row', async () => {
     db.__state.equipment.find((e) => e.id === METER).kit_key = 'moisture_meter';
-    db.__state.equipment_checks = [{ id: 'k1', vehicle_id: TRUCK, technician_id: TECH, checked_at: daysAgo(1), results: JSON.stringify([{ equipment_id: METER, state: 'present', note: '' }, { equipment_id: SPRAYER, state: 'present', note: '' }]) }];
+    db.__state.equipment_checks = [{ id: 'k1', vehicle_id: TRUCK, technician_id: TECH, checked_at: daysAgo(1), results: JSON.stringify([{ equipment_id: METER, state: 'present', note: '', kit_key: 'moisture_meter' }, { equipment_id: SPRAYER, state: 'present', note: '', kit_key: null }]) }];
     db.__state.equipment.find((e) => e.id === METER).assigned_vehicle_id = null;
+    expect(await truckKit.truckHasKeys(TRUCK)).toBe(true);
+    // The snapshot, not the row: clearing the moved item's key later changes nothing.
+    db.__state.equipment.find((e) => e.id === METER).kit_key = null;
     expect(await truckKit.truckHasKeys(TRUCK)).toBe(true);
     expect(await truckKit.toolGapsForTruck(TRUCK, 'termite')).toEqual([{ kit_key: 'moisture_meter', label: 'Moisture meter' }]);
     // A truck that never had a keyed row or a check stays unjudged.
@@ -481,6 +486,8 @@ describe('tool gaps by kit key', () => {
     expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Lawn Assessment', missing: ['Soil probe (thatch)'] }]);
     // The catalog's own fire ant service is the same spreader job, never the pest kit.
     expect(truckKit.requirementsFor('Fire Ant Treatment', { serviceKey: 'fire_ant', serviceCategory: 'pest_control' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']) } });
+    // Tick control is the yard gear: the spreader and the backpack, nothing interior.
+    expect(truckKit.requirementsFor('Tick Control', { serviceKey: 'tick_control', serviceCategory: 'specialty' })).toEqual({ lines: ['lawn', 'tree_shrub'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']), tree_shrub: new Set(['backpack_sprayer']) } });
     // The fire ant yard add-on is a spreader job, never the probe.
     expect(truckKit.requirementsFor('Fire Ant Yard Treatment', { serviceKey: 'area_addon_fire_ant_yard', serviceCategory: 'lawn_care' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']) } });
   });
