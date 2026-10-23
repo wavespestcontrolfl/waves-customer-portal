@@ -10,6 +10,7 @@ const {
   matchCatalogProduct,
   visitNutrientTargets,
   sheetReadsPlansStep,
+  visitProjectionLive,
   fungusNitrogenNotes,
   productSwapNotes,
   chinchRateRows,
@@ -1272,6 +1273,15 @@ router.get('/completion-actions', async (req, res, next) => {
     }
 
     if (!program || !visit) return res.status(404).json({ error: 'Protocol actions not found' });
+
+    // The visit this fallback builds its chips from is the plan's visit: a lawn step rewritten by a rule from the lawn's own data (the
+    // November nitrogen cut, the May Tetrino raise, the December large patch bag) goes through the SAME shared decision the plan and the tank
+    // sheet use (visitNutrientTargets, for the booked visit and only when the plan would read the same step), so the chips and the objective
+    // show exactly what the plan shows. With none of those rules live nothing is read and the visit is the recipe's own object.
+    if (programKey === 'lawn' && visitProjectionLive()) {
+      const scheduled = await visitOnce();
+      ({ visit } = await visitNutrientTargets(db, scheduled, { visit, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey: track, month }) }));
+    }
 
     const exactName = program.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
