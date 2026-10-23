@@ -1360,3 +1360,69 @@ describe('the November nitrogen target on the lawn brief', () => {
     expect(loadActive).not.toHaveBeenCalled();
   });
 });
+
+// GATE_LAWN_CHINCH_TETRINO_RATE (owner 2026-10-22): the brief states the May Tetrino rate the way the plan does.
+describe('the May Tetrino rate on the lawn brief', () => {
+  const { LAWN_V13_VERSION } = require('../services/lawn-program');
+  const areas = require('../services/lawn-trouble-areas');
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_CHINCH_TETRINO_RATE'];
+  const TET = 'Tetrino Insecticide';
+  const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  const may = (version = LAWN_V13_VERSION, month = 5) => mockSummarize.mockReturnValue({
+    version,
+    window: { key: 'may_v13_tetrino_hose', month, title: 'May', visitType: 'hose', goal: 'Insects' },
+    products: [
+      { productName: TET, productId: 'tet', role: 'insecticide', applicationMode: 'broadcast', ratePer1000: 0.367, rateUnit: 'fl oz', defaultInPlan: true, gates: { sunnyTurfOnly: true } },
+      { productName: 'Arena 50 WDG', productId: 'are', role: 'insecticide', applicationMode: 'spot', ratePer1000: 0.147, rateUnit: 'oz', defaultInPlan: false, gates: { trigger: 'chinch' } },
+    ],
+  });
+  let hasArea;
+  let propertyOf;
+  beforeEach(() => {
+    for (const name of GATES) process.env[name] = 'true';
+    hasArea = jest.spyOn(areas, 'hasAreaOfType').mockResolvedValue(true);
+    propertyOf = jest.spyOn(areas, 'propertyOf').mockResolvedValue(PROPERTY);
+  });
+  afterEach(() => { for (const name of GATES) delete process.env[name]; hasArea.mockRestore(); propertyOf.mockRestore(); });
+  const guidanceFor = async () => {
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2027-05-10', property_id: PROPERTY }] }));
+    expect((await PrevisitBrief.generateVisitBrief('svc-1')).generated).toBe(true);
+    return storedBrief(state).brief.product_guidance;
+  };
+  const tetOf = (guidance) => [...guidance.products, ...guidance.conditional_products].find((p) => p.name === TET);
+
+  test('chinch mapped: Tetrino states 0.735 with the reason and the normal figure; Arena is unchanged', async () => {
+    may();
+    const guidance = await guidanceFor();
+    expect(tetOf(guidance).ratePer1000).toBe(0.735);
+    expect(tetOf(guidance).gates).toEqual({ sunnyTurfOnly: true, chinchRate: '0.735 fl oz/1000 (chinch bugs mapped; normal 0.367 fl oz/1000)' });
+    expect(guidance.conditional_products.find((p) => p.name === 'Arena 50 WDG').ratePer1000).toBe(0.147);
+    expect(hasArea).toHaveBeenCalledWith(expect.anything(), PROPERTY, 'chinch', { withinDays: 365 });
+  });
+
+  test('no change and no read when the gate is off, the program is not v13, the month is not May, or no chinch is mapped', async () => {
+    may();
+    delete process.env.GATE_LAWN_CHINCH_TETRINO_RATE;
+    const off = await guidanceFor();
+    expect(tetOf(off).ratePer1000).toBe(0.367);
+    expect(tetOf(off).gates).toEqual({ sunnyTurfOnly: true });
+    process.env.GATE_LAWN_CHINCH_TETRINO_RATE = 'true';
+    may('2026.05');
+    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+    may(LAWN_V13_VERSION, 6);
+    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+    expect(hasArea).not.toHaveBeenCalled();
+    may();
+    hasArea.mockResolvedValue(false);
+    expect(tetOf(await guidanceFor()).ratePer1000).toBe(0.367);
+  });
+
+  test('a failed area read aborts the generation: nothing is stored', async () => {
+    may();
+    hasArea.mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', scheduled_date: '2027-05-10', property_id: PROPERTY }] }));
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('db down');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    expect(state.updates.scheduled_services || []).toEqual([]);
+  });
+});
