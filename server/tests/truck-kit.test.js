@@ -460,13 +460,14 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Fire Ant Yard Treatment', { serviceCategory: 'inspection' })).toEqual(['pest']);
     db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
     db.__state.equipment.push({ id: '66666666-2222-4333-8444-555555555555', name: 'Flashlight', category: 'tool', status: 'active', assigned_vehicle_id: TRUCK, kit_key: 'flashlight' });
+    // The spot treatment add-on brings the termite line AND promotes the foam kit.
     expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceType: 'Quarterly Pest Control', addons: [{ name: 'Termite Spot Treatment' }] }))
-      .toEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });
+      .toEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter and Foam drill kit', tools: ['moisture_meter', 'foam_drill_kit'] });
     const today = require('../utils/datetime-et').etDateString(NOW);
     db.__state.scheduled_services = [{ id: 'v1', technician_id: TECH, scheduled_date: today, status: 'confirmed', service_type: 'Quarterly Pest Control' }];
     expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([]);
     db.__state.scheduled_service_addons = [{ id: 'ad1', scheduled_service_id: 'v1', service_name: 'Termite Spot Treatment', service_key_snapshot: null }];
-    expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Quarterly Pest Control', missing: ['Moisture meter'] }]);
+    expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Quarterly Pest Control', missing: ['Moisture meter', 'Foam drill kit'] }]);
   });
 
   test('readinessToolIssue: nothing while dark, the hold when lit, null (never a throw) on a failed read', async () => {
