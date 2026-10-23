@@ -239,6 +239,13 @@ const SOFTWARE_27A = /software|subscription|saas|\bapp\b|hosting|domain|cloud|\b
 // fee on its own (pnl-report) and a manual expense for it would count it
 // twice. Such a row is parked with that note; other line 10 items book.
 const PROCESSOR_FEE_RE = /stripe|processing fee|processor fee|merchant fee|card fee|payment fee|transaction fee/i;
+// The note a parked business row carries: why it is not booked here.
+function parkNote(line, category) {
+  if (String(line) === '10' && PROCESSOR_FEE_RE.test(String(category || ''))) {
+    return { note: 'processor fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced' };
+  }
+  return {};
+}
 function categoryNameForLine(line, category) {
   const key = String(line || '').trim().toLowerCase();
   if (!key) return null;
@@ -327,8 +334,7 @@ function mapRow(row, ordinal, basename) {
     const categoryName = categoryNameForLine(line, row.category);
     if (!categoryName) {
       bank.status = 'unmatched';
-      const processorFee = line === '10' && PROCESSOR_FEE_RE.test(String(row.category || ''));
-      bank.suggestion = reviewSuggestion(row, processorFee ? { note: 'processor fee: the P&L adds synced Stripe fees on its own; book it only if that Stripe transaction is not synced' } : {});
+      bank.suggestion = reviewSuggestion(row, parkNote(line, row.category));
       out.unmatchedLine = row.sched_c_line || '(none)';
       out.businessParked = true; // business by the ledger, no category to book it under here
       return out;
@@ -380,7 +386,7 @@ function mapNonBusinessRow(row, out, base) {
 function parkForReview(mapped, row) {
   mapped.bank.status = 'unmatched';
   mapped.bank.match_method = null;
-  mapped.bank.suggestion = reviewSuggestion(row, {});
+  mapped.bank.suggestion = reviewSuggestion(row, parkNote(row.sched_c_line, row.category));
   mapped.expense = null;
   mapped.unmatchedLine = row.sched_c_line || '(none)';
   mapped.businessParked = true;
