@@ -67,6 +67,20 @@ describe('the rate cap (7.5 lb per 1,000 sq ft = 0.75 lb per 100 sq ft = 0.98 lb
     expect(limits.ratePer1000(row({ total_amount: 9, amount_unit: 'fl_oz', ...area }))).toBeNull();
   });
 
+  test('an entered oz or g rate is converted to pounds before the cap, and an overridden total still wins when higher', async () => {
+    expect(limits.ratePer1000(row({ application_rate: 120, rate_unit: 'oz' }))).toBe(7.5);
+    expect(limits.ratePer1000(row({ application_rate: 120, rate_unit: 'oz/1000sf' }))).toBe(7.5);
+    expect(limits.ratePer1000(row({ application_rate: 3401.94, rate_unit: 'g' }))).toBeCloseTo(7.5, 3);
+    expect(limits.ratePer1000(row({ application_rate: 5, rate_unit: 'fl_oz' }))).toBeNull();
+    expect(limits.ratePer1000(row({ application_rate: 5, rate_unit: 'lb/palm' }))).toBeNull();
+    // 160 oz/1k is 10 lb/1k; a total of 6 lb over 1,000 sq ft reads 6; the higher reading (10) is judged and sent to the office.
+    const conflicting = row({ application_rate: 160, rate_unit: 'oz', total_amount: 6, amount_unit: 'lb', area_value: 1000, area_unit: 'sqft' });
+    expect(limits.ratePer1000(conflicting)).toBe(10);
+    const { out, notify } = await flag({ rows: [conflicting] });
+    expect(out.blocks[0].message).toMatch(/applied at 10 lb per 1,000 sq ft/);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
   test('the bag label rate of 1 lb per 100 sq ft (10 per 1,000, 1.3 lb N) is over the cap', () => {
     expect(limits.rateFindings([row({ application_rate: 10, rate_unit: 'lb' })])).toEqual([expect.objectContaining({ limitType: 'ornamental_fertilizer_rate', current: 10 })]);
     expect(limits.rateFindings([row({ application_rate: 7.5, rate_unit: 'lb' })])).toEqual([]);

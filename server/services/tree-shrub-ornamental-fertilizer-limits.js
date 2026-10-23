@@ -31,9 +31,15 @@ const UNCHECKED_LIMIT_TYPE = 'ornamental_fertilizer_rate_unchecked';
 const HISTORY_UNCHECKED_LIMIT_TYPE = 'ornamental_fertilizer_history_unchecked';
 const UNCHECKED_LIMIT_TYPES = [UNCHECKED_LIMIT_TYPE, HISTORY_UNCHECKED_LIMIT_TYPE];
 
-const LB_PER_1000_UNITS = new Set(['lb', 'lbs', 'lb/1000sf', 'lb/1000sqft', 'lb/1000ft2']);
+const PER_1000_SUFFIXES = new Set(['', '/1000sf', '/1000sqft', '/1000ft2']);
 // The sheet's weight units for a dry product are g, oz and lb; the total is judged in pounds.
 const LB_PER_UNIT = { lb: 1, lbs: 1, oz: 1 / 16, g: 1 / 453.592 };
+// The factor to pounds of an entered per-1,000 rate unit ('lb', 'oz', 'g', each bare or '/1000sf'), else null.
+function rateUnitFactor(unit) {
+  const [base, ...rest] = squash(unit).split('/');
+  const suffix = rest.length ? `/${rest.join('/')}` : '';
+  return PER_1000_SUFFIXES.has(suffix) ? LB_PER_UNIT[base] ?? null : null;
+}
 function totalLb(row) {
   const factor = LB_PER_UNIT[squash(row.amount_unit)];
   return positive(row.total_amount) && factor ? Number(row.total_amount) * factor : null;
@@ -49,7 +55,8 @@ const positive = (value) => Number.isFinite(Number(value)) && Number(value) > 0 
  */
 function ratePer1000(row) {
   const readings = [];
-  if (positive(row.application_rate) && LB_PER_1000_UNITS.has(squash(row.rate_unit))) readings.push(Number(row.application_rate));
+  const rateFactor = rateUnitFactor(row.rate_unit);
+  if (positive(row.application_rate) && rateFactor) readings.push(Number(row.application_rate) * rateFactor);
   const lb = totalLb(row);
   if (lb !== null && positive(row.area_value) && SQFT_UNITS.has(squash(row.area_unit))) readings.push((lb / Number(row.area_value)) * 1000);
   return readings.length ? Math.max(...readings) : null;
