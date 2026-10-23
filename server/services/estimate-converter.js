@@ -9,7 +9,7 @@
 
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
+const { isMistingSystemIdentity, mistingInstallLine } = require('../utils/mosquito-misting-system');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
@@ -8203,11 +8203,7 @@ const EstimateConverter = {
                 quantity: 1,
                 unit_price: annualPlanSetupFeeAmount,
               }] : []),
-              ...(mistingInstall ? [{
-                description: mistingInstall.description,
-                quantity: 1,
-                unit_price: mistingInstall.amount,
-              }] : [])],
+              ...(mistingInstall ? [mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount })] : [])],
               notes: prepayNotes,
               dueDate: etDateString(),
               ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
@@ -8442,7 +8438,7 @@ const EstimateConverter = {
               // estimate is never also a rodent bait estimate).
               prepayAmount: draftInvoiceAmount != null
                 ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit
-                  - (prepayRodentSetupAmount + annualPlanSetupFeeAmount)
+                  - (prepayRodentSetupAmount + annualPlanSetupFeeAmount + (mistingInstall ? mistingInstall.amount : 0))
                     * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
@@ -8511,11 +8507,7 @@ const EstimateConverter = {
             });
           }
           if (mistingInstall) {
-            lineItems.push({
-              description: mistingInstall.description,
-              quantity: 1,
-              unit_price: mistingInstall.amount,
-            });
+            lineItems.push(mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount }));
           }
           if (firstApplicationAmount > 0) {
             lineItems.push({

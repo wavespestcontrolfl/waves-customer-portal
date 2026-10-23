@@ -14125,11 +14125,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               });
             }
             if (acceptedMistingInstallAmount > 0) {
-              lineItems.push({
-                description: acceptedMistingInstall.description,
-                quantity: 1,
-                unit_price: acceptedMistingInstallAmount,
-              });
+              lineItems.push(require('../utils/mosquito-misting-system').mistingInstallLine({ description: acceptedMistingInstall.description, amount: acceptedMistingInstallAmount }));
             }
             if (includesFirstApplicationLine) {
               // With a resolvable manual discount, the line grosses up by the

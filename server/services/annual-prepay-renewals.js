@@ -2,6 +2,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { addMonthsSameDay: addMonthsSameDayShared } = require('../utils/date-only');
 const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const db = require('../models/db');
+const { mistingInstallLinesTotal } = require('../utils/mosquito-misting-system');
 const logger = require('./logger');
 const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -1141,6 +1142,11 @@ async function seededVisitPriceForTerm(term, conn, coverageVisitCount) {
     } catch { /* unparseable line_items — keep the subtotal basis */ }
   }
   if (setupTotal > 0 && setupTotal < base) base = Math.round((base - setupTotal) * 100) / 100;
+  // The misting installation (misting PR 2a) is one-time money on the acceptance invoice, not coverage money: subtract the lines that
+  // carry the install marker (a durable identity in line_items, never the description) so a gap-filled visit does not inherit
+  // an install share as its application price. Independent of the setup subtraction above.
+  const mistingInstallTotal = mistingInstallLinesTotal(inv?.line_items);
+  if (mistingInstallTotal > 0 && mistingInstallTotal < base) base = Math.round((base - mistingInstallTotal) * 100) / 100;
   return base > 0 ? Math.round((base / coverageVisitCount) * 100) / 100 : null;
 }
 
@@ -11224,6 +11230,8 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
 
 module.exports = {
   createTermForAnnualPrepay,
+  // The per-application price a gap-filled visit inherits from the prepay invoice (setup and misting install lines excluded).
+  seededVisitPriceForTerm,
   termiteDeclineBlockedReason,
   whereTermCurrentOrAwaitingInstallation,
   // Codex pre-push P1: the portal GET (property.js) and /api/auth/me's

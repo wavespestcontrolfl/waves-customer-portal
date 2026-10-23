@@ -137,8 +137,8 @@ describe('the install: a named line on the acceptance invoice and one office bel
   test('the converter bills it on BOTH invoices (standard and annual prepay) and the public accept bills it on its standard invoice', () => {
     const src = read('services/estimate-converter.js');
     expect(src).toContain('const mistingInstall = frozenMistingInstall(estimateData);');
-    expect(src).toMatch(/\.\.\.\(mistingInstall \? \[\{\s*description: mistingInstall\.description,\s*quantity: 1,\s*unit_price: mistingInstall\.amount,\s*\}\] : \[\]\)/);
-    expect(src).toMatch(/if \(mistingInstall\) \{\s*lineItems\.push\(\{\s*description: mistingInstall\.description,/);
+    expect(src).toContain('...(mistingInstall ? [mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount })] : [])');
+    expect(src).toContain('lineItems.push(mistingInstallLine({ description: mistingInstall.description, amount: mistingInstall.amount }));');
     const route = read('routes/estimate-public.js');
     expect(route).toContain('const acceptedMistingInstall = treatAsOneTime ? null : EstimateConverter.frozenMistingInstall(conversionEstData);');
     expect(route).toContain('acceptedRodentSetupAmount > 0 || acceptedMistingInstallAmount > 0)) {');

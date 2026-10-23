@@ -11,6 +11,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
+const { resolveAddonUnitPrice } = require('../services/misting-refill-pricing');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
@@ -2793,7 +2794,7 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
   return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, conn = db }) {
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, parentVisit = null, conn = db }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
@@ -2842,6 +2843,11 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price, { recurringOverride: recurringMembershipBooking });
       const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
       if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    }
+    // A misting refill takes the plan's solution price (Standard / Natural / Premium) instead of the catalog Standard price; every other
+    // add-on goes through unchanged (misting PR 2a, services/misting-refill-pricing.js).
+    if (addonService?.service_key === 'mosquito_misting_refill') {
+      base = await resolveAddonUnitPrice({ serviceKey: addonService.service_key, price: base, catalogBasePrice: addonService.base_price }, parentVisit || { customer_id: customer?.id }, conn);
     }
     const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
       serviceKey: addonService?.service_key,
@@ -8747,6 +8753,7 @@ async function scheduleCreateHandler(req, res, next) {
       discountAmount,
       customer,
       recurringMembershipBooking,
+      parentVisit: { source_estimate_id: linkedEstimateId, customer_id: customer?.id },
     });
 
     // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
