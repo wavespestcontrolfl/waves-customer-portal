@@ -35,7 +35,14 @@ describe('pretreatSentSnapshot (pure)', () => {
   test('every delivered-send update writes the copy (send, held release, send with invoice)', () => {
     const route = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'routes', 'admin-projects.js'), 'utf8');
     // Call sites only (the definition reads "function pretreatSentSnapshot(").
-    expect(route.match(/(?<!function )pretreatSentSnapshot\((project|refreshed), projectCols\)/g)).toHaveLength(3);
+    // Call sites only, each on the row the send delivered: the post-claim
+    // re-read (updatedProject / refreshed), never the pre-claim read.
+    const calls = route.match(/(?<!function )pretreatSentSnapshot\((\w+), projectCols\)/g);
+    expect(calls).toEqual([
+      'pretreatSentSnapshot(updatedProject, projectCols)',
+      'pretreatSentSnapshot(refreshed, projectCols)',
+      'pretreatSentSnapshot(refreshed, projectCols)',
+    ]);
   });
 });
 

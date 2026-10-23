@@ -3851,7 +3851,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       // (closed_at stays set and closeout artifacts key on status='closed').
       deliveryUpdate.status = project.status === 'closed' ? project.status : 'sent';
       deliveryUpdate.sent_at = project.sent_at || db.fn.now();
-      Object.assign(deliveryUpdate, pretreatSentSnapshot(project, projectCols));
+      // The row re-read after the claim is what this send delivered.
+      Object.assign(deliveryUpdate, pretreatSentSnapshot(updatedProject, projectCols));
       if (wdoFiling && projectCols.wdo_sent_filings) {
         // Atomic jsonb append — /send has no send claim, so a concurrent send
         // must not lose a filing record to read-modify-write.
@@ -5577,7 +5578,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         // (closed_at stays set and closeout artifacts key on status='closed').
         status: project.status === 'closed' ? project.status : 'sent',
         sent_at: project.sent_at || db.fn.now(),
-        ...pretreatSentSnapshot(project, projectCols),
+        // The row re-read after the claim is what this send delivered.
+        ...pretreatSentSnapshot(refreshed, projectCols),
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,
