@@ -340,6 +340,48 @@ describe('create and list', () => {
     expect(store.rows.get(item.id).value).toBeNull();
   });
 
+  test('a tax label in the label and the digits in the value are refused together, on create and across two edits', async () => {
+    const refuse = async (res) => {
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/tax ID/);
+      expect(JSON.stringify(res.body)).not.toMatch(/123456789/);
+    };
+    // Create: label EIN + value 123456789 in one request.
+    await refuse(await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'custom', label: 'EIN', value: '123456789' }));
+    await refuse(await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'custom', label: 'Tax ID', notes: '123456789' }));
+    await refuse(await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'w9', value: '123456789' })); // the catalog label is W-9
+    expect([...store.rows.values()]).toHaveLength(0);
+
+    // Two edits that build the same thing: the label first, then the value.
+    const first = await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'custom', label: 'EIN' });
+    expect(first.status).toBe(201);
+    await refuse(await call('PATCH', `/api/admin/bid-kit/${first.body.item.id}`, { value: '123456789', expected_updated_at: first.body.item.updated_at }));
+    expect(store.rows.get(first.body.item.id).value).toBeNull();
+
+    // And the other way round: the value first, then the label (read against the stored value).
+    const second = await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'custom', label: 'Policy number', value: '123456789' });
+    expect(second.status).toBe(201);
+    await refuse(await call('PATCH', `/api/admin/bid-kit/${second.body.item.id}`, { label: 'EIN', expected_updated_at: second.body.item.updated_at }));
+    expect(store.rows.get(second.body.item.id).label).toBe('Policy number');
+    // A change to an unrelated field leaves the stored pair alone and is accepted.
+    expect((await call('PATCH', `/api/admin/bid-kit/${second.body.item.id}`, { notes: 'Call the agent', expected_updated_at: second.body.item.updated_at })).status).toBe(200);
+  });
+
+  test('reference details are screened with the rest of the row', async () => {
+    const res = await call('POST', '/api/admin/bid-kit', { kind: 'reference', item_key: 'reference', details: { contactRole: 'EIN', annualValue: '123456789' } });
+    expect(res.status).toBe(400);
+    const ok = await call('POST', '/api/admin/bid-kit', { kind: 'reference', item_key: 'reference', details: { entity: 'Sample District', annualValue: '123456789' } });
+    expect(ok.status).toBe(201); // a plain number with no tax label near it
+    const bad = await call('PATCH', `/api/admin/bid-kit/${ok.body.item.id}`, { label: 'Taxpayer ID', expected_updated_at: ok.body.item.updated_at });
+    expect(bad.status).toBe(400);
+  });
+
+  test('a label such as "Policy number" with nine digits in the value is accepted', async () => {
+    const res = await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'custom', label: 'Policy number', value: '123456789' });
+    expect(res.status).toBe(201);
+    expect(res.body.item.value).toBe('123456789');
+  });
+
   test('a nine-digit policy number with no tax label is accepted; the same digits after a tax label are not', async () => {
     const ok = await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'insurance_certificate', value: '123456789', source_document: 'Certificate, policy 987654321' });
     expect(ok.status).toBe(201);

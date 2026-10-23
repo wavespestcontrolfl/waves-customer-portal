@@ -273,6 +273,35 @@ describe('tax IDs are never stored', () => {
     expect(looksLikeTaxId(`SSN${' '.repeat(13)}123456789`)).toBe(false); // 13
   });
 
+  describe('a whole item is screened as it will be stored', () => {
+    const has = (row) => catalog.rowHasTaxId(row);
+
+    test('a tax label in one field and nine digits in another are read together, in either order', () => {
+      expect(has({ label: 'EIN', value: '123456789' })).toBe(true);
+      expect(has({ label: 'Tax ID', notes: '123456789' })).toBe(true);
+      expect(has({ label: 'Company', value: 'TIN', source_document: '123456789' })).toBe(true); // any field pair
+      expect(has({ label: 'W-9', value: '123456789' })).toBe(true);
+      expect(has({ label: 'Taxpayer ID', value: '123-45-6789' })).toBe(true);
+      expect(has({ label: 'Policy', value: '123456789', notes: 'EIN' })).toBe(true); // every ordered pair is read, whatever the field order
+      expect(has({ label: 'Policy', value: 'EIN', notes: '123456789' })).toBe(true);
+    });
+
+    test('reference details are fields too', () => {
+      expect(has({ label: 'Sample District', details: { contactRole: 'EIN', annualValue: '123456789' } })).toBe(true);
+      expect(has({ label: 'EIN', details: { entity: '123456789' } })).toBe(true);
+      expect(has({ label: 'Sample District', details: { entity: 'Sample District', phone: '941-555-0100', annualValue: '24000' } })).toBe(false);
+    });
+
+    test('an ordinary number with no tax label near it passes', () => {
+      expect(has({ label: 'Policy number', value: '123456789' })).toBe(false);
+      expect(has({ label: 'Certificate of insurance', value: '987654321', source_document: 'Certificate dated Sep 1' })).toBe(false);
+      expect(has({ label: 'FDACS license number', value: 'JB000000' })).toBe(false);
+      expect(has({ label: 'Phone', value: '941-555-0100' })).toBe(false);
+      expect(has({})).toBe(false);
+      expect(has(null)).toBe(false);
+    });
+  });
+
   test('numbers in limits or an annual value are not read as tax IDs', () => {
     expect(containsTaxId({ glEachOccurrence: 123456789, annualValue: 987654321 })).toBe(false);
   });

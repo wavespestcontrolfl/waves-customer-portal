@@ -410,6 +410,23 @@ describeDb('Bid kit (PostgreSQL)', () => {
       });
     });
 
+    test('a tax label and a nine-digit value are screened together as stored: across two edits, and in reference details', async () => {
+      const first = await call('POST', '', { kind: 'fact', item_key: 'custom', label: 'EIN' });
+      expect(first.status).toBe(201);
+      const refused = await call('PATCH', `/${first.body.item.id}`, { value: '123456789', expected_updated_at: first.body.item.updated_at });
+      expect(refused.status).toBe(400);
+      expect(JSON.stringify(refused.body)).not.toContain('123456789');
+      expect((await rowOf(first.body.item.id)).value).toBeNull();
+      const second = await call('POST', '', { kind: 'fact', item_key: 'custom', label: 'Policy number', value: '123456789' });
+      expect(second.status).toBe(201);
+      expect((await call('PATCH', `/${second.body.item.id}`, { label: 'EIN', expected_updated_at: second.body.item.updated_at })).status).toBe(400);
+      expect((await rowOf(second.body.item.id)).label).toBe('Policy number');
+      // Stored jsonb details are read back as fields too.
+      const reference = await call('POST', '', { kind: 'reference', item_key: 'reference', details: { entity: 'Sample District', annualValue: '123456789' } });
+      expect(reference.status).toBe(201);
+      expect((await call('PATCH', `/${reference.body.item.id}`, { label: 'Taxpayer ID', expected_updated_at: reference.body.item.updated_at })).status).toBe(400);
+    });
+
     test('one live row per catalog item (references repeat); archive keeps the row and frees the slot', async () => {
       await create({ item_key: 'w9' });
       expect((await call('POST', '', { kind: 'document', item_key: 'w9' })).status).toBe(409);

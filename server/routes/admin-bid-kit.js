@@ -76,7 +76,7 @@ function cleanObject(value) {
 }
 
 // The column values a request carries, or the refusal. Dates are real calendar days; no field may hold a tax ID.
-function toColumns(body, kind) {
+function toColumns(body, kind, stored = {}) {
   const out = {};
   for (const key of ['label', 'value', 'source_document', 'notes']) {
     if (body[key] === undefined) continue;
@@ -94,7 +94,10 @@ function toColumns(body, kind) {
     if (body.details !== null && kind !== 'reference') return { refused: 'details belong to references only' };
     out.details = cleanObject(body.details);
   }
-  if (catalog.containsTaxId([out.label, out.value, out.source_document, out.notes, out.details])) return { refused: TAX_ID_REFUSED };
+  // Screened as the row will be stored: the stored values with this edit applied, so a label saved in one edit and a number
+  // saved in another are read together.
+  const merged = Object.fromEntries(['label', 'value', 'source_document', 'notes', 'details'].map((key) => [key, key in out ? out[key] : stored[key]]));
+  if (catalog.rowHasTaxId(merged)) return { refused: TAX_ID_REFUSED };
   return { columns: out };
 }
 
@@ -202,7 +205,7 @@ router.patch('/:id', async (req, res, next) => {
     if (!Object.keys(rest).length) return res.status(400).json({ error: 'Nothing to change' });
     const outcome = await store.updateItem(req.params.id, (row) => {
       if (!sameInstant(row.updated_at, expected)) return { error: { status: 409, message: CHANGED } };
-      const built = toColumns(rest, row.kind);
+      const built = toColumns(rest, row.kind, row);
       if (built.refused) return { error: { status: 400, message: built.refused } };
       const columns = built.columns;
       // A change to anything the sign-off covered clears the sign-off in this same update.

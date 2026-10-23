@@ -139,6 +139,17 @@ const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. Thes
 const looksLikeTaxId = (text) => typeof text === 'string' && TAX_ID_PATTERN.test(text.replace(/_/g, ' '));
 // An uploaded file's name (the strict rule above). Underscores count as spaces, as in typed text.
 const fileNameHasTaxId = (name) => typeof name === 'string' && (FILE_NAME_TAX_ID.test(name.replace(/_/g, ' ')) || looksLikeTaxId(name));
+// A whole item, as it will be stored (stored values with an edit applied). Each text field is screened alone, and every
+// ordered pair of text fields is screened as one string, so a tax label in one field and the nine digits in another ("EIN" in
+// the label, 123456789 in the value; or the same built across two edits) cannot get past the label rule. A reference's
+// details count as fields too. A number with no tax label near it (a policy number) passes.
+function rowHasTaxId(row) {
+  const r = row || {};
+  const details = r.details && typeof r.details === 'object' ? Object.values(r.details) : [];
+  const parts = [r.label, r.value, r.source_document, r.notes, ...details].filter((part) => typeof part === 'string' && part.trim() !== '');
+  if (parts.some(looksLikeTaxId)) return true;
+  return parts.some((a, i) => parts.some((b, j) => i !== j && looksLikeTaxId(`${a} ${b}`)));
+}
 function containsTaxId(value) {
   if (value == null) return false;
   if (typeof value === 'string') return looksLikeTaxId(value);
@@ -263,5 +274,5 @@ module.exports = {
   LIMIT_KEYS, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, MAX_LIMIT_DOLLARS, REFERENCE_DETAIL_KEYS, PUBLIC_OR_PRIVATE,
   SUBSTANTIVE_FIELDS, EXPIRING_DAYS, STATUS, STATUS_ORDER, STATUS_LABEL, SIGN_OFF_REFUSAL,
   catalogItem, catalogSections, itemStatus, buildChecklist, summarize, changesSubstance,
-  TAX_ID_REFUSED, looksLikeTaxId, fileNameHasTaxId, containsTaxId, etToday, dayText, daysBetween,
+  TAX_ID_REFUSED, looksLikeTaxId, fileNameHasTaxId, containsTaxId, rowHasTaxId, etToday, dayText, daysBetween,
 };
