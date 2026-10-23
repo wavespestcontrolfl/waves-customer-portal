@@ -4,7 +4,6 @@ import {
   pretreatWarrantyValues,
   basisDateProblem,
   daysSinceTreatment,
-  warrantyContractBasis,
   warrantyEligible,
   warrantyPlanYears,
 } from './pretreatWarrantyValues';
@@ -62,12 +61,6 @@ describe('pretreatWarrantyValues', () => {
     expect(pretreatWarrantyValues({ findings: { ...findings, warranty_type: 'No warranty' } }).warranty.term_end).toBe('');
   });
 
-  it('words the two lawful contract bases', () => {
-    expect(warrantyContractBasis({ kind: 'master', builder: 'Example Homes LLC', date: '09/01/2026' }))
-      .toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
-    expect(warrantyContractBasis({ kind: 'signed', date: '09/30/2026' }))
-      .toBe('Signed by the owner or authorized agent before treatment, on 09/30/2026.');
-  });
 
   it('offers the warranty only for one soil-barrier application with a plan', () => {
     expect(warrantyEligible(findings)).toBe(true);

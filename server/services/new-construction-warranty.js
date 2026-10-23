@@ -1,6 +1,9 @@
 // New Construction Termite Warranty (Rule 5E-14.105(3)): one live warranty
 // per pre-treat job. The warranty number (NCW-…, from the project id) names
 // the job in every issued snapshot.
+const db = require('../models/db');
+const { etDateString } = require('../utils/datetime-et');
+
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
 
@@ -62,13 +65,161 @@ function flattenWarrantyValue(value) {
   return value;
 }
 
-function warrantySafeValues(templateKey, values) {
-  return templateKey === NEW_CONSTRUCTION_WARRANTY_KEY ? flattenWarrantyValue(values) : values;
+
+// ── Server-built warranty values (Codex #6515 r4) ──────────────────────────
+// The warranty is built here from the saved pre-treat certificate, never from
+// values a browser assembled: the issue route needs the project, the job
+// fields come from its findings, the issue date is the server's ET date, and
+// only the office's own fields are taken from the request.
+
+const PLAN_YEARS = {
+  'Builder 1-year, renewable yearly to year 5': 1,
+  'Builder 1-year': 1,
+  'Renewable 5-year retreatment bond': 5,
+  'Renewable 10-year retreatment bond': 10,
+};
+const OFFICE_FIELDS = ['structures', 'notice_location', 'treatment_price', 'plan_price', 'renewal_fee', 'consumer_notice_date'];
+const FINAL_EXTERIOR_NOT_RECORDED = 'Final exterior treatment: not recorded on this certificate when this warranty was issued. It does not change the warranty dates above.';
+
+function bad(message, status = 400) {
+  return Object.assign(new Error(message), { status });
+}
+
+function oneLine(value) {
+  return flattenWarrantyValue(value == null ? '' : String(value));
+}
+
+function parseIso(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(oneLine(value));
+  return m ? { y: +m[1], m: +m[2], d: +m[3] } : null;
+}
+
+function parseUs(value) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(oneLine(value));
+  if (!m) return null;
+  const date = { y: +m[3], m: +m[1], d: +m[2] };
+  const check = new Date(Date.UTC(date.y, date.m - 1, date.d));
+  return check.getUTCMonth() === date.m - 1 && check.getUTCDate() === date.d ? date : null;
+}
+
+const us = ({ y, m, d }) => `${String(m).padStart(2, '0')}/${String(d).padStart(2, '0')}/${y}`;
+const key = ({ y, m, d }) => y * 10000 + m * 100 + d;
+
+function addYears(date, years) {
+  const y = date.y + years;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  return { y, m: date.m, d: date.m === 2 && date.d === 29 && !leap ? 28 : date.d };
+}
+
+function parseFindings(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  try { return JSON.parse(raw || '{}') || {}; } catch { return {}; }
+}
+
+function extraApplications(value) {
+  const rows = Array.isArray(value) ? value : parseFindings(value);
+  return (Array.isArray(rows) ? rows : []).filter((row) => row && typeof row === 'object' && Object.values(row).some((v) => oneLine(v)));
+}
+
+// Same rule as the admin button: one soil-barrier application with a plan.
+function warrantyEligible(findings) {
+  return Boolean(PLAN_YEARS[oneLine(findings.warranty_type)])
+    && oneLine(findings.treatment_method) === 'Soil barrier (chemical)'
+    && extraApplications(findings.additional_applications).length === 0;
+}
+
+function propertyAddress(findings, customer, lot) {
+  const street = oneLine(findings.treatment_address);
+  if (street) return street;
+  const permit = oneLine(findings.permit_number);
+  if (lot) return [lot, permit && `permit ${permit}`].filter(Boolean).join(', ');
+  return [oneLine(customer.address_line1), oneLine(customer.city), [oneLine(customer.state) || 'FL', oneLine(customer.zip)].filter(Boolean).join(' ')]
+    .filter(Boolean).join(', ');
+}
+
+function contractBasis(basis, builder, initial) {
+  const date = parseUs(basis?.date);
+  if (!date) throw bad('Enter the contract basis date as MM/DD/YYYY.');
+  if (key(date) > key(initial)) throw bad('The contract basis date must be on or before the treatment date.');
+  return basis?.kind === 'signed'
+    ? `Signed by the owner or authorized agent before treatment, on ${us(date)}.`
+    : `Issued under the master agreement with ${builder || 'the builder'} dated ${us(date)}.`;
+}
+
+function officeFields(body, initial) {
+  const warranty = body?.values?.warranty || {};
+  const out = Object.fromEntries(OFFICE_FIELDS.map((field) => [field, oneLine(warranty[field])]));
+  const notice = parseUs(out.consumer_notice_date);
+  if (!notice || key(notice) > key(initial)) throw bad('The FDACS-13692 date must be a real date on or before the treatment date.');
+  out.consumer_notice_date = us(notice);
+  return out;
+}
+
+function certificateValues(project, findings, customer) {
+  const initial = parseIso(findings.treatment_date) || parseIso(project.project_date);
+  if (!initial) throw bad('The certificate has no treatment date.');
+  const termEnd = us(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)]));
+  const lot = [oneLine(findings.lot_block), oneLine(findings.subdivision)].filter(Boolean).join(', ');
+  const finalDate = parseIso(findings.final_exterior_date);
+  const recordedRenewal = parseIso(findings.renewal_due);
+  const product = oneLine(findings.product_name) === 'Other' ? oneLine(findings.product_name_other) : oneLine(findings.product_name);
+  return {
+    initial,
+    values: {
+      project: { builder: oneLine(findings.builder_contractor), address: propertyAddress(findings, customer, lot), lot: lot || 'N/A', permit: oneLine(findings.permit_number) || 'N/A' },
+      treatment: {
+        product,
+        active_ingredient: oneLine(findings.active_ingredient),
+        concentration: oneLine(findings.concentration_pct),
+        gallons: oneLine(findings.gallons_applied),
+        sq_ft: oneLine(findings.square_footage),
+        linear_ft: oneLine(findings.linear_feet) || 'N/A',
+        initial_date: us(initial),
+        final_exterior_line: finalDate ? `Final exterior treatment date: ${us(finalDate)}.` : FINAL_EXTERIOR_NOT_RECORDED,
+        applicator: oneLine(findings.applicator_name),
+        applicator_id: oneLine(findings.applicator_fdacs_id),
+      },
+      warranty: {
+        number: `NCW-${String(project.id).replace(/-/g, '').slice(0, 8).toUpperCase()}`,
+        plan: oneLine(findings.warranty_type),
+        term_end: termEnd,
+        renewal_due: recordedRenewal ? us(recordedRenewal) : termEnd,
+        payer: oneLine(findings.builder_contractor),
+      },
+    },
+  };
+}
+
+// Values for one issue of the warranty, built server-side from the project
+// named in the request. Any other template passes its values through.
+async function templateIssueValues(templateKey, body, customer, conn = db) {
+  if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return body?.values || {};
+  if (body?.allowUnresolved === true) throw bad('The new construction warranty cannot be issued with blank fields.');
+  const projectId = body?.projectId;
+  if (!projectId) throw bad('Issue the new construction warranty from its pre-treat certificate.');
+  const project = await conn('projects').where({ id: projectId }).first();
+  if (!project || project.project_type !== 'pre_treatment_termite_certificate' || project.customer_id !== customer.id) {
+    throw bad('Pre-treat certificate not found for this customer.', 404);
+  }
+  const findings = parseFindings(project.findings);
+  if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
+  const { initial, values } = certificateValues(project, findings, customer);
+  const issuer = body?.values?.issuer || {};
+  return {
+    ...values,
+    warranty: {
+      ...values.warranty,
+      ...officeFields(body, initial),
+      contract_basis: contractBasis(body?.values?.basis, values.project.builder, initial),
+      issue_date: us(parseIso(etDateString())),
+    },
+    issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title) },
+  };
 }
 
 module.exports = {
   NEW_CONSTRUCTION_WARRANTY_KEY,
   supersedeOpenNewConstructionWarranty,
   snapshotWarrantyNumber,
-  warrantySafeValues,
+  templateIssueValues,
 };

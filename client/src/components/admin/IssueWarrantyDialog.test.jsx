@@ -51,17 +51,18 @@ describe('IssueWarrantyDialog', () => {
     const [path, init] = adminFetch.mock.calls[0];
     expect(path).toBe('/admin/document-templates/service_agreement.termite_new_construction_warranty/contracts');
     expect(init.body.customerId).toBe('cust-1');
+    expect(init.body.projectId).toBe('abcd1234-0000');
     expect(init.body.propertyAddress).toBeUndefined();
-    expect(init.body.values.project.address).toBe('12 Test Lane, Bradenton, FL 34202');
-    expect(init.body.values.warranty.notice_location).toBe('on the wall beside the electric panel in the garage');
-    expect(init.body.values.warranty).toMatchObject({
-      term_end: '10/01/2027',
+    expect(init.body.values.warranty).toEqual({
+      structures: 'The new home and its attached garage on this lot.',
+      notice_location: 'on the wall beside the electric panel in the garage',
+      treatment_price: '$1,250.00',
       plan_price: 'Included in the treatment price',
       renewal_fee: '$99.00',
-      contract_basis: 'Issued under the master agreement with Example Homes LLC dated 09/01/2026.',
+      consumer_notice_date: '09/01/2026',
     });
+    expect(init.body.values.basis).toEqual({ kind: 'master', date: '09/01/2026' });
     expect(init.body.values.issuer).toEqual({ name: 'Pat Office', title: 'Office Manager' });
-    expect(init.body.values.warranty.structures).toBe('The new home and its attached garage on this lot.');
   });
 
   it('keeps Create disabled while the contract basis date is after treatment', () => {

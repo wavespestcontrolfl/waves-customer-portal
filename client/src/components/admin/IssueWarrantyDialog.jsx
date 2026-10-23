@@ -8,7 +8,6 @@ import { adminFetch } from "../../lib/adminFetch";
 import {
   NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY,
   pretreatWarrantyValues,
-  warrantyContractBasis,
   daysSinceTreatment,
   warrantyEligible,
   warrantyIssueReadiness,
@@ -61,18 +60,18 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
     setBusy(true);
     setError("");
     try {
+      // The server builds every job field from the saved certificate and
+      // stamps the issue date; only the office's own fields go up.
       const values = {
-        ...base,
         warranty: {
-          ...base.warranty,
           structures: structures.trim(),
           notice_location: noticeLocation.trim(),
           treatment_price: treatmentPrice.trim(),
           plan_price: planPrice.trim(),
           renewal_fee: renewalFee.trim(),
           consumer_notice_date: noticeDate.trim(),
-          contract_basis: warrantyContractBasis({ kind: basisKind, builder: base.project.builder, date: basisDate }),
         },
+        basis: { kind: basisKind, date: basisDate.trim() },
         issuer: { name: issuerName.trim(), title: issuerTitle.trim() },
       };
       const response = await adminFetch(
@@ -81,7 +80,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
           method: "POST",
           // No propertyAddress override: section 1 keeps the owner's or
           // builder's own mailing address; the job address is project.address.
-          body: { customerId: project.customer_id, values },
+          body: { customerId: project.customer_id, projectId: project.id, values },
         },
       );
       const data = await response.json().catch(() => ({}));

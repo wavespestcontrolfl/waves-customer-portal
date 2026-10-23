@@ -55,14 +55,55 @@ describe('supersedeOpenNewConstructionWarranty', () => {
   });
 });
 
-describe('warrantySafeValues', () => {
-  const { warrantySafeValues } = require('../services/new-construction-warranty');
-  test('flattens job values to one line and drops ** for the warranty only', () => {
-    const values = { treatment: { product: 'Termidor SC\n\n**WE ALSO REPAIR ALL DAMAGE.**', gallons: 180 }, list: ['a\nb'] };
-    expect(warrantySafeValues('service_agreement.termite_new_construction_warranty', values)).toEqual({
-      treatment: { product: 'Termidor SC WE ALSO REPAIR ALL DAMAGE.', gallons: 180 },
-      list: ['a b'],
-    });
-    expect(warrantySafeValues('service_agreement.termite_bond_retreatment', values)).toBe(values);
+describe('templateIssueValues (server-built warranty)', () => {
+  const { templateIssueValues } = require('../services/new-construction-warranty');
+  const KEY = 'service_agreement.termite_new_construction_warranty';
+  const customer = { id: 'cust-1', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
+  const findings = {
+    treatment_date: '2026-10-01', treatment_method: 'Soil barrier (chemical)', treatment_address: '12 Test Lane, Bradenton, FL 34202',
+    builder_contractor: 'Example Homes LLC', product_name: 'Termidor SC\n**WE REPAIR ALL DAMAGE.**', active_ingredient: 'fipronil',
+    concentration_pct: '0.06', gallons_applied: '180', square_footage: '1800', applicator_name: 'Sam Tester', applicator_fdacs_id: 'JF000000',
+    warranty_type: 'Builder 1-year, renewable yearly to year 5',
+  };
+  const project = { id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_type: 'pre_treatment_termite_certificate', findings: JSON.stringify(findings) };
+  const conn = (row) => () => ({ where() { return this; }, first: async () => row });
+  const office = {
+    warranty: {
+      structures: 'The new home', notice_location: 'beside the electric panel', treatment_price: '$1,250.00',
+      plan_price: 'Included', renewal_fee: '$99.00', consumer_notice_date: '09/01/2026',
+      term_end: '01/01/2099', product: 'FORGED', issue_date: '01/01/2000',
+    },
+    basis: { kind: 'master', date: '09/01/2026' },
+    issuer: { name: 'Pat Office', title: 'Office Manager' },
+  };
+
+  test('other templates keep their own values', async () => {
+    const values = { a: 1 };
+    await expect(templateIssueValues('service_agreement.termite_bond_retreatment', { values }, customer, conn(null))).resolves.toBe(values);
+  });
+
+  test('builds the job fields from the saved certificate, takes only office fields, stamps the server date', async () => {
+    const v = await templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(project));
+    expect(v.treatment.product).toBe('Termidor SC WE REPAIR ALL DAMAGE.');
+    expect(v.treatment.initial_date).toBe('10/01/2026');
+    expect(v.warranty.term_end).toBe('10/01/2027');
+    expect(v.warranty.number).toBe('NCW-ABCD1234');
+    expect(v.warranty.notice_location).toBe('beside the electric panel');
+    expect(v.warranty.contract_basis).toBe('Issued under the master agreement with Example Homes LLC dated 09/01/2026.');
+    expect(v.warranty.issue_date).not.toBe('01/01/2000');
+    expect(v.warranty.issue_date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
+    expect(v.treatment.final_exterior_line).toMatch(/not recorded on this certificate/);
+  });
+
+  test('refuses blank fields, a missing or foreign project, an ineligible job and late basis dates', async () => {
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office, allowUnresolved: true }, customer, conn(project))).rejects.toMatchObject({ status: 400 });
+    await expect(templateIssueValues(KEY, { values: office }, customer, conn(project))).rejects.toMatchObject({ status: 400 });
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, { id: 'someone-else' }, conn(project))).rejects.toMatchObject({ status: 404 });
+    const borate = { ...project, findings: { ...findings, treatment_method: 'Wood treatment (borate)' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: office }, customer, conn(borate))).rejects.toMatchObject({ status: 409 });
+    const lateBasis = { ...office, basis: { kind: 'signed', date: '10/05/2026' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: lateBasis }, customer, conn(project))).rejects.toMatchObject({ status: 400 });
+    const badNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '2026-09-01' } };
+    await expect(templateIssueValues(KEY, { projectId: project.id, values: badNotice }, customer, conn(project))).rejects.toMatchObject({ status: 400 });
   });
 });

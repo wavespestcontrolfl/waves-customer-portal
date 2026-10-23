@@ -135,7 +135,6 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
   };
 }
 
-// The two lawful bases for issuing after treatment (Rule 5E-14.105(2), (3)(c)).
 // MM/DD/YYYY → { y, m, d }, or null when not a real calendar date.
 export function parseUsDate(value) {
   const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(text(value));
@@ -165,13 +164,6 @@ export function daysSinceTreatment(initialDate, issueDate) {
   const b = parseUsDate(issueDate);
   if (!a || !b) return null;
   return Math.round((Date.UTC(b.y, b.m - 1, b.d) - Date.UTC(a.y, a.m - 1, a.d)) / 86400000);
-}
-
-export function warrantyContractBasis({ kind, builder = '', date = '' }) {
-  if (kind === 'master') {
-    return `Issued under the master agreement with ${text(builder) || 'the builder'} dated ${text(date)}.`;
-  }
-  return `Signed by the owner or authorized agent before treatment, on ${text(date)}.`;
 }
 
 // What blocks Create in the issue dialog: every office field filled, both
