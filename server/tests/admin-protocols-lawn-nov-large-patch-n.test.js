@@ -20,6 +20,9 @@ const mockLoadActive = jest.fn();
 jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
+  // The rules ask for a LARGE PATCH area (loadActiveLargePatch); this store answers for it with the areas the test sets. The evidence itself
+  // (the newest fungicide target at the place) is tested against real rows in lawn-v13-nov-large-patch-n.db.test.js and lawn-v13-dec-large-patch-k.plan.db.test.js.
+  loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
 const db = require('../models/db');
@@ -34,8 +37,8 @@ const CATALOG = [
 const V13_SUMMARY = { version: LAWN_V13_VERSION, products: [{ productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} }] };
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
-const NOTE = 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
 
@@ -84,14 +87,14 @@ beforeEach(() => {
 });
 afterEach(() => { for (const name of [...GATES, 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY']) delete process.env[name]; });
 
-describe('active fungus mapped, gate on', () => {
+describe('active large patch mapped, gate on', () => {
   test('November 24-0-11 is sized for 0.5 lb N: 2.083 lb per 1,000, 20.83 lb on 10,000 sq ft, with the technician note', async () => {
     const body = await sheet();
     expect(bag(body).jobMix).toMatchObject({ rateSource: 'target_n_analysis', targetNPer1000: 0.5, amountUnit: 'lb' });
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
     expect(bag(body).jobMix.amount).toBeCloseTo(20.833, 2);
     expect(bag(body).gateNotes).toContainEqual({ key: 'activeFungusNitrogen', severity: 'note', text: NOTE });
-    expect(mockLoadActive).toHaveBeenCalledWith(db, PROPERTY);
+    expect(mockLoadActive).toHaveBeenCalledWith(db, PROPERTY, { asOf: '2026-11-10' }); // the evidence is dated to the visit
   });
 
   test('the yearly-limit read judges the same reduced rate the sheet quotes', async () => {
@@ -110,10 +113,10 @@ describe('the text staff read agrees with the cut (codex #6256 r1 P1)', () => {
 
   test('cut: the line, the visit primary and the objective all state 0.5 lb N / 2.1 lb, none still says 3.1 lb or "N rate: 0.75"', async () => {
     const body = await sheet();
-    const stated = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active fungus mapped';
+    const stated = 'LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active patch mapped';
     expect(bag(body).raw).toBe(stated);
     expect(body.visit.primary).toBe(stated);
-    expect(body.visit.objective).toMatch(/^N rate: 0\.5 lb N \(active fungus mapped; normal 0\.75 lb N\)\. Spreader visit\./);
+    expect(body.visit.objective).toMatch(/^N rate: 0\.5 lb N \(active large patch mapped; normal 0\.75 lb N\)\. Spreader visit\./);
     const text = JSON.stringify([body.items, body.selectedItems, body.visit]);
     expect(text).not.toContain('3.1 lb per 1,000');
     expect(text).not.toContain('N rate: 0.75 lb N.');
@@ -198,7 +201,7 @@ describe('the cut follows the protocol the PLANNER resolves for the visit (codex
     Object.assign(visit, pin(LAWN_V13_VERSION));
     const body = await sheet();
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
-    expect(bag(body).raw).toMatch(/2\.1 lb per 1,000 sq ft \(0\.5 lb N\), spreader, active fungus mapped$/);
+    expect(bag(body).raw).toMatch(/2\.1 lb per 1,000 sq ft \(0\.5 lb N\), spreader, active patch mapped$/);
     expect(pinnedCalls()).toHaveLength(1);
   });
 

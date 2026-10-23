@@ -5,6 +5,9 @@ const mockLoadActive = jest.fn();
 jest.mock('../services/lawn-trouble-areas', () => ({
   propertyOf: jest.fn(async (knex, svc) => svc?.property_id || null),
   loadActive: (...args) => mockLoadActive(...args),
+  // The rules ask for a LARGE PATCH area (loadActiveLargePatch); this store answers for it with the areas the test sets. The evidence itself
+  // (the newest fungicide target at the place) is tested against real rows in lawn-v13-nov-large-patch-n.db.test.js and lawn-v13-dec-large-patch-k.plan.db.test.js.
+  loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
 const featureGates = require('../config/feature-gates');
@@ -13,7 +16,7 @@ const engine = require('../services/waveguard-plan-engine');
 const v13 = require('../config/lawn-protocol-v13.json');
 const { TYPES } = jest.requireActual('../services/lawn-trouble-areas');
 
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 const allOn = () => { for (const name of GATES) process.env[name] = 'true'; };
 beforeEach(() => { jest.clearAllMocks(); allOn(); mockLoadActive.mockResolvedValue([{ id: 'a', type: 'fungus' }]); });
@@ -36,7 +39,7 @@ describe('lawnNovLargePatchNLive', () => {
     expect(featureGates.lawnNovLargePatchNLive()).toBe(expected);
   });
 
-  test.each(GATES.slice(0, 4))('is off when %s is off (fail closed: the rule reads the mapped areas)', (name) => {
+  test.each(GATES.slice(0, -1))('is off when %s is off (fail closed: the rule reads the mapped areas)', (name) => {
     delete process.env[name];
     expect(featureGates.lawnNovLargePatchNLive()).toBe(false);
   });
@@ -44,7 +47,7 @@ describe('lawnNovLargePatchNLive', () => {
 
 describe('the rule', () => {
   test('one entry: November, fungus, 0.5 lb N; the closed type list names fungus and keeps take-all separate', () => {
-    expect(V13_TROUBLE_N_TARGETS).toEqual([{ month: 11, troubleType: 'fungus', targetNPer1000: 0.5 }]);
+    expect(V13_TROUBLE_N_TARGETS).toEqual([{ month: 11, troubleType: 'fungus', evidence: 'large_patch', targetNPer1000: 0.5 }]);
     expect(TYPES.map((type) => type.id)).toEqual(expect.arrayContaining(['fungus', 'take_all']));
     expect(() => { V13_TROUBLE_N_TARGETS.push({}); }).toThrow();
   });
@@ -57,7 +60,7 @@ describe('the rule', () => {
 describe('visitNutrientTargets', () => {
   test('active fungus in November lowers only the nitrogen target', async () => {
     expect(await targetsFor()).toEqual({ targets: { targetNPer1000: 0.5, targetKPer1000: null }, nitrogenCut: 0.5 });
-    expect(mockLoadActive).toHaveBeenCalledWith({}, service.property_id);
+    expect(mockLoadActive).toHaveBeenCalledWith({}, service.property_id, { asOf: null });
   });
 
   test('potassium is untouched when the visit states one', async () => {
@@ -153,8 +156,8 @@ describe('the visit text staff read agrees with the cut (codex #6256 r1 P1)', ()
 
   test('cut: the primary line states 2.1 lb per 1,000 and 0.5 lb N and why; the notes state 0.5 lb N and the normal figure; the rest is untouched', async () => {
     const found = await run();
-    expect(found.visit.primary).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active fungus mapped');
-    expect(found.visit.notes).toBe(NOV_NOTES.replace('N rate: 0.75 lb N', 'N rate: 0.5 lb N (active fungus mapped; normal 0.75 lb N)'));
+    expect(found.visit.primary).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active patch mapped');
+    expect(found.visit.notes).toBe(NOV_NOTES.replace('N rate: 0.75 lb N', 'N rate: 0.5 lb N (active large patch mapped; normal 0.75 lb N)'));
     expect(found.visit.notes).toContain('Spreader visit. Fertilizer safety:');
     expect(found.visit.secondary).toBe(NOV_VISIT.secondary);
     expect(found.visit.tiers).toBe(NOV_VISIT.tiers);
@@ -338,7 +341,7 @@ describe('fungusNitrogenNotes', () => {
     expect(mix.ratePer1000 * 0.24).toBeCloseTo(0.5, 4);
     expect(engine.fungusNitrogenNotes(mix, 0.5)).toEqual([{
       key: FUNGUS_NITROGEN_NOTE_KEY, severity: 'note',
-      text: 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.',
+      text: 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.',
     }]);
   });
 

@@ -283,7 +283,32 @@ async function buildLawnProtocolReportContext(record, knex, now) {
     });
   }
 
-  return attachProtocolOperationalContext(summarizeProtocolContext(context), { completion, assignment });
+  const summary = summarizeProtocolContext(context);
+  return attachProtocolOperationalContext(await withoutUnappliedSwapRows(summary, { record, knex }), { completion, assignment });
+}
+
+// The customer report lists a protocol window's products. A swap rule's replacement bag (the non-default December LESCO Black Out 0-0-24
+// row, GATE_LAWN_DEC_LARGE_PATCH_K) is not part of the window for every lawn: it is listed only while the swap gate (and the gates it needs)
+// is live AND this visit recorded the product as applied. Any other state, or a failed read, leaves it out (fail closed). Every other
+// product, and a summary with no such row, is returned as it was (the same object).
+async function withoutUnappliedSwapRows(summary, { record, knex }) {
+  const { swapOnlyRule } = require('../../config/lawn-v13-trouble-product-swaps');
+  const featureGates = require('../../config/feature-gates');
+  const products = Array.isArray(summary?.products) ? summary.products : [];
+  const swapRows = products.map((product) => ({ product, rule: swapOnlyRule(product) })).filter((entry) => entry.rule);
+  if (!swapRows.length) return summary;
+  const applied = new Set();
+  if (record?.id && swapRows.some((entry) => featureGates[entry.rule.gate]?.() === true)) {
+    const ids = [...new Set(swapRows.map((entry) => entry.product.productId).filter(Boolean))];
+    const rows = ids.length
+      ? await knex('service_products').where({ service_record_id: record.id }).whereIn('product_id', ids).select('product_id').catch(() => [])
+      : [];
+    for (const row of rows) applied.add(String(row.product_id));
+  }
+  const drop = new Set(swapRows
+    .filter((entry) => !(featureGates[entry.rule.gate]?.() === true && applied.has(String(entry.product.productId))))
+    .map((entry) => entry.product));
+  return { ...summary, products: products.filter((product) => !drop.has(product)) };
 }
 
 async function buildServiceReportDynamicContext({

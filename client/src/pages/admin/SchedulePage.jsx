@@ -25300,6 +25300,8 @@ const PRODUCT_DESCRIPTIONS_V13 = {
     "slow-release fertilizer with extra potassium for winter hardiness",
   "lesco 44-0-0":
     "slow-release nitrogen fertilizer that feeds the lawn for 3 to 4 months",
+  "lesco black out 0-0-24":
+    "potassium fertilizer with no nitrogen for winter hardiness",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

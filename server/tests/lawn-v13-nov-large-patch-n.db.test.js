@@ -4,16 +4,19 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
-const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 jest.setTimeout(60000);
 const KEY = 'fixture_v13_lawn_nov';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
-  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
-const NOTE = 'Active fungus mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
-const day = etDateString(addETDays(new Date(), -1));
+  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
+// Ledger dates are anchored to the fixture visit's day, never to today (the evidence is read as of the visit, so a today-relative date would
+// fall after the visit from 11/10 on).
+const VISIT_DAY = '2026-11-10';
+const daysBeforeVisit = (days) => new Date(Date.parse(`${VISIT_DAY}T12:00:00Z`) - days * 86400000).toISOString().slice(0, 10);
+const LARGE = 'Large patch';
 
 describeDb('November large patch nitrogen through PostgreSQL', () => {
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
@@ -53,18 +56,27 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   }, 90000);
   afterAll(async () => { if (owned) await owned.dispose(); });
-  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); });
+  beforeEach(async () => { setGates(); await knex('lawn_trouble_areas').del(); await knex('property_application_history').del(); });
   afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
-  // A November visit at a fresh lawn, optionally with mapped areas ({ type, status }).
-  async function novemberVisit(areas = []) {
+  // A November visit at a fresh lawn, optionally with mapped areas ({ type, status, target, firstSeen, lastSeen, clearedAt }). `target` is the disease the newest fungicide
+  // spot application at the area's place recorded (property_application_history.target_pest); a fungus area with no `target` has no
+  // disease on record. `ledger` adds more application rows ({ place, target, daysAgo, date, category, retracted }).
+  async function novemberVisit(areas = [], { ledger = [] } = {}) {
     const f = await fixture(knex);
     await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
     await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, grass_type: 'bermuda', track_key: 'bermuda', lawn_sqft: 10000 });
     for (const [index, area] of areas.entries()) {
       await knex('lawn_trouble_areas').insert({
         customer_id: f.customerId, property_id: f.property.id, place: ['front', 'back', 'left_side', 'right_side'][index], type: area.type, status: area.status || 'active',
-        source: 'tech_tap', first_seen_on: day, last_seen_on: day,
+        source: 'tech_tap', first_seen_on: area.firstSeen || daysBeforeVisit(2), last_seen_on: area.lastSeen || daysBeforeVisit(2), cleared_at: area.clearedAt || null,
+      });
+      if (area.target) ledger = [{ place: ['front', 'back', 'left_side', 'right_side'][index], target: area.target }, ...ledger];
+    }
+    for (const row of ledger) {
+      await knex('property_application_history').insert({
+        customer_id: f.customerId, property_id: f.property.id, application_date: row.date || daysBeforeVisit(row.daysAgo ?? 1), category: row.category || 'fungicide',
+        treated_place: row.place, target_pest: row.target, retracted_at: row.retracted ? new Date() : null,
       });
     }
     return f.visit(0, { scheduled_date: '2026-11-10' });
@@ -77,14 +89,14 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   test('active fungus, gate on: 2.083 lb per 1,000 (20.83 lb on 10,000 sq ft) in the plan item, the completion default and the limit read, with the note', async () => {
     const spy = limitsSpy();
     try {
-      const result = await plan(await novemberVisit([{ type: 'fungus' }]));
+      const result = await plan(await novemberVisit([{ type: 'fungus', target: LARGE }]));
       const item = bagOf(result.mixCalculator.items);
       expect(item.mix).toMatchObject({ rateSource: 'target_n_analysis', targetNPer1000: 0.5, amountUnit: 'lb' });
       expect(item.mix.ratePer1000).toBeCloseTo(2.0833, 3);
       expect(item.mix.amount).toBeCloseTo(20.833, 2);
       expect(item.gateNotes).toContainEqual({ key: 'activeFungusNitrogen', severity: 'note', text: NOTE });
       // The recipe text staff read (item.raw, the visit) states the same cut, never the stale 3.1 lb / 0.75 lb N.
-      expect(item.raw).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active fungus mapped');
+      expect(item.raw).toBe('LESCO 24-0-11 with PolyPlus OPTI \u2014 2.1 lb per 1,000 sq ft (0.5 lb N), spreader, active patch mapped');
       expect(item.product.name).toBe(F24);
       expect(JSON.stringify(result.protocol)).not.toContain('3.1 lb per 1,000');
       const defaulted = bagOf(result.completionDefaults.items);
@@ -114,6 +126,66 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     } finally { spy.mockRestore(); }
   });
 
+  // Owner 2026-10-23 (the December potassium PR): the November cut used the generic "fungus" area, which also stands for gray leaf spot,
+  // Pythium, dollar spot, fairy ring and rust. It now asks for the large patch evidence, like the December rule. Behavior change.
+  describe('only a LARGE PATCH lawn is cut (a "fungus" area also stands for the other diseases)', () => {
+    const rateOf = async (visit) => bagOf((await plan(visit)).mixCalculator.items).mix.ratePer1000;
+
+    test.each(['Gray leaf spot', 'Pythium root rot', 'Dollar spot', 'Fairy ring', 'Rust'])('a fungus area treated for %s: 0.75 lb N (3.125 lb), no cut', async (target) => {
+      const result = await plan(await novemberVisit([{ type: 'fungus', target }]));
+      expect(bagOf(result.mixCalculator.items).mix.ratePer1000).toBeCloseTo(3.125, 3);
+      expect(JSON.stringify(result)).not.toContain('activeFungusNitrogen');
+    });
+
+    test('a fungus area whose disease is not on record (no application, or no target on it): no cut (fails closed)', async () => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }]))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: '' }] }))).toBeCloseTo(3.125, 3);
+    });
+
+    test.each(['Large patch', 'Brown patch', 'Rhizoctonia'])('target %j: the cut applies (0.5 lb N)', async (target) => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target }]))).toBeCloseTo(2.0833, 3);
+    });
+
+    test('a newer fungicide application with NO target outranks an older large patch one: no cut (the disease is unknown again)', async () => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, daysAgo: 0 }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: '', daysAgo: 5 }] }))).toBeCloseTo(2.0833, 3);
+    });
+
+    test('the evidence is dated to the visit: a LATER large patch application does not cut an earlier visit; a LATER other-disease one does not hide the evidence that stood', async () => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: '2026-11-20' }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: '2026-11-10' }] }))).toBeCloseTo(2.0833, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Gray leaf spot', date: '2026-11-20' }] }))).toBeCloseTo(2.0833, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, date: '2026-11-20' }] }))).toBeCloseTo(2.0833, 3);
+    });
+
+    test('several fungicides at one place on the SAME day (one completion): large patch only when every one names it; a mix or a blank fails closed', async () => {
+      const day = daysBeforeVisit(3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Dollar spot', date: day }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: 'Gray leaf spot', date: day }, { place: 'front', target: LARGE, date: day }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: null, date: day }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: daysBeforeVisit(30) }, { place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Rust', date: day }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Brown patch', date: day }] }))).toBeCloseTo(2.0833, 3);
+    });
+
+    test('the AREA is dated to the visit too: cleared after the visit still counts for it; cleared on or before it, first seen after it, or active again after it does not', async () => {
+      const lp = { place: 'front', target: LARGE, date: daysBeforeVisit(20) };
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-11-20T15:00:00Z' }], { ledger: [lp] }))).toBeCloseTo(2.0833, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-11-10T15:00:00Z' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', status: 'cleared', clearedAt: '2026-11-05T15:00:00Z' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', status: 'cleared' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', firstSeen: '2026-11-20', lastSeen: '2026-11-20' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', lastSeen: '2026-11-20' }], { ledger: [lp] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', firstSeen: '2026-11-05', lastSeen: '2026-11-10' }], { ledger: [lp] }))).toBeCloseTo(2.0833, 3);
+    });
+
+    test('the newest named target at the place decides; a retracted or non-fungicide row is not evidence', async () => {
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Dollar spot', daysAgo: 0 }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus', target: 'Dollar spot' }], { ledger: [{ place: 'front', target: LARGE, daysAgo: 0 }] }))).toBeCloseTo(2.0833, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, retracted: true }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, category: 'herbicide' }] }))).toBeCloseTo(3.125, 3);
+    });
+  });
+
   describe('a November visit pinned to v13 after v13 is ARCHIVED (codex #6256 r2 P1)', () => {
     const archive = async (status) => knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).update({ status });
     afterEach(() => archive('staged'));
@@ -125,7 +197,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
 
     test('active fungus: the planned items and the completion defaults survive, at the reduced rate', async () => {
       await archive('archived');
-      const result = await plan(await pinned([{ type: 'fungus' }]));
+      const result = await plan(await pinned([{ type: 'fungus', target: LARGE }]));
       expect(result.protocol.structured.status).toBe('archived');
       expect(result.propertyGate.blocks.map((block) => block.code)).not.toContain('lawn_archived_recipe_unavailable');
       const item = bagOf(result.mixCalculator.items);
@@ -155,7 +227,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   });
 
   test('active fungus but the gate is off, or the trouble-areas gate is off: the old plan, no fungus note anywhere', async () => {
-    const visit = await novemberVisit([{ type: 'fungus' }]);
+    const visit = await novemberVisit([{ type: 'fungus', target: LARGE }]);
     setGates(GATES.filter((name) => name !== 'GATE_LAWN_NOV_LARGE_PATCH_N'));
     const gateOff = await plan(visit);
     setGates(GATES.filter((name) => name !== 'GATE_LAWN_TROUBLE_AREAS'));
@@ -169,7 +241,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   });
 
   test('inside a transaction (packet closeout) the plan reads the areas through a savepoint and still cuts', async () => {
-    const visit = await novemberVisit([{ type: 'fungus' }]);
+    const visit = await novemberVisit([{ type: 'fungus', target: LARGE }]);
     const result = await knex.transaction((trx) => buildPlanForService(visit.id, { db: trx, includeCompletionDefaults: true }));
     expect(bagOf(result.mixCalculator.items).mix.ratePer1000).toBeCloseTo(2.0833, 3);
   });
@@ -177,9 +249,9 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
   // Codex #6256 r4 P1: the strict plan (completion defaults, the job card) never plans the normal target off a failed area read;
   // the lenient plan (the Lawn plan panel, the forecast) keeps the normal target and still builds.
   test('a failed trouble-area read: the strict plan throws, the lenient plan keeps the normal target and still builds', async () => {
-    const visit = await novemberVisit([{ type: 'fungus' }]);
+    const visit = await novemberVisit([{ type: 'fungus', target: LARGE }]);
     const areas = require('../services/lawn-trouble-areas');
-    const spy = jest.spyOn(areas, 'loadActive').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    const spy = jest.spyOn(areas, 'loadActiveAsOf').mockRejectedValue(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     try {
       await expect(plan(visit)).rejects.toThrow('db down');
       await expect(buildPlanForService(visit.id, { db: knex, strict: true, completionDefaultsEnabled: false })).rejects.toThrow('db down');
