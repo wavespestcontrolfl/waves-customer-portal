@@ -2596,6 +2596,8 @@ async function claimCancellationNotice({ record, options, claimToken, sendNotifi
             // (only that send: no sweep lists this state).
             if (approvedSend) this.where('cancellation_notice_state', 'pending_approved');
             else this.whereRaw('false');
+            // ...and only while no sibling reminder row of the visit was touched (sent or suppressed by an earlier send).
+            if (approvedSend) this.whereRaw("NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.scheduled_service_id = appointment_reminders.scheduled_service_id AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IS NOT NULL AND sib.cancellation_notice_state <> 'pending_approved')");
           })
           .orWhere(function staleLease() {
             // Stale SINGLETON leases only (codex r18): a stale shared
@@ -2636,6 +2638,10 @@ async function claimApprovedNoticeForGeneration(record, cancelGeneration) {
     // The reminder close handleCancellation skips for a fenced send: under the same share lock, so it can never land on a
     // restored visit's reminder.
     await trx('appointment_reminders').where({ id: record.id }).update({ cancelled: true, updated_at: new Date() });
+    // Adopt only while NO reminder row of the visit was touched (a sibling the live send already sent or suppressed means the
+    // approved text is not untouched): the rows are locked together so the check and the claim cannot be split.
+    const rows = await trx('appointment_reminders').where({ scheduled_service_id: record.scheduled_service_id }).orderBy('id').forUpdate().select('id', 'cancellation_notice_state');
+    if ((rows || []).some((row) => row.cancellation_notice_state && row.cancellation_notice_state !== 'pending_approved')) return 0;
     return trx('appointment_reminders')
       .where({ id: record.id, cancellation_notice_state: 'pending_approved' })
       .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending_approved', updated_at: noticeToken });
@@ -2714,22 +2720,32 @@ async function approvedRecipientsReached(record, scheduledServiceId, destination
 // other marker, which the approved send does not own. Lives with the approved-send helpers
 // (cancel-notice-approved-marker.test.js keeps that marker out of every sweep); it claims and sends nothing.
 async function approvedNoticeStatus(scheduledServiceId, { recipientKeys = null } = {}) {
-  const record = await db('appointment_reminders')
+  // A visit can carry several reminder rows (uniqueness is not guaranteed) and the cancel mints the marker on each: the status
+  // is read across EVERY row. A live send can claim and send one row and die before reporting while a sibling stays untouched;
+  // any touched row decides, so an untouched sibling can never read as "ready" and be sent a second time.
+  const all = await db('appointment_reminders')
     .where({ scheduled_service_id: scheduledServiceId })
-    .first('id', 'customer_id', 'cancellation_notice_state', 'cancellation_notice_at');
-  if (!record) return 'no_reminder';
-  const state = record.cancellation_notice_state;
-  if (state === 'pending_approved') return 'ready';
-  if (state === 'sent') {
-    // Evidence is bound to the claim that stamped 'sent' (the reminder's own token), never to a time window.
-    if (!record.cancellation_notice_at) return 'uncertain';
-    const destinations = await cancellationAcceptedDestinations(scheduledServiceId, record.cancellation_notice_at);
-    if (destinations.size === 0) return 'uncertain';
-    if (!recipientKeys || !recipientKeys.length) return 'delivered';
-    return (await approvedRecipientsReached(record, scheduledServiceId, destinations, recipientKeys)) ? 'delivered' : 'partial';
+    .orderBy('id')
+    .select('id', 'customer_id', 'cancellation_notice_state', 'cancellation_notice_at');
+  if (!all || !all.length) return 'no_reminder';
+  const marked = all.filter((row) => row.cancellation_notice_state);
+  if (!marked.length) return 'other';
+  if (marked.every((row) => row.cancellation_notice_state === 'pending_approved')) return 'ready';
+  const sentRows = marked.filter((row) => row.cancellation_notice_state === 'sent');
+  if (sentRows.length) return sentRowsStatus(scheduledServiceId, sentRows, recipientKeys);
+  return marked.some((row) => row.cancellation_notice_state === 'suppressed') ? 'suppressed' : 'other';
+}
+
+// 'sent' on at least one row: delivery is judged on the audit rows of EVERY sent row's own claim token (never a time window).
+async function sentRowsStatus(scheduledServiceId, sentRows, recipientKeys) {
+  const destinations = new Set();
+  for (const row of sentRows) {
+    if (!row.cancellation_notice_at) continue;
+    for (const to of await cancellationAcceptedDestinations(scheduledServiceId, row.cancellation_notice_at)) destinations.add(to);
   }
-  if (state === 'suppressed') return 'suppressed';
-  return 'other';
+  if (destinations.size === 0) return 'uncertain';
+  if (!recipientKeys || !recipientKeys.length) return 'delivered';
+  return (await approvedRecipientsReached(sentRows[0], scheduledServiceId, destinations, recipientKeys)) ? 'delivered' : 'partial';
 }
 
 // handleCancellation could not take the claim: say, from the claim state, whether the customer already has the text.

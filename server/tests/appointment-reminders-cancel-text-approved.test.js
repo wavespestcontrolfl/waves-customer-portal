@@ -26,7 +26,9 @@ jest.mock('../models/db', () => {
       },
       insert: async (row) => { (mockState.inserts ||= []).push([table, row]); return [1]; },
       update: async (patch) => { mockState.updates.push(patch); return mockState.claim; },
-      then: (res, rej) => Promise.resolve(table === 'messaging_audit_log' ? mockState.auditRows : []).then(res, rej),
+      forUpdate: () => q,
+      then: (res, rej) => Promise.resolve(table === 'messaging_audit_log' ? mockState.auditRows
+        : table === 'appointment_reminders' ? (mockState.reminders || (mockState.reminder ? [mockState.reminder] : [])) : []).then(res, rej),
     };
     return q;
   };
@@ -62,6 +64,7 @@ const render = (body, vars) => body.replace(/\{(\w+)\}/g, (_m, k) => vars[k]);
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockState.reminders = null;
   mockState.reminder = {
     id: 'rem-1', customer_id: 'cust-1', scheduled_service_id: 'svc-1', appointment_time: '2026-11-04T15:00:00Z', service_type: 'Pest Control',
   };
@@ -382,6 +385,46 @@ describe('approvedCancellationNoticeStatus', () => {
 
   // Delivery is proven PER APPROVED RECIPIENT, by that recipient's own phone: a count of destinations proves nothing (an
   // accepted SMS followed by an email fallback to the same person is two destinations and one person).
+  // A visit can have several reminder rows. The live send may have sent one and died before reporting while a sibling is untouched:
+  // the untouched sibling must never make the text 'ready' (it would be sent a second time).
+  describe('several reminder rows for the visit', () => {
+    const row = (id, state, at = '2026-10-23T14:00:00.000Z') => ({ id, customer_id: 'cust-1', cancellation_notice_state: state, cancellation_notice_at: at ? new Date(at) : null });
+    const status = async (rows, auditRows = [{ to_hash: 'h1' }], options) => {
+      mockState.reminders = rows;
+      mockState.auditRows = auditRows;
+      return AppointmentReminders.approvedCancellationNoticeStatus('svc-1', options);
+    };
+
+    test('every row untouched is ready; a sibling already sent makes it delivered/uncertain, never ready (whatever the row order)', async () => {
+      expect(await status([row('a', 'pending_approved'), row('b', 'pending_approved')])).toBe('ready');
+      expect(await status([row('a', 'sent'), row('b', 'pending_approved')])).toBe('delivered');
+      expect(await status([row('a', 'pending_approved'), row('b', 'sent')])).toBe('delivered');
+      expect(await status([row('a', 'pending_approved'), row('b', 'sent')], [])).toBe('uncertain');
+      expect(await status([row('a', 'pending_approved'), row('b', 'suppressed')])).toBe('suppressed');
+      expect(await status([row('a', 'pending_approved'), row('b', 'pending')])).toBe('other');
+    });
+
+    test('a null-state sibling (never marked) does not block ready; delivery is judged on every sent row\'s token', async () => {
+      expect(await status([row('a', 'pending_approved'), row('b', null, null)])).toBe('ready');
+      const keys = [KEY('+19415550101')];
+      expect(await status([row('a', 'sent'), row('b', 'pending_approved')], [{ to_hash: sha('+19415550101') }], { recipientKeys: keys })).toBe('delivered');
+      const audit = mockState.raws.filter(([table]) => table === 'messaging_audit_log').map(([, sql]) => String(sql));
+      expect(audit.every((sql) => !sql.includes('transitioned_at'))).toBe(true);
+    });
+
+    test('the fenced claim adopts nothing while a sibling row was touched, and adopts when every row is untouched', async () => {
+      const FENCE2 = { visitId: 'svc-1', restorations: 0, hits: [] };
+      const claim = async (rows) => {
+        mockState.reminders = rows;
+        mockState.updates = [];
+        return AppointmentReminders.claimApprovedNoticeForGeneration({ id: 'a', scheduled_service_id: 'svc-1' }, FENCE2);
+      };
+      expect((await claim([row('a', 'pending_approved'), row('b', 'sent')])).claimed).toBe(0);
+      expect(mockState.updates.some((u) => 'cancellation_notice_at' in u)).toBe(false);
+      expect((await claim([row('a', 'pending_approved'), row('b', 'pending_approved')])).claimed).toBe(1);
+    });
+  });
+
   test('delivered needs an accepted audit row for the phone of EVERY approved recipient', async () => {
     const primary = '+19415550101';
     const keys = [KEY(primary)];

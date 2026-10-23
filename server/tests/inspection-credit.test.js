@@ -718,6 +718,29 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(mockFence).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ['a deadlock', Object.assign(new Error('deadlock detected'), { code: '40P01' })],
+    ['a dropped connection', new Error('connection terminated unexpectedly')],
+  ])('under a fence, %s inside the rebind stops the offer: a retryable hit, never the reversal', async (_label, boom) => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = [{ id: 'svc-other' }];
+    const fence = { visitId: 'svc-2', restorations: 0, hits: [] };
+    mockFence.mockReset();
+    const db = require('../models/db');
+    db.transaction.mockImplementationOnce(async () => { throw boom; });
+    mockPostCreditMovement.mockClear();
+    mockUpdates.length = 0;
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(res).toEqual({ reversed: 0 });
+    expect(fence.hits).toEqual(['credit_rebind_error']);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockUpdates).toEqual([]);
+  });
+
   it('a rebind that fails for any other reason still falls through to the reversal (unchanged)', async () => {
     mockOffers = [{
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',

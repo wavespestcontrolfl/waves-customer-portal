@@ -1507,6 +1507,13 @@ async function rebindRedeemedOffer(offerId, bookingId, cancelFence = null) {
     // fall through to the reversal, which could take the credit back (the live alternate booking still earns it) if the
     // visit's lock cleared before the reversal's own proof.
     if (err && err.code === 'CANCEL_FENCE') throw err;
+    // Recovery sweep (cancelFence): ANY other rebind error (a deadlock, a dropped connection) also stops this offer: the live
+    // alternate booking may still earn the credit, so it must never fall through to the reversal. It is a retryable hit.
+    if (cancelFence) {
+      cancelFence.hits.push('credit_rebind_error');
+      logger.warn(`[inspection-credit] rebind failed for offer ${offerId} → booking ${bookingId}; the offer is left bound: ${err.message}`);
+      throw Object.assign(err, { inspectionCreditRebindFailed: true });
+    }
     logger.warn(`[inspection-credit] rebind failed for offer ${offerId} → booking ${bookingId}: ${err.message}`);
     return false;
   }
@@ -1792,7 +1799,7 @@ async function claimAndReverseOffer(offer, { scheduledServiceId, createdBy, now,
 
 // One offer's reversal failure. Never throws for a skip; the hourly sweep retries everything else.
 async function handleOfferReversalError(err, offer, scheduledServiceId, cancelFence) {
-  if (err?.inspectionCreditSkip === 'claim_lost') return;
+  if (err?.inspectionCreditSkip === 'claim_lost' || err?.inspectionCreditRebindFailed) return;
   if (err?.code === 'CANCEL_FENCE') {
     // The booking is no longer (or not provably) the approved cancel: this offer is left exactly as it is.
     logger.info(`[inspection-credit] offer ${offer.id} left untouched: ${err.message}`);
