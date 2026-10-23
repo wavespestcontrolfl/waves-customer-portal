@@ -250,12 +250,6 @@ async function createAsset(trx, { body, custody, receiptLineId }) {
   const truckKit = require('../services/truck-kit');
   const receiptLink = require('../services/purchase-receipts/receipt-equipment-link');
   const { category, assigned_to, status } = body;
-  // The receipt line is claimed (locked, still an equipment line) BEFORE
-  // the insert, so a refusal writes nothing.
-  if (receiptLineId) {
-    const refusal = await receiptLink.claimReceiptLine(trx, receiptLineId);
-    if (refusal) return `receipt-${refusal}`;
-  }
   // A new item placed straight onto a truck waits for a check in flight
   // on that truck (same lock as recordTruckCheck), then the target is
   // validated AGAIN under the lock: a truck retired meanwhile is refused.
@@ -267,6 +261,14 @@ async function createAsset(trx, { body, custody, receiptLineId }) {
   if (category === 'vehicle' && assigned_to) {
     await truckKit.lockTechnician(trx, assigned_to);
     if (await secondLiveTruck({ category, assigned_to, status: status || 'active' }, null, trx)) return 'second-truck';
+  }
+  // The receipt line is claimed (locked, still an equipment line) AFTER the
+  // truck and technician locks, the order applyAssetUpdate uses (item, trucks,
+  // line), so a create and an edit filing the same line never deadlock; and
+  // BEFORE the insert, so a refusal writes nothing.
+  if (receiptLineId) {
+    const refusal = await receiptLink.claimReceiptLine(trx, receiptLineId);
+    if (refusal) return `receipt-${refusal}`;
   }
   const [row] = await trx('equipment').insert(assetInsertRow(body, custody)).returning('*');
   if (receiptLineId && row) await receiptLink.linkReceiptLine(trx, receiptLineId, row.id);
@@ -316,6 +318,8 @@ async function applyAssetUpdate(trx, id, updates, expected = {}, receiptLineId =
   if (staleForm(expected, before)) return 'stale-status';
   const refusal = await writeRefusal(trx, id, updates, before);
   if (refusal) return refusal;
+  // The receipt line last, after the item and truck locks (same order as
+  // createAsset), before the write.
   if (receiptLineId) {
     const receiptRefusal = await receiptLink.claimReceiptLine(trx, receiptLineId, id);
     if (receiptRefusal) return `receipt-${receiptRefusal}`;

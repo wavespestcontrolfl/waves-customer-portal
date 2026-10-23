@@ -472,12 +472,17 @@ describe('receipt_line_id (receipt → equipment link)', () => {
   const lineUpdate = () => db.__state.chains.find((c) => c.table === 'purchase_receipt_lines' && c.calls.some(([m]) => m === 'update'));
   const lineClaim = () => db.__state.chains.find((c) => c.table === 'purchase_receipt_lines' && c.calls.some(([m]) => m === 'forUpdate'));
 
-  test('POST claims the line under lock, inserts, then files the line under the new row', async () => {
+  test('POST locks the truck, then claims the line, inserts, then files the line under the new row', async () => {
     db.__state.receiptLines[LINE] = { id: LINE, status: 'agent_equipment', equipment_id: null };
-    const res = await run('post', '/equipment', { body: { name: 'Synthetic moisture meter', category: 'tool', receipt_line_id: LINE } });
+    const order = [];
+    truckKit.lockTruck.mockImplementationOnce(async () => { order.push('truck'); return { rows: [] }; });
+    const res = await run('post', '/equipment', { body: { name: 'Synthetic moisture meter', category: 'tool', assigned_vehicle_id: VEHICLE, receipt_line_id: LINE } });
     expect(res.statusCode).toBe(201);
     expect(db.__state.inserted).toEqual(expect.objectContaining({ name: 'Synthetic moisture meter' }));
     expect(lineClaim()).toBeTruthy();
+    // Same lock order as an edit (item, trucks, line): the truck lock lands before the line is read.
+    expect(order).toEqual(['truck']);
+    expect(db.__state.chains.indexOf(lineClaim())).toBeGreaterThan(db.__state.chains.findIndex((c) => c.table === 'equipment' && c.cond && c.cond.category === 'vehicle'));
     expect(lineUpdate().calls).toEqual(expect.arrayContaining([['update', { equipment_id: 'row-1' }]]));
   });
 

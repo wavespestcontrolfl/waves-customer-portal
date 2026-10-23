@@ -7,9 +7,10 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const techs = { rows: [] };
-jest.mock('../models/db', () => jest.fn(() => {
+jest.mock('../models/db', () => jest.fn((table) => {
   const c = {};
-  for (const m of ['whereRaw', 'orWhereRaw', 'limit']) c[m] = () => c;
+  c.where = (col, op, val) => { techs.query = [table, col, op, val]; return c; };
+  for (const m of ['orderBy', 'limit']) c[m] = () => c;
   c.select = async () => techs.rows;
   return c;
 }));
@@ -51,6 +52,8 @@ test('get_truck_kit with no name is the fleet overview', async () => {
 
 test('get_truck_kit by name: no match, candidates, or one compact kit', async () => {
   expect(await executeTruckKitTool('get_truck_kit', { technician_name: 'Nobody' })).toEqual({ error: 'No technician matches "Nobody"' });
+  // technicians has one `name` column: the search reads that column only.
+  expect(techs.query).toEqual(['technicians', 'name', 'ilike', '%Nobody%']);
   techs.rows = [{ id: 't1', name: 'Synthetic Adam' }, { id: 't2', name: 'Synthetic Adams' }];
   expect(await executeTruckKitTool('get_truck_kit', { technician_name: 'adam' })).toEqual({ candidates: ['Synthetic Adam', 'Synthetic Adams'], note: 'Ask which technician is meant.' });
   techs.rows = [{ id: 't1', name: 'Synthetic Adam' }];

@@ -48,8 +48,9 @@ function compactKit(status) {
 async function getTruckKit(technicianName) {
   const name = String(technicianName || '').trim();
   if (!name) return { trucks: await truckKit.trucksOverview(db) };
-  const matches = await db('technicians').whereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [`%${name}%`])
-    .orWhereRaw('name ILIKE ?', [`%${name}%`]).limit(5).select('id', 'name');
+  // technicians carries one `name` column (customers are the table with
+  // first_name / last_name).
+  const matches = await db('technicians').where('name', 'ilike', `%${name}%`).orderBy('name').limit(5).select('id', 'name');
   if (!matches.length) return { error: `No technician matches "${name}"` };
   if (matches.length > 1) return { candidates: matches.map((t) => t.name), note: 'Ask which technician is meant.' };
   try {
