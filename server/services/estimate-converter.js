@@ -9,6 +9,7 @@
 
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
@@ -296,6 +297,10 @@ function recurringServiceKey(svc = {}) {
       || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
     )
   ) return 'rodent_bait';
+  // The mosquito MISTING system plan (GATE_MOSQUITO_MISTING) is its own identity: it must never read as the barrier
+  // mosquito program (solo-mosquito setup fee, prepay waiver, tier count, seeder routing). It is never a commercial
+  // auto-priced program, so this runs before the commercial and residential mosquito checks.
+  if (isMistingSystemIdentity(raw)) return 'mosquito_misting';
   // Commercial auto-priced lines keep a DISTINCT key — they must never be
   // classified as residential lawn_care/tree_shrub, which are discountable for
   // annual prepay (the flat commercial price would then get a 5% prepay cut).
@@ -2547,8 +2552,11 @@ function isTermiteBaitOneTimeItem(item = {}) {
 // existing-customer waiver on top for the actual setup invoice.
 const MEMBERSHIP_FEE_SOLO_KEYS = new Set(['pest_control', 'mosquito']);
 function recurringMixHasMembershipFeeService(recurringServices = []) {
+  // An unpriced manual-quote row (e.g. an oversize misting layout) is not a second plan:
+  // it must not waive the solo pest/mosquito setup fee.
   const keys = Array.from(new Set(
     (Array.isArray(recurringServices) ? recurringServices : [])
+      .filter((item) => !(item && (item.quoteRequired === true || item.requiresCustomQuote === true)))
       .map(recurringServiceKey)
       .filter(Boolean),
   ));

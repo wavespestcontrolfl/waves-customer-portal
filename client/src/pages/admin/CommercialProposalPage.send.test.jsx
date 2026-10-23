@@ -255,3 +255,36 @@ it('includes the reviewed Cove submission date in the export request', async () 
   const options = JSON.parse(calls.find((call) => call.url.endsWith('/bid-form.pdf')).body.get('options'));
   expect(options.details.submissionDate).toBe('2026-09-22');
 });
+
+it('keeps the mosquito misting identity on lines and programs through an ordinary save', async () => {
+  saved.proposal = {
+    ...saved.proposal,
+    buildings: [{ name: 'Home', lineItems: [
+      { id: 'line-install', description: 'Essential system (drum) Installation', quantity: 1, unitPrice: 4000, frequency: 'one_time', taxable: false, service: 'mosquito_misting_installation' },
+      { id: 'line-commercial', description: 'Commercial misting', quantity: 1, unitPrice: 9000, frequency: 'one_time', taxable: false, service: 'commercial_pest', originalRequestedService: 'mosquito_misting', quoteRequired: true },
+      { id: 'line-plain', description: 'Quarterly service', quantity: 1, unitPrice: 100, frequency: 'quarterly', taxable: false },
+    ] }],
+  };
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Ordinary edit' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await screen.findByRole('button', { name: 'Saved' });
+  const lines = JSON.parse(calls.find((call) => call.method === 'PUT').body).proposal.buildings[0].lineItems;
+  expect(lines.find((l) => l.id === 'line-install')).toMatchObject({ service: 'mosquito_misting_installation' });
+  expect(lines.find((l) => l.id === 'line-commercial')).toMatchObject({ service: 'commercial_pest', originalRequestedService: 'mosquito_misting', quoteRequired: true });
+  expect(lines.find((l) => l.id === 'line-plain')).not.toHaveProperty('service');
+});
+
+it('keeps the misting program identity through an ordinary save', async () => {
+  saved.proposal = {
+    ...saved.proposal,
+    buildings: [],
+    programs: [{ service: 'mosquito', identity: 'mosquito_misting', label: 'Misting plan', frequencyPerYear: 12, pricePerApplication: 59, taxable: false, note: null, inclusions: [], exclusions: [], buildings: [] }],
+  };
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Ordinary edit' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await screen.findByRole('button', { name: 'Saved' });
+  const programs = JSON.parse(calls.find((call) => call.method === 'PUT').body).proposal.programs;
+  expect(programs[0]).toMatchObject({ service: 'mosquito', identity: 'mosquito_misting' });
+});

@@ -1127,6 +1127,10 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
     // trenching review, and (B18) a parked estimate - its phone belongs to another customer, so the card
     // intents always refuse it and a "finish saving your card" email would point at a dead end. Fail closed
     // like the others: a failed park lookup lands in the outer catch and skips the send.
+    // The persisted gated-add-on refusals (Bermuda gate, misting gate OFF, misting acceptance pending until misting PR 2,
+    // area add-on gate) refuse every card intent with a 409 (Codex #6503 r10): checked BEFORE the pricing bundle (a gated
+    // misting estimate's replay throws) so no reminder points the customer back at a dead-end card step.
+    if (require("./pricing-engine/v1-legacy-mapper").gatedAddOnCustomerRefusal(estData, { pricingAuthority: est.pricing_authority })) return false;
     const pricingBundle = await buildPricingBundle(est);
     if (await estimatePublicBlockingState(est, { estData, quoteRequirement: resolveEstimateQuoteRequirement(pricingBundle, estData) })) return false;
     // Contact gate, BOTH lanes (codex 2729 r2 + r3): recurring accept is

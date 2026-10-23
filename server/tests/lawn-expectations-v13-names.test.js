@@ -49,10 +49,10 @@ describe('every product the v13 program can log has a decision', () => {
   const inventory = readInventoryNames();
   const recipe = readRecipeNames();
 
-  test('the readiness list was read whole (24 names today; every v13_ key in the block is read)', () => {
+  test('the readiness list was read whole (25 names today; every v13_ key in the block is read)', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-inventory.js'), 'utf8');
     const block = src.slice(src.indexOf('const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = ['), src.indexOf('].map(', src.indexOf('const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [')));
-    expect(inventory).toHaveLength(24);
+    expect(inventory).toHaveLength(25);
     expect(inventory).toHaveLength((block.match(/\['v13_/g) || []).length);
     expect(new Set(inventory).size).toBe(inventory.length);
     expect(recipe.length).toBeGreaterThan(15);

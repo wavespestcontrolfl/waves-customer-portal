@@ -65,6 +65,7 @@ function normalizeFrequency(value) {
 const { PROPOSAL_UNITS, roundDecimal, proposalLineAmount } = require('../../shared/proposal-bid.cjs');
 
 function normalizeLineItem(raw = {}) {
+  const mistingIdentity = require('../utils/mosquito-misting-system').mistingProposalIdentity(raw);
   const quantity = num(raw.quantity, 1) > 0 ? roundDecimal(raw.quantity ?? 1) : 1;
   // Proposal lines are commercial quote amounts — never negative. Clamp at the
   // authoritative normalizer (the PDF and computeProposalTotals both read this)
@@ -85,6 +86,9 @@ function normalizeLineItem(raw = {}) {
   return {
     ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
     description: String(raw.description || raw.name || '').slice(0, 300),
+    // The mosquito misting SYSTEM keeps a canonical identity (GATE_MOSQUITO_MISTING) so an authored proposal, whose lines
+    // otherwise carry no service, is still seen by the gated-estimate and acceptance-pending refusals. Other lines are unchanged.
+    ...(mistingIdentity ? { service: mistingIdentity, ...(raw.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}), ...(raw.quoteRequired === true ? { quoteRequired: true } : {}) } : {}),
     quantity,
     ...(Object.hasOwn(PROPOSAL_UNITS, raw.unit) ? { unit: raw.unit } : {}),
     unitPrice,
@@ -145,14 +149,22 @@ function normalizeCorrectiveWorkItem(raw = {}) {
   // package's visit count — without them a derived 3-visit roach package
   // costs one treatment's COGS, and operator text decides the family.
   const visits = num(raw.visits ?? raw.visitsPerYear, 0);
+  const mistingIdentity = require('../utils/mosquito-misting-system').mistingProposalIdentity(raw);
   return {
+    // A stable id (same shape as a line's) so an editor save can carry the misting identity by id.
+    ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
     label: cleanString(raw.label ?? raw.description, 160),
     // Same clamp rationale as normalizeLineItem: commercial quote amounts are
     // never negative, and this normalizer is what totals + persistence read.
     amount: Math.max(0, roundMoney(num(raw.amount ?? raw.price, 0))),
     taxable: raw.taxable === true,
     includes: cleanStringList(raw.includes, { maxItems: 12, maxLen: 200 }),
-    service: cleanString(raw.service, 80) || null,
+    // A misting-system row keeps a canonical identity even when the editor sends no service (inferred from its text the way
+    // normalizeLineItem / normalizeProgram do), so a later rename cannot shed it (pre-push audit P1).
+    service: cleanString(raw.service, 80) || mistingIdentity || null,
+    // A separate identity marker, persisted whatever raw.service says (a row may carry a generic family such as 'mosquito'
+    // beside a misting label), so a later rename cannot shed the identity (pre-push audit P1).
+    ...(mistingIdentity || raw.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}),
     visits: visits > 0 ? Math.min(Math.round(visits), 52) : null,
   };
 }
@@ -198,6 +210,57 @@ function normalizeGeneratedResponsibilities(raw) {
 // canonical list is null (and the PUT route 400s it).
 const { PAYMENT_TERMS: PROPOSAL_PAYMENT_TERMS } = require('./payer');
 
+// Carry the misting SYSTEM identity (GATE_MOSQUITO_MISTING) from the previously persisted proposal onto an incoming one, by line id
+// (programs: by label, else by index when the counts match). The editor can change text and prices, but it can never launder the
+// identity away by omitting the fields, so the gated and acceptance-pending refusals keep seeing the system. A line with no id
+// match (a new line) carries nothing. Returns a new object; the incoming one is not mutated.
+function carryMistingIdentity(incoming = {}, saved = {}) {
+  const identityOf = (line) => ({
+    ...(typeof line?.service === 'string' && /^mosquito_misting(?!_system$)/.test(line.service) ? { service: line.service } : {}),
+    ...(line?.originalRequestedService === 'mosquito_misting' ? { originalRequestedService: 'mosquito_misting' } : {}),
+  });
+  const savedById = new Map();
+  const remember = (line) => {
+    const identity = identityOf(line);
+    if (line?.id && Object.keys(identity).length) savedById.set(line.id, identity);
+  };
+  for (const building of Array.isArray(saved?.buildings) ? saved.buildings : []) {
+    for (const line of Array.isArray(building?.lineItems) ? building.lineItems : []) remember(line);
+  }
+  // Corrective-work rows carry the same identity fields (pre-push audit P1): carried by id like a line.
+  for (const work of Array.isArray(saved?.correctiveWork) ? saved.correctiveWork : []) remember(work);
+  const carryLine = (line) => {
+    const carried = line && typeof line === 'object' && line.id ? savedById.get(line.id) : null;
+    if (!carried) return line;
+    const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
+    return mistingProposalIdentity(line) ? line : { ...line, ...carried };
+  };
+  const out = { ...incoming };
+  if (Array.isArray(incoming.buildings)) {
+    out.buildings = incoming.buildings.map((building) => {
+      if (!building || typeof building !== 'object') return building;
+      const key = Array.isArray(building.lineItems) ? 'lineItems' : (Array.isArray(building.line_items) ? 'line_items' : null);
+      return key ? { ...building, [key]: building[key].map(carryLine) } : building;
+    });
+  }
+  if (Array.isArray(incoming.correctiveWork)) out.correctiveWork = incoming.correctiveWork.map(carryLine);
+  const savedPrograms = Array.isArray(saved?.programs) ? saved.programs : [];
+  if (Array.isArray(incoming.programs) && savedPrograms.some((program) => program?.identity === 'mosquito_misting')) {
+    // Carry by STABLE ID only (pre-push audit P1: a same-length array with a removed misting program and a new one
+    // stamped the identity onto an unrelated program). A legacy saved program with no id matches only an EXACT label.
+    const labelOf = (program) => String(program?.label ?? program?.name ?? '').trim().toLowerCase();
+    const savedMisting = savedPrograms.filter((program) => program?.identity === 'mosquito_misting');
+    out.programs = incoming.programs.map((program) => {
+      if (!program || typeof program !== 'object' || program.identity === 'mosquito_misting') return program;
+      const match = program.id
+        ? savedMisting.find((candidate) => candidate?.id && candidate.id === program.id)
+        : savedMisting.find((candidate) => !candidate?.id && labelOf(candidate) && labelOf(candidate) === labelOf(program));
+      return match ? { ...program, identity: 'mosquito_misting' } : program;
+    });
+  }
+  return out;
+}
+
 function normalizePaymentTerms(value) {
   const t = String(value ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
   if (!t) return null;
@@ -216,6 +279,7 @@ const PROGRAM_FAMILIES = ['pest', 'lawn', 'tree_shrub', 'mosquito', 'termite', '
 
 function normalizeProgram(raw = {}) {
   const family = PROGRAM_FAMILIES.includes(String(raw.service || '').trim()) ? String(raw.service).trim() : 'other';
+  const mistingIdentity = require('../utils/mosquito-misting-system').mistingProposalIdentity(raw);
   const frequencyPerYear = (() => {
     const n = Number(raw.frequencyPerYear ?? raw.visitsPerYear);
     return Number.isFinite(n) && n >= 1 && n <= 52 ? Math.round(n) : 0;
@@ -226,7 +290,10 @@ function normalizeProgram(raw = {}) {
   // would let the rendered per-visit math contradict the billed total.
   const annual = roundMoney(pricePerApplication * frequencyPerYear);
   return {
+    // A stable id (same shape as a line's) so an editor save can carry a program's identity by identity, never by position.
+    ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
     service: family,
+    ...(mistingIdentity ? { identity: 'mosquito_misting' } : {}),
     label: cleanString(raw.label ?? raw.name, 120) || 'Recurring service program',
     frequencyPerYear,
     pricePerApplication,
@@ -552,6 +619,7 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
       // The per-application lines already cover the recurring side.
       if (havePerApplicationRecurring || suppressRecurringPricing) continue;
       lineItems.push(normalizeLineItem({
+        service: line.service,
         description: line.displayName || line.name || line.service || 'Recurring service',
         unitPrice: monthly,
         frequency: 'monthly',
@@ -559,6 +627,7 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
       }));
     } else if (oneTime > 0) {
       lineItems.push(normalizeLineItem({
+        service: line.service,
         description: line.displayName || line.name || line.service || 'One-time service',
         unitPrice: oneTime,
         frequency: 'one_time',
@@ -614,6 +683,7 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
         const isCharged = charged.includes(row);
         if (!isCharged && !included.includes(row)) continue;
         lineItems.push(normalizeLineItem({
+          service: row.service,
           description: isCharged
             ? (row.label || row.service || 'One-time service')
             : `${row.label || row.service || 'One-time service'} (Included)`,
@@ -834,6 +904,7 @@ module.exports = {
   normalizePaymentTerms,
   PROPOSAL_PAYMENT_TERMS,
   normalizeProposal,
+  carryMistingIdentity,
   perApplicationRecurringResolution,
   annualizedAmount,
   computeProposalTotals,

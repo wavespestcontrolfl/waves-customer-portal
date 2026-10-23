@@ -6,12 +6,15 @@
  * sized for 0.5 lb N instead (24-0-11: 2.1 lb of product per 1,000, because 2.1 x 0.24 = 0.504).
  *
  * An entry applies to the visit whose month number is `month`, when the property has an ACTIVE trouble area of type
- * `troubleType` (lawn-trouble-areas TYPES; take-all is its own type and does not match), and only LOWERS the visit's nitrogen
+ * `troubleType` (lawn-trouble-areas TYPES; take-all is its own type and does not match) that carries the `evidence` (large_patch: the
+ * newest fungicide application at the place names large patch, brown patch or Rhizoctonia as its target; gray leaf spot, Pythium, dollar
+ * spot, fairy ring and rust are "fungus" areas too and do not count, and an unknown disease fails closed; lawn-trouble-areas
+ * loadActiveLargePatch), and only LOWERS the visit's nitrogen
  * target (never raises it). Nitrogen only; potassium is untouched. December (10-0-22) already carries 0.45 lb N, so it has no entry.
  * Kept in code, not in a protocol row, so no migration is needed and the gate off leaves every stored row as it was.
  */
 const V13_TROUBLE_N_TARGETS = Object.freeze([
-  Object.freeze({ month: 11, troubleType: 'fungus', targetNPer1000: 0.5 }),
+  Object.freeze({ month: 11, troubleType: 'fungus', evidence: 'large_patch', targetNPer1000: 0.5 }),
 ]);
 
 // The key of the line note a reduced nitrogen bag carries (plan gateNotes), so the Fast Complete sheet can pick that one note out.

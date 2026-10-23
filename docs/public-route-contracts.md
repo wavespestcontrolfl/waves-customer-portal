@@ -1984,6 +1984,28 @@ gated (its replay would throw). `GET /:token/data` is unchanged: it serves the s
 Bermuda-gated estimate. With the gate on, or with no add-on on the estimate, every body and status on these routes is unchanged.
 An estimate that carries both a gated Bermuda add-on and a gated area add-on answers the Bermuda body.
 
+**Mosquito misting gate (`GATE_MOSQUITO_MISTING`, 2026-10-23, dark).** An estimate that carries a persisted mosquito misting
+system (a stored `services.mosquitoMisting` / `mosquito_misting` engine input, a mapped `mosquito_misting` recurring row, a
+`mosquito_misting_installation` one-time item, a raw `mosquito_misting` engine line, or an itemized proposal line of either
+key) while the gate is off is refused on the SAME rail and at the SAME position as the area add-on gate above, on the same
+endpoints: `PUT /:token/accept` (pre-transaction check and the locked in-transaction recheck), `GET /:token/available-slots`,
+`POST /:token/find-slots`, `POST /:token/reserve`, `POST /:token/card-hold-intent`, `POST /:token/recurring-card-intent` and
+`POST /:token/reserve/:scheduledServiceId/extend`. Refusal: HTTP 409 with the same customer text as the area add-on refusal and
+`"code": "MOSQUITO_MISTING_GATED"` (reason `mosquito_misting_disabled`). Precedence among gated add-ons: Bermuda, then misting,
+then area add-ons. A gated misting estimate is never priced for the park check (its replay throws a fail-closed 400 carrying the
+same code); the deposit webhook records nothing for it (reason `mosquito_misting_disabled`). `GET /:token/data` is unchanged.
+**Misting acceptance pending (misting PR 1, code-owned `MOSQUITO_MISTING_CONVERSION_READY = false`).** Even with the gate ON,
+an estimate that carries a PRICED misting system (the mapped plan row, the install item, the raw engine line, an itemized
+proposal line, or a selected stored input when no stored row exists; an unpriced quote-required-only row, such as an oversize
+layout, does not count) cannot be accepted: the series seeding, the install on the acceptance invoice and the refill billing
+are not built until misting PR 2. The same endpoints as above answer HTTP 409 with the same customer text and
+`"code": "MOSQUITO_MISTING_ACCEPT_PENDING"` (reason `mosquito_misting_conversion_pending`); Mark Won / manual acceptance and the
+schedule booking preflight refuse it with the staff text; the deposit webhook records nothing for it (reason
+`mosquito_misting_conversion_pending`). `GET /:token/data` and staff send stay allowed so the quote can be shown. Precedence:
+Bermuda, misting gated (gate off), misting acceptance pending, then area add-ons. Lifted by misting PR 2.
+With the gate on and no priced misting row, or with no misting row on the estimate, every body and status on these routes is
+unchanged. The gate is off by default, so today no public response changes.
+
 Which stored rows count (Codex round 17; no new status or body): the add-on rows are read from the estimate's AUTHORITATIVE result
 container only (`storedAreaAddOnRows`, `server/services/estimate-result-container.js`, the pick the Bermuda evidence detector uses: a
 revision's own `result` wins over the raw `engineResult` it left behind, a SERVER-priced `result` wins even when it prices nothing, and an
@@ -4870,6 +4892,16 @@ from the tier sweep the same way the lawn row above dropped its retired
 instead of the old 4/6/9 wording; since the 2026-09-27 typical-job
 narrowing above, the published low is Standard's list-price floor on a
 typical lot (`low` ≈ $36), not a bundle-discounted value.
+Mosquito misting rows (2026-10-22, dark): with `GATE_MOSQUITO_MISTING`
+set (`1`/`true`/`on`, read at call time through the gated-row map in
+`server/services/pricing-engine/public-ranges.js`) the payload gains two
+rows, `mosquito_misting_install` (per installation) and
+`mosquito_misting_plan` (per application, monthly), swept from `priceMosquitoMisting`
+over both system tiers at 20, 35 and 50 nozzles. The numbers are the DRAFT
+price list in ~/mosquito-misting-scope-20260924.md §4.3 (dealer cost
+unknown); the gate stays off until the owner launches the service, so the
+public payload is byte-identical today. The gate also feeds the payload's
+cache signature and the blog price-card exclusion like the other gated rows.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public
@@ -7418,3 +7450,5 @@ document holds the per-route entries only.
 Report greeting first name (follow-up to #5559 / #5612): the service-report V1 payload (`/api/reports/:token/data`, and the PDF and report-email renders that share `buildReportV1Data`), the legacy-format service-report payload from the same route, and the project report payload (`/api/reports/project/:token/data`) now carry `customerFirstName` beside the unchanged `customerName`: the customer's own trimmed `first_name`, or `null` when it is blank (the call booker's last-name-only customers, where the composed `customerName` is only the surname). The report pages, the report email, and the visit recap greet by it and fall back to "there" when it is `null`; a payload without the key (cached or older frozen payloads) greets by the first token of `customerName` as before. On a service record that carries a completion-time identity snapshot the value comes from the snapshot's first name, the same source as `customerName`, so a frozen report keeps greeting the way it did at completion. It is the customer's own first name only, already shown inside `customerName`: no new exposure, token, eligibility, privacy or rate-limit change, and no display change to the full name. A report-email recipient's own contact name still greets by its first token.
 
 Pre-treat sticker report (GATE_PRETREAT_STICKER_REPORT, dark): the project report payload (`/api/reports/project/:token/data`) carries a new boolean `pretreatStickerReport`. It is `true` only when the project is a `pre_treatment_termite_certificate` AND the gate is on; every other type and gate-off return `false`. The client then renders the certificate as the Notice of Termite Protection label (form WV-001) with a details block under it; `false` or a missing key renders today's certificate. The certificate's `findings` may also carry five new optional keys, `final_exterior_date`, `final_exterior_time` (HH:MM, added 2026-10-23), `final_exterior_product`, `final_exterior_active_ingredient` and `final_exterior_applicator_name`, entered by staff on the certificate form; they ride the same `findings` object, with the same token, hold and fee-scrub rules as every other certificate field. The three free-text keys also pass the customer copy screen (`customerCopyViolations` + `containsReportAccessCode`): the admin create/update routes refuse a failing value with 422 `final_exterior_copy`, and `/data` blanks one that is already stored. `final_exterior_date` must be blank or a real date no later than today (ET), else 422 `final_exterior_date_invalid`. `final_exterior_time` must be blank or a clock time (HH:MM), else 422 `final_exterior_time_invalid`, and `/data` blanks a stored non-time value. No new route, token, eligibility, privacy or rate-limit change. Send readiness (2026-10-23, staff send only): a warranty from the form's choices, and a clock-time `treatment_time`, re-judged after the delivery claim (422 `missing_compliance_details`). The final-exterior keys never gate the send: they fill the notice's reference blank, and the later visit's full record is its own certificate. On a certificate that already has a link, `PUT /admin/projects/:id` refuses an edit that leaves a field it changed failing these checks (422 `published_certificate_incomplete`).
+
+Lawn protocol card, December potassium bag (GATE_LAWN_DEC_LARGE_PATCH_K, dark, owner 2026-10-23): the `/api/reports/:token/data` lawn payload (and the PDF and report-email renders that share `buildReportV1Data`) carries `dynamicContext.lawnProtocol.products`, the products of the visit's protocol window. The staged December row for LESCO Black Out 0-0-24 AM Spar-TECH (a non-default row that exists for every v13 window) is listed in it ONLY when all of these hold: the swap gate is live (strict `true`, read at call time; it also needs `GATE_LAWN_TROUBLE_AREAS` and its prerequisites, and `GATE_LAWN_SPOT_TARGET`), AND the visit's `service_products` shows that product was applied on this record. With the gate off, with any prerequisite gate off, for a lawn whose visit did not apply it, or when the `service_products` read fails (the read fails closed: the row is dropped), the payload lists exactly the products it listed before the row existed (byte-identical). The row is identified by its stored trigger (`gates.trigger = active_large_patch_mapped`) or name, never by free text. No new key, route, token, privacy or rate-limit surface; every other product, and a window with no such row, is returned untouched. The same row is also left out of the technician pre-visit brief unless the gate is live (a technician surface, not public).

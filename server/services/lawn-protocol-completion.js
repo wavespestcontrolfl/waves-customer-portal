@@ -335,8 +335,9 @@ function resolveSubstitutions(plan, visitSubstitutions = []) {
 function partitionSkippedProducts(completionInput, plan, structured, allLawn) {
   if (!allLawn) return { skipped: [], unlisted: [] };
   const structuredProducts = structured?.products || [];
+  // `productSwapIn` (GATE_LAWN_DEC_LARGE_PATCH_K): the plan swapped this bag in for the window's default, so it is the visit's default.
   const isVisitDefault = (item) => item?.selected === true
-    && structuredProducts.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id))?.defaultInPlan;
+    && (structuredProducts.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id))?.defaultInPlan || item.productSwapIn === true);
   const visitDefaultIds = new Set((plan?.mixCalculator?.items || [])
     .filter(isVisitDefault)
     .map((item) => String(item.product?.id || ''))
@@ -634,4 +635,5 @@ module.exports = {
   normalizeChecklist,
   missingRequiredTasks,
   normalizeCompletionForStructuredNotes,
+  partitionSkippedProducts,
 };

@@ -60,6 +60,15 @@ const SERVICE_TYPE_MAP = [
 
   // Mosquito — cadence identities are catalog services (mosquito_seasonal /
   // mosquito_monthly) and must survive; the bare pattern is the legacy fallback.
+  // The misting SYSTEM is not the barrier treatment: keep its own label.
+  // The lead-only design visit keeps its own catalog name (migration 20260924000020).
+  // Hand-booked misting WORK rows keep their own identity (Codex #6503 r7): the design-visit pattern below must not
+  // swallow an installation, refill or maintenance row (utils/mosquito-misting-system.js keeps these subtypes distinct).
+  { match: /misting.*\binstall/i,                          type: 'Mosquito Misting System Installation' },
+  { match: /misting.*\brefill/i,                           type: 'Mosquito Misting System Refill' },
+  { match: /misting.*\b(?:maint|repair)/i,                 type: 'Mosquito Misting System Maintenance' },
+  { match: /misting\s*system/i,                             type: 'Mosquito Misting System Service' },
+  { match: /misting\s*service\s*plan/i,                    type: 'Mosquito Misting Service Plan' },
   { match: /seasonal.*mosquito|mosquito.*seasonal/i,        type: 'Seasonal Mosquito Control Service' },
   { match: /monthly.*mosquito|mosquito.*monthly/i,          type: 'Monthly Mosquito Control Service' },
   { match: /mosquito/i,                                     type: 'Mosquito Barrier Treatment' },
