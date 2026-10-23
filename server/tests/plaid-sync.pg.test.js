@@ -752,6 +752,29 @@ async function activate(itemId, overrides = {}) {
     expect(await mockPg('bank_transactions').count('* as n').first()).toEqual({ n: '0' });
   });
 
+  test('feed setup waits for a ledger import that holds the ledger lock, then judges the rows that import wrote', async () => {
+    const itemId = await connect();
+    const holder = knex({ client: 'pg', connection, searchPath: [SCHEMA, 'public'], pool: { min: 1, max: 1 } });
+    try {
+      await holder.raw("select pg_advisory_lock(hashtext('bank-import:ledger'))");
+      let settled = false;
+      const pending = activate(itemId, { 'acc-card': { accountLabel: 'spark-card', syncFrom: '2026-09-01' } }).finally(() => { settled = true; });
+      pending.catch(() => {});
+      await new Promise(r => setTimeout(r, 400));
+      expect(settled).toBe(false); // waiting behind the import
+      await mockPg('bank_transactions').insert({
+        account_label: 'ledger-1234', account_type: 'card', txn_date: '2026-09-05', source: 'ledger-csv',
+        description: 'LEDGER ROW', amount: 5, direction: 'debit', row_hash: 'm'.repeat(64),
+      });
+      await holder.raw("select pg_advisory_unlock(hashtext('bank-import:ledger'))");
+      await expect(pending).rejects.toThrow(/the ledger import through 2026-09-05 — start the feed on 2026-09-06/);
+      await mockPg('bank_transactions').where({ row_hash: 'm'.repeat(64) }).del();
+      await plaidSync.disconnectItem(itemId);
+    } finally {
+      await holder.destroy();
+    }
+  });
+
   test('a replacement connection cannot re-import days an earlier feed of the label already covered', async () => {
     const first = await connect();
     await activate(first);

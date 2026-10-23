@@ -458,6 +458,10 @@ async function setupItem(itemId, input) {
     for (const label of [...enabledLabels].sort()) {
       await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`bank-import-label:${label}`]);
     }
+    // then the ledger key (after the label keys, a fixed order): a ledger
+    // import in progress holds it until its last row is written, so the
+    // check below sees that import's rows, never a half-written portal
+    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [bankImport.LEDGER_LOCK_KEY]);
     const others = await trx('plaid_accounts as pa')
       .join('plaid_items as pi', 'pi.id', 'pa.plaid_item_id')
       .whereNot('pa.plaid_item_id', itemId)

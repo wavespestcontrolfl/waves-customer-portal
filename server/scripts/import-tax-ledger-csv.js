@@ -53,7 +53,7 @@ const { categoryDeductibleAmount } = require('../services/expense-categorizer');
 // days off the statement still holds the ledger's expense row) and its
 // refund-aware gross reading (an expense a refund reduced is compared at the
 // amount the bank debited, applied and released refunds included).
-const { EXPENSE_DATE_WINDOW_DAYS, LEDGER_NAMED_SOURCES, appliedRefundTotal, methodIncompatible, withinCandidateTolerance } = require('../services/bank-import');
+const { EXPENSE_DATE_WINDOW_DAYS, LEDGER_NAMED_SOURCES, LEDGER_LOCK_KEY, appliedRefundTotal, methodIncompatible, withinCandidateTolerance } = require('../services/bank-import');
 
 const HEADER = ['source', 'date', 'description', 'amount', 'direction', 'class', 'category', 'sched_c_line', 'flag', 'processor_match', 'bank_category'];
 const CLASSES = ['expense', 'vehicle', 'interest', 'personal', 'transfer', 'income_proc', 'receipt_unmatched', 'review', 'reward', 'refund', 'asset', 'unknown'];
@@ -891,6 +891,22 @@ async function writeRows(db, fresh, portal) {
  * With dryRun it reads (what the portal holds, categories) but writes nothing.
  * Returns { report, counts, summary }.
  */
+// The whole run, validation and every write, happens under one session-level
+// advisory lock on a dedicated connection (the transactions below use the
+// pool as before). The CSV upload and the Plaid feed setup take the same key
+// (bank-import LEDGER_LOCK_KEY) around their own overlap checks and writes:
+// neither can judge a portal this run has not finished writing, and this
+// run cannot judge a portal a statement or a feed is still landing in.
+async function withLedgerLock(db, fn) {
+  const conn = await db.client.acquireConnection();
+  try {
+    await db.raw('select pg_advisory_lock(hashtext(?))', [LEDGER_LOCK_KEY]).connection(conn);
+    return await fn();
+  } finally {
+    try { await db.raw('select pg_advisory_unlock(hashtext(?))', [LEDGER_LOCK_KEY]).connection(conn); } finally { await db.client.releaseConnection(conn); }
+  }
+}
+
 async function run({ file, dryRun = false, db, log = () => {} } = {}) {
   if (!file) throw fail('missing --file');
   if (!db) throw fail('run() needs a db');
@@ -904,10 +920,13 @@ async function run({ file, dryRun = false, db, log = () => {} } = {}) {
   const rows = parseLedgerCsv(text);
   const ordinals = withOrdinals(rows);
   const mapped = rows.map((r, i) => mapRow(r, ordinals[i], basename));
-  const portal = await loadPortalState(db, mapped, rows);
-  const r = reconcileRows(mapped, rows, portal);
-  const written = dryRun ? { inserted: r.fresh.length, duplicates: 0, parked: [] } : await writeRows(db, r.fresh, portal);
-  if (!dryRun) await noteHeldRows(db, r.held);
+  const { portal, r, written } = await withLedgerLock(db, async () => {
+    const state = await loadPortalState(db, mapped, rows);
+    const rec = reconcileRows(mapped, rows, state);
+    const out = dryRun ? { inserted: rec.fresh.length, duplicates: 0, parked: [] } : await writeRows(db, rec.fresh, state);
+    if (!dryRun) await noteHeldRows(db, rec.held);
+    return { portal: state, r: rec, written: out };
+  });
   // Rows lost to an insert-time conflict are not in the report's tallies.
   const landed = dryRun ? r.fresh : r.fresh.filter(m => !m.skipped);
   const landedHashes = new Set(landed.map(m => m.bank.row_hash));

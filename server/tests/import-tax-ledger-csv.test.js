@@ -305,7 +305,8 @@ function makeFakeDb({ categories } = {}) {
   tables.plaid_accounts = [];
   tables.plaid_items = [];
   let seq = 0;
-  const log = { transactions: 0, rollbacks: 0, writes: 0 };
+  let conns = 0;
+  const log = { transactions: 0, rollbacks: 0, writes: 0, locks: [] };
 
   function builderFor(store, table) {
     const state = { filter: null, pending: null, ignoreConflict: false, wantReturn: false, raws: [], first: null };
@@ -371,7 +372,16 @@ function makeFakeDb({ categories } = {}) {
   }
 
   const db = table => builderFor(tables, table);
-  db.raw = (sql, bindings) => ({ sql, bindings });
+  // a raw pinned to a connection (the run's session lock) is recorded with the write count at that moment
+  db.raw = (sql, bindings) => {
+    const q = { sql, bindings };
+    Object.defineProperty(q, 'connection', { enumerable: false, value: (conn) => { log.locks.push({ sql, bindings, conn: conn.id, writes: log.writes }); return Promise.resolve([]); } });
+    return q;
+  };
+  db.client = {
+    acquireConnection: async () => ({ id: `conn-${(conns += 1)}` }),
+    releaseConnection: async (conn) => { log.locks.push({ released: conn.id, writes: log.writes }); },
+  };
   db.transaction = async fn => {
     log.transactions += 1;
     const staged = Object.fromEntries(Object.entries(tables).map(([k, v]) => [k, v.slice()]));
@@ -568,6 +578,8 @@ describe('run', () => {
       return { ...real, insert: (...a) => real.insert(...a), whereIn: () => blindLookup };
     };
     blind.transaction = realDb.transaction;
+    blind.raw = realDb.raw;
+    blind.client = realDb.client;
     const { counts, summary } = await run({ file, db: blind });
     expect(counts).toEqual({ read: 8, inserted: 7, duplicates: 1, held: 0, parked: 0, portalExpenses: 0 });
     // the summary covers the seven rows that landed, not the raced one
@@ -590,6 +602,8 @@ describe('run', () => {
       return { ...real, insert: (...a) => real.insert(...a), whereIn: () => blindLookup };
     };
     blind.transaction = realDb.transaction;
+    blind.raw = realDb.raw;
+    blind.client = realDb.client;
     const { counts } = await run({ file, db: blind });
     expect(counts.duplicates).toBe(1);
     expect(counts.inserted).toBe(7);
@@ -1018,6 +1032,7 @@ describe('what the portal already holds', () => {
     };
     blind.transaction = realDb.transaction;
     blind.raw = realDb.raw;
+    blind.client = realDb.client;
     const { counts } = await run({ file, db: blind });
     expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 1, held: 0, parked: 0, portalExpenses: 1 });
     expect(realDb.tables().expenses).toHaveLength(1); // no expense made for a row that was not written
@@ -1046,6 +1061,7 @@ describe('what the portal already holds', () => {
     };
     db.transaction = realDb.transaction;
     db.raw = realDb.raw;
+    db.client = realDb.client;
     const { counts } = await run({ file, db });
     expect(expenseReads).toBe(2);
     expect(counts).toEqual({ read: 1, inserted: 1, duplicates: 0, held: 0, parked: 0, portalExpenses: 0 });
@@ -1100,6 +1116,24 @@ describe('what the portal already holds', () => {
     expect((await run({ file, db })).counts).toMatchObject({ held: 1 });
     expect(stored().suggestion.sql).not.toMatch(/refundCredit/);
     expect(JSON.parse(stored().suggestion.bindings[0]).refundCredit).toBeUndefined();
+  });
+
+  test('a run holds the ledger lock on one connection from its first read to its last write, and releases it on a refusal too', async () => {
+    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-03-14' }));
+    const db = makeFakeDb();
+    await run({ file, db });
+    const [lock, ...rest] = db.log.locks;
+    expect(lock).toEqual({ sql: 'select pg_advisory_lock(hashtext(?))', bindings: ['bank-import:ledger'], conn: 'conn-1', writes: 0 });
+    expect(db.log.writes).toBeGreaterThan(0);
+    expect(rest.find(l => /pg_advisory_unlock/.test(l.sql))).toEqual({ sql: 'select pg_advisory_unlock(hashtext(?))', bindings: ['bank-import:ledger'], conn: 'conn-1', writes: db.log.writes });
+    expect(rest[rest.length - 1]).toEqual({ released: 'conn-1', writes: db.log.writes });
+    // a refused run: unlocked and released all the same
+    db.tables().plaid_items.push({ id: 'it', institution_name: 'Bank', status: 'active' });
+    db.tables().plaid_accounts.push({ id: 'pa', plaid_item_id: 'it', account_label: 'Spark', mask: '9731', sync_from: '2025-01-01', enabled: true });
+    fs.writeFileSync(file, csv(row({ source: '9731', date: '2025-03-14' })));
+    await expect(run({ file, db })).rejects.toThrow(/a connected bank feed starts inside this file's days/);
+    expect(db.log.locks.filter(l => /pg_advisory_unlock/.test(l.sql)).map(l => l.conn)).toEqual(['conn-1', 'conn-2']);
+    expect(db.log.locks.filter(l => l.released).map(l => l.released)).toEqual(['conn-1', 'conn-2']);
   });
 
   test('expenses the other year\'s ledger run made are the ledger\'s own: not listed, never held against, even within the window of this file', async () => {

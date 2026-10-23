@@ -25,6 +25,13 @@ const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
 // refuse each other's range (plaid-sync assertFeedStartsAfterPriorRows,
 // import-tax-ledger-csv feedsInsideFile).
 const LEDGER_NAMED_SOURCES = [{ label: 'ledger-amex', institution: /american\s*express|\bamex\b/i }];
+// One advisory-lock key coordinates the three writers of bank rows whose
+// rows can never be deduped against each other: the ledger import holds it
+// (session lock) from its first read to its last write; the CSV upload and
+// the Plaid feed setup take it (transaction lock) around their overlap
+// checks and writes. So no writer judges a portal another is still
+// writing to.
+const LEDGER_LOCK_KEY = 'bank-import:ledger';
 const REFUND_LOOKBACK_DAYS = 90;    // refunds lag their purchase by weeks
 // Auto-links require EXACT cent equality; the tolerance only widens the
 // candidate list shown to the operator (a near-miss is a lead, not a match).
@@ -1970,6 +1977,7 @@ async function ledgerCoverage(year) {
 module.exports = {
   EXPENSE_DATE_WINDOW_DAYS,
   LEDGER_NAMED_SOURCES,
+  LEDGER_LOCK_KEY,
   parseStatementCsv,
   withRowHashes,
   hashRow,
