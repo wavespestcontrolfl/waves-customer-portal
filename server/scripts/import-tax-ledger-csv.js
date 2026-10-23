@@ -32,7 +32,12 @@ const { parse } = require('csv-parse/sync');
 const HEADER = ['source', 'date', 'description', 'amount', 'direction', 'class', 'category', 'sched_c_line', 'flag', 'processor_match', 'bank_category'];
 const CLASSES = ['expense', 'vehicle', 'interest', 'personal', 'transfer', 'income_proc', 'receipt_unmatched', 'review', 'reward', 'refund', 'asset', 'unknown'];
 const BUSINESS_CLASSES = new Set(['expense', 'vehicle', 'interest']);
-const IGNORED_CLASSES = new Set(['personal', 'transfer', 'income_proc', 'reward', 'refund', 'asset']);
+const IGNORED_CLASSES = new Set(['personal', 'transfer', 'income_proc', 'reward', 'asset']);
+// A refund credit (class refund, or money IN on a business class) is left
+// OPEN: the Bank Import refund flow applies it to the original expense, which
+// is what reduces the expense the P&L reads. Ignoring it would leave the
+// expense at its gross amount.
+const REFUND_REASON = 'refund credit from the ledger: apply it to the original expense in Bank Import (it reduces that expense)';
 const CARD_SOURCES = new Set(['9731', '6646', '8804', 'amex']);
 const MAX_AMOUNT = 9999999999.99; // numeric(12,2)
 const SOURCE_TAG = 'ledger-csv';
@@ -57,7 +62,10 @@ const LINE_TO_CATEGORY = {
   '27a': 'Software & Technology',
   30: 'Home Office',
   '16a': 'Interest',
-  '16b': 'Interest',
+  // 16b (other interest) has no category of its own: the seeded Interest
+  // category carries irs_line 16a and the tax summaries report the
+  // category's line, so a 16b row is parked for review instead of being
+  // presented as 16a.
   '24b': 'Meals & Entertainment',
 };
 // Same policy as services/expense-categorizer CATEGORY_DEDUCTIBLE_PCT (not
@@ -215,12 +223,15 @@ function mapRow(row, ordinal, basename) {
   const out = { bank, expense: null, categoryName: null, unmatchedLine: null, ledgerClass: row.class };
   const base = { ledgerClass: row.class, ledgerCategory: row.category, flag: row.flag };
 
+  const refundCredit = row.class === 'refund' || (BUSINESS_CLASSES.has(row.class) && row.direction === 'in');
+  if (refundCredit) {
+    bank.status = 'unmatched';
+    bank.suggestion = { refundCredit: true, reason: REFUND_REASON, ...base, schedCLine: row.sched_c_line };
+    out.unmatchedLine = 'refund';
+    return out;
+  }
+
   if (BUSINESS_CLASSES.has(row.class)) {
-    if (row.direction === 'in') {
-      bank.status = 'ignored';
-      bank.suggestion = { ignore: true, reason: 'refund credit from the ledger (already netted in the books)', ...base };
-      return out;
-    }
     const line = row.sched_c_line || CLASS_DEFAULT_LINE[row.class] || '';
     const categoryName = categoryNameForLine(line, row.category);
     if (!categoryName) {
@@ -323,7 +334,7 @@ function formatReport({ dryRun, file, read, inserted, duplicates, summary }) {
     `${dryRun ? 'expenses to create:' : 'expenses created:'}`.padEnd(27) + summary.expensesCreated,
     ...formatTable(summary.byStatus, 'by status'),
     ...formatTable(summary.expensesByCategory, `expenses ${dryRun ? 'to create' : 'created'} by category`),
-    ...formatTable(summary.unmatchedByLine, 'left unmatched by Schedule C line'),
+    ...formatTable(summary.unmatchedByLine, 'left unmatched by Schedule C line (refund = a refund credit to apply in Bank Import)'),
     `total outflow (debit):     ${fmtMoney(summary.totals.debitCents)}`,
     `total inflow (credit):     ${fmtMoney(summary.totals.creditCents)}`,
     `total expense amount:      ${fmtMoney(summary.totals.expenseCents)}`,

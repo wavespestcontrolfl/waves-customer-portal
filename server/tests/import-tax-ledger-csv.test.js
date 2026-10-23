@@ -128,7 +128,7 @@ describe('row hashing', () => {
 describe('class to status table', () => {
   const map = over => mapRow(parsedRow(over), 0, 'l.csv');
 
-  test.each([['expense', '22'], ['vehicle', '9'], ['interest', '16b']])('%s out becomes a created expense', (cls, line) => {
+  test.each([['expense', '22'], ['vehicle', '9'], ['interest', '16a']])('%s out becomes a created expense', (cls, line) => {
     const m = map({ class: cls, sched_c_line: line, flag: 'F1' });
     expect(m.bank.status).toBe('created_expense');
     expect(m.bank.match_method).toBe('ledger-import');
@@ -143,14 +143,24 @@ describe('class to status table', () => {
     expect(m.expense.quarter).toBe('Q4');
   });
 
-  test.each(['expense', 'vehicle', 'interest'])('%s in is an ignored refund credit with no expense', cls => {
+  test.each(['expense', 'vehicle', 'interest'])('%s in is an OPEN refund credit with no expense: Bank Import applies it to the original expense', cls => {
     const m = map({ class: cls, direction: 'in' });
-    expect(m.bank.status).toBe('ignored');
+    expect(m.bank.status).toBe('unmatched');
     expect(m.expense).toBeNull();
-    expect(m.bank.suggestion).toMatchObject({ ignore: true, reason: 'refund credit from the ledger (already netted in the books)', ledgerClass: cls });
+    expect(m.bank.status).toBe('unmatched');
+    expect(m.unmatchedLine).toBe('refund');
+    expect(m.bank.suggestion).toMatchObject({ refundCredit: true, reason: expect.stringMatching(/apply it to the original expense in Bank Import/), ledgerClass: cls });
+    expect(m.bank.suggestion.ignore).toBeUndefined();
   });
 
-  test.each(['personal', 'transfer', 'income_proc', 'reward', 'refund'])('%s is ignored', cls => {
+  test('refund is an open refund credit, not ignored', () => {
+    const m = mapRow(parsedRow({ direction: 'in', class: 'refund', sched_c_line: '' }), 0, 'l.csv');
+    expect(m.bank.status).toBe('unmatched');
+    expect(m.expense).toBeNull();
+    expect(m.bank.suggestion).toMatchObject({ refundCredit: true, ledgerClass: 'refund' });
+  });
+
+  test.each(['personal', 'transfer', 'income_proc', 'reward'])('%s is ignored', cls => {
     const m = map({ class: cls, description: 'Zelle money sent to TEST HELPER', sched_c_line: '' });
     expect(m.bank.status).toBe('ignored');
     expect(m.expense).toBeNull();
@@ -199,7 +209,7 @@ describe('categoryNameForLine', () => {
     ['8', 'Advertising & Marketing'], ['9', 'Vehicle Expenses'], ['10', 'Commissions & Fees'], ['11', 'Contract Labor'],
     ['15', 'Insurance'], ['17', 'Legal & Professional'], ['18', 'Office Expenses'], ['21', 'Repairs & Maintenance'],
     ['22', 'Supplies'], ['23', 'Taxes & Licenses'], ['25', 'Utilities'], ['30', 'Home Office'],
-    ['16a', 'Interest'], ['16b', 'Interest'], ['24b', 'Meals & Entertainment'],
+    ['16a', 'Interest'], ['16b', null], ['24b', 'Meals & Entertainment'],
   ])('line %s -> %s', (line, name) => {
     expect(categoryNameForLine(line, 'anything')).toBe(name);
   });
