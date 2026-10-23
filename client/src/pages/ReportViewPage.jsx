@@ -3055,7 +3055,7 @@ export function ReserviceReportCard({ data, mode }) {
 // pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
 // so `mode` is a belt-and-braces check here, same as the other live-only
 // cards on this page.
-function PlanSummaryCard({ data, mode }) {
+export function PlanSummaryCard({ data, mode }) {
   if (mode !== 'live') return null;
   const plan = data.planSummary;
   // With the gate on, upcoming visits live INSIDE this section (owner
@@ -3087,7 +3087,11 @@ function PlanSummaryCard({ data, mode }) {
   // another line's visit may come sooner. Not nextSameServiceAppointment,
   // which is scoped to this property for the "What's next" section.
   const nextAppointment = data.upcomingVisitsCard ? null : data.nextAppointment;
-  const nextVisit = hasPlan ? planNextVisitDateLabel(nextAppointment) : null;
+  // The arrival window rides with the date, so the status card can leave out
+  // its own "Next service" cell without losing the window (#6491 audit P1).
+  const nextVisitDate = hasPlan ? planNextVisitDateLabel(nextAppointment) : null;
+  const nextVisitWindow = nextVisitDate ? appointmentWindowLabel(nextAppointment) : null;
+  const nextVisit = nextVisitDate && nextVisitWindow ? `${nextVisitDate}, ${nextVisitWindow}` : nextVisitDate;
   const nextVisitService = String(nextServiceName(nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim();
   return (
     <section
@@ -3180,6 +3184,14 @@ function VisitLabelLines({ visit }) {
     );
   }
   return label || service || 'Scheduled visit';
+}
+
+// The customer-facing arrival window of a visit ("10:00 AM–12:00 PM"), the
+// last part of formatNextAppointmentLabel, or null when the visit has none.
+function appointmentWindowLabel(appointment) {
+  if (!/^\d{1,2}:\d{2}/.test(String(appointment?.windowStart || ''))) return null;
+  const parts = String(formatNextAppointmentLabel(appointment) || '').split(' · ');
+  return parts.length > 1 ? parts[parts.length - 1] : null;
 }
 
 function planNextVisitDateLabel(nextAppointment, todayEt = etDateString()) {

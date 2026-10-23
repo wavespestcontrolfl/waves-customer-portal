@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Owner 2026-10-22 ("we dont need to mention the next service twice"):
 // "What's next" drops its "Next visit:" line when the plan card or the
 // upcoming visits card already names that same visit.
@@ -43,5 +44,21 @@ describe('nextVisitShownInPlanCard needs the same window', () => {
     const data = { nextSameServiceAppointment: NEXT, upcomingVisitsCard: { visits: [{ ...NEXT, windowStart: '14:00' }] } };
     expect(nextVisitShownInPlanCard(data, 'live')).toBe(false);
     expect(nextVisitShownInPlanCard({ ...data, upcomingVisitsCard: { visits: [{ ...NEXT, windowStart: '10:00:00' }] } }, 'live')).toBe(true);
+  });
+});
+
+describe('the plan sentence keeps the arrival window (no visits list)', () => {
+  it('prints date and window, so hiding the status card cell loses nothing', async () => {
+    const React = (await import('react')).default;
+    const { render } = await import('@testing-library/react');
+    const { PlanSummaryCard } = await import('./ReportViewPage');
+    const data = {
+      planSummary: { visitsThisYear: 2 },
+      nextAppointment: { ...NEXT },
+      nextSameServiceAppointment: { ...NEXT },
+    };
+    const { container } = render(React.createElement(PlanSummaryCard, { data, mode: 'live' }));
+    expect(container.textContent).toContain('Your next Quarterly Pest Control visit is Sun, Jan 18, 10:00 AM–12:00 PM.');
+    expect(nextVisitShownInPlanCard(data, 'live', data.nextAppointment)).toBe(true);
   });
 });
