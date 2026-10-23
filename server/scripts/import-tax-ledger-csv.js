@@ -53,7 +53,7 @@ const { categoryDeductibleAmount } = require('../services/expense-categorizer');
 // days off the statement still holds the ledger's expense row) and its
 // refund-aware gross reading (an expense a refund reduced is compared at the
 // amount the bank debited, applied and released refunds included).
-const { EXPENSE_DATE_WINDOW_DAYS, appliedRefundTotal, methodIncompatible, withinCandidateTolerance } = require('../services/bank-import');
+const { EXPENSE_DATE_WINDOW_DAYS, LEDGER_NAMED_SOURCES, appliedRefundTotal, methodIncompatible, withinCandidateTolerance } = require('../services/bank-import');
 
 const HEADER = ['source', 'date', 'description', 'amount', 'direction', 'class', 'category', 'sched_c_line', 'flag', 'processor_match', 'bank_category'];
 const CLASSES = ['expense', 'vehicle', 'interest', 'personal', 'transfer', 'income_proc', 'receipt_unmatched', 'review', 'reward', 'refund', 'asset', 'unknown'];
@@ -513,6 +513,28 @@ function sampleRows(rows, whereOf) {
  *    hand, or from a feed row outside the range) are read for the hold in
  *    reconcileRows and listed; the ones ledger runs made are the ledger's own.
  */
+// A connected Plaid feed that will deliver rows inside this file's days is
+// the same double as the rows above, only later (a feed's rows cannot be
+// deduped against the ledger's): refused while an enabled account for one
+// of the file's sources (its last four, or a named source's institution)
+// starts on or before the file's last day. plaid-sync refuses the mirror
+// case when a feed is set up over loaded ledger rows.
+async function feedsInsideFile(db, rows, range) {
+  const sources = new Set(rows.map(r => String(r.source).trim().toLowerCase()));
+  const accounts = await db('plaid_accounts').where({ enabled: true }).whereNotNull('sync_from')
+    .select('id', 'plaid_item_id', 'account_label', 'mask', 'sync_from');
+  if (!accounts.length) return [];
+  const items = new Map((await db('plaid_items').whereIn('id', [...new Set(accounts.map(a => a.plaid_item_id))]).whereNot('status', 'removed')
+    .select('id', 'institution_name', 'status')).map(i => [i.id, i]));
+  return accounts.filter(a => {
+    const item = items.get(a.plaid_item_id);
+    if (!item) return false;
+    const named = LEDGER_NAMED_SOURCES.filter(n => n.institution.test(String(item.institution_name || ''))).map(n => n.label.replace(/^ledger-/, ''));
+    const covers = sources.has(String(a.mask || '').trim().toLowerCase()) || named.some(s => sources.has(s));
+    return covers && ymdOf(a.sync_from) <= range[1];
+  }).map(a => ({ ...a, institution_name: items.get(a.plaid_item_id).institution_name }));
+}
+
 async function loadPortalState(db, mapped, rows) {
   const existing = new Map();
   for (const part of chunk(mapped.map(m => m.bank.row_hash), HASH_LOOKUP_CHUNK)) {
@@ -525,6 +547,10 @@ async function loadPortalState(db, mapped, rows) {
     .select('id', 'account_label', 'txn_date', 'description', 'amount', 'direction');
   if (otherRows.length) {
     throw fail(`the portal already holds ${otherRows.length} bank row(s) from a feed or an upload between ${range[0]} and ${range[1]}; this loader is for a range the portal has nothing for (the ledger's rows would double them): classify those rows in Bank Import instead. First: ${sampleRows(otherRows, r => r.account_label)}`);
+  }
+  const feeds = await feedsInsideFile(db, rows, range);
+  if (feeds.length) {
+    throw fail(`a connected bank feed starts inside this file's days and will deliver these rows itself: ${feeds.map(f => `${f.account_label} (${f.institution_name || 'feed'}${f.mask ? ` …${f.mask}` : ''}, from ${ymdOf(f.sync_from)})`).join('; ')}. Stop that feed, or start it after ${range[1]}, before loading this file`);
   }
   const fileHashes = new Set(mapped.map(m => m.bank.row_hash));
   const fileYears = [...new Set(rows.map(r => String(r.period.tax_year)))].sort();
@@ -713,7 +739,7 @@ function reconcileRows(mapped, rows, portal) {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
       const reason = reloadReason(prior, m);
-      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, portalNote: reason.portalNote, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion), reading: readingKeys(m.bank.suggestion), category: m.expense ? ledgerCategory(m, categoryIds) : {} });
+      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, status: prior.status, portalNote: reason.portalNote, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion), reading: readingKeys(m.bank.suggestion), category: m.expense ? ledgerCategory(m, categoryIds) : {}, refund: !!(m.bank.suggestion && m.bank.suggestion.refundCredit) });
       else duplicates += 1;
       return;
     }
@@ -739,9 +765,18 @@ function reconcileRows(mapped, rows, portal) {
 async function noteHeldRows(db, held) {
   for (const h of held) {
     const patch = { ...h.reading, ...h.category, review: true, note: h.portalNote, ledgerConflict: { at: new Date().toISOString(), loadedAs: h.loadedAs, fileSays: h.fileSays, line: h.line } };
+    // The refund flag Bank Import's refund flow keys on follows the file's
+    // reading of an OPEN row: now a refund credit, the flag and its reason
+    // are set; no longer one, both go (a transfer flag's own reason stays:
+    // only a row that carried the refund flag loses a reason). A row the
+    // owner settled since keeps what the decision left.
+    const open = h.status === 'unmatched';
+    if (open && h.refund) Object.assign(patch, { refundCredit: true, reason: REFUND_REASON });
+    let stored = "(case when suggestion ->> 'categorySource' = 'ledger' then coalesce(suggestion, '{}'::jsonb) - 'categoryId' - 'categoryName' - 'irsLine' - 'categorySource' else coalesce(suggestion, '{}'::jsonb) end)";
+    if (open && !h.refund) stored = `(case when jsonb_exists(suggestion, 'refundCredit') then ${stored} - 'refundCredit' - 'reason' else ${stored} end)`;
     await db('bank_transactions').where({ id: h.rowId })
       .update({
-        suggestion: db.raw("(case when suggestion ->> 'categorySource' = 'ledger' then coalesce(suggestion, '{}'::jsonb) - 'categoryId' - 'categoryName' - 'irsLine' - 'categorySource' else coalesce(suggestion, '{}'::jsonb) end) || ?::jsonb", [JSON.stringify(patch)]),
+        suggestion: db.raw(`${stored} || ?::jsonb`, [JSON.stringify(patch)]),
         updated_at: new Date(),
       });
   }
@@ -803,11 +838,17 @@ async function writeExpenseRow(db, m, portal, createdIds) {
   const after = await nearbyAtWrite(db, m, portal, createdIds);
   if (!after.near.length && !after.covered.length) return null;
   const line = parkAtWrite(m, after, portal, 'entered while this run wrote it');
-  await db.transaction(async trx => {
-    await trx('bank_transactions').where({ row_hash: m.bank.row_hash, matched_expense_id: expenseId })
+  // the revert is conditional on the row still being this run's booking of
+  // that expense: a writer that changed the row meanwhile (an unlink, a
+  // decision) keeps its state, and the expense stands for it
+  const reverted = await db.transaction(async trx => {
+    const n = await trx('bank_transactions').where({ row_hash: m.bank.row_hash, matched_expense_id: expenseId, status: 'created_expense' })
       .update({ status: 'unmatched', matched_expense_id: null, match_method: null, matched_at: null, suggestion: m.bank.suggestion, updated_at: new Date() });
+    if (Number(n) !== 1) return false;
     await trx('expenses').where({ id: expenseId }).delete();
+    return true;
   });
+  if (!reverted) return null;
   createdIds.delete(expenseId);
   return line;
 }

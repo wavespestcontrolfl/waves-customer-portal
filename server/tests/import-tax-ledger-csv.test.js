@@ -303,6 +303,7 @@ function makeFakeDb({ categories } = {}) {
     ].map((name, i) => ({ id: `cat-${i}`, name })),
   };
   tables.plaid_accounts = [];
+  tables.plaid_items = [];
   let seq = 0;
   const log = { transactions: 0, rollbacks: 0, writes: 0 };
 
@@ -1020,6 +1021,85 @@ describe('what the portal already holds', () => {
     const { counts } = await run({ file, db: blind });
     expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 1, held: 0, parked: 0, portalExpenses: 1 });
     expect(realDb.tables().expenses).toHaveLength(1); // no expense made for a row that was not written
+  });
+
+  test('the post-commit verify reverts only a row still holding this run\'s booking: a row another writer changed meanwhile keeps its state and the expense stands', async () => {
+    const file = fixture(row({ description: 'ACME SUPPLY 4471', amount: '12.50', date: '2025-03-14' }));
+    const realDb = makeFakeDb();
+    // the lookup and the in-transaction recheck see no expense; by the verify after the commit a hand
+    // expense exists AND someone unlinked the row (as Bank Import's unlink leaves it)
+    let expenseReads = 0;
+    const db = table => {
+      if (table !== 'expenses') return realDb(table);
+      const real = realDb(table);
+      return {
+        ...real,
+        whereBetween: (...a) => {
+          expenseReads += 1;
+          if (expenseReads === 2) {
+            realDb.tables().expenses.push({ id: 'exp-hand', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies' });
+            Object.assign(realDb.tables().bank_transactions.find(b => b.description === 'ACME SUPPLY 4471'), { status: 'unmatched', matched_expense_id: null, match_method: null });
+          }
+          return real.whereBetween(...a);
+        },
+      };
+    };
+    db.transaction = realDb.transaction;
+    db.raw = realDb.raw;
+    const { counts } = await run({ file, db });
+    expect(expenseReads).toBe(2);
+    expect(counts).toEqual({ read: 1, inserted: 1, duplicates: 0, held: 0, parked: 0, portalExpenses: 0 });
+    // the other writer's state stands, and so does the expense it now refers to on its own terms
+    expect(realDb.tables().bank_transactions[0]).toMatchObject({ status: 'unmatched', matched_expense_id: null });
+    expect(realDb.tables().expenses.map(e => e.id).sort()).toEqual(['exp-hand', 'id-1'].sort());
+  });
+
+  test('a connected Plaid feed that starts inside the file\'s days refuses the load (the feed will deliver those rows itself); a feed starting after the file, a disabled account, a removed connection or another account\'s last four do not', async () => {
+    const file = fixture(row({ source: '9731', date: '2025-03-14' }), row({ source: 'amex', date: '2025-03-20', description: 'AMEX ROW' }));
+    const db = makeFakeDb();
+    db.tables().plaid_items.push({ id: 'it-1', institution_name: 'Capital One', status: 'active' }, { id: 'it-2', institution_name: 'American Express', status: 'active' }, { id: 'it-3', institution_name: 'Capital One', status: 'removed' });
+    db.tables().plaid_accounts.push({ id: 'pa-1', plaid_item_id: 'it-1', account_label: 'Spark Card', mask: '9731', sync_from: '2025-03-20', enabled: true });
+    await expect(run({ file, db, dryRun: true })).rejects.toThrow(/^a connected bank feed starts inside this file's days and will deliver these rows itself: Spark Card \(Capital One …9731, from 2025-03-20\)\. Stop that feed, or start it after 2025-03-20, before loading this file$/);
+    db.tables().plaid_accounts[0].sync_from = '2025-03-21'; // starts after the file's last day
+    await expect(run({ file, db, dryRun: true })).resolves.toMatchObject({ counts: { read: 2 } });
+    // a named source: the file's amex rows against an American Express connection, by institution (its mask is not the source)
+    db.tables().plaid_accounts.push({ id: 'pa-2', plaid_item_id: 'it-2', account_label: 'Amex Blue', mask: '1005', sync_from: '2025-01-01', enabled: true });
+    await expect(run({ file, db, dryRun: true })).rejects.toThrow(/Amex Blue \(American Express …1005, from 2025-01-01\)/);
+    db.tables().plaid_accounts[1].enabled = false;
+    db.tables().plaid_accounts.push({ id: 'pa-3', plaid_item_id: 'it-3', account_label: 'Old Spark', mask: '9731', sync_from: '2025-01-01', enabled: true }); // removed connection
+    db.tables().plaid_accounts.push({ id: 'pa-4', plaid_item_id: 'it-1', account_label: 'Checking', mask: '0001', sync_from: '2025-01-01', enabled: true }); // not a source in this file
+    await expect(run({ file, db, dryRun: true })).resolves.toMatchObject({ counts: { read: 2 } });
+  });
+
+  test('a rerun that changes an open credit between review and refund keeps the refund flag Bank Import keys on in step with the new reading; a settled row is left as decided', async () => {
+    const credit = (over) => row({ description: 'ACME SUPPLY CREDIT', amount: '12.50', direction: 'in', sched_c_line: '', ...over });
+    const file = fixture(credit({ class: 'review', category: 'Check this' }));
+    const db = makeFakeDb();
+    await run({ file, db });
+    const stored = () => db.tables().bank_transactions[0];
+    expect(stored()).toMatchObject({ status: 'unmatched', suggestion: expect.objectContaining({ review: true }) });
+    expect(stored().suggestion.refundCredit).toBeUndefined();
+    // review -> refund: the flag and its reason are set with the note
+    fs.writeFileSync(file, csv(credit({ class: 'refund', category: 'Refund' })));
+    expect((await run({ file, db })).counts).toMatchObject({ held: 1 });
+    let merged = JSON.parse(stored().suggestion.bindings[0]);
+    expect(merged).toMatchObject({ refundCredit: true, reason: expect.stringMatching(/^refund credit from the ledger/), review: true, ledgerClass: 'refund' });
+    expect(stored().suggestion.sql).not.toMatch(/refundCredit/);
+    // refund -> review: the flag and its reason go, only from a row that carried the flag (a transfer flag's reason is not touched)
+    stored().suggestion = { ...merged };
+    fs.writeFileSync(file, csv(credit({ class: 'review', category: 'Check this' })));
+    expect((await run({ file, db })).counts).toMatchObject({ held: 1 });
+    expect(stored().suggestion.sql).toMatch(/^\(case when jsonb_exists\(suggestion, 'refundCredit'\) then \(case when .* end\) - 'refundCredit' - 'reason' else \(case when .* end\) end\) \|\| \?::jsonb$/);
+    merged = JSON.parse(stored().suggestion.bindings[0]);
+    expect(merged.refundCredit).toBeUndefined();
+    expect(merged.reason).toBeUndefined();
+    // a row the owner settled since keeps what the decision left: no flag change either way
+    stored().suggestion = { ...merged };
+    stored().status = 'refund_applied';
+    fs.writeFileSync(file, csv(credit({ class: 'refund', category: 'Refund' })));
+    expect((await run({ file, db })).counts).toMatchObject({ held: 1 });
+    expect(stored().suggestion.sql).not.toMatch(/refundCredit/);
+    expect(JSON.parse(stored().suggestion.bindings[0]).refundCredit).toBeUndefined();
   });
 
   test('expenses the other year\'s ledger run made are the ledger\'s own: not listed, never held against, even within the window of this file', async () => {

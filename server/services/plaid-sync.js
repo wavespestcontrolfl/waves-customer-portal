@@ -390,9 +390,10 @@ function badRequest(msg) {
 // skipped, and only a full re-sync (idempotent on transaction id) brings
 // them back.
 // The ledger import (server/scripts/import-tax-ledger-csv.js) labels its
-// rows ledger-<source>: the account's last four, or a NAMED source. Each
-// named source maps to the institution whose feed carries that account.
-const LEDGER_NAMED_SOURCES = [{ label: 'ledger-amex', institution: /american\s*express|\bamex\b/i }];
+// rows ledger-<source>: the account's last four, or a NAMED source (each
+// maps to the institution whose feed carries that account; the list lives
+// in bank-import, the ledger import reads it too).
+const { LEDGER_NAMED_SOURCES } = bankImport;
 function ledgerLabelsFor(a, account, item) {
   const labels = [a.label, `ledger-${String(account.mask || '').trim()}`];
   for (const named of LEDGER_NAMED_SOURCES) if (named.institution.test(String(item && item.institution_name || ''))) labels.push(named.label);

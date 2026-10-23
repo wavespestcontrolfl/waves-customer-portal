@@ -761,7 +761,7 @@ async function activate(itemId, overrides = {}) {
 
     const second = await connect('-new');
     await expect(activate(second, { 'acc-card-new': { accountLabel: 'capital-one-card-1234', syncFrom: '2026-09-01' } }))
-      .rejects.toThrow(/earlier feed through 2026-09-08 — start the feed on 2026-09-09/);
+      .rejects.toThrow(/an earlier feed or the ledger import through 2026-09-08 — start the feed on 2026-09-09/);
     await activate(second, { 'acc-card-new': { accountLabel: 'capital-one-card-1234', syncFrom: '2026-09-09' } });
     // the feed's OWN earlier rows never block its own start date
     await mockPg('bank_transactions').where({ plaid_transaction_id: 't-old' }).update({ plaid_account_id: 'acc-card-new' });

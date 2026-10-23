@@ -19,6 +19,12 @@ const logger = require('./logger');
 
 const PAYOUT_DATE_WINDOW_DAYS = 3;  // Stripe arrival vs bank posting drift
 const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
+// The ledger import labels its rows ledger-<source>: a card or account's
+// last four, or a NAMED source. Each named source maps to the institution
+// whose Plaid feed carries that account, so the sync and the import can
+// refuse each other's range (plaid-sync assertFeedStartsAfterPriorRows,
+// import-tax-ledger-csv feedsInsideFile).
+const LEDGER_NAMED_SOURCES = [{ label: 'ledger-amex', institution: /american\s*express|\bamex\b/i }];
 const REFUND_LOOKBACK_DAYS = 90;    // refunds lag their purchase by weeks
 // Auto-links require EXACT cent equality; the tolerance only widens the
 // candidate list shown to the operator (a near-miss is a lead, not a match).
@@ -1963,6 +1969,7 @@ async function ledgerCoverage(year) {
 
 module.exports = {
   EXPENSE_DATE_WINDOW_DAYS,
+  LEDGER_NAMED_SOURCES,
   parseStatementCsv,
   withRowHashes,
   hashRow,
