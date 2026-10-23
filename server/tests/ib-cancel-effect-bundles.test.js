@@ -634,7 +634,6 @@ describe('the text claim is bound to the original cancellation', () => {
     ['sent marker with no audit yet (the request is mid-handoff)', 'uncertain', 'uncertain'],
     ['sent marker with the audit now present', 'delivered', 'sent'],
     ['sent marker, some recipients proven', 'partial', 'partial'],
-    ['marker untouched or another marker (unknown who holds it)', 'ready', 'uncertain'],
     ['a marker the card did not approve', 'other', 'uncertain'],
   ])('a lost claim where the reminder now reads: %s -> recorded %s, never "send it by hand"', async (_label, laterStatus, expected) => {
     const row = await unclaimed(laterStatus);
@@ -678,6 +677,29 @@ describe('an unclaimed send that reads "sent" is checked per approved recipient'
     mockNoticeStatus.mockResolvedValueOnce('delivered');
     await svc.liveNotice({ ibCancelBundleId: row.id }, { notificationSent: true });
     expect(row.notice_outcome).toMatchObject({ state: 'sent', by: 'request' });
+  });
+});
+
+describe('a text that was never claimed', () => {
+  test('an operational failure before the claim leaves the approved marker untouched: the text retries, it is never recorded as uncertain', async () => {
+    seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    mockNoticeStatus.mockResolvedValue('ready');
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => { Object.assign(opts.outcome, { notificationSent: false, notificationError: 'connection terminated' }); });
+    const first = await svc.sweepIbCancelBundles();
+    expect(first).toMatchObject({ failed: 1, recovered: 0 });
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'pending', notice_outcome: null, lease_owner: null });
+    const second = await svc.sweepIbCancelBundles();
+    expect(second.recovered).toBe(1);
+    expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'sent' });
+    expect(mockHandleCancellation).toHaveBeenCalledTimes(2);
+  });
+
+  test('a marker held by someone else the card did not approve stays uncertain (needs-you), never retried', async () => {
+    seedBundle({ followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN), followthrough_outcome: { money_skipped: [], linked_skipped: [] } });
+    mockNoticeStatus.mockResolvedValueOnce('ready').mockResolvedValue('other');
+    mockHandleCancellation.mockImplementationOnce(async (_id, opts) => { Object.assign(opts.outcome, { notificationSent: false, notificationError: 'already handled' }); });
+    await svc.sweepIbCancelBundles();
+    expect(mockStore.bundles[0].notice_outcome).toMatchObject({ state: 'uncertain' });
   });
 });
 

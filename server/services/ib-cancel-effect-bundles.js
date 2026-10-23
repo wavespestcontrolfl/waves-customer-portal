@@ -502,6 +502,10 @@ async function reclassifyUnclaimedSend(bundle, classified) {
   if (status === 'suppressed') return classified;
   if (status === 'delivered') return { state: 'sent', note: NOTICE_TERMINAL_BY_STATUS.delivered.note };
   if (status === 'partial') return { ...NOTICE_TERMINAL_BY_STATUS.partial };
+  // The approved marker is still untouched: nothing was claimed or stamped, so nothing reached the provider handoff. The failure
+  // was operational (a database error before the claim), not a delivery question: retry the text on the next pass (bounded by
+  // the attempts; an exhausted bundle reports the text as not confirmed).
+  if (status === 'ready') throw new Error('the approved text was not claimed (nothing was sent); the text will retry');
   return { state: 'uncertain', note: 'Another send already holds this text and its delivery is not proven. It was NOT sent again.' };
 }
 
