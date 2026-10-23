@@ -277,7 +277,13 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       // dies. Then the row is read AGAIN under the locks: a save that raced
       // another move of the same item is refused, never applied to a truck
       // nobody locked.
-      const touches = (row) => [updates.assigned_vehicle_id, (updates.assigned_vehicle_id !== undefined || updates.status !== undefined) ? row.assigned_vehicle_id : null].filter(Boolean);
+      // A vehicle row locks ITSELF when the write can change whether it
+      // serves as a truck (status, category, technician).
+      const touches = (row) => [
+        updates.assigned_vehicle_id,
+        (updates.assigned_vehicle_id !== undefined || updates.status !== undefined) ? row.assigned_vehicle_id : null,
+        row.category === 'vehicle' && ['status', 'category', 'assigned_to'].some((key) => updates[key] !== undefined) ? req.params.id : null,
+      ].filter(Boolean);
       for (const truckId of [...new Set(touches(first))].sort()) await truckKit.lockTruck(trx, truckId);
       const before = await trx('equipment').where({ id: req.params.id }).first(...columns);
       if (!before || before.assigned_vehicle_id !== first.assigned_vehicle_id) return 'moved';
@@ -287,10 +293,7 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       // Retired, routes/admin-equipment-maintenance.js): the item neither
       // moves nor goes lost, retired or sold from the dialog while one is open.
       if ((oldTruck || dies) && await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
-      // Handing a truck to another technician takes the truck's own lock, so
-      // a check in flight on it finishes (or fails ownership) first; and a
-      // technician never holds two live trucks (truck-kit.js would refuse to guess).
-      if (updates.assigned_to !== undefined) await truckKit.lockTruck(trx, req.params.id);
+      // A technician never holds two live trucks (truck-kit.js would refuse to guess).
       // An omitted key keeps the stored value; an explicit null clears it (that is how a second truck is unassigned).
       const pick = (key) => (Object.prototype.hasOwnProperty.call(updates, key) ? updates[key] : before[key]);
       const live = { category: pick('category'), assigned_to: pick('assigned_to'), status: pick('status') };
