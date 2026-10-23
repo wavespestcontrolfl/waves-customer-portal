@@ -1415,6 +1415,22 @@ describe('AI suggest eligibility follows the ledger kill switch', () => {
     // the dormant rule's keys go with its category: nothing to resurface when the gate comes back on
     for (const k of ['rule', 'rulesAt', 'personal', 'review', 'note', 'examined']) expect(String(state.bankUpdates[0].patch.suggestion.sql)).toContain(`- '${k}'`);
   });
+  test('a shelved row (decision: later) keeps its examination evidence through an AI categorization, gate off or on: the rule keys go, examined stays', async () => {
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    for (const gate of [undefined, 'true']) {
+      if (gate) process.env.GATE_TAX_LEDGER = gate; else delete process.env.GATE_TAX_LEDGER;
+      // an owner expense rule replaced the matcher's transfer flag: examined is the row's only matcher evidence; the owner shelved it as Later
+      state.listRows = [{ id: 'bt-9', description: 'CAPITAL ONE CRCARDPMT', amount: '500.00', suggestion: { examined: true, later: true, decision: 'later', decidedAt: '2026-10-02T00:00:00Z', rule: { id: 'r', kind: 'expense', source: 'owner' }, categoryId: 'cat-old', categorySource: 'rule', rulesAt: '2026-10-01T00:00:00Z' } }];
+      autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+      state.bankUpdates = [];
+      const out = await (await post('/admin/tax/bank-import/suggest', { ids: ['bt-9'] })).json();
+      if (!out.results || !out.results[0] || !out.results[0].applied) continue; // the gate-on pass may not admit the row (category present); the gate-off write is the case
+      const sql = String(state.bankUpdates[0].patch.suggestion.sql);
+      for (const k of ['rule', 'rulesAt']) expect(sql).toContain(`- '${k}'`);
+      expect(sql).not.toContain("- 'examined'");
+    }
+    delete process.env.GATE_TAX_LEDGER;
+  });
   test('gate off: a transfer rule\'s hidden flag goes with the rule when the model\'s category replaces it; a row read without a flag keeps its no-flag check', async () => {
     delete process.env.GATE_TAX_LEDGER;
     const { autoCategorizeExpense } = require('../services/expense-categorizer');

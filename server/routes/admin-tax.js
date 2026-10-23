@@ -2329,19 +2329,25 @@ router.post('/bank-import/match', async (req, res, next) => {
 // its reason included: "personal per ledger rule" must not resurface next
 // to the model's category when the gate comes back on (no rule pass would
 // clear it: the pass only stamps a row no rule matches).
+// A row the owner shelved (decision: later) keeps its examination evidence:
+// an owner rule may have replaced the matcher's flag with 'examined' as the
+// row's only evidence, and the matcher never re-flags a decided row, so
+// dropping it would leave the Inbox refusing the row as unexamined for good
+// once the ledger is on again.
 function aiWriteFlagState(sug, ledgerOn) {
   const ruleOwned = !ledgerOn && !!(sug && sug.rule);
   const ruleFlag = ruleOwned && !!sug.ignore && sug.rule.kind === 'transfer';
+  const ruleKeys = sug && sug.decision ? bankImport.LEDGER_RULE_KEYS.filter((k) => k !== 'examined') : bankImport.LEDGER_RULE_KEYS;
   if (ruleFlag) {
     return {
       flagState: "coalesce(suggestion->>'ignore','') = 'true' and (suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null",
-      dropKeys: [...bankImport.LEDGER_RULE_KEYS, 'ignore', 'reason'],
+      dropKeys: [...ruleKeys, 'ignore', 'reason'],
     };
   }
   if (ruleOwned) {
-    return { flagState: "coalesce(suggestion->>'ignore','') <> 'true' and (suggestion->'rule') is not null", dropKeys: [...bankImport.LEDGER_RULE_KEYS, 'reason'] };
+    return { flagState: "coalesce(suggestion->>'ignore','') <> 'true' and (suggestion->'rule') is not null", dropKeys: [...ruleKeys, 'reason'] };
   }
-  return { flagState: "coalesce(suggestion->>'ignore','') <> 'true'", dropKeys: bankImport.LEDGER_RULE_KEYS };
+  return { flagState: "coalesce(suggestion->>'ignore','') <> 'true'", dropKeys: ruleKeys };
 }
 
 router.post('/bank-import/suggest', async (req, res, next) => {
