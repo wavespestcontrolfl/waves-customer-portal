@@ -50,6 +50,12 @@ const IGNORED_CLASSES = new Set(['personal', 'transfer', 'income_proc', 'reward'
 // expense at its gross amount.
 const REFUND_REASON = 'refund credit from the ledger: apply it to the original expense in Bank Import (it reduces that expense)';
 const CARD_SOURCES = new Set(['9731', '6646', '8804', 'amex']);
+// The ledger's source column is one of the business's accounts: a card above
+// or a checking account's last four. Anything else ("amexx") is a typo that
+// would load as an unknown bank account the portal cannot match, so the file
+// fails before any write.
+const BANK_SOURCES = new Set(['3098', '3965']);
+const KNOWN_SOURCES = new Set([...CARD_SOURCES, ...BANK_SOURCES]);
 const MAX_AMOUNT = 9999999999.99; // numeric(12,2)
 const SOURCE_TAG = 'ledger-csv';
 const MATCH_METHOD = 'ledger-import';
@@ -144,6 +150,7 @@ function parseLedgerCsv(text) {
     for (const h of HEADER) {
       if (String(r[h]).includes('\u0000')) throw fail(`line ${line}: ${h} contains a NUL byte`);
     }
+    if (!KNOWN_SOURCES.has(r.source.toLowerCase())) throw fail(`line ${line}: source must be one of ${[...KNOWN_SOURCES].join(', ')} (got "${r.source}")`);
     const amount = parseAmountCell(r.amount);
     if (amount === null) throw fail(`line ${line}: amount must be a positive decimal (got "${r.amount}")`);
     r.amount = amount;
@@ -429,7 +436,7 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   const dates = rows.map(r => r.date).sort();
   const range = [dates[0], dates[dates.length - 1]];
   const existingBank = rows.length ? await db('bank_transactions').whereBetween('txn_date', range).whereNot('source', SOURCE_TAG)
-    .select('id', 'status', 'account_label', 'matched_expense_id', 'txn_date', 'description', 'amount', 'direction') : [];
+    .select('id', 'status', 'account_label', 'matched_expense_id', 'matched_payout_id', 'txn_date', 'description', 'amount', 'direction') : [];
   // expenses this importer made on an earlier run are the ledger's own, not
   // "already there from elsewhere": they are linked from a ledger bank row
   const ledgerMade = new Set(rows.length ? (await db('bank_transactions').where({ source: SOURCE_TAG }).whereBetween('txn_date', range).whereNotNull('matched_expense_id')
@@ -531,6 +538,17 @@ function describeGap(days) {
   return `${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ${days < 0 ? 'earlier' : 'later'}`;
 }
 
+// A portal row that answers nothing yet: still open, or a link whose expense
+// or payout was deleted since (the FK is null; bank-import's
+// resetDanglingLinks reopens such rows on its next pass).
+const LINKED_TO_EXPENSE = new Set(['matched_expense', 'created_expense']);
+function openReason(row) {
+  if (row.status === 'unmatched') return 'the same row is open in the portal, not booked';
+  if (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) return 'the same row is in the portal but its expense was deleted (the next matching pass reopens it)';
+  if (row.status === 'matched_payout' && !row.matched_payout_id) return 'the same row is in the portal but its payout link is gone (the next matching pass reopens it)';
+  return null;
+}
+
 // Which ledger rows load, and which the portal already answers for.
 function reconcileRows(mapped, rows, portal) {
   const { existing, masks, categoryIds } = portal;
@@ -559,7 +577,8 @@ function reconcileRows(mapped, rows, portal) {
     pools.dropLoose(used);
     pools.dropExpense(used.matched_expense_id);
     settled.add(i);
-    if (used.status === 'unmatched') held.push(note(i, used.description, used.account_label || '(no label)', `the same row is open in the portal, not booked; ${reading(m, i)}`));
+    const why = openReason(used);
+    if (why) held.push(note(i, used.description, used.account_label || '(no label)', `${why}; ${reading(m, i)}`));
     else overlaps += 1;
   });
   // Pass 2: everything else, in file order: a hold wins over an "imported,

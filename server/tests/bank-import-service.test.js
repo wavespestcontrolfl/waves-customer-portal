@@ -749,6 +749,17 @@ describe('runDeterministicMatching', () => {
     expect(second.expensesLinked).toBe(1);
   });
 
+  test('a bank credit the ledger import classified as a merchant refund (refundCredit) never auto-links to a payout — it parks refund candidates instead', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA 5211 REFUND', amount: 58.12, direction: 'credit', account_type: 'bank', account_label: 'ledger-3098', suggestion: { refundCredit: true, reason: 'refund credit from the ledger' } }];
+    state.payouts = [{ id: 'po-1', amount: '58.12', arrival_date: '2026-08-11', status: 'paid', destination_last4: '3098' }];
+    state.expenses = [{ id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates);
+    expect(sugOf(parked).refundCandidates[0].id).toBe('exp-1');
+  });
+
   test('a transfer-flagged CREDIT still parks refund candidates — Ignore is never the only action', async () => {
     // vendor refund whose descriptor contains a transfer word
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card', suggestion: null }];

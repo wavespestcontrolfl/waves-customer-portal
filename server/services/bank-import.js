@@ -1534,8 +1534,11 @@ async function runDeterministicMatching({ limit } = {}) {
       // (a debit-card purchase refunded into checking).
       // Stripe pays out to the BANK account only — card credits skip payout
       // matching entirely. (refundCandidateList/refundPatch are hoisted
-      // above the transfer branch — it parks refund candidates too.)
-      if (row.account_type !== 'bank') {
+      // above the transfer branch — it parks refund candidates too.) A
+      // credit the ledger import classified as a merchant refund
+      // (suggestion.refundCredit) is refund territory on any account: a
+      // same-amount payout in the window must not claim it.
+      if (row.account_type !== 'bank' || (row.suggestion && row.suggestion.refundCredit)) {
         const refunds = await refundCandidateList();
         if (refunds.length) {
           summary.ambiguous++;

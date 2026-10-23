@@ -50,6 +50,8 @@ describe('parseLedgerCsv header validation', () => {
 
   test.each([
     [{ date: '2025-02-31' }, /date/],
+    [{ source: 'amexx' }, /source must be one of/],
+    [{ source: '1234' }, /source must be one of/],
     [{ amount: '-4.00' }, /amount/],
     [{ amount: 'abc' }, /amount/],
     [{ direction: 'sideways' }, /direction/],
@@ -532,7 +534,7 @@ describe('shared helpers', () => {
     // an upload labelled with the account's last four, and a Plaid account whose mask is those digits
     db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'capone-card-3098', txn_date: first.date, description: first.description.toLowerCase(), amount: first.amount, direction: 'debit', status: 'unmatched' });
     db.tables().plaid_accounts.push({ account_label: 'checking-main', mask: '3098' });
-    db.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h2', source: 'plaid', account_label: 'checking-main', txn_date: new Date(`${second.date}T00:00:00`), description: 'Corner Fuel 12', amount: '4.00', direction: 'debit', status: 'created_expense' });
+    db.tables().bank_transactions.push({ id: 'pl-1', row_hash: 'h2', source: 'plaid', account_label: 'checking-main', txn_date: new Date(`${second.date}T00:00:00`), description: 'Corner Fuel 12', amount: '4.00', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
     const { counts, summary, report } = await run({ file, db, skipExisting: true });
     // the booked row (created_expense) is answered: left out; the row still OPEN in the
     // portal is held and listed with the ledger's reading, never counted as present
@@ -546,7 +548,7 @@ describe('shared helpers', () => {
     // the same open row, ignored or linked in the portal, is answered there: an overlap
     for (const status of ['ignored', 'matched_expense']) {
       const dbs = makeFakeDb();
-      dbs.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'capone-card-3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status });
+      dbs.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'capone-card-3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status, matched_expense_id: status === 'matched_expense' ? 'exp-x' : null });
       const out = await run({ file, db: dbs, skipExisting: true });
       expect(out.counts).toMatchObject({ overlaps: 1, held: 0, inserted: 1 });
     }
@@ -575,7 +577,7 @@ describe('shared helpers', () => {
     ));
     const db = makeFakeDb();
     const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
-    db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: 'Corner Fuel 12', amount: '4.00', direction: 'debit', status: 'created_expense' });
+    db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: 'Corner Fuel 12', amount: '4.00', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
     const { counts } = await run({ file, db, skipExisting: true });
     expect(counts).toEqual({ read: 2, inserted: 1, duplicates: 0, overlaps: 1, held: 0, unsure: 0, handExpenses: 0 });
     expect(db.tables().expenses).toHaveLength(1);
@@ -638,6 +640,26 @@ describe('--skip-existing and expenses', () => {
     expect(out2.counts).toMatchObject({ held: 2, inserted: 0 });
     expect(out2.report).toMatch(/line 2 .*dated 1 day later.*\(portal: "Near" in a hand-entered expense\)/);
     expect(out2.report).toMatch(/line 3 .*dated 1 day earlier.*\(portal: "Far" in a hand-entered expense\)/);
+  });
+
+  test.each([
+    ['matched_expense', { matched_expense_id: null }, /its expense was deleted/],
+    ['created_expense', { matched_expense_id: null }, /its expense was deleted/],
+    ['matched_payout', { matched_payout_id: null }, /its payout link is gone/],
+  ])('an exact overlap whose %s link is dangling is held as open, not counted as booked', async (status, link, re) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-test-'));
+    const file = path.join(dir, 'ledger-2025.csv');
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50' })));
+    const db = makeFakeDb();
+    const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
+    db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status, ...link });
+    const { counts, report } = await run({ file, db, skipExisting: true });
+    expect(counts).toMatchObject({ overlaps: 0, held: 1, inserted: 0 });
+    expect(report).toMatch(re);
+    // the same statuses with a live link are answered: an overlap
+    const db2 = makeFakeDb();
+    db2.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status, matched_expense_id: 'exp-x', matched_payout_id: 'po-x' });
+    expect((await run({ file, db: db2, skipExisting: true })).counts).toMatchObject({ overlaps: 1, held: 0, inserted: 0 });
   });
 
   test('an expense linked to a bank row posted a day after the ledger charge still holds the row; the row and its expense are consumed once', async () => {
@@ -740,7 +762,7 @@ describe('--skip-existing and expenses', () => {
     const file = fixture();
     const db = makeFakeDb();
     const first = parseLedgerCsv(fs.readFileSync(file, 'utf8'))[0];
-    db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card-3098', txn_date: first.date, description: first.description, amount: '12.50', direction: 'debit', status: 'created_expense' });
+    db.tables().bank_transactions.push({ id: 'up-1', row_hash: 'h1', source: 'csv', account_label: 'card-3098', txn_date: first.date, description: first.description, amount: '12.50', direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
     const { counts, report } = await run({ file, db, dryRun: true, skipExisting: true });
     expect(counts).toEqual({ read: 1, inserted: 0, duplicates: 0, overlaps: 1, held: 0, unsure: 0, handExpenses: 0 });
     expect(report).toMatch(/DRY RUN/);
