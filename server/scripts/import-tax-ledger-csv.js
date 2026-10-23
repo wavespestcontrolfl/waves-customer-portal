@@ -605,6 +605,11 @@ function openReason(row, m) {
   if (row.status === 'ignored' && m.unmatchedLine === 'refund' && !(row.suggestion && row.suggestion.releasedRefundOf)) {
     return 'the portal ignored this refund credit without applying it (unignore it and apply it to the original expense in Bank Import)';
   }
+  // the mirror conflict: the portal booked an expense, the ledger says the
+  // money was personal, a transfer, a reward or an asset
+  if (LINKED_TO_EXPENSE.has(row.status) && row.matched_expense_id && m.bank.status === 'ignored') {
+    return 'the portal booked this row as an expense but the ledger does not (check which is right; the expense may need deleting)';
+  }
   if (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) return 'the same row is in the portal but its expense was deleted (the next matching pass reopens it)';
   if (row.status === 'matched_payout' && !row.matched_payout_id) return 'the same row is in the portal but its payout link is gone (the next matching pass reopens it)';
   return null;

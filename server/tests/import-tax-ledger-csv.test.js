@@ -772,6 +772,16 @@ describe('--skip-existing and expenses', () => {
       expect([suggestion, out.counts.held, out.counts.overlaps]).toEqual([suggestion, expected.held, expected.overlaps]);
       if (!suggestion) expect(out.report).toMatch(/ignored this refund credit without applying it/);
     }
+    // the mirror conflict: the portal BOOKED an expense, the ledger says personal: held; a ledger
+    // expense against a booked row is the same answer: an overlap
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'personal', sched_c_line: '', category: 'Personal' })));
+    for (const [status, link, expected] of [['created_expense', 'exp-x', { held: 1, overlaps: 0 }], ['matched_expense', 'exp-x', { held: 1, overlaps: 0 }], ['matched_payout', null, { held: 0, overlaps: 1 }]]) {
+      const dbb = makeFakeDb();
+      dbb.tables().bank_transactions.push({ id: 'up-b', row_hash: 'hb', source: 'csv', account_label: 'card 3098', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status, matched_expense_id: link, matched_payout_id: status === 'matched_payout' ? 'po-x' : null });
+      const out = await run({ file, db: dbb, skipExisting: true });
+      expect([status, out.counts.held, out.counts.overlaps]).toEqual([status, expected.held, expected.overlaps]);
+      if (expected.held) expect(out.report).toMatch(/the portal booked this row as an expense but the ledger does not/);
+    }
     // the ledger says personal too: the portal's ignore is the same answer
     fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'personal', sched_c_line: '', category: 'Personal' })));
     const db2 = makeFakeDb();
