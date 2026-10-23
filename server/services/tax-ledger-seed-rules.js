@@ -33,10 +33,9 @@ const U = 'Utilities';
 const W = 'Software & Technology';
 const E = 'Training & Education';
 const H = 'Home Office';
-const N = 'Interest';
 
 const CATEGORY_LINES = {
-  [A]: '8', [V]: '9', [F]: '10', [L]: '11', [I]: '15', [O]: '18', [S]: '22', [T]: '23', [U]: '25', [W]: '27a', [E]: '27a', [H]: '30', [N]: '16b',
+  [A]: '8', [V]: '9', [F]: '10', [L]: '11', [I]: '15', [O]: '18', [S]: '22', [T]: '23', [U]: '25', [W]: '27a', [E]: '27a', [H]: '30',
 };
 
 const x = (pattern, kind, category = null, note = null, priority = 100) => ({ pattern, kind, category, note, priority });
@@ -84,7 +83,7 @@ const SEED_RULES = [
   x('openai|chatgpt|anthropic|claude\\.ai|railway|github|google\\W*gsuite|google workspace|gsuite|name.?cheap|pipedream|intuit|qbooks|quickbooks|transcriptapi|open-meteo|bouncie|zernio|dropbox|notion|slack|zoom|calendly|godaddy|cloudflare|vercel|heroku|digitalocean|\\baws\\b|microsoft|adobe|grammarly|1password|lastpass|wix|mailchimp|constant contact|jobber|housecall|fieldroutes|pestpac|gorilladesk|yardbook|elevenlabs|paddle\\.(net|com)|proxysell|stealth code|midjourney|x corp\\.? paid|pageoptimizer|local dominator|qi.addons|hix\\.ai|cuppa|themeisle|visualcomposer|wp rocket|gptzero|wordpress|webflow|hostinger|wp all import|wp media|shapedplugin|freemius|aycd\\.io|pingproxies|perplexity|hugedomains|nodemaven|gumrd|geoimgr|justdoneai|leapworx|numerous\\.ai|openweather|pdfsimpli|chaty|gptforwork|flexinput|twilio|sendgrid', 'expense', W, null, 90),
   x('fl pest mgmt assoc|npma\\b', 'expense', E, 'association dues', 90),
   // ── card interest (line 16b): business share decided at year end
-  x('interest charge', 'review', N, 'card interest: business share of the card'),
+  x('interest charge', 'review', null, 'card interest: business share goes on Schedule C line 16b (other interest); no category carries 16b, so it is entered at year end, not booked here'),
   // ── bank fees
   x('wire transfer fee|wire fee|wire convenience charge|overdraft fee|monthly service fee', 'expense', F, 'bank fee', 90),
   // ── travel: the owner decides (no category: travel is line 24a)
@@ -96,6 +95,6 @@ const SEED_RULES = [
   x('apple\\.com/bill|apple com bill', 'personal', null, 'Apple subscriptions on a personal account'),
 ];
 
-const SEED_CATEGORY_NAMES = [A, V, F, L, I, O, S, T, U, W, E, H, N];
+const SEED_CATEGORY_NAMES = [A, V, F, L, I, O, S, T, U, W, E, H];
 
 module.exports = { SEED_RULES, SEED_CATEGORY_NAMES, CATEGORY_LINES };

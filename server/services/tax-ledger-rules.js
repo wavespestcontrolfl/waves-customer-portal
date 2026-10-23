@@ -163,18 +163,21 @@ function compileRules(rules) {
       logger.warn(`[tax-ledger] rule ${r.id} skipped, invalid pattern: ${e.message}`);
     }
   }
+  const t = (v) => { const n = new Date(v || 0).getTime(); return Number.isFinite(n) ? n : 0; };
   out.sort((a, b) => (Number(a.priority) - Number(b.priority))
-    || String(a.created_at || '').localeCompare(String(b.created_at || ''))
+    || (t(a.created_at) - t(b.created_at))
     || String(a.pattern).localeCompare(String(b.pattern)));
   return out;
 }
 
-// An income rule (a customer receipt) only fits money in; for a debit the
-// next rule that fits wins, so a payee that is both is still placed.
+// An income rule (a customer receipt) only fits money in and an expense
+// rule only fits money out (a credit from a business merchant is a refund
+// to review, never an expense); the next rule that fits wins.
 function matchRule(description, compiled, direction = null) {
   const d = String(description || '').slice(0, MAX_DESCRIPTION);
   for (const r of compiled) {
-    if (r.kind === 'income' && direction && direction !== 'credit') continue;
+    if (direction && r.kind === 'income' && direction !== 'credit') continue;
+    if (direction && r.kind === 'expense' && direction !== 'debit') continue;
     if (r.re.test(d)) return r;
   }
   return null;
@@ -240,7 +243,19 @@ async function ensureSeedRules(conn = db) {
       irs_line: r.category ? (CATEGORY_LINES[r.category] || null) : null,
       note: r.note || null, priority: r.priority || 100, enabled: true, source: 'seed',
     }));
-    if (rows.length) await conn('tax_ledger_rules').insert(rows).onConflict('pattern').ignore();
+    // A pristine seed row (source seed, never edited: updated_at = created_at)
+    // follows the code when the seed changes; a row the owner edited keeps
+    // the owner's values; a seed the code no longer lists is disabled (not
+    // deleted: its hits and a possible owner re-enable stay).
+    const PRISTINE = "tax_ledger_rules.source = 'seed' and tax_ledger_rules.updated_at = tax_ledger_rules.created_at";
+    if (rows.length) {
+      await conn('tax_ledger_rules').insert(rows).onConflict('pattern')
+        .merge(['kind', 'category_id', 'irs_line', 'note', 'priority', 'enabled'])
+        .whereRaw(PRISTINE);
+    }
+    await conn('tax_ledger_rules').whereRaw(PRISTINE).where({ enabled: true })
+      .whereNotIn('pattern', rows.map((r) => r.pattern))
+      .update({ enabled: false, note: 'retired seed (no longer in the seed list)', updated_at: new Date() });
     return rows.length;
   })().catch((err) => { seedPromise = null; throw err; });
   return seedPromise;
@@ -348,6 +363,22 @@ async function applyRulesForPattern(pattern, { budget = MAX_EXAMINE, maxRounds =
     rounds += 1;
   } while (after && rounds < maxRounds);
   return { ...totals, complete: !after };
+}
+
+// The kill switch: with GATE_TAX_LEDGER off, nothing a RULE wrote drives
+// Bank Import. Owner decisions (suggestion.decision) are the owner's and
+// stay; the matcher's own keys stay. Used by the Bank Import transactions
+// list and by create-expense's suggested-category read.
+const RULE_OWNED_KEYS = ['rule', 'rulesAt', 'personal', 'income', 'review', 'note'];
+function visibleSuggestion(suggestion) {
+  if (!suggestion || typeof suggestion !== 'object' || !suggestion.rule || isOn()) return suggestion;
+  const out = { ...suggestion };
+  const decided = !!out.decision;
+  for (const k of RULE_OWNED_KEYS) if (!(decided && (k === 'income' || k === 'personal'))) delete out[k];
+  if (out.categorySource === 'rule') for (const k of ['categoryId', 'categoryName', 'irsLine', 'categorySource']) delete out[k];
+  if (suggestion.rule.kind === 'transfer' && !decided) { delete out.ignore; delete out.reason; }
+  else if (!decided) delete out.reason;
+  return out;
 }
 
 // Hook for the CSV upload and the Plaid sync: a rule pass right after the
@@ -471,7 +502,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 
 module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON,
-  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor,
+  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };

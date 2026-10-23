@@ -70,11 +70,11 @@ function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
   }, [suggestedCategoryId, touched]);
   const [always, setAlways] = useState(false);
   const off = busy;
-  const chipText = sug
-    ? [sug.rule?.kind || (sug.income ? "income" : sug.ignore ? "transfer" : sug.personal ? "personal" : "review"), sug.categoryName]
-        .filter(Boolean)
-        .join(" · ")
+  // the owner's decision first; a rule's label only while nothing was decided
+  const kindLabel = sug
+    ? sug.decision || sug.rule?.kind || (sug.income ? "income" : sug.ignore ? "transfer" : sug.personal ? "personal" : "review")
     : "";
+  const chipText = sug ? [kindLabel, sug.decision ? null : sug.categoryName].filter(Boolean).join(" · ") : "";
   return (
     <div style={s.card} data-testid={`ledger-row-${row.id}`}>
       <div style={{ ...s.row, justifyContent: "space-between", flexWrap: "nowrap", alignItems: "flex-start" }}>
@@ -116,8 +116,8 @@ function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
       </div>
       )}
       <div style={s.row}>
-        {["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), "later"]
-          .filter((d) => d !== view) // a row on a shelf is not offered that same shelf again
+        {["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), ...(always ? [] : ["later"])]
+          .filter((d) => d !== view) // a row on a shelf is not offered that same shelf again; Later never makes a rule
           .map((d) => (
           <button
             key={d}
@@ -138,7 +138,7 @@ function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
           disabled={off}
           onChange={(e) => setAlways(e.target.checked)}
         />
-        Always treat this payee this way
+        Always treat this payee this way (not for Later)
       </label>
       {error && <div role="alert" style={s.err}>{error}</div>}
     </div>

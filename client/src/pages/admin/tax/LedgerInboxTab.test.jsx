@@ -83,7 +83,7 @@ it('Business with Always posts decide, then create-expense with the chosen categ
   render(<LedgerInboxTab />);
   const card = await screen.findByTestId('ledger-row-row-1');
   fireEvent.change(within(card).getByLabelText('Category'), { target: { value: 'cat-1' } });
-  fireEvent.click(within(card).getByLabelText('Always treat this payee this way'));
+  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later)'));
   fireEvent.click(within(card).getByRole('button', { name: 'Business' }));
   await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
   const p = posts();
@@ -215,4 +215,24 @@ it('after Apply rules now, an untouched category selection follows the refreshed
   fireEvent.click(screen.getByRole('button', { name: 'Apply rules now' }));
   await waitFor(() => expect(within(screen.getByTestId('ledger-row-row-1')).getByLabelText('Category')).toHaveValue('cat-1'));
   expect(within(screen.getByTestId('ledger-row-row-2')).getByLabelText('Category')).toHaveValue('cat-2');
+});
+
+it('checking Always removes the Later action, and a decided row shows the decision instead of the stale rule label', async () => {
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/inbox') && u.includes('view=income')) {
+      return json({ rows: [{ ...row, id: 'row-4', direction: 'credit', suggestion: { ...row.suggestion, rule: { id: 'r9', kind: 'review' }, categoryName: 'Tools', income: true, decision: 'income' } }], total: 1 });
+    }
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  const card = await screen.findByTestId('ledger-row-row-1');
+  expect(within(card).getByRole('button', { name: 'Later' })).toBeInTheDocument();
+  fireEvent.click(within(card).getByLabelText('Always treat this payee this way (not for Later)'));
+  expect(within(card).queryByRole('button', { name: 'Later' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Income view' }));
+  const decided = await screen.findByTestId('ledger-row-row-4');
+  expect(within(decided).getByText('income')).toBeInTheDocument();
+  expect(within(decided).queryByText(/review/)).not.toBeInTheDocument();
 });

@@ -2281,7 +2281,9 @@ router.get('/bank-import/transactions', async (req, res, next) => {
       q = q.whereRaw("to_char(txn_date, 'YYYY-MM') = ?", [String(month)]);
     }
     const rows = await q.select('*');
-    res.json({ transactions: rows.slice(0, limit), hasMore: rows.length > limit, offset, limit });
+    // with GATE_TAX_LEDGER off, nothing a ledger rule wrote reaches this tab
+    const shown = rows.slice(0, limit).map((r) => (r.suggestion && r.suggestion.rule ? { ...r, suggestion: taxLedgerRules.visibleSuggestion(r.suggestion) } : r));
+    res.json({ transactions: shown, hasMore: rows.length > limit, offset, limit });
   } catch (err) { next(err); }
 });
 
@@ -2373,7 +2375,8 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
     const ownerRule = fromLedger && req.body?.always && req.body?.categoryId
       ? taxLedgerRules.ownerRuleFor(row, 'expense', req.body.categoryId) : null;
 
-    const suggested = row.suggestion?.categoryId || null;
+    // a category a ledger rule suggested counts only while the ledger gate is on
+    const suggested = taxLedgerRules.visibleSuggestion(row.suggestion)?.categoryId || null;
     const categoryId = req.body?.categoryId || suggested;
     const usedAi = !req.body?.categoryId && !!suggested;
     let deductible = parseFloat(row.amount);

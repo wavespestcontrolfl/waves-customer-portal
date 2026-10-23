@@ -41,7 +41,7 @@ function builder(table) {
       return Promise.resolve(table === 'tax_ledger_rules' ? 1 : state.casResult);
     }),
     insert: jest.fn((row) => { (Array.isArray(row) ? state.seeded : state.inserted).push(row); return b; }),
-    onConflict: jest.fn(() => b), merge: jest.fn(() => b), ignore: jest.fn(() => Promise.resolve()),
+    onConflict: jest.fn(() => b), merge: jest.fn(() => b), ignore: jest.fn(() => Promise.resolve()), whereNotIn: jest.fn(() => b),
     returning: jest.fn(() => Promise.resolve([{ id: 'rule-new', ...state.inserted[state.inserted.length - 1] }])),
   };
   const rows = table === 'tax_ledger_rules as r' ? state.rules : table === 'expense_categories' ? state.categories : state.bankRows;
@@ -87,6 +87,12 @@ describe('compileRules / matchRule', () => {
       { id: 'older', pattern: 'wawa', priority: 10, created_at: '2026-01-15' },
     ]);
     expect(compiled.map((r) => r.id)).toEqual(['older', 'owner', 'seed']);
+    // created_at arrives as a Date from Postgres: compare in time, not as text
+    const dated = svc.compileRules([
+      { id: 'later', pattern: 'a', priority: 10, created_at: new Date('2026-10-23T10:00:00Z') },
+      { id: 'first', pattern: 'b', priority: 10, created_at: new Date('2026-09-05T10:00:00Z') },
+    ]);
+    expect(dated.map((r) => r.id)).toEqual(['first', 'later']);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('rule bad skipped'));
     expect(svc.matchRule('DEBIT CARD PURCHASE - COSTCO GAS #123', compiled).id).toBe('owner');
     expect(svc.matchRule('COSTCO WHOLESALE', compiled).id).toBe('seed');
@@ -141,6 +147,10 @@ describe('compileRules / matchRule', () => {
     expect(svc.matchRule('ACME SUPPLY', compiled, 'credit').id).toBe('inc');
     expect(svc.matchRule('ACME SUPPLY', compiled, 'debit').id).toBe('exp');
     expect(svc.matchRule('ACME SUPPLY', compiled).id).toBe('inc');
+    // an expense rule never labels money in (a merchant refund is a review item, not an expense)
+    const onlyExpense = svc.compileRules([{ id: 'exp', pattern: 'home depot', kind: 'expense', priority: 100 }]);
+    expect(svc.matchRule('HOME DEPOT REFUND', onlyExpense, 'credit')).toBeNull();
+    expect(svc.matchRule('HOME DEPOT 123', onlyExpense, 'debit').id).toBe('exp');
   });
 });
 
@@ -224,6 +234,8 @@ describe('seed rules', () => {
     ['USPS PO 1130440123', 'review', 'Advertising & Marketing'],
     ['USPS STAMPS 123', 'expense', 'Office Expenses'],
     ['TEMU.COM', 'review', 'Supplies'],
+    // card interest: line 16b has no category, so it is a review item with no pre-filled category
+    ['INTEREST CHARGE ON PURCHASES', 'review', null],
   ])('%s → %s / %s', (description, kind, category) => {
     const compiled = svc.compileRules(seeds.SEED_RULES.map((r, i) => ({ ...r, id: `s${i}`, created_at: '2026-01-01' })));
     const hit = svc.matchRule(description, compiled);
@@ -245,9 +257,17 @@ describe('ensureSeedRules (runtime seed)', () => {
     const unknownCat = rows.find((r) => /google\\W\*ads/.test(r.pattern));
     expect(unknownCat.category_id).toBeNull();
     expect(unknownCat.irs_line).toBe('8');
-    const seedBuilder = mockDb.mock.results.map((r) => r.value).find((b) => b.table === 'tax_ledger_rules');
+    const seedBuilders = mockDb.mock.results.map((r) => r.value).filter((b) => b.table === 'tax_ledger_rules');
+    const seedBuilder = seedBuilders[0];
     expect(seedBuilder.onConflict).toHaveBeenCalledWith('pattern');
-    expect(seedBuilder.ignore).toHaveBeenCalled();
+    // a pristine seed row follows the code; an owner-edited row (updated_at moved) keeps the owner's values
+    expect(seedBuilder.merge).toHaveBeenCalledWith(['kind', 'category_id', 'irs_line', 'note', 'priority', 'enabled']);
+    expect(seedBuilder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('updated_at = tax_ledger_rules.created_at'));
+    expect(seedBuilder.ignore).not.toHaveBeenCalled();
+    // a seed the code no longer lists is disabled, never deleted
+    const retire = seedBuilders[1];
+    expect(retire.whereNotIn).toHaveBeenCalledWith('pattern', rows.map((r) => r.pattern));
+    expect(retire.update).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
     // second call: memoized, no second write
     mockDb.mockClear();
     expect(await svc.ensureSeedRules()).toBe(seeds.SEED_RULES.length);
@@ -591,5 +611,27 @@ describe('views', () => {
     expect(svc.hasLiveCandidates({ suggestion: { payoutCandidates: [{ id: 1 }] } })).toBe(true);
     expect(svc.hasLiveCandidates({ suggestion: { candidates: [], noMatch: true } })).toBe(false);
     expect(svc.hasLiveCandidates({ suggestion: null })).toBe(false);
+  });
+});
+
+describe('visibleSuggestion (the kill switch)', () => {
+  const ruleSug = { rule: { id: 'r', kind: 'expense' }, categoryId: 'c', categoryName: 'Supplies', irsLine: '22', categorySource: 'rule', rulesAt: 't', noMatch: true, candidates: [{ id: 1 }] };
+  test('with the gate on, a suggestion passes through untouched', () => {
+    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
+    expect(svc.visibleSuggestion(ruleSug)).toBe(ruleSug);
+  });
+  test('with the gate off, what a rule wrote is removed; the matcher keys and owner decisions stay', () => {
+    process.env.GATE_BANK_IMPORT = 'true'; delete process.env.GATE_TAX_LEDGER;
+    expect(svc.visibleSuggestion(ruleSug)).toEqual({ noMatch: true, candidates: [{ id: 1 }] });
+    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'transfer' }, ignore: true, reason: 'transfer per ledger rule', rulesAt: 't' })).toEqual({});
+    // the matcher's own transfer flag (no rule key) is not a rule's
+    const matcher = { ignore: true, reason: 'internal transfer?' };
+    expect(svc.visibleSuggestion(matcher)).toBe(matcher);
+    // an owner decision survives the gate: the Income shelf flag and the decision itself
+    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'review' }, income: true, decision: 'income', decidedAt: 'd', reason: 'x', noMatch: true }))
+      .toEqual({ income: true, decision: 'income', decidedAt: 'd', reason: 'x', noMatch: true });
+    // an AI category (not categorySource rule) stays
+    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'review' }, categoryId: 'ai', categorySource: 'ai' })).toEqual({ categoryId: 'ai', categorySource: 'ai' });
+    expect(svc.visibleSuggestion(null)).toBeNull();
   });
 });

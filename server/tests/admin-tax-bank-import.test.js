@@ -404,6 +404,17 @@ describe('create-expense (gate on)', () => {
     expect(state.insertedExpenses).toHaveLength(0);
   });
 
+  test('with GATE_TAX_LEDGER off, a category a ledger rule suggested is not used; with it on, it is', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    state.bankRow.suggestion = { noMatch: true, rule: { id: 'r', kind: 'expense' }, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'rule' };
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].category_id).toBeNull();
+    state.insertedExpenses = []; process.env.GATE_TAX_LEDGER = 'true';
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].category_id).toBe('cat-meals');
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
   // The ledger Inbox (GATE_TAX_LEDGER) marks its calls fromLedger: the row
   // must be one the Inbox may decide, and the claim repeats the check.
   test('fromLedger with the ledger gate off is a 404, like every ledger route', async () => {
