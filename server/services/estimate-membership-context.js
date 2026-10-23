@@ -187,11 +187,13 @@ function accountServiceKey(raw) {
   // the prefix in the duplicate check yields exactly the requested key
   // (turf → lawn_care, monitoring → termite_bait, stations → rodent_bait).
   const s = String(raw || '').toLowerCase();
+  // The misting SYSTEM is one identity whether the row was booked under a residential or a commercial name (Codex #6503
+  // r7): resolve it before the commercial / residential split so scheduled rows and paid invoices file under one key.
+  if (isMistingSystemIdentity(s)) return 'mosquito_misting';
   if (s.includes('commercial')) {
     if (s.includes('pest') && !isRodentLedName(s)) return 'commercial_pest_control';
     if (s.includes('lawn') || s.includes('turf')) return 'commercial_lawn_care';
     if (!isPalmName(s) && (s.includes('tree') || s.includes('shrub'))) return 'commercial_tree_shrub';
-    if (isMistingSystemIdentity(s)) return 'mosquito_misting';
     if (s.includes('mosquito')) return 'commercial_mosquito';
     if (s.includes('termite')) return 'commercial_termite_bait';
     if (s.includes('rodent')) return 'commercial_rodent_bait';
@@ -1912,3 +1914,6 @@ module.exports = {
   loadCurrentServiceSpendContext,
   publicMembershipView,
 };
+
+// Exported for tests (Codex #6503 r7): the one account-key resolver the membership panel groups rows by.
+module.exports.accountServiceKey = accountServiceKey;

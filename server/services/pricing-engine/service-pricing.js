@@ -5052,46 +5052,50 @@ function resolveMistingBasis({ tier, solution }, knobs) {
     refillPrice: knob('refillPrice', refillCfg.price),
     refillProductCost: knob('refillProductCost', refillCfg.productCost),
     serviceCallNoPlan: knob('serviceCallNoPlan', M.serviceCallNoPlan),
+    // The layout limits a sent quote was validated under (Codex #6503 r7): replayed from the stamp so a later change to the
+    // code-owned limits cannot turn a priced quote into a manual one, or reset its refill count.
+    minNozzles: knob('minNozzles', M.minNozzles, { positive: true, whole: true }),
+    maxNozzles: knob('maxNozzles', M.maxNozzles, { positive: true, whole: true }),
+    maxRisers: knob('maxRisers', M.maxRisers, { whole: true }),
+    maxRefillsPerYear: knob('maxRefillsPerYear', M.maxRefillsPerYear, { whole: true }),
+    defaultRefillsPerYear: knob('defaultRefillsPerYear', M.defaultRefillsPerYear, { whole: true }),
   };
 }
 
 // The requested counts, validated (reasons are appended in the order the checks run).
 function resolveMistingNozzles(raw, basis, reasons) {
-  const M = MOSQUITO_MISTING;
   let nozzles = raw == null ? basis.includedNozzles : Number(raw);
-  if (!Number.isFinite(nozzles) || nozzles < M.minNozzles) {
+  if (!Number.isFinite(nozzles) || nozzles < basis.minNozzles) {
     reasons.push('mosquito_misting_invalid_nozzles');
     nozzles = basis.includedNozzles;
   }
   nozzles = Math.round(nozzles);
-  const oversize = nozzles > M.maxNozzles;
+  const oversize = nozzles > basis.maxNozzles;
   if (oversize) reasons.push('mosquito_misting_oversize');
   return { nozzles, oversize };
 }
-function resolveMistingRisers(raw, reasons) {
+function resolveMistingRisers(raw, basis, reasons) {
   let risers = raw == null ? 0 : Number(raw);
   if (!Number.isFinite(risers) || risers < 0) {
     reasons.push('mosquito_misting_invalid_risers');
     risers = 0;
   }
   risers = Math.round(risers);
-  const oversize = risers > MOSQUITO_MISTING.maxRisers;
+  const oversize = risers > basis.maxRisers;
   if (oversize) reasons.push('mosquito_misting_oversize_risers');
   return { risers, oversize };
 }
-function resolveMistingRefills(raw, reasons) {
-  const M = MOSQUITO_MISTING;
-  let refillsPerYear = raw == null ? M.defaultRefillsPerYear : Number(raw);
-  if (!Number.isFinite(refillsPerYear) || refillsPerYear < 0 || refillsPerYear > M.maxRefillsPerYear) {
+function resolveMistingRefills(raw, basis, reasons) {
+  let refillsPerYear = raw == null ? basis.defaultRefillsPerYear : Number(raw);
+  if (!Number.isFinite(refillsPerYear) || refillsPerYear < 0 || refillsPerYear > basis.maxRefillsPerYear) {
     reasons.push('mosquito_misting_invalid_refills');
-    refillsPerYear = M.defaultRefillsPerYear;
+    refillsPerYear = basis.defaultRefillsPerYear;
   }
   return refillsPerYear;
 }
 
 // The knobs this line was priced under, stamped on the line (replayed from the stored row).
 function mistingPricingKnobs(choice, basis) {
-  const M = MOSQUITO_MISTING;
   return {
     tier: choice.tier,
     tierPrice: basis.tierPrice,
@@ -5105,10 +5109,10 @@ function mistingPricingKnobs(choice, basis) {
     installTechs: basis.installTechs,
     installHours: basis.installHours,
     laborRate: basis.laborRate,
-    minNozzles: M.minNozzles,
-    maxNozzles: M.maxNozzles,
-    maxRisers: M.maxRisers,
-    maxRefillsPerYear: M.maxRefillsPerYear,
+    minNozzles: basis.minNozzles,
+    maxNozzles: basis.maxNozzles,
+    maxRisers: basis.maxRisers,
+    maxRefillsPerYear: basis.maxRefillsPerYear,
     planMonthly: basis.planMonthly,
     planVisitsPerYear: basis.planVisitsPerYear,
     laborMinutesPerVisit: basis.laborMinutesPerVisit,
@@ -5116,7 +5120,7 @@ function mistingPricingKnobs(choice, basis) {
     refillSolution: choice.solution,
     refillPrice: basis.refillPrice,
     refillProductCost: basis.refillProductCost,
-    defaultRefillsPerYear: M.defaultRefillsPerYear,
+    defaultRefillsPerYear: basis.defaultRefillsPerYear,
     serviceCallNoPlan: basis.serviceCallNoPlan,
   };
 }
@@ -5178,8 +5182,8 @@ function priceMosquitoMisting(property, options = {}) {
   const { reasons } = choice;
   const basis = resolveMistingBasis(choice, options.knobs);
   const { nozzles, oversize: nozzlesOversize } = resolveMistingNozzles(options.nozzles, basis, reasons);
-  const { risers, oversize: risersOversize } = resolveMistingRisers(options.risers, reasons);
-  const refillsPerYear = resolveMistingRefills(options.refillsPerYear, reasons);
+  const { risers, oversize: risersOversize } = resolveMistingRisers(options.risers, basis, reasons);
+  const refillsPerYear = resolveMistingRefills(options.refillsPerYear, basis, reasons);
   const refillCfg = MOSQUITO_MISTING.refills[choice.solution];
 
   const base = {

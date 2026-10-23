@@ -632,3 +632,46 @@ describe('pre-push audit: priced proposal lines and commercial rows', () => {
     expect(mapper.estimateMistingAcceptBlocked(data)).toBe(false);
   });
 });
+
+describe('Codex round 7: replayed limits, distinct work labels, one account key', () => {
+  const { priceMosquitoMisting } = require('../services/pricing-engine/service-pricing');
+  const { MOSQUITO_MISTING } = require('../services/pricing-engine/constants');
+
+  test('a sent quote replays against the layout limits it was validated under, not the live ones', () => {
+    const first = priceMosquitoMisting({}, { tier: 'smart', nozzles: 80, refillsPerYear: 6 });
+    expect(first.quoteRequired).toBe(false);
+    expect(first.pricingKnobs).toMatchObject({ maxNozzles: 80, maxRefillsPerYear: 24, defaultRefillsPerYear: 4 });
+    const live = { maxNozzles: MOSQUITO_MISTING.maxNozzles, maxRefillsPerYear: MOSQUITO_MISTING.maxRefillsPerYear, defaultRefillsPerYear: MOSQUITO_MISTING.defaultRefillsPerYear };
+    try {
+      MOSQUITO_MISTING.maxNozzles = 70; MOSQUITO_MISTING.maxRefillsPerYear = 5; MOSQUITO_MISTING.defaultRefillsPerYear = 2;
+      const fresh = priceMosquitoMisting({}, { tier: 'smart', nozzles: 80, refillsPerYear: 6 });
+      expect(fresh.quoteRequired).toBe(true);
+      const replay = priceMosquitoMisting({}, { tier: 'smart', nozzles: 80, refillsPerYear: 6, knobs: first.pricingKnobs });
+      expect(replay.quoteRequired).toBe(false);
+      expect(replay.installation.price).toBe(first.installation.price);
+      expect(replay.refill.refillsPerYear).toBe(6);
+      expect(replay.pricingKnobs).toMatchObject({ maxNozzles: 80, maxRefillsPerYear: 24 });
+    } finally { Object.assign(MOSQUITO_MISTING, live); }
+  });
+
+  test('hand-booked misting work rows keep their own label; the design visit and the plan keep theirs', () => {
+    const n = require('../utils/service-normalizer');
+    const f = Object.values(n).find((v) => typeof v === 'function');
+    expect(f('Mosquito Misting System Installation')).toBe('Mosquito Misting System Installation');
+    expect(f('Mosquito Misting System Refill')).toBe('Mosquito Misting System Refill');
+    expect(f('Mosquito Misting System Maintenance')).toBe('Mosquito Misting System Maintenance');
+    expect(f('Mosquito Misting System Service')).toBe('Mosquito Misting System Service');
+    expect(f('Mosquito Misting Service Plan')).toBe('Mosquito Misting Service Plan');
+    expect(f('21-day mosquito misting')).toBe('Mosquito Barrier Treatment');
+  });
+
+  test('the membership account key resolves the misting system before the commercial / residential split', () => {
+    const ctx = require('../services/estimate-membership-context');
+    const key = ctx.accountServiceKey || ctx._internals?.accountServiceKey;
+    expect(typeof key).toBe('function');
+    expect(key('Mosquito Misting Service Plan')).toBe('mosquito_misting');
+    expect(key('Commercial Mosquito Misting System')).toBe('mosquito_misting');
+    expect(key('Monthly Mosquito Control Service')).not.toBe('mosquito_misting');
+    expect(key('Commercial Mosquito Program')).toBe('commercial_mosquito');
+  });
+});
