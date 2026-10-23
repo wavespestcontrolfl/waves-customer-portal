@@ -100,12 +100,12 @@ describe('compileRules / matchRule', () => {
     expect(svc.compilePattern('costco\\W*gas').test('COSTCO GAS')).toBe(true);
   });
 
-  test('compilePattern refuses the shapes that can backtrack catastrophically; every seed and every Inbox pattern passes', () => {
-    for (const bad of ['(a+)+$', '(a*)*b', '(x|xy)+z', '((ab)+)+', '(\\w+\\s?)+$', '(a)\\1', '(?=a)b', '(?<!a)b']) {
+  test('compilePattern admits only the safe grammar: the catastrophic shapes are refused, every seed and every Inbox pattern passes', () => {
+    for (const bad of ['(a+)+$', '(a*)*b', '(x|xy)+z', '((ab)+)+', '(\\w+\\s?)+$', '(a?a?)+$', '(a|a)*', '(a)\\1', '(?=a)b', '(?<!a)b', '(?:ab)+', 'a{2,4}b', 'ab+', '[a-z]+', 'ab*c', '^wawa$', '(ab', 'ab)']) {
       expect([bad, () => svc.compilePattern(bad)]).toEqual([bad, expect.any(Function)]);
       expect(() => svc.compilePattern(bad)).toThrow(expect.objectContaining({ status: 400 }));
     }
-    for (const ok of ['costco\\W*gas', '\\bwawa\\b', 'google\\W*ads|facebk|meta ads', 'o.?reilly auto', 'wu\\b.*\\bco\\b', 'a{2,4}b', '(ab|cd)e', '(mobile )?ach', 'usps po\\b']) {
+    for (const ok of ['costco\\W*gas', '\\bwawa\\b', 'google\\W*ads|facebk|meta ads', 'o.?reilly auto', 'wu\\b.*\\bco\\b', '(ab|cd)e', '(mobile )?ach', 'usps po\\b', 'check deposit \\(mobile\\) reversal', 'cash app \\*', 'x corp\\.? paid', 'nic\\W*-?\\s*fl', 'colou?r', "o'reilly", 'at&t', 'apple\\.com/bill', '[a-z]ar', 'take 5']) {
       expect([ok, svc.compilePattern(ok)]).toEqual([ok, expect.any(RegExp)]);
     }
     for (const r of seeds.SEED_RULES) expect([r.pattern, svc.compilePattern(r.pattern, { maxLength: Infinity })]).toEqual([r.pattern, expect.any(RegExp)]);

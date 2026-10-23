@@ -105,38 +105,28 @@ function httpError(status, message) {
 }
 
 // Patterns run synchronously on every staged row during imports and the
-// hourly sync, so a pattern that can backtrack catastrophically is refused:
-// no backreference, no lookaround, and no quantifier on a group that itself
-// holds a quantifier (the (a+)+ shape). Alternations, classes, \W*, \b,
-// .?, bounded repeats all pass; every seed does.
-const UNSAFE_PATTERN = [
-  { re: /\\[1-9]/, why: 'a backreference' },
-  { re: /\(\?<?[=!]/, why: 'a lookaround' },
-];
-function unboundedGroupRepeat(p) {
-  // walk the pattern once: an unbounded quantifier (* + {) right after a ')'
-  // whose group holds a quantifier, a nested repeated group, or an
-  // alternation ((a+)+, ((ab)+)+, (x|xy)+) is the dangerous shape; (…)? is
-  // bounded and stays allowed
-  const stack = [];
-  let seen = false;
-  let alt = false;
-  for (let i = 0; i < p.length; i += 1) {
-    const c = p[i];
-    if (c === '\\') { i += 1; continue; }
-    if (c === '[') { while (i < p.length && p[i] !== ']') { if (p[i] === '\\') i += 1; i += 1; } continue; }
-    if (c === '(') { stack.push([seen, alt]); seen = false; alt = false; continue; }
-    if (c === '|') { alt = true; continue; }
-    if (c === ')') {
-      const inner = seen || alt;
-      const outer = stack.pop() || [false, false];
-      if (inner && /[*+{]/.test(p[i + 1] || '')) return true;
-      seen = outer[0] || seen; alt = outer[1];
-      continue;
-    }
-    if (c === '*' || c === '+' || c === '{') seen = true;
+// hourly sync, so every rule (seed or owner) must fit a grammar that cannot
+// backtrack catastrophically: words and spaces, | alternation, (…) groups
+// that may only be optional, \b, the escapes \W \s \d \w with * or ?, a
+// dot with * or ?, an escaped literal, a [class] (no repeat), and ? on a
+// single character. No + or * on a word, class or group, no {n,m}, no
+// backreference, no lookaround, no anchors. Every seed and every pattern
+// the Inbox writes fits.
+const GRAMMAR_TOKEN = /\\[bB]|\\[WwsSdD][*?]?|\\[.*+?()[\]{}|\\\/$^-]\??|\.[*?]?|[A-Za-z0-9 _&',\/#:;@%!=-]\??|\(|\)\??|\||\[\^?(?:\\.|[^\]\\])+\]\??/y;
+const GRAMMAR_HELP = 'allowed: words and spaces, |, (…) or (…)?, \\b, \\W* \\s* \\d*, . .* .?, an escaped literal such as \\., a [class], ? after one character; not allowed: + * {} on a word, class or group, backreferences, lookarounds, anchors';
+function fitsGrammar(p) {
+  let depth = 0;
+  let i = 0;
+  while (i < p.length) {
+    GRAMMAR_TOKEN.lastIndex = i;
+    const m = GRAMMAR_TOKEN.exec(p);
+    if (!m) return false;
+    const t = m[0];
+    if (t === '(') depth += 1;
+    else if (t[0] === ')') { depth -= 1; if (depth < 0) return false; }
+    i += t.length;
   }
-  return false;
+  return depth === 0;
 }
 // maxLength caps what the owner types; a stored rule (seeds are long
 // alternations of literals) is checked for safety only.
@@ -144,8 +134,7 @@ function compilePattern(pattern, { maxLength = MAX_PATTERN } = {}) {
   const p = String(pattern || '').trim();
   if (!p) throw httpError(400, 'pattern is required');
   if (p.length > maxLength) throw httpError(400, `pattern is longer than ${maxLength} characters`);
-  for (const { re, why } of UNSAFE_PATTERN) if (re.test(p)) throw httpError(400, `pattern uses ${why}, which is not allowed`);
-  if (unboundedGroupRepeat(p)) throw httpError(400, 'pattern repeats a group that repeats or alternates inside (for example (a+)+ or (x|xy)+), which is not allowed');
+  if (!fitsGrammar(p)) throw httpError(400, `pattern uses a form that is not allowed (${GRAMMAR_HELP})`);
   try { return new RegExp(p, 'i'); } catch (e) { throw httpError(400, `pattern is not a valid regular expression: ${e.message}`); }
 }
 
