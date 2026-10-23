@@ -26,6 +26,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const plaid = require('./plaid-client');
 const bankImport = require('./bank-import');
+const taxLedgerRules = require('./tax-ledger-rules');
 const { isInfrastructureError } = require('./vendor-credentials');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -855,6 +856,7 @@ async function syncItem(itemId, { runMatching = true } = {}) {
   if (runMatching && (result.inserted > 0 || result.updated > 0)) {
     try {
       matching = await bankImport.runDeterministicMatching({ limit: 500 });
+      await taxLedgerRules.applyAfterImport(`plaid item ${itemId}`);
     } catch (err) {
       logger.warn(`[plaid-sync] item ${itemId} synced but the matching pass failed: ${err.message}`);
       matchingError = 'transactions synced, but the matching pass failed — use "Run matching" to retry';
@@ -888,6 +890,7 @@ async function syncAllItems() {
         matchingPasses++;
         more = (await bankImport.runDeterministicMatching({ limit: 500 })).moreRemaining;
       }
+      await taxLedgerRules.applyAfterImport('hourly sync');
     } catch (err) {
       logger.warn(`[plaid-sync] hourly matching pass failed: ${err.message}`);
       matchingError = err.message;

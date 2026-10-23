@@ -25,6 +25,7 @@ import {
   DollarSign,
   Download,
   FileText,
+  Inbox,
   LayoutDashboard,
   ListChecks,
   Package,
@@ -36,6 +37,7 @@ import {
 } from "lucide-react";
 import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import LedgerInboxTab from "./tax/LedgerInboxTab";
 function useTaxRead(path, setData, field) {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -236,6 +238,7 @@ const TAX_SECTIONS = [
     label: "Import",
     Icon: Landmark,
   },
+  { key: "ledger", label: "Inbox", Icon: Inbox },
   {
     key: "mileage",
     label: "Mileage",
@@ -6690,7 +6693,7 @@ export default function TaxPage() {
         g.key === "expenses"
           ? {
               ...g,
-              tabs: [...g.tabs, "bankimport"],
+              tabs: [...g.tabs, "bankimport", "ledger"],
             }
           : g,
       )
@@ -7202,6 +7205,7 @@ export default function TaxPage() {
       {activeTab === "equipment" && <EquipmentTab />}
       {activeTab === "expenses" && <ExpensesTab />}
       {activeTab === "bankimport" && <BankImportTab />}
+      {activeTab === "ledger" && <LedgerInboxTab />}
       {activeTab === "mileage" && <MileageTab />}
       {activeTab === "revenue" && <RevenueTab />}
       {activeTab === "filings" && <FilingCalendarTab />}

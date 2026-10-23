@@ -191,6 +191,15 @@ jest.mock('../services/bank-import', () => ({
   retryPendingEchoes: jest.fn(() => Promise.resolve({ pending: 0, morePending: false, retried: 0, humanRejected: 0 })),
 }));
 
+// The ledger Inbox's Always rule is written by create-expense inside its
+// claim transaction; the rule service has its own suite — stub its writes.
+jest.mock('../services/tax-ledger-rules', () => ({
+  ...jest.requireActual('../services/tax-ledger-rules'),
+  createRule: jest.fn(() => Promise.resolve({ id: 'rule-new' })),
+  applyRules: jest.fn(() => Promise.resolve({ examined: 0, suggested: 0 })),
+}));
+const taxLedgerRules = require('../services/tax-ledger-rules');
+
 const express = require('express');
 const taxRouter = require('../routes/admin-tax');
 
@@ -392,6 +401,57 @@ describe('create-expense (gate on)', () => {
     state.category = null;
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'nope' })).status).toBe(400);
     expect(state.insertedExpenses).toHaveLength(0);
+  });
+
+  // The ledger Inbox (GATE_TAX_LEDGER) marks its calls fromLedger: the row
+  // must be one the Inbox may decide, and the claim repeats the check.
+  test('fromLedger: a row with parked link candidates or one the matcher never examined is a 409 before any insert', async () => {
+    state.bankRow.suggestion = { categoryId: 'cat-meals', candidates: [{ id: 'exp-7' }] };
+    let res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/Bank Import/);
+    state.bankRow.suggestion = { categoryId: 'cat-meals' };
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/matcher has not examined/);
+    expect(state.insertedExpenses).toHaveLength(0);
+    // the same rows are still Bank Import's to create from (its own UI shows the candidates)
+    state.bankRow.suggestion = { categoryId: 'cat-meals', candidates: [{ id: 'exp-7' }] };
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);
+  });
+
+  test('fromLedger + always: the owner rule is written inside the claim transaction and the payee pass runs after; a lost claim writes none', async () => {
+    taxLedgerRules.createRule.mockClear(); taxLedgerRules.applyRules.mockClear();
+    state.bankRow.suggestion = { noMatch: true };
+    let res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
+    expect(res.status).toBe(200);
+    expect((await res.json()).ruleCreated).toBe(true);
+    expect(taxLedgerRules.createRule).toHaveBeenCalledWith(expect.objectContaining({ pattern: '\\bwawa\\b', kind: 'expense', categoryId: 'cat-meals', priority: 10, source: 'owner', conn: mockDb }));
+    expect(taxLedgerRules.applyRules).toHaveBeenCalledWith({ limit: taxLedgerRules.MAX_EXAMINE, force: true, pattern: '\\bwawa\\b' });
+    taxLedgerRules.createRule.mockClear();
+    state.bankUpdateResult = 0;
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
+    expect(res.status).toBe(409);
+    expect(taxLedgerRules.createRule).not.toHaveBeenCalled();
+    // without always, or outside the ledger, no rule
+    state.bankUpdateResult = 1;
+    await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
+    await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', always: true });
+    expect(taxLedgerRules.createRule).not.toHaveBeenCalled();
+  });
+
+  test('fromLedger: the claim also requires examined + no candidates, so a list parked mid-flight loses the race', async () => {
+    state.bankRow.suggestion = { categoryId: 'cat-meals', noMatch: true };
+    const res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
+    expect(res.status).toBe(200);
+    const raws = state.bankUpdates[0].wheres.filter((w) => Array.isArray(w)).map((w) => w[0]);
+    expect(raws).toContainEqual(expect.stringContaining("jsonb_exists_any(coalesce(suggestion, '{}'::jsonb), array['noMatch'"));
+    expect(raws).toContainEqual(expect.stringContaining("jsonb_typeof(suggestion->'candidates') = 'array'"));
+    // without the flag the claim stays what Bank Import's own button needs
+    state.bankUpdates = [];
+    await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' });
+    const plain = state.bankUpdates[0].wheres.filter((w) => Array.isArray(w)).map((w) => w[0]);
+    expect(plain).not.toContainEqual(expect.stringContaining('jsonb_exists_any'));
   });
 });
 
