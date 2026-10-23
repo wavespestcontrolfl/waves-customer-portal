@@ -38,7 +38,10 @@ function builder(table) {
     first: jest.fn(() => Promise.resolve(table === 'expense_categories' ? state.category : state.bankRow)),
     update: jest.fn((patch) => {
       (table === 'tax_ledger_rules' ? state.ruleUpdates : state.updates).push({ wheres: wheres.slice(), patch });
-      return Promise.resolve(table === 'tax_ledger_rules' ? 1 : state.casResult);
+      // awaited directly it is the row count; .returning('*') gives the saved row (updateRule)
+      const done = Promise.resolve(table === 'tax_ledger_rules' ? 1 : state.casResult);
+      done.returning = () => Promise.resolve(state.bankRow ? [{ id: state.bankRow.id, ...state.bankRow, ...patch }] : []);
+      return done;
     }),
     insert: jest.fn((row) => { (Array.isArray(row) ? state.seeded : state.inserted).push(row); return b; }),
     onConflict: jest.fn(() => b), merge: jest.fn(() => b), ignore: jest.fn(() => Promise.resolve()), whereNotIn: jest.fn(() => b),
@@ -188,6 +191,10 @@ describe('patternFromDescription', () => {
     ['THE UPS STORE 1234 BRADENTON FL', '\\bups\\b'],
     ['AMAZON.COM*AB12CD', '\\bamazon\\.com\\b'],
     ["O'REILLY AUTO PARTS 0042", "\\bo'reilly\\W*auto\\W*parts\\b"],
+    // bank framing never anchors a rule
+    ['CHECKCARD 1234 WAWA', '\\bwawa\\b'],
+    ['ACH DEBIT 1234 ACME', '\\bacme\\b'],
+    ['ACH DEBIT 1234', null],
     ['1234567 ##', null],
   ];
   test.each(cases)('%s → %s', (description, expected) => {
@@ -314,6 +321,8 @@ describe('applyRules (suggestion-only)', () => {
       expect(u.wheres).toContainEqual(expect.objectContaining({ status: 'unmatched' }));
       expect(u.wheres).toContain("(suggestion -> 'decision') is null");
       expect(u.wheres).toContain(svc.MATCHER_EXAMINED_SQL);
+      // a seed write is conditional on the matcher not having flagged the row since it was read
+      if (u.wheres[0].id !== 'b5') expect(u.wheres).toContain(svc.NO_MATCHER_FLAG_SQL);
       stamps.add(u.patch.suggestion.merged.rulesAt);
     }
     expect(stamps.size).toBe(1);
@@ -337,14 +346,13 @@ describe('applyRules (suggestion-only)', () => {
     state.bankRows = [{ id: 'b5', txn_date: '2026-01-06', description: 'COSTCO GAS #3', direction: 'debit', suggestion: { ignore: true, reason: 'internal transfer?' } }];
     const out = await svc.applyRules({ force: true });
     expect(out.suggested).toBe(1);
-    expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ categoryId: 'cat-v', categorySource: 'rule' }));
-    // the matcher's flag stays (its rescan would only put it back; it is the row's evidence)
-    expect(state.updates[0].patch.suggestion.removed).not.toContain('ignore');
-    expect(state.updates[0].patch.suggestion.removed).not.toContain('reason');
-    expect(state.updates[0].patch.suggestion.removed).toContain('categoryId');
-    // the evidence is recorded explicitly: ignore next to a rule key would not count any more
-    expect(state.updates[0].patch.suggestion.merged.examined).toBe(true);
-    expect(svc.matcherExamined({ suggestion: { ignore: true, rule: { id: 'r-owner', kind: 'transfer' }, examined: true } })).toBe(true);
+    expect(state.updates[0].patch.suggestion.merged).toEqual(expect.objectContaining({ categoryId: 'cat-v', categorySource: 'rule', examined: true }));
+    // the owner's rule replaces the heuristic's flag (the tab reads ignore first); the evidence is recorded explicitly
+    expect(state.updates[0].patch.suggestion.removed).toContain('ignore');
+    expect(state.updates[0].patch.suggestion.removed).toContain('reason');
+    // a row the matcher had flagged is written without the no-flag guard; others carry it
+    expect(state.updates[0].wheres).not.toContain(svc.NO_MATCHER_FLAG_SQL);
+    expect(svc.matcherExamined({ suggestion: { examined: true, categoryId: 'cat-v', rule: { id: 'r-owner', kind: 'expense' } } })).toBe(true);
     // the same rule as a seed does not
     state.rules[0].source = 'seed'; state.updates = [];
     expect((await svc.applyRules({ force: true })).suggested).toBe(0);
@@ -606,6 +614,37 @@ describe('createRule / updateRule', () => {
     await expect(svc.updateRule('r1', {})).rejects.toMatchObject({ status: 400 });
     await expect(svc.updateRule('r1', { priority: 'high' })).rejects.toMatchObject({ status: 400 });
     await expect(svc.updateRule('r1', { pattern: '[' })).rejects.toMatchObject({ status: 400 });
+  });
+
+  test('updateRule keeps the invariant: the rule as it would be after the change needs a category when it is an expense', async () => {
+    state.bankRow = { id: 'r1', kind: 'personal', category_id: null };
+    await expect(svc.updateRule('r1', { kind: 'expense' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/categoryId/) });
+    state.bankRow = { id: 'r1', kind: 'expense', category_id: 'cat-v' };
+    await expect(svc.updateRule('r1', { categoryId: null })).rejects.toMatchObject({ status: 400 });
+    state.category = { id: 'cat-s', name: 'Supplies', irs_line: '22' };
+    state.bankRow = { id: 'r1', kind: 'personal', category_id: null };
+    await expect(svc.updateRule('r1', { kind: 'expense', categoryId: 'cat-s' })).resolves.toBeTruthy();
+    await expect(svc.updateRule('r1', { enabled: false })).resolves.toBeTruthy();
+    state.bankRow = null;
+    await expect(svc.updateRule('ghost', { kind: 'personal' })).rejects.toMatchObject({ status: 404 });
+  });
+
+  test('a stored pattern is case-folded (letters only; escapes keep their case), so WAWA and wawa are one rule', async () => {
+    expect(svc.canonicalPattern('WAWA')).toBe('wawa');
+    expect(svc.canonicalPattern('\\bWAWA\\W*GAS\\b')).toBe('\\bwawa\\W*gas\\b');
+    expect(svc.canonicalPattern('Costco\\S+Gas')).toBe('costco\\S+gas');
+    const saved = await svc.createRule({ pattern: ' \\bWAWA\\W*GAS ', kind: 'personal' });
+    expect(saved.pattern).toBe('\\bwawa\\W*gas');
+  });
+
+  test('Always on a description with no payee word is refused up front, nothing written', async () => {
+    state.bankRow = { id: 'b1', status: 'unmatched', description: 'ACH DEBIT 1234', direction: 'debit', suggestion: { noMatch: true } };
+    await expect(svc.decide({ id: 'b1', decision: 'personal', always: true })).rejects.toMatchObject({ status: 400, message: svc.NO_RULE_MESSAGE });
+    await expect(svc.decide({ id: 'b1', decision: 'expense', categoryId: 'cat-v', always: true })).rejects.toMatchObject({ status: 400 });
+    expect(state.updates).toHaveLength(0);
+    expect(state.inserted).toHaveLength(0);
+    // without Always the decision goes through
+    expect(await svc.decide({ id: 'b1', decision: 'personal' })).toEqual(expect.objectContaining({ action: 'ignored' }));
   });
 });
 

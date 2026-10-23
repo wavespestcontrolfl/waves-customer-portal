@@ -64,7 +64,7 @@ jest.mock('../services/bank-import', () => ({
 // and the error mapping. isOn stays real so the gate reads the env.
 jest.mock('../services/tax-ledger-rules', () => ({
   ...jest.requireActual('../services/tax-ledger-rules'),
-  decide: jest.fn(), listRules: jest.fn(), createRule: jest.fn(), updateRule: jest.fn(), applyRules: jest.fn(),
+  decide: jest.fn(), listRules: jest.fn(), createRule: jest.fn(), updateRule: jest.fn(), applyRules: jest.fn(), applyAfterImport: jest.fn(() => Promise.resolve(null)),
 }));
 const ledger = require('../services/tax-ledger-rules');
 
@@ -90,6 +90,7 @@ beforeEach(() => {
   Object.assign(state, { counts: {}, rows: [], queries: [] });
   mockDb.mockClear();
   for (const fn of ['decide', 'listRules', 'createRule', 'updateRule', 'applyRules']) ledger[fn].mockReset();
+  ledger.applyAfterImport.mockClear();
   process.env.GATE_BANK_IMPORT = 'true';
   delete process.env.GATE_TAX_LEDGER;
 });
@@ -139,7 +140,7 @@ describe('gate on', () => {
     expect(await res.json()).toEqual({ rows: state.rows, total: 3, limit: 200, offset: 0, view: 'open' });
     let page = state.queries.filter((q) => q.table === 'bank_transactions').pop();
     expect(page.limit).toBe(200); expect(page.offset).toBe(0);
-    expect(page.orderBy[0]).toEqual(['txn_date', 'desc']);
+    expect(page.orderBy).toEqual([['txn_date', 'desc'], ['created_at', 'desc'], ['id', 'desc']]);
     expect(page.raws).toContainEqual(ledger.VIEW_SQL.open);
     state.queries = [];
     res = await get(`${P}/inbox?view=later&limit=10&offset=20`);
@@ -194,16 +195,30 @@ describe('gate on', () => {
     res = await send('POST', `${P}/rules/apply`, {});
     expect(await res.json()).toEqual({ success: true, examined: 5, suggested: 2, byKind: { expense: 2 } });
     // the manual pass re-examines every open row unless told otherwise
-    expect(ledger.applyRules).toHaveBeenCalledWith({ limit: 5000, force: true, after: null });
+    expect(ledger.applyRules).toHaveBeenCalledWith({ limit: 1000, force: true, after: null });
     ledger.applyRules.mockResolvedValueOnce({ examined: 1, suggested: 0, byKind: {} });
     await send('POST', `${P}/rules/apply`, { force: false, limit: 100 });
     expect(ledger.applyRules).toHaveBeenLastCalledWith({ limit: 100, force: false, after: null });
+    // one request never examines more than 1000 rows (one UPDATE per row); the client follows the cursor
+    ledger.applyRules.mockResolvedValueOnce({ examined: 1, suggested: 0, byKind: {} });
+    await send('POST', `${P}/rules/apply`, { limit: 50000 });
+    expect(ledger.applyRules).toHaveBeenLastCalledWith({ limit: 1000, force: true, after: null });
     // continuation: the cursor from a previous answer; anything else is a 400
     ledger.applyRules.mockResolvedValueOnce({ examined: 1, suggested: 0, byKind: {}, more: false, cursor: null });
     res = await send('POST', `${P}/rules/apply`, { after: { txn_date: '2026-03-01T05:00:00.000Z', id: '11111111-1111-4111-8111-111111111111' } });
     expect(res.status).toBe(200);
-    expect(ledger.applyRules).toHaveBeenLastCalledWith({ limit: 5000, force: true, after: { txn_date: '2026-03-01', id: '11111111-1111-4111-8111-111111111111' } });
+    expect(ledger.applyRules).toHaveBeenLastCalledWith({ limit: 1000, force: true, after: { txn_date: '2026-03-01', id: '11111111-1111-4111-8111-111111111111' } });
     res = await send('POST', `${P}/rules/apply`, { after: { txn_date: 'yesterday', id: '1 or 1=1' } });
     expect(res.status).toBe(400);
+  });
+});
+
+describe('manual matching', () => {
+  test('POST /bank-import/match runs the gated rule pass after the matcher, so the Inbox prefill does not wait for the next sync', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    const res = await send('POST', '/admin/tax/bank-import/match', {});
+    expect(res.status).toBe(200);
+    expect(ledger.applyAfterImport).toHaveBeenCalledWith('manual match');
+    delete process.env.GATE_TAX_LEDGER;
   });
 });

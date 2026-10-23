@@ -1,12 +1,31 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  Checkbox,
+  Input,
+  Select,
+  Table,
+  THead,
+  TBody,
+  TR,
+  TH,
+  TD,
+} from "../../../components/ui";
 
 // Tax ledger Inbox: bank rows the rules could not settle on their own.
-// The owner reviews on a phone: 14px minimum text, 40px minimum controls,
-// no horizontal overflow.
+// Built on the shared V2 primitives (same surface as the rest of the Tax
+// page); the owner reviews on a phone, so every control keeps its touch
+// height and nothing scrolls sideways.
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const PAGE = 50;
 const KINDS = ["expense", "personal", "transfer", "income", "review"];
+const VIEWS = [["open", "Open"], ["later", "Later"], ["income", "Income"]];
+const EMPTY = { open: "Nothing to review.", later: "Nothing set aside for later.", income: "No receipts outside the processor." };
 
 // Same helper as TaxPage.jsx (not imported: that would be a circular import).
 function adminFetch(path, options = {}) {
@@ -30,25 +49,10 @@ function adminFetch(path, options = {}) {
   });
 }
 
-const post = (path, body) =>
-  adminFetch(path, { method: "POST", body: JSON.stringify(body) });
-const put = (path, body) =>
-  adminFetch(path, { method: "PUT", body: JSON.stringify(body) });
+const post = (path, body) => adminFetch(path, { method: "POST", body: JSON.stringify(body) });
+const put = (path, body) => adminFetch(path, { method: "PUT", body: JSON.stringify(body) });
 
 const T = "/admin/tax/bank-import";
-
-const s = {
-  wrap: { display: "flex", flexDirection: "column", gap: 12, fontSize: 14, color: "#18181b", minWidth: 0 },
-  card: { background: "#fff", border: "1px solid #e4e4e7", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 },
-  row: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, minWidth: 0 },
-  chip: { display: "inline-block", fontSize: 14, padding: "2px 8px", borderRadius: 999, background: "#f4f4f5", border: "1px solid #e4e4e7", maxWidth: "100%", overflowWrap: "anywhere" },
-  small: { fontSize: 14, color: "#52525b", overflowWrap: "anywhere" },
-  btn: { minHeight: 40, padding: "0 14px", fontSize: 14, fontWeight: 600, borderRadius: 6, border: "1px solid #d4d4d8", background: "#fff", color: "#18181b", cursor: "pointer" },
-  btnPrimary: { background: "#18181b", color: "#fff", border: "1px solid #18181b" },
-  input: { minHeight: 40, padding: "0 10px", fontSize: 14, borderRadius: 6, border: "1px solid #d4d4d8", background: "#fff", color: "#18181b", boxSizing: "border-box", minWidth: 0, maxWidth: "100%" },
-  err: { color: "#b91c1c", fontSize: 14, overflowWrap: "anywhere" },
-  check: { display: "flex", alignItems: "center", gap: 8, minHeight: 40, fontSize: 14 },
-};
 
 function fmtAmount(r) {
   const n = Math.abs(parseFloat(r.amount));
@@ -58,89 +62,159 @@ function fmtAmount(r) {
   return `${r.direction === "credit" ? "+" : "-"}$${txt}`;
 }
 
+// The API sends the calendar day as text; a Date that slipped through as an
+// ISO timestamp still reads as its day, never shifted by the viewer's zone.
+function fmtDate(v) {
+  return String(v || "").slice(0, 10);
+}
+
+// The owner's decision first; a rule's label only while nothing was decided.
+function chipText(sug) {
+  if (!sug) return "";
+  const kind = sug.decision || sug.rule?.kind || (sug.income ? "income" : sug.ignore ? "transfer" : sug.personal ? "personal" : "review");
+  return [kind, sug.decision ? null : sug.categoryName].filter(Boolean).join(" · ");
+}
+
+function RowHeader({ row }) {
+  const sug = row.suggestion || null;
+  const note = sug && (sug.rule?.note || sug.reason);
+  return (
+    <>
+      <div className="flex items-start justify-between gap-2">
+        <span className="text-sm text-ink-secondary shrink-0">{fmtDate(row.txn_date)}</span>
+        <strong className="text-base shrink-0">{fmtAmount(row)}</strong>
+      </div>
+      <div className="font-semibold [overflow-wrap:anywhere]">{row.description}</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone="neutral">{row.account_label}</Badge>
+        {sug && <Badge tone="strong">{chipText(sug)}</Badge>}
+      </div>
+      {note && <div className="text-sm text-ink-secondary [overflow-wrap:anywhere]">{note}</div>}
+    </>
+  );
+}
+
+// Category pick + Business, for money out only (a credit is never an expense).
+function BusinessAction({ row, categories, categoryId, onCategory, busy, onAct }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Select
+        aria-label="Category"
+        className="flex-1 min-w-[160px]"
+        value={categoryId}
+        disabled={busy}
+        onChange={(e) => onCategory(e.target.value)}
+      >
+        <option value="">Choose category…</option>
+        {categories.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.name}
+          </option>
+        ))}
+      </Select>
+      <Button variant="primary" disabled={busy} onClick={() => onAct(row, "expense")}>
+        Business
+      </Button>
+    </div>
+  );
+}
+
+// The shelf and park actions a row may take: no Income on money out, no
+// Later while Always is checked (Later never makes a rule), and never the
+// shelf the row is already on.
+function shelfActions(row, view, always) {
+  const all = ["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), ...(always ? [] : ["later"])];
+  return all.filter((d) => d !== view);
+}
+
+function ShelfActions({ row, view, always, busy, onAct }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {shelfActions(row, view, always).map((d) => (
+        <Button key={d} variant="secondary" disabled={busy} onClick={() => onAct(row, d)}>
+          {d[0].toUpperCase() + d.slice(1)}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
 function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
   const sug = row.suggestion || null;
-  const [categoryId, setCategoryId] = useState(sug?.categoryId || "");
-  const [touched, setTouched] = useState(false);
   const suggestedCategoryId = sug?.categoryId || "";
+  const [categoryId, setCategoryId] = useState(suggestedCategoryId);
+  const [touched, setTouched] = useState(false);
+  const [always, setAlways] = useState(false);
   // a rule pass can refresh the suggestion under a mounted row: an untouched
   // selection follows it, a selection the owner made stays
   useEffect(() => {
     if (!touched) setCategoryId(suggestedCategoryId);
   }, [suggestedCategoryId, touched]);
-  const [always, setAlways] = useState(false);
-  const off = busy;
-  // the owner's decision first; a rule's label only while nothing was decided
-  const kindLabel = sug
-    ? sug.decision || sug.rule?.kind || (sug.income ? "income" : sug.ignore ? "transfer" : sug.personal ? "personal" : "review")
-    : "";
-  const chipText = sug ? [kindLabel, sug.decision ? null : sug.categoryName].filter(Boolean).join(" · ") : "";
+  const act = (r, decision) => onAct(r, decision, { categoryId, always });
   return (
-    <div style={s.card} data-testid={`ledger-row-${row.id}`}>
-      <div style={{ ...s.row, justifyContent: "space-between", flexWrap: "nowrap", alignItems: "flex-start" }}>
-        <span style={{ ...s.small, flexShrink: 0 }}>{row.txn_date}</span>
-        <strong style={{ fontSize: 16, flexShrink: 0 }}>{fmtAmount(row)}</strong>
-      </div>
-      <div style={{ overflowWrap: "anywhere", fontWeight: 600 }}>{row.description}</div>
-      <div style={s.row}>
-        <span style={s.chip}>{row.account_label}</span>
-        {sug && <span style={{ ...s.chip, background: "#eff6ff", borderColor: "#bfdbfe" }}>{chipText}</span>}
-      </div>
-      {sug && (sug.rule?.note || sug.reason) && (
-        <div style={s.small}>{sug.rule?.note || sug.reason}</div>
-      )}
-      {row.direction !== "credit" && (
-      <div style={s.row}>
-        <select
-          aria-label="Category"
-          style={{ ...s.input, flex: "1 1 160px" }}
-          value={categoryId}
-          disabled={off}
-          onChange={(e) => { setTouched(true); setCategoryId(e.target.value); }}
-        >
-          <option value="">Choose category…</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          style={{ ...s.btn, ...s.btnPrimary }}
-          disabled={off}
-          onClick={() => onAct(row, "expense", { categoryId, always })}
-        >
-          Business
-        </button>
-      </div>
-      )}
-      <div style={s.row}>
-        {["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), ...(always ? [] : ["later"])]
-          .filter((d) => d !== view) // a row on a shelf is not offered that same shelf again; Later never makes a rule
-          .map((d) => (
-          <button
-            key={d}
-            type="button"
-            style={s.btn}
-            disabled={off}
-            onClick={() => onAct(row, d, { always })}
-          >
-            {d[0].toUpperCase() + d.slice(1)}
-          </button>
-        ))}
-      </div>
-      <label style={s.check}>
-        <input
-          type="checkbox"
-          style={{ width: 20, height: 20 }}
+    <Card data-testid={`ledger-row-${row.id}`}>
+      <CardBody className="flex flex-col gap-2 min-w-0">
+        <RowHeader row={row} />
+        {row.direction !== "credit" && (
+          <BusinessAction
+            row={row}
+            categories={categories}
+            categoryId={categoryId}
+            onCategory={(v) => { setTouched(true); setCategoryId(v); }}
+            busy={busy}
+            onAct={act}
+          />
+        )}
+        <ShelfActions row={row} view={view} always={always} busy={busy} onAct={act} />
+        <Checkbox
+          id={`always-${row.id}`}
+          label="Always treat this payee this way (not for Later)"
           checked={always}
-          disabled={off}
+          disabled={busy}
           onChange={(e) => setAlways(e.target.checked)}
         />
-        Always treat this payee this way (not for Later)
-      </label>
-      {error && <div role="alert" style={s.err}>{error}</div>}
+        {error && <ActionFeedback error>{error}</ActionFeedback>}
+      </CardBody>
+    </Card>
+  );
+}
+
+function RulesTable({ rules, busy, onToggle }) {
+  if (rules.length === 0) return <div className="text-sm text-ink-secondary">No rules yet.</div>;
+  return (
+    <div className="overflow-x-auto max-w-full">
+      <Table>
+        <THead>
+          <TR>
+            <TH>Pattern</TH>
+            <TH>Kind</TH>
+            <TH>Category</TH>
+            <TH>Priority</TH>
+            <TH>Hits</TH>
+            <TH>On</TH>
+          </TR>
+        </THead>
+        <TBody>
+          {rules.map((r) => (
+            <TR key={r.id}>
+              <TD className="[overflow-wrap:anywhere]">{r.pattern}</TD>
+              <TD>{r.kind}</TD>
+              <TD>{r.category_name || "-"}</TD>
+              <TD>{r.priority}</TD>
+              <TD>{r.hits ?? 0}</TD>
+              <TD>
+                <Checkbox
+                  role="switch"
+                  aria-label={`Enable rule ${r.pattern}`}
+                  checked={!!r.enabled}
+                  disabled={busy}
+                  onChange={() => onToggle(r)}
+                />
+              </TD>
+            </TR>
+          ))}
+        </TBody>
+      </Table>
     </div>
   );
 }
@@ -194,80 +268,120 @@ function RulesPanel({ categories }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   return (
-    <div style={s.card}>
-      {rules.length === 0 ? (
-        <div style={s.small}>No rules yet.</div>
-      ) : (
-        <div style={{ overflowX: "auto", maxWidth: "100%" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-            <thead>
-              <tr style={{ textAlign: "left", color: "#52525b" }}>
-                <th style={{ padding: 6 }}>Pattern</th>
-                <th style={{ padding: 6 }}>Kind</th>
-                <th style={{ padding: 6 }}>Category</th>
-                <th style={{ padding: 6 }}>Priority</th>
-                <th style={{ padding: 6 }}>Hits</th>
-                <th style={{ padding: 6 }}>On</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rules.map((r) => (
-                <tr key={r.id} style={{ borderTop: "1px solid #e4e4e7" }}>
-                  <td style={{ padding: 6, overflowWrap: "anywhere" }}>{r.pattern}</td>
-                  <td style={{ padding: 6 }}>{r.kind}</td>
-                  <td style={{ padding: 6 }}>{r.category_name || "-"}</td>
-                  <td style={{ padding: 6 }}>{r.priority}</td>
-                  <td style={{ padding: 6 }}>{r.hits ?? 0}</td>
-                  <td style={{ padding: 6 }}>
-                    <input
-                      type="checkbox"
-                      role="switch"
-                      aria-label={`Enable rule ${r.pattern}`}
-                      style={{ width: 24, height: 24 }}
-                      checked={!!r.enabled}
-                      disabled={busy}
-                      onChange={() => toggle(r)}
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <form onSubmit={add} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <strong>Add rule</strong>
-        <input
-          aria-label="Pattern"
-          placeholder="Pattern"
-          style={s.input}
-          value={form.pattern}
-          onChange={set("pattern")}
-        />
-        <div style={s.small}>The pattern is a case-insensitive regular expression matched against the bank description.</div>
-        <div style={s.row}>
-          <select aria-label="Kind" style={{ ...s.input, flex: "1 1 120px" }} value={form.kind} onChange={set("kind")}>
-            {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-          </select>
-          {form.kind === "expense" && (
-            <select aria-label="Rule category" style={{ ...s.input, flex: "1 1 160px" }} value={form.categoryId} onChange={set("categoryId")}>
-              <option value="">Choose category…</option>
-              {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          )}
-        </div>
-        <input aria-label="Note" placeholder="Note (optional)" style={s.input} value={form.note} onChange={set("note")} />
-        <label style={s.row}>
-          Priority
-          <input aria-label="Priority" type="number" style={{ ...s.input, width: 90 }} value={form.priority} onChange={set("priority")} />
-        </label>
-        <div>
-          <button type="submit" style={{ ...s.btn, ...s.btnPrimary }} disabled={busy}>Add rule</button>
-        </div>
-      </form>
-      {error && <div role="alert" style={s.err}>{error}</div>}
+    <Card>
+      <CardBody className="flex flex-col gap-3 min-w-0">
+        <RulesTable rules={rules} busy={busy} onToggle={toggle} />
+        <form onSubmit={add} className="flex flex-col gap-2">
+          <strong>Add rule</strong>
+          <Input aria-label="Pattern" placeholder="Pattern" value={form.pattern} onChange={set("pattern")} />
+          <div className="text-sm text-ink-secondary">
+            The pattern is a case-insensitive regular expression matched against the bank description.
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Select aria-label="Kind" className="flex-1 min-w-[120px]" value={form.kind} onChange={set("kind")}>
+              {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+            </Select>
+            {form.kind === "expense" && (
+              <Select aria-label="Rule category" className="flex-1 min-w-[160px]" value={form.categoryId} onChange={set("categoryId")}>
+                <option value="">Choose category…</option>
+                {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </Select>
+            )}
+          </div>
+          <Input aria-label="Note" placeholder="Note (optional)" value={form.note} onChange={set("note")} />
+          <label className="flex items-center gap-2 text-sm">
+            Priority
+            <Input aria-label="Priority" type="number" className="w-24" value={form.priority} onChange={set("priority")} />
+          </label>
+          <div>
+            <Button type="submit" variant="primary" disabled={busy}>Add rule</Button>
+          </div>
+        </form>
+        {error && <ActionFeedback error>{error}</ActionFeedback>}
+      </CardBody>
+    </Card>
+  );
+}
+
+function StatusBar({ status, applying, onApply }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <strong className="flex-1 min-w-[180px]">
+        {status.inbox} rows to review · {status.rules} rules{status.income ? ` · ${status.income} income` : ""}
+      </strong>
+      <Button variant="secondary" disabled={applying} onClick={onApply}>
+        {applying ? "Applying…" : "Apply rules now"}
+      </Button>
     </div>
   );
+}
+
+function ViewSwitch({ view, onView }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2" role="group" aria-label="View">
+      {VIEWS.map(([v, label]) => (
+        <Button
+          key={v}
+          variant={view === v ? "primary" : "secondary"}
+          aria-label={`${label} view`}
+          aria-pressed={view === v}
+          onClick={() => onView(v)}
+        >
+          {label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function plural(n, one, many) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+function InboxNotices({ status, view, notice, loadError, categoryError, onRetryCategories }) {
+  return (
+    <>
+      {status.unexamined > 0 && (
+        <div className="text-sm text-ink-secondary">
+          {plural(status.unexamined, "row waits", "rows wait")} for the matcher (next sync). A row is shown here only after the matcher found nothing already booked for it.
+        </div>
+      )}
+      {status.bankImport > 0 && (
+        <div className="text-sm text-ink-secondary">
+          {plural(status.bankImport, "row waits", "rows wait")} in Bank Import: each may match an expense or payout that is already booked, so the link decision is made there.
+        </div>
+      )}
+      {view === "income" && (
+        <div className="text-sm text-ink-secondary">
+          Receipts outside the processor. They are not in the P&amp;L or any report. Record each one as an invoice and payment, or it waits here for the return engine.
+        </div>
+      )}
+      {notice && <div className="text-sm text-ink-secondary">{notice}</div>}
+      {categoryError && (
+        <ActionFeedback error onRetry={onRetryCategories}>
+          Categories did not load ({categoryError}); Business needs them.
+        </ActionFeedback>
+      )}
+      {loadError && <ActionFeedback error>{loadError}</ActionFeedback>}
+    </>
+  );
+}
+
+// Follows the server's cursor until there is no more; returns the totals.
+async function runRulePass(onProgress) {
+  const sum = { examined: 0, suggested: 0, cleared: 0 };
+  let after = null;
+  let rounds = 0;
+  do {
+    const d = await post(`${T}/ledger/rules/apply`, after ? { after } : {});
+    sum.examined += d.examined || 0;
+    sum.suggested += d.suggested || 0;
+    sum.cleared += d.cleared || 0;
+    after = d.more && d.cursor ? d.cursor : null;
+    rounds += 1;
+    onProgress(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}${after ? "…" : "."}`);
+  } while (after && rounds < 40);
+  return sum;
 }
 
 export default function LedgerInboxTab() {
@@ -276,6 +390,8 @@ export default function LedgerInboxTab() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [categories, setCategories] = useState([]);
+  const [categoryError, setCategoryError] = useState("");
+  const [categoryAttempt, setCategoryAttempt] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [busyId, setBusyId] = useState(null);
@@ -311,15 +427,21 @@ export default function LedgerInboxTab() {
 
   useEffect(() => { loadStatus(); }, [loadStatus]);
 
+  // the category list has its own error and retry: a row load never clears it
   useEffect(() => {
+    setCategoryError("");
     adminFetch("/admin/tax/expense-categories")
       .then((d) => setCategories(d.categories || []))
-      .catch((e) => setLoadError(e.message));
-  }, []);
+      .catch((e) => setCategoryError(e.message));
+  }, [categoryAttempt]);
 
   const enabled = status?.enabled;
+  // a view change shows nothing of the previous shelf while the new one loads
   useEffect(() => {
-    if (enabled) loadRows(view, 0);
+    if (!enabled) return;
+    setRows([]);
+    setTotal(0);
+    loadRows(view, 0);
   }, [enabled, view, loadRows]);
 
   const act = async (row, decision, { categoryId, always }) => {
@@ -333,21 +455,18 @@ export default function LedgerInboxTab() {
       if (decision === "expense") {
         // decide re-checks the row is still the Inbox's to decide (the matcher
         // examined it, no existing expense or payout to link); create-expense
-        // checks again inside its claim
+        // checks again inside its claim and writes the Always rule itself
         await post(`${T}/ledger/decide`, { id: row.id, decision, categoryId });
-        // the Always rule is written by create-expense itself, once the expense exists
         await post(`${T}/${row.id}/create-expense`, { categoryId, fromLedger: true, always: !!always });
       } else {
         await post(`${T}/ledger/decide`, { id: row.id, decision, always: !!always });
       }
-      // a decision that keeps the row on the current shelf reloads the view
-      // instead of hiding the row (an unrecorded receipt must stay visible);
-      // an Always decision reloads too, because the new rule has just
-      // re-labelled every other row of that payee on the server
-      const stays = decision === view;
+      // a decision that keeps the row on the current shelf, or an Always
+      // decision (the new rule has just re-labelled every other row of that
+      // payee), reloads the view instead of hiding the row
       if (viewRef.current !== view) {
         // the user moved on: the new view already loaded its own rows
-      } else if (stays || always) {
+      } else if (decision === view || always) {
         await loadRows(view, 0);
       } else {
         setRows((prev) => prev.filter((r) => r.id !== row.id));
@@ -365,19 +484,7 @@ export default function LedgerInboxTab() {
     setApplying(true);
     setNotice("");
     try {
-      // one pass is bounded; follow the cursor until the server says there is no more
-      const sum = { examined: 0, suggested: 0, cleared: 0 };
-      let after = null;
-      let rounds = 0;
-      do {
-        const d = await post(`${T}/ledger/rules/apply`, after ? { after } : {});
-        sum.examined += d.examined || 0;
-        sum.suggested += d.suggested || 0;
-        sum.cleared += d.cleared || 0;
-        after = d.more && d.cursor ? d.cursor : null;
-        rounds += 1;
-        setNotice(`Examined ${sum.examined}, suggested ${sum.suggested}, cleared ${sum.cleared}${after ? "…" : "."}`);
-      } while (after && rounds < 40);
+      await runRulePass(setNotice);
       await loadStatus();
       // the view the user is on now, not the one the pass started from
       await loadRows(viewRef.current, 0);
@@ -389,53 +496,28 @@ export default function LedgerInboxTab() {
   };
 
   if (!status) {
-    return <div style={s.wrap}>{loadError ? <div role="alert" style={s.err}>{loadError}</div> : <div style={s.small}>Loading…</div>}</div>;
+    return (
+      <div className="flex flex-col gap-3 text-sm">
+        {loadError ? <ActionFeedback error>{loadError}</ActionFeedback> : <div className="text-ink-secondary">Loading…</div>}
+      </div>
+    );
   }
   if (!status.enabled) {
-    return <div style={s.wrap}><div>The tax ledger is off (GATE_TAX_LEDGER).</div></div>;
+    return <div className="flex flex-col gap-3 text-sm"><div>The tax ledger is off (GATE_TAX_LEDGER).</div></div>;
   }
 
   return (
-    <div style={s.wrap}>
-      <div style={s.row}>
-        <strong style={{ flex: "1 1 180px" }}>
-          {status.inbox} rows to review · {status.rules} rules{status.income ? ` · ${status.income} income` : ""}
-        </strong>
-        <button type="button" style={s.btn} disabled={applying} onClick={applyRules}>
-          {applying ? "Applying…" : "Apply rules now"}
-        </button>
-      </div>
-      <div style={s.row} role="group" aria-label="View">
-        {[["open", "Open"], ["later", "Later"], ["income", "Income"]].map(([v, label]) => (
-          <button
-            key={v}
-            type="button"
-            aria-label={`${label} view`}
-            aria-pressed={view === v}
-            style={{ ...s.btn, ...(view === v ? s.btnPrimary : {}) }}
-            onClick={() => setView(v)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      {status.unexamined > 0 && (
-        <div style={s.small}>
-          {status.unexamined} {status.unexamined === 1 ? "row waits" : "rows wait"} for the matcher (next sync). A row is shown here only after the matcher found nothing already booked for it.
-        </div>
-      )}
-      {status.bankImport > 0 && (
-        <div style={s.small}>
-          {status.bankImport} {status.bankImport === 1 ? "row waits" : "rows wait"} in Bank Import: each may match an expense or payout that is already booked, so the link decision is made there.
-        </div>
-      )}
-      {view === "income" && (
-        <div style={s.small}>
-          Receipts outside the processor. They are not in the P&amp;L or any report. Record each one as an invoice and payment, or it waits here for the return engine.
-        </div>
-      )}
-      {notice && <div style={s.small}>{notice}</div>}
-      {loadError && <div role="alert" style={s.err}>{loadError}</div>}
+    <div className="flex flex-col gap-3 text-sm min-w-0">
+      <StatusBar status={status} applying={applying} onApply={applyRules} />
+      <ViewSwitch view={view} onView={setView} />
+      <InboxNotices
+        status={status}
+        view={view}
+        notice={notice}
+        loadError={loadError}
+        categoryError={categoryError}
+        onRetryCategories={() => setCategoryAttempt((n) => n + 1)}
+      />
 
       {rows.map((r) => (
         <InboxRow
@@ -448,29 +530,18 @@ export default function LedgerInboxTab() {
           onAct={act}
         />
       ))}
-      {!loading && rows.length === 0 && !loadError && (
-        <div style={s.small}>
-          {view === "later" ? "Nothing set aside for later." : view === "income" ? "No receipts outside the processor." : "Nothing to review."}
-        </div>
-      )}
-      {loading && <div style={s.small}>Loading…</div>}
+      {!loading && rows.length === 0 && !loadError && <div className="text-ink-secondary">{EMPTY[view]}</div>}
+      {loading && <div className="text-ink-secondary">Loading…</div>}
       {!loading && rows.length < total && (
         <div>
-          <button type="button" style={s.btn} onClick={() => loadRows(view, rows.length)}>
-            Load more
-          </button>
+          <Button variant="secondary" onClick={() => loadRows(view, rows.length)}>Load more</Button>
         </div>
       )}
 
       <div>
-        <button
-          type="button"
-          style={s.btn}
-          aria-expanded={showRules}
-          onClick={() => setShowRules((v) => !v)}
-        >
+        <Button variant="secondary" aria-expanded={showRules} onClick={() => setShowRules((v) => !v)}>
           {showRules ? "Hide rules" : "Rules"}
-        </button>
+        </Button>
       </div>
       {showRules && <RulesPanel categories={categories} />}
     </div>

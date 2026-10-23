@@ -147,6 +147,12 @@ function fitsGrammar(p) {
 }
 // maxLength caps what the owner types; a stored rule (seeds are long
 // alternations of literals) is checked for safety only.
+// Patterns match case-insensitively, so the stored text is case-folded
+// (letters lowercased, escape letters such as \W and \b kept): "WAWA" and
+// "wawa" are one rule under the unique constraint.
+function canonicalPattern(pattern) {
+  return String(pattern || '').trim().replace(/\\.|[A-Z]/g, (m) => (m.length === 2 ? m : m.toLowerCase()));
+}
 function compilePattern(pattern, { maxLength = MAX_PATTERN } = {}) {
   const p = String(pattern || '').trim();
   if (!p) throw httpError(400, 'pattern is required');
@@ -205,7 +211,13 @@ function suggestionFor(rule) {
 // \bsiteone\W*landscape\W*supply\b. The result always matches the
 // description it came from.
 const PREFIX_RE = /^(debit card purchase - |digital card purchase - |recurring payment - |pos purchase - |withdrawal from |deposit from |zelle money sent to |zelle money received from |payment to |purchase authorized on \d{2}\/\d{2} )/i;
-const STOP = new Set(['the', 'and', 'inc', 'llc', 'com', 'www', 'card', 'purchase', 'payment', 'pmt', 'online', 'store']);
+// Words that never name a payee: bank framing, processors' framing, legal
+// suffixes. An owner rule anchors on the first word that is not one of
+// these; with none left there is no rule (the caller says so).
+const STOP = new Set(['the', 'and', 'inc', 'llc', 'ltd', 'corp', 'com', 'www', 'net', 'org', 'card', 'checkcard', 'check', 'chk', 'purchase', 'payment', 'pmt', 'pymt',
+  'online', 'store', 'ach', 'debit', 'credit', 'web', 'pos', 'visa', 'mastercard', 'authorized', 'recurring', 'autopay', 'mobile', 'digital', 'transfer', 'xfer',
+  'withdrawal', 'deposit', 'zelle', 'money', 'sent', 'received', 'from', 'ppd', 'des', 'ref', 'trace', 'bill', 'pay', 'epay', 'electronic', 'eft', 'intl', 'fee', 'des',
+  'tst', 'sq', 'paypal', 'pp', 'apl', 'amzn']);
 const TOKEN_RE = /[a-z][a-z&'.\-]*/g;
 const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function patternFromDescription(description) {
@@ -292,11 +304,80 @@ async function loadRules(conn = db) {
 // - after = {txn_date, id} continues a pass past its row budget: the result
 //   carries more:true and the cursor to send back.
 const NOT_DECIDED_SQL = "(suggestion -> 'decision') is null";
+// "the matcher has not flagged this row as a transfer since it was read":
+// a seed-rule write is conditional on it, so a flag the matcher adds between
+// the SELECT and the UPDATE still wins over the seed.
+const NO_MATCHER_FLAG_SQL = `not (jsonb_exists(${SUG}, 'ignore') and not jsonb_exists(${SUG}, 'rule'))`;
 function ymd(v) {
   if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
   return String(v || '').slice(0, 10);
 }
 function cursorOf(row) { return row ? { txn_date: ymd(row.txn_date), id: String(row.id) } : null; }
+const hasKey = (sug, k) => sug[k] !== undefined && sug[k] !== null;
+
+// One page of open, matcher-examined, undecided rows, oldest first.
+function rulePassPage({ pageSize, force, after }) {
+  let q = db('bank_transactions')
+    .where({ status: 'unmatched' })
+    .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
+    .whereRaw(NOT_DECIDED_SQL)
+    .whereRaw(MATCHER_EXAMINED_SQL)
+    .orderBy('txn_date', 'asc').orderBy('id', 'asc')
+    .limit(pageSize)
+    .select('id', 'txn_date', 'description', 'direction', 'suggestion');
+  if (!force) q = q.whereRaw("(suggestion -> 'rulesAt') is null");
+  if (after) q = q.whereRaw('(txn_date, id) > (?::date, ?::uuid)', [after.txn_date, after.id]);
+  return q;
+}
+
+// What one row gets from the pass: nothing (skip), a stamp, a stamp that
+// also clears what an earlier rule wrote (stale), or a rule's suggestion
+// (writes). The matcher's own transfer flag (ignore without a rule) holds
+// against a seed; an owner rule outranks it, replaces it, and records the
+// examination evidence itself (examined) because the flag was that evidence.
+function ruleVerdict(sug, rule, pattern) {
+  const matcherFlag = hasKey(sug, 'ignore') && !hasKey(sug, 'rule');
+  const ownerWins = !!rule && rule.source === 'owner';
+  const writes = !!rule && (!matcherFlag || ownerWins) && (!pattern || rule.pattern === pattern);
+  return { matcherFlag, writes };
+}
+function classifyRow(row, compiled, { pattern, force, stamp }) {
+  const sug = row.suggestion || {};
+  if (sug.decision || !matcherExamined(row)) return { skip: true };
+  const rule = matchRule(row.description, compiled, row.direction);
+  const { matcherFlag, writes } = ruleVerdict(sug, rule, pattern);
+  if (pattern && !writes) return { skip: true };
+  const stale = !writes && !pattern && force && hasKey(sug, 'rule') && !matcherFlag;
+  const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
+  if (writes && matcherFlag) patch.examined = true;
+  return { skip: false, writes, stale, rule, patch, removeKeys: (writes || stale) ? CLASSIFICATION_KEYS : [], guardMatcherFlag: !matcherFlag };
+}
+
+// Writes one row's outcome and books it in the counts and the hit map.
+async function applyClassification(row, c, counts, hits) {
+  let w = db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL);
+  if (c.guardMatcherFlag) w = w.whereRaw(NO_MATCHER_FLAG_SQL);
+  await w.update({ suggestion: bankImport.suggestionMerge(c.patch, c.removeKeys), updated_at: new Date() });
+  if (c.stale) counts.cleared += 1;
+  if (!c.writes) return;
+  counts.suggested += 1;
+  counts.byKind[c.rule.kind] = (counts.byKind[c.rule.kind] || 0) + 1;
+  hits.set(c.rule.id, (hits.get(c.rule.id) || 0) + 1);
+}
+
+async function recordHits(hits) {
+  for (const [id, n] of hits) {
+    // hits are not an edit: updated_at stays, so a seed row stays pristine
+    await db('tax_ledger_rules').where({ id }).update({ hits: db.raw('hits + ?', [n]), last_hit_at: new Date() });
+  }
+}
+
+// Suggestion-only pass over open rows, in pages, oldest first. Every row a
+// full pass examines gets a rulesAt stamp, matched or not, so a pass never
+// re-reads the same unmatched rows and newer rows always get their turn.
+// force re-examines stamped rows too (after a rule changed); pattern limits
+// the pass to one rule's matches (an Always decision); after = {txn_date,
+// id} continues past a row budget (the result carries more + cursor).
 async function applyRules({ limit = PAGE, force = false, pattern = null, after: start = null } = {}) {
   const counts = { examined: 0, suggested: 0, cleared: 0, byKind: {}, more: false, cursor: null };
   const compiled = compileRules(await loadRules());
@@ -310,53 +391,17 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
   let lastPageFull = false;
   while (counts.examined < maxRows) {
     const pageSize = Math.min(PAGE, maxRows - counts.examined);
-    let q = db('bank_transactions')
-      .where({ status: 'unmatched' })
-      .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
-      .whereRaw(NOT_DECIDED_SQL)
-      .whereRaw(MATCHER_EXAMINED_SQL)
-      .orderBy('txn_date', 'asc').orderBy('id', 'asc')
-      .limit(pageSize)
-      .select('id', 'txn_date', 'description', 'direction', 'suggestion');
-    if (!force) q = q.whereRaw("(suggestion -> 'rulesAt') is null");
-    if (after) q = q.whereRaw('(txn_date, id) > (?::date, ?::uuid)', [after.txn_date, after.id]);
-    const rows = await q;
+    const rows = await rulePassPage({ pageSize, force, after });
     for (const row of rows) {
       counts.examined += 1;
-      const sug = row.suggestion || {};
-      if (sug.decision || !matcherExamined(row)) continue;
-      const rule = matchRule(row.description, compiled, row.direction);
-      // the matcher's own "internal transfer?" flag (ignore without a rule)
-      // holds against a seed; a rule the owner wrote outranks the heuristic
-      // (a vendor whose descriptor says AUTOPAY is the usual case)
-      const matcherFlag = !!(sug.ignore && !sug.rule);
-      const matcherTransfer = matcherFlag && !(rule && rule.source === 'owner');
-      const writes = !!rule && !matcherTransfer && (!pattern || rule.pattern === pattern);
-      if (pattern && !writes) continue;
-      const stale = !writes && !pattern && force && !!sug.rule && !matcherTransfer;
-      const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
-      // an owner rule writing over the matcher's flag keeps that flag (it is
-      // the matcher's; its rescan would only put it back) and records the
-      // examination evidence explicitly, because an ignore flag that now
-      // sits next to a rule key no longer counts as the matcher's
-      const removeKeys = (writes || stale) ? CLASSIFICATION_KEYS.filter((k) => !(writes && matcherFlag && (k === 'ignore' || k === 'reason'))) : [];
-      if (writes && matcherFlag) patch.examined = true;
-      await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NOT_DECIDED_SQL).whereRaw(MATCHER_EXAMINED_SQL)
-        .update({ suggestion: bankImport.suggestionMerge(patch, removeKeys), updated_at: new Date() });
-      if (stale) counts.cleared += 1;
-      if (!writes) continue;
-      counts.suggested += 1;
-      counts.byKind[rule.kind] = (counts.byKind[rule.kind] || 0) + 1;
-      hits.set(rule.id, (hits.get(rule.id) || 0) + 1);
+      const c = classifyRow(row, compiled, { pattern, force, stamp });
+      if (!c.skip) await applyClassification(row, c, counts, hits);
     }
     lastPageFull = rows.length >= pageSize;
     if (!lastPageFull) break;
     after = cursorOf(rows[rows.length - 1]);
   }
-  for (const [id, n] of hits) {
-    // hits are not an edit: updated_at stays, so a seed row stays pristine
-    await db('tax_ledger_rules').where({ id }).update({ hits: db.raw('hits + ?', [n]), last_hit_at: new Date() });
-  }
+  await recordHits(hits);
   if (lastPageFull && counts.examined >= maxRows) { counts.more = true; counts.cursor = after; }
   return counts;
 }
@@ -426,7 +471,7 @@ async function createRule({ pattern, kind, categoryId = null, note = null, prior
   const cat = await resolveCategory(categoryId, conn);
   if (kind === 'expense' && !cat) throw httpError(400, 'an expense rule needs a categoryId');
   const row = {
-    pattern: String(pattern).trim(), kind, category_id: cat ? cat.id : null, irs_line: cat ? cat.irs_line : null,
+    pattern: canonicalPattern(pattern), kind, category_id: cat ? cat.id : null, irs_line: cat ? cat.irs_line : null,
     note: note ? String(note).slice(0, 500) : null, priority: Number.isFinite(Number(priority)) ? Number(priority) : OWNER_PRIORITY,
     enabled: true, source, updated_at: new Date(),
   };
@@ -436,15 +481,27 @@ async function createRule({ pattern, kind, categoryId = null, note = null, prior
   return saved;
 }
 
-async function updateRule(id, patch = {}) {
+async function ruleUpdatePatch(patch) {
   const row = {};
-  if (patch.pattern !== undefined) { compilePattern(patch.pattern); row.pattern = String(patch.pattern).trim(); }
+  if (patch.pattern !== undefined) { compilePattern(patch.pattern); row.pattern = canonicalPattern(patch.pattern); }
   if (patch.kind !== undefined) { if (!KINDS.includes(patch.kind)) throw httpError(400, `kind must be one of ${KINDS.join(', ')}`); row.kind = patch.kind; }
   if (patch.categoryId !== undefined) { const cat = await resolveCategory(patch.categoryId); row.category_id = cat ? cat.id : null; row.irs_line = cat ? cat.irs_line : null; }
   if (patch.note !== undefined) row.note = patch.note ? String(patch.note).slice(0, 500) : null;
   if (patch.priority !== undefined) { const p = Number(patch.priority); if (!Number.isFinite(p)) throw httpError(400, 'priority must be a number'); row.priority = p; }
   if (patch.enabled !== undefined) row.enabled = !!patch.enabled;
+  return row;
+}
+
+async function updateRule(id, patch = {}) {
+  const row = await ruleUpdatePatch(patch);
   if (!Object.keys(row).length) throw httpError(400, 'nothing to update');
+  // the rule as it would be after the change keeps createRule's invariant
+  if (row.kind !== undefined || row.category_id !== undefined) {
+    const current = await db('tax_ledger_rules').where({ id }).first('id', 'kind', 'category_id');
+    if (!current) throw httpError(404, 'rule not found');
+    const next = { kind: row.kind !== undefined ? row.kind : current.kind, category_id: row.category_id !== undefined ? row.category_id : current.category_id };
+    if (next.kind === 'expense' && !next.category_id) throw httpError(400, 'an expense rule needs a categoryId');
+  }
   row.updated_at = new Date();
   const [saved] = await db('tax_ledger_rules').where({ id }).update(row).returning('*');
   if (!saved) throw httpError(404, 'rule not found');
@@ -459,42 +516,51 @@ function ownerRuleFor(row, decision, categoryId) {
   return { pattern, kind: decision, categoryId: decision === 'expense' ? categoryId : null, note: 'from the inbox', priority: OWNER_PRIORITY, source: 'owner' };
 }
 
-async function decide({ id, decision, categoryId = null, always = false }) {
-  if (!DECISIONS.includes(decision)) throw httpError(400, `decision must be one of ${DECISIONS.join(', ')}`);
+// The write for a decision that is not an expense: later and income shelve
+// the row (still open); personal and transfer park it as ignored.
+function decisionWrite(decision, row, now) {
+  if (decision === 'later') {
+    return { action: 'later', write: { suggestion: bankImport.suggestionMerge({ later: true, decision, decidedAt: now.toISOString() }, ['income']), updated_at: now } };
+  }
+  if (decision === 'income') {
+    // Stays an open row, on the Income shelf: nothing counts it as revenue
+    // yet, and hiding it would understate sales. Dropping the matcher's
+    // ignore flag must not drop the row's examination evidence with it.
+    const sug = row.suggestion || {};
+    const patch = { income: true, reason: INCOME_REASON, decision, decidedAt: now.toISOString() };
+    if (sug.ignore && !MATCHER_KEYS.some((k) => hasKey(sug, k))) patch.examined = true;
+    return { action: 'income', write: { suggestion: bankImport.suggestionMerge(patch, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now } };
+  }
+  const patch = { reason: `${decision} per the owner`, decision, decidedAt: now.toISOString() };
+  if (decision === 'transfer') patch.ignore = true; else patch.personal = true;
+  return { action: 'ignored', write: { status: 'ignored', suggestion: bankImport.suggestionMerge(patch, ['categoryId', 'categoryName', 'irsLine', 'categorySource', 'ignore', 'personal', 'income', 'review', 'note', 'later']), updated_at: now } };
+}
+
+async function loadDecidableRow(id) {
   const row = await db('bank_transactions').where({ id }).first('id', 'status', 'description', 'direction', 'suggestion');
   if (!row) throw httpError(404, 'row not found');
   if (row.status !== 'unmatched') throw httpError(409, 'only an open (unmatched) row can be decided');
   if (bankImport.hasUnresolvedBankChange(row)) throw httpError(409, 'the bank changed this transaction after it was reviewed — apply or dismiss the bank change first');
   const block = inboxBlock(row);
   if (block) throw httpError(409, block);
+  return row;
+}
+
+const NO_RULE_MESSAGE = 'no payee word in this description to make a rule from; decide it without Always';
+
+async function decide({ id, decision, categoryId = null, always = false }) {
+  if (!DECISIONS.includes(decision)) throw httpError(400, `decision must be one of ${DECISIONS.join(', ')}`);
+  const row = await loadDecidableRow(id);
   if (decision === 'expense' && !categoryId) throw httpError(400, 'an expense needs a categoryId');
   if (decision === 'income' && row.direction !== 'credit') throw httpError(400, 'only money in can be income; this row is a payment out');
+  // an Always the pattern builder cannot honour is refused up front: the
+  // owner must not believe the payee is handled from now on
+  const rule = always && decision !== 'later' ? ownerRuleFor(row, decision, categoryId) : null;
+  if (always && decision !== 'later' && !rule) throw httpError(400, NO_RULE_MESSAGE);
   if (decision === 'expense') return { success: true, action: 'create-expense', createExpense: true, ruleCreated: false };
 
   const now = new Date();
-  let write;
-  let action;
-  if (decision === 'later') {
-    // a shelf is a decision: the rule passes skip decided rows, so a later
-    // income rule cannot put the row on both shelves
-    action = 'later';
-    write = { suggestion: bankImport.suggestionMerge({ later: true, decision, decidedAt: now.toISOString() }, ['income']), updated_at: now };
-  } else if (decision === 'income') {
-    // Stays an open row, on the Income shelf: nothing counts it as revenue
-    // yet, and hiding it would understate sales. Dropping the matcher's
-    // ignore flag must not drop the row's examination evidence with it.
-    action = 'income';
-    const sug = row.suggestion || {};
-    const patch = { income: true, reason: INCOME_REASON, decision, decidedAt: now.toISOString() };
-    if (sug.ignore && !MATCHER_KEYS.some((k) => sug[k] !== undefined && sug[k] !== null)) patch.examined = true;
-    write = { suggestion: bankImport.suggestionMerge(patch, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now };
-  } else {
-    action = 'ignored';
-    const patch = { reason: `${decision} per the owner`, decision, decidedAt: now.toISOString() };
-    if (decision === 'transfer') patch.ignore = true; else patch.personal = true;
-    write = { status: 'ignored', suggestion: bankImport.suggestionMerge(patch, ['categoryId', 'categoryName', 'irsLine', 'categorySource', 'ignore', 'personal', 'income', 'review', 'note', 'later']), updated_at: now };
-  }
-  const rule = always && decision !== 'later' ? ownerRuleFor(row, decision, categoryId) : null;
+  const { action, write } = decisionWrite(decision, row, now);
   // the decision and its rule commit together: a row that stopped being the
   // Inbox's to decide (candidates parked, bank change) refuses both
   await db.transaction(async (trx) => {
@@ -516,7 +582,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 
 module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON,
-  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, visibleSuggestion,
+  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };

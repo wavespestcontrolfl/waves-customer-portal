@@ -404,6 +404,30 @@ describe('create-expense (gate on)', () => {
     expect(state.insertedExpenses).toHaveLength(0);
   });
 
+  test('a category a ledger rule suggested never gets the AI-verify note; a model\'s does', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.suggestion = { noMatch: true, rule: { id: 'r', kind: 'expense' }, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'rule' };
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].category_id).toBe('cat-meals');
+    expect(state.insertedExpenses[0].notes).not.toContain('AI-categorized');
+    state.insertedExpenses = [];
+    state.bankRow.suggestion = { noMatch: true, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'ai' };
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].notes).toContain('AI-categorized');
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
+  test('fromLedger + always on a description with no payee word is a 400 before any insert', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.description = 'ACH DEBIT 1234';
+    state.bankRow.suggestion = { noMatch: true };
+    const res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/no payee word/);
+    expect(state.insertedExpenses).toHaveLength(0);
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
   test('with GATE_TAX_LEDGER off, a category a ledger rule suggested is not used; with it on, it is', async () => {
     delete process.env.GATE_TAX_LEDGER;
     state.bankRow.suggestion = { noMatch: true, rule: { id: 'r', kind: 'expense' }, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'rule' };
