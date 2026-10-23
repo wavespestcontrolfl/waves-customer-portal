@@ -230,6 +230,12 @@ describe('cancel_appointment confirm WITH effects replays the Dispatch cancel', 
     const result = await executeTool('cancel_appointment', input(), ADMIN);
     expect(result.warning).toMatch(/system retries it within about 15 minutes/);
     expect(result.warning).not.toMatch(/send it by hand\.|will not be retried automatically/);
+    // Bookkeeping failed and the bundle's outcome is unknown (recoveryOwnsOutcome): no manual-send advice either.
+    mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationError: 'x', recoveryOwnsOutcome: true } });
+    const owned = await executeTool('cancel_appointment', input(), ADMIN);
+    expect(owned.recovery_owns_outcome).toBe(true);
+    expect(owned.warning).not.toMatch(/did not go out \(x\)|send it by hand\.$/);
+    expect(owned.warning).toMatch(/Do not send it by hand unless/);
     // A delivery-uncertain report keeps its own advice (the system never resends it).
     mockCancelFromBar.mockResolvedValue({ status: 200, json: { success: true, notificationSent: false, notificationUncertain: true, textRetryScheduled: true } });
     expect((await executeTool('cancel_appointment', input(), ADMIN)).warning).toMatch(/may have gone out/);

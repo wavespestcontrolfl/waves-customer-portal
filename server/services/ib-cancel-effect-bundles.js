@@ -124,20 +124,22 @@ async function insertBundle(trx, pins) {
 
 // ── The request's side ────────────────────────────────────────────────────────────────────────────────────────
 
-async function guarded(label, fn) {
+async function guarded(label, fn, req = null) {
   try {
     return await fn();
   } catch (err) {
-    // Never fails the request: the row stays pending and the sweep finishes it.
+    // Never fails the request: the row stays pending and the sweep finishes it. The request cannot know what the row holds
+    // now, so its reply is provisional (the sweep's note is the record) and gives no manual-send advice.
     logger.warn(`[ib-cancel-bundle] ${label} failed: ${scrub(err && err.message)}`);
+    if (req) req.ibCancelBundleLost = true;
     return null;
   }
 }
 
 // A request bookkeeping write that changed NO row means the sweep (or a finished recovery) owns the bundle now: the request
 // has to say so on its own receipt (req.ibCancelBundleLost -> the route), instead of overwriting the recovery's outcome.
-async function trackOwnership(req, write) {
-  const changed = await write;
+async function trackOwnership(req, label, fn) {
+  const changed = await guarded(label, fn, req);
   if (changed === 0) req.ibCancelBundleLost = true;
   return changed;
 }
@@ -147,7 +149,7 @@ async function trackOwnership(req, write) {
 function liveStart(req) {
   const id = req && req.ibCancelBundleId;
   if (!id) return Promise.resolve(null);
-  return trackOwnership(req, guarded('heartbeat', () => db(TABLE)
+  return trackOwnership(req, 'heartbeat', () => db(TABLE)
     .where({ id, status: 'pending' })
     .where(function leaseFree() {
       this.whereNull('lease_until').orWhere('lease_until', '<', db.fn.now()).orWhere('lease_owner', REQUEST_LEASE);
@@ -156,7 +158,7 @@ function liveStart(req) {
       lease_owner: REQUEST_LEASE,
       lease_until: nowPlusMs(db, LEASE_MS),
       updated_at: db.fn.now(),
-    })));
+    }));
 }
 
 /** handleCancellation's reported outcome -> the stored text state. */
@@ -214,7 +216,7 @@ function liveNotice(req, outcome) {
   const id = req && req.ibCancelBundleId;
   const classified = classifyNoticeOutcome(outcome);
   if (!id || !classified) return Promise.resolve(null);
-  return trackOwnership(req, guarded('notice outcome', async () => {
+  return trackOwnership(req, 'notice outcome', async () => {
     const row = classified.state === 'not_sent' || classified.state === 'sent'
       ? await db(TABLE).where({ id }).first('scheduled_service_id', 'approved_notice')
       : null;
@@ -229,7 +231,7 @@ function liveNotice(req, outcome) {
       .where({ id, status: 'pending' })
       .where(notHeldBySweep)
       .update({ notice_outcome: JSON.stringify({ ...settled, by: 'request' }), updated_at: db.fn.now() });
-  }));
+  });
 }
 
 // The follow-through returned: the request finished its work. The bundle is marked complete ONLY when the text step also has a
@@ -245,7 +247,7 @@ function liveFinish(req) {
     money_skipped: (req.ibMoneyReport && req.ibMoneyReport.skipped) || [],
     linked_skipped: (req.ibLinkedChildReport && req.ibLinkedChildReport.skipped) || [],
   };
-  return trackOwnership(req, guarded('complete', async () => {
+  return trackOwnership(req, 'complete', async () => {
     const row = await db(TABLE).where({ id }).first('status', 'notify_customer', 'approved_notice', 'notice_outcome');
     const textOpen = Boolean(row) && row.status === 'pending' && row.notify_customer === true
       && Array.isArray(row.approved_notice) && row.approved_notice.length > 0 && !row.notice_outcome;
@@ -269,7 +271,7 @@ function liveFinish(req) {
       .update(patch);
     if (textOpen && changed) req.ibCancelTextPending = true;
     return changed;
-  }));
+  });
 }
 
 // ── The sweep's side ──────────────────────────────────────────────────────────────────────────────────────────

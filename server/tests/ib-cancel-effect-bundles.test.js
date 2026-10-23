@@ -486,8 +486,11 @@ describe('the request marks its bundle complete', () => {
   test('a database failure in these calls never throws into the request', async () => {
     const original = db.fn.now;
     db.fn.now = () => { throw new Error('connection lost'); };
-    await expect(svc.liveFinish({ ibCancelBundleId: 'bundle-1' })).resolves.toBeNull();
+    const req = { ibCancelBundleId: 'bundle-1' };
+    await expect(svc.liveFinish(req)).resolves.toBeNull();
     db.fn.now = original;
+    // The request cannot know what the row holds: its reply is provisional (the sweep's note is the record).
+    expect(req.ibCancelBundleLost).toBe(true);
   });
 });
 

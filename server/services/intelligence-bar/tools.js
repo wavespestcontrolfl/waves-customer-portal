@@ -4680,7 +4680,7 @@ function cancelTextWarnings(json, sendText) {
   // Delivery unproven (the provider may have accepted it): never advise a resend, whatever else is true.
   if (sendText && json.notificationUncertain === true) {
     warnings.push(`The visit is cancelled, but the customer text may have gone out (${json.notificationError || 'delivery could not be confirmed'}). Check the customer's message history before sending it again.`);
-  } else if (sendText && json.textRetryScheduled === true && json.notificationSent !== true) {
+  } else if (sendText && (json.textRetryScheduled === true || json.recoveryOwnsOutcome === true) && json.notificationSent !== true) {
     // The bundle is pending with the text still open (even when this request holds a not-sent report whose bookkeeping failed):
     // the system sends it, so a manual send would duplicate it.
     warnings.push(TEXT_RETRY_WARNING);
