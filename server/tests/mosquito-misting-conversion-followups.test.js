@@ -205,6 +205,121 @@ describe('P1: a refill add-on takes the plan solution price through one helper',
     expect(src).toContain('base = await resolveAddonUnitPrice({ serviceKey: addonService.service_key, price: base, catalogBasePrice: addonService.base_price }');
     expect(src).toContain('parentVisit: { source_estimate_id: linkedEstimateId, customer_id: customer?.id },');
     // the add-on reads of stored rows (restack, rebase, copy to child visits) keep the price the booking resolved
-    expect((src.match(/resolveAddonUnitPrice\(/g) || [])).toHaveLength(1);
+    expect((src.match(/resolveAddonUnitPrice\(/g) || [])).toHaveLength(2);
+  });
+});
+
+describe('P0 (audit 3): invoice-mode acceptance bills the marked install line', () => {
+  // estimate-public pulls a very large module graph; load the pure draft builder lazily with the db mocked above.
+  const { buildEstimateInvoiceModeDraft } = require('../routes/estimate-public');
+  const base = {
+    estimate: { id: 77, monthly_total: 59 },
+    recurringSvcList: [{ name: 'Mosquito Misting Service Plan' }],
+    recurringFirstVisitAmount: 59,
+    effectiveBillingCadence: { frequencyLabel: 'Monthly' },
+    selectedFrequency: { label: 'Monthly' },
+  };
+
+  test('an install adds one marked line beside the first application and its amount to the total and title', () => {
+    const install = { amount: INSTALL, description: 'Essential system (drum) Installation' };
+    const draft = buildEstimateInvoiceModeDraft({ ...base, mistingInstall: install });
+    const lines = draft.lineItems;
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toEqual(misting.mistingInstallLine({ description: install.description, amount: INSTALL }));
+    expect(misting.mistingInstallLinesTotal(lines)).toBe(INSTALL);
+    expect(draft.amount).toBe(Math.round((59 + INSTALL) * 100) / 100);
+    expect(draft.title).toContain('misting system installation');
+  });
+
+  test('no misting: byte-identical to before (no extra line, same amount and title)', () => {
+    const plain = buildEstimateInvoiceModeDraft({ ...base });
+    const withNull = buildEstimateInvoiceModeDraft({ ...base, mistingInstall: null });
+    expect(withNull).toEqual(plain);
+    expect(plain.lineItems).toHaveLength(1);
+    expect(plain.amount).toBe(59);
+    expect(plain.title).not.toContain('installation');
+  });
+
+  test('the rodent setup line and the install line can coexist; a one-time acceptance never carries the install', () => {
+    const draft = buildEstimateInvoiceModeDraft({ ...base, rodentSetupAmount: 150, mistingInstall: { amount: INSTALL, description: 'X Installation' } });
+    expect(draft.lineItems).toHaveLength(3);
+    expect(draft.amount).toBe(Math.round((59 + 150 + INSTALL) * 100) / 100);
+    const oneTime = buildEstimateInvoiceModeDraft({
+      estimate: { id: 78 }, treatAsOneTime: true, effectiveOneTimeTotal: 200, oneTimeList: [], mistingInstall: { amount: INSTALL, description: 'X' },
+    });
+    expect(oneTime.lineItems.some(misting.isMistingInstallLine)).toBe(false);
+  });
+
+  test('the accept handler passes the frozen install into the draft (not for a one-time acceptance)', () => {
+    const src = read('routes/estimate-public.js');
+    expect(src).toContain("mistingInstall: treatAsOneTime\n            ? null\n            : require('../services/estimate-converter').frozenMistingInstall(acceptedEstDataForPricing),");
+  });
+});
+
+describe('P1 (audit 3): a refill newly added on a visit edit takes the plan solution price', () => {
+  const adminSchedule = require('../routes/admin-schedule');
+  const natural = estimateData({ tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' });
+
+  function editDb({ addonRows = [] } = {}) {
+    const tables = {
+      services: [
+        { id: 'svc-refill', service_key: 'mosquito_misting_refill', category: 'mosquito', name: 'Mosquito Misting Refill', base_price: 129, is_active: true },
+        { id: 'svc-other', service_key: 'mosquito_one_time', category: 'mosquito', name: 'Mosquito One Time', base_price: 129, is_active: true },
+      ],
+      scheduled_services: [{ id: 'visit-1', customer_id: 'c1', source_estimate_id: 5 }],
+      scheduled_service_addons: addonRows,
+      estimates: [{ id: 5, customer_id: 'c1', estimate_data: natural }],
+    };
+    const database = (table) => {
+      const conds = [];
+      let inCol = null;
+      const rows = () => (tables[table] || []).filter((r) => conds.every((c) => Object.entries(c).every(([k, v]) => r[k] === undefined || r[k] === v))
+        && (!inCol || inCol.values.includes(r[inCol.col])));
+      const q = {
+        where(c) { conds.push(c); return q; },
+        whereIn(col, values) { inCol = { col, values }; return q; },
+        orderBy() { return q; },
+        limit() { return q; },
+        select: async () => rows().map((r) => ({ ...r })),
+        first: async () => { const hit = rows()[0]; return hit ? { ...hit } : undefined; },
+        columnInfo: async () => ({}),
+      };
+      return q;
+    };
+    return database;
+  }
+  const run = (addons, addonRows) => adminSchedule.normalizeUpdateDetailsAddons({
+    db: editDb({ addonRows }), id: 'visit-1', addons, updates: {}, isRecurring: false, serviceType: 'Mosquito Misting Service Plan', scheduledDate: '2027-03-10',
+  });
+
+  test('a NEW refill line posted at the catalog Standard price is repriced to the Natural plan price (219)', async () => {
+    const out = await run([{ serviceId: 'svc-refill', serviceName: 'Mosquito Misting Refill', basePrice: 129 }], []);
+    expect(out.normalizedAddons).toHaveLength(1);
+    expect(out.normalizedAddons[0]).toMatchObject({ serviceKey: 'mosquito_misting_refill', base: 219, price: 219 });
+  });
+
+  test('a refill that already exists on the visit keeps its stored (override) price', async () => {
+    const out = await run(
+      [{ id: 'row-1', serviceId: 'svc-refill', serviceName: 'Mosquito Misting Refill', basePrice: 150 }],
+      [{ id: 'row-1', scheduled_service_id: 'visit-1', service_id: 'svc-refill', base_price: 150, estimated_price: 150 }],
+    );
+    expect(out.normalizedAddons[0]).toMatchObject({ base: 150, price: 150 });
+  });
+
+  test('a new refill whose price staff changed from the catalog price keeps that price', async () => {
+    const out = await run([{ serviceId: 'svc-refill', serviceName: 'Mosquito Misting Refill', basePrice: 175 }], []);
+    expect(out.normalizedAddons[0]).toMatchObject({ base: 175, price: 175 });
+  });
+
+  test('a non-misting add-on is unchanged', async () => {
+    const out = await run([{ serviceId: 'svc-other', serviceName: 'Mosquito One Time', basePrice: 129 }], []);
+    expect(out.normalizedAddons[0]).toMatchObject({ serviceKey: 'mosquito_one_time', base: 129, price: 129 });
+  });
+
+  test('both add-on pricing sites go through the one helper', () => {
+    const src = read('routes/admin-schedule.js');
+    expect(src).toContain("gross = await resolveAddonUnitPrice({ serviceKey: catalogService.service_key, price: gross, catalogBasePrice: catalogService.base_price }, visitPricingLink || {}, db);");
+    expect(src).toContain("if (catalogService?.service_key === 'mosquito_misting_refill' && !(a.id && existingAddonDiscountById.has(a.id))) {");
+    expect((src.match(/resolveAddonUnitPrice\(/g) || [])).toHaveLength(2);
   });
 });

@@ -2522,6 +2522,10 @@ function buildEstimateInvoiceModeDraft({
   // invoice-mode draft bills it beside the first application exactly like
   // the standard accept leg (codex #3591 r15 P1).
   rodentSetupAmount = 0,
+  // Frozen misting installation the accepted estimate disclosed ({ amount, description } from
+  // EstimateConverter.frozenMistingInstall, null when none): the invoice-mode draft bills it beside the first application as a
+  // MARKED line (misting_installation) so every per-visit divider excludes it. Never on a one-time acceptance.
+  mistingInstall = null,
 } = {}) {
   if (treatAsOneTime) {
     const amount = roundInvoiceAmount(effectiveOneTimeTotal);
@@ -2631,11 +2635,21 @@ function buildEstimateInvoiceModeDraft({
     });
   }
 
+  const installAmount = mistingInstall && Number(mistingInstall.amount) > 0 ? roundInvoiceAmount(mistingInstall.amount) : 0;
+  if (installAmount > 0) {
+    recurringLineItems.push(require('../utils/mosquito-misting-system').mistingInstallLine({
+      description: mistingInstall.description,
+      amount: installAmount,
+    }));
+  }
+
   return {
     invoiceKind: 'recurring_first_visit',
     serviceLabel: svcType,
-    amount: Math.round((amount + setupAmount) * 100) / 100,
-    title: setupAmount > 0 ? `${svcType} — first ${visitNoun} + bait station setup` : `${svcType} — first ${visitNoun}`,
+    amount: Math.round((amount + setupAmount + installAmount) * 100) / 100,
+    title: installAmount > 0
+      ? `${svcType} — first ${visitNoun} + misting system installation`
+      : (setupAmount > 0 ? `${svcType} — first ${visitNoun} + bait station setup` : `${svcType} — first ${visitNoun}`),
     lineItems: recurringLineItems,
     notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`,
   };
@@ -13420,6 +13434,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           rodentSetupAmount: treatAsOneTime
             ? 0
             : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing),
+          mistingInstall: treatAsOneTime
+            ? null
+            : require('../services/estimate-converter').frozenMistingInstall(acceptedEstDataForPricing),
         });
         // Acceptance deposit credits this first invoice through create()'s
         // depositCredit param — create() caps the request against its own

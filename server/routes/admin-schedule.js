@@ -12254,7 +12254,7 @@ async function normalizeUpdateDetailsAddons({
         .map((addon) => addon?.serviceId)
         .filter(Boolean)));
       const addonServices = addonServiceIds.length > 0
-        ? await db('services').whereIn('id', addonServiceIds).select('id', 'service_key', 'category')
+        ? await db('services').whereIn('id', addonServiceIds).select('id', 'service_key', 'category', 'base_price')
         : [];
       const addonServiceById = new Map(addonServices.map((service) => [service.id, service]));
       // Lines picked from the modal's static fallback list carry a name but
@@ -12266,7 +12266,7 @@ async function normalizeUpdateDetailsAddons({
         .map((addon) => String(addon.serviceName || addon.name || '').trim())
         .filter(Boolean)));
       const addonServicesByName = addonFallbackNames.length > 0
-        ? await db('services').whereIn('name', addonFallbackNames).where({ is_active: true }).select('id', 'service_key', 'category', 'name').catch(() => [])
+        ? await db('services').whereIn('name', addonFallbackNames).where({ is_active: true }).select('id', 'service_key', 'category', 'name', 'base_price').catch(() => [])
         : [];
       const addonServiceByName = new Map(addonServicesByName.map((service) => [service.name, service]));
       const addonFallbackKeys = Array.from(new Set(addons
@@ -12274,7 +12274,7 @@ async function normalizeUpdateDetailsAddons({
         .map((addon) => String(addon.serviceKey).trim().toLowerCase())
         .filter(Boolean)));
       const addonServicesByKey = addonFallbackKeys.length > 0
-        ? await db('services').whereIn('service_key', addonFallbackKeys).where({ is_active: true }).select('id', 'service_key', 'category', 'name').catch(() => [])
+        ? await db('services').whereIn('service_key', addonFallbackKeys).where({ is_active: true }).select('id', 'service_key', 'category', 'name', 'base_price').catch(() => [])
         : [];
       const addonServiceByKey = new Map(addonServicesByKey.map((service) => [service.service_key, service]));
       if (addonServices.length !== addonServiceIds.length) {
@@ -12365,6 +12365,7 @@ async function normalizeUpdateDetailsAddons({
         return membershipContextPromise;
       };
       const normalizedAddons = [];
+      let visitPricingLink = null;
       for (const a of addons) {
         // GitHub Codex round 12 P1 (#4657, :9970): the save transaction
         // REPLACES every add-on row (delete + reinsert), so a row id is
@@ -12391,7 +12392,14 @@ async function normalizeUpdateDetailsAddons({
           : (addonServiceByKey.get(String(a.serviceKey || '').trim().toLowerCase())
             || addonServiceByName.get(serviceName)
             || null);
-        const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
+        let gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
+        // A NEWLY ADDED misting refill takes the plan's solution price (Standard / Natural / Premium) instead of the catalog Standard
+        // default. A line the visit already has, and a price staff typed that differs from the catalog price, keep exactly what was
+        // posted (misting PR 2a, services/misting-refill-pricing.js). Every other add-on goes through unchanged.
+        if (catalogService?.service_key === 'mosquito_misting_refill' && !(a.id && existingAddonDiscountById.has(a.id))) {
+          if (!visitPricingLink) visitPricingLink = await db('scheduled_services').where({ id }).first('source_estimate_id', 'customer_id');
+          gross = await resolveAddonUnitPrice({ serviceKey: catalogService.service_key, price: gross, catalogBasePrice: catalogService.base_price }, visitPricingLink || {}, db);
+        }
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
         let net = gross;
@@ -28822,3 +28830,5 @@ module.exports.createScheduleBooking = createScheduleBooking;
 // Same handler as PUT /:id/update-details — see updateVisitDetails above.
 module.exports.updateVisitDetails = updateVisitDetails;
 module.exports.assertApprovedRepriceState = assertApprovedRepriceState;
+// Exported for server/tests/mosquito-misting-conversion-followups.test.js (refill solution pricing on a visit edit).
+module.exports.normalizeUpdateDetailsAddons = normalizeUpdateDetailsAddons;
