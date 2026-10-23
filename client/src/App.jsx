@@ -361,6 +361,7 @@ function lazyWithRetry(factory) {
 const StaffDocumentLibrary = lazyWithRetry(() => import('./components/staffDocuments/Library'));
 const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
 const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
+const ReportPreviewPage = lazyWithRetry(() => import('./pages/ReportViewPage').then((m) => ({ default: m.ReportPreviewPage })));
 const VisitSummaryPage = lazyWithRetry(() => import('./pages/VisitSummaryPage'));
 const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));
 const AdminReviewsPage = lazyWithRetry(() => import('./pages/admin/ReviewsPage'));
@@ -710,6 +711,8 @@ export default function App() {
           <Route path="/newsletter" element={<NewsletterExternalRedirect />} />
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />
+          {/* Admin-only read-only preview of a not-yet-completed visit's customer report. Outside the admin chrome on purpose: it renders the report exactly as the customer sees it. The data endpoint enforces admin auth. */}
+          <Route path="/admin/report-preview/:serviceId" element={isNativeApp() ? <Navigate to="/" replace /> : <Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportPreviewPage /></WavesShell></Suspense>} />
           <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
           <Route path="/admin/change-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminChangePasswordPage />} />
           <Route path="/admin/two-step" element={isNativeApp() ? <Navigate to="/" replace /> : <Suspense fallback={<div style={{background:'#0f1923',minHeight:'100vh'}}/>}><AdminTwoStepPage /></Suspense>} />

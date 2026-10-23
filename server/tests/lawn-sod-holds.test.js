@@ -209,6 +209,12 @@ describe('swapBagFor: the swap rate follows the month of the replaced pass', () 
     expect(SOD_SWAP_BAG_APRIL).toEqual({ name: SOD_SWAP_BAG.name, lbPer1000: 2.1, lbN: 0.5 });
     expect(swapBagFor('nonsense')).toBe(SOD_SWAP_BAG);
   });
+  test('a month the caller knows (the plan window the bag replaces) overrides the visit day\'s month', () => {
+    expect(swapBagFor('2027-05-12', 4)).toBe(SOD_SWAP_BAG_APRIL);
+    expect(swapBagFor('2027-04-12', 5)).toBe(SOD_SWAP_BAG);
+    expect(swapBagFor('2027-05-12', null)).toBe(SOD_SWAP_BAG);
+    expect(swapBagFor('nonsense', 4)).toBe(SOD_SWAP_BAG_APRIL);
+  });
 });
 
 describe('sodHolds: swap bag and active', () => {

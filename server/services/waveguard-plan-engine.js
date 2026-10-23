@@ -4,7 +4,8 @@ const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaPro
 const { lawnProhibitedProductBlock, treatedPropertyType } = require('./lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
-const { V13_TROUBLE_N_TARGETS, FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
+const { V13_TROUBLE_N_TARGETS, FUNGUS_NITROGEN_NOTE_KEY, RECLAIMED_N_FRACTION, RECLAIMED_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
+const { V13_TROUBLE_PRODUCT_SWAPS, PRODUCT_SWAP_NOTE_KEY, swapOnlyRule } = require('../config/lawn-v13-trouble-product-swaps');
 const { V13_CHINCH_TETRINO, CHINCH_TETRINO_NOTE_KEY, CHINCH_TETRINO_NOTE } = require('../config/lawn-v13-chinch-rate');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -780,17 +781,29 @@ function parseVisitNutrientTargets(notes) {
   };
 }
 
-// GATE_LAWN_NOV_LARGE_PATCH_N: does the visit's property have an ACTIVE mapped trouble area of this type? A gate that is off or a
-// visit with no property is "no" (the normal target stands). A read that fails is "no" too, with its code logged, UNLESS `strict`
-// (a persisted or fail-closed reader: the previsit brief, the strict plan): then it THROWS, so nothing stores the normal target as if
-// it were the answer. The property resolution and the read share ONE savepoint either way, so a query that fails inside either
-// cannot leave a transaction (packet closeout) aborted for the queries after it.
-async function hasActiveTroubleArea(knex, service, type, { strict = false } = {}) {
+// GATE_LAWN_NOV_LARGE_PATCH_N / GATE_LAWN_DEC_LARGE_PATCH_K: does the visit's property have an ACTIVE mapped trouble area of this type
+// that carries the rule's evidence? `evidence: 'large_patch'` asks lawn-trouble-areas loadActiveLargePatch: a "fungus" area also stands
+// for gray leaf spot, Pythium, dollar spot, fairy ring and rust, so only an area whose newest fungicide application names large patch
+// counts, and an unknown disease is "no". A gate that is off or a visit with no property is "no" (the normal target stands). A read that
+// fails is "no" too, with its code logged, UNLESS `strict` (a persisted or fail-closed reader: the previsit brief, the strict plan): then
+// it THROWS, so nothing stores the normal target as if it were the answer. The property resolution and the read share ONE savepoint
+// either way, so a query that fails inside either cannot leave a transaction (packet closeout) aborted for the queries after it.
+// The day (YYYY-MM-DD, ET) a booked visit is scheduled for, the date large patch evidence is read as of; null when the visit has none
+// (the reference tank sheet): then no application is excluded.
+function visitDay(service) {
+  const value = service?.scheduled_date;
+  if (!value) return null;
+  return etDateString(toServiceDate(value));
+}
+
+async function hasActiveTroubleArea(knex, service, type, { strict = false, evidence = null } = {}) {
   const areas = require('./lawn-trouble-areas');
   try {
     const found = await savepointRead(knex, async (k) => {
       const propertyId = await areas.propertyOf(k, service, { strict });
-      return propertyId ? areas.loadActive(k, propertyId) : [];
+      if (!propertyId) return [];
+      // The evidence is dated: the visit's scheduled day (ET), so a later application never decides an earlier visit.
+      return evidence === 'large_patch' ? areas.loadActiveLargePatch(k, propertyId, { asOf: visitDay(service) }) : areas.loadActive(k, propertyId);
     });
     return found.some((area) => area.type === type);
   } catch (err) {
@@ -802,18 +815,25 @@ async function hasActiveTroubleArea(knex, service, type, { strict = false } = {}
 
 // The recipe text of a visit whose nitrogen target was cut, so what staff read (the line's `raw`, the visit's primary and notes) agrees
 // with the amount the plan computes. Rewrites only the shapes the v13 recipe uses; a line or note the pattern does not match stays as
-// written (the cut and the line note still apply: the amount and the note are never dependent on this text).
+// written (the cut and the line note still apply: the amount and the note are never dependent on this text). `why` is the reason in
+// the words the line states it with: 'active patch mapped' (GATE_LAWN_NOV_LARGE_PATCH_N) or 'reclaimed water, half' (GATE_LAWN_RECLAIMED_HALF_N).
 const NITROGEN_LINE = /(\d+(?:\.\d+)?) lb per 1,000 sq ft \((\d+(?:\.\d+)?) lb N\)/;
 const NITROGEN_NOTE = /\bN\s+rate:?\s*(\d+(?:\.\d+)?)\s*lb\s*N/i;
-function fungusAdjustedVisit(visit, cut) {
+// The line suffix never says "large patch": classifyProtocolLine reads that phrase in a line as a disease-gated line (conditionFlag
+// active_disease), and the cut line must classify exactly as the line it replaces. The notes say it in full (CUT_WHY_NOTE).
+const CUT_WHY = Object.freeze({ fungus: 'active patch mapped', reclaimed: 'reclaimed water, half' });
+const CUT_WHY_NOTE = Object.freeze({ ...CUT_WHY, fungus: 'active large patch mapped' });
+// The reason a cut states in the visit text: the rule that set the smaller target, and the other one too when both applied.
+const nitrogenCutWhy = (decision, words = CUT_WHY) => (decision.why === 'reclaimed' && decision.fungusApplied ? `${words.reclaimed}; ${words.fungus}` : words[decision.why]);
+function nitrogenAdjustedVisit(visit, cut, why, noteWhy = why) {
   const primary = typeof visit.primary !== 'string' ? visit.primary : visit.primary.split('\n').map((line) => {
     const found = line.match(NITROGEN_LINE);
     if (!found || !(Number(found[2]) > cut)) return line;
     const rate = ((Number(found[1]) * cut) / Number(found[2])).toFixed(1);
-    return `${line.replace(found[0], `${rate} lb per 1,000 sq ft (${cut} lb N)`)}, active fungus mapped`;
+    return `${line.replace(found[0], `${rate} lb per 1,000 sq ft (${cut} lb N)`)}, ${why}`;
   }).join('\n');
   const notes = typeof visit.notes !== 'string' ? visit.notes
-    : visit.notes.replace(NITROGEN_NOTE, (whole, normal) => (Number(normal) > cut ? `N rate: ${cut} lb N (active fungus mapped; normal ${normal} lb N)` : whole));
+    : visit.notes.replace(NITROGEN_NOTE, (whole, normal) => (Number(normal) > cut ? `N rate: ${cut} lb N (${noteWhy}; normal ${normal} lb N)` : whole));
   return { ...visit, primary, notes };
 }
 
@@ -824,8 +844,72 @@ function fungusAdjustedVisit(visit, cut) {
 async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Active, strict = false }) {
   if (!v13Active || !featureGates.lawnNovLargePatchNLive()) return null;
   const rule = V13_TROUBLE_N_TARGETS.find((entry) => entry.month === monthNumber);
-  if (!rule || !(targetN > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict }))) return null;
+  if (!rule || !(targetN > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict, evidence: rule.evidence }))) return null;
   return rule.targetNPer1000;
+}
+
+// The catalog names of the combination pre-emergent plus fertilizer bags (LESCO Dimension 0.21% 18-0-10 ... Pre-Emergent Plus
+// Fertilizer; Stonewall 15-0-15 ... Pre-Emergent Plus Fertilizer). The bag is sized by the pre-emergent rate, not by its nitrogen.
+const PRE_EMERGENT_BAG = /\bPre-?Emergent Plus Fertilizer\b/i;
+const isPreEmergentBag = (text) => PRE_EMERGENT_BAG.test(String(text ?? ''));
+
+// What keeps a bag at its full rate on a reclaimed lawn (GATE_LAWN_RECLAIMED_HALF_N): a bag whose rate is set by something other than its
+// nitrogen. 'pre_emergent': a pre-emergent plus fertilizer (October and the 9x April Dimension): halving N would halve the pre-emergent.
+// 'potash': a visit that states a potassium target (December 10-0-22): reclaimed water adds N, not K, and the potash is for cold weather and
+// large patch, so halving the bag would halve the K2O. null: an ordinary nitrogen bag, which is halved.
+function keptBagReason({ primary, targetK }) {
+  if (isPreEmergentBag(primary)) return 'pre_emergent';
+  return targetK > 0 ? 'potash' : null;
+}
+
+// GATE_LAWN_RECLAIMED_HALF_N (owner 2026-10-05, 2026-10-23): half of the visit's nitrogen target at a property marked reclaimed
+// (lawn-reclaimed-water.js), `{ cut }`; or `{ kept }` (a keptBagReason) when the visit's bag keeps its full rate and the line says so.
+// null = not reclaimed, gate off, not a v13 plan, or a visit with no nitrogen target above zero (no read at all in the last three cases).
+async function reclaimedNitrogenCut(knex, service, { targetN, v13Active, keep = null, strict = false }) {
+  if (!v13Active || !featureGates.lawnReclaimedHalfNLive() || !(targetN > 0)) return null;
+  if (!(await require('./lawn-reclaimed-water').isReclaimedService(knex, service, { strict }))) return null;
+  return keep ? { kept: keep } : { cut: Number((targetN * RECLAIMED_N_FRACTION).toFixed(3)) };
+}
+
+// Both nitrogen rules as ONE decision (the plan, the tank sheet and the previsit brief all call this): `{ cut, why, reclaimed, keptFor }`
+// or null. `cut` is the reduced target, the SMALLER of the rules that apply (never raised), else null; `why` names the rule that set
+// it (a CUT_WHY key); `reclaimed` is 'half' when the reclaimed rule set the cut and 'kept' when it left a bag at full rate (`keptFor` says why).
+async function nitrogenDecision(knex, service, { targetN, monthNumber, v13Active, keep = null, strict = false }) {
+  const fungus = await fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Active, strict });
+  const water = await reclaimedNitrogenCut(knex, service, { targetN, v13Active, keep, strict });
+  const half = water?.cut ?? null;
+  if (fungus == null && half == null && !water) return null;
+  const byWater = half != null && (fungus == null || half <= fungus);
+  return {
+    cut: byWater ? half : fungus,
+    why: byWater ? 'reclaimed' : 'fungus',
+    reclaimed: byWater ? 'half' : (water?.kept ? 'kept' : null),
+    ...(water?.kept ? { keptFor: water.kept } : {}),
+    // The fungus rule applied too (its target was the larger one, so the smaller reclaimed target won): its spreader instruction still stands.
+    ...(fungus != null ? { fungusApplied: true } : {}),
+  };
+}
+
+// GATE_LAWN_DEC_LARGE_PATCH_K: the ONE decision whether a visit's whole-lawn bag is swapped for a mapped trouble area
+// (config/lawn-v13-trouble-product-swaps.js), for every reader that states it (the plan, the tank sheet, the previsit brief): the
+// matching rule, else null. Gate first: with the gate off (or not a v13 program) nothing is read. The visit's own recipe line must be
+// the rule's `from` product, so a recipe that moved on is never half-swapped. `strict`: a failed area read throws (see hasActiveTroubleArea).
+async function troubleProductSwap(knex, service, { visit, monthNumber, v13Active, strict = false }) {
+  if (!v13Active || !visit) return null;
+  const rule = V13_TROUBLE_PRODUCT_SWAPS.find((entry) => entry.month === monthNumber);
+  if (!rule || featureGates[rule.gate]?.() !== true) return null;
+  const hasFrom = String(visit.primary || '').split('\n').some((line) => line.split(' \u2014 ')[0].trim() === rule.from);
+  if (!hasFrom || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict, evidence: rule.evidence }))) return null;
+  return rule;
+}
+
+// The visit as a swap states it: the rule's line in place of the `from` line, and the nitrogen target the rule sets (the normal one
+// stays visible in the note).
+function swappedVisit(visit, rule) {
+  const primary = String(visit.primary).split('\n').map((line) => (line.split(' \u2014 ')[0].trim() === rule.from ? rule.line : line)).join('\n');
+  const notes = typeof visit.notes !== 'string' ? visit.notes
+    : visit.notes.replace(NITROGEN_NOTE, (whole, normal) => `N rate: ${rule.targetN} lb N (active large patch mapped; normal ${normal} lb N)`);
+  return { ...visit, primary, notes };
 }
 
 // GATE_LAWN_CHINCH_TETRINO_RATE: does the visit's property have a chinch trouble area that is ACTIVE or was resolved within the last
@@ -913,33 +997,95 @@ function chinchAdjustedVisit(visit, rate) {
 
 // A visit's nutrient targets, for the plan and the tank sheet alike, so the plan amount, the mix sheet, the completion defaults, the
 // yearly limit check and the Fast Complete planned amount all read the same number. Returns the visit the lines are parsed from (an
-// adjusted copy when the nitrogen target was cut: fungusNitrogenCut, or the May Tetrino rate was raised: chinchTetrinoRate; else the
-// visit itself), its targets, `nitrogenCut` (the reduced N target, else null) and, only when raised, `chinchRate` (the raised Tetrino
-// rate). Call it BEFORE the visit's lines are parsed.
+// adjusted copy when the nitrogen target was cut: nitrogenDecision, the May Tetrino rate was raised: chinchTetrinoRate, or the whole-lawn bag
+// was swapped: troubleProductSwap; else the visit itself), its targets, `nitrogenCut` (the reduced N target, else null) and, only when they
+// apply, `chinchRate` (the raised Tetrino rate), `productSwap` (the swap rule) and `reclaimedWater` ('half' when the reclaimed rule set the cut,
+// 'kept' when a pre-emergent or potash bag was left at full rate, `keptFor`: 'pre_emergent' | 'potash'; `fungusAlso` when the fungus rule
+// applied too). Without any of them the result is the same three keys as before, so a gate that is off changes nothing a reader can see.
+// Call it BEFORE the visit's lines are parsed.
 async function visitNutrientTargets(knex, service, { visit, month, v13Active, strict = false }) {
   const targets = parseVisitNutrientTargets(visit?.notes);
   const monthNumber = MONTH_ABBR.indexOf(month) + 1;
-  const cut = visit ? await fungusNitrogenCut(knex, service, { targetN: targets.targetNPer1000, monthNumber, v13Active, strict }) : null;
+  // The swap is December's, the Tetrino raise May's: they never meet on one visit. A swapped bag carries no nitrogen (its target is 0), so
+  // neither nitrogen rule applies to a swapped visit.
+  const swap = await troubleProductSwap(knex, service, { visit, monthNumber, v13Active, strict });
+  if (swap) {
+    const swapped = swappedVisit(visit, swap);
+    return { visit: swapped, targets: parseVisitNutrientTargets(swapped.notes), nitrogenCut: null, productSwap: swap };
+  }
+  const decision = visit ? await nitrogenDecision(knex, service, {
+    targetN: targets.targetNPer1000, monthNumber, v13Active,
+    keep: keptBagReason({ primary: visit.primary, targetK: targets.targetKPer1000 }), strict,
+  }) : null;
   const chinchRate = visit ? await chinchTetrinoRate(knex, service, { monthNumber, v13Active, strict }) : null;
-  if (cut == null && chinchRate == null) return { visit, targets, nitrogenCut: null };
-  const nitrogenAdjusted = cut == null ? visit : fungusAdjustedVisit(visit, cut);
+  if (!decision && chinchRate == null) return { visit, targets, nitrogenCut: null };
+  const water = decision?.reclaimed ? {
+    reclaimedWater: decision.reclaimed, ...(decision.keptFor ? { keptFor: decision.keptFor } : {}), ...(decision.fungusApplied ? { fungusAlso: true } : {}),
+  } : {};
+  const cut = decision?.cut ?? null;
+  const nitrogenAdjusted = cut == null ? visit : nitrogenAdjustedVisit(visit, cut, nitrogenCutWhy(decision), nitrogenCutWhy(decision, CUT_WHY_NOTE));
   return {
     visit: chinchRate == null ? nitrogenAdjusted : chinchAdjustedVisit(nitrogenAdjusted, chinchRate),
     targets: cut == null ? targets : { ...targets, targetNPer1000: cut },
     nitrogenCut: cut,
+    ...water,
     ...(chinchRate == null ? {} : { chinchRate }),
   };
 }
 
+// Is this catalog product the bag the swap puts down? By IDENTITY, not by its current name: the staged protocol row that carries the swap's
+// trigger (or the swap's name) is linked to a catalog product id, and that is the product, so a catalog rename that keeps the old name as an
+// alias (the matcher still resolves the line to it) does not lose the flag or the note. Falls back to the exact name when the rows are not
+// at hand (the reference sheet).
+function isSwapProduct(product, productSwap, v13Rows) {
+  if (!productSwap || !product) return false;
+  const row = v13Rows instanceof Map ? v13Rows.get(String(product.id)) : null;
+  if (row) return swapOnlyRule(row)?.key === productSwap.key;
+  return product.name === productSwap.to;
+}
+
+// The line note for the swapped bag (in the line's gateNotes, like the nitrogen cut's). [] for every other line.
+function productSwapNotes(product, productSwap, v13Rows) {
+  if (!isSwapProduct(product, productSwap, v13Rows)) return [];
+  return [{ key: PRODUCT_SWAP_NOTE_KEY, severity: 'note', text: productSwap.note }];
+}
+
 // The line note for a nitrogen bag sized for the reduced target (in the line's gateNotes, the way the Fast Complete sheet and the
 // plan panel already show a line's notes). [] for any line the cut did not size.
+const FUNGUS_EXCLUSION = 'Close the spreader over the patch and 6 ft around it.';
 function fungusNitrogenNotes(mix, nitrogenCut) {
   if (nitrogenCut == null || mix?.rateSource !== 'target_n_analysis' || mix.targetNPer1000 !== nitrogenCut) return [];
   return [{
     key: FUNGUS_NITROGEN_NOTE_KEY,
     severity: 'note',
-    text: `Active fungus mapped: nitrogen reduced to ${nitrogenCut} lb N (${Number(mix.ratePer1000).toFixed(1)} lb per 1,000). Close the spreader over the patch and 6 ft around it.`,
+    text: `Active large patch mapped: nitrogen reduced to ${nitrogenCut} lb N (${Number(mix.ratePer1000).toFixed(1)} lb per 1,000). ${FUNGUS_EXCLUSION}`,
   }];
+}
+
+// The reclaimed-water line notes (GATE_LAWN_RECLAIMED_HALF_N): "half nitrogen today" on the bag the halved target sized, and on a
+// bag that keeps its rate (pre-emergent plus fertilizer, winter potash) the reason it was not halved. `found` is what visitNutrientTargets returned.
+function reclaimedNitrogenNotes(mix, product, found) {
+  if (found?.reclaimedWater === 'half') {
+    if (mix?.rateSource !== 'target_n_analysis' || mix.targetNPer1000 !== found.nitrogenCut) return [];
+    return [{ key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: `Reclaimed water: half nitrogen today (${found.nitrogenCut} lb N, ${Number(mix.ratePer1000).toFixed(1)} lb per 1,000).` }];
+  }
+  if (found?.reclaimedWater === 'kept') {
+    const text = found.keptFor === 'potash' && Number(product?.analysis_k) > 0
+      ? 'Reclaimed water: this bag carries the winter potash, so its full rate stays today.'
+      : (found.keptFor === 'pre_emergent' && isPreEmergentBag(product?.name)
+        ? 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.' : null);
+    if (text) return [{ key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text }];
+  }
+  return [];
+}
+
+// Every nitrogen line note of one visit's decision, for one planned line: the reclaimed-water note and the fungus note. When the smaller
+// reclaimed target set the amount and the fungus rule applied as well, the fungus note keeps only its spreader instruction (its own
+// "reduced to" figures would contradict the amount the line now states).
+function nitrogenCutNotes(mix, product, found) {
+  const reclaimed = reclaimedNitrogenNotes(mix, product, found);
+  if (found?.reclaimedWater !== 'half') return [...reclaimed, ...fungusNitrogenNotes(mix, found?.nitrogenCut ?? null)];
+  return found.fungusAlso && reclaimed.length ? [...reclaimed, { key: FUNGUS_NITROGEN_NOTE_KEY, severity: 'note', text: `Active large patch mapped. ${FUNGUS_EXCLUSION}` }] : reclaimed;
 }
 
 // The line note for a Tetrino line planned at the raised chinch rate. [] for any line the raise did not size.
@@ -2018,8 +2164,17 @@ async function visitOnV13Protocol(knex, visit, { trackKey }) {
 // version and window for the visit. The sheet shows the recipe of the REQUESTED month; the plan reads the month of the window the
 // visit is pinned to (under the completion defaults, as selectProtocolVisit does) or else the month of the service date, so the cut
 // applies only to a visit that is on v13 and either unpinned or asked for in the month the plan reads.
+// Is any rule that rewrites a visit's step from the lawn's own data live (the November cut, the reclaimed-water half, the May Tetrino raise,
+// the December swap)? With none live nothing is read, so a reader that projects a visit through visitNutrientTargets can skip it with no query
+// at all. v13 eligibility is decided here and nowhere else, independently of WHICH rule asks: each rule checks its own gate inside
+// visitNutrientTargets, so the answer never depends on another rule's gate.
+function visitProjectionLive() {
+  return featureGates.lawnV13Live?.() === true && !!(featureGates.lawnNovLargePatchNLive() || featureGates.lawnReclaimedHalfNLive?.()
+    || featureGates.lawnChinchTetrinoRateLive() || featureGates.lawnDecLargePatchKLive?.());
+}
+
 async function sheetReadsPlansStep(knex, visit, { trackKey, month }) {
-  if (featureGates.lawnV13Live?.() !== true || !(featureGates.lawnNovLargePatchNLive() || featureGates.lawnChinchTetrinoRateLive())) return false;
+  if (!visitProjectionLive()) return false;
   const { onV13, windowMonth } = await visitOnV13Protocol(knex, visit, { trackKey });
   if (!onV13) return false;
   if (windowMonth == null) return true;
@@ -2267,8 +2422,10 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  // The visit the lines are parsed from: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N) its copy with the cut nitrogen stated.
-  const { visit, targets: nutrientTargets, nitrogenCut, chinchRate } = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
+  // The visit the lines are parsed from: the recipe step, or its copy with the cut nitrogen stated (GATE_LAWN_NOV_LARGE_PATCH_N,
+  // GATE_LAWN_RECLAIMED_HALF_N), the Tetrino rate raised (GATE_LAWN_CHINCH_TETRINO_RATE) or the whole-lawn bag swapped (GATE_LAWN_DEC_LARGE_PATCH_K).
+  const nitrogen = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
+  const { visit, targets: nutrientTargets, nitrogenCut, chinchRate, productSwap } = nitrogen;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
@@ -2345,7 +2502,9 @@ async function buildPlanForService(serviceId, options = {}) {
     return {
       ...planLineFields(item),
       // Gate off: no v13 field at all, the payload is the old one.
-      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, [...fungusNitrogenNotes(mix, nitrogenCut), ...chinchTetrinoNotes(line?.row, mix, chinchRate)]) : {}),
+      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct, [...nitrogenCutNotes(mix, plannedProduct, nitrogen), ...chinchTetrinoNotes(line?.row, mix, chinchRate), ...productSwapNotes(plannedProduct, productSwap, v13Rows)]) : {}),
+      // GATE_LAWN_DEC_LARGE_PATCH_K: the swapped-in bag is the visit's default whole-lawn product though its staged row is not a default.
+      ...(isSwapProduct(plannedProduct, productSwap, v13Rows) ? { productSwapIn: true } : {}),
       matched: !!plannedProduct,
       product: planProductSnapshot(plannedProduct, mix),
       substitution: planSubstitutionSnapshot(substitution),
@@ -2364,7 +2523,7 @@ async function buildPlanForService(serviceId, options = {}) {
     productOf: (id) => products.find((product) => String(product.id) === String(id)) || null,
   });
   planItems = bermudaProjection.items;
-  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut == null ? null : { from: parseVisitNutrientTargets(recipeStep?.notes).targetNPer1000, to: nitrogenCut }, chinchRate == null ? null : { from: V13_CHINCH_TETRINO.normalRate, to: chinchRate, productName: V13_CHINCH_TETRINO.productName });
+  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems, nitrogenCut == null ? null : { from: parseVisitNutrientTargets(recipeStep?.notes).targetNPer1000, to: nitrogenCut }, chinchRate == null ? null : { from: V13_CHINCH_TETRINO.normalRate, to: chinchRate, productName: V13_CHINCH_TETRINO.productName }, productSwap || null);
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
   const v13PlanBlock = lawnV13PlanBlock({ trackKey, service, structuredProtocol });
@@ -2667,10 +2826,19 @@ module.exports = {
   visitNutrientTargets,
   fungusNitrogenCut,
   sheetReadsPlansStep,
+  visitOnV13Protocol,
+  visitProjectionLive,
   fungusNitrogenNotes,
+  nitrogenCutNotes,
+  nitrogenCutWhy,
+  CUT_WHY_NOTE,
+  nitrogenDecision,
   chinchTetrinoRate,
   chinchRateRows,
   chinchTetrinoNotes,
+  troubleProductSwap,
+  productSwapNotes,
+  isSwapProduct,
   summarizeMaterialCost,
   effectiveAreaFactor,
   v13ProtocolRows,

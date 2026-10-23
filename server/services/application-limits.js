@@ -124,6 +124,13 @@ function familyConvert(amount, unit, capUnit) {
   return rateInUnit(amount, unit, capUnit) || 0;
 }
 
+// The history rows a v13 yearly amount cap counts: the product's own, or, when the cap says the label's maximum is shared (Advion Insect
+// Granule and the pest-control Advion WDG Granular are one granule, EPA 100-1483), every catalog row with that EPA number.
+function amountHistoryProducts(query, database, product, limit) {
+  if (!limit.history_epa_reg_number) return query.where('pah.product_id', product.id);
+  return query.whereIn('pah.product_id', database('products_catalog').where({ epa_reg_number: limit.history_epa_reg_number }).select('id'));
+}
+
 // One earlier application as a share of a v13 yearly amount cap (the synthetic row of lawn-v13-count-caps):
 // the ledger's own reading only (the recorded rate, else the quantity over the treated area), and when the
 // ledger cannot size it the row's FIXED fallback rate (Arena: the old 0.29 oz, the whole year) - never the
@@ -586,10 +593,9 @@ class ApplicationLimitChecker {
   // at the cap row's fallback rate), plus the application being planned. Per 1,000 sq ft of the treated
   // area, as the shared active-ingredient cap reads it: a spot is its recorded rate, not scaled to its area.
   async evaluateV13AmountCap(limit, product, ctx, database = db) {
-    const query = database('property_application_history as pah')
+    const query = amountHistoryProducts(database('property_application_history as pah')
       .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
-      .where('pah.customer_id', ctx.customerId)
-      .where('pah.product_id', product.id)
+      .where('pah.customer_id', ctx.customerId), database, product, limit)
       .where('pah.application_date', '>=', ctx.yearStart)
       .where('pah.application_date', '<=', etCalendarDayOf(ctx.proposedDate))
       .whereNull('pah.retracted_at')
@@ -838,7 +844,7 @@ class ApplicationLimitChecker {
   // adds nothing (only the others filling the cap is flagged), as the count audit does.
   async auditAmount(database, customerId, product, day, limit, opts = {}) {
     const year = day.slice(0, 4);
-    const yearRows = (query) => query.where({ 'pah.customer_id': customerId, 'pah.product_id': product.id }).whereNull('pah.retracted_at')
+    const yearRows = (query) => amountHistoryProducts(query.where({ 'pah.customer_id': customerId }), database, product, limit).whereNull('pah.retracted_at')
       .where('pah.application_date', '>=', `${year}-01-01`).where('pah.application_date', '<=', `${year}-12-31`)
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft', 'pah.property_id', 'pah.service_record_id',
         'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');

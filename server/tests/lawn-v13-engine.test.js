@@ -63,24 +63,52 @@ describe('gate and loader', () => {
 
   test('gate off hands every reader protocols.json lawn itself; on hands v13', () => {
     expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
-    // Gate on, bermuda removal gate off: v13 without the per-visit addOns blocks.
-    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, ...visit }) => visit) }]));
+    // Gate on, bermuda removal gate off and the December swap gate off: v13 without the per-visit addOns and swaps blocks.
+    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, swaps, ...visit }) => visit) }]));
     expect(withGate('true', () => lawnProtocols())).toEqual(stripped);
     expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+    expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('"swaps":');
   });
 
   test('the bermuda removal addOns reach the shared reader only while GATE_LAWN_BERMUDA_REMOVAL is on', () => {
     const saved = process.env.GATE_LAWN_BERMUDA_REMOVAL;
     try {
       process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
-      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      // (the December swap gate is off, so the swaps blocks are still left out)
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('addOns');
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('"swaps":');
       // The removal gate cannot surface the add-on while v13 itself is off.
       expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
       delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
     } finally {
       if (saved === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = saved;
+    }
+  });
+
+  test('the December swaps block reaches the shared reader only while GATE_LAWN_DEC_LARGE_PATCH_K (and the trouble-area gates it needs) is on; both blocks on gives v13 itself', () => {
+    const names = ['GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    try {
+      for (const name of names) process.env[name] = 'true';
+      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('largePatchPotassium');
+      // The swap gate off, or one gate it needs off: no swaps, and the bermuda add-ons are unaffected.
+      for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET']) {
+        process.env[name] = 'true';
+        delete process.env[name];
+        const view = JSON.stringify(withGate('true', () => lawnProtocols()));
+        expect(view).not.toContain('"swaps":');
+        expect(view).toContain('addOns');
+        process.env[name] = 'true';
+      }
+      // The visits without the blocks keep their own objects (identity).
+      for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K']) delete process.env[name];
+      const view = withGate('true', () => lawnProtocols());
+      expect(view.zoysia.visits[0]).toBe(v13.zoysia.visits[0]);
+      expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
+    } finally {
+      for (const name of names) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
     }
   });
 
@@ -156,7 +184,7 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
-      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, ...visit }) => visit) });
+      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, swaps, ...visit }) => visit) });
     });
   });
 
@@ -267,11 +295,13 @@ const BLINDSIDE = 'Blindside Herbicide';
 const DIMENSION_18 = octoberMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
+// June and July mole cricket nymph spots: the Advion Insect Granule catalog row (20261023140000).
+const advionMigration = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
 // December's whole-lawn bag is the LESCO 10-0-22 row (20261008130000 swaps it in for the staged 24-0-11 line).
 const F10_22 = decemberMigration.NEW_NAME;
 // April's 12x whole-lawn bag is the LESCO 44-0-0 polymer row (20261022195000 swaps it in for the staged 24-0-11 line).
 const F44_0_0 = aprilPolymerMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }

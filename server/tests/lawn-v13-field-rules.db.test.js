@@ -64,6 +64,8 @@ describeDb('v13 field rules through PostgreSQL', () => {
       rows[track] = {
         nutraJune: await productRow(june, NUTRA, { rate_per_1000: 12, rate_unit: 'fl oz', carrier_gal_per_1000: 1 }),
         dimensionJune: await productRow(june, DIMENSION, { rate_per_1000: 0.5, rate_unit: 'fl oz', carrier_gal_per_1000: 1, sort_order: 2 }),
+        // June's mole cricket nymph line (20261023141000) names Acelepryn: its staged row keeps the plan from warning that the line is unlinked.
+        aceleprynJune: await productRow(june, ACELEPRYN, { application_mode: 'spot', default_in_plan: false, gates: JSON.stringify({ trigger: 'mole_cricket_nymphs' }), sort_order: 8 }),
         nutraJanuary: await productRow(january, NUTRA, { rate_per_1000: 6, rate_unit: 'fl oz', carrier_gal_per_1000: 1 }),
         dismissJanuary: await productRow(january, DISMISS, { application_mode: 'spot', default_in_plan: false, gates: JSON.stringify({ novToMarOnly: true }), sort_order: 9 }),
         acelepryn: await productRow(july, ACELEPRYN, { application_mode: 'spot', default_in_plan: false, gates: JSON.stringify({ trigger: 'caterpillars' }) }),

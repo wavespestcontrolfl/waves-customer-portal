@@ -955,7 +955,11 @@ function buildExistingCustomerPublicQuoteUpdates({
   if (!existingCust.lead_source_detail) updates.lead_source_detail = leadSourceDetail;
   if (!existingCust.lead_source_channel) updates.lead_source_channel = entryChannel;
   if (!existingCust.lead_source_area && quoteCity) updates.lead_source_area = String(quoteCity).slice(0, 50);
-  if (existingCust.property_sqft == null && sqft) updates.property_sqft = sqft;
+  // customers.property_sqft is TREATED LAWN AREA by schema contract (initial_schema 20260401000001; lawn-size-sync
+  // and property-service-areas mirror the turf profile into it). The quote form's `sqft` is the HOME square footage
+  // (clamped, defaulting to 2,000), so it is never written here: a house size in the lawn mirror blocked the lawn
+  // backfill for every website-quote customer and read as a lawn to every lawn reader (owner 2026-10-23). The home
+  // figure still reaches pricing through the estimate (engine profile homeSqFt) and the lead row.
   if (existingCust.lot_sqft == null && lot) updates.lot_sqft = lot;
   if (!existingCust.landing_page_url && landingForCustomer) updates.landing_page_url = landingForCustomer;
   if (!existingCust.utm_data && utm) updates.utm_data = utm;
@@ -2741,7 +2745,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           zip: quoteZip || '',
           latitude: ep.lat || null,
           longitude: ep.lng || null,
-          property_sqft: sqft,
+          // property_sqft is the LAWN mirror, never the home size `sqft` (see
+          // buildExistingCustomerPublicQuoteUpdates): left for a lawn writer.
           // Measured/confirmed only — never the engine's synthetic fallback
           // (GH codex P1, same rule as the existing-customer update above).
           lot_sqft: persistLotSqFt,

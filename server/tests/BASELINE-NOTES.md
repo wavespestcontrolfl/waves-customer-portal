@@ -689,3 +689,30 @@ non-member setup fee. Only `v1adapter_rodent_bait_large_footprint` moved:
 (was $69/mo = $828 outside them), plus the $99 setup as a one-time row
 (rodent-only = non-member). DB (prod-parity) baselines still need an
 owner-run recapture after the migration `20260829000040` deploys.
+
+## 2026-10-23 — Post-deploy DB-parity recapture of the v1-adapter suite (after #6398)
+
+`pricing-engine-v1-adapter.baseline.json` (DB mode) recaptured with
+`CAPTURE_BASELINE=1` against live prod `pricing_config` after #6398 (Tree &
+Shrub open-parcel bed basis, 2/4/6 ornamental backstop, 0.40 margin)
+deployed — the step #6398's body left open. Owner-run read-only session
+(`railway run`, `PGOPTIONS=-c default_transaction_read_only=on`; nothing
+written). The suite verifies green against prod afterward (14/14). The
+`pricing-engine.baseline.json` DB file is untouched.
+
+Per-case attribution (five of 14 cases moved):
+- **Tree & Shrub (#6398, and stale before it)**: `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub`
+  (Standard 41.08 → 41.83/mo, Enhanced 54 → 55.25) and
+  `v1adapter_platinum_bundle_4_services_zone_a` (Standard 41.08 → 44.42,
+  Enhanced 54 → 58.83; bundle annual 2849 → 2889 before discount). The old
+  DB values never matched code; the new ones equal the LOCAL baseline #6398
+  captured, case for case.
+- **Rodent bait realignment (2026-08-29 entry above)**: `v1adapter_rodent_bait_large_footprint`
+  — the recapture that entry called for; now equals the LOCAL baseline
+  ($109/visit × 4 = $436/yr inside the totals, $99 setup).
+- **Termite, prod config only (DB ≠ LOCAL)**: `v1adapter_preslab_2000sf_basic_warranty`
+  (Pre-Slab 896 → 808) and `v1adapter_termite_bait_three_systems` (Trelona
+  install 740 → 704, year 1 1088 → 1052). LOCAL constants still give 896 /
+  740, so this is live prod config or catalog cost, not code — most likely
+  the inventory-driven station/cartridge cost from #4313. Recorded as prod
+  parity, as the 2026-07-28 recapture did.
