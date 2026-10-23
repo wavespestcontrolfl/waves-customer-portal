@@ -292,6 +292,17 @@ describeDb('December large patch potassium bag through PostgreSQL', () => {
       expect(await swapped(await decemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, date: '2026-12-20' }] }))).toBe(true);
     });
 
+    test('several fungicides at one place on the SAME day (one completion): large patch only when every one names it; a mix or a blank fails closed', async () => {
+      const day = daysBeforeVisit(3);
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Dollar spot', date: day }] }));
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: 'Gray leaf spot', date: day }, { place: 'front', target: LARGE, date: day }] }));
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: null, date: day }] }));
+      // An older large patch row does not rescue an ambiguous newest day.
+      await normal(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: daysBeforeVisit(30) }, { place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Rust', date: day }] }));
+      // Two large patch fungicides the same day (Large patch and Brown patch) are unambiguous.
+      expect(await swapped(await decemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Brown patch', date: day }] }))).toBe(true);
+    });
+
     test('a take-all area with a large patch application at its place is still take-all: no swap', async () => {
       await normal(await decemberVisit([{ type: 'take_all', target: LARGE }]));
     });

@@ -25,7 +25,8 @@ describe('loadActiveLargePatch', () => {
     const calls = [];
     const query = {};
     for (const method of ['where', 'whereNull', 'whereIn', 'whereRaw', 'orderByRaw']) query[method] = jest.fn((...args) => { calls.push([method, ...args]); return query; });
-    query.select = jest.fn(async () => rows);
+    // The real query orders by application_date DESC; rows with no date keep their given order.
+    query.select = jest.fn(async () => [...rows].sort((a, b) => String(b.application_date || '').localeCompare(String(a.application_date || ''))));
     const knex = jest.fn((table) => { calls.push(['table', table]); return query; });
     return { knex, calls };
   };
@@ -44,8 +45,8 @@ describe('loadActiveLargePatch', () => {
       { id: 'a', place: 'front', type: 'fungus' }, { id: 'b', place: 'back', type: 'fungus' }, { id: 'c', place: 'left_side', type: 'fungus' }, { id: 'd', place: 'right_side', type: 'take_all' },
     ]);
     const { knex, calls } = ledgerKnex([
-      { treated_place: 'front', target_pest: 'Gray leaf spot' }, { treated_place: 'front', target_pest: 'Large patch' },
-      { treated_place: 'back', target_pest: 'Brown patch' }, { treated_place: 'back', target_pest: 'Dollar spot' },
+      { treated_place: 'front', target_pest: 'Gray leaf spot', application_date: '2026-12-02' }, { treated_place: 'front', target_pest: 'Large patch', application_date: '2026-11-02' },
+      { treated_place: 'back', target_pest: 'Brown patch', application_date: '2026-12-02' }, { treated_place: 'back', target_pest: 'Dollar spot', application_date: '2026-11-02' },
     ]);
     const found = await areas.loadActiveLargePatch(knex, PROPERTY);
     expect(found.map((area) => area.id)).toEqual(['b']);
@@ -59,8 +60,8 @@ describe('loadActiveLargePatch', () => {
   test('the newest application decides even when it names no target: an older large patch row is stale after it', async () => {
     jest.spyOn(areas, 'loadActive').mockResolvedValue([{ id: 'a', place: 'front', type: 'fungus' }, { id: 'b', place: 'back', type: 'fungus' }]);
     const { knex } = ledgerKnex([
-      { treated_place: 'front', target_pest: null }, { treated_place: 'front', target_pest: 'Large patch' },
-      { treated_place: 'back', target_pest: '' }, { treated_place: 'back', target_pest: 'Brown patch' },
+      { treated_place: 'front', target_pest: null, application_date: '2026-12-02' }, { treated_place: 'front', target_pest: 'Large patch', application_date: '2026-11-02' },
+      { treated_place: 'back', target_pest: '', application_date: '2026-12-02' }, { treated_place: 'back', target_pest: 'Brown patch', application_date: '2026-11-02' },
     ]);
     expect(await areas.loadActiveLargePatch(knex, PROPERTY)).toEqual([]);
   });
@@ -73,6 +74,28 @@ describe('loadActiveLargePatch', () => {
     const undated = ledgerKnex([{ treated_place: 'front', target_pest: 'Large patch' }]);
     await areas.loadActiveLargePatch(undated.knex, PROPERTY);
     expect(undated.calls.some((call) => call[0] === 'where' && call[1] === 'application_date')).toBe(false);
+  });
+
+  test('several fungicides recorded at one place on the SAME day: large patch only when every one of them names it; a mix or a blank is ambiguous and fails closed, whatever the row order', async () => {
+    jest.spyOn(areas, 'loadActive').mockResolvedValue([
+      { id: 'a', place: 'front', type: 'fungus' }, { id: 'b', place: 'back', type: 'fungus' }, { id: 'c', place: 'left_side', type: 'fungus' }, { id: 'd', place: 'right_side', type: 'fungus' },
+    ]);
+    const day = '2026-12-02';
+    const older = '2026-11-02';
+    const rows = [
+      // front: Large patch + Brown patch on the day (both large patch): counts.
+      { treated_place: 'front', target_pest: 'Large patch', application_date: day }, { treated_place: 'front', target_pest: 'Brown patch', application_date: day },
+      // back: Large patch + Dollar spot on the day (a mix): ambiguous, in either order.
+      { treated_place: 'back', target_pest: 'Large patch', application_date: day }, { treated_place: 'back', target_pest: 'Dollar spot', application_date: day },
+      // left: Gray leaf spot first, then Large patch, the same day: ambiguous.
+      { treated_place: 'left_side', target_pest: 'Gray leaf spot', application_date: day }, { treated_place: 'left_side', target_pest: 'Large patch', application_date: day },
+      // right: Large patch + a blank target the same day, and an older Large patch row: ambiguous (the older row does not rescue it).
+      { treated_place: 'right_side', target_pest: null, application_date: day }, { treated_place: 'right_side', target_pest: 'Large patch', application_date: day },
+      { treated_place: 'right_side', target_pest: 'Large patch', application_date: older },
+    ];
+    expect((await areas.loadActiveLargePatch(ledgerKnex(rows).knex, PROPERTY)).map((area) => area.id)).toEqual(['a']);
+    // The same rows in the reverse order give the same answer: no row-order dependence.
+    expect((await areas.loadActiveLargePatch(ledgerKnex([...rows].reverse()).knex, PROPERTY)).map((area) => area.id)).toEqual(['a']);
   });
 
   test('an area with no ledger row is not a large patch (the disease is unknown), and a failed read throws', async () => {

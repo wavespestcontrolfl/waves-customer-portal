@@ -138,8 +138,9 @@ const isLargePatchTarget = (value) => LARGE_PATCH_TARGET.test(String(value || ''
 
 /**
  * The property's ACTIVE fungus areas that are known to be a LARGE PATCH, as loadActive shows them. The evidence is the newest
- * fungicide application at the area's place (the ledger, retractions left out), whatever it recorded: the area is a large patch only
- * when THAT application's target names large patch. An area with no application, whose newest application names no target (it
+ * application day at the area's place (the ledger, fungicides, retractions left out), whatever it recorded: the area is a large patch only
+ * when EVERY fungicide row of that day names large patch (several fungicides in one completion share the day and the timestamp, so a mix of
+ * targets, or a blank one, is ambiguous and fails closed). An area with no application, whose newest application names no target (it
  * outranks an older large patch one: the disease is unknown again), or whose newest target is another disease (gray leaf spot, Pythium,
  * dollar spot, fairy ring, rust) is NOT returned: the answer fails closed when the disease is unknown.
  *
@@ -157,10 +158,21 @@ async function loadActiveLargePatch(knex, propertyId, { asOf = null } = {}) {
     .whereIn('treated_place', [...new Set(areas.map((area) => area.place))])
     .whereRaw("lower(category) = 'fungicide'");
   if (asOf) query.where('application_date', '<=', asOf);
-  const rows = await query.orderByRaw('application_date DESC, created_at DESC').select('treated_place', 'target_pest');
-  const newest = new Map();
-  for (const row of rows) if (!newest.has(row.treated_place)) newest.set(row.treated_place, row.target_pest);
-  return areas.filter((area) => isLargePatchTarget(newest.get(area.place)));
+  const rows = await query.orderByRaw('application_date DESC').select('treated_place', 'target_pest', 'application_date');
+  // The newest application DAY at a place decides, and it must be unambiguous: one completion can record several fungicides at one place on
+  // the same day with the same timestamp, so there is no "newest row" among them. The area is a large patch only when EVERY fungicide row of
+  // that day names large patch; a mix of targets (or a blank one) is ambiguous evidence and fails closed.
+  const newestDay = new Map();
+  const targets = new Map();
+  for (const row of rows) {
+    const day = dayOf(row.application_date);
+    if (!newestDay.has(row.treated_place)) { newestDay.set(row.treated_place, day); targets.set(row.treated_place, []); }
+    if (day === newestDay.get(row.treated_place)) targets.get(row.treated_place).push(row.target_pest);
+  }
+  return areas.filter((area) => {
+    const list = targets.get(area.place);
+    return !!list && list.length > 0 && list.every(isLargePatchTarget);
+  });
 }
 
 /**

@@ -160,6 +160,15 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: null, date: '2026-11-20' }] }))).toBeCloseTo(2.0833, 3);
     });
 
+    test('several fungicides at one place on the SAME day (one completion): large patch only when every one names it; a mix or a blank fails closed', async () => {
+      const day = daysBeforeVisit(3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Dollar spot', date: day }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: 'Gray leaf spot', date: day }, { place: 'front', target: LARGE, date: day }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: null, date: day }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: daysBeforeVisit(30) }, { place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Rust', date: day }] }))).toBeCloseTo(3.125, 3);
+      expect(await rateOf(await novemberVisit([{ type: 'fungus' }], { ledger: [{ place: 'front', target: LARGE, date: day }, { place: 'front', target: 'Brown patch', date: day }] }))).toBeCloseTo(2.0833, 3);
+    });
+
     test('the newest named target at the place decides; a retracted or non-fungicide row is not evidence', async () => {
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: LARGE }], { ledger: [{ place: 'front', target: 'Dollar spot', daysAgo: 0 }] }))).toBeCloseTo(3.125, 3);
       expect(await rateOf(await novemberVisit([{ type: 'fungus', target: 'Dollar spot' }], { ledger: [{ place: 'front', target: LARGE, daysAgo: 0 }] }))).toBeCloseTo(2.0833, 3);
