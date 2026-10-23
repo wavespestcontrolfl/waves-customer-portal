@@ -14,6 +14,10 @@ const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROP
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
 const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
 const day = etDateString(addETDays(new Date(), -1));
+// Ledger dates are anchored to the fixture visit's day, never to today (the evidence is read as of the visit, so a today-relative date would
+// fall after the visit from 11/10 on).
+const VISIT_DAY = '2026-11-10';
+const daysBeforeVisit = (days) => new Date(Date.parse(`${VISIT_DAY}T12:00:00Z`) - days * 86400000).toISOString().slice(0, 10);
 const LARGE = 'Large patch';
 
 describeDb('November large patch nitrogen through PostgreSQL', () => {
@@ -73,7 +77,7 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     }
     for (const row of ledger) {
       await knex('property_application_history').insert({
-        customer_id: f.customerId, property_id: f.property.id, application_date: row.date || etDateString(addETDays(new Date(), -(row.daysAgo ?? 1))), category: row.category || 'fungicide',
+        customer_id: f.customerId, property_id: f.property.id, application_date: row.date || daysBeforeVisit(row.daysAgo ?? 1), category: row.category || 'fungicide',
         treated_place: row.place, target_pest: row.target, retracted_at: row.retracted ? new Date() : null,
       });
     }
