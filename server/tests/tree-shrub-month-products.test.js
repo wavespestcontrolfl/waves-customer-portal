@@ -39,14 +39,14 @@ describe('resolveMonthProducts', () => {
     // Every month card names Snapshot and a palm feed (program date rules,
     // owner 2026-10-05): Oct-May the 8-0-12 palm SKU, Jun-Sep the 0-0-16 one.
     // The due gates (60-day/quarter Snapshot, 3-month palm) decide what shows.
-    // Lines still waiting on an exact label (13-0-13, Copper) are withheld too.
+    // 13-0-13 is a primary line in April and October only (label read 2026-10-22: two feedings a year).
     expect(ids('2026-01-15')).toEqual(['snapshot', 'palm']);
     // TriTek is a secondary (live find) line in every month now (owner
     // 2026-10-09), so it is never a suggestion. NutriRoot is ambiguous in
     // this catalog; Mn Combo and the Sequestar/KPHITE lines are not primary.
     expect(ids('2026-02-10')).toEqual(['snapshot', 'palm']);
     expect(ids('2026-03-10')).toEqual(['snapshot', 'palm', 'mainspring', 'distance']);
-    expect(ids('2026-04-10')).toEqual(['snapshot', 'palm']);
+    expect(ids('2026-04-10')).toEqual(['snapshot', 'palm', 'orn']);
     expect(ids('2026-05-10')).toEqual(['snapshot', 'mainspring', 'palm']);
     // The summer palm feeding is the 0-0-16 palm SKU, never the lawn winterizer.
     expect(ids('2026-06-10')).toEqual(['snapshot', 'palm16']);
@@ -54,7 +54,7 @@ describe('resolveMonthProducts', () => {
     expect(ids('2026-08-10')).toEqual(['snapshot', 'palm16', 'mainspring', 'distance', 'cytogro']);
     // Talus and Headway are gone from the program; TriStar is secondary only.
     expect(ids('2026-09-10')).toEqual(['snapshot', 'palm16', 'distance']);
-    expect(ids('2026-10-01')).toEqual(['snapshot', 'palm']);
+    expect(ids('2026-10-01')).toEqual(['snapshot', 'palm', 'orn']);
     expect(ids('2026-11-10')).toEqual(['snapshot', 'palm', 'espoma']);
     expect(ids('2026-12-10')).toEqual(['snapshot', 'palm', 'cytogro']);
   });
@@ -164,7 +164,7 @@ describe('resolveMonthProducts', () => {
 
   test('each entry carries the application method', () => {
     const october = Object.fromEntries(resolveMonthProducts('2026-10-01', CATALOG).map((e) => [e.productId, e.method]));
-    expect(october).toEqual({ snapshot: 'granular_broadcast', palm: 'granular_broadcast' });
+    expect(october).toEqual({ snapshot: 'granular_broadcast', palm: 'granular_broadcast', orn: 'granular_broadcast' });
     const november = Object.fromEntries(resolveMonthProducts('2026-11-10', CATALOG).map((e) => [e.productId, e.method]));
     expect(november.espoma).toBe('granular_broadcast');
   });
@@ -174,6 +174,9 @@ describe('resolveMonthProducts', () => {
     expect(NON_PRODUCT_LINE.test('Sequestar EDDHA: exact container label needed; no verified dose or injector recipe')).toBe(true);
     // An exact label still needed / a held dose is withheld too (Codex r3 #5089).
     expect(NON_PRODUCT_LINE.test('13-0-13 ornamental fertilizer: exact bag label needed; hold dose')).toBe(true);
+    // The real April and October lines carry the label dose, so they are not held.
+    const bed = protocols.tree_shrub.visits.find((v) => v.month === 'Apr').primary.split('\n').find((l) => /^13-0-13/.test(l));
+    expect(NON_PRODUCT_LINE.test(bed)).toBe(false);
     expect(NON_PRODUCT_LINE.test('Snapshot 2.5TG Q4: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16)')).toBe(false);
   });
 
@@ -272,3 +275,57 @@ describe('visitMonthET', () => {
     expect(visitMonthET(undefined)).toBeNull();
   });
 });
+
+describe('13-0-13 and Sequestar card lines (labels read 2026-10-22, owner approved)', () => {
+  const visits = protocols.tree_shrub.visits;
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const lineOf = (visit, section, pattern) => String(visit[section] || '').split('\n').find((l) => pattern.test(l));
+
+  test('13-0-13 is a primary line in April and October only, with the label dose and the county reason', () => {
+    for (const visit of visits) {
+      const line = lineOf(visit, 'primary', /^13-0-13/);
+      if (!['Apr', 'Oct'].includes(visit.month)) { expect([visit.month, line]).toEqual([visit.month, undefined]); continue; }
+      expect(line).toMatch(/beds 0\.75 lb per 100 sq ft \(a 1,200 sq ft bed is 9 lb\)/);
+      expect(line).toMatch(/trees and large shrubs ½ lb per inch of trunk diameter spread under the drip line, never more than 0\.75 lb per 100 sq ft of the area under it/);
+      // Below the bag's 1 to 1½ lb because 1 lb per 100 sq ft is over the 1 lb N per 1,000 sq ft county limit.
+      expect(line).toMatch(/below the bag's 1 to 1½ lb per 100 sq ft because the Sarasota County fertilizer code caps nitrogen at 1 lb per 1,000 sq ft/);
+      expect(line).toMatch(/only when due \(2 a year, April and October, at least 5 months apart; none June 1 to Sept\. 30\)/);
+      expect(line).not.toMatch(/label needed|hold dose/i);
+    }
+    // 7.5 lb per 1,000 sq ft x 13% = 0.975 lb N, under the cap; the bag's 1 lb per 100 sq ft x 13% = 1.3 lb N, over it.
+    expect(7.5 * 0.13).toBeCloseTo(0.975, 3);
+    expect(10 * 0.13).toBeGreaterThan(1);
+    expect(protocols.tree_shrub.calibration.ornamental_fertilizer_rate).toMatch(/0\.75 lb per 100 sq ft \(7\.5 lb per 1,000 sq ft = 0\.98 lb N/);
+  });
+
+  test('the field guide row follows the card: 13-0-13 only in April and October', () => {
+    for (const visit of visits) {
+      const row = visit.fieldGuide.routine.find((r) => r.key === 'f13013');
+      expect([visit.month, Boolean(row)]).toEqual([visit.month, ['Apr', 'Oct'].includes(visit.month)]);
+    }
+  });
+
+  test('Sequestar is a symptom-only secondary line with the label dose, never a primary line', () => {
+    expect(JSON.stringify(visits.map((v) => v.primary))).not.toMatch(/sequestar/i);
+    for (const visit of visits) {
+      const line = lineOf(visit, 'secondary', /^Sequestar/);
+      const guided = visit.fieldGuide.conditional.some((r) => r.key === 'sequestar');
+      expect([visit.month, Boolean(line), guided]).toEqual([visit.month, ['Jan', 'Feb', 'May', 'Nov', 'Dec'].includes(visit.month), Boolean(line)]);
+      if (!line) continue;
+      expect(line).toMatch(/^Sequestar 6% Fe EDDHA: only for iron chlorosis \(yellow new leaves with green veins;/);
+      expect(line).toMatch(/2 oz per small shrub, up to 2 oz per inch of trunk diameter on large shrubs and trees, or up to 2 oz per 100 sq ft of bed/);
+      expect(line).toMatch(/dissolve in water, pour at the root zone and water in; once a year per plant, in spring before new growth or when symptoms appear; never tank-mix with oil/);
+    }
+  });
+
+  test('no program line still waits on a label, and the sheet suggests 13-0-13 but never Sequestar', () => {
+    const text = JSON.stringify(protocols.tree_shrub);
+    expect(text).not.toMatch(/exact (?:bag|container) label needed|hold dose|no verified dose|injector recipe/i);
+    for (const month of ['Jan', 'Feb', 'May', 'Nov', 'Dec']) {
+      const date = `2026-${String(MONTHS.indexOf(month) + 1).padStart(2, '0')}-10`;
+      expect(ids(date)).not.toContain('sequestar');
+      expect(ids(date)).not.toContain('orn');
+    }
+  });
+});
+

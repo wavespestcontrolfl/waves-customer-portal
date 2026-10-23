@@ -324,12 +324,13 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx).toMatchObject({ ok: true, eligible: true, reason: null, lastVisit: null, warnings: [] });
     expect(ctx.warningsUnavailable).toBeUndefined();
     expect(ctx.service).toMatchObject({ id: 'visit-1', customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1', serviceKey: 'tree_shrub_program' });
-    // October protocol: Snapshot and 8-0-12 palm — suggestions, no amounts
-    // invented. KPHITE (method unverified) and 13-0-13 (exact label needed;
-    // hold dose) are withheld.
+    // October protocol: Snapshot, 8-0-12 palm and 13-0-13 (label dose on the
+    // card, read 2026-10-22) — suggestions, no amounts invented. KPHITE (method
+    // unverified) is withheld.
     expect(ctx.monthProducts).toEqual([
       { productId: 'snapshot', method: 'granular_broadcast' },
       { productId: 'palm', method: 'granular_broadcast' },
+      { productId: 'orn', method: 'granular_broadcast' },
     ]);
     expect(ctx.products.map((p) => p.id)).toEqual(['snapshot', 'palm', 'orn', 'kphite']);
     expect(ctx.products.find((p) => p.id === 'kphite').tsFlags).toMatchObject({ needsIracFrac: true });
@@ -344,18 +345,37 @@ describe('buildTreeShrubFastContext', () => {
         { application_date: '2026-09-05', property_id: 'prop-1', product_name: 'Snapshot 2.5TG', application_rate: 2.3, rate_unit: 'lb' },
       ],
     }));
-    expect(ctx.monthProducts).toEqual([{ productId: 'palm', method: 'granular_broadcast' }]);
+    expect(ctx.monthProducts).toEqual([{ productId: 'palm', method: 'granular_broadcast' }, { productId: 'orn', method: 'granular_broadcast' }]);
     expect(ctx.monthProductHolds).toEqual([{ name: 'Snapshot 2.5TG', reason: 'Snapshot was applied less than 60 days ago.' }]);
   });
 
-  test('an unreadable application history holds Snapshot and the palm feed instead of suggesting them', async () => {
+  test('13-0-13 is held when the last one was under five months ago, and a palm feed does not hold it', async () => {
+    const run = (history) => buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [],
+      'property_application_history as pah': [],
+      'property_application_history as history': history,
+    }));
+    // Visit is 2026-10-01: a 13-0-13 on 2026-05-20 is 4 months 11 days back; a palm feed 2 weeks ago is a different rule.
+    const recent = await run([
+      { application_date: '2026-05-20', property_id: 'prop-1', product_name: 'LESCO 13-0-13 60% PolyPlus Landscape' },
+      { application_date: '2026-09-17', property_id: 'prop-1', product_name: 'LESCO 0-0-16 #510513' },
+    ]);
+    expect(recent.monthProducts.map((p) => p.productId)).toEqual(['snapshot']);
+    expect(recent.monthProductHolds).toEqual(expect.arrayContaining([
+      { name: 'LESCO 13-0-13 60% PolyPlus Landscape', reason: 'The last 13-0-13 application was less than five months ago.' },
+    ]));
+    const spaced = await run([{ application_date: '2026-04-20', property_id: 'prop-1', product_name: 'LESCO 13-0-13 60% PolyPlus Landscape' }]);
+    expect(spaced.monthProducts.map((p) => p.productId)).toContain('orn');
+  });
+
+  test('an unreadable application history holds Snapshot, the palm feed and 13-0-13 instead of suggesting them', async () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [],
       'property_application_history as pah': [],
       'property_application_history as history': new Error('db down'),
     }));
     expect(ctx.monthProducts).toEqual([]);
-    expect(ctx.monthProductHolds.map((h) => h.name)).toEqual(['Snapshot 2.5TG', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)']);
+    expect(ctx.monthProductHolds.map((h) => h.name)).toEqual(['Snapshot 2.5TG', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)', 'LESCO 13-0-13 60% PolyPlus Landscape']);
   });
 
   test('a summer visit in a blackout zone flags N/P fertilizer on the catalog rows', async () => {

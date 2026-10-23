@@ -2,6 +2,11 @@ const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const PALM = /(?:8[-–]0[-–]12|8[-–]2[-–]12|palm.*fertili|fertili.*palm|\b510513\b)/i;
 const PALM_ZERO_N_LEGACY = /^LESCO\s+0[-–]0[-–]16$/i;
+// The bed and tree fertilizer (LESCO 13-0-13, label read 2026-10-22). Its bag is titled "Palm & Tropical", so the
+// palm pattern above can match its name; it is a separate product with its own due rule and never a palm feeding.
+const ORNAMENTAL_13_0_13 = /\b13[-–]0[-–]13\b/;
+const ORNAMENTAL_MAX_PER_YEAR = 2;
+const ORNAMENTAL_MIN_MONTHS_APART = 5;
 const SNAPSHOT = /\bsnapshot\b/i;
 const MAX_SNAPSHOT_LB_PER_1000 = 600 / 43.56;
 
@@ -54,10 +59,20 @@ function snapshotRatePer1000(row) {
   return SNAPSHOT_LABEL_MAX_LB_PER_1000;
 }
 
+// June 1 through September 30 (Sarasota and Manatee landscape N/P blackout; an unknown zone gets the same rule).
+function inLandscapeNpBlackout(scheduledDate) {
+  const month = Number(String(etCalendarDayOf(scheduledDate)).slice(5, 7));
+  return month >= 6 && month <= 9;
+}
+
 function treeShrubDueReason(key, history, scheduledDate, propertyId) {
   const today = dayNumber(scheduledDate);
   if (!Number.isFinite(today) || !propertyId) return 'Confirm the service property and visit date.';
-  const matches = name => key === 'snapshot' ? SNAPSHOT.test(name) : PALM.test(name) || PALM_ZERO_N_LEGACY.test(name.trim());
+  const ornamental = key === 'f13013';
+  if (ornamental && inLandscapeNpBlackout(scheduledDate)) return '13-0-13 holds nitrogen, so it is not allowed June 1 to September 30.';
+  const matches = name => key === 'snapshot' ? SNAPSHOT.test(name)
+    : ornamental ? ORNAMENTAL_13_0_13.test(name)
+      : !ORNAMENTAL_13_0_13.test(name) && (PALM.test(name) || PALM_ZERO_N_LEGACY.test(name.trim()));
   // Only the past 12 months can affect a due decision. An older row (even an
   // unlinked one) never holds a suggestion; an undated row still does.
   const relevant = history.filter(row => matches(row.product_name || '') &&
@@ -70,6 +85,11 @@ function treeShrubDueReason(key, history, scheduledDate, propertyId) {
   // product by silently dropping a conflicting application date.
   if (relevant.some(row => dayNumber(row.application_date) >= today)) return 'An application is already recorded on or after this visit.';
   const annual = relevant.filter(row => today < monthsAfter(row.application_date, 12));
+  if (ornamental) {
+    if (annual.length >= ORNAMENTAL_MAX_PER_YEAR) return 'Two 13-0-13 applications are already recorded in the past year.';
+    if (annual.some(row => today < monthsAfter(row.application_date, ORNAMENTAL_MIN_MONTHS_APART))) return 'The last 13-0-13 application was less than five months ago.';
+    return null;
+  }
   if (annual.length >= 4) return 'Four applications are already recorded in the past year.';
   if (key === 'snapshot') {
     if (annual.some(row => today - dayNumber(row.application_date) < 60)) return 'Snapshot was applied less than 60 days ago.';
@@ -113,7 +133,7 @@ async function filterTreeShrubDefaults({ db, scheduled, entries }) {
   }
   const allowed = [], holds = [];
   for (const entry of entries) {
-    if (!['snapshot', 'f8012', 'f0016'].includes(entry.treeShrubKey)) continue;
+    if (!['snapshot', 'f8012', 'f0016', 'f13013'].includes(entry.treeShrubKey)) continue;
     const reason = treeShrubDueReason(entry.treeShrubKey, normalized, scheduled.scheduled_date, scheduled.property_id);
     if (reason) holds.push({ name: entry.name, reason });
     else allowed.push(entry);

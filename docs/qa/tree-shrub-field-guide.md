@@ -89,10 +89,12 @@ The owner merges; this lane stops before merge.
 
 ## Open content inputs
 
-Exact labels for 13-0-13, Sequestar and the kit copper (palm bud drench use); Mainspring program-range choice; and the later
+The exact label for the kit copper (palm bud drench use); Mainspring program-range choice; and the later
 March/May/October/November program decisions remain unresolved. Their
 holds are visible. Talus (residential use prohibited) and Headway (turf-only
 label) were removed from the program on 2026-10-05, with no replacement product. Both LESCO bag prices remain pending, never zero.
+
+The 13-0-13 bag and Sequestar labels were read on 2026-10-22. 13-0-13 is a primary line in April and October only, at the Waves rate of 0.75 lb per 100 sq ft of bed (below the bag's 1 to 1½ lb because of the county nitrogen limit). Sequestar is a symptom-only secondary line for iron chlorosis. The 13-0-13 due rule (at most two a year, five months apart, never June 1 to Sept. 30) lives in `tree-shrub-completion-defaults.js`.
 
 Label summaries and source URLs live together in
 `server/config/tree-shrub-field-guide.json`. The 8-0-12 bag manufacturer PDF

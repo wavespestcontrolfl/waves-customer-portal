@@ -380,13 +380,15 @@ async function loadRecentApplications(svc, visitDate, knex) {
 // visits start on the signup date, so any month can host a visit). Those
 // suggestions pass the same due rules as the full form's completion defaults
 // (filterTreeShrubDefaults: Snapshot 60 days / one per quarter / annual cap;
-// palm three months; at most four a year). A failed history read holds them,
+// palm three months; at most four a year; LESCO 13-0-13 at most twice a year,
+// 5 months apart, never June to September). A failed history read holds them,
 // never suggests them unchecked.
 function dueKeyFor(row) {
   const name = String(row?.name || '').trim();
   if (/^snapshot\s*2\.5\s*tg\b/i.test(name)) return 'snapshot';
   if (/^lesco\s+8-0-12\s+palm\b/i.test(name)) return 'f8012';
   if (/^lesco\s+0-0-16\s+palm\b/i.test(name)) return 'f0016';
+  if (/^lesco\s+13-0-13\b/i.test(name)) return 'f13013';
   return null;
 }
 
