@@ -18,6 +18,11 @@ jest.mock('../sockets', () => ({
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
 }));
+const mockFence = jest.fn(async () => {});
+jest.mock('../services/cancel-generation-fence', () => ({
+  assertCancelGeneration: (...a) => mockFence(...a),
+  isCancelFence: (err) => Boolean(err) && err.code === 'CANCEL_FENCE',
+}));
 
 const db = require('../models/db');
 const { sendTechArrived } = require('../services/twilio');
@@ -1270,5 +1275,68 @@ describe('future-scheduled-date stale-attempt guard', () => {
     expect(result).toEqual({ ok: false, reason: 'cannot_cancel_no_show' });
     expect(transitionJobStatus).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+});
+
+// The Intelligence Bar cancel recovery sweep passes cancelFence (services/cancel-generation-fence.js): cancel() would
+// cancel a LIVE visit, so with a fence it only ever finishes the cancellation the card approved.
+describe('cancel with a cancelFence (the cancel recovery sweep)', () => {
+  const FENCE = { visitId: 'job-1', since: new Date('2026-10-23T14:00:00Z'), hits: [] };
+  const refuse = (fenceReason) => Object.assign(new Error(`cancellation fence: ${fenceReason}`), { code: 'CANCEL_FENCE', fenceReason });
+  const svc = { id: 'job-1', customer_id: 'cust-1', technician_id: null, status: 'cancelled', track_state: 'scheduled' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFence.mockReset();
+    mockFence.mockResolvedValue(undefined);
+    db.raw = jest.fn(async () => ({ rows: [] }));
+    transitionJobStatus.mockReset().mockResolvedValue({});
+    getIo.mockReturnValue(socketStub());
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('a visit that is no longer the approved cancel is left alone: no transaction, no transition, no cascade', async () => {
+    mockFence.mockRejectedValueOnce(refuse('visit_is_confirmed'));
+    db.transaction = jest.fn(async (fn) => fn(db));
+    db.mockReturnValueOnce(query({ ...svc, status: 'confirmed' }));
+    const cascade = jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel');
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result).toEqual({ ok: false, reason: 'cancel_fence' });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(cascade).not.toHaveBeenCalled();
+  });
+
+  test('the fence is re-proved INSIDE the cancelling transaction, and the cascade carries it as parentFence', async () => {
+    const trackingUpdate = query(1);
+    const trx = jest.fn(() => trackingUpdate);
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    db.mockReturnValueOnce(query(svc));
+    const cascade = jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockResolvedValue(0);
+    const result = await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE });
+    expect(result.ok).toBe(true);
+    expect(mockFence).toHaveBeenCalledWith(db, FENCE);
+    expect(mockFence).toHaveBeenCalledWith(trx, FENCE);
+    expect(cascade).toHaveBeenCalledWith(expect.objectContaining({ parentServiceId: 'job-1', parentFence: FENCE }));
+  });
+
+  test('a restore that lands between the pre-check and the transaction stops the tracker write (the live visit is not cancelled)', async () => {
+    mockFence.mockResolvedValueOnce(undefined).mockRejectedValueOnce(refuse('visit_busy'));
+    const trackingUpdate = query(1);
+    const trx = jest.fn(() => trackingUpdate);
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    db
+      .mockReturnValueOnce(query(svc)) // loadService
+      .mockReturnValueOnce(query({ ...svc, status: 'confirmed' })); // the reconcile re-read after the refusal
+    await expect(trackTransitions.cancel('job-1', { reason: 'x', cancelFence: FENCE })).rejects.toMatchObject({ code: 'CANCEL_FENCE' });
+    expect(trackingUpdate.update).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('without a fence the cancel never consults it', async () => {
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    db.mockReturnValueOnce(query({ ...svc, status: 'confirmed' })).mockReturnValue(query([]));
+    await trackTransitions.cancel('job-1', { reason: 'x' });
+    expect(mockFence).not.toHaveBeenCalled();
   });
 });

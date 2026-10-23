@@ -190,6 +190,7 @@ async function claimNext(token) {
            AND created_at > now() - (? * interval '1 millisecond')
            AND attempts < ?
            AND (lease_until IS NULL OR lease_until < now())
+           AND (next_attempt_at IS NULL OR next_attempt_at <= now())
          ORDER BY created_at
          LIMIT 1
          FOR UPDATE SKIP LOCKED)
@@ -239,7 +240,7 @@ async function splitLinkedChildren(bundle) {
 }
 
 /** The follow-through call, with exactly the arguments the Dispatch handler's cancel branch passes. */
-function followThroughArgs(bundle, linkedChildren, reports) {
+function followThroughArgs(bundle, linkedChildren, reports, cancelFence = null) {
   return {
     targetIds: [bundle.scheduled_service_id],
     actorId: bundle.actor_id || null,
@@ -250,14 +251,33 @@ function followThroughArgs(bundle, linkedChildren, reports) {
     linkedChildReport: reports.linked,
     pinnedEffects: { [bundle.scheduled_service_id]: bundle.approved_money || {} },
     moneyReport: reports.money,
+    // Recovery only (the request is never fenced): every mutation re-proves the cancellation generation.
+    ...(cancelFence ? { cancelFence } : {}),
   };
+}
+
+// The visit changed under the recovery (restored, re-cancelled by another cancel, or gone): nothing more runs.
+class Abandon extends Error {
+  constructor(reason, partial = false) {
+    super(reason);
+    this.reason = reason;
+    this.partial = partial;
+  }
 }
 
 async function recoverFollowThrough(bundle, token) {
   const { runVisitCancellationFollowThrough } = require('./visit-cancellation-followthrough');
   const reports = { money: { skipped: [] }, linked: { skipped: [] } };
+  const fence = { visitId: bundle.scheduled_service_id, since: bundle.created_at, hits: [] };
   const { remaining, alreadyCancelled } = await splitLinkedChildren(bundle);
-  await runVisitCancellationFollowThrough(followThroughArgs(bundle, remaining, reports));
+  await runVisitCancellationFollowThrough(followThroughArgs(bundle, remaining, reports, fence));
+  if (fence.hits.length) {
+    // A mutation was refused. The visit is either no longer the approved cancel (abandon: some steps may already have
+    // run before it changed) or only busy because a restore is in flight (retry on the next pass, nothing is saved).
+    const standing = await cancelStillStands(bundle);
+    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
+    throw new Error(`the visit was busy (${fence.hits.join(', ')}); recovery will retry`);
+  }
   const outcome = {
     money_skipped: reports.money.skipped,
     linked_skipped: reports.linked.skipped,
@@ -316,6 +336,10 @@ async function recoverNotice(bundle, svc) {
   const AppointmentReminders = require('./appointment-reminders');
   const status = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id);
   if (status !== 'ready') return { done: true, outcome: NOTICE_TERMINAL_BY_STATUS[status] || NOTICE_TERMINAL_BY_STATUS.other };
+  // The money steps just ran and a restore may have landed since: re-prove the cancel before any customer text. (The
+  // send's own stamp is conditional on status 'cancelled', and a restore sheds the approved marker.)
+  const standing = await cancelStillStands(bundle);
+  if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true);
   return sendApprovedNotice(bundle, svc);
 }
 
@@ -462,7 +486,7 @@ async function finishRecovered(bundle, token, ft, notice) {
   });
 }
 
-async function finishAbandoned(bundle, token, reason) {
+async function finishAbandoned(bundle, token, reason, partial = false) {
   await assertStillOwned(bundle.id, token);
   const info = await visitInfo(bundle);
   await recordOnPendingAction(bundle, withVisitFacts({
@@ -470,13 +494,19 @@ async function finishAbandoned(bundle, token, reason) {
     appointment_id: bundle.scheduled_service_id,
     ran_dispatch_cancel: true,
     recovered_after_interruption: true,
-    warning: `The visit is no longer cancelled (${plain(reason)}), so the approved follow-on steps were NOT run. Check the visit's invoices, linked visits and message history.`,
+    warning: `The visit is no longer the cancelled visit the card approved (${plain(reason)}), so the approved follow-on steps were ${partial ? 'stopped' : 'NOT run'}. Check the visit's invoices, linked visits and message history.`,
   }, info));
   await tellOffice(bundle, info, {
     review: true,
     action: (name) => `check ${name}'s visit`,
-    why: 'The visit is no longer cancelled, so the approved cancel steps were not run.',
-    lines: [`Approved but not run: ${pinnedSummary(bundle)}.`, `Why: ${plain(reason)}.`],
+    why: partial
+      ? 'The visit was restored while its cancel steps ran, so the rest were stopped.'
+      : 'The visit is no longer cancelled, so the approved cancel steps were not run.',
+    lines: [
+      `Approved on the card: ${pinnedSummary(bundle)}.`,
+      `Why it stopped: ${plain(reason)}.`,
+      ...(partial ? ['Some steps may already have run before the change. Check the visit, its invoices and its linked visits.'] : []),
+    ],
   });
   await ownedUpdate(bundle.id, token, {
     status: 'abandoned', finished_at: db.fn.now(), finish_note: reason, lease_owner: null, lease_until: null,
@@ -490,24 +520,38 @@ async function runBundle(bundle, token) {
     await finishAbandoned(bundle, token, standing.reason);
     return 'abandoned';
   }
-  let ft = bundle.followthrough_done_at ? bundle.followthrough_outcome : null;
-  if (!bundle.followthrough_done_at) ft = await recoverFollowThrough(bundle, token);
-  let notice = bundle.notice_outcome || null;
-  if (!notice) {
-    const step = await recoverNotice(bundle, standing.svc);
-    if (!step.done) return 'deferred';
-    notice = step.outcome;
-    await ownedUpdate(bundle.id, token, { notice_outcome: JSON.stringify({ ...notice, by: 'sweep' }) });
+  try {
+    let ft = bundle.followthrough_done_at ? bundle.followthrough_outcome : null;
+    if (!bundle.followthrough_done_at) ft = await recoverFollowThrough(bundle, token);
+    let notice = bundle.notice_outcome || null;
+    if (!notice) {
+      const step = await recoverNotice(bundle, standing.svc);
+      if (!step.done) return 'deferred';
+      notice = step.outcome;
+      await ownedUpdate(bundle.id, token, { notice_outcome: JSON.stringify({ ...notice, by: 'sweep' }) });
+    }
+    await finishRecovered(bundle, token, ft || {}, notice);
+    return 'recovered';
+  } catch (err) {
+    if (!(err instanceof Abandon)) throw err;
+    await finishAbandoned(bundle, token, err.reason, err.partial);
+    return 'abandoned';
   }
-  await finishRecovered(bundle, token, ft || {}, notice);
-  return 'recovered';
 }
 
-// Frees the lease without counting a deferral against the attempts.
+// Frees the lease without counting a deferral against the attempts, and keeps the row out of every claim until the send
+// window opens: the money and linked work of other bundles must never queue behind a text that has to wait.
 async function releaseDeferred(bundle, token) {
+  const { nextSendWindowOpenET } = require('./messaging/send-window');
   await db(TABLE)
     .where({ id: bundle.id, lease_owner: token, status: 'pending' })
-    .update({ lease_owner: null, lease_until: null, attempts: db.raw('GREATEST(attempts - 1, 0)'), updated_at: db.fn.now() });
+    .update({
+      lease_owner: null,
+      lease_until: null,
+      next_attempt_at: nextSendWindowOpenET(new Date()),
+      attempts: db.raw('GREATEST(attempts - 1, 0)'),
+      updated_at: db.fn.now(),
+    });
 }
 
 async function releaseFailed(bundle, token, err) {

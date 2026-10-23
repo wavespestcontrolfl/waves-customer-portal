@@ -1678,6 +1678,9 @@ async function reverseInspectionCreditForBooking({
   // deferrals move no money and run as always. null = unpinned (every
   // other caller).
   pinnedReversalOfferIds = null,
+  // The Intelligence Bar cancel recovery sweep only (services/cancel-generation-fence.js): the reversal re-proves, inside
+  // its own transaction, that the booking is still the cancelled one the card approved.
+  cancelFence = null,
 }) {
   // Deliberately NOT gate-checked (Codex #3178 r3 P1): once an offer has
   // redeemed, its money is in the customer's general balance. Turning the
@@ -1746,6 +1749,7 @@ async function reverseInspectionCreditForBooking({
           continue;
         }
         await db.transaction(async (trx) => {
+          if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelFence);
           // Claim the reversal first: status-guarded so two cancellations
           // can't both give the money back — and bound to the LIFECYCLE this
           // sweep actually read (Codex #3178 r21 P1): a delayed attempt can

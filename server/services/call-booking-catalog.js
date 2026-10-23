@@ -913,6 +913,13 @@ async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want)
   if (money) throw changed(`money_added_${money}`);
 }
 
+// A typed refusal inside a child's transaction -> the reason the report carries; null = an unexpected failure.
+function childRefusalReason(err) {
+  if (err && err.code === 'LINKED_CHILD_CHANGED') return err.reason;
+  if (err && err.code === 'CANCEL_FENCE') return `parent_${err.fenceReason}`;
+  return null;
+}
+
 // actorId: the staff row cancelling the parent (a technicians.id, or null)
 // — rides into each child's history + the child's tech cancel card, so a
 // technician cancelling their own booking hears nothing about its follow-up
@@ -926,7 +933,10 @@ async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want)
 // lock and still matches the card (still a live linked follow-up, same status, date and service, no invoice of its
 // own); any other child, and any approved child that changed, is NOT cancelled and is listed in report.skipped
 // ({ id, reason }). Without approvedChildren every caller behaves exactly as before.
-async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null, packageOnly = false, approvedChildren = null, report = null }) {
+// parentFence (opt-in, the Intelligence Bar cancel recovery sweep, services/cancel-generation-fence.js): inside each child's
+// transaction the PARENT must still be the cancelled visit the card approved (FOR SHARE NOWAIT, so a restore in flight
+// skips the child instead of waiting); a child that fails it is NOT cancelled and is listed in report.skipped.
+async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null, packageOnly = false, approvedChildren = null, report = null, parentFence = null }) {
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
@@ -948,6 +958,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
     try {
       await conn.transaction(async (trx) => {
         if (approved) await assertApprovedChildUnchanged(trx, parentServiceId, child.id, approved.get(String(child.id)));
+        if (parentFence) await require('./cancel-generation-fence').assertCancelGeneration(trx, parentFence);
         await transitionJobStatus({
           jobId: child.id,
           fromStatus: child.status,
@@ -983,7 +994,8 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
       cancelled += 1;
       logger.info(`[call-booking] cancelled linked follow-up ${child.id} with parent ${parentServiceId}`);
     } catch (childErr) {
-      if (childErr && childErr.code === 'LINKED_CHILD_CHANGED') { skip(child.id, childErr.reason); continue; }
+      const refusal = childRefusalReason(childErr);
+      if (refusal) { skip(child.id, refusal); continue; }
       logger.error(`[call-booking] call follow-up cancel cascade failed for child ${child.id} of ${parentServiceId}: ${childErr.message}`);
       // Opt-in report: an approved linked visit that failed to cancel stays active, and the receipt must say so.
       if (approved && report && Array.isArray(report.skipped)) report.skipped.push({ id: child.id, reason: 'cancel_failed' });

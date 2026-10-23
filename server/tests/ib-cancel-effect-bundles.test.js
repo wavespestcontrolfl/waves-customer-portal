@@ -127,7 +127,8 @@ jest.mock('../models/db', () => {
         && new Date(b.created_at) <= new Date(mockNow.getTime() - svc.GRACE_MS)
         && new Date(b.created_at) > new Date(mockNow.getTime() - svc.HARD_STOP_MS)
         && b.attempts < svc.MAX_ATTEMPTS
-        && (!b.lease_until || new Date(b.lease_until) < mockNow))
+        && (!b.lease_until || new Date(b.lease_until) < mockNow)
+        && (!b.next_attempt_at || new Date(b.next_attempt_at) <= mockNow))
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0];
     if (candidate) Object.assign(candidate, { lease_owner: token, lease_until: new Date(mockNow.getTime() + leaseMs), attempts: candidate.attempts + 1 });
     return Promise.resolve({ rows: candidate ? [{ ...candidate }] : [] });
@@ -452,6 +453,8 @@ describe('the approved text is sent at most once and never when it cannot be pro
     expect(mockFollowThrough).toHaveBeenCalledTimes(1);
     expect(mockHandleCancellation).not.toHaveBeenCalled();
     expect(mockStore.bundles[0]).toMatchObject({ status: 'pending', attempts: 0, lease_owner: null, notice_outcome: null });
+    // Parked until the window opens (8 AM ET = 12:00Z), so the next passes do not claim it again tonight.
+    expect(new Date(mockStore.bundles[0].next_attempt_at).toISOString()).toBe('2026-10-24T12:00:00.000Z');
     expect(mockStore.bundles[0].followthrough_done_at).toBeTruthy();
     expect(mockRaised).toEqual([]);
     // Next morning: the money step is not redone, the text goes, the bundle completes.
@@ -577,5 +580,79 @@ describe('housekeeping and copy', () => {
     expect(svc.classifyNoticeOutcome({ notificationSent: true, notificationPartial: true, notificationError: 'one blocked' })).toMatchObject({ state: 'partial' });
     expect(svc.classifyNoticeOutcome({ notificationSent: false, notificationUncertain: true })).toMatchObject({ state: 'uncertain' });
     expect(svc.classifyNoticeOutcome({ notificationSent: false, notificationError: 'x' })).toMatchObject({ state: 'not_sent' });
+  });
+});
+
+describe('the recovery is fenced against a restore of the visit', () => {
+  test('the follow-through gets a fence for THIS cancellation: the visit and the instant the bundle was written', async () => {
+    const row = seedBundle();
+    await svc.sweepIbCancelBundles();
+    const { cancelFence } = mockFollowThrough.mock.calls[0][0];
+    expect(cancelFence).toEqual({ visitId: SERVICE, since: row.created_at, hits: [] });
+  });
+
+  test('a mutation refused because the visit was restored mid-recovery abandons the bundle, sends no text, and says steps may have run', async () => {
+    seedBundle();
+    mockFollowThrough.mockImplementationOnce(async ({ cancelFence }) => {
+      mockStore.visits[0].status = 'confirmed';
+      mockStore.history.push({ id: 9, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 1000) });
+      cancelFence.hits.push('visit_is_confirmed');
+    });
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary).toMatchObject({ abandoned: 1, recovered: 0, failed: 0 });
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'abandoned', followthrough_done_at: null });
+    expect(mockStore.bundles[0].finish_note).toBe('visit_is_confirmed_during_recovery');
+    expect(mockRaised[0].spec.severity).toBe('needs-you');
+    expect(mockRaised[0].opts.detail).toContain('Some steps may already have run');
+    expect(mockRecordResult.mock.calls[0][1].warning).toMatch(/stopped/);
+  });
+
+  test('a mutation refused only because a restore is in flight (visit busy) saves nothing and retries on the next pass', async () => {
+    seedBundle();
+    mockFollowThrough.mockImplementationOnce(async ({ cancelFence }) => { cancelFence.hits.push('visit_busy'); });
+    const first = await svc.sweepIbCancelBundles();
+    expect(first).toMatchObject({ failed: 1, recovered: 0 });
+    expect(mockStore.bundles[0]).toMatchObject({ status: 'pending', followthrough_done_at: null, lease_owner: null, attempts: 1 });
+    expect(mockRaised).toEqual([]);
+    const second = await svc.sweepIbCancelBundles();
+    expect(second).toMatchObject({ recovered: 1 });
+    expect(mockFollowThrough).toHaveBeenCalledTimes(2);
+  });
+
+  test('a restore that lands between the money steps and the text stops the text', async () => {
+    seedBundle();
+    mockFollowThrough.mockImplementationOnce(async () => {
+      mockStore.visits[0].status = 'confirmed';
+    });
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary).toMatchObject({ abandoned: 1 });
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(mockStore.bundles[0].finish_note).toBe('visit_is_confirmed_during_recovery');
+  });
+});
+
+describe('a deferred text never holds up other bundles', () => {
+  test('past the batch size, the parked bundles are skipped and the newer ones are worked in the next pass', async () => {
+    setNow(new Date('2026-10-24T05:00:00Z')); // 1:00 AM ET: the text must wait
+    for (let i = 1; i <= 12; i += 1) {
+      seedBundle({ id: `b${i}`, pending_action_id: `00000000-0000-4000-8000-0000000001${String(i).padStart(2, '0')}`, created_at: new Date(mockNow.getTime() - (60 - i) * MIN), lease_until: new Date(mockNow.getTime() - 30 * MIN) });
+    }
+    const first = await svc.sweepIbCancelBundles();
+    expect(first).toMatchObject({ deferred: 10 });
+    expect(mockFollowThrough).toHaveBeenCalledTimes(10);
+    const second = await svc.sweepIbCancelBundles();
+    // The ten parked bundles are not claimed again; the two newest get their money work now.
+    expect(second).toMatchObject({ deferred: 2 });
+    expect(mockFollowThrough).toHaveBeenCalledTimes(12);
+    expect(mockStore.bundles.every((b) => b.followthrough_done_at && !b.notice_outcome && new Date(b.next_attempt_at) > mockNow)).toBe(true);
+    // Morning: every parked text goes, the money work is not repeated.
+    setNow(new Date('2026-10-24T13:00:00Z'));
+    mockStore.visits[0].scheduled_date = '2026-10-30';
+    await svc.sweepIbCancelBundles();
+    await svc.sweepIbCancelBundles();
+    expect(mockFollowThrough).toHaveBeenCalledTimes(12);
+    expect(mockHandleCancellation).toHaveBeenCalledTimes(12);
+    expect(mockStore.bundles.every((b) => b.status === 'recovered')).toBe(true);
   });
 });

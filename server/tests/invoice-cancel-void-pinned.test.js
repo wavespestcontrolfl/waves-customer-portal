@@ -79,6 +79,9 @@ jest.mock('../services/stripe', () => ({
   assertNoInvoiceChargeReconciliationPending: (...a) => mockChargeFence(...a),
 }));
 
+const mockFence = jest.fn(async () => {});
+jest.mock('../services/cancel-generation-fence', () => ({ assertCancelGeneration: (...a) => mockFence(...a) }));
+
 const InvoiceService = require('../services/invoice');
 
 const deposit = (amt) => JSON.stringify([{ category: 'service', amount: 125 }, { category: 'deposit_credit', amount: -amt, estimate_id: 'est-1' }]);
@@ -92,6 +95,8 @@ beforeEach(() => {
   mockLockedOverride = {};
   mockOtherRows = {};
   mockUpdates.length = 0;
+  mockFence.mockReset();
+  mockFence.mockResolvedValue(undefined);
   jest.spyOn(InvoiceService, 'restoreRodentSetupObligationForReversedInvoice').mockResolvedValue(undefined);
 });
 
@@ -469,5 +474,48 @@ describe('combined-payment lock preparation failure', () => {
     expect(db.__lockTrx.commit).not.toHaveBeenCalled();
     expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
     expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
+  });
+});
+
+// Recovery sweep only (services/cancel-generation-fence.js): every void re-proves, inside its own transaction and under
+// the invoice row lock, that the visit is still the cancelled one the card approved; a pre-check keeps Stripe untouched.
+describe('cancelFence (the cancel recovery sweep)', () => {
+  const FENCE = { visitId: 'svc-1', since: new Date('2026-10-23T14:00:00Z'), hits: [] };
+  const refuse = (reason) => Object.assign(new Error(`cancellation fence: ${reason}`), { code: 'CANCEL_FENCE', fenceReason: reason });
+  const sweep = async () => {
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    require('../services/stripe').retrievePaymentIntent.mockClear(); // the card's preview looks the PaymentIntent up; the sweep must not
+    return InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned, pinnedCreditReversalOfferIds: ['offer-1'], cancelFence: FENCE });
+  };
+
+  test('a standing cancel is fenced twice per invoice (before Stripe, then in the locked transaction) and the fence reaches the credit reversal', async () => {
+    const voided = await sweep();
+    expect([...voided]).toEqual(['inv-a', 'inv-b']);
+    expect(mockFence).toHaveBeenCalledTimes(4);
+    expect(mockFence).toHaveBeenCalledWith(expect.anything(), FENCE);
+    expect(mockReverse).toHaveBeenCalledWith(expect.objectContaining({ pinnedReversalOfferIds: ['offer-1'], cancelFence: FENCE }));
+  });
+
+  test('a visit restored before the sweep: nothing is voided and no Stripe call is made', async () => {
+    mockFence.mockRejectedValue(refuse('visit_is_confirmed'));
+    mockInvoiceRows = [{ ...INV_B, stripe_payment_intent_id: 'pi_test' }];
+    const voided = await sweep();
+    expect([...voided]).toEqual([]);
+    expect(voidedIds()).toEqual([]);
+    expect(require('../services/stripe').retrievePaymentIntent).not.toHaveBeenCalled();
+  });
+
+  test('a restore that lands between the pre-check and the row lock stops the void inside its transaction', async () => {
+    mockFence.mockResolvedValueOnce(undefined).mockRejectedValueOnce(refuse('visit_busy'));
+    mockInvoiceRows = [INV_B];
+    const voided = await sweep();
+    expect([...voided]).toEqual([]);
+    expect(voidedIds()).toEqual([]);
+  });
+
+  test('without a fence nothing consults it (the request, Dispatch and every other caller are unchanged)', async () => {
+    await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
+    expect(mockFence).not.toHaveBeenCalled();
+    expect(Object.keys(mockReverse.mock.calls[0][0])).not.toContain('cancelFence');
   });
 });

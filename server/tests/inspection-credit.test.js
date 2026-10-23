@@ -18,6 +18,9 @@ jest.mock('../services/customer-credit', () => ({
   postCreditMovement: (...a) => mockPostCreditMovement(...a),
 }));
 
+const mockFence = jest.fn(async () => {});
+jest.mock('../services/cancel-generation-fence', () => ({ assertCancelGeneration: (...a) => mockFence(...a) }));
+
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'notif-1' }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...a) => mockNotifyAdmin(...a),
@@ -560,6 +563,33 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     const taken = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'] });
     expect(taken).toEqual({ reversed: 1 });
     expect(mockPostCreditMovement).toHaveBeenCalledWith(expect.objectContaining({ delta: -75 }), expect.anything());
+  });
+
+  // The cancel recovery sweep passes cancelFence (services/cancel-generation-fence.js): the credit goes back only while the
+  // booking is still the cancelled one the card approved, proved inside the reversal's own transaction.
+  it('a recovery reversal re-proves the cancellation inside its transaction before it moves any money', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    const fence = { visitId: 'svc-2', since: new Date(), hits: [] };
+    mockFence.mockReset();
+    const taken = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(taken).toEqual({ reversed: 1 });
+    expect(mockFence).toHaveBeenCalledWith(expect.anything(), fence);
+    // A visit restored meanwhile: the fence refuses, no claim, no ledger movement.
+    mockPostCreditMovement.mockClear();
+    mockUpdates.length = 0;
+    mockFence.mockRejectedValueOnce(Object.assign(new Error('cancellation fence: visit_is_confirmed'), { code: 'CANCEL_FENCE' }));
+    const refused = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(refused).toEqual({ reversed: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockUpdates).toEqual([]);
+    // No fence, no consultation (every other caller is unchanged).
+    mockFence.mockClear();
+    await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(mockFence).not.toHaveBeenCalled();
   });
 
   it('a lapsed offer closes out instead of dangling reopened', async () => {

@@ -5,6 +5,7 @@
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const migration = require('../models/migrations/20261023010000_ib_cancel_effect_bundles');
+const { assertCancelGeneration } = require('../services/cancel-generation-fence');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -27,7 +28,11 @@ jest.mock('../services/appointment-reminders', () => ({
   approvedCancellationNoticeStatus: async () => 'ready',
   handleCancellation: (...a) => mockHandleCancellation(...a),
 }));
-jest.mock('../services/messaging/send-window', () => ({ isWithinSendWindowET: () => true }));
+let mockWindowOpen = true;
+jest.mock('../services/messaging/send-window', () => ({
+  isWithinSendWindowET: () => mockWindowOpen,
+  nextSendWindowOpenET: () => new Date(Date.now() + 3 * 60 * 60 * 1000),
+}));
 const mockRecordResult = jest.fn(async () => true);
 jest.mock('../services/intelligence-bar/pending-actions', () => ({ recordResult: (...a) => mockRecordResult(...a) }));
 const mockRaise = jest.fn(async () => ({}));
@@ -69,6 +74,7 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockWindowOpen = true;
     await app(TABLE).del();
     await app('job_status_history').del();
     await app('scheduled_services').del();
@@ -173,6 +179,97 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
     expect(await svc.sweepIbCancelBundles()).toMatchObject({ abandoned: 1 });
     expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'abandoned', finish_note: 'visit_is_confirmed' });
     expect(mockFollowThrough).not.toHaveBeenCalled();
+  });
+
+
+  // ── The cancellation-generation fence, on real row locks ────────────────────────────────────────────────────
+  describe('cancel generation fence', () => {
+    const fenceFor = (since) => ({ visitId: visit, since, hits: [] });
+    const longAgo = () => new Date(Date.now() - 60 * 60 * 1000);
+    const restore = (conn) => conn('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+
+    test('a standing cancel passes; the share lock is held only for the transaction', async () => {
+      const fence = fenceFor(longAgo());
+      await app.transaction((trx) => assertCancelGeneration(trx, fence));
+      expect(fence.hits).toEqual([]);
+    });
+
+    test('a restored visit is refused, and so is one cancelled, restored and cancelled again', async () => {
+      const since = longAgo();
+      await restore(app);
+      await app('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() });
+      const restored = fenceFor(since);
+      await expect(app.transaction((trx) => assertCancelGeneration(trx, restored))).rejects.toMatchObject({ code: 'CANCEL_FENCE', fenceReason: 'visit_is_confirmed' });
+      await app('scheduled_services').where({ id: visit }).update({ status: 'cancelled' });
+      await app('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: app.fn.now() });
+      const again = fenceFor(since);
+      await expect(app.transaction((trx) => assertCancelGeneration(trx, again))).rejects.toMatchObject({ fenceReason: 'visit_restored_since' });
+      expect(again.hits).toEqual(['visit_restored_since']);
+    });
+
+    test('a restore in flight (row locked, uncommitted) fails at once with visit_busy instead of waiting', async () => {
+      const trxA = await app.transaction();
+      try {
+        await restore(trxA);
+        const fence = fenceFor(longAgo());
+        const started = Date.now();
+        await expect(app.transaction((trx) => assertCancelGeneration(trx, fence))).rejects.toMatchObject({ fenceReason: 'visit_busy' });
+        expect(Date.now() - started).toBeLessThan(2000);
+        expect(fence.hits).toEqual(['visit_busy']);
+      } finally {
+        await trxA.rollback();
+      }
+    });
+
+    test('while the fence transaction holds its share lock a restore WAITS, then sees the commit order', async () => {
+      const fence = fenceFor(longAgo());
+      const trxB = await app.transaction();
+      await assertCancelGeneration(trxB, fence);
+      let restored = false;
+      const restoring = restore(app).then(() => { restored = true; });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(restored).toBe(false);
+      await trxB.commit();
+      await restoring;
+      expect(restored).toBe(true);
+      expect((await app('scheduled_services').where({ id: visit }).first()).status).toBe('confirmed');
+    });
+  });
+
+  test('a visit restored while the recovery runs abandons the bundle and sends no text', async () => {
+    const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+    await ageBundle(id, 30);
+    mockFollowThrough.mockImplementationOnce(async ({ cancelFence }) => {
+      await app('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      await app('job_status_history').insert({ job_id: visit, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: app.fn.now() });
+      cancelFence.hits.push('visit_is_confirmed');
+    });
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ abandoned: 1, recovered: 0 });
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    expect(await app(TABLE).where({ id }).first()).toMatchObject({ status: 'abandoned', finish_note: 'visit_is_confirmed_during_recovery', followthrough_done_at: null });
+  });
+
+  test('a text parked for the send window is skipped by the claim, so other bundles are never starved', async () => {
+    mockWindowOpen = false;
+    const parked = [];
+    for (let i = 0; i < 12; i += 1) {
+      const id = await app.transaction((trx) => svc.insertBundle(trx, pins()));
+      await app(TABLE).where({ id }).update({ created_at: app.raw(`now() - interval '${60 - i} minutes'`), lease_until: app.raw("now() - interval '30 minutes'") });
+      parked.push(id);
+    }
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ deferred: 10 });
+    const rows = await app(TABLE).whereIn('id', parked).orderBy('created_at');
+    expect(rows.slice(0, 10).every((r) => r.next_attempt_at && r.attempts === 0 && r.lease_owner === null && r.followthrough_done_at)).toBe(true);
+    expect(await svc.sweepIbCancelBundles()).toMatchObject({ deferred: 2 });
+    expect(mockFollowThrough).toHaveBeenCalledTimes(12);
+    // Window open and the park time passed: the texts go, the money work is not repeated.
+    mockWindowOpen = true;
+    await app(TABLE).update({ next_attempt_at: app.raw("now() - interval '1 minute'") });
+    await svc.sweepIbCancelBundles();
+    await svc.sweepIbCancelBundles();
+    expect(mockFollowThrough).toHaveBeenCalledTimes(12);
+    expect(mockHandleCancellation).toHaveBeenCalledTimes(12);
+    expect((await app(TABLE).whereIn('id', parked)).every((r) => r.status === 'recovered')).toBe(true);
   });
 
   test('down drops the table and up builds it again', async () => {

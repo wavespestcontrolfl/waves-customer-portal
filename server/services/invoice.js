@@ -6117,6 +6117,9 @@ async function recheckAndVoidCancelledServiceCandidate(candidate, triagedPiId, c
       .forUpdate()
       .first();
     if (!locked) return { skipped: "invoice no longer exists" };
+    // Recovery sweep only: under the invoice lock, in this transaction, the visit must still be the cancelled one the
+    // card approved (a restore waits for this transaction or has already committed). NOWAIT: no lock-order deadlock.
+    if (ctx.cancelFence) await require("./cancel-generation-fence").assertCancelGeneration(trx, ctx.cancelFence);
     const stateSkip = ctx.refusedSendCleanup
       ? await refusedSendCleanupSkip(trx, locked, ctx)
       : await lockedCandidateSkip(trx, locked, ctx);
@@ -6189,6 +6192,9 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
   // Pinned path only: the combined-payment lock, held until this candidate is settled.
   let combinedLock = null;
   try {
+    // Recovery sweep only: no Stripe call for a visit that is no longer the cancelled one (the locked check below is
+    // the guard of the void itself).
+    if (ctx.cancelFence) await require("./cancel-generation-fence").assertCancelGeneration(db, ctx.cancelFence);
     const gate = await pinnedCandidateGate(candidate, ctx);
     combinedLock = gate.combinedLock;
     if (gate.skip) return null;
@@ -6247,7 +6253,7 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
 }
 
 // Inspection-credit reversal after the sweep (see the call site); sets voided.inspectionCreditReversal. Never throws.
-async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds) {
+async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds, cancelFence = null) {
   try {
     // Surfaced for callers that COUNT reversals (the hourly sweep,
     // which now routes through this seam - Codex #3178 r33 P2): a
@@ -6257,6 +6263,7 @@ async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId
       scheduledServiceId,
       createdBy: 'system:inspection_credit_cancellation_void_hook',
       ...(pinnedCreditReversalOfferIds ? { pinnedReversalOfferIds: pinnedCreditReversalOfferIds } : {}),
+      ...(cancelFence ? { cancelFence } : {}),
     });
     voided.inspectionCreditReversal = rev;
   } catch (revErr) {
@@ -13731,7 +13738,7 @@ const InvoiceService = {
    */
   async voidOpenInvoicesForCancelledService(
     scheduledServiceId,
-    { invoiceId = null, refusedClaimToken = null, pinnedInvoices = null, pinnedCreditReversalOfferIds = null } = {},
+    { invoiceId = null, refusedClaimToken = null, pinnedInvoices = null, pinnedCreditReversalOfferIds = null, cancelFence = null } = {},
   ) {
     const voided = [];
     if (!scheduledServiceId) return voided;
@@ -13746,7 +13753,9 @@ const InvoiceService = {
         scheduledServiceId, invoiceId, refusedClaimToken, refusedSendCleanup, pinnedById,
       });
       if (candidates.length === 0) return voided;
-      const ctx = { scheduledServiceId, refusedSendCleanup, refusedClaimToken, pinnedById, pinnedMismatch, StripeService: require("./stripe") };
+      // cancelFence (the Intelligence Bar cancel recovery sweep only): each void re-proves, inside its own transaction,
+      // that the visit is still the cancelled one the card approved (services/cancel-generation-fence.js).
+      const ctx = { scheduledServiceId, refusedSendCleanup, refusedClaimToken, pinnedById, pinnedMismatch, cancelFence, StripeService: require("./stripe") };
       for (const candidate of candidates) {
         const voidedId = await voidOneCancelledServiceCandidate(candidate, ctx);
         if (voidedId) voided.push(voidedId);
@@ -13766,7 +13775,7 @@ const InvoiceService = {
       // early return too - a cancel with nothing to void still reverses.
       // Idempotent and never throws; the hourly sweep stays as recovery.
       if (!refusedSendCleanup || voided.includes(invoiceId)) {
-        await reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds);
+        await reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId, pinnedCreditReversalOfferIds, cancelFence);
       }
     }
     return voided;

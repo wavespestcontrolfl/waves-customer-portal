@@ -22,6 +22,9 @@
  *    cancelled: nothing run, reported).
  *  - lease_owner / lease_until: one runner at a time. The request takes a 'request' lease as a heartbeat; a sweep
  *    claims with FOR UPDATE SKIP LOCKED and a random token, and only the holder of the token writes results.
+ *  - next_attempt_at: when only the customer text has to wait (the 8 AM to 8 PM send window is closed), the sweep sets
+ *    this to the next window opening and the claim skips the row until then, so the money and linked work of other
+ *    bundles never queue behind a deferred text. NULL = claimable now.
  *  - followthrough_done_at / followthrough_outcome: the money and linked-visit step; notice_outcome: the text step.
  *    Each is written the moment its step ends, so a crashed sweep resumes without redoing a finished step.
  */
@@ -43,6 +46,7 @@ exports.up = async function up(knex) {
     t.text('lease_owner');
     t.timestamp('lease_until', { useTz: true });
     t.integer('attempts').notNullable().defaultTo(0);
+    t.timestamp('next_attempt_at', { useTz: true });
     t.timestamp('followthrough_done_at', { useTz: true });
     t.jsonb('followthrough_outcome');
     t.jsonb('notice_outcome');

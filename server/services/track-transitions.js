@@ -1530,11 +1530,13 @@ async function markComplete(serviceId, opts = {}) {
 // also runs on the already-cancelled/0-row retry paths — a prior attempt
 // may have cancelled the tracker but died before reaching the cascade,
 // which would otherwise strand the follow-up active forever.
-async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null) {
+async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = null, cancelFence = null) {
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
     await cancelCallFollowUpsForParentCancel({
       conn: db, parentServiceId: serviceId, actorId,
+      // Recovery sweep only: each child's cancel re-proves the parent is still the cancelled one the card approved.
+      ...(cancelFence ? { parentFence: cancelFence } : {}),
       // Opt-in (the Intelligence Bar cancel card): only the approved linked visits, each re-checked under its lock.
       ...(approval ? { approvedChildren: approval.linkedChildren, report: approval.linkedChildReport } : {}),
     });
@@ -1550,10 +1552,22 @@ async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = n
  * Admin-only cancel. Extends token expiry to NOW()+24h so the customer
  * can still see the cancelled state for a day.
  */
-async function cancel(serviceId, { reason, actorId, linkedChildren = null, linkedChildReport = null } = {}) {
+// cancelFence (the Intelligence Bar cancel recovery sweep only, services/cancel-generation-fence.js): this function
+// would cancel a LIVE visit, so with a fence it only ever finishes the cancellation the card approved. A visit
+// restored since is left alone ({ ok: false, reason: 'cancel_fence' }), re-proved inside the cancelling transaction.
+async function cancel(serviceId, { reason, actorId, linkedChildren = null, linkedChildReport = null, cancelFence = null } = {}) {
   const approval = Array.isArray(linkedChildren) ? { linkedChildren, linkedChildReport } : null;
   let svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  if (cancelFence) {
+    const { assertCancelGeneration, isCancelFence } = require('./cancel-generation-fence');
+    try {
+      await assertCancelGeneration(db, cancelFence);
+    } catch (err) {
+      if (isCancelFence(err)) return { ok: false, reason: 'cancel_fence' };
+      throw err;
+    }
+  }
   if (svc.status === 'completed') return { ok: false, reason: 'cannot_cancel_complete' };
   if (svc.status === 'skipped') return { ok: false, reason: 'cannot_cancel_skipped' };
   if (svc.status === 'no_show') return { ok: false, reason: 'cannot_cancel_no_show' };
@@ -1561,7 +1575,7 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
     // Continue below when an older writer advanced only track_state; the
     // canonical status transition will repair it and append history.
     if (svc.status === 'cancelled') {
-      await cascadeCallFollowUpCancel(serviceId, actorId, approval);
+      await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
       emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
       return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
     }
@@ -1572,6 +1586,7 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
 
   const { transitionJobStatus } = require('./job-status');
   const persistCancellation = async (current, now, expiry) => db.transaction(async (trx) => {
+    if (cancelFence) await require('./cancel-generation-fence').assertCancelGeneration(trx, cancelFence);
     if (current.status !== 'cancelled') {
       if (!['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'].includes(current.status)) {
         const invalid = new Error(`cannot cancel service from operational status ${current.status}`);
@@ -1631,7 +1646,7 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
   }
 
   if (svc.track_state === 'cancelled') {
-    await cascadeCallFollowUpCancel(serviceId, actorId, approval);
+    await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
     emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
     return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
@@ -1646,7 +1661,7 @@ async function cancel(serviceId, { reason, actorId, linkedChildren = null, linke
       logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
     }
   }
-  await cascadeCallFollowUpCancel(serviceId, actorId, approval);
+  await cascadeCallFollowUpCancel(serviceId, actorId, approval, cancelFence);
   emitCustomerTrackRefresh(svc, 'cancelled', now);
   return {
     ok: true,
