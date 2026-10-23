@@ -852,6 +852,18 @@ describe('runDeterministicMatching', () => {
     expect(sugOf(flagged).reason).toMatch(/internal transfer/);
     expect(String(flagged.patch.suggestion.sql)).toContain("- 'rule'");
     expect(String(flagged.patch.suggestion.sql)).toContain("- 'rulesAt'");
+    // an owner EXPENSE rule's override (category, examined) goes the same way with the ledger off:
+    // nothing a rule wrote may stay visible or drive Create expense through the kill switch
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank', suggestion: { examined: true, rule: { id: 'r-owner', kind: 'expense', source: 'owner' }, categoryId: 'cat-1', categoryName: 'Supplies', irsLine: '22', categorySource: 'rule', rulesAt: 'x' } }];
+    state.updates = [];
+    expect((await runDeterministicMatching()).transferFlagged).toBe(1);
+    const replaced = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    for (const k of ['rule', 'rulesAt', 'examined', 'categoryId', 'categoryName', 'irsLine', 'categorySource']) expect(String(replaced.patch.suggestion.sql)).toContain(`- '${k}'`);
+    // a model's category is not the ledger's: it stays
+    state.bankRows = [{ id: 'bt-3', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank', suggestion: { ignore: true, reason: 'rule', rule: { id: 'r-t', kind: 'transfer', source: 'seed' }, categoryId: 'cat-ai', categorySource: 'ai' } }];
+    state.updates = [];
+    expect((await runDeterministicMatching()).transferFlagged).toBe(1);
+    expect(String(state.updates.find(u => sugOf(u) && sugOf(u).ignore).patch.suggestion.sql)).not.toContain("- 'categoryId'");
     delete process.env.GATE_BANK_IMPORT;
   });
 

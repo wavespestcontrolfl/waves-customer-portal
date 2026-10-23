@@ -1370,10 +1370,18 @@ function transferFlagWanted(sug, ledgerOn) {
   const ruleIgnore = !!sug.ignore && !!sug.rule;   // a transfer RULE's flag: hidden from Bank Import while the ledger is off
   return !matcherIgnore && !(ledgerOn && (ruleIgnore || sug.examined));
 }
-// With the ledger off, the matcher's flag REPLACES a transfer rule's: the
-// rule's keys go with it (its stamp too, so the rule pass re-applies the
-// rule when the ledger is on again) and the row reads as matcher-flagged.
-function ruleKeysToDrop(sug, ledgerOn) { return !ledgerOn && sug && sug.rule ? ['rule', 'rulesAt'] : []; }
+// With the ledger off, the matcher's flag REPLACES a rule's reading: every
+// key a rule owns goes with it (tax-ledger-rules CLASSIFICATION_KEYS minus
+// the flag the matcher is writing and the decision keys a rule never
+// writes; the stamp too, so the rule pass re-applies the rule when the
+// ledger is on again). A category only goes when a rule wrote it: a model's
+// (categorySource 'ai') is not the ledger's.
+const LEDGER_RULE_KEYS = ['rule', 'rulesAt', 'examined', 'personal', 'income', 'review', 'note'];
+const LEDGER_RULE_CATEGORY_KEYS = ['categoryId', 'categoryName', 'irsLine', 'categorySource'];
+function ruleKeysToDrop(sug, ledgerOn) {
+  if (ledgerOn || !sug || !sug.rule) return [];
+  return sug.categorySource === 'rule' ? [...LEDGER_RULE_KEYS, ...LEDGER_RULE_CATEGORY_KEYS] : LEDGER_RULE_KEYS;
+}
 const NO_DECISION_SQL = "(suggestion is null or (suggestion -> 'decision') is null)";
 // An Income decision from the ledger Inbox holds against the matcher: the
 // row stays open on its shelf, is never read by a pass, and every per-row
@@ -1995,6 +2003,8 @@ async function ledgerCoverage(year) {
 }
 
 module.exports = {
+  LEDGER_RULE_KEYS,
+  LEDGER_RULE_CATEGORY_KEYS,
   parseStatementCsv,
   withRowHashes,
   hashRow,

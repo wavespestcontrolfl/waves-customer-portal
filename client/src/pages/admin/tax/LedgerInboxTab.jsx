@@ -399,7 +399,10 @@ export default function LedgerInboxTab() {
   const [categoryAttempt, setCategoryAttempt] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [busyId, setBusyId] = useState(null);
+  // one entry per row with a request in flight: acting on row B must not
+  // re-enable row A while A's request is still running
+  const [busyIds, setBusyIds] = useState(() => new Set());
+  const setBusy = (id, on) => setBusyIds((prev) => { const next = new Set(prev); if (on) next.add(id); else next.delete(id); return next; });
   const [rowErrors, setRowErrors] = useState({});
   const [notice, setNotice] = useState("");
   const [showRules, setShowRules] = useState(false);
@@ -457,7 +460,7 @@ export default function LedgerInboxTab() {
       setRowErrors((p) => ({ ...p, [row.id]: "Choose a category first." }));
       return;
     }
-    setBusyId(row.id);
+    setBusy(row.id, true);
     setRowErrors((p) => ({ ...p, [row.id]: "" }));
     try {
       // the server answers propagated:false when the Always rule was saved
@@ -492,7 +495,7 @@ export default function LedgerInboxTab() {
     } catch (e) {
       setRowErrors((p) => ({ ...p, [row.id]: e.message }));
     } finally {
-      setBusyId(null);
+      setBusy(row.id, false);
     }
   };
 
@@ -543,7 +546,7 @@ export default function LedgerInboxTab() {
           row={r}
           view={view}
           categories={categories}
-          busy={busyId === r.id}
+          busy={busyIds.has(r.id)}
           error={rowErrors[r.id]}
           onAct={act}
         />

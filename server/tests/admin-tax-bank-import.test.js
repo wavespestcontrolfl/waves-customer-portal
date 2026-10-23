@@ -1297,6 +1297,8 @@ describe('AI suggest eligibility follows the ledger kill switch', () => {
     const body = await res.json();
     expect(body.results[0]).toEqual({ id: 'bt-7', applied: false, error: expect.stringMatching(/classified or settled meanwhile/) });
     expect(state.bankUpdates[0].wheres).toContainEqual([expect.stringContaining("coalesce(suggestion->>'personal','') <> 'true'"), undefined]);
+    // and the category eligibility: a rule category that landed during the model call is not overwritten
+    expect(state.bankUpdates[0].wheres).toContainEqual(["(suggestion is null or (suggestion->>'categoryId') is null)", undefined]);
     state.bankUpdateResult = 1;
     delete process.env.GATE_TAX_LEDGER;
   });

@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import LedgerInboxTab from './LedgerInboxTab.jsx';
 
 const categories = [
@@ -202,6 +202,32 @@ it('an Always decision whose payee pass stopped short (propagated:false) keeps t
   fireEvent.click(screen.getByRole('button', { name: 'Personal' }));
   expect(await screen.findByText(/Decision saved, but not every open row of this payee was updated yet\. Click Apply rules now to finish\./)).toBeInTheDocument();
   expect(calls.find((c) => c.url.includes('/ledger/decide')).body).toEqual({ id: 'row-1', decision: 'personal', always: true });
+});
+
+it('a row stays busy until its own request finishes, whatever happens on another row', async () => {
+  const base = fetch;
+  let resolveFirst;
+  const second = { ...row, id: 'row-2', description: 'OTHER SHOP 55' };
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/inbox')) return json({ rows: [row, second], total: 2 });
+    if (u.includes('/ledger/decide')) {
+      const body = JSON.parse(opts.body);
+      if (body.id === 'row-1') return new Promise((r) => { resolveFirst = () => r(json({ success: true, action: 'ignored', ruleCreated: false })); });
+      return json({ success: true, action: 'ignored', ruleCreated: false });
+    }
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByText('OTHER SHOP 55');
+  const personal = (id) => within(screen.getByTestId(`ledger-row-${id}`)).getByRole('button', { name: 'Personal' });
+  fireEvent.click(personal('row-1'));
+  await waitFor(() => expect(personal('row-1')).toBeDisabled());
+  fireEvent.click(personal('row-2'));
+  await waitFor(() => expect(screen.queryByText('OTHER SHOP 55')).not.toBeInTheDocument());
+  expect(personal('row-1')).toBeDisabled(); // still in flight
+  await act(async () => { resolveFirst(); });
+  await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
 });
 
 it('a money-out row offers no Income button', async () => {

@@ -213,6 +213,9 @@ describe('patternFromDescription', () => {
     ['ACH DEBIT 1234 ACME', '\\bacme\\b'],
     ['ACH DEBIT 1234', null],
     ['1234567 ##', null],
+    ['DBT CRD 1234 WAWA', '\\bwawa\\b'],
+    ['DBT CRD 1234', null],
+    ['CHKCARD PURCH AUTH 0617 SHELL OIL', '\\bshell\\W*oil\\b'],
     // a digit glued to the payee sits inside the word boundary: the rule tolerates a digit run there
     ['GOOGLE *ADS1234567', '\\bgoogle\\W*ads\\d*\\b'],
     ['1PASSWORD', '\\b\\d*password\\b'],
@@ -273,6 +276,18 @@ describe('seed rules', () => {
     expect(hit).not.toBeNull();
     expect(hit.kind).toBe(kind);
     expect(hit.category || null).toBe(category);
+  });
+});
+
+describe('the matcher knows every key a rule owns', () => {
+  test('bank-import drops, with the ledger off, every classification key a rule can write', () => {
+    // read as text: the matcher module pulls the real db at load time
+    const src = require('fs').readFileSync(require.resolve('../services/bank-import'), 'utf8');
+    const list = (name) => JSON.parse(src.match(new RegExp(`const ${name} = (\\[[^\\]]*\\])`))[1].replace(/'/g, '"'));
+    const dropped = new Set([...list('LEDGER_RULE_KEYS'), ...list('LEDGER_RULE_CATEGORY_KEYS')]);
+    const ruleWritten = svc.CLASSIFICATION_KEYS.filter((k) => !['ignore', 'reason', 'decision', 'decidedAt'].includes(k));
+    for (const k of ruleWritten) expect([k, dropped.has(k)]).toEqual([k, true]);
+    expect(dropped.has('examined')).toBe(true);
   });
 });
 

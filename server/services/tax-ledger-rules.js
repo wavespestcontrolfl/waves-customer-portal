@@ -242,7 +242,9 @@ const PREFIX_RE = /^(debit card purchase - |digital card purchase - |recurring p
 const STOP = new Set(['the', 'and', 'inc', 'llc', 'ltd', 'corp', 'com', 'www', 'net', 'org', 'card', 'checkcard', 'check', 'chk', 'purchase', 'payment', 'pmt', 'pymt',
   'online', 'store', 'ach', 'debit', 'credit', 'web', 'pos', 'visa', 'mastercard', 'authorized', 'recurring', 'autopay', 'mobile', 'digital', 'transfer', 'xfer',
   'withdrawal', 'deposit', 'zelle', 'money', 'sent', 'received', 'from', 'ppd', 'des', 'ref', 'trace', 'bill', 'pay', 'epay', 'electronic', 'eft', 'intl', 'fee', 'des',
-  'tst', 'sq', 'paypal', 'pp', 'apl', 'amzn']);
+  'tst', 'sq', 'paypal', 'pp', 'apl', 'amzn',
+  // more statement framing ("DBT CRD 1234 WAWA", "CHKCARD", "PURCH AUTH"): never a payee
+  'dbt', 'crd', 'crdt', 'dbit', 'chkcard', 'chkcrd', 'purch', 'auth', 'pin', 'sig', 'tran', 'trn', 'txn', 'pending', 'temp', 'hold', 'recur']);
 const TOKEN_RE = /[a-z][a-z&'.\-]*/g;
 const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function patternFromDescription(description) {

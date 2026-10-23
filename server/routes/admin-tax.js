@@ -2346,7 +2346,7 @@ router.post('/bank-import/suggest', async (req, res, next) => {
           // the eligibility is repeated at the write: a ledger pass can mark
           // the row personal or a transfer during the model call, and an AI
           // category on top of that would recreate the contradiction
-          const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(notIgnored).update({
+          const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(noCategory).whereRaw(notIgnored).update({
             // provenance moves to the model: a category a ledger rule wrote
             // before is replaced, and the kill switch no longer owns it
             suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null })]),
