@@ -35,9 +35,32 @@ const v13WithoutAddOns = Object.fromEntries(Object.entries(v13).map(([track, pro
   { ...program, visits: program.visits.map((visit) => (visit.addOns ? (({ addOns, ...rest }) => rest)(visit) : visit)) },
 ]));
 
+// GATE_LAWN_RECLAIMED_HALF_N: the two reclaimed-water sentences of the recipe (every track's notes[2] and safety_rules[6]) say what the TECH does.
+// The JSON holds the wording that is true with the gate off ("the app does not adjust it yet"); with the gate on, the reader gets the wording
+// that is true when the app halves the N (and names the two bags that keep their full rate). Swapped by exact sentence, so a recipe edit that
+// rewords one of them fails the test that pins the pair instead of silently serving the old text.
+const RECLAIMED_WORDING = Object.freeze([
+  [
+    'Reclaimed-water lawns (purple pipes or caps): the tech logs half the N at every N visit; the app does not adjust it yet.',
+    'Reclaimed-water lawns (purple pipes or caps) get half the N at every N visit, except bags that carry the pre-emergent or the winter potassium, which keep their full rate. A line that shows "Reclaimed water: half nitrogen today" is already halved by the app; otherwise the tech logs half.',
+  ],
+  [
+    'the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).',
+    'reclaimed-water lawns get half the N at every N visit, except bags that carry the pre-emergent or the winter potassium, which keep their full rate. A line that shows "Reclaimed water: half nitrogen today" is already halved by the app; otherwise the tech logs half.',
+  ],
+]);
+const reword = (line) => RECLAIMED_WORDING.reduce((text, [from, to]) => text.replace(from, to), line);
+const withReclaimedWording = (program) => Object.fromEntries(Object.entries(program).map(([track, recipe]) => [track, {
+  ...recipe, notes: recipe.notes.map(reword), safety_rules: recipe.safety_rules.map(reword),
+}]));
+const v13Reclaimed = withReclaimedWording(v13);
+const v13WithoutAddOnsReclaimed = withReclaimedWording(v13WithoutAddOns);
+
 function lawnProtocols() {
   if (!featureGates.lawnV13Live?.()) return protocols.lawn;
-  return featureGates.lawnBermudaRemovalLive?.() === true ? v13 : v13WithoutAddOns;
+  const reclaimed = featureGates.lawnReclaimedHalfNLive?.() === true;
+  if (featureGates.lawnBermudaRemovalLive?.() === true) return reclaimed ? v13Reclaimed : v13;
+  return reclaimed ? v13WithoutAddOnsReclaimed : v13WithoutAddOns;
 }
 
 // v13 is one program for every grass, still filed under the three track keys.

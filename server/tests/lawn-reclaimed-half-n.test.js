@@ -269,13 +269,61 @@ describe('the property read (isReclaimedService)', () => {
   });
 });
 
-describe('the recipe text', () => {
-  test('all three tracks say the amount is set by the app when the property is marked reclaimed (true with the gate off or on: it names the line note, not the property mark), and no track says the app does not adjust it', () => {
+describe('the recipe text the readers get (lawnProtocols), true with the gate off and on', () => {
+  const programs = require('../services/lawn-program');
+  const OFF_NOTE = 'Reclaimed-water lawns (purple pipes or caps): the tech logs half the N at every N visit; the app does not adjust it yet.';
+  const OFF_RULE = 'N and P blackout Jun 1 - Sep 30 (North Port Apr 1); the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).';
+  const NEW = 'get half the N at every N visit, except bags that carry the pre-emergent or the winter potassium, which keep their full rate. A line that shows "Reclaimed water: half nitrogen today" is already halved by the app; otherwise the tech logs half.';
+  const ON_NOTE = `Reclaimed-water lawns (purple pipes or caps) ${NEW}`;
+  const ON_RULE = `N and P blackout Jun 1 - Sep 30 (North Port Apr 1); reclaimed-water lawns ${NEW}`;
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_BERMUDA_REMOVAL'];
+  const savedGates = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
+  afterEach(() => { for (const name of GATES) { if (savedGates[name] === undefined) delete process.env[name]; else process.env[name] = savedGates[name]; } });
+
+  test('the recipe file holds the original, gate-off wording in every track (and states no future behavior)', () => {
     for (const track of Object.values(v13)) {
-      const exact = 'get half the N at every N visit, except bags that carry the pre-emergent or the winter potassium, which keep their full rate. A line that shows "Reclaimed water: half nitrogen today" is already halved by the app; otherwise the tech logs half.';
-      expect(track.notes.join(' ')).toContain(`Reclaimed-water lawns (purple pipes or caps) ${exact}`);
-      expect(track.safety_rules[6]).toContain(`reclaimed-water lawns ${exact}`);
-      expect(JSON.stringify(track)).not.toContain('does not adjust it yet');
+      expect(track.notes[2]).toContain(OFF_NOTE);
+      expect(track.safety_rules[6]).toBe(OFF_RULE);
     }
+    expect(JSON.stringify(v13)).not.toMatch(/winter potassium|half nitrogen today/);
+  });
+
+  test.each([['bermuda removal off', undefined], ['bermuda removal on', 'true']])('%s: the gate off serves the original text, the gate on the new text, in every track; nothing else differs', (_label, removal) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    if (removal) process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true'; else delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
+    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+    const off = programs.lawnProtocols();
+    process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
+    const on = programs.lawnProtocols();
+    expect(on).not.toBe(off);
+    for (const track of Object.keys(v13)) {
+      expect(off[track].notes[2]).toContain(OFF_NOTE);
+      expect(off[track].safety_rules[6]).toBe(OFF_RULE);
+      expect(on[track].notes[2]).toContain(ON_NOTE);
+      expect(on[track].safety_rules[6]).toBe(ON_RULE);
+      expect(on[track].notes[2]).not.toMatch(/does not adjust it yet/);
+      const strip = (program) => ({ ...program[track], notes: program[track].notes.filter((_l, i) => i !== 2), safety_rules: program[track].safety_rules.filter((_l, i) => i !== 6) });
+      expect(strip(on)).toEqual(strip(off));
+    }
+  });
+
+  test('the original text is the object the readers held before when bermuda removal is on (identity kept), and the variant is memoized', () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
+    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+    expect(programs.lawnProtocols()).toBe(v13);
+    process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
+    expect(programs.lawnProtocols()).toBe(programs.lawnProtocols());
+  });
+
+  test('strict opt-in: only exactly true swaps the wording, and GATE_LAWN_V13 off serves the old program regardless', () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    for (const value of ['TRUE', '1', 'false', '']) {
+      process.env.GATE_LAWN_RECLAIMED_HALF_N = value;
+      expect(programs.lawnProtocols().bermuda.notes[2]).toContain(OFF_NOTE);
+    }
+    process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
+    delete process.env.GATE_LAWN_V13;
+    expect(JSON.stringify(programs.lawnProtocols())).not.toContain('Reclaimed water: half nitrogen today');
   });
 });

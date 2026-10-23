@@ -6,7 +6,8 @@
  * on our own copy: nothing about a property (no coordinate, address or id) is ever sent to the county service. The only
  * outbound request is the constant query below, so the test asserts the URL and headers carry no property data.
  *
- * Sarasota and Charlotte publish no such layer, so a property outside the Manatee extent gets no automatic value. An
+ * Sarasota and Charlotte publish no such layer, and a miss in Manatee proves nothing either, so the county only ever says YES (a property at a meter);
+ * every other property keeps no county value. An
  * office or customer value (reclaimed_water_source 'office' or 'customer') is never overwritten by this job.
  */
 const defaultDb = require('../models/db');
@@ -137,15 +138,12 @@ const cellOf = (value) => Math.floor(value / CELL_DEG);
 
 function buildIndex(meters) {
   const cells = new Map();
-  let minLat = Infinity; let maxLat = -Infinity; let minLng = Infinity; let maxLng = -Infinity;
   for (const m of meters) {
     const key = `${cellOf(m.lat)}:${cellOf(m.lng)}`;
     if (!cells.has(key)) cells.set(key, []);
     cells.get(key).push(m);
-    minLat = Math.min(minLat, m.lat); maxLat = Math.max(maxLat, m.lat);
-    minLng = Math.min(minLng, m.lng); maxLng = Math.max(maxLng, m.lng);
   }
-  return { cells, extent: meters.length ? { minLat, maxLat, minLng, maxLng } : null };
+  return { cells };
 }
 
 /** The closest meter within `radiusM` of the point, as `{ objectid, distanceM }`, else null. */
@@ -163,17 +161,14 @@ function nearestMeter(index, lat, lng, radiusM = MATCH_RADIUS_M) {
   return best;
 }
 
-const insideExtent = (index, lat, lng) => !!index.extent
-  && lat >= index.extent.minLat && lat <= index.extent.maxLat && lng >= index.extent.minLng && lng <= index.extent.maxLng;
-
 /**
- * What the county layer says about one point: `{ reclaimed: true }` at a meter, `{ reclaimed: false }` inside the Manatee
- * extent with no meter near, `{ reclaimed: null }` outside it (no layer, no opinion).
+ * Is the point at a reclaimed meter (within MATCH_RADIUS_M)? The county layer can only ever say YES. A point with no meter near is not
+ * "not reclaimed": the layer covers one county, its extent is not its boundary (a Sarasota point just over the line is inside any bounding
+ * box), and a lawn can be reclaimed with its meter beyond 30 m. So a miss writes nothing and the property stays unknown (full nitrogen
+ * until the office or a meter says otherwise).
  */
-function judgePoint(index, lat, lng) {
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { reclaimed: null };
-  if (nearestMeter(index, lat, lng)) return { reclaimed: true };
-  return { reclaimed: insideExtent(index, lat, lng) ? false : null };
+function atMeter(index, lat, lng) {
+  return Number.isFinite(lat) && Number.isFinite(lng) && nearestMeter(index, lat, lng) !== null;
 }
 
 async function loadIndex(knex) {
@@ -181,44 +176,46 @@ async function loadIndex(knex) {
 }
 
 /**
- * Settle the county value of the properties that have coordinates and no office or customer value. `all: false` only
- * visits properties never checked (a new property, or one the office handed back to automatic) or checked before the stored layer was fetched. Writes only the
- * county-owned columns, never updated_at, and never a row whose source is 'office' or 'customer' or whose coordinates changed since they were read. Safe to run twice.
+ * Settle the county value of the properties that have coordinates and no office or customer value. A property at a meter becomes
+ * true / 'county_meter'; a property the county marked earlier whose meter is gone (a new layer dropped it) goes back to unknown (all three
+ * columns NULL); every other property is left exactly as it is. `all: false` visits the properties with no county value, and those
+ * marked before the stored layer was fetched (so a refresh whose match pass failed is finished by the next tick). Writes only the
+ * county-owned columns, never updated_at, and never a row whose source is 'office' or 'customer' or whose coordinates changed since they
+ * were read. Safe to run twice.
  */
 async function matchProperties({ knex = defaultDb, now = new Date(), all = true } = {}) {
   const index = await loadIndex(knex);
   const layerAt = (await knex('reclaimed_water_meters').max('fetched_at as latest').first())?.latest || now;
-  if (!index.extent) return { checked: 0, reclaimed: 0, notFound: 0, outside: 0, skipped: 'no_meters' };
+  if (!index.cells.size) return { checked: 0, reclaimed: 0, cleared: 0, written: 0, skipped: 'no_meters' };
   const rows = await knex('customer_properties')
     .where({ active: true })
     .whereNotNull('latitude').whereNotNull('longitude')
     .where((q) => q.whereNull('reclaimed_water_source').orWhere('reclaimed_water_source', 'county_meter'))
-    // Not `all`: the properties never checked, and those last checked BEFORE the stored layer was fetched (a refresh whose match pass failed or
-    // was cut short is finished by the next tick, not left stale until the next download).
-    .modify((q) => { if (!all) q.where((w) => w.whereNull('reclaimed_water_checked_at').orWhere('reclaimed_water_checked_at', '<', layerAt)); })
-    .select('id', 'latitude', 'longitude');
-  const groups = { true: [], false: [], null: [] };
-  for (const row of rows) groups[String(judgePoint(index, Number(row.latitude), Number(row.longitude)).reclaimed)].push(row);
+    .modify((q) => {
+      if (!all) q.where((w) => w.whereNull('reclaimed_water_source').orWhereNull('reclaimed_water_checked_at').orWhere('reclaimed_water_checked_at', '<', layerAt));
+    })
+    .select('id', 'latitude', 'longitude', 'reclaimed_water_source');
+  const found = rows.filter((row) => atMeter(index, Number(row.latitude), Number(row.longitude)));
+  const gone = rows.filter((row) => row.reclaimed_water_source === 'county_meter' && !found.includes(row));
   let written = 0;
-  for (const [value, group] of Object.entries(groups)) {
-    const verdict = value === 'null' ? { water: null, source: null } : { water: value === 'true', source: 'county_meter' };
+  for (const [group, patch] of [[found, { water: true, source: 'county_meter', at: now.toISOString() }], [gone, { water: null, source: null, at: null }]]) {
     for (let i = 0; i < group.length; i += CHUNK) {
       const chunk = group.slice(i, i + CHUNK);
-      // The write is guarded by what the verdict was judged on: the same coordinates (an address move clears or replaces them and drops the
-      // answer, customer-properties.js reclaimedResetOnMove), an active row, and still no office or customer value. A row that changed
-      // meanwhile is skipped and stays unchecked for the next tick, never given the old location's answer.
+      // The write is guarded by what the verdict was judged on: the same coordinates (a move changes them and the trigger of migration
+      // 20261023110000 drops the county's answer), an active row, and still no office or customer value. A row that changed meanwhile is
+      // skipped and stays for the next tick, never given the old location's answer.
       const result = await knex.raw(
         `UPDATE customer_properties AS cp
             SET reclaimed_water = ?::boolean, reclaimed_water_source = ?::varchar, reclaimed_water_checked_at = ?::timestamptz
            FROM (VALUES ${chunk.map(() => '(?::uuid, ?::numeric, ?::numeric)').join(', ')}) AS v(id, lat, lng)
           WHERE cp.id = v.id AND cp.latitude = v.lat AND cp.longitude = v.lng AND cp.active
             AND (cp.reclaimed_water_source IS NULL OR cp.reclaimed_water_source = 'county_meter')`,
-        [verdict.water, verdict.source, now.toISOString(), ...chunk.flatMap((row) => [row.id, row.latitude, row.longitude])],
+        [patch.water, patch.source, patch.at, ...chunk.flatMap((row) => [row.id, row.latitude, row.longitude])],
       );
       written += result?.rowCount ?? 0;
     }
   }
-  return { checked: rows.length, written, reclaimed: groups.true.length, notFound: groups.false.length, outside: groups.null.length };
+  return { checked: rows.length, written, reclaimed: found.length, cleared: gone.length };
 }
 
 /**
@@ -243,5 +240,5 @@ async function runDailyTick({ knex = defaultDb, fetchImpl = globalThis.fetch, no
 module.exports = {
   LAYER_QUERY_URL, PAGE_SIZE, IN_SERVICE_LIFECYCLE, MATCH_RADIUS_M, USER_AGENT, REFRESH_AFTER_MS, MIN_PLAUSIBLE_METERS,
   distanceM, pageUrl, parsePage, fetchPage, fetchAllMeters, storeMeters, layerIsStale,
-  buildIndex, nearestMeter, judgePoint, matchProperties, runDailyTick,
+  buildIndex, nearestMeter, atMeter, matchProperties, runDailyTick,
 };

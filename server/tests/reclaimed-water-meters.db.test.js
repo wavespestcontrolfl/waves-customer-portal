@@ -59,7 +59,7 @@ describeDb('reclaimed water through PostgreSQL', () => {
     expect(await knex.schema.hasColumn('customer_properties', 'reclaimed_water_source')).toBe(true);
   });
 
-  test('the county match: a property within 30 m of a meter is reclaimed (county_meter); one inside the extent with no meter near is false; one outside is unknown', async () => {
+  test('the county only ever says yes: a property within 30 m of a meter is reclaimed (county_meter); every other property, inside the layer\'s extent or outside it, keeps NO county value', async () => {
     const atMeter = await property(offset(0, 10));
     const farInside = await property(offset(1000, 1000));
     const outside = await property(offset(-60000, 0));
@@ -68,8 +68,8 @@ describeDb('reclaimed water through PostgreSQL', () => {
     const summary = await meters.runDailyTick({ knex, fetchImpl, now: T0 });
     expect(summary).toMatchObject({ refreshed: meters.MIN_PLAUSIBLE_METERS + 1 });
     expect(await atMeter.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
-    expect(await farInside.read()).toMatchObject({ reclaimed_water: false, reclaimed_water_source: 'county_meter' });
-    expect(await outside.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
+    expect(await farInside.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+    expect(await outside.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
     expect(await noCoords.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
     expect(new Date((await atMeter.read()).reclaimed_water_checked_at).toISOString()).toBe(T0.toISOString());
   });
@@ -94,7 +94,7 @@ describeDb('reclaimed water through PostgreSQL', () => {
     const fetchImpl = jest.fn();
     const summary = await meters.runDailyTick({ knex, fetchImpl, now: new Date(T0.getTime() + 60000) });
     expect(fetchImpl).not.toHaveBeenCalled();
-    expect(summary).toMatchObject({ refreshed: null, checked: 1, reclaimed: 1 });
+    expect(summary).toMatchObject({ refreshed: null, reclaimed: 1 });
     expect(await p.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
   });
 
@@ -109,24 +109,32 @@ describeDb('reclaimed water through PostgreSQL', () => {
     expect(await p.read()).toMatchObject({ address_line1: '212 Fixture Street', reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
   });
 
-  test('a refresh whose match pass failed is finished by the next tick: properties checked before the stored layer are matched again', async () => {
+  test('a refresh whose match pass failed is finished by the next tick: a stale county verdict is re-judged against the stored layer (kept, cleared, or newly set)', async () => {
     await knex('customer_properties').update({ active: false });
-    const p = await property(offset(0, 5));
-    await meters.runDailyTick({ knex, fetchImpl: async () => layerOf([offset(-500, -500), ...filler]), now: T0 }); // layer A: a meter 700 m away, none at p
-    expect(await p.read()).toMatchObject({ reclaimed_water: false, reclaimed_water_source: 'county_meter' });
+    const kept = await property(offset(0, 5));
+    const dropped = await property(offset(300, 300));
+    const added = await property(offset(600, 600));
+    await meters.runDailyTick({ knex, fetchImpl: async () => layer(offset(0, 0), offset(300, 300)), now: T0 }); // layer A: meters at kept and dropped
+    expect(await kept.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
+    expect(await dropped.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
+    expect((await added.read()).reclaimed_water).toBeNull();
     const later = new Date(T0.getTime() + 7 * 86400000);
     const failing = Object.assign((...args) => knex(...args), {
       transaction: (...args) => knex.transaction(...args),
       raw: (...args) => (String(args[0]).includes('UPDATE customer_properties') ? Promise.reject(new Error('match cut short')) : knex.raw(...args)),
     });
-    await expect(meters.runDailyTick({ knex: failing, fetchImpl: async () => layer(offset(0, 0)), now: later })).rejects.toThrow('match cut short');
-    expect(Number((await knex('reclaimed_water_meters').count('* as n').first()).n)).toBe(meters.MIN_PLAUSIBLE_METERS + 1); // layer B is stored (it dropped the far meter, added one at p)
-    expect((await p.read()).reclaimed_water).toBe(false); // ... but p was never matched against it
+    // layer B: the meter at `dropped` is gone, one appeared at `added`
+    await expect(meters.runDailyTick({ knex: failing, fetchImpl: async () => layer(offset(0, 0), offset(600, 600)), now: later })).rejects.toThrow('match cut short');
+    expect(Number((await knex('reclaimed_water_meters').count('* as n').first()).n)).toBe(meters.MIN_PLAUSIBLE_METERS + 2); // layer B is stored
+    expect((await dropped.read()).reclaimed_water).toBe(true); // ... but nothing was re-judged against it
+    expect((await added.read()).reclaimed_water).toBeNull();
     const fetchImpl = jest.fn();
     const retry = await meters.runDailyTick({ knex, fetchImpl, now: new Date(later.getTime() + 3600000) });
     expect(fetchImpl).not.toHaveBeenCalled();
-    expect(retry).toMatchObject({ refreshed: null, checked: 1, reclaimed: 1 });
-    expect(await p.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
+    expect(retry).toMatchObject({ refreshed: null, reclaimed: 2, cleared: 1 });
+    expect(await kept.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
+    expect(await dropped.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+    expect(await added.read()).toMatchObject({ reclaimed_water: true, reclaimed_water_source: 'county_meter' });
   });
 
   describe('a county verdict never outlives its coordinates (one trigger, every coordinate writer)', () => {
@@ -172,7 +180,7 @@ describeDb('reclaimed water through PostgreSQL', () => {
       expect(await p.read()).toMatchObject({ reclaimed_water: false, reclaimed_water_source: 'county_meter' });
     });
 
-    test('the county\'s "outside the layer" result (no source, checked_at stamped) is invalidated by a pin move too, and the new location is judged at the next tick', async () => {
+    test('a stamped no-verdict row (an older pass\'s "outside the layer" result: no source, checked_at set) is invalidated by a pin move too, and the new location is judged at the next tick', async () => {
       await knex('customer_properties').update({ active: false });
       const p = await property(offset(-60000, 0), { reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: new Date() });
       await knex('customer_properties').where({ id: p.id }).update({ latitude: offset(0, 5).lat, longitude: offset(0, 5).lng });
@@ -237,10 +245,9 @@ describeDb('reclaimed water through PostgreSQL', () => {
     const summary = await meters.runDailyTick({ knex, fetchImpl: async () => layerOf(filler), now: later });
     expect(summary).toMatchObject({ refreshed: meters.MIN_PLAUSIBLE_METERS });
     expect(Number((await knex('reclaimed_water_meters').count('* as n').first()).n)).toBe(meters.MIN_PLAUSIBLE_METERS);
-    // The dropped meter no longer holds the property, and the new layer's extent no longer covers it: no opinion (not "false").
-    expect(await p.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
-    expect(await q.read()).toMatchObject({ reclaimed_water: false, reclaimed_water_source: 'county_meter' });
-    expect(new Date((await q.read()).reclaimed_water_checked_at).toISOString()).toBe(later.toISOString());
+    // The dropped meter no longer holds the property: back to unknown (no county value), never "not reclaimed". A property that never had a meter stays untouched.
+    expect(await p.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
+    expect(await q.read()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
   });
 
   test('a failed download (403, or a short answer) keeps the stored layer and the stored values; with nothing stored it throws', async () => {

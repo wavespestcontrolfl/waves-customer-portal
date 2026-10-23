@@ -895,6 +895,34 @@ function propertyActionError(message, statusCode = 400, code = 'invalid_property
   return Object.assign(new Error(message), { statusCode, status: statusCode, isOperational: true, code });
 }
 
+// The fields a saved property may be edited or added with beyond its address, each with its one normalization/validation rule and, where the
+// write stamps other columns with it, those columns. manualPropertyFields applies `normalize`; editManualProperty applies `columns`.
+// reclaimed_water (GATE_LAWN_RECLAIMED_HALF_N) is the office's answer for the lawn water: true, false, or null = back to the county match. It
+// changes a nitrogen dose, so it goes through this audited writer, with its source ('office') and time written alongside.
+const EDITABLE_FIELDS = {
+  label: { normalize: value => value || null },
+  occupancy_type: { normalize: value => {
+    if (!OCCUPANCY_TYPES.includes(value)) throw propertyActionError('invalid occupancy_type');
+    return value;
+  } },
+  relationship: { normalize: value => {
+    const relationship = require('../constants/property-relationships').normalizeRelationship(value);
+    if (!relationship.ok) throw propertyActionError('invalid relationship');
+    return relationship.value;
+  } },
+  reclaimed_water: {
+    normalize: (value, kind) => {
+      if (kind !== 'edit' || !require('../config/feature-gates').lawnReclaimedHalfNLive()) throw propertyActionError('reclaimed_water cannot be set here');
+      if (value !== null && typeof value !== 'boolean') throw propertyActionError('reclaimed_water must be true, false or null');
+      return value;
+    },
+    columns: (value, trx) => ({
+      reclaimed_water_source: value === null ? null : 'office',
+      reclaimed_water_checked_at: value === null ? null : trx.fn.now(),
+    }),
+  },
+};
+
 function manualPropertyFields(kind, input = {}) {
   for (const [field, max] of Object.entries(PROPERTY_FIELD_LIMITS)) {
     if (input[field] == null) continue;
@@ -902,22 +930,8 @@ function manualPropertyFields(kind, input = {}) {
     if (input[field].length > max) throw propertyActionError(`${field} must be ${max} characters or fewer`);
   }
   const changes = {};
-  if (input.label !== undefined) changes.label = input.label || null;
-  if (input.occupancy_type !== undefined) {
-    if (!OCCUPANCY_TYPES.includes(input.occupancy_type)) throw propertyActionError('invalid occupancy_type');
-    changes.occupancy_type = input.occupancy_type;
-  }
-  if (input.relationship !== undefined) {
-    const relationship = require('../constants/property-relationships').normalizeRelationship(input.relationship);
-    if (!relationship.ok) throw propertyActionError('invalid relationship');
-    changes.relationship = relationship.value;
-  }
-  // GATE_LAWN_RECLAIMED_HALF_N: the office's answer for the lawn water (true, false, or null = back to the county match). It changes a
-  // nitrogen dose, so it goes through this audited writer; the source and time are written with it (editManualProperty).
-  if (input.reclaimed_water !== undefined) {
-    if (kind !== 'edit' || !require('../config/feature-gates').lawnReclaimedHalfNLive()) throw propertyActionError('reclaimed_water cannot be set here');
-    if (input.reclaimed_water !== null && typeof input.reclaimed_water !== 'boolean') throw propertyActionError('reclaimed_water must be true, false or null');
-    changes.reclaimed_water = input.reclaimed_water;
+  for (const [field, { normalize }] of Object.entries(EDITABLE_FIELDS)) {
+    if (input[field] !== undefined) changes[field] = normalize(input[field], kind);
   }
   if (kind !== 'add') return changes;
   if (!String(input.address_line1 || '').trim()) throw propertyActionError('address_line1 is required');
@@ -1225,11 +1239,7 @@ async function writeManualProperty(customerId, kind, input, propertyId, options,
     const auditId = await require('./audit-log').recordAuditEvent({
       actor_type: 'admin', actor_id: options.actorId || null, action: `customer_property_${kind}`,
       resource_type: 'customer_property', resource_id: savedId,
-      metadata: {
-        customer_id: customerId, fields: Object.keys(changes),
-        // A dose-changing edit records the answer and what it replaced (the property's reclaimed water, GATE_LAWN_RECLAIMED_HALF_N).
-        ...('reclaimed_water' in changes ? { reclaimed_water: changes.reclaimed_water, reclaimed_water_before: preview.before?.reclaimed_water ?? null } : {}),
-      },
+      metadata: { customer_id: customerId, fields: Object.keys(changes), values: changes, before: preview.before || null },
       critical: true, trx,
     });
     const properties = await listProperties(customerId, trx);
@@ -1265,13 +1275,9 @@ async function addManualProperty(customerId, input, options = {}) {
 
 async function editManualProperty(customerId, propertyId, input, options = {}) {
   return writeManualProperty(customerId, 'edit', input, propertyId, options, async (trx, _loaded, changes) => {
-    // The office's reclaimed-water answer carries its source and time; null hands the property back to the county match.
-    const reclaimed = 'reclaimed_water' in changes ? {
-      reclaimed_water_source: changes.reclaimed_water === null ? null : 'office',
-      reclaimed_water_checked_at: changes.reclaimed_water === null ? null : trx.fn.now(),
-    } : {};
+    const stamps = Object.assign({}, ...Object.keys(changes).map(field => EDITABLE_FIELDS[field].columns?.(changes[field], trx)));
     await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
-      .update({ ...changes, ...reclaimed, updated_at: trx.fn.now() });
+      .update({ ...changes, ...stamps, updated_at: trx.fn.now() });
     return propertyId;
   });
 }

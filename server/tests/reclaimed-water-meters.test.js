@@ -92,8 +92,8 @@ describe('the paging parser', () => {
     const west = { attributes: { OBJECTID: 3, LIFECYCLESTATUS: 8 }, geometry: { x: -82.41, y: 27.5 } };
     const all = await meters.fetchAllMeters({ fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ features: [retired, live, west] }) }) });
     const index = meters.buildIndex(all);
-    expect(meters.judgePoint(index, 27.5, -82.4)).toEqual({ reclaimed: false });
-    expect(meters.judgePoint(index, 27.5, -82.39)).toEqual({ reclaimed: true });
+    expect(meters.atMeter(index, 27.5, -82.4)).toBe(false);
+    expect(meters.atMeter(index, 27.5, -82.39)).toBe(true);
   });
 
   test('a page with no features array, or an empty page that still claims more, is an error: it never ends the download early', async () => {
@@ -124,7 +124,7 @@ describe('the paging parser', () => {
 
 describe('the matcher: a property is at a meter within 30 m', () => {
   const at = (n, e, id = 1) => ({ objectid: id, ...offset(n, e) });
-  const judge = (list, point) => meters.judgePoint(meters.buildIndex(list), point.lat, point.lng);
+  const judge = (list, point) => meters.atMeter(meters.buildIndex(list), point.lat, point.lng);
 
   test('the radius is 30 m', () => { expect(meters.MATCH_RADIUS_M).toBe(30); });
 
@@ -142,13 +142,18 @@ describe('the matcher: a property is at a meter within 30 m', () => {
     expect(meters.nearestMeter(index, property.lat, property.lng).distanceM).toBeCloseTo(9.9, 0);
   });
 
-  test('reclaimed at a meter, not reclaimed inside the Manatee extent with no meter near, no opinion outside the extent', () => {
+  test('the county only ever says yes: at a meter is true; a miss is false-as-in-"no opinion", wherever the point is (a Manatee gap, Sarasota over the line, far away, no layer, bad input)', () => {
     const list = [at(0, 0, 1), at(2000, 2000, 2)];
-    expect(judge(list, offset(0, 5))).toEqual({ reclaimed: true });
-    expect(judge(list, offset(1000, 1000))).toEqual({ reclaimed: false });
-    expect(judge(list, offset(-9000, 0))).toEqual({ reclaimed: null });
-    expect(judge([], offset(0, 0))).toEqual({ reclaimed: null });
-    expect(meters.judgePoint(meters.buildIndex(list), NaN, 1)).toEqual({ reclaimed: null });
+    expect(judge(list, offset(0, 5))).toBe(true);
+    // Inside the bounding box of the meters, outside every 30 m: not at a meter, and nothing more is claimed.
+    expect(judge(list, offset(1000, 1000))).toBe(false);
+    expect(judge(list, offset(-9000, 0))).toBe(false);
+    expect(judge([], offset(0, 0))).toBe(false);
+    expect(meters.atMeter(meters.buildIndex(list), NaN, 1)).toBe(false);
+    expect(meters.atMeter(meters.buildIndex(list), 27.5, undefined)).toBe(false);
+    // The index carries no extent at all: nothing can label a point "inside the county".
+    expect(Object.keys(meters.buildIndex(list))).toEqual(['cells']);
+    expect(meters).not.toHaveProperty('judgePoint');
   });
 
   test('distance is great-circle metres', () => {

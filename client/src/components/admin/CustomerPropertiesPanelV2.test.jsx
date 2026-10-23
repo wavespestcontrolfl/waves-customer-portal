@@ -53,7 +53,7 @@ describe('CustomerPropertiesPanelV2', () => {
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
     const select = await screen.findByLabelText('Reclaimed water for 10 Palm Ave');
     expect(select).toHaveValue('');
-    expect(screen.getByText('County meter found at this address. Lawn visits use half the nitrogen.')).toBeInTheDocument();
+    expect(screen.getByText('County meter found at this address. Half nitrogen on eligible v13 lawn visits.')).toBeInTheDocument();
     fireEvent.change(select, { target: { value: 'no' } });
     await waitFor(() => expect(screen.getByText('Office said not reclaimed. Lawn visits use the full nitrogen.')).toBeInTheDocument());
     const put = fetchMock.mock.calls.find(([, o]) => o?.method === 'PUT');
@@ -63,6 +63,8 @@ describe('CustomerPropertiesPanelV2', () => {
     fireEvent.change(screen.getByLabelText('Reclaimed water for 10 Palm Ave'), { target: { value: '' } });
     await waitFor(() => expect(fetchMock.mock.calls.filter(([, o]) => o?.method === 'PUT')).toHaveLength(2));
     expect(JSON.parse(fetchMock.mock.calls.filter(([, o]) => o?.method === 'PUT')[1][1].body)).toEqual({ reclaimed: null });
+    // The hint never promises half nitrogen on "lawn visits" in general: only on eligible v13 visits.
+    expect(document.body.textContent).not.toMatch(/Lawn visits use half the nitrogen/);
   });
 
   it('shows no reclaimed-water control while the gate is off, and a read-only view cannot change it', async () => {

@@ -24,11 +24,11 @@ suite('reclaimed water edits against isolated Postgres', () => {
     expect((await primaryOf()).reclaimed_water_checked_at).toBeTruthy();
     const [event] = await auditOf(property.id);
     expect(event).toMatchObject({ actor_type: 'admin', actor_id: actor });
-    expect(event.metadata).toMatchObject({ customer_id: customerA, fields: ['reclaimed_water'], reclaimed_water: true, reclaimed_water_before: null });
+    expect(event.metadata).toMatchObject({ customer_id: customerA, fields: ['reclaimed_water'], values: { reclaimed_water: true }, before: { reclaimed_water: null } });
 
     expect((await put(property.id, { reclaimed: false })).status).toBe(200);
     expect(await primaryOf()).toMatchObject({ reclaimed_water: false, reclaimed_water_source: 'office' });
-    expect((await auditOf(property.id))[0].metadata).toMatchObject({ reclaimed_water: false, reclaimed_water_before: true });
+    expect((await auditOf(property.id))[0].metadata).toMatchObject({ values: { reclaimed_water: false }, before: { reclaimed_water: true } });
 
     expect((await put(property.id, { reclaimed: null })).status).toBe(200);
     expect(await primaryOf()).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: null });
