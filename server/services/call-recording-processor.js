@@ -20107,19 +20107,7 @@ const CallRecordingProcessor = {
                   // 2026-10-04, "same time") — the time visit 1's own hours
                   // checks already passed; only the date can come from the call.
                   const primaryStart = String(primaryRow.window_start || '').slice(0, 5);
-                  const plannedFuStart = packageFollowUp && /^\d{2}:\d{2}$/.test(primaryStart) ? primaryStart : fuPlan.windowStart;
-                  // A copied hour (the call set none) that another stop holds
-                  // on visit 2's date moves to the nearest free whole hour that
-                  // day (GATE_CALL_FOLLOWUP_FREE_HOUR, owner 2026-10-22;
-                  // scheduling/plan-taken-hour.js). A time set on the call and a
-                  // package visit 2 keep theirs.
-                  const fuStart = await require('./scheduling/plan-taken-hour').callFollowUpStart(trx, {
-                    visit1: primaryRow,
-                    customerId,
-                    defaultTechnicianId,
-                    date: fuPlan.scheduledDate,
-                    start: plannedFuStart,
-                  }, { hourStated: fuPlan.hourStated === true, packageVisit: packageFollowUp });
+                  const fuStart = packageFollowUp && /^\d{2}:\d{2}$/.test(primaryStart) ? primaryStart : fuPlan.windowStart;
                   const [fuH, fuM] = fuStart.split(':').map(Number);
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
                   // A package visit 2 is the same treatment as visit 1, so it
@@ -20182,6 +20170,24 @@ const CallRecordingProcessor = {
                         followUpFence = { acquired: false, keys: [], reason: 'error' };
                         logger.warn(`[call-proc] follow-up fence failed for ${maskSid(callSid)} (seeding unfenced): ${fenceErr.message}`);
                       }
+                      // A copied hour (the call set none) that another stop
+                      // holds on visit 2's date moves to the nearest free whole
+                      // hour that day (GATE_CALL_FOLLOWUP_FREE_HOUR, owner
+                      // 2026-10-22; scheduling/plan-taken-hour.js), read under
+                      // the fence above so a concurrent fenced call booking
+                      // cannot pick the same hour. A time set on the call and
+                      // a package visit 2 keep theirs; the idempotency key
+                      // below stays on the planned hour.
+                      const fuWindow = await require('./scheduling/plan-taken-hour').callFollowUpWindow(sp, {
+                        visit1: primaryRow,
+                        customerId,
+                        technicianId: followUpTechId,
+                        date: fuPlan.scheduledDate,
+                      }, {
+                        window_start: fuStart,
+                        window_end: fuWindowEnd,
+                        window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
+                      }, { hourStated: fuPlan.hourStated, packageVisit: packageFollowUp });
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
@@ -20206,9 +20212,7 @@ const CallRecordingProcessor = {
                           service_address_state: primaryRow.service_address_state || null,
                           service_address_zip: primaryRow.service_address_zip || null,
                           scheduled_date: fuPlan.scheduledDate,
-                          window_start: fuStart,
-                          window_end: fuWindowEnd,
-                          window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
+                          ...fuWindow,
                           service_type: serviceType,
                           service_id: callBookingCatalogRow?.id || null,
                           parent_service_id: primaryRow.id,
@@ -20260,8 +20264,7 @@ const CallRecordingProcessor = {
                           idempotency_key: computeAppointmentIdempotencyKey({
                             callLogId: call.id,
                             schedulingStatus: 'follow_up',
-                            // The planned hour, so a retry keys the same follow-up whatever free hour it got.
-                            confirmedStartAt: `${fuPlan.scheduledDate}T${plannedFuStart}`,
+                            confirmedStartAt: `${fuPlan.scheduledDate}T${fuStart}`,
                             primaryServiceCategory: serviceType,
                             addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
                           }),

@@ -612,7 +612,7 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, paren
     windowStart: [statedWindow, parentWindowStart].find(isValidWindowTime) || '09:00',
     // The call set this hour; without it windowStart is a copy (visit 1's
     // hour, or 09:00) that may move to a free hour (plan-taken-hour.js
-    // callFollowUpStart).
+    // callFollowUpWindow).
     ...(isValidWindowTime(statedWindow) ? { hourStated: true } : {}),
     // The plan exists only because the service is a package — nobody on the
     // call discussed a second visit. The writer skips it while the primary

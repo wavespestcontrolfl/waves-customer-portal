@@ -1028,7 +1028,7 @@ describe('resolveCallFollowUpPlan', () => {
       parentDate: '2026-07-02',
       parentWindowStart: '08:00',
     });
-    // The call set the hour: it is kept as is (plan-taken-hour.js callFollowUpStart).
+    // The call set the hour: it is kept as is (plan-taken-hour.js callFollowUpWindow).
     expect(plan).toEqual({ scheduledDate: '2026-07-20', windowStart: '13:00', hourStated: true });
   });
 
