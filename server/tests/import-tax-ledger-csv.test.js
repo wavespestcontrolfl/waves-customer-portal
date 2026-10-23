@@ -794,6 +794,16 @@ describe('--skip-existing and expenses', () => {
       expect([categoryName, out.counts.held, out.counts.overlaps]).toEqual([categoryName, expected.held, expected.overlaps]);
       if (expected.held) expect(out.report).toMatch(/booked this row under Advertising & Marketing, the ledger says Supplies/);
     }
+    // a credit the portal linked to a payout while the ledger says refund: held; a processor
+    // deposit the ledger also reads as income is the same answer
+    for (const [cls, expected] of [['refund', { held: 1, overlaps: 0 }], ['income_proc', { held: 0, overlaps: 1 }]]) {
+      fs.writeFileSync(file, csv(row({ description: 'PROCESSOR CREDIT 77', amount: '12.50', direction: 'in', class: cls, sched_c_line: '', category: cls === 'refund' ? 'Refund' : 'Income' })));
+      const dbp = makeFakeDb();
+      dbp.tables().bank_transactions.push({ id: 'up-p', row_hash: 'hp', source: 'csv', account_label: 'checking 3098', txn_date: first.date, description: 'PROCESSOR CREDIT 77', amount: 12.5, direction: 'credit', status: 'matched_payout', matched_payout_id: 'po-1' });
+      const out = await run({ file, db: dbp, skipExisting: true });
+      expect([cls, out.counts.held, out.counts.overlaps]).toEqual([cls, expected.held, expected.overlaps]);
+      if (expected.held) expect(out.report).toMatch(/linked this credit to a payout but the ledger says it is a refund credit/);
+    }
     // the ledger says personal too: the portal's ignore is the same answer
     fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', class: 'personal', sched_c_line: '', category: 'Personal' })));
     const db2 = makeFakeDb();

@@ -611,6 +611,12 @@ function openReason(row, m, portal) {
   if (row.status === 'ignored' && m.unmatchedLine === 'refund' && !(row.suggestion && row.suggestion.releasedRefundOf)) {
     return 'the portal ignored this refund credit without applying it (unignore it and apply it to the original expense in Bank Import)';
   }
+  // the portal linked this credit to a Stripe payout, the ledger says it is
+  // a merchant refund: one of them is wrong, and the expense it would reduce
+  // stays at its gross amount until the owner decides
+  if (row.status === 'matched_payout' && row.matched_payout_id && m.unmatchedLine === 'refund') {
+    return 'the portal linked this credit to a payout but the ledger says it is a refund credit (check which is right)';
+  }
   // the mirror conflict: the portal booked an expense, the ledger says the
   // money was personal, a transfer, a reward or an asset
   if (LINKED_TO_EXPENSE.has(row.status) && row.matched_expense_id && m.bank.status === 'ignored') {
