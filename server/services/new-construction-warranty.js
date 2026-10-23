@@ -392,7 +392,10 @@ function soilLiquid(treatment) {
   if (!known) {
     throw bad(`This warranty covers the soil liquids ${Object.values(SOIL_LIQUIDS).map((item) => item.product).join(', ')}. The certificate names "${treatment.product}".`, 409);
   }
-  if (treatment.active_ingredient && !treatment.active_ingredient.toLowerCase().includes(known.ingredient)) {
+  // Exactly the product's one ingredient, optionally with its percent
+  // ("Fipronil 9.1%"); "fipronil + bifenthrin" is a different product.
+  const ingredientPattern = new RegExp(`^${known.ingredient}(\\s*\\d+(\\.\\d+)?\\s*%)?$`, 'i');
+  if (treatment.active_ingredient && !ingredientPattern.test(treatment.active_ingredient)) {
     throw bad(`The certificate's active ingredient (${treatment.active_ingredient}) does not match ${known.product} (${known.ingredient}). Fix the certificate first.`, 409);
   }
   return { product: known.product, active_ingredient: treatment.active_ingredient || known.ingredient };
@@ -412,14 +415,14 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   // committed after the caller read it would leave a stale owner name or
   // address on the contract.
   const locked = await conn('customers').where({ id: customer.id }).forUpdate().first();
-  if (!locked || PRINTED_CUSTOMER_FIELDS.some((field) => oneLine(locked[field]) !== oneLine(customer[field]))) {
+  if (!locked || [...PRINTED_CUSTOMER_FIELDS, 'contact_role'].some((field) => oneLine(locked[field]) !== oneLine(customer[field]))) {
     throw bad('This customer changed while the warranty was being issued. Reload and try again.', 409);
   }
   const project = await conn('projects').where({ id: projectId }).forUpdate().first();
   if (!project || project.project_type !== 'pre_treatment_termite_certificate' || project.customer_id !== customer.id) {
     throw bad('Pre-treat certificate not found for this customer.', 404);
   }
-  assertCustomerPrintable(customer);
+  assertCustomerPrintable(locked);
   // A sent certificate passed the full send gate (attestation, application
   // record); a draft has not, so it cannot back a signed warranty yet.
   if (!(project.sent_at || project.status === 'sent')) throw bad('Send the pre-treat certificate first, then issue its warranty.', 409);

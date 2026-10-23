@@ -201,6 +201,7 @@ describe('templateIssueValues (server-built warranty)', () => {
       { product_name: 'Termidor SC WE REPAIR ALL DAMAGE' },
       { product_name: 'HexPro Termite Monitoring Baiting System' },
       { product_name: 'Termidor SC', active_ingredient: 'bifenthrin' },
+      { product_name: 'Termidor SC', active_ingredient: 'fipronil + bifenthrin' },
     ]) {
       const row = { ...project, findings: { ...findings, ...bad } };
       await expect(issue({ projectId: project.id, values: office }, customer, row)).rejects.toMatchObject({ status: 409 });
@@ -212,6 +213,8 @@ describe('templateIssueValues (server-built warranty)', () => {
     await expect(issue({ projectId: project.id, values: office }, customer, other))
       .resolves.toMatchObject({ treatment: { product: 'Taurus SC', active_ingredient: 'fipronil' } });
     await expect(issue({ projectId: project.id, values: office }, { ...customer, contact_role: 'tenant' }, project)).rejects.toMatchObject({ status: 409 });
+    // A role change that committed under the lock counts, even with the same name and address.
+    await expect(issue({ projectId: project.id, values: office }, customer, project, { ...customer, contact_role: 'tenant' })).rejects.toMatchObject({ status: 409 });
   });
 
   test('round 16: legacy plan label passes the send gate as its current label; built-in products; address clauses; notice before contract', async () => {
