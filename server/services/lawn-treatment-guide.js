@@ -146,7 +146,8 @@ async function addOnOffers({ candidates, rows, svc, knex, places = null, takeAll
   // `blocked`: the picks a limit or a city hold that was READ forbids. `unreadable`: the picks whose
   // limit read failed (nothing is offered for them, and they are not forbidden). A pick that merely
   // has no finding is neither.
-  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [] };
+  // The passed-over Group 11 rows are blocked outright: no limit read is needed, and no list or search offers them.
+  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: group11HeldAddOns(candidates, rows, { takeAllMapped }).map((c) => idOf(c.raw.product.id)), unreadable: [] };
   if (!chosen.length) return offers;
   const wide = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
   if (!wide) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
@@ -217,6 +218,16 @@ function pickAddOns(candidates, rows, { takeAllMapped = false } = {}) {
     caterpillars: withRole((row) => row.gates?.trigger === CATERPILLAR_TRIGGER)[0] || null,
     dry_spots: withRole((row) => row.gates?.trigger === DRY_SPOT_TRIGGER)[0] || null,
   };
+}
+
+// The large patch Artavia rows pickAddOns passed over for a take-all lawn: governed all the same (never listed with the plain add-ons, never
+// reachable by the search), so the tech cannot add a third consecutive Group 11 application by hand. Empty unless `takeAllMapped`.
+function group11HeldAddOns(candidates, rows, { takeAllMapped = false } = {}) {
+  if (!takeAllMapped) return [];
+  return (candidates || []).filter((candidate) => {
+    const row = stagedRowOf(rows, candidate.raw);
+    return row && row.role === FUNGICIDE_ROLE && isGroup11LargePatchRow(row, candidate);
+  });
 }
 
 // Every take-all fungicide row of the month, wherever it stands in the program order (owner 2026-10-08:
@@ -696,6 +707,7 @@ module.exports = {
   signalsFromAssessment,
   addOnOffers,
   pickAddOns,
+  group11HeldAddOns,
   takeAllAddOns,
   weedOffer,
   blockedProductIds,

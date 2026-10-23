@@ -257,6 +257,21 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
     expect(offers.dry_spots.item.productId).toBe(P_DISP);
   });
 
+  test('Group 11 stacking (take-all mapped): the large patch Artavia row is passed over for Velista and returned blocked, so no list or search offers it', async () => {
+    const rows = new Map([
+      [P_ART, { productName: 'Artavia 2 SC (Azoxy)', role: 'fungicide_spot', gates: { trigger: 'active_large_patch' } }],
+      [P_VEL, { productName: 'Velista', role: 'fungicide_spot', gates: { trigger: 'active_large_patch_take_all_mapped' } }],
+    ]);
+    const candidates = [candidate(P_VEL, 'Velista'), candidate(P_ART, 'Artavia 2 SC (Azoxy)')];
+    const mapped = await addOnOffers({ candidates, rows, svc, knex: {}, takeAllMapped: true });
+    expect(mapped.fungus.item.productId).toBe(P_VEL);
+    expect(mapped.blocked).toContain(P_ART);
+    const unmapped = await addOnOffers({ candidates, rows, svc, knex: {}, takeAllMapped: false });
+    expect(unmapped.blocked).not.toContain(P_ART);
+    // Only the Velista row is read for limits; the passed-over row needs no read.
+    expect(engine.v13VisitLimits.mock.calls[0][2].map((line) => line.product.id)).toEqual([P_VEL]);
+  });
+
   test('the plan\'s own judge is asked about the products it may suggest, as selected lines', async () => {
     await run();
     const asked = engine.v13VisitLimits.mock.calls[0][2];

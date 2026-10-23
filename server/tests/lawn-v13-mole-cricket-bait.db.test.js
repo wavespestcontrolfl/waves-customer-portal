@@ -11,6 +11,7 @@ const v13Recipe = require('../config/lawn-protocol-v13.json');
 const catalogMigration = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
 const rowsMigration = require('../models/migrations/20261023141000_lawn_v13_mole_cricket_bait_staged_rows');
 const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
+const stampMigration = require('../models/migrations/20261023142000_lawn_v13_advion_label_verified');
 const { validateRule, rulesForTargets } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { approvedReportProductFacts } = require('../services/service-report/report-data');
@@ -38,7 +39,8 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
     }
     expect(lineFor(visit(grass, 'Jun').secondary, NAME)).toMatch(/put on after the micronutrient pass has dried/);
     expect(visit(grass, 'Jun').notes).toMatch(/Advion bait goes on after the micronutrient pass has dried/);
-    expect(lineFor(visit(grass, 'Jul').secondary, NAME)).toMatch(/a repeat on a June spot at 1\.6 lb or less \(label yearly maximum 4\.6 lb per 1,000 sq ft\)/);
+    expect(lineFor(visit(grass, 'Jul').secondary, NAME)).toMatch(/new tunnel areas that were not baited in June \(once per spot per year; label yearly maximum 4\.6 lb per 1,000 sq ft\)/);
+    expect(JSON.stringify(v13Recipe)).not.toMatch(/1\.6 lb/);
     // Acelepryn is the second product: watered in (the opposite of the Advion direction), June and July.
     expect(lineFor(visit(grass, 'Jun').secondary, N.ACE)).toMatch(/mole cricket nymph spots, second product after Advion, label rate, watered in right after application/);
     expect(lineFor(visit(grass, 'Jul').secondary, N.ACE)).toMatch(/caterpillars, 0\.046 to 0\.092 fl oz per 1,000 sq ft.*; mole cricket nymph spots, second product after Advion: label rate, watered in right after application/);
@@ -52,7 +54,7 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
     expect(notes).toMatch(/Mole cricket nymphs, June and the July scout visit/);
     expect(notes).toMatch(/Advion Insect Granule \(indoxacarb, Group 22A\) on the tunnel areas, 3 lb per 1,000 sq ft of treated area by hand shaker/);
     expect(notes).toMatch(/so the one-tool rule holds/);
-    expect(notes).toMatch(/Label yearly maximum: 4\.6 lb per 1,000 sq ft/);
+    expect(notes).toMatch(/Label yearly maximum: 4\.6 lb per 1,000 sq ft, so Advion goes on a spot once a year, at 3 lb\. The July visit is for new tunnel areas that were not baited in June\./);
     expect(notes).toMatch(/the opposite of Acelepryn, which is watered in/);
     expect(notes).toMatch(/Fall adults and bigger mole crickets go to Dylox 6\.2 G/);
     expect(notes).not.toMatch(/Mole cricket nymphs, July and August/);
@@ -60,7 +62,7 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
     expect(safety).toMatch(/Bifenthrin \(Atticus Talak 7\.9 F\): delay watering 24 hours\.(\n|$)/);
     expect(safety).not.toMatch(/waters it in right after application with the hose/);
     expect(safety).toMatch(/Advion Insect Granule \(mole cricket bait, indoxacarb, label EPA Reg\. No\. 100-1483\)/);
-    expect(safety).toMatch(/Label yearly maximum 4\.6 lb per 1,000 sq ft/);
+    expect(safety).toMatch(/A spot is baited once a year, at 3 lb; label yearly maximum 4\.6 lb per 1,000 sq ft/);
   });
 
   test('the notes keep one whole-lawn tool per visit: the bait is a spot tool and no month lists it as a primary', () => {
@@ -99,8 +101,7 @@ describe('catalog spec and watering rule', () => {
     expect(CATALOG.min_label_rate_per_1000).toBeLessThanOrEqual(3);
     expect(CATALOG.max_label_rate_per_1000).toBe(4.6);
     expect(CATALOG.max_annual_per_1000).toBe(4.6);
-    expect(3 + 3).toBeGreaterThan(CATALOG.max_annual_per_1000);
-    expect(3 + 1.6).toBeLessThanOrEqual(CATALOG.max_annual_per_1000);
+    expect(3 + 3).toBeGreaterThan(CATALOG.max_annual_per_1000); // a second 3 lb pass on one spot is over the label's yearly maximum
     expect(CATALOG).toMatchObject({
       name: NAME, category: 'insecticide', product_type: 'pesticide', formulation: 'granular bait', container_size: '25 lb', unit_size_oz: 400,
       siteone_sku: '53202', epa_reg_number: '100-1483', moa_group: 'Group 22A', irac_group: '22A', rate_unit: 'lb', approved_for_service_report: true,
@@ -167,6 +168,15 @@ describe('treatment guide: the Group 11 large patch row is passed over when take
     expect(pickAddOns(candidates, rows, { takeAllMapped: true }).fungus.item.productId).toBe('vel');
   });
 
+  test('the passed-over Artavia row is returned as held (governed, never listed or searched); empty unless take-all is mapped', () => {
+    const { group11HeldAddOns } = require('../services/lawn-treatment-guide');
+    expect(group11HeldAddOns(candidates, rows)).toEqual([]);
+    expect(group11HeldAddOns(candidates, rows, { takeAllMapped: false })).toEqual([]);
+    expect(group11HeldAddOns(candidates, rows, { takeAllMapped: true }).map((c) => c.item.productId)).toEqual(['art']);
+    const other = new Map([['art', { productName: N.ART, role: 'fungicide_spot', gates: { trigger: 'gray_leaf_spot_pythium_root_rot' } }]]);
+    expect(group11HeldAddOns([cand('art', N.ART)], other, { takeAllMapped: true })).toEqual([]);
+  });
+
   test('a take-all or gray leaf spot Artavia row is not a large patch row, so it is never passed over', () => {
     const other = new Map([['art', { productName: N.ART, role: 'fungicide_spot', gates: { trigger: 'gray_leaf_spot_pythium_root_rot' } }]]);
     expect(pickAddOns([cand('art', N.ART)], other, { takeAllMapped: true }).fungus.item.productId).toBe('art');
@@ -182,16 +192,49 @@ describe('treatment guide: a failed take-all lookup is read as mapped, never as 
   const svc = { id: 'visit-1', customer_id: 'cust-1', property_id: '00000000-0000-4000-8000-000000000001' };
   afterEach(() => jest.restoreAllMocks());
 
-  test('gate off: false and no read; take-all area on file: true; fungus only: false', async () => {
+  test('places gate off: unknown, so mapped (true) with no read; take-all area on file: true; fungus only: false', async () => {
     const loadActive = jest.spyOn(areas, 'loadActive');
     jest.spyOn(featureGates, 'lawnTroubleAreasLive').mockReturnValue(false);
-    expect(await takeAllMappedOn({ svc, knex: {} })).toBe(false);
+    expect(await takeAllMappedOn({ svc, knex: {} })).toBe(true);
     expect(loadActive).not.toHaveBeenCalled();
     featureGates.lawnTroubleAreasLive.mockReturnValue(true);
+    jest.spyOn(areas, 'propertyOf').mockResolvedValue(svc.property_id);
     loadActive.mockResolvedValueOnce([{ type: 'fungus', place: 'front' }, { type: 'take_all', place: 'back' }]);
     expect(await takeAllMappedOn({ svc, knex: {} })).toBe(true);
     loadActive.mockResolvedValueOnce([{ type: 'fungus', place: 'front' }]);
     expect(await takeAllMappedOn({ svc, knex: {} })).toBe(false);
+  });
+
+  test('group11PassOver: only October to December; a lawn with no take-all in those months is the one that keeps Artavia', async () => {
+    const { group11PassOver } = require('../services/lawn-fast-complete');
+    jest.spyOn(featureGates, 'lawnTroubleAreasLive').mockReturnValue(true);
+    jest.spyOn(areas, 'propertyOf').mockResolvedValue(svc.property_id);
+    const loadActive = jest.spyOn(areas, 'loadActive').mockResolvedValue([]);
+    for (const [date, expected] of [['2026-01-15', false], ['2026-09-15', false], ['2026-10-05', false], ['2026-12-10', false]]) {
+      expect(await group11PassOver({ svc: { ...svc, scheduled_date: date }, knex: {} })).toBe(expected);
+    }
+    loadActive.mockResolvedValue([{ type: 'take_all', place: 'back' }]);
+    for (const [date, expected] of [['2026-01-15', false], ['2026-03-10', false], ['2026-09-15', false], ['2026-10-05', true], ['2026-11-12', true], ['2026-12-10', true]]) {
+      expect(await group11PassOver({ svc: { ...svc, scheduled_date: date }, knex: {} })).toBe(expected);
+    }
+    // The places gate off: unknown counts as mapped in the window, and January is untouched.
+    featureGates.lawnTroubleAreasLive.mockReturnValue(false);
+    expect(await group11PassOver({ svc: { ...svc, scheduled_date: '2026-10-05' }, knex: {} })).toBe(true);
+    expect(await group11PassOver({ svc: { ...svc, scheduled_date: '2026-01-15' }, knex: {} })).toBe(false);
+  });
+
+  test('the context\'s guided picks use the same decision: Velista is the pick, and the passed-over Artavia row rides takeAllProductIds (held)', () => {
+    const { guidedProductIds } = require('../services/lawn-fast-complete');
+    jest.spyOn(featureGates, 'lawnTreatmentGuideLive').mockReturnValue(true);
+    const rows = new Map([
+      ['art', { productName: N.ART, role: 'fungicide_spot', gates: { trigger: 'active_large_patch' } }],
+      ['vel', { productName: N.VEL, role: 'fungicide_spot', gates: { trigger: 'active_large_patch_take_all_mapped' } }],
+    ]);
+    jest.spyOn(require('../services/waveguard-plan-engine'), 'v13ProtocolRows').mockReturnValue(rows);
+    const loaded = { eligible: true, plan: { protocol: { structured: {} } }, addOns: [{ product: { id: 'vel', name: N.VEL } }, { product: { id: 'art', name: N.ART } }] };
+    const sheet = { addOns: [{ productId: 'vel', name: N.VEL }, { productId: 'art', name: N.ART }] };
+    expect(guidedProductIds(loaded, sheet, false)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: [] });
+    expect(guidedProductIds(loaded, sheet, true)).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'] });
   });
 
   test('the active-area read throws (or the property cannot be resolved): the lawn counts as mapped, so the guide suggests Velista and never Artavia', async () => {
@@ -213,7 +256,7 @@ describe('treatment guide: a failed take-all lookup is read as mapped, never as 
 });
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
-const TABLES = ['products_catalog', 'product_aliases', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_product_actuals',
+const TABLES = ['property_application_history', 'products_catalog', 'product_aliases', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_product_actuals',
   'lawn_protocol_audit_log', 'lawn_protocol_service_completions', 'product_limits'];
 const PRICES = ['best_price', 'best_vendor', 'cost_per_unit', 'cost_unit', 'best_vendor_pricing_id', 'best_price_amount_cached'];
 
@@ -365,6 +408,114 @@ describeDb('mole cricket bait migrations through PostgreSQL', () => {
       expect(on.filter((r) => r.match_type === V13_AMOUNT).map((r) => [r.limit_type, Number(r.limit_value), r.limit_unit, r.severity])).toEqual([['annual_max_rate', 4.6, 'lb/1000sf/year', 'hard_block']]);
       delete process.env.GATE_LAWN_V13;
       expect((await applyV13CountCaps(knex, { id: product.id, name: NAME }, [], product.id)).filter((r) => r.match_type === V13_AMOUNT)).toEqual([]);
+    });
+  });
+
+  describe('label verified (20261023142000): the job card shows the 3 lb amount', () => {
+    beforeEach(async () => { await reset(); await upBoth(); });
+    const stamp = async () => (await newRow()).label_verified_at;
+    const audits = () => knex('lawn_protocol_audit_log').where({ action: stampMigration.ACTION });
+
+    test('the inserted row has no stamp until the migration runs; then it carries exactly the wired value and nothing else changed', async () => {
+      expect(await stamp()).toBeNull();
+      const before = await newRow();
+      await stampMigration.up(knex);
+      const after = await newRow();
+      expect(new Date(after.label_verified_at).toISOString()).toBe(stampMigration.VERIFIED_AT);
+      const { label_verified_at: _a, updated_at: _u, ...rest } = after;
+      const { label_verified_at: _b, updated_at: _v, ...restBefore } = before;
+      expect(rest).toEqual(restBefore);
+      expect(await audits()).toHaveLength(1);
+      // The pest-control Advion WDG Granular row is not the inserted row and is never stamped.
+      expect((await knex('products_catalog').where({ id: ids.wdg }).first()).label_verified_at).toBeNull();
+    });
+
+    test('a second up changes nothing; a row someone stamped first is left exactly as it is', async () => {
+      await stampMigration.up(knex);
+      const once = await snapshot();
+      await stampMigration.up(knex);
+      expect(await snapshot()).toEqual(once);
+      await stampMigration.down(knex);
+      const staffDate = '2026-11-01T12:00:00.000Z';
+      await knex('products_catalog').where({ name: NAME }).update({ label_verified_at: staffDate });
+      await stampMigration.up(knex);
+      expect(new Date(await stamp()).toISOString()).toBe(staffDate);
+      expect(await audits()).toHaveLength(0);
+    });
+
+    test('with no inserted row (no catalog audit marker) nothing is stamped', async () => {
+      await downBoth();
+      const [other] = await knex('products_catalog').insert({ name: NAME, category: 'insecticide', active: true }).returning('*');
+      await stampMigration.up(knex);
+      expect((await knex('products_catalog').where({ id: other.id }).first()).label_verified_at).toBeNull();
+    });
+
+    test('down clears the stamp only while it is still the written value; a changed stamp stays', async () => {
+      await stampMigration.up(knex);
+      await stampMigration.down(knex);
+      expect(await stamp()).toBeNull();
+      expect(await audits()).toHaveLength(0);
+      await stampMigration.up(knex);
+      await knex('products_catalog').where({ name: NAME }).update({ label_verified_at: '2026-11-01T12:00:00.000Z' });
+      await stampMigration.down(knex);
+      expect(new Date(await stamp()).toISOString()).toBe('2026-11-01T12:00:00.000Z');
+      expect(await audits()).toHaveLength(0);
+    });
+
+    test('the full rollback in reverse order (stamp, rows, catalog) returns to the start; the catalog down is not blocked by the stamp', async () => {
+      await reset();
+      const start = await snapshot();
+      await upBoth();
+      await stampMigration.up(knex);
+      await stampMigration.down(knex);
+      await downBoth();
+      expect(await snapshot()).toEqual(start);
+    });
+  });
+
+  describe('Advion once per spot per year: June baits a spot, July baits a NEW spot (owner 2026-10-23)', () => {
+    const applicationLimits = require('../services/application-limits');
+    const featureGates = require('../config/feature-gates');
+    const caps = require('../config/lawn-v13-count-caps');
+    const { fixture } = require('./helpers/lawn-history-db');
+    const JULY = new Date('2026-07-14T16:00:00Z');
+    let customerId;
+    let product;
+
+    beforeAll(async () => { await reset(); await upBoth(); product = await newRow(); });
+    beforeEach(async () => {
+      process.env.GATE_LAWN_V13 = 'true';
+      caps.resetV13CapIdentity();
+      await knex('property_application_history').del();
+      ({ customerId } = await fixture(knex));
+      // June: 3 lb at the FRONT of the lawn.
+      await knex('property_application_history').insert({
+        customer_id: customerId, product_id: product.id, application_date: '2026-06-23', application_rate: 3, rate_unit: 'lb', treated_place: 'front',
+      });
+    });
+    afterEach(() => { delete process.env.GATE_LAWN_V13; jest.restoreAllMocks(); });
+    const check = (opts) => applicationLimits.checkLimits(customerId, product.id, JULY, knex, { proposed: { ratePer1000: 3, unit: 'lb' }, ...opts });
+    const amount = (result) => result.blocks.filter((b) => b.type === 'annual_max_rate');
+
+    test('places on: a July pass at a NEW place (back) is allowed', async () => {
+      jest.spyOn(featureGates, 'lawnTroubleAreasLive').mockReturnValue(true);
+      const result = await check({ place: 'back' });
+      expect(amount(result)).toEqual([]);
+      expect(result.allowed).toBe(true);
+    });
+
+    test('places on: a July pass at the SAME place (front) is blocked with the yearly-amount reason', async () => {
+      jest.spyOn(featureGates, 'lawnTroubleAreasLive').mockReturnValue(true);
+      const result = await check({ place: 'front' });
+      expect(result.allowed).toBe(false);
+      expect(amount(result)).toHaveLength(1);
+      expect(amount(result)[0].message).toMatch(/yearly label amount \(4\.6 lb per 1,000 sq ft\).*THIS APPLICATION WOULD EXCEED IT/);
+    });
+
+    test('a whole-lawn check (no place) after June\'s 3 lb is blocked too: 3 + 3 lb is over 4.6', async () => {
+      const result = await check({});
+      expect(result.allowed).toBe(false);
+      expect(amount(result)[0].message).toMatch(/THIS APPLICATION WOULD EXCEED IT/);
     });
   });
 

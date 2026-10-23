@@ -595,16 +595,17 @@ async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
 // and the wetting-agent rows, by what their staged rows say), as `{ guidedProductIds }` or `{}`. The
 // sheet holds their taps until the fresh guide has answered, so a card never finds its product
 // already on the sheet. Pure; no limit read.
-function guidedProductIds(loaded, sheet) {
+function guidedProductIds(loaded, sheet, takeAllMapped = false) {
   if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   const guide = require('./lawn-treatment-guide');
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-  const picks = guide.pickAddOns(candidates, rows);
+  const picks = guide.pickAddOns(candidates, rows, { takeAllMapped });
   return {
     guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId),
-    // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons.
-    takeAllProductIds: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId),
+    // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons. The large patch Artavia row the
+    // pick passed over (Group 11 stacking on a take-all lawn) is held the same way.
+    takeAllProductIds: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId),
   };
 }
 
@@ -791,7 +792,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       addOns: sheet.addOns,
       ...weed,
       ...chinch,
-      ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet)),
+      ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, await group11PassOver({ svc, knex }))),
       // GATE_LAWN_MIX_HELP: the amount for a full tank of each spot spray (lawn-mix-help.js; `{}` while the gate is off).
       ...await require('./lawn-mix-help').contextBlock({ loaded, weed, chinch, month: visitMonthOf(svc), knex }),
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
@@ -1049,13 +1050,16 @@ async function takeAllAreasOn({ svc, knex, offers }) {
   }
 }
 
-// True when the lawn has an active take-all trouble area on file (GATE_LAWN_TROUBLE_AREAS), or when that cannot be read (a failed read or a
-// property that does not resolve). The guide then passes
-// over the large patch Artavia row: Artavia ran in September and Headway in October, both Group 11, and the Headway label allows no more than
-// 2 in a row. A failed read counts as mapped (never as unmapped): the guide then suggests Velista, which works on large patch whether or not
-// take-all is on the lawn, and never the azoxystrobin row for a lawn that may need to skip it. The failure is logged; the guide still answers.
+// Group 11 stacking (Headway label: no more than 2 consecutive QoI applications, owner 2026-10-23). A lawn with take-all had Artavia in
+// September and Headway in October, so October's and December's large patch Artavia row is passed over for Velista. The window is October
+// to December: January's Artavia starts a new large patch pair.
+const GROUP11_MONTHS = Object.freeze([10, 11, 12]);
+
+// True when the lawn has an active take-all trouble area on file, or when that cannot be told: the places gate is off (no store is read), the
+// read failed, or the visit property does not resolve. Unknown counts as mapped, never as unmapped: the guide then suggests Velista, which works
+// on large patch whether or not take-all is on the lawn, and never the azoxystrobin row for a lawn that may need to skip it.
 async function takeAllMappedOn({ svc, knex }) {
-  if (!featureGates.lawnTroubleAreasLive()) return false;
+  if (!featureGates.lawnTroubleAreasLive()) return true;
   try {
     const areas = require('./lawn-trouble-areas');
     const propertyId = await areas.propertyOf(knex, svc, { strict: true });
@@ -1068,6 +1072,11 @@ async function takeAllMappedOn({ svc, knex }) {
     logger.warn(`[lawn-fast] take-all areas unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return true;
   }
+}
+
+// Whether the guide passes over the large patch Artavia row for this visit: in the Group 11 window, on a lawn with take-all (or unknown).
+async function group11PassOver({ svc, knex }) {
+  return GROUP11_MONTHS.includes(visitMonthOf(svc)) && takeAllMappedOn({ svc, knex });
 }
 
 /**
@@ -1114,8 +1123,9 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
+  const takeAllMapped = await group11PassOver({ svc, knex });
   const [offers, chinch] = await Promise.all([
-    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped: await takeAllMappedOn({ svc, knex }) }),
+    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: await limitPlaces(svc, knex) }) : null,
   ]);
   // A read that throws fails the request (the sheet then follows the context's decisions); only a
@@ -1129,7 +1139,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active) at places the take-all product is not closed at.
     troubleAreas: await takeAllAreasOn({ svc, knex, offers }),
-  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId), placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId), placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────
@@ -1371,6 +1381,8 @@ module.exports = {
   buildLawnFastWateringPreview,
   buildLawnTreatmentGuide,
   takeAllMappedOn,
+  group11PassOver,
+  guidedProductIds,
   takeAllProductIdsFor,
   troubleTypeIdsFor,
   preflightLawnFastCompletion,
