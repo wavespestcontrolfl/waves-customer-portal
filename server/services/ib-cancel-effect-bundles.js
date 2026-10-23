@@ -222,9 +222,11 @@ function notHeldBySweep() {
 // "send it by hand". Any other not-sent reason (no reminder, consent, a failed send) stays not sent.
 async function settleRequestNotice(row, outcome, classified) {
   if (!['not_sent', 'sent'].includes(classified.state) || !row || !Array.isArray(row.approved_notice) || !row.approved_notice.length) return classified;
-  const status = await require('./appointment-reminders').approvedCancellationNoticeStatus(row.scheduled_service_id, {
-    recipientKeys: row.approved_notice.map((entry) => entry.recipient_key),
-  });
+  // The reminder is judged for THIS cancellation (noticeStatusFor): if the visit was restored and cancelled again before this
+  // bookkeeping ran, a newer cancellation's delivered text must never turn this request's outcome into "sent".
+  const { status, bound } = await noticeStatusFor(row);
+  // Nothing of this cancellation can be attributed (no stored claim token): record no outcome; the sweep reports it.
+  if (bound && status === 'unbound') return { state: 'open' };
   // "Sent" from an unclaimed send rests on ANY accepted audit row, so it is verified per approved recipient too: a recipient
   // the other sender never reached downgrades it to partial (or uncertain), and the receipt says so.
   // The approved marker is still untouched: nothing was claimed or handed to the provider, so the failure was operational (an
@@ -254,7 +256,7 @@ function liveNotice(req, outcome) {
   if (!id || !classified) return Promise.resolve(null);
   return trackOwnership(req, 'notice outcome', async () => {
     const row = classified.state === 'not_sent' || classified.state === 'sent'
-      ? await db(TABLE).where({ id }).first('scheduled_service_id', 'approved_notice')
+      ? await db(TABLE).where({ id }).first('id', 'scheduled_service_id', 'restorations_seen', 'approved_notice')
       : null;
     const settled = await settleRequestNotice(row, outcome, classified);
     if (settled.state === 'open') {
@@ -557,7 +559,7 @@ async function sendApprovedNotice(bundle, svc, token) {
   if (fence.hits.length) {
     const standing = await cancelStillStands(bundle);
     // A later recipient's proof can be refused after an earlier one was already accepted: that evidence goes with the abandon.
-    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true, await noticeEvidence(bundle, classifyNoticeOutcome(reported), { bound: true, keepUnbound: false }));
+    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true, await noticeEvidence(bundle, classifyNoticeOutcome(reported), { keepUnbound: false }));
     throw new Error(`the visit was busy (${fence.hits.join(', ')}); the text will retry`);
   }
   let classified = classifyNoticeOutcome(reported)
@@ -569,7 +571,7 @@ async function sendApprovedNotice(bundle, svc, token) {
   // instead of recording a send failure.
   if (classified.state === 'not_sent') {
     const standing = await cancelStillStands(bundle);
-    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true, await noticeEvidence(bundle, null, { bound: true, keepUnbound: false }));
+    if (!standing.ok) throw new Abandon(`${standing.reason}_during_recovery`, true, await noticeEvidence(bundle, null, { keepUnbound: false }));
     return { done: true, outcome: await reclassifyUnclaimedSend(bundle, classified) };
   }
   return { done: true, outcome: classified };
@@ -585,38 +587,51 @@ async function storedClaimTokens(bundle) {
 
 const UNCONFIRMED_NOTE = 'no send of this cancellation could be matched to the customer messages, so the text is not confirmed';
 
-// The reminder's state for one bundle. `bound` (a report after the visit changed, or long after the request): judged ONLY on
-// this cancellation's stored claim tokens, because after a restore and a new cancel the reminder's current marker and claim
-// token belong to the NEWER cancellation. Unbound (the cancel was just proven standing, same restoration count): the current
-// reminder rows are this cancellation's, as before. Returns the status names of approvedCancellationNoticeStatus; a bound read
-// adds 'unbound' (no token stored: nothing can be attributed to this cancellation).
-async function noticeStatusFor(bundle, bound) {
+// Where the text of THIS bundle's cancellation stands, as { status, bound }. The reminder's current marker and claim token belong
+// to this cancellation only while it still stands: the visit is cancelled and no restoration happened since the bundle was written
+// (the restoration count is monotonic, so ONE check made AFTER the read proves no restore and no new cancel happened before it).
+// Then the status is the reminder's current one (unbound: 'ready' is meaningful, 'uncertain' is a stamped send in flight).
+// Otherwise (restored, or restored and cancelled again) the current marker is another cancellation's and is never read: delivery
+// is judged only by accepted audit rows carrying a claim token this bundle stored (bound), and with no stored token the answer is
+// 'unbound' (nothing can be attributed to this cancellation). A bound read never answers 'ready'.
+async function noticeStatusFor(bundle) {
   const recipientKeys = bundle.approved_notice.map((entry) => entry.recipient_key);
   const AppointmentReminders = require('./appointment-reminders');
-  if (!bound) return AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, { recipientKeys });
+  const current = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, { recipientKeys });
+  if ((await cancelStillStands(bundle)).ok) return { status: current, bound: false };
   const claimTokens = await storedClaimTokens(bundle);
-  if (!claimTokens.length) return 'unbound';
-  return AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, { recipientKeys, claimTokens });
+  if (!claimTokens.length) return { status: 'unbound', bound: true };
+  return { status: await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, { recipientKeys, claimTokens }), bound: true };
 }
 
-// What is known about delivery when the text step stops: the state handleCancellation reported if it says anything went out
-// (sent is verified per approved recipient), else the reminder re-read per recipient. null = no evidence that anything went out.
-// An abandonment (`bound`) never reads the current marker: delivered only when THIS cancellation's tokens have accepted audit rows.
-async function noticeEvidence(bundle, reportedState, { bound = false, keepUnbound = true } = {}) {
-  if (reportedState && ['partial', 'uncertain'].includes(reportedState.state)) return reportedState;
-  if (reportedState && reportedState.state === 'sent') return verifySentCoverage(bundle, reportedState, { bound });
-  const status = await noticeStatusFor(bundle, bound);
+// A status as the text outcome a report or an abandonment carries. null = nothing is known to have gone out. A bound
+// 'uncertain' / 'unbound' reads "not confirmed" (unless keepUnbound is off: an abandonment that found no token saves nothing).
+function noticeFromStatus(status, { bound, keepUnbound = true }) {
   if (status === 'delivered') return { state: 'sent', note: NOTICE_TERMINAL_BY_STATUS.delivered.note };
   if (status === 'partial') return { ...NOTICE_TERMINAL_BY_STATUS.partial };
   if (status === 'uncertain') return bound ? { state: 'uncertain', note: UNCONFIRMED_NOTE } : { ...NOTICE_TERMINAL_BY_STATUS.uncertain };
-  // No token on the bundle: this cancellation never claimed its text (or the claim record is missing); say it is unconfirmed.
-  // (An abandonment that itself found no token saves nothing: the report still says unconfirmed, but no outcome is recorded.)
   if (status === 'unbound' && keepUnbound) return { state: 'uncertain', note: UNCONFIRMED_NOTE };
   return null;
 }
 
-async function verifySentCoverage(bundle, classified, { bound = false } = {}) {
-  const status = await noticeStatusFor(bundle, bound);
+// The cancel changed while the text step was being judged: stop with the evidence this cancellation's own tokens give.
+async function abandonForChange(bundle, status) {
+  const standing = await cancelStillStands(bundle);
+  throw new Abandon(`${standing.reason || 'visit_restored_since'}_during_recovery`, true, noticeFromStatus(status, { keepUnbound: false }));
+}
+
+// What is known about delivery when the text step stops: the state handleCancellation reported if it says anything went out
+// (sent is verified per approved recipient), else the reminder judged for this cancellation (noticeStatusFor).
+// null = no evidence that anything went out.
+async function noticeEvidence(bundle, reportedState, { keepUnbound = true } = {}) {
+  if (reportedState && ['partial', 'uncertain'].includes(reportedState.state)) return reportedState;
+  if (reportedState && reportedState.state === 'sent') return verifySentCoverage(bundle, reportedState);
+  const { status, bound } = await noticeStatusFor(bundle);
+  return noticeFromStatus(status, { bound, keepUnbound });
+}
+
+async function verifySentCoverage(bundle, classified) {
+  const { status } = await noticeStatusFor(bundle);
   if (status === 'partial') return { ...NOTICE_TERMINAL_BY_STATUS.partial };
   if (status === 'uncertain') return { ...NOTICE_TERMINAL_BY_STATUS.uncertain };
   return classified;
@@ -627,13 +642,14 @@ async function verifySentCoverage(bundle, classified, { bound = false } = {}) {
 // the provider handoff RIGHT NOW (a paused worker resumes there and nothing can hold it under a lock), so it is reported
 // as in flight, never as "nothing more will run", and no one is told to send it again. null = nothing went out.
 const IN_FLIGHT_NOTE = 'a send was started for it and its delivery is not proven yet; it may be going out right now';
-async function reportedTextState(bundle, { proven = false } = {}) {
+async function reportedTextState(bundle) {
   if (bundle.notice_outcome) return bundle.notice_outcome;
   if (bundle.notify_customer !== true || !Array.isArray(bundle.approved_notice) || !bundle.approved_notice.length) return null;
-  // Only a report written right after the cancel was proven standing may read the reminder's current marker (the expiry report).
-  // Abandonment and the rebuilt receipt of a finished row are bound to this cancellation's stored claim tokens.
-  const found = await noticeEvidence(bundle, null, { bound: !proven });
-  return found && found.state === 'uncertain' && proven ? { ...found, in_flight: true, note: IN_FLIGHT_NOTE } : found;
+  // A cancel that still stands reads the current reminder (a stamped, unproven send is in flight); an abandonment, or a row
+  // finished long ago after a restore, is judged only by this cancellation's stored claim tokens (see noticeStatusFor).
+  const { status, bound } = await noticeStatusFor(bundle);
+  const found = noticeFromStatus(status, { bound });
+  return found && found.state === 'uncertain' && !bound ? { ...found, in_flight: true, note: IN_FLIGHT_NOTE } : found;
 }
 
 // A send this sweep could not claim or complete reads "not sent" from handleCancellation, but the reminder may have been
@@ -642,10 +658,9 @@ async function reportedTextState(bundle, { proven = false } = {}) {
 // terminal 'suppressed' marker (the approved send failed or was blocked) stays a plain not-sent; anything delivered or in
 // flight is recorded sent, partial or uncertain, which never advises a resend.
 async function reclassifyUnclaimedSend(bundle, classified) {
-  const AppointmentReminders = require('./appointment-reminders');
-  const status = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, {
-    recipientKeys: bundle.approved_notice.map((entry) => entry.recipient_key),
-  });
+  const { status, bound } = await noticeStatusFor(bundle);
+  // The cancel changed since the standing check: the current marker is another cancellation's. Stop with this bundle's own evidence.
+  if (bound) return abandonForChange(bundle, status);
   if (status === 'suppressed') return classified;
   if (status === 'delivered') return { state: 'sent', note: NOTICE_TERMINAL_BY_STATUS.delivered.note };
   if (status === 'partial') return { ...NOTICE_TERMINAL_BY_STATUS.partial };
@@ -661,8 +676,8 @@ async function recoverNotice(bundle, svc, token) {
   if (!Array.isArray(bundle.approved_notice) || !bundle.approved_notice.length) {
     return { done: true, outcome: { state: 'not_sent', note: 'The approved text was not saved with the card, so nothing was sent.' } };
   }
-  const AppointmentReminders = require('./appointment-reminders');
-  const status = await AppointmentReminders.approvedCancellationNoticeStatus(bundle.scheduled_service_id, { recipientKeys: bundle.approved_notice.map((entry) => entry.recipient_key) });
+  const { status, bound } = await noticeStatusFor(bundle);
+  if (bound) return abandonForChange(bundle, status);
   if (status !== 'ready') return { done: true, outcome: NOTICE_TERMINAL_BY_STATUS[status] || NOTICE_TERMINAL_BY_STATUS.other };
   // The money steps just ran and a restore may have landed since: re-prove the cancel before any customer text. (The
   // send's own stamp is conditional on status 'cancelled', and a restore sheds the approved marker.)
@@ -1039,7 +1054,7 @@ async function reportExpired(bundle, token) {
     : 'hard_stop';
   // The text is judged on the reminder evidence, so a send stamped but not yet proven is reported as in flight and is never
   // part of "nothing more will run" (that sentence covers only the steps listed as not confirmed).
-  const notice = await reportedTextState(bundle, { proven: true });
+  const notice = await reportedTextState(bundle);
   const done = bundle.followthrough_done_at ? bundle.followthrough_outcome : null;
   const open = [
     ...(done ? [] : ['the invoice, credit and linked-visit steps']),

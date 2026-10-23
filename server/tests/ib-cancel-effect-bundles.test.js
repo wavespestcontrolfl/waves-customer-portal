@@ -413,6 +413,44 @@ describe('the request marks its bundle complete', () => {
       expect(outcome.notificationSent).toBe(true);
     });
 
+    // The visit was restored and cancelled again before the request's bookkeeping ran: the reminder now belongs to a NEWER cancellation.
+    const restoreAndRecancel = () => mockStore.history.push(
+      { id: 2, job_id: SERVICE, from_status: 'cancelled', to_status: 'confirmed', transitioned_at: new Date(mockNow.getTime() - 20 * MIN) },
+      { id: 3, job_id: SERVICE, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: new Date(mockNow.getTime() - 10 * MIN) },
+    );
+
+    test('restore + re-cancel, no stored token: a newer cancellation\'s delivered text never turns this request\'s not-sent into sent', async () => {
+      const row = seedBundle();
+      restoreAndRecancel();
+      mockNoticeStatus.mockResolvedValue('delivered');
+      const req = { ibCancelBundleId: row.id };
+      const outcome = unclaimed();
+      await svc.liveNotice(req, outcome);
+      expect(row.notice_outcome).toBeNull();
+      expect(outcome.notificationSent).toBeUndefined();
+      expect(req.ibCancelTextPending).toBe(true);
+      expect(mockNoticeStatus).not.toHaveBeenCalledWith(SERVICE, expect.objectContaining({ claimTokens: expect.anything() }));
+    });
+
+    test('restore + re-cancel with this bundle\'s own stored token: the audit rows of that token decide', async () => {
+      const row = seedBundle({ approved_money: MONEY_CLAIMED });
+      restoreAndRecancel();
+      mockNoticeStatus.mockImplementation(async (_id, opts) => (opts && Array.isArray(opts.claimTokens) ? 'delivered' : 'suppressed'));
+      const outcome = unclaimed();
+      await svc.liveNotice({ ibCancelBundleId: row.id }, outcome);
+      expect(mockNoticeStatus).toHaveBeenCalledWith(SERVICE, expect.objectContaining({ claimTokens: [TOKEN] }));
+      expect(row.notice_outcome).toMatchObject({ state: 'sent', by: 'request' });
+      expect(outcome.notificationSent).toBe(true);
+    });
+
+    test('a cancel that still stands reads the current reminder, as before', async () => {
+      const row = seedBundle();
+      mockNoticeStatus.mockResolvedValue('delivered');
+      await svc.liveNotice({ ibCancelBundleId: row.id }, unclaimed());
+      expect(mockNoticeStatus).not.toHaveBeenCalledWith(SERVICE, expect.objectContaining({ claimTokens: expect.anything() }));
+      expect(row.notice_outcome).toMatchObject({ state: 'sent' });
+    });
+
     test('a real failure (the approved send was blocked) stays not sent', async () => {
       const row = seedBundle();
       mockNoticeStatus.mockResolvedValueOnce('suppressed');
@@ -934,6 +972,18 @@ describe('abandonment evidence belongs to this bundle\'s cancellation (claim tok
     const result = mockRecordResult.mock.calls[0][1];
     expect(result.customer_text_sent).toBe(true);
     expect(result.warning).toMatch(/went out/);
+  });
+
+  test('restore + re-cancel landing between the money steps and the text status read: the recovery stops, sends nothing, reports unconfirmed', async () => {
+    const row = seedBundle();
+    mockFollowThrough.mockImplementationOnce(async () => restoreAndRecancel());
+    mockNoticeStatus.mockResolvedValue('delivered');
+    await svc.sweepIbCancelBundles();
+    expect(row.status).toBe('abandoned');
+    expect(mockHandleCancellation).not.toHaveBeenCalled();
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.customer_text_sent).not.toBe(true);
+    expect(result.warning).not.toMatch(/The approved customer text went out/);
   });
 
   test('a stored token whose send has no accepted audit row is unconfirmed, not delivered, even if the current marker reads delivered', async () => {
