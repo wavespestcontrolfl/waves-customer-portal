@@ -1245,6 +1245,8 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ]),
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', warrantyLine],
+    // The staff send validates this record on both layouts, so both print it.
+    ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
   ];
   return { fields, applications, multiApplication };
 }
@@ -1391,7 +1393,7 @@ function CertificateSignature({ f, technicianName, projectDateLabel, detailsOnly
         ) : null}
         {/* The final exterior visit comes later, often by another
             applicator: this signature never vouches for it. */}
-        {detailsOnly && finalExteriorLine(f) ? (
+        {finalExteriorLine(f) ? (
           <>
             <br />
             <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>

@@ -255,18 +255,23 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(queryByText(/Activate Your Termite Warranty/i)).not.toBeInTheDocument();
   });
 
-  it('gate off: the certificate stays today\'s document even with final exterior values stored', async () => {
-    const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+  it('gate off: the certificate also prints a recorded final exterior treatment and scopes the signature', async () => {
+    // The staff send validates the final exterior record on both layouts
+    // (Codex #6490 r4), so the gate-off certificate prints it too.
+    const { findAllByText, findByText, getByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       findings: {
         ...findings,
         applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
         final_exterior_date: '2026-09-14',
+        final_exterior_time: '09:30',
         final_exterior_product: 'Termidor SC',
+        final_exterior_active_ingredient: 'Fipronil',
+        final_exterior_applicator_name: 'Sam Example',
       },
     }));
     await findAllByText(/Pre-Construction Termite Protection/i);
-    expect(queryByText(/Final exterior treatment/i)).not.toBeInTheDocument();
-    expect(queryByText(/covers the initial treatment only/)).not.toBeInTheDocument();
+    expect(await findByText('09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
+    expect(getByText(/covers the initial treatment only/)).toBeInTheDocument();
   });
 
   it('gate on: "No warranty" drops the contract clause and the warranty call to action', async () => {
