@@ -277,6 +277,8 @@ describe('a tool leaving a truck re-judges that truck\'s bell', () => {
       expect(res.body.error).toMatch(/Found \/ Lost/);
     }
     expect(db.__state.updated).toBeNull();
+    // The item's truck is locked before the alert check, so a check in flight finishes first.
+    expect(truckKit.lockTruck).toHaveBeenCalledWith(db, VEHICLE);
     // Any other edit of that item still saves.
     expect((await run('put', '/equipment/:id', { params: { id: TOOL }, body: { name: 'Renamed', assigned_vehicle_id: VEHICLE } })).statusCode).toBe(200);
     truckKit.openToolAlertFor.mockResolvedValue(null);

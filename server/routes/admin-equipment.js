@@ -269,13 +269,17 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       if (updates.assigned_vehicle_id !== undefined) {
         oldTruck = before.assigned_vehicle_id || null;
         if (oldTruck === updates.assigned_vehicle_id) oldTruck = null;
-        for (const truckId of [oldTruck, updates.assigned_vehicle_id].filter(Boolean).sort()) await truckKit.lockTruck(trx, truckId);
       }
+      const dies = DEAD_ITEM_STATUSES.includes(updates.status);
+      // Every truck this write can touch is locked first (in one order), so a
+      // truck check in flight on it finishes before the item moves or dies.
+      const trucks = new Set([oldTruck, updates.assigned_vehicle_id, dies ? before.assigned_vehicle_id : null].filter(Boolean));
+      for (const truckId of [...trucks].sort()) await truckKit.lockTruck(trx, truckId);
       // An unresolved tool alert belongs to the truck it was found on and
       // closes only through the office's outcome (Found / Lost, Repaired /
       // Retired, routes/admin-equipment-maintenance.js): the item neither
       // moves nor goes lost, retired or sold from the dialog while one is open.
-      if ((oldTruck || DEAD_ITEM_STATUSES.includes(updates.status)) && await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
+      if ((oldTruck || dies) && await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
       // Handing a truck to another technician takes the truck's own lock, so
       // a check in flight on it finishes (or fails ownership) first; and a
       // technician never holds two live trucks (truck-kit.js would refuse to guess).

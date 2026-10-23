@@ -387,6 +387,15 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Lawn Health Inspection', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
   });
 
+  test('mechanical lawn work and the web sweep need no treatment tools', () => {
+    expect(truckKit.serviceLinesFor('Lawn Dethatching Service')).toEqual([]);
+    expect(truckKit.serviceLinesFor('Core Aeration', { serviceKey: 'lawn_aeration' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Lawn Plugging Service', { serviceKey: 'plugging' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Top Dressing', { serviceKey: 'top_dressing' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Web Sweep', serviceKey: 'area_addon_web_sweep' }] })).toEqual(['pest']);
+    expect(truckKit.serviceLinesFor('Lawn Care — Standard Visit', { serviceKey: 'lawn_standard' })).toEqual(['lawn']);
+  });
+
   test('booked add-ons bring their own line, on readiness and on Today', async () => {
     expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Tree & Shrub Care' }, { name: 'Termite Spot Treatment' }] })).toEqual(['pest', 'tree_shrub', 'termite']);
     expect(truckKit.serviceLinesFor('Quarterly Pest Control', { addons: [{ name: 'Waves Assessment' }] })).toEqual(['pest']);

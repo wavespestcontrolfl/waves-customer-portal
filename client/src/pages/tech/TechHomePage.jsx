@@ -269,6 +269,14 @@ function serviceTechnicianId(service) {
 
 import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
+// The Tools tile for the truck check (GATE_TRUCK_KIT): present only while the
+// kit answered enabled. Kept out of the page component's decision count.
+const toolGapsOf = (kit) => (kit ? kit.gaps : undefined);
+function truckCheckTool(kit, onClick) {
+  if (!kit?.enabled) return [];
+  return [{ label: 'Truck check', description: 'Confirm what is on your truck', icon: 'truck', onClick }];
+}
+
 export default function TechHomePage({ section = 'today' }) {
   const fieldPortalClass = useFieldPortalClass();
   const navigate = useNavigate();
@@ -810,7 +818,7 @@ export default function TechHomePage({ section = 'today' }) {
   };
   const fieldTools = [
     { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
-    ...(truckKit.data?.enabled ? [{ label: 'Truck check', description: 'Confirm what is on your truck', icon: 'truck', onClick: () => navigate(`${base}/truck-check${visitSearch}`) }] : []),
+    ...truckCheckTool(truckKit.data, () => navigate(`${base}/truck-check${visitSearch}`)),
     { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
     projectReportTool({ saved, projectServices, loading, onClick: handleProjectQuickAction }),
     ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
@@ -851,7 +859,7 @@ export default function TechHomePage({ section = 'today' }) {
           heldVisits={techRole === 'admin' ? <TechHeldVisits /> : null}
           timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
           truckCheck={<TechTruckCheckCard kit={truckKit.data} base={base} visitSearch={visitSearch} />}
-          toolGaps={truckKit.data?.gaps}
+          toolGaps={toolGapsOf(truckKit.data)}
           onboarding={<OnboardingCard available={documentsAvailable} base={base} visitSearch={visitSearch} />}
           timekeeping={<>
             <div className="tf-existing"><TimecardSignoffCard techName={techName} /></div>

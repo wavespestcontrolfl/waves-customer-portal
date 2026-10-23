@@ -78,12 +78,19 @@ const CONSULTATION_KEYS = new Set(['waves_assessment', 'lead_consultation_link',
 const CONSULTATION_NAME = /\b(assessment|consultation|walk-?through)\b/i;
 const isConsultation = (serviceType, serviceKey) =>
   (serviceKey ? CONSULTATION_KEYS.has(String(serviceKey).toLowerCase()) : false) || CONSULTATION_NAME.test(String(serviceType || ''));
+// Mechanical lawn work (job-card.js ADDON_PROGRAMS lawn_care.nonChemical)
+// and the web sweep use their own machines, not the spray checklist: no
+// treatment-tool hold. Legacy rows without a key match by name.
+const MECHANICAL_KEYS = new Set(['lawn_aeration', 'dethatching', 'plugging', 'top_dressing', 'area_addon_web_sweep']);
+const MECHANICAL_NAME = /\b(dethatch\w*|aerat\w*|plugging|top\s*-?dress\w*|web sweep)\b/i;
+const isMechanical = (serviceType, serviceKey) =>
+  (serviceKey ? MECHANICAL_KEYS.has(String(serviceKey).toLowerCase()) : false) || MECHANICAL_NAME.test(String(serviceType || ''));
 
 // The checklist lines ONE service's tools come from: its line plus every
 // companion line its name mentions, in that order, once each.
 function linesForService(serviceType, serviceKey) {
   const lines = [];
-  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey)) return lines;
+  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey) || isMechanical(serviceType, serviceKey)) return lines;
   const primary = detectServiceLine(serviceType);
   if (primary) lines.push(primary);
   const text = String(serviceType || '').toLowerCase();
