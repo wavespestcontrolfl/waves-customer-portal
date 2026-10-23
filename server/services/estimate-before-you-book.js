@@ -110,10 +110,11 @@ const SECTIONS = [
     heading: 'Lawn',
     when: (s) => s.lawn,
     lines: [
-      { rank: 1, text: 'Your lawn program covers fertilizer, weed control and insect control, on a seasonal rotation. It does not include mowing. Check your visit card for when to mow.' },
-      { rank: 2, text: 'Weed control takes about 10 to 14 days to show, and some weeds need a second round.' },
+      // Program lines only for a recurring lawn plan: a one-time lawn treatment is one application (pre-push P1).
+      { rank: 1, when: (s) => s.recurringLawn, text: 'Your lawn program covers fertilizer, weed control and insect control, on a seasonal rotation. It does not include mowing. Check your visit card for when to mow.' },
+      { rank: 2, when: (s) => s.recurringLawn, text: 'Weed control takes about 10 to 14 days to show, and some weeds need a second round.' },
       { rank: 2, text: "Please water on your county's watering days, early in the morning, deeply and less often." },
-      { rank: 3, text: 'Lawn insects such as chinch bugs are part of the program. Your technician checks at the next visit and treats where we confirm them and the label allows.' },
+      { rank: 3, when: (s) => s.recurringLawn, text: 'Lawn insects such as chinch bugs are part of the program. Your technician checks at the next visit and treats where we confirm them and the label allows.' },
     ],
   },
   {

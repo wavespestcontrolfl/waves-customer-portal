@@ -338,3 +338,16 @@ describe('rodent trap checks need explicit trapping (pre-push P1)', () => {
     expect(detectServices({ items: ['Rodent Exclusion'] }).rodentTrapping).toBe(false);
   });
 });
+
+describe('one-time lawn work gets no program promises (pre-push P1)', () => {
+  test('a one-time lawn line keeps only the watering advice', () => {
+    const page = buildBeforeYouBook(detectServices({ items: ['One-Time Lawn Treatment'] }), {});
+    const lawn = page.sections.find((x) => x.key === 'lawn');
+    expect(lawn).toBeTruthy();
+    const text = JSON.stringify(lawn);
+    expect(text).toContain('watering days');
+    expect(text).not.toMatch(/seasonal rotation|second round|next visit/);
+    const recurring = JSON.stringify(buildBeforeYouBook(detectServices({ rows: [{ key: 'lawn_care' }], items: ['Lawn Care'] }), {}).sections.find((x) => x.key === 'lawn'));
+    expect(recurring).toContain('seasonal rotation');
+  });
+});
