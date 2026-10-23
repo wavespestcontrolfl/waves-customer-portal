@@ -80,6 +80,15 @@ it('posts a personal decision and removes the row', async () => {
 });
 
 it('Business with Always posts decide, then create-expense with the chosen category', async () => {
+  // after an Always decision the view reloads: the server no longer lists the booked row
+  let created = false;
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/create-expense')) { created = true; calls.push({ url: u, method: 'POST', body: JSON.parse(opts.body) }); return json({ success: true, expense: { id: 'e1' } }); }
+    if (u.includes('/ledger/inbox') && created) return json({ rows: [], total: 0 });
+    return base(url, opts);
+  }));
   render(<LedgerInboxTab />);
   const card = await screen.findByTestId('ledger-row-row-1');
   fireEvent.change(within(card).getByLabelText('Category'), { target: { value: 'cat-1' } });
@@ -257,4 +266,25 @@ it('an Always decision reloads the view so sibling rows show the new rule', asyn
   const sibling = await screen.findByTestId('ledger-row-row-5');
   await waitFor(() => expect(within(sibling).getByText('personal')).toBeInTheDocument());
   expect(screen.queryByTestId('ledger-row-row-1')).not.toBeInTheDocument();
+});
+
+it('an action that finishes after a view switch does not write the old view into the new one', async () => {
+  let resolveDecide;
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/decide')) { calls.push({ url: u, method: 'POST', body: JSON.parse(opts.body) }); return new Promise((r) => { resolveDecide = () => r(json({ success: true, action: 'ignored', ruleCreated: false })); }); }
+    if (u.includes('/ledger/inbox') && u.includes('view=later')) return json({ rows: [{ ...row, id: 'row-L', description: 'LATER ROW', suggestion: { later: true } }], total: 1 });
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  const card = await screen.findByTestId('ledger-row-row-1');
+  fireEvent.click(within(card).getByRole('button', { name: 'Personal' }));
+  await waitFor(() => expect(resolveDecide).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: 'Later view' }));
+  await screen.findByTestId('ledger-row-row-L');
+  resolveDecide();
+  await waitFor(() => expect(calls.filter((c) => c.url.includes('/ledger/status')).length).toBeGreaterThanOrEqual(2));
+  expect(screen.getByTestId('ledger-row-row-L')).toBeInTheDocument();
+  expect(screen.getByText('1 rows to review · 3 rules')).toBeInTheDocument();
 });

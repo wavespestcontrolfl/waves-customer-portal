@@ -284,6 +284,10 @@ export default function LedgerInboxTab() {
   const [showRules, setShowRules] = useState(false);
   const [applying, setApplying] = useState(false);
   const seq = useRef(0);
+  // the view the user is looking at NOW: an action that finishes after a
+  // view switch must not reload or edit the old view's rows into the new one
+  const viewRef = useRef(view);
+  useEffect(() => { viewRef.current = view; }, [view]);
 
   const loadStatus = useCallback(() => {
     return adminFetch(`${T}/ledger/status`)
@@ -341,7 +345,9 @@ export default function LedgerInboxTab() {
       // an Always decision reloads too, because the new rule has just
       // re-labelled every other row of that payee on the server
       const stays = decision === view;
-      if (stays || always) {
+      if (viewRef.current !== view) {
+        // the user moved on: the new view already loaded its own rows
+      } else if (stays || always) {
         await loadRows(view, 0);
       } else {
         setRows((prev) => prev.filter((r) => r.id !== row.id));
