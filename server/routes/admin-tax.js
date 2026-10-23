@@ -2414,15 +2414,19 @@ const BANK_CHANGE_BLOCKS_CLAIM = 'the bank changed this transaction after it was
 // link), checked here and again inside the claim, so a candidate list that
 // appeared after the Inbox loaded still wins over a second expense. "Always"
 // resolves the owner rule up front; it is written in the claim's transaction.
-function ledgerCreateExpenseGuard(req, row) {
+// The rule takes the category the expense gets: the pick, else the visible
+// suggestion the owner accepted (the Inbox sends no categoryId for an
+// untouched default, so the expense keeps its provenance; the rule still
+// has a category).
+function ledgerCreateExpenseGuard(req, row, categoryId) {
   const fromLedger = !!req.body?.fromLedger;
   if (!fromLedger) return { fromLedger, ownerRule: null };
   // dark ledger = invisible ledger, this entry point included
   if (!taxLedgerRules.isOn()) return { error: [404, 'not found'] };
   const block = taxLedgerRules.inboxBlock(row);
   if (block) return { error: [409, block] };
-  const wantsRule = !!(req.body?.always && req.body?.categoryId);
-  const ownerRule = wantsRule ? taxLedgerRules.ownerRuleFor(row, 'expense', req.body.categoryId) : null;
+  const wantsRule = !!(req.body?.always && categoryId);
+  const ownerRule = wantsRule ? taxLedgerRules.ownerRuleFor(row, 'expense', categoryId) : null;
   if (wantsRule && !ownerRule) return { error: [400, taxLedgerRules.NO_RULE_MESSAGE] };
   return { fromLedger, ownerRule };
 }
@@ -2431,10 +2435,13 @@ function ledgerCreateExpenseGuard(req, row) {
 // suggestion (a ledger rule's counts only while the ledger gate is on). The
 // verify note is for a category a model (or an unknown source) suggested,
 // never for a deterministic ledger rule's.
-async function resolveCreateExpenseCategory(req, row) {
+function effectiveCreateExpenseCategory(req, row) {
   const visible = taxLedgerRules.visibleSuggestion(row.suggestion);
   const suggested = visible?.categoryId || null;
-  const categoryId = req.body?.categoryId || suggested;
+  return { visible, suggested, categoryId: req.body?.categoryId || suggested };
+}
+async function resolveCreateExpenseCategory(req, row) {
+  const { visible, suggested, categoryId } = effectiveCreateExpenseCategory(req, row);
   const usedAi = !req.body?.categoryId && !!suggested && visible?.categorySource !== 'rule';
   let deductible = parseFloat(row.amount);
   if (categoryId) {
@@ -2509,7 +2516,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — refund credits use apply-refund' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
     if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
-    const ledger = ledgerCreateExpenseGuard(req, row);
+    const ledger = ledgerCreateExpenseGuard(req, row, effectiveCreateExpenseCategory(req, row).categoryId);
     if (ledger.error) return res.status(ledger.error[0]).json({ error: ledger.error[1] });
     const category = await resolveCreateExpenseCategory(req, row);
     if (category.error) return res.status(category.error[0]).json({ error: category.error[1] });

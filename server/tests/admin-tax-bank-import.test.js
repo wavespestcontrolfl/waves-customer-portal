@@ -510,6 +510,23 @@ describe('create-expense (gate on)', () => {
     expect(taxLedgerRules.createRule).not.toHaveBeenCalled();
   });
 
+  test('fromLedger + always with an untouched suggested category (no categoryId sent): the rule takes the suggested category; the expense keeps its provenance', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    taxLedgerRules.createRule.mockClear(); taxLedgerRules.applyRulesForPattern.mockClear();
+    state.bankRow.suggestion = { noMatch: true, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'ai' };
+    const res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, always: true });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(expect.objectContaining({ ruleCreated: true, propagated: true }));
+    expect(taxLedgerRules.createRule).toHaveBeenCalledWith(expect.objectContaining({ pattern: '\\bwawa\\b', kind: 'expense', categoryId: 'cat-meals', source: 'owner' }));
+    // the expense itself still carries the model's note: the owner accepted a suggestion, a rule did not decide it
+    expect(state.insertedExpenses.at(-1)).toEqual(expect.objectContaining({ category_id: 'cat-meals', notes: expect.stringContaining('AI-categorized') }));
+    // no visible category at all (ledger suggestion of a disabled source, or none): no rule, and a plain 200
+    taxLedgerRules.createRule.mockClear();
+    state.bankRow.suggestion = { noMatch: true };
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, always: true })).status).toBe(200);
+    expect(taxLedgerRules.createRule).not.toHaveBeenCalled();
+  });
+
   test('fromLedger: the claim also requires examined + no candidates, so a list parked mid-flight loses the race', async () => {
     process.env.GATE_TAX_LEDGER = 'true';
     state.bankRow.suggestion = { categoryId: 'cat-meals', noMatch: true };
