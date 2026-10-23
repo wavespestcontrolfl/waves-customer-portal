@@ -75,6 +75,13 @@ beforeEach(() => {
   db.__state.updates = [];
 });
 
+test.each([['post', '/'], ['put', '/:id([0-9a-fA-F-]{36})'], ['delete', '/:id([0-9a-fA-F-]{36})']])('%s %s (asset writer that spreads the body) carries requireAdmin', (method, path) => {
+  const { requireAdmin } = require('../middleware/admin-auth');
+  const layer = layerFor(method, path);
+  expect(layer).toBeTruthy();
+  expect(layer.route.stack.some((l) => l.handle === requireAdmin)).toBe(true);
+});
+
 test('Lost resolves the alert, marks the item lost and closes the truck bell', async () => {
   const res = await put('a-missing', { status: 'resolved', outcome: 'lost' });
   expect(res.statusCode).toBe(200);

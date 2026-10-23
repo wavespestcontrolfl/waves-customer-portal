@@ -195,8 +195,11 @@ router.get('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
   }
 });
 
+// Asset rows are the office's (the same rule as routes/admin-equipment.js):
+// a technician token never creates, edits or retires one. These handlers
+// spread the body, so kit_key and the custody columns would be reachable.
 // POST / — create equipment
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const data = { ...req.body };
     if (!data.name) return res.status(400).json({ error: 'Equipment name is required' });
@@ -215,7 +218,7 @@ router.post('/', async (req, res, next) => {
 });
 
 // PUT /:id — update equipment
-router.put('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
+router.put('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
   try {
     const data = { ...req.body, updated_at: db.fn.now() };
     delete data.id;
@@ -236,7 +239,7 @@ router.put('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
 });
 
 // DELETE /:id — soft delete (retire)
-router.delete('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
+router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
   try {
     const [record] = await db('equipment')
       .where({ id: req.params.id })

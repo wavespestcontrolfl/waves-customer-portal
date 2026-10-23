@@ -410,9 +410,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/email/vendors` | admin-email |
 | POST | `/api/admin/email/vendors` | admin-email |
 | DELETE | `/api/admin/email/vendors/:id` | admin-email |
-| POST | `/api/admin/equipment-maintenance` | admin-equipment-maintenance |
-| DELETE | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})` | admin-equipment-maintenance |
-| PUT | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})` | admin-equipment-maintenance |
 | POST | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/downtime` | admin-equipment-maintenance |
 | POST | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/mileage` | admin-equipment-maintenance |
 | POST | `/api/admin/equipment-maintenance/:id([0-9a-fA-F-]{36})/records` | admin-equipment-maintenance |
