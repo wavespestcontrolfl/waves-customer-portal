@@ -1,7 +1,7 @@
 // Issue the New Construction Termite Warranty (Rule 5E-14.105(3)) from a
 // pre-treat certificate. The certificate fills every job value; the office
 // adds the contract basis, prices, the FDACS-13692 date and the issuer.
-// Creates the e-sign link only: nothing is sent to the customer here.
+// Saves a draft only: nothing is sent to the customer here.
 import { useMemo, useState } from "react";
 import { Button, Dialog, DialogBody, DialogFooter } from "../ui";
 import { adminFetch } from "../../lib/adminFetch";
@@ -92,7 +92,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [payer, setPayer] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [signingUrl, setSigningUrl] = useState("");
+  const [created, setCreated] = useState(false);
   const [preview, setPreview] = useState(null);
   const [reviewed, setReviewed] = useState(false);
 
@@ -151,7 +151,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
     );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) return setError(issueError(data, "Could not create the warranty."));
-    setSigningUrl(data.signingUrl || data.contract?.signingUrl || "");
+    setCreated(true);
   });
 
   if (!open) return null;
@@ -170,12 +170,11 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
               Treated {lateDays} days ago: past the 30-day limit in Rule 5E-14.105(3)(a). Send it today.
             </div>
           )}
-          {signingUrl ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <div style={{ fontSize: 14, color: "#18181B" }}>
-                Warranty created. Send it for signature from Document Requests.
-              </div>
-              <input id="warranty-signing-url" readOnly value={signingUrl} style={fieldStyle} onFocus={(e) => e.target.select()} />
+          {created ? (
+            // The server saves it as a draft with no link: it counts as sent
+            // only when Document Requests sends it (email, text or copy link).
+            <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+              Warranty saved as a draft. Nothing has gone to the owner yet. Send it from Contracts → Document Requests.
             </div>
           ) : preview ? (
             <>
@@ -228,7 +227,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         </div>
       </DialogBody>
       <IssueFooter
-        stage={signingUrl ? "done" : preview ? "review" : "edit"}
+        stage={created ? "done" : preview ? "review" : "edit"}
         canPreview={ready && !busy}
         canCreate={reviewed && !busy}
         busy={busy}

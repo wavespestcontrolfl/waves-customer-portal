@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  NEW_CONSTRUCTION_WARRANTY_KEY, assertConfirmedRender, renderHash, supersedeOpenNewConstructionWarranty, templateIssueValues,
+  NEW_CONSTRUCTION_WARRANTY_KEY, assertConfirmedRender, issueDeliveryState, renderHash, supersedeOpenNewConstructionWarranty, templateIssueValues,
 } = require('../services/new-construction-warranty');
 
 const router = express.Router();
@@ -10,9 +10,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   ESIGN_DISCLOSURE,
   documentContractExpiresAt,
-  hashContractToken,
   mintContractToken,
-  publicContractUrl,
   serializeContract,
   signerName,
 } = require('../services/contracts');
@@ -572,21 +570,19 @@ router.post('/:key/contracts', async (req, res, next) => {
         context: liveContext,
         actorId: req.technicianId,
       });
+      const delivery = issueDeliveryState(loaded.template.template_key, token, expiresAt);
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
         created_by: req.technicianId || null,
         contract_type: 'document_template',
         title: liveRendered.title || loaded.activeVersion.title || loaded.template.name,
-        status: loaded.template.requires_signature === false ? 'sent' : 'sent',
         recipient_name: recipientNameLive,
         recipient_email: recipientEmailLive,
         recipient_phone: recipientPhoneLive,
         service_name: liveContext.service?.name || null,
         esign_disclosure_snapshot: loaded.activeVersion.signer_disclosure || ESIGN_DISCLOSURE,
         contract_text_snapshot: liveRendered.body,
-        share_token_hash: hashContractToken(token),
-        share_token_expires_at: expiresAt,
-        shared_at: new Date(),
+        ...delivery.fields,
         document_template_id: loaded.template.id,
         document_template_version_id: loaded.activeVersion.id,
         document_template_key: loaded.template.template_key,
@@ -599,7 +595,7 @@ router.post('/:key/contracts', async (req, res, next) => {
         templateVersionId: loaded.activeVersion.id,
         unresolvedVariables: liveRendered.unresolvedVariables,
       });
-      await trx('customer_contract_events').insert({
+      if (delivery.linkCreated) await trx('customer_contract_events').insert({
         contract_id: row.id,
         customer_id: customer.id,
         event_type: 'share_link_created',
@@ -609,11 +605,12 @@ router.post('/:key/contracts', async (req, res, next) => {
         user_agent: req.get('user-agent') || null,
         metadata: jsonb({ expiresAt: expiresAt.toISOString() }, {}),
       });
-      return { row, liveRendered };
+      return { row, liveRendered, signingUrl: delivery.signingUrl };
     });
 
     const hydrated = await contractQuery().where('cc.id', contract.row.id).first();
-    const signingUrl = publicContractUrl(token);
+    // A draft warranty has no link yet (Document Requests sends it).
+    const { signingUrl } = contract;
     res.status(201).json({
       contract: serializeContract(hydrated, { signingUrl }),
       signingUrl,
