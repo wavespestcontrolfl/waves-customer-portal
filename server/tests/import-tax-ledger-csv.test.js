@@ -690,6 +690,13 @@ describe('--skip-existing and expenses', () => {
     expect(report).toMatch(/check these:\s+0 /);
   });
 
+  test('an amount with more than two decimals fails the file instead of being rounded', () => {
+    const header = HEADER.join(',');
+    expect(() => parseLedgerCsv(`${header}\n3098,2025-03-14,ACME,12.505,out,expense,Supplies,22,,,`)).toThrow(/amount must be a positive decimal/);
+    expect(parseLedgerCsv(`${header}\n3098,2025-03-14,ACME,12.5,out,expense,Supplies,22,,,`)[0].amount).toBe(12.5);
+    expect(parseLedgerCsv(`${header}\n3098,2025-03-14,ACME,"1,234.00",out,expense,Supplies,22,,,`)[0].amount).toBe(1234);
+  });
+
   test('parseArgs reads --skip-existing', () => {
     expect(parseArgs(['--file', 'x.csv', '--skip-existing', '--dry-run'])).toEqual({ file: 'x.csv', dryRun: true, skipExisting: true });
   });

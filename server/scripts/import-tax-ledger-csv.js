@@ -93,10 +93,12 @@ function fmtMoney(cents) {
   return `${sign}$${Math.floor(abs / 100).toLocaleString('en-US')}.${String(abs % 100).padStart(2, '0')}`;
 }
 
+// A money cell: digits with at most two decimals. A third decimal is a
+// malformed row, not something to round away.
 function parseAmountCell(raw) {
   const cleaned = String(raw === undefined || raw === null ? '' : raw).replace(/[$,\s]/g, '');
-  if (!/^\d+(\.\d+)?$/.test(cleaned)) return null;
-  const n = Math.round(Number(cleaned) * 100) / 100;
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
+  const n = Number(cleaned);
   if (!Number.isFinite(n) || n <= 0 || n > MAX_AMOUNT) return null;
   return n;
 }
