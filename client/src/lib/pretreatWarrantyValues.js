@@ -16,7 +16,6 @@ const PLAN_YEARS = {
 };
 
 export const WARRANTY_DEFAULT_STRUCTURES = 'The new home and its attached garage on this lot.';
-export const WARRANTY_DEFAULT_NOTICE_LOCATION = 'near the water heater or the electric panel';
 // A blank date on this certificate does not prove the later visit has not
 // happened (that visit keeps its own record), so the wording stays neutral.
 export const FINAL_EXTERIOR_NOT_DONE = 'Final exterior treatment: not recorded on this certificate when this warranty was issued. It does not change the warranty dates above.';
@@ -121,7 +120,7 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
       term_end: termEnd,
       renewal_due: renewalDue(findings, termEnd),
       payer: text(findings.builder_contractor),
-      notice_location: WARRANTY_DEFAULT_NOTICE_LOCATION,
+      notice_location: '',
       issue_date: todayParts ? formatUs(todayParts) : '',
       treatment_price: '',
       plan_price: years === 1 ? 'Included in the treatment price' : '',

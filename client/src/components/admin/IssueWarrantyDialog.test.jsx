@@ -31,6 +31,7 @@ function fillOfficeFields() {
   set('warranty-renewal-fee', '$99.00');
   set('warranty-issuer-name', 'Pat Office');
   set('warranty-issuer-title', 'Office Manager');
+  set('warranty-notice-location', 'on the wall beside the electric panel in the garage');
 }
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -50,7 +51,9 @@ describe('IssueWarrantyDialog', () => {
     const [path, init] = adminFetch.mock.calls[0];
     expect(path).toBe('/admin/document-templates/service_agreement.termite_new_construction_warranty/contracts');
     expect(init.body.customerId).toBe('cust-1');
-    expect(init.body.propertyAddress).toBe('12 Test Lane, Bradenton, FL 34202');
+    expect(init.body.propertyAddress).toBeUndefined();
+    expect(init.body.values.project.address).toBe('12 Test Lane, Bradenton, FL 34202');
+    expect(init.body.values.warranty.notice_location).toBe('on the wall beside the electric panel in the garage');
     expect(init.body.values.warranty).toMatchObject({
       term_end: '10/01/2027',
       plan_price: 'Included in the treatment price',

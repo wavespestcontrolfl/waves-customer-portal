@@ -47,12 +47,13 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [issuerName, setIssuerName] = useState("");
   const [issuerTitle, setIssuerTitle] = useState("");
   const [structures, setStructures] = useState(base.warranty.structures);
+  const [noticeLocation, setNoticeLocation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
 
   const { basisProblem, noticeProblem, ready } = warrantyIssueReadiness(base, {
-    basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures,
+    basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures, noticeLocation,
   });
   const lateDays = daysSinceTreatment(base.treatment.initial_date, base.warranty.issue_date);
 
@@ -65,6 +66,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         warranty: {
           ...base.warranty,
           structures: structures.trim(),
+          notice_location: noticeLocation.trim(),
           treatment_price: treatmentPrice.trim(),
           plan_price: planPrice.trim(),
           renewal_fee: renewalFee.trim(),
@@ -77,11 +79,9 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
         `/admin/document-templates/${encodeURIComponent(NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY)}/contracts`,
         {
           method: "POST",
-          body: {
-            customerId: project.customer_id,
-            values,
-            ...(base.project.address ? { propertyAddress: base.project.address } : {}),
-          },
+          // No propertyAddress override: section 1 keeps the owner's or
+          // builder's own mailing address; the job address is project.address.
+          body: { customerId: project.customer_id, values },
         },
       );
       const data = await response.json().catch(() => ({}));
@@ -139,6 +139,9 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
                 <input id="warranty-notice-date" value={noticeDate} onChange={(e) => setNoticeDate(e.target.value)} style={fieldStyle} />
               </Field>
               {noticeProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{noticeProblem}</div>}
+              <Field id="warranty-notice-location" label="Treatment notice posted at (F.S. 482.226(5))">
+                <input id="warranty-notice-location" value={noticeLocation} onChange={(e) => setNoticeLocation(e.target.value)} placeholder="e.g. on the wall beside the electric panel in the garage" style={fieldStyle} />
+              </Field>
               <Field id="warranty-structures" label="Structures covered">
                 <input id="warranty-structures" value={structures} onChange={(e) => setStructures(e.target.value)} style={fieldStyle} />
               </Field>
