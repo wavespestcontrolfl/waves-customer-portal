@@ -92,7 +92,7 @@ const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  priceMosquito, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
   priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
@@ -767,6 +767,8 @@ function generateEstimate(input) {
     // silently dropped while the estimate still looks priced.
     const alreadyHasManual = lineItems.some(
       (line) => line.service === result.service && line.quoteRequired === true
+        // A misting manual row shares commercial_pest's shape but is a different request: it neither hides nor is hidden by one.
+        && (line.originalRequestedService === 'mosquito_misting') === (result.originalRequestedService === 'mosquito_misting')
     );
     if (!alreadyHasManual) {
       lineItems.push(result);
@@ -1265,6 +1267,37 @@ function generateEstimate(input) {
         }
       }
     }
+  }
+
+  // Mosquito misting system (install + monthly plan + per-fill refills).
+  // DARK behind GATE_MOSQUITO_MISTING, read at call time: with the gate off the
+  // key is ignored entirely (output byte-identical). The line is NOT tier-counted
+  // (not in WAVEGUARD.qualifyingServices) and NOT percent-discountable
+  // (excludedFromPercentDiscount.mosquito_misting); its install price rides
+  // line.installation.price into installationTotal / year1Total below.
+  // ONE selection rule with the stored-estimate guards (isMistingSelection): only `true` or a plain object selects the system,
+  // so a truthy string / number / list is neither priced here nor carried by the guard.
+  const { isMistingSelection } = require('../../utils/mosquito-misting-system');
+  const mistingService = [services.mosquitoMisting, services.mosquito_misting].find(isMistingSelection) || null;
+  const mistingReplayKnobs = input.mistingPricingKnobs && typeof input.mistingPricingKnobs === 'object' ? input.mistingPricingKnobs : null;
+  if (mistingService && !require('../../config/feature-gates').mosquitoMistingLive() && mistingReplayKnobs) {
+    // A STORED misting quote (the server-derived replay stamp rides only a replay) re-entering the engine while the gate is
+    // off must fail closed, never silently reprice without the system (a fresh quote with the key is simply ignored).
+    const err = new Error('The mosquito misting system is not enabled on this environment (GATE_MOSQUITO_MISTING) - remove it or flip the gate.');
+    err.statusCode = 400;
+    err.code = 'MOSQUITO_MISTING_GATED';
+    err.reason = 'mosquito_misting_disabled';
+    err.failClosed = true;
+    throw err;
+  }
+  // A commercial property never auto-prices the residential misting plan (no commercial misting program exists):
+  // it rides the existing commercial manual-quote rail, like every other residential-only pricer.
+  if (mistingService && require('../../config/feature-gates').mosquitoMistingLive()
+    && !useCommercialManualQuote(mistingService, 'mosquito_misting')) {
+    // knobs: the quote-time snapshot replayed from a stored estimate (server-derived only, like the termite knobs).
+    const result = priceMosquitoMisting(property, { ...serviceOptions(mistingService), knobs: mistingReplayKnobs });
+    lineItems.push(result);
+    if (!result.quoteRequired) activeServiceKeys.push('mosquito_misting');
   }
 
   // Rodent Bait

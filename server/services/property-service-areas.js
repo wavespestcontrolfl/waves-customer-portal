@@ -212,6 +212,12 @@ async function saveAreaMeasurements(scope, req, input, { knex = db } = {}) {
         await trx('customers').where({ id: property.customer_id }).update({ property_sqft: changes.lawn.sqft, updated_at: trx.fn.now() });
         await trx('customer_turf_profiles').insert({ customer_id: property.customer_id, lawn_sqft: changes.lawn.sqft })
           .onConflict('customer_id').merge({ lawn_sqft: changes.lawn.sqft, updated_at: trx.fn.now() });
+        // A reviewed lawn at the customer's own address re-establishes the lawn AREA for the weekly plan after a move
+        // (its own ledger entry — codex #6498 r1 P2).
+        if (Number(changes.lawn.sqft) > 0) {
+          const { confirmIrrigationFields, LAWN_SQFT_CONFIRMED_FIELD } = require('./irrigation-schedule-confirmation');
+          await confirmIrrigationFields(trx, property.customer_id, [LAWN_SQFT_CONFIRMED_FIELD]);
+        }
       }
     }
     await require('./audit-log').recordAuditEvent({

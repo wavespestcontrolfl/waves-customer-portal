@@ -105,6 +105,62 @@ test('both palm fertilizers and the old palm product share one three-month/four-
   expect(treeShrubDueReason('f8012', [], '2028-10-01', null)).toMatch(/Confirm the service property/);
 });
 
+describe('13-0-13 bed fertilizer due rule (label read 2026-10-22)', () => {
+  const orn = 'LESCO 13-0-13 60% PolyPlus Landscape';
+  const due = (rows, date) => treeShrubDueReason('f13013', rows, date, 'property-a');
+  test('never June 1 to September 30, any history', () => {
+    for (const date of ['2028-06-01', '2028-07-15', '2028-09-30']) expect(due([], date)).toMatch(/June 1 to September 30/);
+    expect(due([], '2028-05-31')).toBeNull();
+    expect(due([], '2028-10-01')).toBeNull();
+  });
+  test('the June to September hold follows the property\'s ordinance zone: North Port is outside it; Sarasota, Manatee and an unknown zone are inside', () => {
+    const inJuly = zone => treeShrubDueReason('f13013', [], '2028-07-15', 'property-a', zone);
+    expect(inJuly('north_port')).toBeNull();
+    for (const zone of ['sarasota_venice', 'manatee_parrish', 'other_unknown']) expect(inJuly(zone)).toMatch(/June 1 to September 30/);
+    // No zone given keeps the conservative Sarasota/Manatee rule.
+    expect(treeShrubDueReason('f13013', [], '2028-07-15', 'property-a')).toMatch(/June 1 to September 30/);
+    // The other rules still apply in North Port.
+    expect(treeShrubDueReason('f13013', [application(orn, '2028-05-20')], '2028-07-15', 'property-a', 'north_port')).toMatch(/less than five months/);
+  });
+  test('at least five calendar months after the last one', () => {
+    // An October feeding clears on 2029-03-15; the next spring window opens after that.
+    const history = [application(orn, '2028-10-15')];
+    expect(due(history, '2029-03-14')).toMatch(/less than five months/);
+    expect(due(history, '2029-03-15')).toBeNull();
+    // April then October is the program: 5 months and 3 weeks apart.
+    expect(due([application(orn, '2028-04-20')], '2028-10-01')).toBeNull();
+    expect(due([application(orn, '2028-05-20')], '2028-10-01')).toMatch(/less than five months/);
+  });
+  test('every cadence gets a spring and a fall feeding: the rule picks the visit, not the month card', () => {
+    // A spring feeding in February holds the March and April cards, skips the summer, and clears for the fall cards.
+    const spring = [application(orn, '2028-02-20')];
+    expect(due(spring, '2028-04-15')).toMatch(/less than five months/);
+    expect(due(spring, '2028-07-24')).toMatch(/June 1 to September 30/);
+    expect(due(spring, '2028-10-10')).toBeNull();
+    expect(due(spring, '2028-11-10')).toBeNull();
+    // A March feeding clears on August 20, so the first card that offers it again is October.
+    expect(due([application(orn, '2028-03-20')], '2028-10-10')).toBeNull();
+    // A fall feeding in November holds December and the winter cards, and clears for the spring cards.
+    const fall = [application(orn, '2027-11-12')];
+    expect(due(fall, '2028-02-10')).toMatch(/less than five months/);
+    expect(due(fall, '2028-04-14')).toBeNull();
+    expect(due(fall, '2028-05-15')).toBeNull();
+  });
+  test('at most two in twelve months', () => {
+    expect(due([application(orn, '2028-04-15'), application(orn, '2028-10-15')], '2029-03-30')).toMatch(/Two 13-0-13/);
+    expect(due([application(orn, '2027-10-15'), application(orn, '2028-04-15')], '2028-10-16')).toBeNull();
+  });
+  test('only 13-0-13 rows count, on this property, and a recorded 13-0-13 is not a palm feeding', () => {
+    expect(due([application('LESCO 8-0-12 #511542', '2028-08-01')], '2028-10-01')).toBeNull();
+    expect(due([application(orn, '2028-08-01', { property_id: 'property-b' })], '2028-10-01')).toBeNull();
+    // The bag is titled "Palm & Tropical Ornamental Fertilizer": that name never holds a palm feed.
+    expect(treeShrubDueReason('f8012', [application('LESCO 13-0-13 Palm & Tropical Ornamental Fertilizer', '2028-09-01')], '2028-10-01', 'property-a')).toBeNull();
+    expect(due([application(orn, '2028-04-01', { property_id: null })], '2028-10-01')).toMatch(/unconfirmed property/);
+    expect(due([], '2028-10-01')).toBeNull();
+    expect(treeShrubDueReason('f13013', [], '2028-10-01', null)).toMatch(/Confirm the service property/);
+  });
+});
+
 test('lawn winterizer does not count as a palm feeding but the confirmed palm SKU does', () => {
   expect(treeShrubDueReason('f0016', [application('0-0-16 Winterizer', '2028-09-01')], '2028-10-01', 'property-a')).toBeNull();
   expect(treeShrubDueReason('f0016', [application('LESCO 0-0-16 Winterizer', '2028-09-01')], '2028-10-01', 'property-a')).toBeNull();
@@ -300,6 +356,55 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(limits).not.toMatch(/two per six months/);
     for (const visit of visits) {
       for (const row of visit.fieldGuide.conditional) if (row.key === 'distance') expect(row.where).toBe('Whitefly nymphs; scale on hold');
+    }
+  });
+});
+
+describe('13-0-13 and Sequestar guide entries (labels read 2026-10-22)', () => {
+  const { products } = require('../config/tree-shrub-field-guide.json');
+  const fs = require('fs');
+  const path = require('path');
+
+  test('13-0-13 carries the bag label analysis, the Waves bed and tree rates and the county reason', () => {
+    const orn = products.f13013;
+    expect(orn.pending).toBeUndefined();
+    expect(orn.targets).toMatch(/13% nitrogen \(7\.8% slow release\), 13% potash, 2% magnesium/);
+    expect(orn.targets).toMatch(/no phosphate/i);
+    expect(orn.rates.map(([rate]) => rate)).toEqual([
+      'Waves beds: 0.75 lb / 100 sq ft',
+      'Trees and larger shrubs: ½ lb / inch of trunk diameter',
+      'Bag label: 1–1½ lb / 100 sq ft beds',
+    ]);
+    expect(orn.rates[0][1]).toMatch(/1,200 sq ft bed takes 9 lb/);
+    expect(orn.rates[0][1]).toMatch(/0\.98 lb nitrogen per 1,000 sq ft/);
+    expect(orn.rates[1][1]).toMatch(/Never more than 0\.75 lb per 100 sq ft of the area under it/);
+    expect(orn.rates[2][1]).toMatch(/1\.3 lb nitrogen per 1,000 sq ft, over the county limit/);
+    expect(orn.limits.join('\n')).toMatch(/spring and late fall, at least 5 months apart/);
+    expect(orn.limits.join('\n')).toMatch(/No nitrogen or phosphorus fertilizer June 1 to Sept\. 30/);
+    expect(orn.summary).toBe('0.75 lb / 100 sq ft beds · ½ lb / inch trunk');
+  });
+
+  test('Sequestar carries the symptom use, the three label doses and the oil rule', () => {
+    const iron = products.sequestar;
+    expect(iron.pending).toBeUndefined();
+    expect(iron.targets).toMatch(/Iron chlorosis: yellow new leaves with green veins/);
+    expect(iron.rates.map(([rate]) => rate)).toEqual([
+      'Small shrubs: 2 oz each',
+      'Large shrubs and trees: up to 2 oz / inch of trunk diameter',
+      'Beds and groundcovers: up to 2 oz / 100 sq ft',
+    ]);
+    expect(iron.limits.join('\n')).toMatch(/Label direction for shrubs and trees: apply annually in the spring before the flush of growth, or when deficiency symptoms appear/);
+    // The label's own direction is quoted; the entry states no "once a year per plant" cap of its own.
+    expect(JSON.stringify(iron)).not.toMatch(/once a year|once per year|per year|per plant per/i);
+    expect(iron.limits.join('\n')).toMatch(/Never tank-mix with oil/);
+    expect(iron.program).toMatch(/only when iron chlorosis shows/);
+  });
+
+  test('both label links point at a PDF shipped with the client', () => {
+    for (const key of ['f13013', 'sequestar']) {
+      const url = products[key].url;
+      expect(url).toMatch(/^\/labels\/.+\.pdf$/);
+      expect(fs.existsSync(path.join(__dirname, '../../client/public', url))).toBe(true);
     }
   });
 });

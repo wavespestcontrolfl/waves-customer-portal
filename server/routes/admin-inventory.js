@@ -790,9 +790,11 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_lesco_24_0_11', 'LESCO 24-0-11 with PolyPlus OPTI', 'fertilizer', 'fertilizer'],
   ['v13_lesco_10_0_22', 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
   ['v13_lesco_44_0_0', 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
+  ['v13_lesco_0_0_24', 'LESCO Black Out 0-0-24 AM Spar-TECH', 'fertilizer', 'fertilizer'],
   ['v13_tetrino', 'Tetrino Insecticide', 'pesticide', 'insecticide'],
   ['v13_arena', 'Arena 50 WDG', 'pesticide', 'insecticide'],
   ['v13_talak', 'Atticus Talak 7.9 F', 'pesticide', 'insecticide'],
+  ['v13_advion_insect_granule', 'Advion Insect Granule', 'pesticide', 'insecticide'],
   ['v13_acelepryn', 'Acelepryn Insecticide', 'pesticide', 'insecticide'],
   ['v13_dylox_6_2_g', 'Dylox 6.2 G Granular Insecticide', 'pesticide', 'insecticide'],
   ['v13_artavia', 'Artavia 2 SC (Azoxy)', 'pesticide', 'fungicide'],
@@ -825,7 +827,10 @@ function protocolProductReferences(definition) {
       // A cadence variant's step (v13 April on the 9x plan) is part of the visit: its
       // products are referenced by that month too.
       const variantSteps = Object.values(visit.cadenceVariants || {}).flatMap((variant) => [variant.primary, variant.secondary]);
-      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes, ...variantSteps].filter(Boolean).join('\n'));
+      // A conditional swap of the visit's bag (v13 December, GATE_LAWN_DEC_LARGE_PATCH_K) is part of the visit too; lawnProtocols() hands the
+      // block out only while its gate is live, so with the gate off nothing changes.
+      const swapLines = Object.values(visit.swaps || {}).map((swap) => swap.primary);
+      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes, ...variantSteps, ...swapLines].filter(Boolean).join('\n'));
       if (definition.aliases.some((alias) => text.includes(normalizeProtocolText(alias)))) {
         refs.push({
           turf: trackKey,

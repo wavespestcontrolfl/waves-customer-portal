@@ -1,17 +1,20 @@
 // Every product mix the v13 lawn program can put on one visit gets a watering text (owner 2026-10-22: "for all
 // combinations, a text goes out, but the text is accurate") once GATE_LAWN_WATERING_EVERY_VISIT resolves targets and
 // applies rule E. A mix = every primary product of a month (or of its cadence variant) plus any subset of that
-// month's secondaries and add-ons, with or without the liquid K-Flow + Chelated AM pair. The rules are the catalog's
+// month's secondaries and add-ons, with or without the liquid K-Flow + Chelated AM pair. A whole-lawn bag the plan swaps for a mapped
+// trouble area (GATE_LAWN_DEC_LARGE_PATCH_K: the December 0-0-24) is one more variant of its month, so the swapped visit has a text too. The rules are the catalog's
 // after migrations 20261022120000 and 20261022160000 (fixture); a product the program names that the fixture lacks
 // fails here, so a new protocol product needs a watering rule first.
 const v13 = require('../config/lawn-protocol-v13.json');
 const RULES = require('./fixtures/lawn-watering-rules-v13-2026-10-22.json');
 const { validateRule, rulesForTargets } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+const { V13_TROUBLE_PRODUCT_SWAPS } = require('../config/lawn-v13-trouble-product-swaps');
 
 const LIQUIDS = ['LESCO K-Flow 0-0-25 17% S Turfgrass Liquid Fertilizer', 'LESCO Chelated AM + Micros Turf & Ornamental Liquid Micronutrient'];
 // Lawn visits end between 9 AM and 6 PM ET (2026-05 to 2026-10): 10 AM and 4 PM, EDT.
 const TIMES = ['2026-10-21T14:00:00Z', '2026-10-21T20:00:00Z'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const BANNED = /(keep[^.]{0,20}off|stay off|\bwait\b|\bdry\b)[^.]{0,30}\b\d+\s*(h|hour|min)/i;
 const namesOf = (text) => String(text || '').split('\n').map((line) => line.split(' — ')[0].trim())
   .filter((name) => name && !name.startsWith('Scout visit'));
@@ -21,7 +24,8 @@ function visitMixes() {
   for (const [turf, program] of Object.entries(v13)) {
     for (const visit of program.visits) {
       const addOns = Object.values(visit.addOns || {}).flatMap((addOn) => namesOf(addOn.secondary));
-      for (const variant of [visit, ...Object.values(visit.cadenceVariants || {})]) {
+      const swaps = V13_TROUBLE_PRODUCT_SWAPS.filter((rule) => MONTHS[rule.month - 1] === visit.month).map((rule) => ({ ...visit, primary: rule.line }));
+      for (const variant of [visit, ...Object.values(visit.cadenceVariants || {}), ...swaps]) {
         const optional = [...new Set([...namesOf(variant.secondary), ...addOns])];
         for (let mask = 0; mask < (1 << optional.length); mask += 1) {
           const chosen = optional.filter((_, i) => mask & (1 << i));
@@ -56,4 +60,11 @@ test('every program mix gets an accurate-shaped watering text at a daytime compl
     }
   }
   expect(failures.slice(0, 5)).toEqual([]);
+});
+
+test('the swapped December visit is among the mixes checked, and its bag has a valid rule', () => {
+  const swapped = visitMixes().filter((mix) => mix.label.endsWith('Dec') && mix.names.includes(V13_TROUBLE_PRODUCT_SWAPS[0].to));
+  expect(swapped.length).toBeGreaterThan(0);
+  expect(swapped.every((mix) => !mix.names.includes(V13_TROUBLE_PRODUCT_SWAPS[0].from))).toBe(true);
+  expect(validateRule(RULES[V13_TROUBLE_PRODUCT_SWAPS[0].to]).valid).toBe(true);
 });

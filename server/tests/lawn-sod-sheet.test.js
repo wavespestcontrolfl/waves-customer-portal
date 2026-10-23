@@ -6,7 +6,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
-jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()), v13GateNotes: jest.fn(() => []) }));
+jest.mock('../services/waveguard-plan-engine', () => ({
+  buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()), v13GateNotes: jest.fn(() => []),
+  // GATE_LAWN_RECLAIMED_HALF_N: the swap bag asks the engine's own decision; the real one, so the sheet and the plan cannot drift.
+  nitrogenDecision: (...args) => jest.requireActual('../services/waveguard-plan-engine').nitrogenDecision(...args),
+  nitrogenCutNotes: (...args) => jest.requireActual('../services/waveguard-plan-engine').nitrogenCutNotes(...args),
+  visitOnV13Protocol: jest.fn((...args) => jest.requireActual('../services/waveguard-plan-engine').visitOnV13Protocol(...args)),
+}));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -240,6 +246,112 @@ describe('loadSodForContext', () => {
       const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: visitRow({ scheduled_date: '2026-04-14' }), planned: OCT() });
       expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 2.1 });
       expect(out.plannedProducts.items[1]).toMatchObject({ amount: 10.5, ratePer1000: 2.1 });
+    });
+
+    // GATE_LAWN_RECLAIMED_HALF_N: the swap bag is plain 24-0-11 (no pre-emergent), so a reclaimed lawn gets half its nitrogen.
+    describe('on a reclaimed lawn (GATE_LAWN_RECLAIMED_HALF_N)', () => {
+      const water = require('../services/lawn-reclaimed-water');
+      let reclaimed;
+      const realRead = water.isReclaimedService;
+      beforeEach(() => { process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true'; process.env.GATE_LAWN_V13 = 'true'; reclaimed = jest.spyOn(water, 'isReclaimedService').mockResolvedValue(true); });
+      afterEach(() => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; delete process.env.GATE_LAWN_V13; reclaimed.mockRestore(); });
+      const VISIT_UNPINNED = () => visitRow();
+      const VISIT_PINNED = () => visitRow({ lawn_protocol_key: 'fixture_v13', lawn_protocol_version: '2026.05', lawn_protocol_window_key: 'oct_v13_spreader_fall' });
+      const NOTE = (n, rate) => `Reclaimed water: half nitrogen today (${n} lb N, ${rate} lb per 1,000).`;
+
+      test('October: 1.25 lb per 1,000 (0.3 lb N) instead of 2.5, the amount follows, the Dimension bag is still held, and the line says why', async () => {
+        const out = await load({ record, planned: OCT() });
+        expect(out.newSod.swap).toEqual({ resolved: true, forProductId: P_DIM_BAG, productId: P_BAG24, name: SOD_SWAP_BAG.name, lbPer1000: 1.25, reason: 'New sod: no pre-emergent yet.' });
+        expect(out.plannedProducts.items[1]).toMatchObject({
+          productId: P_BAG24, amount: 6.25, amountUnit: 'lb', treatedSqft: 5000, ratePer1000: 1.25, rateUnit: 'lb', gateNotes: [NOTE(0.3, '1.3')],
+          sodSwap: { forProductId: P_DIM_BAG, reason: 'New sod: no pre-emergent yet.' },
+        });
+        expect(lineOf(out, P_DIM_BAG).held).toBe(true);
+        expect(reclaimed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: VISIT }), expect.anything());
+      });
+
+      test('April on the 9-visit plan: 1.05 lb per 1,000 (0.25 lb N) instead of 2.1', async () => {
+        const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: visitRow({ scheduled_date: '2026-04-14' }), planned: OCT() });
+        expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 1.05 });
+        expect(out.plannedProducts.items[1]).toMatchObject({ amount: 5.25, ratePer1000: 1.05, gateNotes: [NOTE(0.25, '1.1')] });
+      });
+
+      // v13 is the visit's actual protocol: the planner's own test (GATE_LAWN_V13 live, and a pin to another version or an unresolvable pin is not v13).
+      test.each([
+        ['GATE_LAWN_V13 off', () => { delete process.env.GATE_LAWN_V13; }, VISIT_UNPINNED],
+        ['a visit pinned to an older protocol version', () => require('../services/waveguard-plan-engine').visitOnV13Protocol.mockResolvedValueOnce({ onV13: false, windowMonth: 10 }), VISIT_PINNED],
+        ['a visit pinned to a protocol that cannot be resolved', () => require('../services/waveguard-plan-engine').visitOnV13Protocol.mockResolvedValueOnce({ onV13: false, windowMonth: null }), VISIT_PINNED],
+      ])('%s: the bag as it was, 2.5 lb per 1,000, no note, and the property is not read', async (_label, arrange, visit) => {
+        arrange();
+        const out = await load({ record, planned: OCT(), visit: visit() });
+        expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 2.5 });
+        expect(out.plannedProducts.items[1]).toMatchObject({ amount: 12.5, ratePer1000: 2.5 });
+        expect(out.plannedProducts.items[1]).not.toHaveProperty('gateNotes');
+        expect(reclaimed).not.toHaveBeenCalled();
+      });
+
+      // A 9x April visit rescheduled into May keeps its pinned April window under the completion defaults: the bag replaces April's 0.5 lb N pass.
+      describe('a 9x April visit rescheduled into May (pinned to the April window)', () => {
+        const MAY = () => visitRow({ scheduled_date: '2026-05-12', lawn_protocol_key: 'fixture_v13', lawn_protocol_version: '2026.10-v13', lawn_protocol_window_key: 'apr_v13_spreader_feeding' });
+        const engineOf = () => require('../services/waveguard-plan-engine');
+        const GATES = ['GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
+        const withDefaults = (on) => { for (const name of GATES) { if (on) process.env[name] = 'true'; else delete process.env[name]; } };
+        afterEach(() => { for (const name of GATES) delete process.env[name]; });
+
+        test('completion defaults on: sized from the pinned April window, 1.05 lb per 1,000 (0.25 lb N), not October\'s 1.25', async () => {
+          withDefaults(true);
+          engineOf().visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 4 });
+          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
+          expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 1.05 });
+          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 5.25, ratePer1000: 1.05, gateNotes: [NOTE(0.25, '1.1')] });
+        });
+
+        test('completion defaults on, a lawn that is not reclaimed: the same pinned-window baseline, 2.1 lb (the April pass), no note', async () => {
+          withDefaults(true);
+          reclaimed.mockResolvedValue(false);
+          engineOf().visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 4 });
+          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
+          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 10.5, ratePer1000: 2.1 });
+          expect(out.plannedProducts.items[1]).not.toHaveProperty('gateNotes');
+        });
+
+        test('completion defaults off: the planner reads the service date\'s month (May), so the October bag: 1.25 lb halved', async () => {
+          withDefaults(false);
+          engineOf().visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 4 });
+          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
+          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 6.25, ratePer1000: 1.25 });
+        });
+
+        test('the reclaimed gate off (the sod sheet as it was): the bag follows the visit day, May, so the October bag 2.5 lb, unread and unchanged', async () => {
+          withDefaults(true);
+          delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+          engineOf().visitOnV13Protocol.mockClear();
+          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
+          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 12.5, ratePer1000: 2.5 });
+          expect(engineOf().visitOnV13Protocol).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a visit pinned to v13 is halved, and the pin is passed to the planner\'s own lookup with the lawn\'s track', async () => {
+        const engine = require('../services/waveguard-plan-engine');
+        engine.visitOnV13Protocol.mockResolvedValueOnce({ onV13: true, windowMonth: 10 });
+        const out = await load({ record, planned: OCT(), visit: VISIT_PINNED() });
+        expect(out.plannedProducts.items[1]).toMatchObject({ amount: 6.25, ratePer1000: 1.25 });
+        expect(engine.visitOnV13Protocol).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lawn_protocol_key: 'fixture_v13', lawn_protocol_version: '2026.05' }), { trackKey: 'st_augustine' });
+      });
+
+      test.each([
+        ['not reclaimed', () => reclaimed.mockResolvedValue(false)],
+        ['a failed property read (the real reader, a query that throws)', () => reclaimed.mockImplementation((_knex, svc, options) => realRead(() => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); }, svc, options))],
+        ['the gate off (the engine is not asked at all)', () => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; reclaimed.mockClear(); }],
+      ])('%s: the bag as it was, 2.5 lb per 1,000, no note', async (_label, arrange) => {
+        arrange();
+        const out = await load({ record, planned: OCT() });
+        expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 2.5 });
+        expect(out.plannedProducts.items[1]).toMatchObject({ amount: 12.5, ratePer1000: 2.5 });
+        expect(out.plannedProducts.items[1]).not.toHaveProperty('gateNotes');
+        if (process.env.GATE_LAWN_RECLAIMED_HALF_N !== 'true') expect(reclaimed).not.toHaveBeenCalled();
+      });
     });
 
     test('a swap bag the catalog cannot resolve is never invented: the bag is held with "by hand" words', async () => {

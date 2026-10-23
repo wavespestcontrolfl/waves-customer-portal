@@ -37,6 +37,10 @@ const GRASS_CONFIRMED_FIELD = 'turf_grass';
 // The rain-sensor flag describes the former home's controller after a move —
 // confirmed only when the customer re-saves that field itself (gh-r41).
 const RAIN_SENSOR_CONFIRMED_FIELD = 'rain_sensor';
+// Lawn AREA is re-established for the current home only by a lawn-size writer (turf-profile editor, service-area
+// review, an accepted estimate's confirmed size, a primary flip carrying a reviewed lawn). The grass entry says nothing
+// about the size, and a size edit says nothing about the grass, so each has its own entry (codex #6498 r1 P2).
+const LAWN_SQFT_CONFIRMED_FIELD = 'turf_lawn_sqft';
 const RUNTIME_FIELDS = ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'];
 
 function present(v) {
@@ -99,6 +103,12 @@ function grassConfirmedAfterMove(row = {}) {
   return parseConfirmed(row.irrigation_confirmed_fields).includes(GRASS_CONFIRMED_FIELD);
 }
 
+/** The lawn area was re-established for the current home by a lawn-size writer (or no move). */
+function lawnSqftConfirmedAfterMove(row = {}) {
+  if (!row.irrigation_home_changed_at) return true;
+  return parseConfirmed(row.irrigation_confirmed_fields).includes(LAWN_SQFT_CONFIRMED_FIELD);
+}
+
 /** The rain-sensor field was re-saved for the current home (or no move). */
 function rainSensorConfirmedAfterMove(row = {}) {
   if (!row.irrigation_home_changed_at) return true;
@@ -131,10 +141,17 @@ async function confirmIrrigationFields(conn, customerId, fields) {
     );
     const n = await trx('property_preferences').where({ customer_id: customerId }).update({ irrigation_confirmed_fields: union });
     if (n) return n;
+    // Inside ON CONFLICT DO UPDATE the bare column name is ambiguous between the table and EXCLUDED (Postgres
+    // 42702), so the union for the upsert path names the table. Hit only for a customer with no preferences row
+    // (every new website customer, once the lawn-area stamp lands at estimate acceptance — CI on #6498).
+    const unionQualified = trx.raw(
+      "(SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM jsonb_array_elements_text(COALESCE(property_preferences.irrigation_confirmed_fields, '[]'::jsonb) || ?::jsonb) AS t(v))",
+      [JSON.stringify(list)],
+    );
     await trx('property_preferences')
       .insert({ customer_id: customerId, irrigation_confirmed_fields: JSON.stringify(list) })
       .onConflict('customer_id')
-      .merge({ irrigation_confirmed_fields: union });
+      .merge({ irrigation_confirmed_fields: unionQualified });
     return 1;
   };
   return conn.isTransaction ? run(conn) : conn.transaction(run);
@@ -194,4 +211,4 @@ function unconfirmedFieldsRaw(knexLike, fields) {
   );
 }
 
-module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, confirmIrrigationFields, changedSizingFields, unconfirmedFieldsRaw, parseConfirmedFields: parseConfirmed };
+module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, LAWN_SQFT_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, lawnSqftConfirmedAfterMove, confirmIrrigationFields, changedSizingFields, unconfirmedFieldsRaw, parseConfirmedFields: parseConfirmed };

@@ -161,7 +161,21 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
   test('a visit without an assessment retains the empty response', async () => {
     const f = await fixture(mockKnex);
     const visit = await f.visit();
-    expect(await reloadService(visit.id)).toEqual({ assessment: null });
+    expect(await reloadService(visit.id)).toEqual({ lastVisit: null, assessment: null });
+  });
+
+  test('the lookup carries the last confirmed visit\'s four scores and overall score, never this visit\'s own', async () => {
+    const f = await fixture(mockKnex);
+    const earlier = await f.visit(-40);
+    const visit = await f.visit(-10);
+    await f.assessment(earlier, { ...COMPLETE, confirmed_by_tech: true, confirmed_at: new Date(), is_baseline: false });
+    await f.assessment(visit, { ...COMPLETE, turf_density: 10, confirmed_by_tech: true, confirmed_at: new Date(), is_baseline: false });
+    const { lastVisit } = await reloadService(visit.id);
+    expect(lastVisit).toMatchObject({
+      date: String(earlier.scheduled_date instanceof Date ? earlier.scheduled_date.toISOString() : earlier.scheduled_date).slice(0, 10),
+      scores: { turf_density: 80, weed_suppression: 82, color_health: 76, stress_damage: 85 },
+    });
+    expect(lastVisit.overall).toEqual(expect.any(Number));
   });
 
   test('unexpected run-store errors are surfaced instead of appearing to be a legacy assessment', async () => {

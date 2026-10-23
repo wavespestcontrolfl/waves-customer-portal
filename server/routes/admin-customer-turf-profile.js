@@ -294,6 +294,12 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
         const { GRASS_CONFIRMED_FIELD } = require('../services/irrigation-schedule-confirmation');
         await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);
       }
+      // A CHANGED positive lawn size on a fresh form is a statement about the current lawn's area: its own ledger
+      // entry (the weekly plan's gallons line), never the grass's (codex #6498 r1 P2).
+      if (Object.hasOwn(fields, 'lawn_sqft') && nextLawnSqft > 0 && nextLawnSqft !== (priorRow?.lawn_sqft ?? null) && requestFresh) {
+        const { LAWN_SQFT_CONFIRMED_FIELD } = require('../services/irrigation-schedule-confirmation');
+        await confirmIrrigationFields(trx, customerId, [LAWN_SQFT_CONFIRMED_FIELD]);
+      }
       // A county the technician EXPLICITLY reviewed on this save
       // (`county_confirmed: true` — the client sets it only when the county
       // field was edited in this session) is their statement about the

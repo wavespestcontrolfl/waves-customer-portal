@@ -60,12 +60,63 @@
  */
 
 const MISTING_SYSTEM_SERVICE_KEY = 'mosquito_misting_system';
+// The pricing engine's recurring plan line (GATE_MOSQUITO_MISTING). It is the
+// misting SYSTEM's install + plan + refills, so isMistingSystemService counts
+// it, but isMistingDesignConsultation does NOT: it is not the free design visit.
+const MISTING_ENGINE_SERVICE_KEY = 'mosquito_misting';
 // Separator-tolerant: "misting system", "misting-system", "misting_system".
 const MISTING_SYSTEM_NAME_PATTERN = /\bmisting[\s_-]+systems?\b/i;
 // Words that mark a keyless name as a DIFFERENT phase of the product
 // (install/maintenance/refill), not the plain design-visit identity. Bare
 // "service" is excluded on purpose — see the module comment above.
 const MISTING_SYSTEM_SUBTYPE_QUALIFIER_PATTERN = /\b(install(?:ation|ed|s)?|maint(?:ain\w*|enance)|refill\w*|repair\w*)\b/i;
+
+// ONE predicate for "is this row the misting SYSTEM (the engine's install + plan line and the design-visit family), not the
+// barrier mosquito program?". The barrier program's own copy says "misting" ("21-day misting", "mosquito misting"), so a bare
+// "misting" is NEVER the system. A row is the system when its KEY is `mosquito_misting` or any `mosquito_misting_*` key, or
+// (a name, no key) when it contains the phrase "misting system" or "misting service plan". Every resolver that classifies by
+// key or name uses this instead of its own includes('misting').
+const MISTING_SYSTEM_KEY_PATTERN = /^mosquito_misting(?:_[a-z0-9_]+)?$/;
+const MISTING_SYSTEM_PLAN_NAME_PATTERN = /\bmisting[\s_-]+(?:systems?|service[\s_-]+plans?)\b/i;
+function isMistingSystemIdentity(value) {
+  const raw = String(value == null ? '' : value).trim().toLowerCase();
+  if (!raw) return false;
+  return MISTING_SYSTEM_KEY_PATTERN.test(raw) || MISTING_SYSTEM_PLAN_NAME_PATTERN.test(raw);
+}
+
+// The misting SYSTEM identity of a proposal line or program (estimate-proposal.js keeps it through normalization, so the gate and
+// the acceptance-pending refusals can still see a priced misting row once staff authors a proposal). Key fields are matched by
+// key shape (`mosquito_misting`, `mosquito_misting_installation`, ...) EXCEPT the free design visit `mosquito_misting_system`,
+// which is a different identity; text fields only by the engine's own plan phrase or the commercial manual-quote label.
+const MISTING_PROPOSAL_KEY_PATTERN = /^mosquito_misting(?!_system$)(?:_[a-z0-9_]+)?$/;
+// Work labels: the engine's plan phrase, the commercial manual-quote label, and the canonical hand-booked work labels the
+// service normalizer emits ("Mosquito Misting System Installation / Refill / Maintenance"). "Mosquito Misting System Service"
+// (the free design visit) is deliberately NOT here.
+const MISTING_PROPOSAL_TEXT_PATTERN = /misting\s+service\s+plan|misting\s+system\s*\(commercial\)|misting\s+system\s+(?:refill|maintenance)\b/i;
+const MISTING_PROPOSAL_INSTALL_TEXT_PATTERN = /misting\s+system\s+installation\b/i;
+function mistingProposalIdentity(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const keys = [raw.service, raw.serviceKey, raw.service_key, raw.originalRequestedService, raw.identity, raw.family]
+    .map((v) => String(v == null ? '' : v).trim().toLowerCase()).filter(Boolean);
+  const hit = keys.find((k) => MISTING_PROPOSAL_KEY_PATTERN.test(k));
+  if (hit) return hit.includes('installation') ? 'mosquito_misting_installation' : 'mosquito_misting';
+  const text = [raw.label, raw.name, raw.description].map((v) => String(v == null ? '' : v)).join(' ');
+  if (MISTING_PROPOSAL_INSTALL_TEXT_PATTERN.test(text)) return 'mosquito_misting_installation';
+  if (MISTING_PROPOSAL_TEXT_PATTERN.test(text)) return 'mosquito_misting';
+  // The install item the mapper emits is named "<tier label> Installation" (derived from the tier table, never hard-coded), so a
+  // fully rebuilt line is still recognized by its text.
+  const lowered = text.toLowerCase();
+  const { MOSQUITO_MISTING } = require('../services/pricing-engine/constants');
+  const installLabels = Object.values(MOSQUITO_MISTING.tiers).map((tier) => `${tier.label} Installation`.toLowerCase());
+  return installLabels.some((label) => lowered.includes(label)) ? 'mosquito_misting_installation' : null;
+}
+
+// The ONE selection rule for a `services.mosquitoMisting` / `services.mosquito_misting` input, shared by the pricing engine and
+// the stored-estimate guards (v1-legacy-mapper), so what the engine prices and what the guard carries can never disagree:
+// `true` or a plain object selects the system; anything else (false, 0, '', 'yes', 1, a list, null) does not.
+function isMistingSelection(value) {
+  return value === true || (value !== null && typeof value === 'object' && !Array.isArray(value));
+}
 
 function normalizeServiceKey(serviceKey) {
   return serviceKey ? String(serviceKey).trim().toLowerCase() : '';
@@ -89,7 +140,8 @@ function matchesMistingSystemName(...values) {
  * @returns {boolean}
  */
 function isMistingSystemService({ serviceKey, name, text } = {}) {
-  if (normalizeServiceKey(serviceKey) === MISTING_SYSTEM_SERVICE_KEY) return true;
+  const key = normalizeServiceKey(serviceKey);
+  if (key === MISTING_SYSTEM_SERVICE_KEY || key === MISTING_ENGINE_SERVICE_KEY || MISTING_SYSTEM_KEY_PATTERN.test(key)) return true;
   return matchesMistingSystemName(name, text);
 }
 
@@ -132,6 +184,10 @@ function isMistingSystemServiceUnconfigured({ serviceKey, name } = {}) {
 
 module.exports = {
   MISTING_SYSTEM_SERVICE_KEY,
+  MISTING_ENGINE_SERVICE_KEY,
+  isMistingSystemIdentity,
+  isMistingSelection,
+  mistingProposalIdentity,
   MISTING_SYSTEM_NAME_PATTERN,
   isMistingSystemService,
   isMistingDesignConsultation,

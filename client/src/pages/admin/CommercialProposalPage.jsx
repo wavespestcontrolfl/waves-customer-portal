@@ -299,6 +299,10 @@ function CommercialProposalEditor() {
               unitPrice: li.unitPrice ?? 0,
               frequency: li.frequency || 'monthly',
               taxable: li.taxable === true,
+              // Server-owned identity of the mosquito misting system: kept through the editor so a save cannot drop it.
+              ...(li.service ? { service: li.service } : {}),
+              ...(li.originalRequestedService ? { originalRequestedService: li.originalRequestedService } : {}),
+              ...(li.quoteRequired === true ? { quoteRequired: true } : {}),
             })),
           }))
         : [emptyBuilding(0)],
@@ -307,7 +311,9 @@ function CommercialProposalEditor() {
       label: item.label || '', value: item.value || '',
     })));
     setProgramsState((p.programs || []).map((program) => ({
+      id: program.id || crypto.randomUUID(),
       service: program.service || 'other',
+      ...(program.identity ? { identity: program.identity } : {}),
       label: program.label || '',
       frequencyPerYear: program.frequencyPerYear ?? 4,
       pricePerApplication: program.pricePerApplication ?? 0,
@@ -328,6 +334,9 @@ function CommercialProposalEditor() {
     generatedRespByFamilyRef.current = p.generatedResponsibilities || null;
     if (data.familyRegistry) familyRegistryRef.current = data.familyRegistry;
     setCorrectiveWork((p.correctiveWork || []).map((w) => ({
+      id: w.id || crypto.randomUUID(),
+      ...(w.service ? { service: w.service } : {}),
+      ...(w.originalRequestedService ? { originalRequestedService: w.originalRequestedService } : {}),
       label: w.label || '',
       amount: w.amount ?? 0,
       taxable: w.taxable === true,
@@ -444,6 +453,7 @@ function CommercialProposalEditor() {
         || (draft?.correctiveWork?.length && live.correctiveWork.length !== 0);
       if (draft?.programs?.length && !monetaryInstallBlocked) {
         setProgramsState(draft.programs.map((program) => ({
+          id: program.id || crypto.randomUUID(),
           service: program.service,
           label: program.label,
           frequencyPerYear: program.frequencyPerYear,
@@ -462,6 +472,8 @@ function CommercialProposalEditor() {
       }
       if (draft?.correctiveWork?.length && !monetaryInstallBlocked) {
         setCorrectiveWork(draft.correctiveWork.map((w) => ({
+          id: w.id || crypto.randomUUID(),
+          ...(w.service ? { service: w.service } : {}),
           label: w.label,
           amount: w.amount,
           taxable: w.taxable === true,
@@ -690,7 +702,9 @@ function CommercialProposalEditor() {
     const programsPayload = f.programsState
       .filter(programRowIsPriced)
       .map((p) => ({
+        ...(p.id ? { id: p.id } : {}),
         service: p.service,
+        ...(p.identity ? { identity: p.identity } : {}),
         label: p.label.trim(),
         // UNROUNDED — a fractional entry (4.5) must reach the server's
         // whole-number validation and 400, never silently round to a
@@ -718,6 +732,9 @@ function CommercialProposalEditor() {
       }));
     const work = f.correctiveWork
       .map((w) => ({
+        ...(w.id ? { id: w.id } : {}),
+        ...(w.service ? { service: w.service } : {}),
+        ...(w.originalRequestedService ? { originalRequestedService: w.originalRequestedService } : {}),
         label: w.label.trim(),
         amount: Number(w.amount) || 0,
         taxable: w.taxable === true,
@@ -776,6 +793,9 @@ function CommercialProposalEditor() {
             unitPrice: l.unitPrice,
             frequency: l.frequency,
             taxable: l.taxable === true,
+            ...(l.service ? { service: l.service } : {}),
+            ...(l.originalRequestedService ? { originalRequestedService: l.originalRequestedService } : {}),
+            ...(l.quoteRequired === true ? { quoteRequired: true } : {}),
           })),
       })).filter((b) => b.lineItems.length > 0),
     },
@@ -1316,7 +1336,7 @@ function CommercialProposalEditor() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
+                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { id: crypto.randomUUID(), service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '', genInclusions: [], genExclusions: [] }]); }}>
                   <Plus size={14} /> Add program
                 </Button>
               )}
@@ -1507,7 +1527,7 @@ function CommercialProposalEditor() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { label: '', amount: 0, taxable: false, includesText: '' }]); }}>
+                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { id: crypto.randomUUID(), label: '', amount: 0, taxable: false, includesText: '' }]); }}>
                   <Plus size={14} /> Add corrective work
                 </Button>
               )}

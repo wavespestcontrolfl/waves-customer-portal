@@ -211,19 +211,21 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
   describe('the three-product bermuda mix resolves a watering instruction on a migrations-only database', () => {
     const NAMES = ['Recognition Post Emergent Herbicide', 'Fusilade II Post Emergent Liquid Herbicide', 'LESCO 90/10 Nonionic Surfactant'];
 
-    test('the surfactant has its v13 rule, every product resolves a rule, and the mix holds watering for 3 hours', async () => {
+    // The herbicides' rule is the owner's 24-hour post-emergent hold (owner 2026-10-09), with each label's own
+    // rainfast time kept as label_minimum (20261022160000).
+    test('the surfactant has its v13 rule, every product resolves a rule, and the mix holds watering for 24 hours', async () => {
       const rows = await db('products_catalog').whereIn('name', NAMES).select('*');
       expect(rows).toHaveLength(3);
       const rules = rows.map((row) => ({ name: row.name, rule: resolveWateringRule(row) }));
       for (const entry of rules) expect(entry.rule).not.toBeNull();
       // The surfactant's v13 rule (20261005235500): the herbicide in the mix sets the rule.
       expect(rules.find((entry) => entry.name === NAMES[2]).rule).toMatchObject({ mode: 'none', source: 'owner' });
-      for (const name of NAMES.slice(0, 2)) expect(rules.find((entry) => entry.name === name).rule).toMatchObject({ mode: 'hold', hold_hours: 3 });
-      // One instruction for the whole mix: skip turf watering until completion + 3 hours.
+      for (const name of NAMES.slice(0, 2)) expect(rules.find((entry) => entry.name === name).rule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+      // One instruction for the whole mix: skip turf watering until completion + 24 hours.
       const completedAt = '2026-06-16T14:00:00.000Z';
       const instruction = buildWateringInstruction({ rules, completedAt });
       expect(instruction.state).toBe('hold');
-      expect(new Date(instruction.holdUntil).getTime() - new Date(completedAt).getTime()).toBe(3 * 3600 * 1000);
+      expect(new Date(instruction.holdUntil).getTime() - new Date(completedAt).getTime()).toBe(24 * 3600 * 1000);
       expect(instruction.lines[0]).toMatch(/^Skip your turf watering until/);
     });
   });
@@ -307,8 +309,10 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
     const SEEDED = 'migration:20261006220800_bermuda_mow_hold_days:seeded';
     const hold = async (trx, name) => (await trx('products_catalog').where({ name }).first('mow_hold_days')).mow_hold_days;
 
-    test('on a migrations-only database both herbicides carry a 2-day mow hold and the surfactant none', async () => {
-      for (const name of NAMES) expect(await hold(db, name)).toBe(2);
+    // Fusilade II's later label read (20261022120000): no disturbance such as mowing within 7 days after application.
+    test('on a migrations-only database Recognition carries a 2-day mow hold, Fusilade II 7 days, the surfactant none', async () => {
+      expect(await hold(db, NAMES[0])).toBe(2);
+      expect(await hold(db, NAMES[1])).toBe(7);
       expect(await hold(db, 'LESCO 90/10 Nonionic Surfactant')).toBeNull();
     });
 

@@ -16,6 +16,13 @@ const parsed = (over = {}) => ({
   due_at: null, due_source_line: null, ...over,
 });
 
+test('attachPatch fills a solicitation number the bid lacks (a VendorLink notice in the thread) and never replaces one', () => {
+  expect(attachPatch(bid({ solicitation_number: null }), parsed({ solicitation_number: 'ITB 27-001' }), 'invite').patch)
+    .toMatchObject({ solicitation_number: 'ITB 27-001' });
+  expect(attachPatch(bid({ solicitation_number: 'ITB 26-001' }), parsed({ solicitation_number: 'ITB 27-001' }), 'invite').patch.solicitation_number)
+    .toBeUndefined();
+});
+
 describe('attachPatch: an email never overwrites a due date', () => {
   const confirmed = new Date('2026-10-20T03:59:00Z');
   const moved = new Date('2026-10-27T03:59:00Z');

@@ -42,6 +42,15 @@ export function shouldApplyProtocolCompletionDefaults(response) {
   return Array.isArray(response.products) && response.products.length > 0;
 }
 
+// Tree & Shrub suggestions that dose by bed area (Snapshot, the 13-0-13 bed fertilizer) carry `lb` and no prefilled
+// amount; every other keyed suggestion is a palm feed, dosed in lb per palm from the canopy chart.
+const BED_DOSE_KEYS = new Set(['snapshot', 'f13013']);
+const doseRateUnit = (treeShrubKey) => (BED_DOSE_KEYS.has(treeShrubKey) ? 'lb' : 'lb/palm');
+// The most lb per 1,000 sq ft the form accepts without a warning: Snapshot's label maximum, and the 13-0-13 county cap
+// (0.75 lb per 100 sq ft = 7.5 lb per 1,000 = 0.98 lb N, under the 1 lb N per 1,000 sq ft ordinance limit). The server
+// holds the same 7.5 at closeout (tree-shrub-ornamental-fertilizer-limits.js).
+const MAX_RATE_PER_1000 = { snapshot: 4.6, f13013: 7.5 };
+
 // Maps the server's resolved products onto the CALLER's already-loaded
 // catalog rows (by id — never re-derived from the name, so the client and
 // server always agree on which row this is) and builds each selection
@@ -67,14 +76,14 @@ export function protocolCompletionDefaultSelections(response, clientProducts, bu
     const selection = buildSelectedProduct(product, { applicationMethodOverride: item?.completionApplicationMethod || undefined });
     selections.push({
       ...selection,
-      // Snapshot needs its weed rate; palms need individual canopy widths.
+      // Snapshot needs its weed rate; 13-0-13 needs the bed amount; palms need individual canopy widths.
       // Clear catalog shortcuts before an area/tank calculator can reuse one.
       ...(item.requiresDoseSelection ? {
         requiresDoseSelection: true,
         rate: '', totalAmount: '', totalAmountManual: false,
-        amountUnit: 'lb', rateUnit: item.treeShrubKey === 'snapshot' ? 'lb' : 'lb/palm',
-        catalogRateUnit: item.treeShrubKey === 'snapshot' ? 'lb' : 'lb/palm',
-        carrierGallons: '', maxLabelRatePer1000: item.treeShrubKey === 'snapshot' ? 4.6 : null,
+        amountUnit: 'lb', rateUnit: doseRateUnit(item.treeShrubKey),
+        catalogRateUnit: doseRateUnit(item.treeShrubKey),
+        carrierGallons: '', maxLabelRatePer1000: MAX_RATE_PER_1000[item.treeShrubKey] ?? null,
       } : {}),
       // Provenance flag only — no visible tag renders from it today (the
       // product-card UI has no cheap per-line badge slot), but it lets a

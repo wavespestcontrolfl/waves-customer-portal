@@ -82,6 +82,11 @@ function rangeRow({ key, name, unit, values, notes = null, decimals = 0 }) {
 const PURCHASE_GATED_ROWS = Object.freeze({
   termite_station_rental: 'GATE_TERMITE_STATION_RENTAL',
   termite_bond: 'GATE_TERMITE_BOND_OPTION',
+  // One gate, two rows. Keyed by the EMITTED row keys: content-astro's
+  // price-range.js excludes blog price cards by exact row key (pre-push
+  // audit P1), and the cache signature reads the gate values.
+  mosquito_misting_install: 'GATE_MOSQUITO_MISTING',
+  mosquito_misting_plan: 'GATE_MOSQUITO_MISTING',
 });
 function purchaseGateOn(key) {
   return ['1', 'true', 'on'].includes(String(process.env[PURCHASE_GATED_ROWS[key]] || '').toLowerCase());
@@ -397,6 +402,34 @@ function buildRows() {
       unit: 'per application',
       values: sweepValues(Object.keys(constants.TERMITE.bond), (term) => sp.priceTermiteBond(term), (r) => r.perApp),
       notes: 'Rides quarterly service applications; 1, 5, and 10-year terms.',
+    }));
+  }
+
+  // Mosquito misting system rows publish only while GATE_MOSQUITO_MISTING is on
+  // (the estimate engine's choke point). Draft prices; sweeps both tiers across
+  // typical nozzle counts.
+  if (purchaseGateOn('mosquito_misting_install')) {
+    const MISTING_SWEEP = Object.keys(constants.MOSQUITO_MISTING.tiers)
+      .flatMap((tier) => [20, 35, 50].map((nozzles) => ({ tier, nozzles })));
+    add('mosquito_misting_install', () => rangeRow({
+      key: 'mosquito_misting_install',
+      name: 'Mosquito Misting System Installation',
+      unit: 'per installation',
+      values: sweepValues(
+        MISTING_SWEEP,
+        (opts) => sp.priceMosquitoMisting({}, opts),
+        (r) => (r.quoteRequired ? NaN : r.installation && r.installation.price)),
+      notes: 'Priced by system type (drum or tankless with app) and nozzle count; more nozzles and risers price higher.',
+    }));
+    add('mosquito_misting_plan', () => rangeRow({
+      key: 'mosquito_misting_plan',
+      name: `Mosquito Misting Service Plan (${Number(constants.MOSQUITO_MISTING.plan.visitsPerYear) === 12 ? 'monthly application' : `${Number(constants.MOSQUITO_MISTING.plan.visitsPerYear)} applications a year`})`,
+      unit: 'per application',
+      values: sweepValues(
+        MISTING_SWEEP,
+        (opts) => sp.priceMosquitoMisting({}, opts),
+        (r) => (r.quoteRequired ? NaN : r.perApp)),
+      notes: `${Number(constants.MOSQUITO_MISTING.plan.visitsPerYear)} applications a year (the configured plan cadence); solution refills are billed per refill application.`,
     }));
   }
 

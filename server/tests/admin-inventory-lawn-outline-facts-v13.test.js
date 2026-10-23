@@ -64,7 +64,8 @@ async function getFacts() {
   } finally { await new Promise((r) => server.close(r)); }
 }
 
-afterEach(() => { delete process.env.GATE_LAWN_V13; });
+const SWAP_GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_DEC_LARGE_PATCH_K'];
+afterEach(() => { for (const name of SWAP_GATES) delete process.env[name]; });
 beforeEach(() => { jest.clearAllMocks(); wireCatalog(); });
 
 test('gate on: readiness has a row for every product the v13 recipe names, matched to its own catalog row', async () => {
@@ -99,4 +100,27 @@ test('gate on: the 9x April product (Dimension 18-0-10, named only in the April 
   const dimension = body.facts.find((row) => row.needle === 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer');
   expect(dimension.referenceCount).toBeGreaterThan(0);
   expect(dimension.product?.name).toBe(dimension.needle);
+});
+
+// The December large patch potassium bag (GATE_LAWN_DEC_LARGE_PATCH_K) lives in the visit's swaps block, not in primary or secondary:
+// readiness must still list it while the block is served, and must not list it otherwise (so the gate off is the old list exactly).
+test('swap gate on: the December 0-0-24 is in readiness, referenced by December of every track; gate off: no row for it', async () => {
+  const BLACK_OUT = 'LESCO Black Out 0-0-24 AM Spar-TECH';
+  CATALOG.push({ id: 'p-black-out', name: BLACK_OUT, category: 'fertilizer' });
+  try {
+    process.env.GATE_LAWN_V13 = 'true';
+    const before = await getFacts();
+    expect(before.facts.map((row) => row.needle)).not.toContain(BLACK_OUT);
+    for (const name of SWAP_GATES) process.env[name] = 'true';
+    const body = await getFacts();
+    const row = body.facts.find((fact) => fact.needle === BLACK_OUT);
+    expect(row).toBeDefined();
+    expect(row.referenceCount).toBe(Object.keys(v13).length);
+    expect(row.product?.name).toBe(BLACK_OUT);
+    // Everything else is the list it was.
+    expect(body.facts.filter((fact) => fact.needle !== BLACK_OUT).map((fact) => fact.needle).sort()).toEqual(before.facts.map((fact) => fact.needle).sort());
+    // One of the gates it needs off: back to the old list.
+    delete process.env.GATE_LAWN_TROUBLE_AREAS;
+    expect((await getFacts()).facts.map((fact) => fact.needle)).not.toContain(BLACK_OUT);
+  } finally { CATALOG.pop(); }
 });

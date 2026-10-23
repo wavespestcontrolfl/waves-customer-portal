@@ -1,6 +1,5 @@
-import LawnAssessmentCompletionBlock, { LAWN_ASSESSMENT_METRICS } from "../../components/lawn/LawnAssessmentCompletionBlock";
+import LawnAssessmentCompletionBlock from "../../components/lawn/LawnAssessmentCompletionBlock";
 import PropertyServiceAreas from "../../components/tech/PropertyServiceAreas";
-import lawnScores from '@lawn-scores';
 import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
 import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 // client/src/pages/admin/SchedulePage.jsx
@@ -123,6 +122,7 @@ import {
 import {
   protocolCompletionDefaultSelections,
 } from "../../lib/protocol-completion-defaults";
+import { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000, bedFeedCountyLimitLine } from "../../lib/bed-feed-rate";
 import {
   exclusiveProtocolProductConflict,
   exclusiveProtocolSelectionConflict,
@@ -133,7 +133,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, recordedLawnArea, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, recordedLawnArea, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -10113,43 +10113,6 @@ export function TypedFindingsSection({
   );
 }
 
-function LawnPreviousVisitCard({ service }) {
-  const [state, setState] = useState({ loading: true, row: null, error: false });
-  const customerId = service.customerId || service.customer_id;
-  const day = service.scheduledDate || service.scheduled_date || service.date;
-  useEffect(() => {
-    let live = true;
-    setState({ loading: true, row: null, error: false });
-    if (!customerId) { setState({ loading: false, row: null, error: false }); return undefined; }
-    adminFetch(`/admin/lawn-assessment/history/${customerId}`)
-      .then((data) => { if (live) setState({ loading: false, row: previousLawnAssessment(data.history, { id: service.id, date: day }), error: false }); })
-      .catch(() => { if (live) setState({ loading: false, row: null, error: true }); });
-    return () => { live = false; };
-  }, [customerId, day, service.id]);
-  const row = state.row && {
-    ...state.row,
-    overall_score: lawnScores.calculateLawnOverallScore(state.row),
-    stress_damage: lawnScores.resolveStressDamage(state.row),
-  };
-  const display = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : `${Math.round(Number(value))}/100`;
-  return (
-    <section aria-label="Previous lawn visit" style={{ margin: "16px 0", padding: 14, background: D.white, border: `1px solid ${D.border}`, borderRadius: 12, color: D.heading }}>
-      <div style={{ fontSize: 16, fontWeight: 500 }}>Last Visit</div>
-      {state.loading ? <p style={{ fontSize: 14 }}>Loading previous scores…</p>
-        : state.error ? <p style={{ fontSize: 14 }} role="status">Previous scores could not be loaded.</p>
-        : !row ? <p style={{ fontSize: 14 }}>No earlier confirmed assessment. Today’s assessment will establish a baseline.</p>
-        : <>
-          <p style={{ fontSize: 14 }}>Overall score <strong>{display(row.overall_score)}</strong></p>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-            {LAWN_ASSESSMENT_METRICS.map((metric) => <div key={metric.key} style={{ fontSize: 14, padding: 10, border: `1px solid ${D.border}`, borderRadius: 8 }}>
-              <div>{metric.label}</div><strong>{display(row[metric.key])}</strong>
-            </div>)}
-          </div>
-        </>}
-    </section>
-  );
-}
-
 function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onReload, loading, error, disabled, hideArea = false }) {
   const history = defaults.history;
   const score = (row) => row?.overall_score == null ? "—" : `${Math.round(Number(row.overall_score))}/100`;
@@ -10250,7 +10213,66 @@ function requiresAreaSqft(method, serviceType = "") {
   );
 }
 
-function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false, includeServiceArea = false) {
+// The LESCO 13-0-13 bed fertilizer on a Tree & Shrub visit is held to the county cap (0.75 lb per 100 sq ft), which the
+// closeout can only judge from the treated area: its row always needs the treated square feet, whatever the method.
+const BED_FEED_NAME = /\b13-0-13\b/;
+// The row is classified by the product's identity (its 13-0-13 name) whenever the visit has ANY Tree & Shrub work: the row's own
+// line, or `treeShrubWork` (a Tree & Shrub primary or companion, see visitHasTreeShrubWork). A lawn-primary visit with a Tree &
+// Shrub companion records the same product against the same county cap.
+// Classified by product identity on ANY visit: the server judges every saved 13-0-13 row against the county cap whatever the
+// service line, so a 13-0-13 picked on a plain lawn visit must carry its bed area too, never the turf area (Codex #6516 r9).
+// serviceType and treeShrubWork are kept for call-site compatibility.
+ 
+export function isBedFeedRow(product, serviceType = "", treeShrubWork = false) {
+  return BED_FEED_NAME.test(String(product?.name || ""));
+}
+
+// True when the visit has Tree & Shrub work: its own line or a Tree & Shrub companion (the
+// same companions the server judges for photos and regulatory compliance: service.companionSchemas, and the profile's companions).
+export function visitHasTreeShrubWork(service) {
+  const companions = [...(service?.companionSchemas || []), ...(service?.completionProfile?.companions || [])];
+  return serviceLineFromType(service?.serviceType || service?.service_type || "") === "tree_shrub"
+    || companions.some((item) => item?.type === "tree_shrub");
+}
+
+// The 13-0-13 row's starting treated area: the REVIEWED bed area, never the turf area. On a Tree & Shrub primary that is the visit's
+// bed coverage; on a lawn (or other) primary with a Tree & Shrub companion it is the property's reviewed beds figure. No areas loaded: blank.
+export function bedFeedStartArea({ currentPropertyAreas, propertyAreaLine, propertyTreatedArea }) {
+  if (propertyAreaLine === "tree_shrub") return propertyTreatedArea;
+  const beds = currentPropertyAreas?.areas?.beds;
+  return beds?.reviewedAt ? beds.sqft : "";
+}
+
+// The pre-submit lines for a Tree & Shrub visit's rows over their rate ceiling (a quiet advisory, never a block). Other rows use
+// their label ceiling only on a Tree & Shrub primary; a 13-0-13 row is judged on its effective rate (entered rate, else total
+// over treated area, like the server's cap check) on any visit with Tree & Shrub work.
+export function treeShrubRateAdvisories({ selectedProducts, highRateSelectedProducts, primaryIsTreeShrub, treeShrubWork }) {
+  const labelRows = primaryIsTreeShrub ? highRateSelectedProducts.filter((product) => !isBedFeedRow(product, "", treeShrubWork)) : [];
+  // A 13-0-13 row gets its county-limit line on any visit (classified by identity, like the server audit).
+  const bedRows = selectedProducts.filter((product) => isBedFeedRow(product));
+  return [...labelRows, ...bedRows].map((product) => treeShrubHighRateAdvisory(product, "Tree & Shrub Care")).filter(Boolean);
+}
+
+// The pre-submit line for a Tree & Shrub row entered above its rate ceiling. The 13-0-13 ceiling is the COUNTY limit (0.75 lb per
+// 100 sq ft = 7.5 lb per 1,000 sq ft), not a label maximum, so the line says so. Other rows keep the label-max wording of the
+// WaveGuard approval message. Advisory only: it never holds the completion.
+export { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000 };
+
+export function treeShrubHighRateAdvisory(product, serviceType = "") {
+  if (serviceLineFromType(serviceType) !== "tree_shrub") return null;
+  const name = product?.name || "Selected product";
+  const suffix = isPerBasisUnit(product?.catalogRateUnit) ? "" : "/1k";
+  if (isBedFeedRow(product, serviceType)) {
+    const rate = bedFeedRatePer1000(product);
+    return bedFeedCountyLimitLine(name, rate);
+  }
+  return `${name} rate ${product.rate} ${product.rateUnit || ""}${suffix} exceeds label max ${product.maxLabelRatePer1000} ${product.catalogRateUnit || ""}${suffix}.`;
+}
+
+function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false, includeServiceArea = false, product = null, treeShrubWork = false) {
+  if (isBedFeedRow(product, serviceType, treeShrubWork)) {
+    return { unit: "sqft", label: "Treated sq ft", alertLabel: "the treated square feet" };
+  }
   if (requiresLinearFt(method)) {
     return { unit: "linear_ft", label: "Linear ft", alertLabel: "linear feet" };
   }
@@ -10295,8 +10317,9 @@ export function completionGroupMates(group, selectedProducts, protocolActions) {
   };
 }
 
-function completionProductRowProblem(service, rows, typeFor) {
-  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p));
+export function completionProductRowProblem(service, rows, typeFor) {
+  const treeShrubWork = visitHasTreeShrubWork(service);
+  const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p), false, false, p, treeShrubWork);
   const missingArea = rows.find((p) => {
     const requirement = areaOf(p);
     if (!requirement) return false;
@@ -10316,9 +10339,9 @@ function productApplicationMethod(product = {}, serviceType = "") {
     defaultApplicationMethod(product, serviceType);
 }
 
-function normalizeProductArea(product = {}, serviceType = "") {
+function normalizeProductArea(product = {}, serviceType = "", treeShrubWork = false) {
   const applicationMethod = productApplicationMethod(product, serviceType);
-  const areaRequirement = requiredApplicationArea(applicationMethod, serviceType);
+  const areaRequirement = requiredApplicationArea(applicationMethod, serviceType, false, false, product, treeShrubWork);
   return {
     ...product,
     applicationMethod,
@@ -13441,6 +13464,8 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = visitServiceLine(service, serviceTypeForArea);
+  // Any Tree & Shrub work on this visit (the line, or a Tree & Shrub companion): a 13-0-13 row follows the bed-area rule.
+  const hasTreeShrubWork = visitHasTreeShrubWork(service);
   // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
   // flag): the visit's photos and their descriptions sit inside the notes
   // box and the separate photo section goes away. Never on lawn or tree,
@@ -13468,6 +13493,7 @@ export function CompletionPanel({
     && propertyVisitArea?.kind === propertyAreaKey ? propertyVisitArea.area : undefined;
   const propertyTreatedArea = propertyAreaLine === "lawn" ? lawnVisitArea
     : propertyVisitOverride ?? (reviewedPropertyArea?.reviewedAt ? reviewedPropertyArea.sqft : "");
+  const bedFeedPrefillArea = bedFeedStartArea({ currentPropertyAreas, propertyAreaLine, propertyTreatedArea });
   // The bed coverage this effect last accounted for (wrote or promoted), so
   // its own earlier value is never mistaken for one the tech entered.
   const bedCoverageSeenRef = useRef(null);
@@ -14440,6 +14466,13 @@ export function CompletionPanel({
       : []),
     ...(managerApprovalRequired && managerApprovalHelpText
       ? [softenApprovalWording(managerApprovalHelpText)]
+      : []),
+    // Tree & Shrub has no WaveGuard approval step (managerApprovalRequired is lawn only), so a row over its ceiling
+    // would otherwise reach Complete unseen. A quiet line, never a block.
+    // The 13-0-13 county-limit line is independent of the lawn approval branch (a WaveGuard lawn visit with a Tree & Shrub companion
+    // shows both); only the label-ceiling rows step aside for the approval text, which already lists them.
+    ...(!isIncompleteVisit
+      ? treeShrubRateAdvisories({ selectedProducts, highRateSelectedProducts, primaryIsTreeShrub: serviceLineForCloseout === "tree_shrub" && !managerApprovalRequired, treeShrubWork: hasTreeShrubWork })
       : []),
     ...(calibrationRequired && !isIncompleteVisit
       ? treatmentPlanCalibrationBlocks
@@ -15481,7 +15514,7 @@ export function CompletionPanel({
     setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
-            const normalized = normalizeProductArea(product, typeFor(product));
+            const normalized = normalizeProductArea(product, typeFor(product), hasTreeShrubWork);
             // Bed bug: a pre-migration draft carries the old inferred
             // perimeter default — reclassify it to the interior default so
             // a restored draft can't demand perimeter footage or record
@@ -16946,6 +16979,9 @@ export function CompletionPanel({
   function productUsesPropertyArea(product, applicationMethod) {
     // An add-on's product is entered with the area the add-on was sold for, never the host line's property area.
     if (product.areaAddOnKey) return false;
+    // A 13-0-13 on a visit whose shared coverage is not the bed area (a lawn primary with a Tree & Shrub companion) keeps its own
+    // treated area, started from the reviewed bed area; it never follows the lawn coverage.
+    if (propertyAreaKey !== "beds" && isBedFeedRow(product, "", hasTreeShrubWork)) return false;
     if (propertyAreaKey === "lawn" && !["granular_broadcast", "broadcast_spray"].includes(applicationMethod)) return false;
     return !!propertyAreaKey
       && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
@@ -16967,7 +17003,7 @@ export function CompletionPanel({
     const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
-      rowType, false, !!currentPropertyAreas && productUsesServiceArea,
+      rowType, false, !!currentPropertyAreas && productUsesServiceArea, product, hasTreeShrubWork,
     );
     // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
     // resolver ServiceRecapModal uses, so both completion paths prefill
@@ -16990,8 +17026,10 @@ export function CompletionPanel({
     // Perimeter sprays start from the traced barrier's measured footage
     // (Treatment Zone Mapper) so the tech doesn't retype what the trace
     // already measured. Editable as before.
-    const sharedArea = currentPropertyAreas ? (productUsesServiceArea ? propertyTreatedArea : "")
-      : lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill;
+    // The 13-0-13 bed row never borrows the turf area: with no property areas loaded it starts blank and is required.
+    const sharedArea = isBedFeedRow(product, rowType, hasTreeShrubWork) ? bedFeedPrefillArea
+      : currentPropertyAreas ? (productUsesServiceArea ? propertyTreatedArea : "")
+        : lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill;
     const prefillArea =
       areaRequirement?.unit === "sqft" && sharedArea !== "" && sharedArea != null && Number(sharedArea) >= 0
         ? Number(sharedArea)
@@ -17248,7 +17286,7 @@ export function CompletionPanel({
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
-            typeFor(next), false, next.propertyServiceAreaField,
+            typeFor(next), false, next.propertyServiceAreaField, next, hasTreeShrubWork,
           );
           if (areaRequirement) {
             if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
@@ -17275,7 +17313,7 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, typeFor(next)),
             typeFor(next),
-            governed || !!next.group, next.propertyServiceAreaField,
+            governed || !!next.group, next.propertyServiceAreaField, next, hasTreeShrubWork,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -18484,6 +18522,10 @@ export function CompletionPanel({
                 scoredCount: treeShrubReview.scoredCount,
                 // Server HMAC proving these scores came from /assess-preview (anti-tamper).
                 signature: treeShrubReview.signature,
+                // GATE_TS_LIGHTING: the signed light read, echoed back as received (absent while dark).
+                ...(treeShrubReview.photoLights && treeShrubReview.lightSignature
+                  ? { photoLights: treeShrubReview.photoLights, lightSignature: treeShrubReview.lightSignature }
+                  : {}),
                 decisions: (treeShrubReview.findings || []).map((f) => ({ key: f.key, action: f.defaultAction || "monitor", detail: f.detail })),
               }
             : undefined,
@@ -19377,7 +19419,7 @@ export function CompletionPanel({
         hideArea={!!currentPropertyAreas} areaValue={lawnVisitArea} loading={treatmentPlanLoading} error={treatmentPlanError} disabled={submitting || generating}
         onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); setLawnAreaOverrideFor(propertyAreasIdentity); }}
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
-        : <LawnPreviousVisitCard service={service} />
+        : null
   );
   if (isMobile) {
     const M = {
@@ -19978,6 +20020,7 @@ export function CompletionPanel({
             {isLawn && !quickComplete && (
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
+                  showReportPreview
                   request={adminFetch}
                   service={service}
                   disabled={isIncompleteVisit || submitting || generating}
@@ -21143,7 +21186,7 @@ export function CompletionPanel({
                         const areaRequirement = requiredApplicationArea(
                           productApplicationMethod(sp, typeFor(sp)),
                           typeFor(sp),
-                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
+                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField, sp, hasTreeShrubWork,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -22385,6 +22428,7 @@ export function CompletionPanel({
               {" "}
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
+                  showReportPreview
                   request={adminFetch}
                 service={service}
                 disabled={isIncompleteVisit || submitting || generating}
@@ -23617,7 +23661,7 @@ export function CompletionPanel({
                     const areaRequirement = requiredApplicationArea(
                       productApplicationMethod(sp, typeFor(sp)),
                       typeFor(sp),
-                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
+                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField, sp, hasTreeShrubWork,
                     );
                     if (!areaRequirement) return null;
                     return (
@@ -25332,6 +25376,8 @@ const PRODUCT_DESCRIPTIONS_V13 = {
     "slow-release fertilizer with extra potassium for winter hardiness",
   "lesco 44-0-0":
     "slow-release nitrogen fertilizer that feeds the lawn for 3 to 4 months",
+  "lesco black out 0-0-24":
+    "potassium fertilizer with no nitrogen for winter hardiness",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */

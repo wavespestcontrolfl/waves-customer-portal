@@ -1815,6 +1815,10 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // never half a row); the label-bound fields (yearly limits, grass, product) are not in the row's reach.
     require('./area-addon-config').syncAreaAddOnPricingConfig(config.area_addon_pricing, constants.AREA_ADDONS);
 
+    // Mosquito misting system (pricing_config `mosquito_misting_pricing`): same rebase-then-apply posture; labels and the
+    // nozzle/riser/refill bounds are code-owned and no row reaches them.
+    require('./mosquito-misting-config').syncMosquitoMistingPricingConfig(config.mosquito_misting_pricing, constants.MOSQUITO_MISTING);
+
     // ── One-Time / Specialty ─────────────────────────────────
     if (config.onetime_urgency) {
       if (config.onetime_urgency.soon) constants.URGENCY.SOON.standard = config.onetime_urgency.soon;

@@ -55,10 +55,12 @@ const SOD_SWAP_BAG_APRIL = Object.freeze({ name: SOD_SWAP_BAG.name, lbPer1000: 2
 const DAY_MS = 86400000;
 const LARGE_PATCH_GRASSES = new Set(['st_augustine', 'zoysia']);
 
-// The swap bag for a visit day: the April rate in April, the October rate otherwise.
-function swapBagFor(visitDate) {
+// The swap bag for a visit day: the April rate in April, the October rate otherwise. `month` (1-12) overrides the day's month when the caller
+// knows the month of the plan window the bag replaces (a visit rescheduled out of its window).
+function swapBagFor(visitDate, month = null) {
   const day = ymdOrNull(visitDate);
-  return day && day.slice(5, 7) === '04' ? SOD_SWAP_BAG_APRIL : SOD_SWAP_BAG;
+  const planMonth = month ?? (day ? Number(day.slice(5, 7)) : null);
+  return planMonth === 4 ? SOD_SWAP_BAG_APRIL : SOD_SWAP_BAG;
 }
 
 // All columns set to null, for the writers that clear the record together.

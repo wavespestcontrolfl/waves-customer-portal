@@ -241,6 +241,16 @@ function validateAreaAddOnPricing(data) {
   return missing ? { ok: false, error: `area_addon_pricing: ${missing} is missing. Send the whole object.` } : { ok: true };
 }
 
+// The mosquito misting system prices: bounded, plain JSON numbers, and no code-owned field (labels, nozzle/riser/refill
+// bounds, defaults). Whole object required, like area_addon_pricing, so a partial PUT cannot reset tuned values.
+function validateMosquitoMistingPricing(data) {
+  const config = require('../services/pricing-engine/mosquito-misting-config');
+  const verdict = config.normalizeMosquitoMistingPricingConfig(data);
+  if (!verdict.ok) return { ok: false, error: `mosquito_misting_pricing: ${verdict.error}` };
+  const missing = missingPricingKey(config.defaultMosquitoMistingPricingData(), data);
+  return missing ? { ok: false, error: `mosquito_misting_pricing: ${missing} is missing. Send the whole object.` } : { ok: true };
+}
+
 // The first key path of `shape` (objects only; arrays and values are leaves) that `data` does not carry, or null.
 function missingPricingKey(shape, data, path = '') {
   for (const key of Object.keys(shape)) {
@@ -257,6 +267,7 @@ function missingPricingKey(shape, data, path = '') {
 
 // PUT /:key's validator: a key with its own validator module first, then the shared per-key checks below.
 const OWN_VALIDATORS = { area_addon_pricing: validateAreaAddOnPricing };
+OWN_VALIDATORS.mosquito_misting_pricing = validateMosquitoMistingPricing;
 function validatePricingConfigFor(configKey, data, oldConfig) {
   return OWN_VALIDATORS[configKey] ? OWN_VALIDATORS[configKey](data) : validatePricingConfigData(configKey, data, oldConfig);
 }
@@ -774,6 +785,7 @@ async function ensureTable() {
       { config_key: 'mosquito_base_prices', name: 'Mosquito Program Per-Visit Pricing', category: 'mosquito', sort_order: 2, data: JSON.stringify({ SMALL: { seasonal9: 77, monthly12: 69 }, QUARTER: { seasonal9: 80, monthly12: 72 }, THIRD: { seasonal9: 83, monthly12: 77 }, HALF: { seasonal9: 90, monthly12: 81 }, ACRE: { seasonal9: 102, monthly12: 90 } }) },
       { config_key: 'mosquito_visits', name: 'Mosquito Program Visits', category: 'mosquito', sort_order: 3, data: JSON.stringify({ seasonal9: 9, monthly12: 12 }) },
       { config_key: 'mosquito_pressure', name: 'Mosquito Pressure Factors', category: 'mosquito', sort_order: 4, data: JSON.stringify({ trees_heavy: 0.15, trees_moderate: 0.05, complexity_complex: 0.10, complexity_moderate: 0.05, pool: 0.05, near_water: 0.10, irrigation: 0.08, lot_acre: 0.15, lot_half: 0.05, cap: 2.0 }) },
+      { config_key: 'mosquito_misting_pricing', name: 'Mosquito Misting System Pricing', category: 'mosquito', sort_order: 10, data: JSON.stringify(require('../services/pricing-engine/mosquito-misting-config').defaultMosquitoMistingPricingData()) },
 
       // Termite
       { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 24.00, labor_per_station: 5.25, misc_per_station: 0.75, link_station_costs_to_catalog: true, cartridge_cost: 6.83, cartridges_per_station: 2, cartridge_replacement_rate: 0.33, follow_up_visit_reserve: 0.25 }) },
