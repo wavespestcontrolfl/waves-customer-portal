@@ -127,6 +127,21 @@ async function loadActive(knex, propertyId) {
 }
 
 /**
+ * Does the property have a trouble area of this type that is ACTIVE, or that was cleared within the last `withinDays` days
+ * (GATE_LAWN_CHINCH_TETRINO_RATE reads chinch)? A cleared area with no cleared_at counts from its last update. A read failure
+ * throws; the caller decides what a failed read means.
+ */
+async function hasAreaOfType(knex, propertyId, type, { withinDays = 365 } = {}) {
+  if (!propertyId || !UUID_RE.test(String(propertyId))) return false;
+  const row = await knex('lawn_trouble_areas')
+    .where({ property_id: propertyId, type })
+    .where((q) => q.where('status', 'active').orWhere((cleared) => cleared.where('status', 'cleared')
+      .whereRaw("COALESCE(cleared_at, updated_at) >= now() - (?::int * interval '1 day')", [Number(withinDays)])))
+    .first('id');
+  return !!row;
+}
+
+/**
  * Writes the store from a completion's spot rows. `rows` are `{ place, type, source }` (already validated:
  * a closed-list place and type), one entry per treated spot. The first writer wins per (property, place,
  * type) (first seen, source, first record); a later treatment moves last seen, last treated and the last
@@ -542,6 +557,7 @@ module.exports = {
   placeChoices,
   troubleTypeFor,
   loadActive,
+  hasAreaOfType,
   recordFromCompletion,
   clearArea,
   areaRowsOf,

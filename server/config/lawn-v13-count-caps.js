@@ -36,6 +36,8 @@
  * entry asks for.
  *   Velista                       yearly amount 2.2 oz per 1,000 sq ft (label EPA 100-1534).
  *   Artavia 2 SC (Azoxy)          yearly amount 7.1 fl oz per 1,000 sq ft (label: 9.6 quarts per acre per year).
+ *   Tetrino Insecticide           yearly amount 1.47 fl oz per 1,000 sq ft (label: 64 fl oz per acre; at most 2 maximum-rate passes of
+ *                                 0.735) and 28 days between applications (label: 4 weeks). Owner 2026-10-22.
  *
  * V13_COUNT_CAPS keeps its four entries and nothing else: migrations 20261007175000 and 20261007177000
  * (pushed, frozen) read its names when they RUN, and a fifth name would make them stamp annualMaxApps 2 on
@@ -52,6 +54,7 @@
  */
 const LABEL = 'owner 2026-10-06';
 const FINAL_PASS = 'v13 final pass 2026-10-09';
+const CHINCH_PASS = 'owner 2026-10-22';
 
 const V13_COUNT_CAPS = Object.freeze([
   { name: 'Celsius WG', cap: 2, yearWindow: 'rolling365', description: `Celsius WG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` }, // label: 0.17 oz per 1,000 sq ft "per year (365 days)"
@@ -122,6 +125,25 @@ const V13_MORE_LIMITS = Object.freeze([
       unit: 'fl oz/1000sf/year',
       fallbackRate: 0.77,
       description: `Artavia 2 SC (Azoxy): no more than 7.1 fl oz per 1,000 sq ft (9.6 quarts per acre) a year under the v13 lawn program, all applications on the lawn added up (label). An earlier application with no readable rate counts as 0.77 fl oz. ${FINAL_PASS}.`,
+    },
+  },
+  {
+    name: 'Tetrino Insecticide',
+    // Tetrino label (EPA 432-1591), chinch bugs: 16 to 32 fl oz per acre a pass (0.367 to 0.735 fl oz per 1,000 sq ft), "no more than 2
+    // applications at the maximum rate a year", at least 4 weeks (28 days) between applications, and 64 fl oz per acre a year. The label's
+    // 0.735 per 1,000 is its own conversion of 32 fl oz per acre, so two maximum-rate passes (1.47) must fit: the yearly amount is 1.47,
+    // the same conversion of 64 fl oz per acre (1.469 would block the second label-rate pass by 0.001). The yearly amount also holds the
+    // maximum-rate count: a third 0.735 pass is 2.205, and the program rate 0.367 four times (1.468) fits. v13 owner 2026-10-22
+    // (GATE_LAWN_CHINCH_TETRINO_RATE raises the May rate to 0.735). This entry limits Tetrino whether or not that gate is on, because it
+    // enforces the label for every Tetrino application the lawn records, planned, manual or added by search.
+    // An earlier application the ledger cannot size counts at the maximum rate, 0.735.
+    minIntervalDays: 28,
+    intervalDescription: `Tetrino Insecticide: at least 28 days (4 weeks) between applications on a lawn under the v13 lawn program (label EPA 432-1591; ${CHINCH_PASS}).`,
+    annualAmount: {
+      cap: 1.47,
+      unit: 'fl oz/1000sf/year',
+      fallbackRate: 0.735,
+      description: `Tetrino Insecticide: no more than 1.47 fl oz per 1,000 sq ft (64 fl oz per acre) a year under the v13 lawn program, all applications on the lawn added up (label EPA 432-1591; at most 2 applications at the maximum rate 0.735 fl oz per 1,000 sq ft). An earlier application with no readable rate counts as 0.735 fl oz. ${CHINCH_PASS}.`,
     },
   },
   {

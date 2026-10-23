@@ -2471,8 +2471,8 @@ describe('suggested from this lawn', () => {
       detail: 'Art Fungicide — mapped large patch', productIds: [P_ART], items: [ADD_ONS[2]], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
     }),
     chinch: (item = ARENA_ITEM, note = null) => card('chinch', {
-      title: 'Insects: check for chinch bugs', finding: 'Photos show moderate insect damage.', check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.',
-      detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment.`, note, productIds: [item.productId], items: [item], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
+      title: 'Insects: check for chinch bugs', finding: 'Photos show moderate insect damage.', check: 'Check first: at the sunny edge of the damaged patch, push a bottomless can 3 in into the soil at 4 spots, fill with water and count for 5 minutes. Do not count big-eyed bugs (wide head, bulging eyes). Write the count in the notes.',
+      detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment, recheck at 5 and 12 days.`, note, productIds: [item.productId], items: [item], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
     }),
     takeAll: () => card('fungus', {
       title: 'Fungus', finding: 'Photos show moderate fungus activity.', check: 'Check first: look at the blades and the edge of the patch.',
@@ -2599,7 +2599,7 @@ describe('suggested from this lawn', () => {
     await open();
     await analyze();
     const group = await suggested();
-    expect(within(group).getByText('Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment.')).toBeTruthy();
+    expect(within(group).getByText('Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment, recheck at 5 and 12 days.')).toBeTruthy();
     fireEvent.click(within(group).getByRole('button', { name: 'Found at the edge. Add it' }));
     const arena = editorFor('Arena 50 WDG');
     expect(within(arena).getByText(/from the protocol/)).toBeTruthy();

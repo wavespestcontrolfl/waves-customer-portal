@@ -24,6 +24,7 @@
  */
 const logger = require('./logger');
 const { worstSeverity } = require('./lawn-photo-merge');
+const { chinchCardCheck, chinchRecheckClause } = require('../config/lawn-chinch-count');
 
 const KINDS = Object.freeze(['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots']);
 const SEVERITY_RANK = Object.freeze({ none: 0, minor: 1, moderate: 2, severe: 3 });
@@ -50,7 +51,7 @@ const YEARLY_CAP = 'annual_max_apps';
 
 const CHECKS = Object.freeze({
   fungus: 'Check first: look at the blades and the edge of the patch.',
-  chinch: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.',
+  chinch: chinchCardCheck(),
   caterpillars: 'Check first: soap flush to bring them to the surface.',
 });
 // Take-all is treated on known trouble areas only (owner 2026-10-08). The month's take-all fungicide
@@ -557,7 +558,7 @@ function chinchCard({ s, month, offers }) {
     title: 'Insects: check for chinch bugs',
     finding: `Photos show ${s.insect} insect damage.`,
     check: CHECKS.chinch,
-    detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment.`,
+    detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment, ${chinchRecheckClause()}.`,
     note: note || null,
     productIds: [item.productId],
     items: [item],
