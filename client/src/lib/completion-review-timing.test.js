@@ -74,6 +74,11 @@ describe('the Automatic hint while the ask goes out after the report text', () =
     expect(text).not.toMatch(/cadence tick/i);
   });
 
+  test('GATE_REVIEW_SENDER_EVERY_5_MIN: twelve ticks read as "every 5 minutes"', () => {
+    const fast = { ...afterReport, cadenceTickMinutesOfHour: [4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59] };
+    expect(timedReviewHint({ reviewTiming: 'auto', preview: fast })).toMatch(/^Review text goes out separately at the first review send \(every 5 minutes\) at least 10 minutes after the report text\./);
+  });
+
   test('without the send window gate the window is not promised', () => {
     expect(timedReviewHint({ reviewTiming: 'auto', preview: { ...afterReport, smsSendWindowEnabled: false } }))
       .toBe('Review text goes out separately at the first review send (:14 and :44 each hour) at least 10 minutes after the report text. If the report does not go out as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.');

@@ -708,6 +708,14 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
 // page shows that tick, not the eligibility instant (codex #4140 r4 P2).
 const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
+// GATE_REVIEW_SENDER_EVERY_5_MIN: the same job on every fifth minute of its
+// own offset (scheduler.js registers these minutes and runs only on the live table).
+const REVIEW_EVERY_5_TICK_MINUTES = [4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59];
+// The minutes processReviewSequences runs on now: one table for the cron
+// filter, the Reviews page ticks and the completion panel preview.
+function reviewCadenceTickMinutes() {
+  return require("../config/feature-gates").isEnabled("reviewSenderEvery5Min") ? REVIEW_EVERY_5_TICK_MINUTES : REVIEW_CADENCE_TICK_MINUTES;
+}
 // The legacy (cadences-off) path: processScheduled runs on the scheduler's
 // `*/15` cron (kept in step by review-sequences.test.js), and a legacy row's
 // scheduled_for is rebuilt from a later Date.now() after the target became a
@@ -756,11 +764,12 @@ function nextCadenceTickAt(from) {
   const tick = new Date(d.getTime());
   tick.setUTCSeconds(0, 0);
   // Minutes are zone-independent (every ET offset is a whole hour).
-  const next = REVIEW_CADENCE_TICK_MINUTES.find((m) => m > minute || (m === minute && !pastTheMinute));
+  const tickMinutes = reviewCadenceTickMinutes();
+  const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
   if (next != null) {
     tick.setUTCMinutes(next);
   } else {
-    tick.setUTCHours(tick.getUTCHours() + 1, REVIEW_CADENCE_TICK_MINUTES[0]);
+    tick.setUTCHours(tick.getUTCHours() + 1, tickMinutes[0]);
   }
   return tick;
 }
@@ -8228,6 +8237,8 @@ ReviewService.__private = {
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
+  REVIEW_EVERY_5_TICK_MINUTES,
+  reviewCadenceTickMinutes,
   reportTextAnchorFromNotes,
   LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,
