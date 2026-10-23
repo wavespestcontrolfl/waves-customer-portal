@@ -6,11 +6,12 @@
  * source with a sanctioned API (the SAM.gov website itself forbids scraping).
  *
  *   runSamGovPoll()     once a day: notices posted since the stored cursor, for each NAICS code, filed as bids
- *   mapOpportunity()    PURE: one API notice -> the bid row we would file, or { skip } with the reason
+ *   mapOpportunity()    PURE: one API notice -> its bid row and why it may not create a new bid (block)
  *
- * A notice is filed when it is a solicitation, combined synopsis, presolicitation or sources sought, active, its
- * response deadline (if any) is in the future (an inactive notice or a passed deadline still updates a bid already filed), and its place of performance is a Florida ZIP in SERVICE_ZIP3. Each
- * notice id is filed once (unique source + external_id); a republished notice refreshes its bid (refreshPatch). The
+ * A notice creates a bid when it is a solicitation, combined synopsis, presolicitation or sources sought, active, its
+ * response deadline (if any) is in the future, and its place of performance is a Florida ZIP in SERVICE_ZIP3. Each
+ * notice id is filed once (unique source + external_id). A notice already filed is refreshed whatever its type, place
+ * or state now (refreshPatch): a republish, a moved or removed deadline, an archive or an award all reach the bid. The
  * deadline is the API's own field, stored unconfirmed with the raw value as its source line: reminders still need the
  * operator to confirm it. One admin notification per new bid, and one when a republished notice changes the deadline,
  * owed on the bid and delivered by the Bid Desk's shared owed-bell sweep (deliverOwedAlerts). No AI call; nothing is sent to an
@@ -91,25 +92,33 @@ function publicUrl(notice) {
   return id && /^[A-Za-z0-9-]+$/.test(id) ? `https://sam.gov/opp/${id}/view` : null;
 }
 
+// Why a notice may not create a NEW bid (null = it may). A notice already filed is refreshed whatever this says:
+// SAM.gov changing its type to an award, archiving it, moving its deadline into the past or changing its place still
+// has to reach the stored bid.
+function newBidBlock({ filedType, active, place, dueAt }, now) {
+  if (!filedType) return 'type';
+  if (place.state !== 'FL') return 'not_florida';
+  if (!place.zip || !SERVICE_ZIP3.includes(place.zip.slice(0, 3))) return 'outside_area';
+  if (!active) return 'inactive';
+  if (dueAt != null && dueAt.getTime() <= now.getTime()) return 'deadline_passed';
+  return null;
+}
+
 /**
- * One API notice -> { row, expired } to file, or { skip: reason }. `expired` (the deadline has passed at `now`) files no
- * new bid but still refreshes one already filed.
+ * One API notice -> { row, block } (block: why it may not create a new bid, else null), or { skip } with no notice id.
+ * `row.source_active` is false when the notice is inactive or no longer a solicitation-type notice (an award): either
+ * way it is closed on SAM.gov.
  */
 function mapOpportunity(notice, now = new Date()) {
   const id = text(notice?.noticeId);
   if (!id) return { skip: 'no_notice_id' };
-  if (!FILED_TYPES.has(String(notice.type || '').toLowerCase().trim())) return { skip: 'type' };
+  const filedType = FILED_TYPES.has(String(notice.type || '').toLowerCase().trim());
+  const active = String(notice.active || '').toLowerCase() !== 'no';
   const place = placeOf(notice);
-  if (place.state !== 'FL') return { skip: 'not_florida' };
-  if (!place.zip || !SERVICE_ZIP3.includes(place.zip.slice(0, 3))) return { skip: 'outside_area' };
-
   const rawDeadline = text(notice.responseDeadLine);
   const dueAt = rawDeadline ? parseDeadline(rawDeadline) : null;
-  const active = String(notice.active || '').toLowerCase() !== 'no';
-  // An inactive notice or a passed deadline files no NEW bid, but still updates a bid already filed (SAM.gov archived
-  // the notice, or moved the date earlier).
   return {
-    expired: !active || (dueAt != null && dueAt.getTime() <= now.getTime()),
+    block: newBidBlock({ filedType, active, place, dueAt }, now),
     row: {
       source: 'sam_gov',
       external_id: id,
@@ -120,7 +129,7 @@ function mapOpportunity(notice, now = new Date()) {
       location: locationWords(place),
       due_at: dueAt,
       source_due_at: dueAt,
-      source_active: active,
+      source_active: active && filedType,
       due_source_line: dueAt ? `SAM.gov response deadline: ${rawDeadline}` : null,
       due_confirmed: false,
       status: 'new',
@@ -243,10 +252,10 @@ function refreshPatch(bid, row) {
 // Files one notice: a new bid (with its new-bid bell owed), a refresh of the bid already filed for it, or nothing.
 // The partial unique index on (source, external_id) cannot be named by knex's onConflict, so the conflict target is
 // written out; DO NOTHING keeps the transaction usable, and the existing row is then re-read under a row lock.
-async function upsertNotice(row, { expired = false } = {}) {
+async function upsertNotice(row, { block = null } = {}) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
-    if (!expired) {
+    if (!block) {
       const { sql, bindings } = trx('bid_opportunities').insert({ ...row, owed_alert_kind: 'new' }).toSQL();
       const inserted = await trx.raw(`${sql} ON CONFLICT (source, external_id) WHERE external_id IS NOT NULL DO NOTHING RETURNING id`, bindings);
       const id = inserted.rows?.[0]?.id;
@@ -256,7 +265,7 @@ async function upsertNotice(row, { expired = false } = {}) {
       }
     }
     const bid = await trx('bid_opportunities').where({ source: 'sam_gov', external_id: row.external_id }).forUpdate().first();
-    if (!bid) return { outcome: 'not_open' };
+    if (!bid) return { outcome: block || 'not_open' };
     const patch = refreshPatch(bid, row);
     if (!Object.keys(patch).length) return { outcome: 'already_filed' };
     // clock_timestamp(), not now(): the version the page fences a date save on must move.
@@ -310,7 +319,7 @@ async function fileNotices(notices, now) {
   const counts = { filed: 0, refreshed: 0, skippedByReason: {} };
   for (const notice of notices) {
     const mapped = mapOpportunity(notice, now);
-    const outcome = mapped.skip || (await upsertNotice(mapped.row, { expired: mapped.expired })).outcome;
+    const outcome = mapped.skip || (await upsertNotice(mapped.row, { block: mapped.block })).outcome;
     if (outcome === 'filed' || outcome === 'refreshed') counts[outcome] += 1;
     else counts.skippedByReason[outcome] = (counts.skippedByReason[outcome] || 0) + 1;
   }
@@ -344,6 +353,6 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
 }
 
 module.exports = {
-  runSamGovPoll, mapOpportunity, refreshPatch, fetchPage, fetchAll, safeError, SamApiError, apiDate, parseDeadline,
+  runSamGovPoll, mapOpportunity, newBidBlock, refreshPatch, fetchPage, fetchAll, safeError, SamApiError, apiDate, parseDeadline,
   CURSOR_KEY, NAICS_CODES, SERVICE_ZIP3, LOG, PAGE_LIMIT, MAX_PAGES, REFRESH_LIMIT,
 };

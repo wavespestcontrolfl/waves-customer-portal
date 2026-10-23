@@ -209,7 +209,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid' });
     const past = '2026-10-21T14:00:00-04:00';
     const result = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-9', { responseDeadLine: past }), notice('n-10', { responseDeadLine: past })]), apiKey: 'test-key' });
-    expect(result).toMatchObject({ filed: 0, refreshed: 1, skippedByReason: { not_open: 1 } });
+    expect(result).toMatchObject({ filed: 0, refreshed: 1, skippedByReason: { deadline_passed: 1 } });
     const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
     expect(bid.needs_date_confirmation).toBe(true);
     expect(bid.due_source_line).toBe(`SAM.gov response deadline: ${past}`);
@@ -285,6 +285,18 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(await read()).toEqual(ids.slice(sam.REFRESH_LIMIT));
     expect((await cursorState()).refresh_after).toBeNull();
     expect(await read()).toEqual(ids.slice(0, sam.REFRESH_LIMIT));
+  });
+
+  test('a filed notice that becomes an award notice outside the area still reaches its bid', async () => {
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-14')]), apiKey: 'test-key' });
+    const [filed] = await samBids();
+    await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid' });
+    const award = notice('n-14', { type: 'Award Notice', placeOfPerformance: { state: { code: 'GA' }, zip: '30301' } });
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([award]), apiKey: 'test-key' })).toMatchObject({ refreshed: 1, rung: 1 });
+    const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
+    expect(bid.source_active).toBe(false);
+    expect(bid.needs_date_confirmation).toBe(true);
+    expect(bid.location).toBe('GA 30301');
   });
 
   test('a cursor older than a year is clamped to the API window', async () => {

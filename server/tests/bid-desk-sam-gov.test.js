@@ -39,8 +39,8 @@ afterEach(() => {
 
 describe('mapOpportunity', () => {
   test('a Sarasota combined synopsis becomes an unconfirmed sam_gov bid with its deadline and link', () => {
-    const { row, skip } = sam.mapOpportunity(notice(), NOW);
-    expect(skip).toBeUndefined();
+    const { row, block } = sam.mapOpportunity(notice(), NOW);
+    expect(block).toBeNull();
     expect(row).toMatchObject({
       source: 'sam_gov',
       external_id: 'abc123def456',
@@ -63,16 +63,22 @@ describe('mapOpportunity', () => {
     ['another state', { placeOfPerformance: { state: { code: 'GA' }, zip: '30301' } }, 'not_florida'],
     ['north Florida', { placeOfPerformance: { state: { code: 'FL' }, zip: '32202' } }, 'outside_area'],
     ['no place ZIP', { placeOfPerformance: { state: { code: 'FL' } } }, 'outside_area'],
-    ['no notice id', { noticeId: '' }, 'no_notice_id'],
-  ])('skips %s', (_label, overrides, reason) => {
-    expect(sam.mapOpportunity(notice(overrides), NOW)).toEqual({ skip: reason });
+    ['inactive notices', { active: 'No' }, 'inactive'],
+    ['a passed deadline', { responseDeadLine: '2026-10-21T14:00:00-04:00' }, 'deadline_passed'],
+  ])('%s create no new bid, but still map a row for a bid already filed', (_label, overrides, reason) => {
+    const mapped = sam.mapOpportunity(notice(overrides), NOW);
+    expect(mapped.block).toBe(reason);
+    expect(mapped.row.external_id).toBe('abc123def456');
   });
 
-  test('a passed deadline is mapped as expired (it files no new bid but can update one already filed)', () => {
-    const mapped = sam.mapOpportunity(notice({ responseDeadLine: '2026-10-21T14:00:00-04:00' }), NOW);
-    expect(mapped.expired).toBe(true);
-    expect(mapped.row.source_due_at.toISOString()).toBe('2026-10-21T18:00:00.000Z');
-    expect(sam.mapOpportunity(notice(), NOW).expired).toBe(false);
+  test('no notice id is skipped outright', () => {
+    expect(sam.mapOpportunity(notice({ noticeId: '' }), NOW)).toEqual({ skip: 'no_notice_id' });
+  });
+
+  test('an award or an archive marks the notice closed on SAM.gov', () => {
+    expect(sam.mapOpportunity(notice({ type: 'Award Notice' }), NOW).row.source_active).toBe(false);
+    expect(sam.mapOpportunity(notice({ active: 'No' }), NOW).row.source_active).toBe(false);
+    expect(sam.mapOpportunity(notice(), NOW).row.source_active).toBe(true);
   });
 
   test('keeps a sources sought with no deadline, and Tampa Bay ZIPs are in the area', () => {
@@ -109,12 +115,6 @@ describe('deadlines', () => {
     const { row } = sam.mapOpportunity(notice({ responseDeadLine: 'TBD' }), NOW);
     expect(row.due_at).toBeNull();
     expect(row.due_source_line).toBeNull();
-  });
-
-  test('an inactive notice is mapped as expired (it files no new bid but can update one already filed)', () => {
-    const mapped = sam.mapOpportunity(notice({ active: 'No' }), NOW);
-    expect(mapped.expired).toBe(true);
-    expect(mapped.row.source_active).toBe(false);
   });
 
   test('API dates are MM/dd/yyyy', () => {
