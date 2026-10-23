@@ -71,7 +71,7 @@ function validateFile(file) {
   if (detected !== declared) throw new FileError('The file content does not match its type. ' + SUPPORTED_MESSAGE);
   // A file name is typed text too: one that carries a tax ID or SSN (W9-123-45-6789.pdf) is refused, never stored or cleaned,
   // so the number cannot reach file_name, a list response or a signed link. The refusal never repeats the name.
-  if (catalog.fileNameHasTaxId(file.originalname) || catalog.fileNameHasTaxId(safeFileName(file.originalname))) throw new FileError(catalog.TAX_ID_REFUSED);
+  if (catalog.detectTaxId(file.originalname, { fileName: true }) || catalog.detectTaxId(safeFileName(file.originalname), { fileName: true })) throw new FileError(catalog.TAX_ID_REFUSED);
   return detected;
 }
 
@@ -94,7 +94,7 @@ function safeFileName(name = 'file') {
 // The name a signed link offers. A stored name that somehow holds a tax ID is replaced by a plain one.
 function downloadName(fileName, contentType) {
   const name = safeFileName(fileName);
-  return catalog.fileNameHasTaxId(name) ? `file.${(TYPES[contentType] || ['bin'])[0]}` : name;
+  return catalog.detectTaxId(name, { fileName: true }) ? `file.${(TYPES[contentType] || ['bin'])[0]}` : name;
 }
 
 const keyFingerprint = (key) => crypto.createHash('sha256').update(String(key || '')).digest('hex').slice(0, 12);
@@ -106,7 +106,15 @@ async function putFile(itemId, file) {
   const fileName = safeFileName(file.originalname);
   // The key never carries the original name: a random token and a whitelisted extension only.
   const key = `${KEY_PREFIX}${itemId}/${crypto.randomBytes(8).toString('hex')}.${TYPES[contentType][0]}`;
-  await s3().send(new PutObjectCommand({ Bucket: config.s3.bucket, Key: key, Body: file.buffer, ContentType: contentType }));
+  try {
+    await s3().send(new PutObjectCommand({ Bucket: config.s3.bucket, Key: key, Body: file.buffer, ContentType: contentType }));
+  } catch (err) {
+    // A timeout or a reset can leave the object stored although the call failed. No row points at this key yet, so it is
+    // removed best effort before the error goes on (a fixed line, the item id only).
+    logger.warn(`[bid-kit] storing a file for item ${itemId} failed; a cleanup delete of the new key was sent`);
+    await deleteFile(key);
+    throw err;
+  }
   return { key, fileName, contentType, size: file.buffer.length };
 }
 

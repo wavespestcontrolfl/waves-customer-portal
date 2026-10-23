@@ -126,36 +126,69 @@ const SIGN_OFF_REFUSAL = {
   needs_expiry: 'Add the expiry date first.',
 };
 
-// Tax IDs are never stored. Refused in any typed text: a hyphenated EIN (12-3456789), a hyphenated SSN (123-45-6789), and a
-// nine-digit run that follows a label (EIN, FEIN, TIN, SSN, W-9 or W9, "tax id", "taxpayer") by at most 12 characters. A bare nine-digit
-// number with no such label (an insurance policy number) is fine. The message never repeats the text.
-const TAX_ID_PATTERN = /(?<!\d)(?:\d{2}-\d{7}|\d{3}-\d{2}-\d{4})(?!\d)|(?:\b(?:EIN|FEIN|TIN|SSN)\b|\bW[-\s]?9\b|tax\s*id|taxpayer)[\s\S]{0,12}?(?<!\d)\d{9}(?!\d)/i;
-// A file name is held to a stricter rule: any standalone run of exactly nine digits (not part of a longer run) is refused with
-// or without a label, as are the hyphenated forms. A name has no sentence around it, and "W9 123456789.pdf" is the common case.
-const FILE_NAME_TAX_ID = /(?<!\d)(?:\d{2}-\d{7}|\d{3}-\d{2}-\d{4}|\d{9})(?!\d)/;
-// The one plain refusal every tax-ID check gives. It never repeats the text.
+// ---- tax IDs: ONE detector ----
+// A tax ID or Social Security number is never stored: the W-9 file is the only place one lives. Every path asks this one
+// function (typed fields, the merged-row pairs, reference details, uploaded file names, the signed-link name fallback).
+//
+// A separator is any run of space, hyphen, en dash, dot, underscore or slash. Refused:
+//   - SSN shape: 3 digits, separator, 2 digits, separator, 4 digits (label or not);
+//   - EIN shape: 2 digits, separator, 7 digits (label or not);
+//   - a plain nine-digit run, digits possibly split by separators into other groupings ("123456789", "1234 56789",
+//     "123.456.789"), when a tax label (EIN, FEIN, TIN, SSN, "tax id", "taxpayer", W9, W-9, W 9) ends at most 12 characters
+//     before it. In a FILE NAME ({ fileName: true }) any such nine-digit run is refused, label or not.
+// Not refused: runs of 8 digits or of 10 or more, dates, phone numbers, and an ordinary policy number with no tax label.
+// A run is a maximal chain of digit groups joined by separators; nine digits means some consecutive groups of the chain add up to
+// exactly nine. The refusal never repeats the text.
+const SEPARATOR = '[\\s\\-\\u2013._/]+';
+const SSN_SHAPE = new RegExp(`(?<!\\d)\\d{3}${SEPARATOR}\\d{2}${SEPARATOR}\\d{4}(?!\\d)`);
+const EIN_SHAPE = new RegExp(`(?<!\\d)\\d{2}${SEPARATOR}\\d{7}(?!\\d)`);
+const DIGIT_CHAIN = new RegExp(`\\d+(?:${SEPARATOR}\\d+)*`, 'g');
+const TAX_LABEL = /\b(?:EIN|FEIN|TIN|SSN)\b|\bW[-\s]?9\b|tax\s*id|taxpayer/gi;
+const LABEL_REACH = 12;
 const TAX_ID_REFUSED = 'That looks like a tax ID or Social Security number. These are never stored here; the W-9 file holds the tax ID.';
-// An underscore counts as a space, so a file name like EIN_123456789.pdf is read the same as "EIN 123456789".
-const looksLikeTaxId = (text) => typeof text === 'string' && TAX_ID_PATTERN.test(text.replace(/_/g, ' '));
-// An uploaded file's name (the strict rule above). Underscores count as spaces, as in typed text.
-const fileNameHasTaxId = (name) => typeof name === 'string' && (FILE_NAME_TAX_ID.test(name.replace(/_/g, ' ')) || looksLikeTaxId(name));
-// A whole item, as it will be stored (stored values with an edit applied). Each text field is screened alone, and every
-// ordered pair of text fields is screened as one string, so a tax label in one field and the nine digits in another ("EIN" in
-// the label, 123456789 in the value; or the same built across two edits) cannot get past the label rule. A reference's
-// details count as fields too. A number with no tax label near it (a policy number) passes.
+
+// Where each nine-digit run starts: the first group of any consecutive groups in a chain that add up to exactly nine digits.
+function nineDigitRunStarts(text) {
+  const starts = [];
+  for (const chain of text.matchAll(DIGIT_CHAIN)) {
+    const groups = [...chain[0].matchAll(/\d+/g)].map((group) => ({ start: chain.index + group.index, length: group[0].length }));
+    for (let from = 0; from < groups.length; from += 1) {
+      let sum = 0;
+      for (let to = from; to < groups.length && sum < 9; to += 1) {
+        sum += groups[to].length;
+        if (sum === 9) starts.push(groups[from].start);
+      }
+    }
+  }
+  return starts;
+}
+
+// True when the text holds a tax ID or an SSN. An underscore counts as a space ("EIN_123456789.pdf" reads as "EIN 123456789").
+function detectTaxId(text, { fileName = false } = {}) {
+  if (typeof text !== 'string') return false;
+  const t = text.replace(/_/g, ' ');
+  if (SSN_SHAPE.test(t) || EIN_SHAPE.test(t)) return true;
+  const starts = nineDigitRunStarts(t);
+  if (!starts.length) return false;
+  if (fileName) return true;
+  return [...t.matchAll(TAX_LABEL)].some((label) => {
+    const end = label.index + label[0].length;
+    return starts.some((start) => start >= end && start - end <= LABEL_REACH);
+  });
+}
+
+// A whole item as it will be stored (stored values with an edit applied). Each text field is screened alone, and every
+// ordered pair of text fields is screened as one string, so a tax label in one field and the digits in another (the label
+// "EIN" with the value 123456789, or the same built across two edits) cannot get past the label rule. A reference's details
+// are fields too (a number counts as its digits). A number with no tax label near it passes.
 function rowHasTaxId(row) {
   const r = row || {};
   const details = r.details && typeof r.details === 'object' ? Object.values(r.details) : [];
-  const parts = [r.label, r.value, r.source_document, r.notes, ...details].filter((part) => typeof part === 'string' && part.trim() !== '');
-  if (parts.some(looksLikeTaxId)) return true;
-  return parts.some((a, i) => parts.some((b, j) => i !== j && looksLikeTaxId(`${a} ${b}`)));
-}
-function containsTaxId(value) {
-  if (value == null) return false;
-  if (typeof value === 'string') return looksLikeTaxId(value);
-  if (Array.isArray(value)) return value.some(containsTaxId);
-  if (typeof value === 'object') return Object.values(value).some(containsTaxId);
-  return false;
+  const parts = [r.label, r.value, r.source_document, r.notes, ...details]
+    .map((part) => (typeof part === 'number' ? String(part) : part))
+    .filter((part) => typeof part === 'string' && part.trim() !== '');
+  if (parts.some((part) => detectTaxId(part))) return true;
+  return parts.some((a, i) => parts.some((b, j) => i !== j && detectTaxId(`${a} ${b}`)));
 }
 
 // ---- dates (America/New_York) ----
@@ -165,6 +198,9 @@ function etToday(now = new Date()) {
   const parts = Object.fromEntries(ET_DAY.formatToParts(now).map(({ type, value }) => [type, value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
+// True when a calendar day (YYYY-MM-DD) is after today in America/New_York: a check or a permission cannot be dated ahead.
+const isFutureDay = (day, today = etToday()) => { const d = dayText(day); return d !== null && d > today; };
+
 // A DATE read back as text. A Date object is taken at its UTC calendar day (pg parses DATE at local midnight, so the
 // server reads dates as text; this is the safe fallback for a Date at UTC midnight).
 function dayText(value) {
@@ -184,15 +220,17 @@ const present = (value) => typeof value === 'string' ? value.trim() !== '' : val
 
 // The status of one row. Pure: pass `today` (an Eastern YYYY-MM-DD) or `now`.
 // First match wins, in this order: missing, expired, needs_expiry, needs_permission, unattested, expiring, ready.
-// A row is "there" when it has a file or a value; a reference also counts when it names its entity. A catalog item that expires (expires: true) and has
-// no expiry date is needs_expiry; custom rows are not held to that.
+// A document is "there" only when it has a FILE: the paper is the evidence, and a typed number alone is not (this holds for a
+// custom document too). A fact is there with a value, and a reference with a value or when it names its entity. A catalog item
+// that expires (expires: true) and has no expiry date is needs_expiry; custom rows are not held to that.
 function itemStatus(row, { today, now } = {}) {
   const day = today || etToday(now);
   const r = row || {};
   const hasFile = present(r.file_s3_key) || r.has_file === true;
   const hasValue = present(r.value);
   const hasEntity = r.kind === 'reference' && present(r.details && r.details.entity);
-  if (!hasFile && !hasValue && !hasEntity) return STATUS.MISSING;
+  const there = r.kind === 'document' ? hasFile : (hasFile || hasValue || hasEntity);
+  if (!there) return STATUS.MISSING;
   const expires = dayText(r.expires_on);
   const left = expires ? daysBetween(day, expires) : null;
   if (left !== null && left < 0) return STATUS.EXPIRED;
@@ -261,6 +299,9 @@ function sortKeys(value) {
 const blankToNull = (value) => (value === '' || value === undefined ? null : value);
 // True when a patch changes one of the fields a sign-off covers, compared with the stored row.
 function changesSubstance(row, patch) {
+  // A custom item's label is the owner's own words about the paper, so a new label is a new claim and clears the sign-off. A
+  // catalog item's label comes from the catalog.
+  if (row.item_key === CUSTOM_KEY && 'label' in patch && blankToNull(row.label) !== blankToNull(patch.label)) return true;
   return SUBSTANTIVE_FIELDS.some((field) => {
     if (!(field in patch)) return false;
     if (field === 'limits' || field === 'details') return !sameJson(row[field], patch[field]);
@@ -273,6 +314,6 @@ module.exports = {
   SECTIONS, ITEMS, ITEM_BY_KEY, KINDS, CUSTOM_KEY, CUSTOM_SECTION,
   LIMIT_KEYS, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, MAX_LIMIT_DOLLARS, REFERENCE_DETAIL_KEYS, PUBLIC_OR_PRIVATE,
   SUBSTANTIVE_FIELDS, EXPIRING_DAYS, STATUS, STATUS_ORDER, STATUS_LABEL, SIGN_OFF_REFUSAL,
-  catalogItem, catalogSections, itemStatus, buildChecklist, summarize, changesSubstance,
-  TAX_ID_REFUSED, looksLikeTaxId, fileNameHasTaxId, containsTaxId, rowHasTaxId, etToday, dayText, daysBetween,
+  catalogItem, catalogSections, itemStatus, isFutureDay, buildChecklist, summarize, changesSubstance,
+  TAX_ID_REFUSED, detectTaxId, rowHasTaxId, etToday, dayText, daysBetween,
 };

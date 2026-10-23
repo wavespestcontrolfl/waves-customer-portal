@@ -6,7 +6,7 @@ import {
   ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Textarea, UiSurface,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
-import { formatETDateOnly } from "../../lib/timezone";
+import { formatETDate, formatETDateOnly, formatETTime } from "../../lib/timezone";
 import { STATUS_LABEL, SIGN_OFF_REFUSAL, LIMIT_DOLLAR_KEYS, WORKERS_COMP_VALUES, PUBLIC_OR_PRIVATE, REFERENCE_DETAIL_KEYS } from "@bid-kit-catalog";
 
 // Bid kit (GATE_BID_KIT, dark, admin only). The papers and facts every government bid asks for. Nothing here is public and
@@ -76,7 +76,18 @@ async function uploadFor(entry, file) {
   }
 }
 
+// A calendar date (checked, expires, permission) is a plain day with no time zone.
 const dateText = (value) => (value ? formatETDateOnly(value, { month: "short", day: "numeric", year: "numeric" }) : "");
+// A timestamp (the sign-off) is an instant: it is shown in Eastern time with the zone named, so a sign-off late in the evening
+// does not show the next day's date.
+const instantText = (value) => {
+  if (!value) return "";
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return "";
+  return `${formatETDate(at, { month: "short", day: "numeric", year: "numeric" })} at ${formatETTime(at)} ET`;
+};
+// Today in Eastern time as YYYY-MM-DD: the latest day a check or a permission can carry.
+const todayET = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
 
 // The server's items laid over the catalog: one entry per catalog item and row, or one empty entry for an item with no
 // row yet. A row with item_key "custom" goes to the last section.
@@ -279,9 +290,9 @@ function DateFields({ form, set, shown }) {
   return (
     <div className="grid gap-3 md:grid-cols-3">
       <Field id="kit-source" label="Source document" help="Where this came from."><Input value={form.source} maxLength={500} onChange={(event) => set("source", event.target.value)} /></Field>
-      <Field id="kit-checked" label="Checked on"><Input type="date" value={form.checkedOn} onChange={(event) => set("checkedOn", event.target.value)} /></Field>
+      <Field id="kit-checked" label="Checked on"><Input type="date" max={todayET()} value={form.checkedOn} onChange={(event) => set("checkedOn", event.target.value)} /></Field>
       {shown.showExpiry && <Field id="kit-expires" label="Expires on"><Input type="date" value={form.expiresOn} onChange={(event) => set("expiresOn", event.target.value)} /></Field>}
-      {shown.isReference && <Field id="kit-permission" label="Permission given on" help="The day this person agreed to be named."><Input type="date" value={form.permissionOn} onChange={(event) => set("permissionOn", event.target.value)} /></Field>}
+      {shown.isReference && <Field id="kit-permission" label="Permission given on" help="The day this person agreed to be named."><Input type="date" max={todayET()} value={form.permissionOn} onChange={(event) => set("permissionOn", event.target.value)} /></Field>}
     </div>
   );
 }
@@ -399,7 +410,7 @@ function RowDetails({ row, item }) {
       <SourceLine row={row} />
       {row.kind === "reference" && <ReferenceLines row={row} />}
       {row.limits && <Line label="Limits: ">{limitsText(row.limits)}</Line>}
-      {row.attested_at && <div className="text-ink-secondary">Signed off {dateText(row.attested_at)}</div>}
+      {row.attested_at && <div className="text-ink-secondary">Signed off {instantText(row.attested_at)}</div>}
     </div>
   );
 }

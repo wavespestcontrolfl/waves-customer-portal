@@ -2,11 +2,22 @@
 // expiry-equals-today edge in America/New_York), the counts, change detection and the tax-ID guard. No database.
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 
-const { STATUS, STATUS_ORDER, itemStatus, buildChecklist, summarize, changesSubstance, containsTaxId, looksLikeTaxId, etToday, daysBetween } = catalog;
+const { STATUS, STATUS_ORDER, itemStatus, buildChecklist, summarize, changesSubstance, etToday, daysBetween } = catalog;
 const TODAY = '2026-10-23';
 const doc = (over = {}) => ({ kind: 'document', item_key: 'business_license_copy', has_file: true, value: null, expires_on: null, attested_at: null, ...over });
 
 describe('catalog', () => {
+  test('isFutureDay compares a calendar day with today in America/New_York, at the Eastern midnight edge', () => {
+    const lateEvening = new Date('2026-10-24T03:30:00Z'); // Oct 23, 11:30 PM EDT: the UTC date is already Oct 24
+    expect(catalog.etToday(lateEvening)).toBe('2026-10-23');
+    expect(catalog.isFutureDay('2026-10-23', catalog.etToday(lateEvening))).toBe(false);
+    expect(catalog.isFutureDay('2026-10-24', catalog.etToday(lateEvening))).toBe(true);
+    const justAfter = new Date('2026-10-24T04:00:00Z'); // Oct 24, 12:00 AM EDT
+    expect(catalog.isFutureDay('2026-10-24', catalog.etToday(justAfter))).toBe(false);
+    expect(catalog.isFutureDay('2026-10-25', catalog.etToday(justAfter))).toBe(true);
+    expect(catalog.isFutureDay(null, '2026-10-23')).toBe(false);
+  });
+
   test('sections come in the order the owner works through them, and the first one is the papers that sank bids', () => {
     expect(catalog.SECTIONS.map((section) => section.key)).toEqual(['sank_bids', 'insurance', 'registration_tax', 'plans_company', 'references', 'facts']);
     expect(catalog.SECTIONS[0].items.map((item) => item.key)).toEqual([
@@ -67,8 +78,15 @@ describe('status', () => {
     expect(STATUS_ORDER).toEqual(['missing', 'expired', 'needs_expiry', 'needs_permission', 'unattested', 'expiring', 'ready']);
   });
 
-  test('a value alone makes a document present; a fact with no value is missing, whatever else the row carries', () => {
-    expect(itemStatus(w9({ has_file: false, value: 'On file' }), { today: TODAY })).toBe(STATUS.UNATTESTED);
+  test('a document is there only with a FILE: a typed number alone is missing; a fact is there with a value', () => {
+    expect(itemStatus(w9({ has_file: false, value: 'On file' }), { today: TODAY })).toBe(STATUS.MISSING);
+    expect(itemStatus(doc({ has_file: false, value: 'POL-0001', expires_on: '2999-01-01', attested_at: SIGNED }), { today: TODAY })).toBe(STATUS.MISSING);
+    expect(itemStatus({ kind: 'document', item_key: 'custom', has_file: false, value: 'Letter 7' }, { today: TODAY })).toBe(STATUS.MISSING); // a custom paper too
+    expect(itemStatus(w9({ has_file: true }), { today: TODAY })).toBe(STATUS.UNATTESTED);
+    expect(itemStatus(w9({ has_file: false, file_s3_key: 'bid-kit/x/y.pdf' }), { today: TODAY })).toBe(STATUS.UNATTESTED);
+    // Facts and references are ready on text.
+    expect(itemStatus({ kind: 'fact', item_key: 'phone', value: '941-555-0100' }, { today: TODAY })).toBe(STATUS.UNATTESTED);
+    expect(itemStatus({ kind: 'reference', item_key: 'reference', value: 'Sample District', permission_on: '2026-09-30' }, { today: TODAY })).toBe(STATUS.UNATTESTED);
     // A fact's value is the one the owner typed. Nothing is read from any other table, so a stray number on the row is ignored.
     expect(itemStatus({ kind: 'fact', item_key: 'fdacs_license_number', value: null, credential_number: 'JB000000' }, { today: TODAY })).toBe(STATUS.MISSING);
     expect(itemStatus({ kind: 'fact', item_key: 'fdacs_license_number', value: 'JB000000', attested_at: SIGNED }, { today: TODAY })).toBe(STATUS.READY);
@@ -227,82 +245,127 @@ describe('what clears a sign-off', () => {
     expect(changesSubstance({ value: null, limits: null }, { value: '', limits: null })).toBe(false);
   });
 
+  test('a custom item\'s label is part of what a sign-off covers; a catalog item\'s label is not', () => {
+    expect(changesSubstance({ item_key: 'custom', label: 'County vendor letter' }, { label: 'County vendor letter (renewed)' })).toBe(true);
+    expect(changesSubstance({ item_key: 'custom', label: 'County vendor letter' }, { label: 'County vendor letter' })).toBe(false);
+    expect(changesSubstance({ item_key: 'custom', label: 'County vendor letter' }, { notes: 'Call the county' })).toBe(false);
+    expect(changesSubstance({ item_key: 'insurance_certificate', label: 'Certificate of insurance' }, { label: 'COI (renewal Mar 1)' })).toBe(false);
+  });
+
   test('a label or a note is not part of what a sign-off covers', () => {
     expect(changesSubstance(row, { label: 'Renamed', notes: 'Call the agent in March' })).toBe(false);
   });
 });
 
-describe('tax IDs are never stored', () => {
-  test.each([
-    '12-3456789', '123-45-6789', 'EIN 12-3456789 on file', 'note: 987-65-4321.',
-    'EIN 123456789', 'EIN: 123456789', 'ein 123456789', 'FEIN 123456789', 'TIN: 123456789', 'SSN 123456789', 'tax id 123456789', 'Tax ID: 123456789', 'taxpayer ID: 123456789', 'Taxpayer 123456789', 'W9 123456789', 'W-9 123456789', 'W 9: 123456789', 'w-9_123456789', 'W-9 TIN 123456789', 'EIN_123456789.pdf', 'W9_TIN_123456789', 'W9-SSN-123456789.pdf',
-  ])('%s is refused', (text) => {
-    expect(looksLikeTaxId(text)).toBe(true);
-    expect(containsTaxId({ nested: [text] })).toBe(true);
+describe('tax IDs are never stored: one detector', () => {
+  const { detectTaxId, rowHasTaxId } = catalog;
+  const SEPARATORS = [['space', ' '], ['hyphen', '-'], ['en dash', '–'], ['dot', '.'], ['underscore', '_'], ['slash', '/'], ['double space', '  '], ['hyphen and space', '- ']];
+
+  // [text, refused?, note]: typed text, no file-name rule.
+  const TYPED = [
+    // SSN shape, every separator, label or not
+    ...SEPARATORS.map(([name, sep]) => [`123${sep}45${sep}6789`, true, `SSN shape with ${name}`]),
+    ['note: 987-65-4321.', true, 'SSN shape inside a sentence'],
+    ['123 - 45 - 6789', true, 'SSN shape with spaced hyphens'],
+    ['123-45.6789', true, 'SSN shape with mixed separators'],
+    // EIN shape, every separator, label or not
+    ...SEPARATORS.map(([name, sep]) => [`12${sep}3456789`, true, `EIN shape with ${name}`]),
+    ['EIN 12-3456789 on file', true, 'EIN shape inside a sentence'],
+    // plain nine digits near a tax label
+    ['EIN 123456789', true, 'EIN label'], ['EIN: 123456789', true, 'colon'], ['ein 123456789', true, 'lower case'], ['FEIN 123456789', true, 'FEIN'],
+    ['TIN: 123456789', true, 'TIN'], ['SSN 123456789', true, 'SSN label'], ['tax id 123456789', true, 'tax id'], ['Tax ID: 123456789', true, 'Tax ID'],
+    ['taxpayer ID: 123456789', true, 'taxpayer ID'], ['Taxpayer 123456789', true, 'taxpayer'], ['W9 123456789', true, 'W9'], ['W-9 123456789', true, 'W-9'],
+    ['W 9: 123456789', true, 'W 9'], ['w-9_123456789', true, 'underscore after W-9'], ['W-9 TIN 123456789', true, 'two labels'],
+    ['EIN_123456789', true, 'underscore after EIN'],
+    // plain nine digits split into other groupings, near a label
+    ['EIN 1234 56789', true, 'split 4-5'], ['EIN 123 456 789', true, 'split 3-3-3'], ['EIN 123.456.789', true, 'split with dots'],
+    ['EIN 12345 6789', true, 'split 5-4'], ['TIN 1 2 3 4 5 6 7 8 9', true, 'every digit apart'], ['tax id 123/456/789', true, 'split with slashes'],
+    ['W9 1234–56789', true, 'split with an en dash'],
+    // the label reach: at most 12 characters between the label and the digits
+    [`SSN${' '.repeat(12)}123456789`, true, '12 characters between'], [`SSN${' '.repeat(13)}123456789`, false, '13 characters between'],
+    // not refused
+    ['EIN 12345678', false, 'eight digits after a label'], ['EIN 12345678901', false, 'eleven digits after a label'], ['TIN 1234567890', false, 'ten digits'],
+    ['Policy 123456789', false, 'policy number, no label'], ['POL 987654321', false, 'policy number'], ['123456789', false, 'bare nine digits, no label'],
+    ['Certificate 123456789 dated Sep 1', false, 'policy number in a sentence'], ['Policy number 123-456-789', false, 'policy number, grouped'],
+    ['W-9 on file with the office manager, policy 123456789', false, 'label too far from the digits'],
+    ['EIN is on file with the W-9 and the insurance certificate, policy 123456789', false, 'label too far'],
+    ['EIN on the W-9 only', false, 'label with no number'], ['the tin roof', false, 'tin as a word with no number'], ['tax identification is on the W-9', false, 'words only'],
+    ['2026-10-23', false, 'date'], ['10/23/2026', false, 'date, slashes'], ['23.10.2026', false, 'date, dots'], ['2026-10-23 14:30', false, 'date and time'],
+    ['Oct 23, 2026', false, 'date in words'], ['20261023', false, 'compact date'],
+    ['941-555-0100', false, 'phone'], ['(941) 555-0100', false, 'phone with parentheses'], ['941.555.0100', false, 'phone with dots'], ['941 555 0100', false, 'phone with spaces'],
+    ['9415550100', false, 'phone, digits only'], ['+1 941 555 0100', false, 'phone with country code'], ['1-941-555-0100', false, 'phone, dialing 1'],
+    ['561710, 561730', false, 'NAICS list'], ['NIGP 968-45', false, 'NIGP code'], ['JB000000', false, 'license number'], ['JNXA12345678', false, 'entity ID'],
+    ['1234567890123', false, 'thirteen digits'], ['Example Pest Services LLC', false, 'a name'], ['100 Fixture Way, Sampleville, FL 34202', false, 'address'],
+    ['', false, 'empty'],
+  ];
+
+  test.each(TYPED)('typed text %j: refused = %s (%s)', (text, refused) => {
+    expect(detectTaxId(text)).toBe(refused);
   });
 
-  test.each([
-    '941-555-0100', '9415550100', '34202-1234', '561710, 561730', 'JB000000', '2026-10-23', 'NIGP 968-45', '1234567890123', 'Example Pest Services LLC',
-    'Policy 123456789', 'POL 987654321', '123456789', 'Certificate 123456789 dated Sep 1', 'W-9 on file with the office manager, policy 123456789',
-    'EIN is on file with the W-9 and the insurance certificate, policy 123456789', // the label is more than 12 characters before the digits
-    'EIN on the W-9 only', 'the tin roof', 'tax identification is on the W-9',
-  ])('%s is fine', (text) => {
-    expect(looksLikeTaxId(text)).toBe(false);
-  });
-
-  test('W-9 and W9 are tax labels in typed text too, with the same 12-character reach', () => {
-    expect(looksLikeTaxId('W9 123456789')).toBe(true);
-    expect(looksLikeTaxId('See the w-9: 123456789')).toBe(true);
-    expect(looksLikeTaxId('W-9 on file with the office, policy 123456789')).toBe(false); // too far from the label
-    expect(looksLikeTaxId('W-9 on file; Policy 98765432')).toBe(false); // eight digits
-  });
-
-  test('a file name is held to a stricter rule: any standalone nine-digit run, with or without a label', () => {
-    for (const name of ['W9 123456789.pdf', 'w-9_123456789.pdf', 'scan_123456789.pdf', '123456789.pdf', 'insurance-123456789-final.png', 'W9-123-45-6789.pdf', 'W9 12-3456789.pdf', 'EIN 123456789.pdf', 'W9_TIN_123456789.pdf']) {
-      expect(catalog.fileNameHasTaxId(name)).toBe(true);
+  test('the table covers at least 40 typed cases, every separator and every shape', () => {
+    expect(TYPED.length).toBeGreaterThanOrEqual(40);
+    for (const [, sep] of SEPARATORS) {
+      expect(detectTaxId(`123${sep}45${sep}6789`)).toBe(true);
+      expect(detectTaxId(`12${sep}3456789`)).toBe(true);
     }
-    for (const name of ['12345678.pdf', '1234567890.pdf', '1234567890123.pdf', 'FDACS license 2026.pdf', 'Policy 2026-10-23.pdf', 'W-9 signed.pdf', 'COI 2026 renewal (final).docx']) {
-      expect(catalog.fileNameHasTaxId(name)).toBe(false);
-    }
-    expect(catalog.fileNameHasTaxId(undefined)).toBe(false);
   });
 
-  test('the label reaches at most 12 characters ahead, and a longer run of digits is not a tax ID', () => {
-    expect(looksLikeTaxId('EIN 12345678901')).toBe(false); // eleven digits
-    expect(looksLikeTaxId(`SSN${' '.repeat(12)}123456789`)).toBe(true); // 12 characters between the label and the digits
-    expect(looksLikeTaxId(`SSN${' '.repeat(13)}123456789`)).toBe(false); // 13
+  // File names: any standalone nine-digit run is refused, label or not; so are the SSN and EIN shapes.
+  const FILE_NAMES = [
+    ['W9 123456789.pdf', true], ['w-9_123456789.pdf', true], ['scan_123456789.pdf', true], ['123456789.pdf', true], ['insurance-123456789-final.png', true],
+    ['W9-123-45-6789.pdf', true], ['W9 12-3456789.pdf', true], ['EIN 123456789.pdf', true], ['W9_TIN_123456789.pdf', true],
+    ['SSN 123 45 6789.pdf', true], ['SSN_123_45_6789.pdf', true], ['EIN 12 3456789.pdf', true], ['W9 1234 56789.pdf', true], ['W9 123.456.789.pdf', true],
+    ['scan 123-456-789.pdf', true], ['W9 123–45–6789.pdf', true],
+    ['12345678.pdf', false], ['1234567890.pdf', false], ['1234567890123.pdf', false], ['FDACS license 2026.pdf', false], ['Policy 2026-10-23.pdf', false],
+    ['W-9 signed.pdf', false], ['COI 2026 renewal (final).docx', false], ['scan 941-555-0100.pdf', false], ['license_2026_10_23.pdf', false],
+  ];
+  test.each(FILE_NAMES)('file name %j: refused = %s', (name, refused) => {
+    expect(detectTaxId(name, { fileName: true })).toBe(refused);
+  });
+
+  test('the file-name rule is stricter than the typed rule, never looser', () => {
+    for (const [text] of TYPED) {
+      if (detectTaxId(text)) expect(detectTaxId(text, { fileName: true })).toBe(true);
+    }
+    expect(detectTaxId('Policy 123456789')).toBe(false);
+    expect(detectTaxId('Policy 123456789', { fileName: true })).toBe(true);
+  });
+
+  test('anything that is not a string is not a tax ID', () => {
+    for (const value of [undefined, null, 123456789, {}, []]) expect(detectTaxId(value)).toBe(false);
   });
 
   describe('a whole item is screened as it will be stored', () => {
-    const has = (row) => catalog.rowHasTaxId(row);
+    const has = (row) => rowHasTaxId(row);
 
-    test('a tax label in one field and nine digits in another are read together, in either order', () => {
+    test('a tax label in one field and the digits in another are read together, whatever the field order', () => {
       expect(has({ label: 'EIN', value: '123456789' })).toBe(true);
       expect(has({ label: 'Tax ID', notes: '123456789' })).toBe(true);
-      expect(has({ label: 'Company', value: 'TIN', source_document: '123456789' })).toBe(true); // any field pair
+      expect(has({ label: 'Company', value: 'TIN', source_document: '123456789' })).toBe(true);
       expect(has({ label: 'W-9', value: '123456789' })).toBe(true);
       expect(has({ label: 'Taxpayer ID', value: '123-45-6789' })).toBe(true);
-      expect(has({ label: 'Policy', value: '123456789', notes: 'EIN' })).toBe(true); // every ordered pair is read, whatever the field order
+      expect(has({ label: 'EIN', value: '1234 56789' })).toBe(true);
+      expect(has({ label: 'Policy', value: '123456789', notes: 'EIN' })).toBe(true);
       expect(has({ label: 'Policy', value: 'EIN', notes: '123456789' })).toBe(true);
     });
 
-    test('reference details are fields too', () => {
+    test('reference details are fields too, a number counts as its digits', () => {
       expect(has({ label: 'Sample District', details: { contactRole: 'EIN', annualValue: '123456789' } })).toBe(true);
+      expect(has({ label: 'Sample District', details: { contactRole: 'EIN', annualValue: 123456789 } })).toBe(true);
       expect(has({ label: 'EIN', details: { entity: '123456789' } })).toBe(true);
       expect(has({ label: 'Sample District', details: { entity: 'Sample District', phone: '941-555-0100', annualValue: '24000' } })).toBe(false);
+      expect(has({ label: 'Sample District', details: { annualValue: 123456789 } })).toBe(false);
     });
 
     test('an ordinary number with no tax label near it passes', () => {
       expect(has({ label: 'Policy number', value: '123456789' })).toBe(false);
+      expect(has({ label: 'Policy number', value: '123-456-789' })).toBe(false);
       expect(has({ label: 'Certificate of insurance', value: '987654321', source_document: 'Certificate dated Sep 1' })).toBe(false);
       expect(has({ label: 'FDACS license number', value: 'JB000000' })).toBe(false);
       expect(has({ label: 'Phone', value: '941-555-0100' })).toBe(false);
       expect(has({})).toBe(false);
       expect(has(null)).toBe(false);
     });
-  });
-
-  test('numbers in limits or an annual value are not read as tax IDs', () => {
-    expect(containsTaxId({ glEachOccurrence: 123456789, annualValue: 987654321 })).toBe(false);
   });
 });

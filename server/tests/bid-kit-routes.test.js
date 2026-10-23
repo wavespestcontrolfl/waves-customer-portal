@@ -155,9 +155,12 @@ const archive = (id, version) => {
   return call('DELETE', `/api/admin/bid-kit/${id}${sent === null ? '' : `?expected_updated_at=${encodeURIComponent(sent)}`}`);
 };
 const create = async (over = {}) => (await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'business_license_copy', ...over })).body.item;
-// Fill a row (a value and, for a paper that expires, an expiry date) so it can be signed off, then sign it off.
+// A document is there only with a file: put one on the item and return the item as it is afterwards.
+const withFile = async (item) => (await upload(item.id, { version: item.updated_at })).body.item;
+// Fill a row (a file for a document, a value, and for a paper that expires an expiry date) so it can be signed off, then sign it off.
 async function signed(over = {}) {
-  const item = await create(over);
+  const created = await create(over);
+  const item = (over.kind || 'document') === 'document' ? await withFile(created) : created;
   const withValue = (await call('PATCH', `/api/admin/bid-kit/${item.id}`, { value: 'JB000000', expires_on: '2999-01-01', expected_updated_at: item.updated_at })).body.item;
   return (await call('POST', `/api/admin/bid-kit/${item.id}/attest`, { expected_updated_at: withValue.updated_at })).body.item;
 }
@@ -467,9 +470,55 @@ describe('patch', () => {
   });
 });
 
+describe('a check or a permission cannot be dated ahead', () => {
+  const catalogModule = require('../../shared/bid-kit-catalog.cjs');
+  const patch = (item, fields) => call('PATCH', `/api/admin/bid-kit/${item.id}`, { ...fields, expected_updated_at: item.updated_at });
+
+  test('checked_on and permission_on after today (Eastern) are a plain 400 on create and on patch; expires_on may be ahead', async () => {
+    const future = '2999-01-01';
+    const created = await call('POST', '/api/admin/bid-kit', { kind: 'document', item_key: 'w9', checked_on: future });
+    expect(created.status).toBe(400);
+    expect(created.body.error).toBe('checked date cannot be in the future');
+    const item = await create({ item_key: 'w9' });
+    expect((await patch(item, { checked_on: future })).body.error).toBe('checked date cannot be in the future');
+    expect((await patch(item, { permission_on: future })).body.error).toBe('permission date cannot be in the future');
+    expect(store.rows.get(item.id)).toMatchObject({ checked_on: null, permission_on: null });
+    const ok = await patch(item, { checked_on: '2000-01-01', permission_on: '2000-01-02', expires_on: future });
+    expect(ok.status).toBe(200);
+    expect(ok.body.item).toMatchObject({ checked_on: '2000-01-01', permission_on: '2000-01-02', expires_on: future });
+  });
+
+  test('the Eastern midnight edge: today is accepted, tomorrow is not, even when the UTC date is already tomorrow', async () => {
+    const item = await create({ item_key: 'w9' });
+    // 11:30 PM Eastern on Oct 23 is already Oct 24 in UTC; the rule follows the Eastern day.
+    const spy = jest.spyOn(catalogModule, 'etToday').mockReturnValue(catalogModule.etToday(new Date('2026-10-24T03:30:00Z')));
+    try {
+      const today = await patch(item, { checked_on: '2026-10-23' });
+      expect(today.status).toBe(200);
+      expect((await patch(today.body.item, { checked_on: '2026-10-24' })).status).toBe(400);
+      expect((await patch(today.body.item, { permission_on: '2026-10-24' })).status).toBe(400);
+      expect((await patch(today.body.item, { permission_on: '2026-10-22' })).status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('a custom item\'s label is part of what a sign-off covers', () => {
+  test('changing a custom label clears the sign-off; the same label again, and a catalog label, do not', async () => {
+    const custom = await signed({ kind: 'fact', item_key: 'custom', label: 'County vendor letter' });
+    expect(custom.attested_at).not.toBeNull();
+    const same = await call('PATCH', `/api/admin/bid-kit/${custom.id}`, { label: 'County vendor letter', expected_updated_at: custom.updated_at });
+    expect(same.body.item.attested_at).not.toBeNull();
+    const renamed = await call('PATCH', `/api/admin/bid-kit/${custom.id}`, { label: 'County vendor letter (2027)', expected_updated_at: same.body.item.updated_at });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.item).toMatchObject({ attested_at: null, attested_by: null, status: 'unattested' });
+  });
+});
+
 describe('attest', () => {
   test('the sign-off records the admin and the time and makes a current item ready', async () => {
-    const item = await create({ item_key: 'w9', value: 'On file with the office manager', expires_on: '2999-01-01' });
+    const item = await withFile(await create({ item_key: 'w9', value: 'On file with the office manager', expires_on: '2999-01-01' }));
     const res = await call('POST', `/api/admin/bid-kit/${item.id}/attest`, { expected_updated_at: item.updated_at });
     expect(res.status).toBe(200);
     expect(res.body.item).toMatchObject({ attested_by: ADMIN, status: 'ready' });
@@ -482,11 +531,15 @@ describe('attest', () => {
     const missing = await call('POST', `/api/admin/bid-kit/${empty.id}/attest`, { expected_updated_at: empty.updated_at });
     expect(missing.status).toBe(400);
     expect(missing.body.error).toMatch(/Add the file or value/);
-    const old = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
+    const old = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' }));
     const expired = await call('POST', `/api/admin/bid-kit/${old.id}/attest`, { expected_updated_at: old.updated_at });
     expect(expired.status).toBe(400);
     expect(expired.body.error).toMatch(/expired/);
-    const license = await create({ item_key: 'business_license_copy', value: 'JB000000' });
+    // A typed number alone is not a paper: with no file the license copy is missing, whatever else it carries.
+    const typed = await create({ item_key: 'business_license_copy', value: 'JB000000' });
+    expect(typed.status).toBe('missing');
+    expect((await call('POST', `/api/admin/bid-kit/${typed.id}/attest`, { expected_updated_at: typed.updated_at })).body.error).toMatch(/Add the file or value/);
+    const license = await withFile(typed);
     expect(license.status).toBe('needs_expiry');
     const noExpiry = await call('POST', `/api/admin/bid-kit/${license.id}/attest`, { expected_updated_at: license.updated_at });
     expect(noExpiry.status).toBe(400);
@@ -501,11 +554,13 @@ describe('attest', () => {
   });
 
   test('an item that does not expire needs no expiry date, and a custom item is not held to one', async () => {
-    const w9 = await create({ item_key: 'w9', value: 'On file' });
+    const w9 = await withFile(await create({ item_key: 'w9', value: 'On file' }));
     expect(w9.status).toBe('unattested');
     expect((await call('POST', `/api/admin/bid-kit/${w9.id}/attest`, { expected_updated_at: w9.updated_at })).body.item.status).toBe('ready');
-    const custom = await create({ item_key: 'custom', label: 'County vendor letter', value: 'Letter 7' });
-    expect(custom.status).toBe('unattested');
+    const custom = await create({ kind: 'fact', item_key: 'custom', label: 'County vendor letter', value: 'Letter 7' });
+    expect(custom.status).toBe('unattested'); // a custom fact is there on text; a custom document needs a file like any paper
+    const customPaper = await create({ kind: 'document', item_key: 'custom', label: 'County vendor paper', value: 'Letter 8' });
+    expect(customPaper.status).toBe('missing');
   });
 
   test('it signs the version the owner looked at: a change in between makes it a 409, and the version is required', async () => {
@@ -518,7 +573,7 @@ describe('attest', () => {
 
   test('an item that expires within 30 days can be signed off; it then reads "expiring" and counts as ready, with its own count', async () => {
     const soon = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
-    const item = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: soon });
+    const item = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: soon }));
     expect(item.status).toBe('unattested');
     const res = await call('POST', `/api/admin/bid-kit/${item.id}/attest`, { expected_updated_at: item.updated_at });
     expect(res.status).toBe(200);
@@ -712,6 +767,7 @@ describe('files', () => {
   test('replacing a file clears the sign-off, and the old object is deleted', async () => {
     const item = await signed({ item_key: 'business_license_copy' });
     expect(item.attested_at).not.toBeNull();
+    const originalKey = store.keyOf(item.id); // the file the item was signed with
     const first = await upload(item.id, { name: 'first.pdf' });
     expect(first.body.item.attested_at).toBeNull();
     const firstKey = store.keyOf(item.id);
@@ -720,7 +776,23 @@ describe('files', () => {
     expect(second.body.item).toMatchObject({ attested_at: null, attested_by: null, file: { name: 'second.pdf' } });
     expect(store.keyOf(item.id)).not.toBe(firstKey);
     const deleted = mockSent.filter((command) => command.constructor.name === 'DeleteObjectCommand').map((command) => command.input.Key);
-    expect(deleted).toEqual([firstKey]);
+    expect(deleted).toEqual([originalKey, firstKey]);
+  });
+
+  test('an ambiguous S3 PUT failure (the call throws, the object may exist) sends a cleanup delete of that key and logs the item id only', async () => {
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const item = await create();
+    mockSent.failNext = true;
+    const res = await upload(item.id, { name: 'Jane Q Sample scan.pdf' });
+    expect(res.status).toBe(500);
+    const put = mockSent.find((command) => command.constructor.name === 'PutObjectCommand');
+    const deleted = mockSent.filter((command) => command.constructor.name === 'DeleteObjectCommand');
+    expect(deleted.map((command) => command.input.Key)).toEqual([put.input.Key]);
+    expect(store.rows.get(item.id).file_s3_key).toBeNull();
+    const lines = logger.warn.mock.calls.map(([line]) => line);
+    expect(lines).toContain(`[bid-kit] storing a file for item ${item.id} failed; a cleanup delete of the new key was sent`);
+    expect(lines.join(' ')).not.toMatch(/Jane|scan\.pdf|storage down/);
   });
 
   test('a storage failure leaves the item as it was and is not reported as saved', async () => {
@@ -905,7 +977,8 @@ describe('expiry bells close when the item no longer needs renewing', () => {
   const key = (item) => `bid-kit:expiry:${item.id}`;
 
   test('a save that moves the date out of the 30-day window closes that item\'s bell; a save that leaves it inside does not', async () => {
-    const item = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: soon() });
+    const item = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: soon() }));
+    episodes.closeAdminAlertKeys.mockClear();
     const same = await call('PATCH', `/api/admin/bid-kit/${item.id}`, { notes: 'Call the county', expected_updated_at: item.updated_at });
     expect(same.status).toBe(200);
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();

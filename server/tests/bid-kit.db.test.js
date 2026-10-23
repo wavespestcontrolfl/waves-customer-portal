@@ -106,6 +106,8 @@ describeDb('Bid kit (PostgreSQL)', () => {
     const sent = version === undefined ? (await rowOf(id)).updated_at.toISOString() : version;
     return call('DELETE', `/${id}${sent === null ? '' : `?expected_updated_at=${encodeURIComponent(sent)}`}`);
   };
+  // A document is there only with a file: put one on the item and return the item as it is afterwards.
+  const withFile = async (item) => (await upload(item.id, 'doc.pdf', item.updated_at)).body.item;
   const rowOf = (id) => mockPg('bid_kit_items').where({ id }).first();
   const credential = (over = {}) => mockPg('business_credentials').insert({
     slug: `fixture-${randomUUID()}`, display_name: 'Fixture license', credential_type: 'license', credential_number: 'FX000000', expiration_date: '2999-03-03', ...over,
@@ -164,11 +166,13 @@ describeDb('Bid kit (PostgreSQL)', () => {
         item_key: 'insurance_certificate', value: 'POL-0001', source_document: 'Certificate dated Sep 1', checked_on: '2026-09-01', expires_on: '2999-12-31',
         limits: { glEachOccurrence: 1000000, workersComp: 'statutory' },
       });
-      expect(item).toMatchObject({ checked_on: '2026-09-01', expires_on: '2999-12-31', limits: { glEachOccurrence: 1000000, workersComp: 'statutory' }, status: 'unattested' });
+      // A typed number alone is not a paper: missing until a file is uploaded.
+      expect(item).toMatchObject({ checked_on: '2026-09-01', expires_on: '2999-12-31', limits: { glEachOccurrence: 1000000, workersComp: 'statutory' }, status: 'missing' });
       expect(await rowOf(item.id)).toMatchObject({ limits: { glEachOccurrence: 1000000, workersComp: 'statutory' } });
       const uploaded = await upload(item.id);
       expect(uploaded.status).toBe(200);
       expect(typeof (await rowOf(item.id)).file_s3_key).toBe('string');
+      expect(uploaded.body.item.status).toBe('unattested');
       expect(JSON.stringify((await call('GET', '')).body)).not.toMatch(/bid-kit\/|file_s3_key|https?:/);
     });
 
@@ -184,7 +188,7 @@ describeDb('Bid kit (PostgreSQL)', () => {
     });
 
     test('sign-off: recorded with the admin and time, cleared in the same update by an edit, a replaced file and a relink', async () => {
-      const created = await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-06-30' });
+      const created = await withFile(await create({ item_key: 'business_license_copy', value: 'JB000000', expires_on: '2999-06-30' }));
       const attested = await call('POST', `/${created.id}/attest`, { expected_updated_at: created.updated_at });
       expect(attested.status).toBe(200);
       expect(await rowOf(created.id)).toMatchObject({ attested_by: mockAdminId });
@@ -204,10 +208,12 @@ describeDb('Bid kit (PostgreSQL)', () => {
     test('a sign-off is refused for a missing item, an expired one and one with no expiry date, and the row is left alone', async () => {
       const missing = await create({ item_key: 'w9' });
       expect((await call('POST', `/${missing.id}/attest`, { expected_updated_at: missing.updated_at })).status).toBe(400);
-      const old = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
+      const old = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' }));
       expect((await call('POST', `/${old.id}/attest`, { expected_updated_at: old.updated_at })).status).toBe(400);
       expect((await rowOf(old.id)).attested_at).toBeNull();
-      const undated = await create({ item_key: 'business_license_copy', value: 'JB000000' });
+      const typed = await create({ item_key: 'business_license_copy', value: 'JB000000' });
+      expect(typed.status).toBe('missing'); // a number alone is not a paper
+      const undated = await withFile(typed);
       expect(undated.status).toBe('needs_expiry');
       const refused = await call('POST', `/${undated.id}/attest`, { expected_updated_at: undated.updated_at });
       expect(refused).toMatchObject({ status: 400, body: { error: 'Add the expiry date first.' } });
@@ -427,6 +433,22 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect((await call('PATCH', `/${reference.body.item.id}`, { label: 'Taxpayer ID', expected_updated_at: reference.body.item.updated_at })).status).toBe(400);
     });
 
+    test('on real rows: a document needs a file, a custom label change clears the sign-off, and checks cannot be dated ahead', async () => {
+      const paper = await create({ item_key: 'w9', value: 'On file' });
+      expect(paper.status).toBe('missing');
+      expect((await withFile(paper)).status).toBe('unattested');
+      const fact = await call('POST', '', { kind: 'fact', item_key: 'custom', label: 'County vendor letter', value: 'Letter 7' });
+      expect(fact.body.item.status).toBe('unattested'); // a fact is there on text
+      const signedFact = await call('POST', `/${fact.body.item.id}/attest`, { expected_updated_at: fact.body.item.updated_at });
+      expect(signedFact.body.item.status).toBe('ready');
+      const renamed = await call('PATCH', `/${fact.body.item.id}`, { label: 'County vendor letter 2027', expected_updated_at: signedFact.body.item.updated_at });
+      expect(renamed.body.item).toMatchObject({ attested_at: null, attested_by: null });
+      const tomorrow = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+      const ahead = await call('PATCH', `/${fact.body.item.id}`, { checked_on: tomorrow, expected_updated_at: renamed.body.item.updated_at });
+      expect(ahead).toMatchObject({ status: 400, body: { error: 'checked date cannot be in the future' } });
+      expect((await call('PATCH', `/${fact.body.item.id}`, { checked_on: '2000-01-01', expires_on: tomorrow, expected_updated_at: renamed.body.item.updated_at })).status).toBe(200);
+    });
+
     test('one live row per catalog item (references repeat); archive keeps the row and frees the slot', async () => {
       await create({ item_key: 'w9' });
       expect((await call('POST', '', { kind: 'document', item_key: 'w9' })).status).toBe(409);
@@ -496,11 +518,11 @@ describeDb('Bid kit (PostgreSQL)', () => {
 
   describe('the daily expiry job', () => {
     test('rings once for each expired or soon-expiring item, with a spec the notification rules accept, and not for the rest', async () => {
-      const expired = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
-      const soon = await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(5) });
+      const expired = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' }));
+      const soon = await withFile(await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(5) }));
       await create({ item_key: 'w9', value: 'On file', expires_on: addDays(200) });
       await create({ item_key: 'ipm_plan', value: 'On file' });
-      const gone = await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: '2000-01-01' });
+      const gone = await withFile(await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: '2000-01-01' }));
       await archive(gone.id);
       const result = await runBidKitExpiryCheck();
       expect(result).toEqual({ scanned: 2, rang: 2, closed: 0 });
@@ -512,9 +534,9 @@ describeDb('Bid kit (PostgreSQL)', () => {
     });
 
     test('a renewal, an archive and a vanished item close their bells; an item still inside the window keeps its bell', async () => {
-      const kept = await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(5) });
-      const renewed = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) });
-      const archived = await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: addDays(5) });
+      const kept = await withFile(await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(5) }));
+      const renewed = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) }));
+      const archived = await withFile(await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: addDays(5) }));
       episodes.closeAdminAlertKeys.mockClear();
       // A save that moves the date out of the window closes that bell at once.
       expect((await call('PATCH', `/${renewed.id}`, { expires_on: addDays(300), expected_updated_at: renewed.updated_at })).status).toBe(200);
@@ -536,9 +558,9 @@ describeDb('Bid kit (PostgreSQL)', () => {
 
     test('a renewal or an archive that lands after the list was read but before the raise leaves no bell', async () => {
       const store = require('../services/bid-kit-store');
-      const renewed = await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) });
-      const archived = await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: addDays(5) });
-      const kept = await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(6) });
+      const renewed = await withFile(await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: addDays(5) }));
+      const archived = await withFile(await create({ item_key: 'drug_free_policy', value: 'On file', expires_on: addDays(5) }));
+      const kept = await withFile(await create({ item_key: 'insurance_certificate', value: 'POL-0001', expires_on: addDays(6) }));
       const realList = store.listItems;
       const spy = jest.spyOn(store, 'listItems').mockImplementationOnce(async (...args) => {
         const snapshot = await realList(...args);

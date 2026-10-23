@@ -76,6 +76,7 @@ function cleanObject(value) {
 }
 
 // The column values a request carries, or the refusal. Dates are real calendar days; no field may hold a tax ID.
+const DONE_DATES = ['checked_on', 'permission_on'];
 function toColumns(body, kind, stored = {}) {
   const out = {};
   for (const key of ['label', 'value', 'source_document', 'notes']) {
@@ -87,6 +88,8 @@ function toColumns(body, kind, stored = {}) {
     if (body[key] === undefined) continue;
     if (body[key] === null || body[key] === '') { out[key] = null; continue; }
     if (!validCalendarDate(body[key])) return { refused: `${key} is not a real date` };
+    // A check or a permission already happened, so it cannot be dated after today (Eastern). An expiry may be in the future.
+    if (DONE_DATES.includes(key) && catalog.isFutureDay(body[key], catalog.etToday())) return { refused: `${key.replace('_on', '')} date cannot be in the future` };
     out[key] = body[key];
   }
   if (body.limits !== undefined) out.limits = cleanObject(body.limits);

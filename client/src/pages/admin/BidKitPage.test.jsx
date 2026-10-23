@@ -133,6 +133,35 @@ it("a sign-off the server refuses as out of date says so, closes any open editor
   expect(screen.queryByRole("form", { name: "Edit W-9" })).toBeNull();
 });
 
+it("a sign-off time is an instant shown in Eastern time with the zone named, while calendar dates stay plain days", async () => {
+  // 3:30 AM UTC on Oct 24 is 11:30 PM Eastern on Oct 23: the date must not roll to the 24th.
+  const late = ITEMS.map((item) => (item.id === "i4" ? { ...item, attested_at: "2026-10-24T03:30:00.000Z" } : item));
+  route({ "GET /admin/bid-kit/": () => reply(payload(late)) });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  const w9 = rowFor("W-9");
+  expect(within(w9).getByText("Signed off Oct 23, 2026 at 11:30 PM ET")).toBeInTheDocument();
+  expect(within(w9).queryByText(/Oct 24/)).toBeNull();
+  // A date column that arrives as a UTC-midnight instant stays the same calendar day: expires 2027-06-30, checked 2026-10-01.
+  const license = rowFor("FDACS business license copy");
+  expect(within(license).getByText("Jun 30, 2027")).toBeInTheDocument();
+  expect(within(license).getByText(/checked Oct 1, 2026/)).toBeInTheDocument();
+});
+
+it("the editor will not take a check or permission date after today (Eastern), and an expiry may be ahead", async () => {
+  route({ "GET /admin/bid-kit/": () => reply(payload()) });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Edit" }));
+  expect(screen.getByLabelText("Checked on")).toHaveAttribute("max", expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+  expect(screen.getByLabelText("Expires on")).not.toHaveAttribute("max");
+  cleanup();
+  renderPage();
+  await screen.findByText("Customer reference");
+  fireEvent.click(within(rowFor("Customer reference")).getByRole("button", { name: "Edit" }));
+  expect(screen.getByLabelText("Permission given on")).toHaveAttribute("max", expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+});
+
 it("a 409 on save closes the editor, shows the latest version, and a second save cannot send the old fields", async () => {
   const theirs = ITEMS.map((item) => (item.id === "i1" ? { ...item, source_document: "Other admin's letter", updated_at: "2026-10-23T18:00:00.000Z" } : item));
   let reads = 0;
