@@ -773,6 +773,22 @@ describe('files', () => {
     expect((await upload(item.id, { bytes: exact })).status).toBe(200);
   });
 
+  test('an upload with no file storage configured is refused before anything is stored, and says so', async () => {
+    const config = require('../config');
+    const item = await create();
+    const bucket = config.s3.bucket;
+    config.s3.bucket = undefined;
+    try {
+      const res = await upload(item.id);
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'File storage is not configured', nothingSaved: true });
+      expect(mockSent).toHaveLength(0);
+      expect(store.rows.get(item.id).file_s3_key).toBeNull();
+    } finally {
+      config.s3.bucket = bucket;
+    }
+  });
+
   test('no file, a wrongly named field and an unknown item are refused', async () => {
     const item = await create();
     expect((await upload(item.id, { field: 'attachment' })).status).toBe(400);

@@ -32,7 +32,8 @@ const NEW_REFERENCE = "new:add-reference"; // its own id: never the same as the 
 const NEW_CUSTOM = "new:custom";
 const CUSTOM_ENTRY = { item: { key: "custom", kind: "document", label: "", expires: true, why: "" }, row: null, status: "missing" };
 
-// explicit: the server answered with its own error sentence (a refusal). A bare HTTP status from a proxy or gateway is not.
+// explicit: the server refused and nothing was written: a 4xx with the server's own error sentence, or a 5xx whose body
+// says nothingSaved. Any other 5xx (the write may have committed before the failure) or a bare status from a proxy is not.
 class ApiError extends Error {
   constructor(message, status, explicit = true) {
     super(message);
@@ -44,7 +45,7 @@ class ApiError extends Error {
 async function api(path, options = {}) {
   const res = await adminFetch(`/admin/bid-kit${path}`, options);
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(body.error || `HTTP ${res.status}`, res.status, Boolean(body.error));
+  if (!res.ok) throw new ApiError(body.error || `HTTP ${res.status}`, res.status, Boolean(body.error) && (res.status < 500 || body.nothingSaved === true));
   return body;
 }
 

@@ -323,7 +323,8 @@ router.post('/:id/file', receiveFile, async (req, res, next) => {
     await afterReplacement(req, replaced.outcome);
     return res.json({ item: present(statusRow(replaced.outcome.item), catalog.etToday()) });
   } catch (err) {
-    if (err instanceof files.FileError) return res.status(err.status).json({ error: err.message });
+    // A file check refuses before anything is stored, so the page may say "Not saved" even for a 5xx.
+    if (err instanceof files.FileError) return res.status(err.status).json({ error: err.message, nothingSaved: true });
     return next(scrubError(err));
   }
 });

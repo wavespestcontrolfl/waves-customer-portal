@@ -315,7 +315,7 @@ it("a failed first upload leaves the created row in place, and a retry uploads t
   let tries = 0;
   const create = vi.fn(() => { created = true; return reply({ item: BLANK }, { status: 201 }); });
   const send = vi.fn(() => (tries++ === 0
-    ? reply({ error: "File storage is not configured" }, { ok: false, status: 500 })
+    ? reply({ error: "File storage is not configured", nothingSaved: true }, { ok: false, status: 500 })
     : reply({ item: row({ ...BLANK, file: { name: "ipm.pdf", contentType: "application/pdf", size: 8 }, status: "unattested" }) })));
   const archive = vi.fn(() => reply({ success: true }));
   route({
@@ -643,7 +643,12 @@ it("a save with no answer from the server says it could not confirm and reads th
   const UNCONFIRMED = "Could not confirm the save. The list below shows what the server has now.";
   let reads = 0;
   let saves = 0;
-  const outcomes = [() => Promise.reject(new TypeError("Failed to fetch")), () => reply({}, { ok: false, status: 502 }), () => reply({ error: "Legal name is too long" }, { ok: false, status: 400 })];
+  const outcomes = [
+    () => Promise.reject(new TypeError("Failed to fetch")),
+    () => reply({}, { ok: false, status: 502 }),
+    () => reply({ error: "Bid kit request failed (57014)" }, { ok: false, status: 500 }),
+    () => reply({ error: "Legal name is too long" }, { ok: false, status: 400 }),
+  ];
   route({
     "GET /admin/bid-kit/": () => { reads += 1; return reply(payload()); },
     "PATCH /admin/bid-kit/i6": () => outcomes[saves++](),
@@ -663,10 +668,15 @@ it("a save with no answer from the server says it could not confirm and reads th
   await waitFor(() => expect(saves).toBe(2));
   expect(await screen.findByText(UNCONFIRMED)).toBeInTheDocument();
   await waitFor(() => expect(reads).toBe(3));
+  await save(); // a server error with a sentence may still have committed: unconfirmed, not "Not saved"
+  await waitFor(() => expect(saves).toBe(3));
+  expect(await screen.findByText(UNCONFIRMED)).toBeInTheDocument();
+  expect(screen.queryByText(/Not saved/)).toBeNull();
+  await waitFor(() => expect(reads).toBe(4));
   await save(); // the server refused
   expect(await screen.findByText("Not saved: Legal name is too long")).toBeInTheDocument();
   expect(screen.queryByText(UNCONFIRMED)).toBeNull();
-  await waitFor(() => expect(reads).toBe(4));
+  await waitFor(() => expect(reads).toBe(5));
 });
 
 it("with no references yet, Add a reference opens the form and saving it creates the row", async () => {
