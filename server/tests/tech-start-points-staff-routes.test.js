@@ -386,6 +386,40 @@ describe('nightly pass starts and ends each tech at their start point', () => {
     expect(technicianQueries).toBe(0);
   });
 
+  describe('day-quality snapshots in the ledger (GATE_SCHEDULE_QUALITY_MEASUREMENTS)', () => {
+    beforeEach(() => {
+      process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
+      // t1 stored A,C,B (40 miles from home); Google answers C,B,A (36).
+      stopsByDate[DAY] = [
+        stop('t1-A', { lng: 2, route_order: 1 }), stop('t1-C', { lng: 6, route_order: 2 }), stop('t1-B', { lng: 4, route_order: 3 }),
+        ...day('t2'),
+      ];
+      RouteOptimizer.optimizeRoute.mockImplementation(async (stops) => ({
+        orderedStops: [...stops].sort((x, y) => y.lng - x.lng), totalDistanceMeters: 1, totalDurationSeconds: 1, source: 'google_routes_api',
+      }));
+    });
+    afterEach(() => { delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS; });
+    const drive = (tech, phase) => ledger().route_quality.find((m) => m.technician_id === tech && m.snapshot_phase === phase).modeledDriveMinutes;
+
+    test('gate on: both snapshots of t1 are measured from and back to the start point, t2 from the office, and no coordinates are stored', async () => {
+      process.env.GATE_TECH_START_POINTS = 'true';
+      await runRouteReorder({ now: NOW });
+      expect([drive('t1', 'loaded_schedule'), drive('t1', 'applied_reorder')]).toEqual([40, 36]);
+      expect([drive('t2', 'loaded_schedule'), drive('t2', 'applied_reorder')]).toEqual([18, 14]);
+      expect(technicianQueries).toBe(1);
+      expect(JSON.stringify(ledger().route_quality)).not.toMatch(/"lat"|"lng"|start_lat|start_lng/);
+    });
+
+    test('gate off: every snapshot is measured from the office', async () => {
+      delete process.env.GATE_TECH_START_POINTS;
+      await runRouteReorder({ now: NOW });
+      // The office sees A,C,B and C,B,A as equal (14), so nothing is applied for t1.
+      expect(drive('t1', 'loaded_schedule')).toBe(14);
+      expect(drive('t2', 'loaded_schedule')).toBe(18);
+      expect(technicianQueries).toBe(0);
+    });
+  });
+
   test('gate on but the start-point read fails: the run fails, writes nothing, and logs only the error text', async () => {
     process.env.GATE_TECH_START_POINTS = 'true';
     db.mockImplementation((table) => {

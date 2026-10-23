@@ -13,8 +13,31 @@ import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/time
 
 const STATUS_LABEL = { new: "New", bid: "Bid", no_bid: "No bid", submitted: "Submitted", won: "Won", lost: "Lost" };
 const SOURCE_LABEL = {
-  buildingconnected: "BuildingConnected", procore: "Procore", gov_email: "Government / portal", email_subject: "Email subject", manual: "Marked by hand",
+  buildingconnected: "BuildingConnected", procore: "Procore", gov_email: "Government / portal", email_subject: "Email subject", manual: "Marked by hand", sam_gov: "SAM.gov",
 };
+// A SAM.gov bid links to its public notice; only an https sam.gov address is rendered as a link.
+function isSamLink(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" && (url.hostname === "sam.gov" || url.hostname.endsWith(".sam.gov"));
+  } catch {
+    return false;
+  }
+}
+// Where the due date was read, the solicitation number, and (a SAM.gov bid) the link to its notice.
+function SourceLines({ bid }) {
+  return (
+    <>
+      {bid.due_source_line && <div><span className="text-ink-secondary">{bid.source === "sam_gov" ? "Read from SAM.gov: " : "Read from the email: "}</span>“{bid.due_source_line}”</div>}
+      {bid.solicitation_number && <div><span className="text-ink-secondary">Solicitation: </span>{bid.solicitation_number}</div>}
+      {isSamLink(bid.external_url) && (
+        <div><a className="underline" href={bid.external_url} target="_blank" rel="noopener noreferrer">Open the notice on SAM.gov</a></div>
+      )}
+    </>
+  );
+}
+// A SAM.gov bid has no emails, so its empty email list gets no heading.
+const showEmailHeading = (bid, emails) => emails.length > 0 || bid.source !== "sam_gov";
 const KIND_LABEL = { invite: "Invite", addendum: "Addendum", reminder: "Reminder", message: "Message" };
 const OPEN = ["new", "bid"];
 const FILTERS = [
@@ -178,9 +201,11 @@ function BidDetail({ bidId, onChanged, onClose }) {
 
         <div className="mb-4 grid gap-1 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2 text-ui-body">
           <div><span className="text-ink-secondary">Due: </span>{dueText(bid.due_at)} {bid.due_at && (bid.due_confirmed ? <Badge tone="strong">Confirmed</Badge> : <Badge tone="warn">Unconfirmed</Badge>)}</div>
-          {bid.due_source_line && <div><span className="text-ink-secondary">Read from the email: </span>“{bid.due_source_line}”</div>}
+          <SourceLines bid={bid} />
           {bid.needs_date_confirmation && (
-            <div className="text-warn-fg">A later email may have changed the date. Check the emails below, then type or confirm the date.</div>
+            <div className="text-warn-fg">{bid.source === "sam_gov"
+              ? "SAM.gov changed this notice: the line above says what changed (a new deadline, no deadline, or a closed notice). Check the notice on SAM.gov before you type or confirm a date."
+              : "A later email may have changed the date. Check the emails below, then type or confirm the date."}</div>
           )}
           {bid.job_walk_at && <div><span className="text-ink-secondary">Job walk: </span>{dueText(bid.job_walk_at)}</div>}
         </div>
@@ -214,7 +239,7 @@ function BidDetail({ bidId, onChanged, onClose }) {
 
         {message && <ActionFeedback error={message.startsWith("Not saved")} className="mb-3">{message}</ActionFeedback>}
 
-        <h3 className="mb-1 text-ui-body font-medium text-zinc-900">Emails on this bid</h3>
+        {showEmailHeading(bid, emails) && <h3 className="mb-1 text-ui-body font-medium text-zinc-900">Emails on this bid</h3>}
         <ul className="grid gap-1">
           {emails.map((email) => (
             <li key={email.email_id} className="flex flex-wrap items-center gap-2 text-ui-body">

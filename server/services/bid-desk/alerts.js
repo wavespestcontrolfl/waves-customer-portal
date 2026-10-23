@@ -63,20 +63,40 @@ function newBidSpec(bid, email) {
   };
 }
 
+// A SAM.gov notice that closed (inactive, awarded, or no longer returned) is not a date question: the bid waits on a
+// decision, so confirming a date never clears it.
+function closedNoticeSpec(bid) {
+  const title = titleOf(bid, null);
+  return {
+    spec: {
+      area: AREA,
+      action: fitAction(AREA, title, [(n) => `SAM.gov closed ${n}: decide the bid`, (n) => `SAM.gov closed ${n}`, (n) => `notice closed, ${n}`]),
+      why: cutAtWord(`${plain(bid.due_source_line, 'SAM.gov no longer lists this notice as active')}; mark the bid passed or lost, or check the notice.`, MAX_WHY_CHARS),
+      severity: 'needs-you',
+      link: linkFor(bid),
+      subject: subjectFor(bid),
+      doneWhen: 'bid_decided',
+      who: 'person',
+    },
+    detail: `SAM.gov closed ${title}: check the notice on SAM.gov, then decide the bid`,
+  };
+}
+
 function addendumSpec(bid, email) {
+  if (!email && bid.source === 'sam_gov' && bid.source_active === false) return closedNoticeSpec(bid);
   const title = titleOf(bid, email);
   return {
     spec: {
       area: AREA,
       action: fitAction(AREA, title, [(n) => `addendum on ${n}: confirm the due date`, (n) => `addendum on ${n}`, (n) => `addendum, ${n}`]),
-      why: cutAtWord(`A new email may change the date, so confirm it; the bid reads ${dueWords(bid)}.`, MAX_WHY_CHARS),
+      why: cutAtWord(`${email || bid.source !== 'sam_gov' ? 'A new email may change the date' : 'SAM.gov changed this notice'}, so confirm it; the bid reads ${dueWords(bid)}.`, MAX_WHY_CHARS),
       severity: 'needs-you',
       link: linkFor(bid),
       subject: subjectFor(bid),
       doneWhen: 'due_date_confirmed',
       who: 'person',
     },
-    detail: `Addendum on ${title}: confirm the due date`,
+    detail: email || bid.source !== 'sam_gov' ? `Addendum on ${title}: confirm the due date` : `SAM.gov changed ${title}: check the notice and confirm the due date`,
   };
 }
 
