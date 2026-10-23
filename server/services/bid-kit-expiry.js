@@ -23,6 +23,9 @@ const DEDUPE_DAYS = 7;
 // raises at most this many per-item bells; the rest are one quiet Activity-only row (a standing count) with the list in detail.
 const MAX_NEW_BELLS = 3;
 const OVERFLOW_KEY = 'bid-kit:expiry-overflow'; // not under KEY_PREFIX: the per-item sweep never sees it
+// One key per episode of the standing count (OVERFLOW_KEY:<id>): a count that reached zero is closed, and the next one is a new
+// quiet row. Reopening a closed row would ring it and drop its Activity routing (raiseAdminAlertWithReopen rings a comeback).
+const isOverflowKey = (key) => key === OVERFLOW_KEY || String(key || '').startsWith(`${OVERFLOW_KEY}:`);
 
 const KEY_PREFIX = 'bid-kit:expiry:';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -116,7 +119,7 @@ async function syncExpiryBell(item, { now = new Date() } = {}) {
 async function refreshOverflowFor(itemId, today) {
   try {
     // A cheap look first, so a save whose item is not listed takes no lock; the list is read again under the lock.
-    const standing = (await episodes.openAdminAlertMetadata(db, OVERFLOW_KEY)).find((meta) => meta.dedupeKey === OVERFLOW_KEY);
+    const standing = (await episodes.openAdminAlertMetadata(db, OVERFLOW_KEY)).find((meta) => isOverflowKey(meta.dedupeKey));
     if (!standing || !Array.isArray(standing.itemKeys) || !standing.itemKeys.includes(itemId)) return;
     await syncOverflowRow(null, today, { onlyIfListed: itemId });
   } catch (err) {
@@ -174,7 +177,7 @@ const byUrgency = (a, b) => (a.expires_on < b.expires_on ? -1 : a.expires_on > b
 // is on that list). Returns how many papers the count now lists.
 async function syncOverflowRow(candidateIds, today, { onlyIfListed = null } = {}) {
   return withItemLock(OVERFLOW_KEY, async (trx) => {
-    const standing = (await episodes.openAdminAlertMetadata(trx, OVERFLOW_KEY)).find((meta) => meta.dedupeKey === OVERFLOW_KEY);
+    const standing = (await episodes.openAdminAlertMetadata(trx, OVERFLOW_KEY)).find((meta) => isOverflowKey(meta.dedupeKey));
     const listed = standing && Array.isArray(standing.itemKeys) ? standing.itemKeys : [];
     if (onlyIfListed && !listed.includes(onlyIfListed)) return listed.length;
     const overflow = [];
@@ -184,7 +187,7 @@ async function syncOverflowRow(candidateIds, today, { onlyIfListed = null } = {}
     }
     overflow.sort(byUrgency);
     if (!overflow.length) {
-      if (standing) await episodes.closeAdminAlertKeys(trx, [OVERFLOW_KEY], 'count_zero', { resolution: 'Cleared: no expiring paper is waiting without a bell' });
+      if (standing) await episodes.closeAdminAlertKeys(trx, [standing.dedupeKey], 'count_zero', { resolution: 'Cleared: no expiring paper is waiting without a bell' });
       return 0;
     }
     const n = overflow.length;
@@ -205,7 +208,7 @@ async function syncOverflowRow(candidateIds, today, { onlyIfListed = null } = {}
       // bell: true admits the row under the admin bell policy (a bell:false row is dropped there); metadata.feed = 'activity'
       // keeps it off the bell list, its unread count and mark-all-read, exactly like the overdue-promises backlog row.
       bell: true,
-      dedupeKey: OVERFLOW_KEY,
+      dedupeKey: standing ? standing.dedupeKey : `${OVERFLOW_KEY}:${crypto.randomUUID()}`, // the open episode, or a new one
       dedupeVersion: crypto.createHash('sha256').update(ids.join(',')).digest('hex'),
       refreshOnDedupe: true,
       ringOnRefresh: () => false, // a changed count or list is rewritten quietly: it stays an Activity-only standing count
@@ -239,7 +242,7 @@ async function runBidKitExpiryCheck({ now = new Date() } = {}) {
     // count's lock when there is nothing to count and nothing to close; the count itself is decided under its lock).
     const open = await episodes.openAdminAlertKeys(db, 'bid-kit:expiry');
     holders = new Set(open.filter((key) => key.startsWith(KEY_PREFIX)));
-    standing = open.includes(OVERFLOW_KEY);
+    standing = open.some(isOverflowKey);
   } catch (err) {
     logger.warn(`[bid-kit] reading open expiry bells failed: ${errorTag(err)}`);
   }

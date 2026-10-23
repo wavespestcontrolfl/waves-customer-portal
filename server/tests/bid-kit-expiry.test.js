@@ -191,7 +191,7 @@ describe('bells close when the paper no longer needs renewing', () => {
 
   describe('an item listed in the standing count', () => {
     const { OVERFLOW_KEY } = require('../services/bid-kit-expiry');
-    const standingRaises = () => raiseAdminAlert.mock.calls.filter(([, , , opts]) => opts.dedupeKey === OVERFLOW_KEY);
+    const standingRaises = () => raiseAdminAlert.mock.calls.filter(([, , , opts]) => opts.dedupeKey.startsWith(OVERFLOW_KEY));
 
     test('renewed: it leaves the count at once, and the rest stay listed with their dates', async () => {
       episodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: OVERFLOW_KEY, itemKeys: [ID(1), ID(2)] }]);
@@ -328,8 +328,8 @@ describe('the daily ring budget (docs/admin-notifications.md rule 3)', () => {
   const MANY = (n) => Array.from({ length: n }, (_, i) => item(`00000000-0000-4000-8000-0000000001${String(i).padStart(2, '0')}`, {
     label: `Paper ${String.fromCharCode(65 + i)}`, expires_on: `2026-10-${String(10 + i).padStart(2, '0')}`, // a different, past or near date for each
   }));
-  const bellCalls = () => raiseAdminAlert.mock.calls.filter(([, , , opts]) => opts.dedupeKey !== OVERFLOW_KEY);
-  const standingCalls = () => raiseAdminAlert.mock.calls.filter(([, , , opts]) => opts.dedupeKey === OVERFLOW_KEY);
+  const bellCalls = () => raiseAdminAlert.mock.calls.filter(([, , , opts]) => !opts.dedupeKey.startsWith(OVERFLOW_KEY));
+  const standingCalls = () => raiseAdminAlert.mock.calls.filter(([, , , opts]) => opts.dedupeKey.startsWith(OVERFLOW_KEY));
   const { OVERFLOW_KEY, MAX_NEW_BELLS } = require('../services/bid-kit-expiry');
 
   test('12 due items: three bells, expired first then soonest, and one quiet standing row that counts the other nine', async () => {
@@ -441,6 +441,26 @@ describe('the daily ring budget (docs/admin-notifications.md rule 3)', () => {
     await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW });
     expect(standingCalls()).toHaveLength(0);
     expect(episodes.closeAdminAlertKeys.mock.calls.flatMap(([, keys]) => keys)).not.toContain(OVERFLOW_KEY);
+  });
+
+  test('a count that closed at zero comes back as a new quiet row under a new key, never a reopened (rung) one', async () => {
+    mockRows.push(...MANY(5));
+    await runBidKitExpiryCheck({ now: NOW }); // no standing count is open
+    const first = standingCalls()[0][3];
+    expect(first.dedupeKey).toMatch(/^bid-kit:expiry-overflow:[0-9a-f-]{36}$/);
+    expect(first.metadata).toMatchObject({ feed: 'activity', quiet: true });
+    raiseAdminAlert.mockClear();
+    episodes.openAdminAlertKeys.mockResolvedValue([first.dedupeKey]);
+    episodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: first.dedupeKey, itemKeys: first.metadata.itemKeys }]);
+    await runBidKitExpiryCheck({ now: NOW }); // while it stands, the same row is rewritten
+    expect(standingCalls()[0][3].dedupeKey).toBe(first.dedupeKey);
+    raiseAdminAlert.mockClear();
+    episodes.openAdminAlertKeys.mockResolvedValue([]); // closed at zero (auto-cleared rows are not open)
+    episodes.openAdminAlertMetadata.mockResolvedValue([]);
+    await runBidKitExpiryCheck({ now: NOW });
+    const next = standingCalls()[0][3].dedupeKey;
+    expect(next).toMatch(/^bid-kit:expiry-overflow:[0-9a-f-]{36}$/);
+    expect(next).not.toBe(first.dedupeKey);
   });
 
   test('the standing row is not an item bell: the stale-bell sweep never closes it', async () => {
