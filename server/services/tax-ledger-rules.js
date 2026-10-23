@@ -396,20 +396,24 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
   const sug = row.suggestion || {};
   if (sug.decision || !matcherExamined(row)) return { skip: true };
   const rule = matchRule(row.description, compiled, row.direction);
-  const { matcherFlag, writes } = ruleVerdict(sug, rule, pattern);
+  const verdict = ruleVerdict(sug, rule, pattern);
+  const { matcherFlag } = verdict;
+  // An owner rule that overrode the matcher's transfer flag left 'examined'
+  // as the row's only examination evidence. When that rule is gone and a
+  // SEED would take the row, the seed does not write: the row is cleared
+  // back to the matcher's reading (no rule, no marker; its next rescan
+  // flags it again, and a matcher flag holds against seeds). Writing the
+  // seed would leave a rule with no evidence under it, and a row the Inbox
+  // never shows again.
+  const ownerHeld = hasKey(sug, 'rule') && sug.rule.source === 'owner';
+  const fellToSeed = verdict.writes && ownerHeld && rule.source !== 'owner' && !!sug.examined;
+  const writes = verdict.writes && !fellToSeed;
   if (pattern && !writes) return { skip: true };
-  const stale = !writes && !pattern && force && hasKey(sug, 'rule') && !matcherFlag;
+  const stale = fellToSeed || (!writes && !pattern && force && hasKey(sug, 'rule') && !matcherFlag);
   const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
   if (writes && matcherFlag) patch.examined = true;
-  // The override marker an owner rule left on a matcher-flagged row lives
-  // only while an owner rule holds the row: a stale clear drops it, and so
-  // does a write that falls from an owner rule to a seed (the owner rule
-  // was disabled or re-pointed and a seed still matches). Either way the
-  // row returns to the matcher's reading (its next rescan flags it again),
-  // not to a seed classification the matcher can never warn about.
-  const ownerHeld = hasKey(sug, 'rule') && sug.rule.source === 'owner';
-  const fellToSeed = writes && ownerHeld && rule.source !== 'owner';
-  const removeKeys = (stale || fellToSeed) ? [...CLASSIFICATION_KEYS, 'examined'] : (writes ? CLASSIFICATION_KEYS : []);
+  // a stale clear drops the override marker with the classification
+  const removeKeys = stale ? [...CLASSIFICATION_KEYS, 'examined'] : (writes ? CLASSIFICATION_KEYS : []);
   const versionRead = sug.rulesAt ? String(sug.rulesAt) : '';
   return { skip: false, writes, stale, rule, patch, removeKeys, guardMatcherFlag: !matcherFlag, versionRead };
 }
@@ -456,11 +460,13 @@ async function applyRules({ limit = PAGE, force = false, pattern = null, after: 
   let after = start && start.id && start.txn_date ? { txn_date: ymd(start.txn_date), id: String(start.id) } : null;
   let lastPageFull = false;
   while (counts.examined < maxRows) {
-    // the active rule set is re-read for every page after the first: a rule
-    // disabled or added during a long pass applies from the next page on
-    if (counts.examined > 0) compiled = compileRules(await loadRules());
     const pageSize = Math.min(PAGE, maxRows - counts.examined);
     const rows = await rulePassPage({ pageSize, force, after });
+    // the active rule set is read AFTER the page's rows: an Always
+    // propagation that finished before this read is in both (its rule and
+    // its rulesAt stamps), one that finishes after it changes rulesAt and
+    // the versioned UPDATE below refuses the older result
+    compiled = compileRules(await loadRules());
     for (const row of rows) {
       counts.examined += 1;
       const c = classifyRow(row, compiled, { pattern, force, stamp });
