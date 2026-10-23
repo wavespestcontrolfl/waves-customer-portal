@@ -153,6 +153,7 @@ import {
   CONSENT_VERSION,
 } from "../../lib/paymentMethodConsentText";
 import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
+import { NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY } from "../../lib/pretreatWarrantyValues";
 import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 import { labelNamesRetiredSale } from "../../constants/retiredSaleLabels";
 import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS } from "@waves/irrigation-runtime";
@@ -939,7 +940,8 @@ function ElectronicAuthorizationContractV2({
     adminFetch("/admin/document-templates?status=active&limit=100")
       .then((result) => {
         if (cancelled) return;
-        const templates = result.templates || [];
+        // The new construction warranty issues only from its pre-treat certificate.
+        const templates = (result.templates || []).filter((template) => template.templateKey !== NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY);
         setDocumentTemplates(templates);
         setSelectedDocumentTemplateKey((current) =>
           current && templates.some((template) => template.templateKey === current)

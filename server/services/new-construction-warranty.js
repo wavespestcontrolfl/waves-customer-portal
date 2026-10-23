@@ -6,7 +6,6 @@ const db = require('../models/db');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
-const { getProjectType } = require('./project-types');
 
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
@@ -356,6 +355,10 @@ const PRINTED_CUSTOMER_FIELDS = ['first_name', 'last_name', 'company_name', 'add
 // Section 1 prints the owner's or agent's name and complete address (Rule
 // 5E-14.105(2)(a)), so the customer record must have one and pass the screen.
 function assertCustomerPrintable(customer) {
+  // Section 1 names the owner or authorized agent; a tenant is neither.
+  if (oneLine(customer.contact_role).toLowerCase() === 'tenant') {
+    throw bad('This customer is marked as a tenant. Issue the warranty to the owner or the builder as agent.', 409);
+  }
   if (![customer.address_line1, customer.city, customer.state, customer.zip].every((part) => oneLine(part))) {
     throw bad("Add the owner's or agent's full mailing address (street, city, state, ZIP) to the customer first.", 409);
   }
@@ -373,25 +376,26 @@ function assertCustomerPrintable(customer) {
   }
 }
 
-// The product prints as its catalog entry, never as typed text: a typed
-// name could carry a clause ("Termidor SC WE REPAIR ALL DAMAGE"). The
-// catalog's active ingredient wins when it has one.
-// The certificate's built-in product choices print as offered when the
-// catalog has no row for them (a fresh database seeds none).
-const BUILT_IN_PRODUCTS = (getProjectType('pre_treatment_termite_certificate')?.findingsFields || [])
-  .find((field) => field.key === 'product_name')?.options || [];
-// A bait system or a direct wood treatment is not a soil barrier, whatever
-// method the certificate records (termitePretreatRates.js kinds).
-const NON_SOIL_PRODUCT = /\b(trelona|bora-?care|sentricon|timbor|jecta|bait)\b/i;
-async function catalogProduct(conn, treatment) {
-  if (NON_SOIL_PRODUCT.test(treatment.product)) throw bad(`${treatment.product} is not a soil treatment, so this warranty does not fit the job.`, 409);
-  const row = await conn('products_catalog').whereRaw('lower(name) = ?', [treatment.product.toLowerCase()]).first('name', 'active_ingredient');
-  if (!row) {
-    const builtIn = BUILT_IN_PRODUCTS.find((name) => name.toLowerCase() === treatment.product.toLowerCase());
-    if (builtIn) return { product: builtIn };
-    throw bad(`Pick the product from the product catalog on the certificate (found "${treatment.product}").`, 409);
+// The warranty describes a liquid soil barrier, so the product must be one
+// of the soil liquids it is written for, each with its active ingredient
+// (termitePretreatRates.js kinds; the catalog's category cannot tell a bait
+// station or Bora-Care from a soil liquid). The certificate's ingredient
+// must agree, never be rewritten: a mismatch means the certificate is wrong.
+const SOIL_LIQUIDS = {
+  'termidor sc': { product: 'Termidor SC', ingredient: 'fipronil' },
+  'taurus sc': { product: 'Taurus SC', ingredient: 'fipronil' },
+  'talstar p': { product: 'Talstar P', ingredient: 'bifenthrin' },
+  'premise 2': { product: 'Premise 2', ingredient: 'imidacloprid' },
+};
+function soilLiquid(treatment) {
+  const known = SOIL_LIQUIDS[treatment.product.toLowerCase()];
+  if (!known) {
+    throw bad(`This warranty covers the soil liquids ${Object.values(SOIL_LIQUIDS).map((item) => item.product).join(', ')}. The certificate names "${treatment.product}".`, 409);
   }
-  return { product: oneLine(row.name), active_ingredient: oneLine(row.active_ingredient) || treatment.active_ingredient };
+  if (treatment.active_ingredient && !treatment.active_ingredient.toLowerCase().includes(known.ingredient)) {
+    throw bad(`The certificate's active ingredient (${treatment.active_ingredient}) does not match ${known.product} (${known.ingredient}). Fix the certificate first.`, 409);
+  }
+  return { product: known.product, active_ingredient: treatment.active_ingredient || known.ingredient };
 }
 
 // Values for one issue of the warranty, built server-side from the project
@@ -432,7 +436,7 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   const findings = parseFindings(project.findings);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
   const { initial, values } = certificateValues(project, findings);
-  Object.assign(values.treatment, await catalogProduct(conn, values.treatment));
+  Object.assign(values.treatment, soilLiquid(values.treatment));
   const issuer = body?.values?.issuer || {};
   return screenValues({
     ...values,

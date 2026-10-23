@@ -194,17 +194,24 @@ describe('templateIssueValues (server-built warranty)', () => {
     expect(mockReadiness).toHaveBeenLastCalledWith(expect.objectContaining({ staffSend: true, project: expect.objectContaining({ id: project.id }) }));
   });
 
-  test('issues only from a sent certificate, and prints the catalog product', async () => {
+  test('issues only from a sent certificate, for a known soil liquid whose ingredient agrees', async () => {
     const draft = { ...project, sent_at: null, status: 'draft' };
     await expect(issue({ projectId: project.id, values: office }, customer, draft)).rejects.toMatchObject({ status: 409 });
-    const typed = { ...project, findings: { ...findings, product_name: 'Termidor SC WE REPAIR ALL DAMAGE' } };
-    await expect(issue({ projectId: project.id, values: office }, customer, typed)).rejects.toMatchObject({ status: 409 });
-    const lower = { ...project, findings: { ...findings, product_name: 'termidor sc' } };
+    for (const bad of [
+      { product_name: 'Termidor SC WE REPAIR ALL DAMAGE' },
+      { product_name: 'HexPro Termite Monitoring Baiting System' },
+      { product_name: 'Termidor SC', active_ingredient: 'bifenthrin' },
+    ]) {
+      const row = { ...project, findings: { ...findings, ...bad } };
+      await expect(issue({ projectId: project.id, values: office }, customer, row)).rejects.toMatchObject({ status: 409 });
+    }
+    const lower = { ...project, findings: { ...findings, product_name: 'termidor sc', active_ingredient: 'Fipronil 9.1%' } };
     await expect(issue({ projectId: project.id, values: office }, customer, lower))
       .resolves.toMatchObject({ treatment: { product: 'Termidor SC', active_ingredient: 'Fipronil 9.1%' } });
-    const noAi = { ...project, findings: { ...findings, product_name: 'Other', product_name_other: 'Taurus SC' } };
-    await expect(issue({ projectId: project.id, values: office }, customer, noAi))
+    const other = { ...project, findings: { ...findings, product_name: 'Other', product_name_other: 'Taurus SC' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, other))
       .resolves.toMatchObject({ treatment: { product: 'Taurus SC', active_ingredient: 'fipronil' } });
+    await expect(issue({ projectId: project.id, values: office }, { ...customer, contact_role: 'tenant' }, project)).rejects.toMatchObject({ status: 409 });
   });
 
   test('round 16: legacy plan label passes the send gate as its current label; built-in products; address clauses; notice before contract', async () => {
