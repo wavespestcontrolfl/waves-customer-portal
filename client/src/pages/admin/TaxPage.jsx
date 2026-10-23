@@ -6051,16 +6051,21 @@ function BankImportTab() {
                 >
                   {r.account_label}
                 </TD>
-                <TD
-                  style={{
-                    maxWidth: 320,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                  title={r.description}
-                >
-                  {r.description}
+                <TD style={{ maxWidth: 320 }} title={r.description}>
+                  <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {r.description}
+                  </div>
+                  {/* a row the ledger import parked (open, no expense) says
+                      why here, next to the action that would book it */}
+                  {r.suggestion?.review && r.suggestion?.note ? (
+                    <div
+                      className="text-xs text-ink-secondary"
+                      style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      title={r.suggestion.note}
+                    >
+                      {r.suggestion.note}
+                    </div>
+                  ) : null}
                 </TD>
                 <TD
                   style={{
@@ -6546,6 +6551,7 @@ function BankImportTab() {
                           }
                           variant="secondary"
                           className="min-w-11"
+                          title={r.suggestion?.review && r.suggestion?.note ? r.suggestion.note : undefined}
                         >
                           Create expense
                         </Button>

@@ -17,13 +17,15 @@
  *  - a rerun of the same file loads nothing twice (row_hash is unique): an
  *    unchanged row is a duplicate; a row the file now reads differently, or
  *    whose expense was deleted since, is HELD and listed, never rewritten;
- *  - one file loads a tax year: a loaded row of that year that is no longer
- *    in the file (a corrected date, text or amount, or a dropped row) refuses
- *    the run, because a loaded row is corrected in Bank Import, not by
- *    re-import;
- *  - an expense already in the portal (entered by hand, or from a feed) of
- *    the same gross amount within the matcher's window holds the ledger's
- *    expense row; every such expense is listed to check once.
+ *  - one file loads one tax year (a file with two years is refused): a
+ *    loaded row of that year that is no longer in the file (a corrected
+ *    date, text or amount, or a dropped row) refuses the run, because a
+ *    loaded row is corrected in Bank Import, not by re-import;
+ *  - a ledger expense row with an expense already in the portal (entered by
+ *    hand, or from a feed) of the same gross amount within the matcher's
+ *    window is loaded as an open review row with no expense: the owner links
+ *    it to that expense in Bank Import, or creates the expense there. Every
+ *    such portal expense is listed to check once.
  *
  * CSV header (exact):
  *   source,date,description,amount,direction,class,category,sched_c_line,flag,processor_match,bank_category
@@ -186,6 +188,15 @@ function parseLedgerCsv(text, { now = new Date() } = {}) {
     r.line = line;
     rows.push(r);
   });
+  // one file loads one tax year (the rerun rule is per year): a stray year
+  // is a typo to fix, never half of a mixed load
+  const years = [...new Set(rows.map(r => String(r.period.tax_year)))].sort();
+  if (years.length > 1) {
+    const count = y => rows.filter(r => String(r.period.tax_year) === y).length;
+    const minority = years.slice().sort((a, b) => count(a) - count(b))[0];
+    const stray = rows.filter(r => String(r.period.tax_year) === minority).slice(0, 3).map(r => `line ${r.line} (${r.date})`).join(', ');
+    throw fail(`the file has rows from tax years ${years.join(', ')}: one file loads one year; fix the stray date(s), e.g. ${stray}`);
+  }
   return rows;
 }
 
@@ -226,9 +237,12 @@ function processorMarked(row) {
 function processorFee(row, line) {
   return processorMarked(row) || (String(line) === '10' && PROCESSOR_FEE_RE.test(String(row.category || '')));
 }
-// The note a parked business row carries: why it is not booked here.
+// The note a parked business row carries: why it is not booked here. Bank
+// Import shows it under the row and on its Create expense button, so the
+// category the importer refused is never picked unknowingly.
 function parkNote(row, line) {
-  return processorFee(row, line) ? { note: PROCESSOR_NOTE } : {};
+  if (processorFee(row, line)) return { note: PROCESSOR_NOTE };
+  return { note: `no category in the portal for line ${line || '(none)'}; the ledger says ${row.class}: "${row.category}". Pick the category knowingly, or leave it for the return` };
 }
 function categoryNameForLine(line, category) {
   const key = String(line || '').trim().toLowerCase();
@@ -259,7 +273,7 @@ function deductibleFor(categoryName, amount) {
 }
 
 function reviewSuggestion(row, extra) {
-  const note = row.flag ? `${row.category} [${row.flag}]` : row.category;
+  const note = `the ledger says ${row.class}: "${row.category}"${row.flag ? ` [${row.flag}]` : ''}`;
   return {
     review: true,
     note,
@@ -370,11 +384,11 @@ function mapNonBusinessRow(row, out, base) {
   return out;
 }
 
-/** A business row whose category is missing from this database: park it for review, no expense. */
-function parkForReview(mapped, row) {
+/** A business row that is not booked here (its category is missing from this database, or an expense may already exist): an open review row, no expense. */
+function parkForReview(mapped, row, extra = parkNote(row, row.sched_c_line)) {
   mapped.bank.status = 'unmatched';
   mapped.bank.match_method = null;
-  mapped.bank.suggestion = reviewSuggestion(row, parkNote(row, row.sched_c_line));
+  mapped.bank.suggestion = reviewSuggestion(row, extra);
   mapped.expense = null;
   mapped.unmatchedLine = row.sched_c_line || '(none)';
   mapped.businessParked = true;
@@ -424,21 +438,23 @@ function grossNote(e) {
   return e.gross != null && Number(e.gross) !== Number(e.amount) ? ` (gross ${Number(e.gross).toFixed(2)} before refunds)` : '';
 }
 
-function formatReport({ dryRun, file, read, inserted, duplicates, held = [], portalExpenses = [], summary }) {
+function formatReport({ dryRun, file, read, inserted, duplicates, held = [], parked = [], portalExpenses = [], summary }) {
   const lines = [
     `${dryRun ? 'DRY RUN - nothing written. ' : ''}Ledger import report for ${path.basename(file)}`,
     `rows read:                 ${read}`,
     `${dryRun ? 'would insert:              ' : 'inserted:                  '}${inserted}`,
     `skipped as duplicate:      ${duplicates} (loaded by an earlier run, unchanged)`,
-    `held, not imported:        ${held.length} (loaded before under another reading or without its expense, or an expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days is already in the portal; decide each in Bank Import)`,
+    `held in the portal:        ${held.length} (loaded before; the file now reads it differently, or its expense is gone: decide each in Bank Import)`,
     ...held.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
-    `expenses in the portal:    ${portalExpenses.length} entered by hand or from a feed within ${EXPENSE_DATE_WINDOW_DAYS} days of this file's dates (never matched by guesswork: a ledger expense row of the same amount nearby is held above; check each once)`,
+    `parked for review:         ${parked.length} (loaded as open rows, no expense: an expense of the same amount within ${EXPENSE_DATE_WINDOW_DAYS} days is already in the portal; link or create it in Bank Import)`,
+    ...parked.map(h => `  line ${h.line}  ${h.date}  ${h.description}  ${h.amount}  [${h.why}]`),
+    `expenses in the portal:    ${portalExpenses.length} entered by hand or from a feed within ${EXPENSE_DATE_WINDOW_DAYS} days of this file's dates (never matched by guesswork: a ledger expense row of the same amount nearby is parked above; check each once)`,
     ...portalExpenses.map(e => `  ${ymdOf(e.expense_date)}  ${(e.vendor_name || e.description || '').slice(0, 40)}  ${Number(e.amount).toFixed(2)}${grossNote(e)}`),
     `${dryRun ? 'expenses to create:' : 'expenses created:'}`.padEnd(27) + summary.expensesCreated,
     ...formatTable(summary.byStatus, 'by status'),
     ...formatTable(summary.expensesByCategory, `expenses ${dryRun ? 'to create' : 'created'} by category`),
     ...formatTable(summary.unmatchedByLine, 'left unmatched by Schedule C line (refund = a refund credit to apply in Bank Import)'),
-    ...formatTable(summary.byYear, 'rows by tax year (one return year per file: a stray year is a typo to fix)'),
+    ...formatTable(summary.byYear, 'rows by tax year'),
     `total outflow (debit):     ${fmtMoney(summary.totals.debitCents)}`,
     `total inflow (credit):     ${fmtMoney(summary.totals.creditCents)}`,
     `total expense amount:      ${fmtMoney(summary.totals.expenseCents)}`,
@@ -531,11 +547,11 @@ function expenseGone(row) {
   return (LINKED_TO_EXPENSE.has(row.status) && !row.matched_expense_id) || row.status === 'unmatched';
 }
 // The ledger's reading of a row: what the hash leaves out (class, category,
-// line and the processor mark can change in the file without changing the
-// row's identity).
+// line, flag and the processor mark can change in the file without changing
+// the row's identity).
 function readingOf(sug) {
   const s = sug || {};
-  return [s.ledgerClass, s.ledgerCategory, s.schedCLine, s.processorMatch ? 'processor' : ''].map(v => String(v || '').trim().toLowerCase()).join('|');
+  return [s.ledgerClass, s.ledgerCategory, s.schedCLine, s.flag, s.processorMatch ? 'processor' : ''].map(v => String(v || '').trim().toLowerCase()).join('|');
 }
 function describeReading(sug) {
   const s = sug || {};
@@ -559,10 +575,10 @@ function reloadReason(prior, m) {
 // Every portal expense of the same gross amount within the matcher's window
 // (a receipt dated the purchase, the statement dated the posting) whose
 // payment method can be this account: any of them may be this very charge,
-// entered before the ledger was loaded. The ledger row is held and they are
-// all listed. There is no one-for-one assignment and no nearest-first pick
-// (two rows of one amount near two receipts are both held): the owner
-// decides each in Bank Import.
+// entered before the ledger was loaded. The ledger row is loaded as an open
+// review row with no expense, naming them all. There is no one-for-one
+// assignment and no nearest-first pick (two rows of one amount near two
+// receipts are both parked): the owner links or creates each in Bank Import.
 function nearbyExpenses(portalExpenses, row, bank) {
   const amount = Number(bank.amount).toFixed(2);
   const day = dayNumber(row.date);
@@ -577,13 +593,16 @@ function describeNearby(near, date) {
 }
 
 // Which ledger rows load: every row but one loaded before (a duplicate, or
-// held when its reading or its expense changed) and an expense row the
-// portal may already hold as an expense (held). A business row whose
-// category is missing from this database is parked for review.
+// held when its reading or its expense changed). An expense row the portal
+// may already hold as an expense is loaded parked (an open review row, no
+// expense): left out, it could never be decided anywhere, and every rerun
+// would leave it out again. A business row whose category is missing from
+// this database is parked the same way.
 function reconcileRows(mapped, rows, portal) {
   const { existing, portalExpenses, categoryIds } = portal;
   const fresh = [];
   const held = [];
+  const parked = [];
   let duplicates = 0;
   const note = (i, why) => ({ line: rows[i].line, description: rows[i].description, amount: Number(rows[i].amount).toFixed(2), date: rows[i].date, why });
   const reading = (m, i) => `the ledger says ${rows[i].class}${m.categoryName ? ` (${m.categoryName})` : ''}`;
@@ -598,14 +617,14 @@ function reconcileRows(mapped, rows, portal) {
     if (m.expense) {
       const near = nearbyExpenses(portalExpenses, rows[i], m.bank);
       if (near.length) {
-        held.push(note(i, `${describeNearby(near, rows[i].date)}; ${reading(m, i)}`));
-        return;
-      }
-      if (!categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
+        const why = describeNearby(near, rows[i].date);
+        parkForReview(m, rows[i], { note: `${why}: link this row to that expense in Bank Import, or create the expense there if it is a different purchase`, nearbyExpenseIds: near.map(e => e.id) });
+        parked.push({ ...note(i, `${why}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
+      } else if (!categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     }
     fresh.push(m);
   });
-  return { fresh, duplicates, held };
+  return { fresh, duplicates, held, parked };
 }
 
 // Writes the fresh rows: non-expense rows in bulk (row_hash conflicts
@@ -672,10 +691,12 @@ async function run({ file, dryRun = false, db, log = () => {} } = {}) {
   const written = dryRun ? { inserted: r.fresh.length, duplicates: 0 } : await writeRows(db, r.fresh, portal.categoryIds);
   // Rows lost to an insert-time conflict are not in the report's tallies.
   const landed = dryRun ? r.fresh : r.fresh.filter(m => !m.skipped);
+  const landedHashes = new Set(landed.map(m => m.bank.row_hash));
+  const parked = r.parked.filter(p => landedHashes.has(p.rowHash));
   const summary = summarize(landed);
   const duplicates = r.duplicates + written.duplicates;
-  const counts = { read: rows.length, inserted: written.inserted, duplicates, held: r.held.length, portalExpenses: portal.portalExpenses.length };
-  const report = formatReport({ dryRun, file, read: rows.length, inserted: written.inserted, duplicates, held: r.held, portalExpenses: portal.portalExpenses, summary });
+  const counts = { read: rows.length, inserted: written.inserted, duplicates, held: r.held.length, parked: parked.length, portalExpenses: portal.portalExpenses.length };
+  const report = formatReport({ dryRun, file, read: rows.length, inserted: written.inserted, duplicates, held: r.held, parked, portalExpenses: portal.portalExpenses, summary });
   log(report);
   return { report, counts, summary };
 }
