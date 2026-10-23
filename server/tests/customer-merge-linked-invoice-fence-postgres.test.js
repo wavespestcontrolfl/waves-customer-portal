@@ -73,6 +73,21 @@ postgres('customer merge defers on a linked invoice that would move to a payer w
   }
   const phone = () => `+1999556${String(Math.floor(Math.random() * 9000) + 1000)}`;
 
+  test('a stamp the loser\'s invoice carried over is re-judged against the survivor: re-pointed to the survivor\'s payer', async () => {
+    const p = phone();
+    const oldPayer = await payer(true);
+    const survivorPayer = await payer(true);
+    const winnerId = await customer('Winner', p, survivorPayer);
+    const loserId = await customer('Loser', p);
+    const invoiceId = await linkedInvoice(loserId, 'sent');
+    // A stamp left from an earlier owner (the loser no longer has a payer).
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ scheduled_send_error: `payer_billed:${oldPayer}` });
+    await dedupe.executeMerge({ winnerId, loserId, performedBy: 'test:merge-fence' });
+    const merged = await mockDatabase('invoices').where({ id: invoiceId }).first();
+    expect(merged.customer_id).toBe(winnerId);
+    expect(merged.scheduled_send_error).toBe(`payer_billed:${survivorPayer}`);
+  });
+
   test('an active winner payer absorbing a payerless loser refuses while the loser\'s linked invoice is sending, and merges (withdrawing it) once it is not', async () => {
     const p = phone();
     const winnerId = await customer('Winner', p, await payer(true));

@@ -839,8 +839,9 @@ describe('executeMerge', () => {
       if ((table === 'scheduled_services' || table === 'invoices') && q.called('first')) {
         return (state.billingArtifacts && state.billingArtifacts[table]) || null;
       }
-      // Stamped combined-session read (pay-combined stampedCombinedSessionRows).
-      if (table === 'invoices' && q.called('whereNotNull') && q.called('select')) {
+      // Stamped combined-session read (pay-combined stampedCombinedSessionRows; it never calls whereNull, which tells it
+      // apart from the withdrawn-stamp reconciliation read).
+      if (table === 'invoices' && q.called('whereNotNull') && q.called('select') && !q.called('whereNull')) {
         const owner = q.args('where')[0].customer_id;
         state.events.push(['sessions_read', owner]);
         return (sessions && sessions[owner]) || [];

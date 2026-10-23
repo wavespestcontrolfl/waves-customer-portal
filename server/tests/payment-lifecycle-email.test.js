@@ -127,6 +127,8 @@ function invoice(overrides = {}) {
     id: 'inv-1',
     customer_id: 'cust-1',
     invoice_number: 'INV-1001',
+    // A full invoices row: no record link (invoice-payer-ownership re-reads a row read without the column).
+    service_record_id: null,
     title: 'Quarterly Pest Control',
     token: 'pay-token',
     total: '129.00',

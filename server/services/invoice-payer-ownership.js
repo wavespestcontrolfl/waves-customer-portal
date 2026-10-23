@@ -13,14 +13,27 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+// The visit an invoice rides: its own link, else the visit its service record names (the same answer the
+// Bill-To withdrawal reads, invoice.js linkedScheduledServiceId), so a record-linked invoice whose visit
+// has its own payer or is pinned self-pay is judged by that visit, not the customer default. A row read
+// without its service_record_id column is re-read by id.
+async function linkedVisitIdOf(inv, dbh) {
+  if (inv.scheduled_service_id) return inv.scheduled_service_id;
+  const recordId = 'service_record_id' in inv ? inv.service_record_id
+    : (inv.id ? (await dbh('invoices').where({ id: inv.id }).first('service_record_id'))?.service_record_id : null);
+  if (!recordId) return null;
+  return (await dbh('service_records').where({ id: recordId }).first('scheduled_service_id'))?.scheduled_service_id || null;
+}
+
 async function invoicePayerOwnership(inv, dbh = db) {
   if (inv.payer_id || inv.payer_statement_id) return 'payer_owned';
   if (!inv.customer_id) return 'payer_unverifiable';
   try {
+    const visitId = await linkedVisitIdOf(inv, dbh);
     const resolved = await require('./payer').resolveForInvoice({
       database: dbh,
       customerId: String(inv.customer_id),
-      ...(inv.scheduled_service_id ? { scheduledServiceId: String(inv.scheduled_service_id) } : {}),
+      ...(visitId ? { scheduledServiceId: String(visitId) } : {}),
       throwOnError: true,
     });
     return resolved?.payerId ? 'payer_owned' : null;
@@ -44,14 +57,22 @@ async function invoicePayerOwnership(inv, dbh = db) {
 // then the real resolver runs ONCE per distinct candidate payer (it alone decides active / inactive). A failed read => unverifiable.
 async function candidatePayerKeys(customerId, rows, dbh) {
   const payer = require('./payer');
-  const ssIds = [...new Set(rows.filter((r) => !(r.payer_id || r.payer_statement_id) && r.scheduled_service_id).map((r) => String(r.scheduled_service_id)))];
+  const unstamped = rows.filter((r) => !(r.payer_id || r.payer_statement_id));
+  // A record-linked row rides the visit its service record names (linkedVisitIdOf), read in one batch.
+  const recordIds = [...new Set(unstamped.filter((r) => !r.scheduled_service_id && r.service_record_id).map((r) => String(r.service_record_id)))];
+  const recordVisit = new Map(recordIds.length
+    ? (await dbh('service_records').whereIn('id', recordIds).select('id', 'scheduled_service_id')).map((r) => [String(r.id), r.scheduled_service_id])
+    : []);
+  const visitOf = (r) => r.scheduled_service_id || (r.service_record_id ? recordVisit.get(String(r.service_record_id)) : null) || null;
+  const ssIds = [...new Set(unstamped.map(visitOf).filter(Boolean).map(String))];
   const cust = await dbh('customers').where({ id: customerId }).first('payer_id');
   const cols = ['id', 'payer_id'];
   if (ssIds.length && await payer.scheduledServicesHasSelfPay(dbh)) cols.push('self_pay_override');
   const services = ssIds.length ? await dbh('scheduled_services').where({ customer_id: customerId }).whereIn('id', ssIds).select(cols) : [];
   const byId = new Map((services || []).map((ss) => [String(ss.id), ss]));
   return (inv) => {
-    const ss = inv.scheduled_service_id ? byId.get(String(inv.scheduled_service_id)) : null;
+    const visitId = visitOf(inv);
+    const ss = visitId ? byId.get(String(visitId)) : null;
     const candidate = ss?.payer_id || (ss?.self_pay_override === true ? null : cust?.payer_id) || null;
     return candidate == null ? 'self' : `payer:${candidate}`;
   };
@@ -64,7 +85,7 @@ function memoizedVerdict({ customerId, dbh, memo, candidateKey, maxResolutions }
   let resolutions = 0;
   return async (inv) => {
     const keyed = !(inv.payer_id || inv.payer_statement_id);
-    const key = keyed ? (candidateKey ? candidateKey(inv) : String(inv.scheduled_service_id || '')) : null;
+    const key = keyed ? (candidateKey ? candidateKey(inv) : String(inv.scheduled_service_id || (inv.service_record_id ? `record:${inv.service_record_id}` : ''))) : null;
     if (keyed && memo.has(key)) return memo.get(key);
     if (resolutions >= maxResolutions) return CAP_HIT;
     resolutions += 1;

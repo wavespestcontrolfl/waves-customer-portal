@@ -385,6 +385,20 @@ describe('unvoid: the bar restores the row and nothing else (structural refusal 
       expect(calls.map((c) => c.table)).not.toContain('scheduled_services');
     });
 
+    // Owner ruling 2026-10-22 ("move"): with GATE_BILL_TO_NO_VISIT_INVOICES on, the restore's withdrawal moves an invoice with no
+    // visit to the customer default, so the card refuses it the same way.
+    test('gate on: an invoice with no visit and a customer default payer is linked_payer_owner; no default, no refusal', async () => {
+      process.env.GATE_BILL_TO_NO_VISIT_INVOICES = 'true';
+      try {
+        owner({ customerPayer: 'payer-2' });
+        await expect(reason(row({ status: 'void' }))).resolves.toBe('linked_payer_owner');
+        owner({});
+        await expect(reason(row({ status: 'void' }))).resolves.toBeNull();
+      } finally {
+        delete process.env.GATE_BILL_TO_NO_VISIT_INVOICES;
+      }
+    });
+
     test('the bar’s restore also refuses on the draft row under the lock (a payer assigned after the card), before the withdrawal runs', async () => {
       owner({ visitPayer: 'payer-1' });
       // The restore's linked-visit guard asks the schema first.

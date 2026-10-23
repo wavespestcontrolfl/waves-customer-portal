@@ -819,11 +819,9 @@ async function unvoidObligationReason(conn, invoice) {
   if (lines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY])) return "membership_dues";
   if (lines.some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()))) return "setup_fee";
   // From the records the restore also touches.
-  if (invoice.scheduled_service_id || invoice.service_record_id) {
-    const Linked = require("./visit-linked-invoice-withdrawal");
-    // Not ownerTransitions: that skips a VOID invoice, which is exactly what the card is asked about at preview.
-    if (await Linked.liveVisitPayerOf(conn, invoice)) return "linked_payer_owner";
-  }
+  // Not ownerTransitions: that skips a VOID invoice, which is exactly what the card is asked about at preview. An invoice
+  // with no visit answers through the customer default when the withdrawal covers it (GATE_BILL_TO_NO_VISIT_INVOICES).
+  if (invoice.customer_id && await require("./visit-linked-invoice-withdrawal").liveVisitPayerOf(conn, invoice)) return "linked_payer_owner";
   if (await conn("sms_log")
     .whereRaw("metadata->>'invoice_id' = ?", [String(invoice.id)])
     .where(function queuedOrFinalizing() {
@@ -934,9 +932,9 @@ async function lockUnvoidOwnershipRows(trx, id) {
       await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
     }
   }
-  // A restored invoice that rides a visit WITHOUT a packet (a service-record or direct visit link) takes the same rows in the
-  // same order: the withdrawal after the restore resolves its live owner under them.
-  if (!own.visit_completion_packet_id && own.customer_id && (own.scheduled_service_id || own.service_record_id)) {
+  // A restored invoice WITHOUT a packet (a service-record or direct visit link, or no visit at all, owned through the
+  // customer default) takes the same rows in the same order: the withdrawal after the restore resolves its live owner under them.
+  if (!own.visit_completion_packet_id && own.customer_id) {
     // customer -> visit -> every payer row the resolver reads (FOR SHARE), the order every Bill-To writer takes, BEFORE the
     // invoice row is updated.
     await require("./visit-linked-invoice-withdrawal").lockLinkedOwnershipRows(trx, own);
@@ -967,9 +965,9 @@ async function rejudgeRestoredInvoiceOwnership(trx, updated, id) {
     await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id, includeLinked: false });
     // …and a restored row whose live owner is a payer is withdrawn before it can ever be collected.
     await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id, includeLinked: false });
-  } else if (updated.customer_id && (updated.scheduled_service_id || updated.service_record_id)) {
-    // The same re-judgement for a restored invoice with no packet: a payer assigned to its visit while it sat void must not
-    // hand the homeowner a collectible link on restore.
+  } else if (updated.customer_id) {
+    // The same re-judgement for a restored invoice with no packet: a payer assigned to its visit (or, for one with no visit,
+    // to the customer) while it sat void must not hand the homeowner a collectible link on restore.
     const Linked = require("./visit-linked-invoice-withdrawal");
     await Linked.reconcileLinkedInvoices(trx, { invoiceId: id }, { requeue: false });
     await Linked.withdrawLinkedInvoicesForOwner(trx, { invoiceId: id });
