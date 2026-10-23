@@ -521,44 +521,47 @@ async function getFleetOverview() {
 
 // ─── Report Equipment Issue (Tech PWA) ───────────────────────────
 /**
- * Technician reports an equipment issue from the field.
+ * Technician reports an equipment issue from the field. The truck check
+ * (services/truck-kit.js) reuses it with its own alert type and title; a
+ * missing tool passes adjustCondition false, since it has no condition to judge.
  */
-async function reportEquipmentIssue({ equipmentId, technicianId, description, severity = 'medium' }) {
+async function reportEquipmentIssue({ equipmentId, technicianId, description, severity = 'medium', alertType = 'condition_low', title = null, adjustCondition = true, conn = db }) {
   const tag = '[equipment-maintenance] reportEquipmentIssue';
   try {
-    const equipment = await db('equipment').where('id', equipmentId).first();
+    const equipment = await conn('equipment').where('id', equipmentId).first();
     if (!equipment) throw new Error('Equipment not found');
 
     let techName = 'Unknown Tech';
     if (technicianId) {
-      const tech = await db('technicians').where('id', technicianId).first();
+      const tech = await conn('technicians').where('id', technicianId).first();
       if (tech) techName = tech.name;
     }
 
     const alert = {
       id: uuidv4(),
       equipment_id: equipmentId,
-      alert_type: 'condition_low',
+      alert_type: alertType,
       severity,
-      title: `Issue Reported: ${equipment.name} ${equipment.asset_tag || ''} — by ${techName}`.trim(),
+      title: title || `Issue Reported: ${equipment.name} ${equipment.asset_tag || ''} — by ${techName}`.trim(),
       description: description || 'Equipment issue reported from the field.',
       status: 'new',
       created_at: db.fn.now(),
       updated_at: db.fn.now(),
     };
 
-    const [inserted] = await db('maintenance_alerts').insert(alert).returning('*');
+    const [inserted] = await conn('maintenance_alerts').insert(alert).returning('*');
 
     // Lower condition rating if severity is high/critical
-    if (severity === 'high' || severity === 'critical') {
+    if (adjustCondition && (severity === 'high' || severity === 'critical')) {
       const newRating = Math.max(1, (equipment.condition_rating || 5) - 2);
-      await db('equipment').where('id', equipmentId).update({
+      await conn('equipment').where('id', equipmentId).update({
         condition_rating: newRating,
         updated_at: db.fn.now(),
       });
     }
 
-    logger.info(`${tag} Issue reported on ${equipment.name} by ${techName}: ${description}`);
+    // Ids only: a field note may name a customer or an address (AGENTS.md: no PII in logs).
+    logger.info(`${tag} Issue reported on equipment ${equipmentId} (${alertType}, ${severity}) by technician ${technicianId || 'unknown'}`);
     return inserted;
   } catch (err) {
     logger.error(`${tag} Error:`, err);

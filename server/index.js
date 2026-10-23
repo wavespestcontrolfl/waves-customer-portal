@@ -1020,6 +1020,7 @@ app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/tech/line', require('./routes/tech-line'));
 app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/tech/dictation', require('./routes/tech-dictation'));
+app.use('/api/tech/truck-check', require('./routes/tech-truck-check'));
 const adminVehiclesRouter = require('./routes/admin-vehicles');
 app.use('/api/admin/vehicles', adminVehiclesRouter);
 app.use('/api/admin', require('./routes/admin-billing-health'));

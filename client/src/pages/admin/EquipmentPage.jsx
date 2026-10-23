@@ -18,8 +18,12 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json"
     },
     ...options
-  }).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async r => {
+    if (!r.ok) {
+      // The server's refusal says what to do (resolve the alert, reload, move riders): show it.
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body?.error || `HTTP ${r.status}`);
+    }
     return r.json();
   });
 }
@@ -252,6 +256,7 @@ const EMPTY_EQUIP = {
   asset_tag: "",
   location: "van",
   assigned_vehicle_id: "",
+  kit_key: "",
   condition_rating: 8,
   purchase_date: "",
   purchase_price: "",
@@ -311,6 +316,12 @@ function EquipmentTab({
   // Holder picker options (admin only: the dialog is admin only). A failed
   // read leaves the picker with the current holder alone.
   const [technicians, setTechnicians] = useState([]);
+  // Kit key suggestions: the keyed checklist items and the keys already in use
+  // (admin only, with the dialog). A failed read leaves plain typing.
+  // Kit keys exist only while GATE_TRUCK_KIT is on: the server says so on
+  // the vocabulary read (404 { enabled: false } when off), and the field
+  // stays away until it does (fail closed).
+  const [kitKeys, setKitKeys] = useState({ enabled: false, keys: [] });
   // "" = every row, a vehicle id = that truck's roster, "none" = on no truck.
   const [vehicleFilter, setVehicleFilter] = useState("");
   const loadSeq = useRef(0);
@@ -341,12 +352,18 @@ function EquipmentTab({
     }).catch(() => {
       if (!cancelled) setTechnicians([]);
     });
+    adminFetch("/admin/equipment/kit-keys").then(d => {
+      if (!cancelled) setKitKeys(d?.enabled === true ? { enabled: true, keys: d.keys || [] } : { enabled: false, keys: [] });
+    }).catch(() => {
+      if (!cancelled) setKitKeys({ enabled: false, keys: [] });
+    });
     return () => {
       cancelled = true;
     };
   }, [canEdit]);
   useEffect(() => setActionError(""), [editing?.id, !!editing]);
-  const vehicles = items.filter(e => e.category === "vehicle");
+  // Only a live truck can carry a kit: a retired, sold or lost vehicle is never offered.
+  const vehicles = items.filter(e => e.category === "vehicle" && !["retired", "sold", "lost"].includes(e.status));
   const visibleItems = vehicleFilter === "" ? items : vehicleFilter === "none" ? items.filter(e => !e.assigned_vehicle_id && e.category !== "vehicle") : items.filter(e => e.assigned_vehicle_id === vehicleFilter);
   const save = async () => {
     if (actionRef.current) return;
@@ -362,10 +379,12 @@ function EquipmentTab({
         ["purchase_price", "current_hours", "next_service_hours", "book_value", "condition_rating"].forEach(k => {
           payload[k] = payload[k] === "" || payload[k] == null ? null : Number(payload[k]);
         });
-        ["assigned_to", "assigned_vehicle_id", "asset_tag", "location"].forEach(k => {
+        ["assigned_to", "assigned_vehicle_id", "asset_tag", "location", "kit_key"].forEach(k => {
           if (payload[k] === "" || payload[k] == null) payload[k] = null;
         });
         if (!payload.purchase_date) payload.purchase_date = null;
+        // No Kit key field without the gate: never send the column back.
+        if (!kitKeys.enabled) delete payload.kit_key;
         if (editing.id) {
           await adminFetch(`/admin/equipment/equipment/${editing.id}`, {
             method: "PUT",
@@ -486,6 +505,10 @@ function EquipmentTab({
                   location: e.location ?? "",
                   assigned_vehicle_id: e.assigned_vehicle_id ?? "",
                   assigned_to: e.assigned_to ?? "",
+                  kit_key: e.kit_key ?? "",
+                  expected_status: e.status ?? null,
+                  expected_assigned_vehicle_id: e.assigned_vehicle_id ?? null,
+                  expected_updated_at: e.updated_at ?? null,
                   condition_rating: e.condition_rating ?? ""
                 });
               }} type="button" variant="secondary" className="min-w-11" disabled={saving}>
@@ -534,13 +557,14 @@ function EquipmentTab({
             </Card>;
       })}
       </div>
-      {editing && <EquipmentEditModal equipment={editing} vehicles={vehicles} technicians={technicians} onChange={setEditing} onClose={() => setEditing(null)} onSave={save} saving={saving} error={actionError} />}
+      {editing && <EquipmentEditModal equipment={editing} vehicles={vehicles} technicians={technicians} kitKeys={kitKeys} onChange={setEditing} onClose={() => setEditing(null)} onSave={save} saving={saving} error={actionError} />}
     </>;
 }
 function EquipmentEditModal({
   equipment: e,
   vehicles = [],
   technicians = [],
+  kitKeys = { enabled: false, keys: [] },
   onChange,
   onClose,
   onSave,
@@ -624,6 +648,12 @@ function EquipmentEditModal({
           {field("asset_tag", "Asset tag")}
           {field("status", "Status", "text", STATUSES)}
           {e.category !== "vehicle" && choice("assigned_vehicle_id", "Truck", truckOptions)}
+          {kitKeys.enabled && e.category !== "vehicle" && <Field label="Kit key" help="What this tool is, matching the checklist item it satisfies" className="min-w-0">
+              <Input list="equipment-kit-keys" value={e.kit_key ?? ""} onChange={ev => onChange({
+          ...e,
+          kit_key: ev.target.value
+        })} disabled={saving} />
+            </Field>}
           {choice("location", "Kept", locationOptions)}
           {field("condition_rating", "Condition (1 to 10)", "number")}
           {field("purchase_date", "Purchase Date", "date")}
@@ -635,6 +665,11 @@ function EquipmentEditModal({
           {choice("assigned_to", "Assigned To", holderOptions)}
         </div>
         <div className="mt-3">{field("notes", "Notes", "textarea")}</div>
+        <datalist id="equipment-kit-keys">
+          {kitKeys.keys.map(k => <option key={k.kit_key} value={k.kit_key}>
+              {k.label}
+            </option>)}
+        </datalist>
       </DialogBody>
       <DialogFooter className="grid grid-cols-2">
         <Button variant="secondary" disabled={saving} onClick={onClose}>

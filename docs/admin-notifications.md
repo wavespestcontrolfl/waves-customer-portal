@@ -32,7 +32,7 @@ they miss it if it were only a count on a page? If any answer is no, it is not a
 | **Why** | 110 chars, one sentence | The fact that makes it worth doing now: who, how much, how old. |
 | **Severity** | `needs-you` / `broken` / `fyi` | `needs-you`: a person decides or acts; rings the bell. `broken`: something of ours failed; goes to the Activity feed, not the bell. `fyi`: never rings and writes no row. |
 | **Link** | one | Opens the record where the fix is made, not a list page, whenever a record id is known. Never the Activity feed for a `needs-you` row. |
-| **Subject** | `{type, id}` | What the row is about: `customer`, `visit`, `invoice`, `estimate`, `lead`, `call`, `check`. One open row per subject per class. |
+| **Subject** | `{type, id}` | What the row is about: `customer`, `visit`, `invoice`, `estimate`, `lead`, `call`, `check`, `equipment` (a truck or a tool). One open row per subject per class. |
 | **Done-when** | a named predicate | The condition that clears it, e.g. `invoice_sent`, `visit_priced`, `promise_fulfilled`, `count_zero`. The emitter that raises a row owns clearing it. |
 | **Who** | `person` / `claude` / `either` | Who may resolve it. See section 5. |
 

@@ -7,6 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const truckKit = require('../services/truck-kit');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
@@ -194,11 +195,23 @@ router.get('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
   }
 });
 
+// Asset rows are the office's (the same rule as routes/admin-equipment.js):
+// a technician token never creates, edits or retires one. These handlers
+// spread the body, so kit_key and the custody columns would be reachable.
+// Truck, holder, status, category and kit key change only through the
+// guarded Assets route (routes/admin-equipment.js: one live truck per
+// technician, no move or retirement while a tool alert is open, truck locks).
+// This older writer spreads the body, so it refuses those columns outright.
+const GUARDED_COLUMNS = ['assigned_vehicle_id', 'assigned_to', 'status', 'category', 'kit_key'];
+const GUARDED_ERROR = `Set ${GUARDED_COLUMNS.join(', ')} on Equipment → Assets (PUT /api/admin/equipment/equipment/:id)`;
+const carriesGuarded = (body) => GUARDED_COLUMNS.some((key) => body && body[key] !== undefined);
+
 // POST / — create equipment
-router.post('/', async (req, res, next) => {
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const data = { ...req.body };
     if (!data.name) return res.status(400).json({ error: 'Equipment name is required' });
+    if (carriesGuarded(data)) return res.status(400).json({ error: GUARDED_ERROR });
 
     delete data.id;
     data.created_at = db.fn.now();
@@ -214,8 +227,9 @@ router.post('/', async (req, res, next) => {
 });
 
 // PUT /:id — update equipment
-router.put('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
+router.put('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
   try {
+    if (carriesGuarded(req.body)) return res.status(400).json({ error: GUARDED_ERROR });
     const data = { ...req.body, updated_at: db.fn.now() };
     delete data.id;
     delete data.created_at;
@@ -235,12 +249,38 @@ router.put('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
 });
 
 // DELETE /:id — soft delete (retire)
-router.delete('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
+router.delete('/:id([0-9a-fA-F-]{36})', requireAdmin, async (req, res, next) => {
   try {
-    const [record] = await db('equipment')
-      .where({ id: req.params.id })
-      .update({ status: 'retired', updated_at: db.fn.now() })
-      .returning('*');
+    // Retiring a tool with an open truck check alert goes through the
+    // alert's outcome (Retired / Lost), never around it; the probe and the
+    // write hold the item's truck lock so a check in flight finishes first.
+    const record = await db.transaction(async (trx) => {
+      // Same lock order as an asset save: the item row first (so the
+      // snapshot below cannot race another save of the same row), then the
+      // truck it rides on, or itself when it is a truck (a check in flight
+      // must finish or fail ownership before the truck retires), then a
+      // re-read under both: a row that moved trucks or changed category
+      // meanwhile is refused, never retired on a truck nobody locked.
+      await truckKit.lockTruck(trx, req.params.id);
+      const item = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category');
+      const itemTruck = item?.assigned_vehicle_id || null;
+      const itemCategory = item?.category || null;
+      const truckId = itemCategory === 'vehicle' ? req.params.id : itemTruck;
+      if (truckId) await truckKit.lockTruck(trx, truckId);
+      const again = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category');
+      if (item && (!again || (again.assigned_vehicle_id || null) !== itemTruck || (again.category || null) !== itemCategory)) return 'moved';
+      // A truck with tools still on it is not retired from here either.
+      if (item?.category === 'vehicle' && await trx('equipment').where({ assigned_vehicle_id: req.params.id }).first('id')) return 'riders';
+      if (await truckKit.openToolAlertFor(req.params.id, trx)) return 'open-alert';
+      const [row] = await trx('equipment')
+        .where({ id: req.params.id })
+        .update({ status: 'retired', updated_at: db.fn.now() })
+        .returning('*');
+      return row || null;
+    });
+    if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload and try again.' });
+    if (record === 'riders') return res.status(409).json({ error: 'Items still ride on this truck. Move them to another truck first.' });
+    if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it with an outcome first.' });
 
     if (!record) return res.status(404).json({ error: 'Equipment not found' });
     logger.info(`Equipment retired: ${record.name} (${record.id})`);
@@ -686,21 +726,101 @@ router.get('/alerts', async (req, res, next) => {
   }
 });
 
+// Resolving a truck-check alert (services/truck-kit.js) may carry an outcome:
+// lost and retired also set the item's status; found, repaired and replaced
+// only close the alert. The truck's office bell closes once no tool alert on
+// it is open. Admin only: an item's status is an office call.
+const TOOL_OUTCOME_STATUS = { found: null, repaired: null, replaced: null, lost: 'lost', retired: 'retired' };
+// A missing tool is found, replaced or lost; a damaged one repaired, replaced or retired.
+const OUTCOMES_BY_ALERT_TYPE = { tool_missing: ['found', 'replaced', 'lost'], tool_damaged: ['repaired', 'replaced', 'retired'] };
+const OPEN_TOOL_ALERT_STATUSES = ['new', 'acknowledged'];
+
+// Why a status change on an alert is refused, or null. A truck-check alert
+// closes from the office (the technician's own path is the next truck check,
+// which finds the tool), only by resolving it, only with an outcome from the
+// fixed list; a plain maintenance alert keeps its old reach.
+function alertTransitionRefusal({ toolAlert, alertType, status, outcome, techRole }) {
+  if ((toolAlert || outcome !== undefined) && techRole !== 'admin') return { code: 403, error: 'Admin access required' };
+  if (outcome !== undefined) {
+    if (!toolAlert) return { code: 400, error: 'outcome applies to truck check alerts only' };
+    if (!Object.prototype.hasOwnProperty.call(TOOL_OUTCOME_STATUS, outcome)) {
+      return { code: 400, error: 'outcome must be found, repaired, replaced, lost or retired' };
+    }
+    const allowed = OUTCOMES_BY_ALERT_TYPE[alertType] || [];
+    if (!allowed.includes(outcome)) return { code: 400, error: `a ${alertType === 'tool_missing' ? 'missing' : 'damaged'} tool resolves as ${allowed.join(', ')}` };
+    if (status !== 'resolved') return { code: 400, error: 'an outcome resolves the alert' };
+  }
+  // (The Fleet tab lists status=new only, so an acknowledged tool alert
+  // would vanish while still holding the tool and the bell.)
+  if (toolAlert && status !== 'resolved') return { code: 400, error: 'a truck check alert closes only by resolving it with an outcome' };
+  if (toolAlert && outcome === undefined) {
+    return { code: 400, error: 'resolving a truck check alert needs an outcome: found, repaired, replaced, lost or retired' };
+  }
+  return null;
+}
+
 // PUT /alerts/:id — update alert status
 router.put('/alerts/:id', async (req, res, next) => {
   try {
-    const { status, resolved_by } = req.body;
+    const { status, resolved_by, outcome } = req.body;
+    const existing = await db('maintenance_alerts').where('id', req.params.id).first();
+    if (!existing) return res.status(404).json({ error: 'Alert not found' });
+    const toolAlert = truckKit.TOOL_ALERT_TYPES.includes(existing.alert_type);
+    const refusal = alertTransitionRefusal({ toolAlert, alertType: existing.alert_type, status, outcome, techRole: req.techRole });
+    if (refusal) return res.status(refusal.code).json({ error: refusal.error });
     const updates = { status, updated_at: db.fn.now() };
     if (status === 'resolved') {
       updates.resolved_at = db.fn.now();
-      updates.resolved_by = resolved_by || 'admin';
+      // The outcome is part of the record: "admin: lost" says what happened
+      // to the tool even after the item's status changes again.
+      // Attribution is the signed-in admin, never client text.
+      const actor = req.technicianId ? `admin ${req.technicianId}` : (resolved_by || 'admin');
+      updates.resolved_by = outcome ? `${actor}: ${outcome}` : actor;
     }
 
-    const [record] = await db('maintenance_alerts')
-      .where('id', req.params.id)
-      .update(updates)
-      .returning('*');
+    // The alert, the item's status and the bell close commit together, under
+    // the truck's lock so a running truck check and this resolve never
+    // interleave (the check would re-ring a bell no open alert could clear).
+    const record = await db.transaction(async (trx) => {
+      let item = null;
+      if (toolAlert) {
+        // Same lock order as an asset save: the item row first, then its
+        // truck, then the assignment re-read under both.
+        await truckKit.lockTruck(trx, existing.equipment_id);
+        item = await trx('equipment').where('id', existing.equipment_id).first('assigned_vehicle_id');
+        if (item?.assigned_vehicle_id) {
+          await truckKit.lockTruck(trx, item.assigned_vehicle_id);
+          const again = await trx('equipment').where('id', existing.equipment_id).first('assigned_vehicle_id');
+          if ((again?.assigned_vehicle_id || null) !== (item.assigned_vehicle_id || null)) return 'moved';
+        }
+      }
+      // A stale office button never re-closes a tool alert a truck check
+      // already closed (it would mark a found tool lost): resolve only an
+      // open one, and answer 409 when none matches.
+      // ... and a closed tool alert never reopens either: every tool-alert
+      // transition needs the row still open.
+      let query = trx('maintenance_alerts').where('id', req.params.id);
+      if (toolAlert) query = query.whereIn('status', OPEN_TOOL_ALERT_STATUSES);
+      const [row] = await query.update(updates).returning('*');
+      if (!row) return toolAlert ? 'closed' : null;
+      if (status === 'resolved' && toolAlert) {
+        const nextStatus = outcome ? TOOL_OUTCOME_STATUS[outcome] : null;
+        if (nextStatus) await trx('equipment').where('id', row.equipment_id).update({ status: nextStatus, updated_at: db.fn.now() });
+        // And an audit row carries the outcome with the alert and the item.
+        // critical: a failed audit write propagates and rolls the resolve
+        // back, instead of leaving the transaction aborted behind a swallowed
+        // error.
+        await require('../services/audit-log').recordAuditEvent({
+          actor_type: 'admin', actor_id: req.technicianId || null, action: 'tool_alert_resolved', resource_type: 'maintenance_alerts', resource_id: row.id,
+          metadata: { outcome, equipment_id: row.equipment_id, alert_type: row.alert_type, item_status: nextStatus }, critical: true, trx,
+        });
+        if (item?.assigned_vehicle_id) await truckKit.closeTruckBellIfClear(item.assigned_vehicle_id, new Date(), trx);
+      }
+      return row;
+    });
 
+    if (record === 'closed') return res.status(409).json({ error: 'That alert is already closed (the truck check found the tool, or the office resolved it). Reload the list.' });
+    if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload the list.' });
     if (!record) return res.status(404).json({ error: 'Alert not found' });
     res.json({ alert: record });
   } catch (err) {

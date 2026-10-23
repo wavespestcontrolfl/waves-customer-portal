@@ -28,6 +28,15 @@ describe('dispatch readiness', () => {
     expect(button.title).toContain('Company stock is not a truck count');
   });
 
+  // Truck kit (GATE_TRUCK_KIT): the tools exception from services/truck-kit.js
+  // is a hold like stock or weather; the strip derives its state from the
+  // issue list alone, so an appended hold reads as a hold.
+  it('shows a missing truck tool as a hold', () => {
+    render(<DispatchReadinessStrip readiness={{ issues: [{ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter' }] }} onOpen={() => {}} />);
+    const button = screen.getByRole('button', { name: 'Truck lacks Moisture meter. Open Job Card' });
+    expect(button.className).toContain('text-alert-fg');
+  });
+
   it('never turns an empty exception list into application clearance', () => {
     render(<DispatchReadinessStrip readiness={{ issues: [] }} onOpen={() => {}} />);
     expect(screen.getByRole('button').textContent).toBe('View Job Card');
