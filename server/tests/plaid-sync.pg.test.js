@@ -604,6 +604,19 @@ async function activate(itemId, overrides = {}) {
     await plaidSync.disconnectItem(itemId);
   });
 
+  test('the ledger import\'s rows for a bank account (ledger-<last four>) block a feed that would start inside their days', async () => {
+    await mockPg('bank_transactions').insert({
+      account_label: 'ledger-1234', account_type: 'card', txn_date: '2025-12-31', source: 'ledger-csv',
+      description: 'LEDGER ROW', amount: 5, direction: 'debit', row_hash: 'l'.repeat(64),
+    });
+    const itemId = await connect();
+    // the Spark card's mask is 1234: the feed must start after the ledger's last day for that account
+    await expect(activate(itemId, { 'acc-card': { accountLabel: 'spark-card', syncFrom: '2025-12-31' } }))
+      .rejects.toThrow(/the ledger import through 2025-12-31 — start the feed on 2026-01-01/);
+    await activate(itemId, { 'acc-card': { accountLabel: 'spark-card', syncFrom: '2026-01-01' } });
+    await plaidSync.disconnectItem(itemId);
+  });
+
   test('CSV and feed never cover the same days for one label', async () => {
     await mockPg('bank_transactions').insert({
       account_label: 'capone-card', account_type: 'card', txn_date: '2026-09-10', source: 'csv',

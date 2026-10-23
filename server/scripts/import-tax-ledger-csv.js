@@ -653,28 +653,33 @@ function splitNearby(nearby, claimedBy) {
 // charge is in the portal through that row, so this one is parked with no
 // candidates (the link could never succeed) and the owner ignores it, or
 // creates the expense if it is a different purchase.
-function parkCovered(m, covered) {
+// The ledger's resolved category, carried on a parked row so Create expense
+// in Bank Import books it under the right line (and deducts the right
+// share) without a second pick; nothing when the portal lacks the category.
+function ledgerCategory(m, categoryIds) {
+  const categoryId = categoryIds.get(m.categoryName) || null;
+  return categoryId ? { categoryId, categoryName: m.categoryName, categorySource: 'ledger' } : {};
+}
+function parkCovered(m, covered, categoryIds) {
   const row = m.ledgerRow;
   const first = [...covered].sort(candidateOrder)[0];
   const why = `already booked in the portal: ${covered.length === 1 ? 'an expense' : `${covered.length} expenses`} of the same amount linked to a feed or upload row (${first.claimedBy.account_label || 'no label'}, posted ${ymdOf(first.claimedBy.txn_date)})`;
-  parkForReview(m, row, { note: `${why}: ignore this row if it is the same charge, or create the expense here if it is a different purchase`, manualLink: true });
+  parkForReview(m, row, { note: `${why}: ignore this row if it is the same charge, or create the expense here if it is a different purchase`, manualLink: true, ...ledgerCategory(m, categoryIds) });
   return why;
 }
 function parkNear(m, nearUnsorted, categoryIds) {
   const row = m.ledgerRow;
   const near = [...nearUnsorted].sort(candidateOrder);
   const why = describeNearby(near, row.date, m.bank.amount);
-  const categoryId = categoryIds.get(m.categoryName) || null;
+  const category = ledgerCategory(m, categoryIds);
   parkForReview(m, row, {
-    note: `${why}: link this row to that expense in Bank Import, or create the expense there if it is a different purchase${categoryId ? '' : `; no category in the portal for line ${row.sched_c_line || '(none)'}`}`,
+    note: `${why}: link this row to that expense in Bank Import, or create the expense there if it is a different purchase${category.categoryId ? '' : `; no category in the portal for line ${row.sched_c_line || '(none)'}`}`,
     candidates: near.slice(0, 20).map(e => ({ id: e.id, amount: grossOf(e), description: e.description, vendor_name: e.vendor_name, expense_date: ymdOf(e.expense_date) })),
     candidatesTotal: near.length,
     // the link is the owner's call: the matcher offers candidates on this
     // row and never claims one by itself
     manualLink: true,
-    // the ledger's category rides along, so Create expense in Bank Import
-    // books it under the right line without a second pick
-    ...(categoryId ? { categoryId, categoryName: m.categoryName, categorySource: 'ledger' } : {}),
+    ...category,
   });
   return why;
 }
@@ -708,13 +713,13 @@ function reconcileRows(mapped, rows, portal) {
     const prior = existing.get(m.bank.row_hash);
     if (prior) {
       const reason = reloadReason(prior, m);
-      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, portalNote: reason.portalNote, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion), reading: readingKeys(m.bank.suggestion) });
+      if (reason) held.push({ ...note(i, `${reason.why}; ${reading(m, i)}`), rowId: prior.id, portalNote: reason.portalNote, loadedAs: describeReading(prior.suggestion), fileSays: describeReading(m.bank.suggestion), reading: readingKeys(m.bank.suggestion), category: m.expense ? ledgerCategory(m, categoryIds) : {} });
       else duplicates += 1;
       return;
     }
     if (m.expense) {
       const { near, covered } = splitNearby(nearbyExpenses(portalExpenses, rows[i], m.bank), claimedBy);
-      if (covered.length) parked.push({ ...note(i, `${parkCovered(m, covered)}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
+      if (covered.length) parked.push({ ...note(i, `${parkCovered(m, covered, categoryIds)}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
       else if (near.length) parked.push({ ...note(i, `${parkNear(m, near, categoryIds)}; ${reading(m, i)}`), rowHash: m.bank.row_hash });
       else if (!categoryIds.has(m.categoryName)) parkForReview(m, rows[i]);
     }
@@ -727,11 +732,18 @@ function reconcileRows(mapped, rows, portal) {
 // shows them under the row and on its Create expense button) and the
 // conflict itself, with the same atomic jsonb merge the matcher uses
 // (bank-import suggestionMerge): a concurrent writer can only append.
+// The category default follows the file too: a ledger default an earlier
+// run stored (categorySource 'ledger') goes, and the corrected reading's
+// category comes in when the file now books it; a model's or a rule's
+// category is not the ledger's and stays.
 async function noteHeldRows(db, held) {
   for (const h of held) {
-    const patch = { ...h.reading, review: true, note: h.portalNote, ledgerConflict: { at: new Date().toISOString(), loadedAs: h.loadedAs, fileSays: h.fileSays, line: h.line } };
+    const patch = { ...h.reading, ...h.category, review: true, note: h.portalNote, ledgerConflict: { at: new Date().toISOString(), loadedAs: h.loadedAs, fileSays: h.fileSays, line: h.line } };
     await db('bank_transactions').where({ id: h.rowId })
-      .update({ suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]), updated_at: new Date() });
+      .update({
+        suggestion: db.raw("(case when suggestion ->> 'categorySource' = 'ledger' then coalesce(suggestion, '{}'::jsonb) - 'categoryId' - 'categoryName' - 'irsLine' - 'categorySource' else coalesce(suggestion, '{}'::jsonb) end) || ?::jsonb", [JSON.stringify(patch)]),
+        updated_at: new Date(),
+      });
   }
 }
 
@@ -750,7 +762,7 @@ async function nearbyAtWrite(dbOrTrx, m, portal, createdIds) {
 }
 // The park a recheck chose, and its report line.
 function parkAtWrite(m, found, portal, when) {
-  const why = found.covered.length ? parkCovered(m, found.covered) : parkNear(m, found.near, portal.categoryIds);
+  const why = found.covered.length ? parkCovered(m, found.covered, portal.categoryIds) : parkNear(m, found.near, portal.categoryIds);
   const row = m.ledgerRow;
   return { line: row.line, description: row.description, amount: Number(row.amount).toFixed(2), date: row.date, why: `${why} (${when}); the ledger says ${row.class}${m.categoryName ? ` (${m.categoryName})` : ''}`, rowHash: m.bank.row_hash };
 }

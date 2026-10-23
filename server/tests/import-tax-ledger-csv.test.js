@@ -474,8 +474,11 @@ describe('run', () => {
     expect(noted).toHaveLength(3);
     const acmeRow = db.tables().bank_transactions.find(b => b.description === 'ACME SUPPLY 4471');
     expect(acmeRow.status).toBe('created_expense');
-    expect(acmeRow.suggestion.sql).toMatch(/coalesce\(suggestion, '\{\}'::jsonb\) \|\| \?::jsonb/);
+    expect(acmeRow.suggestion.sql).toMatch(/\|\| \?::jsonb$/); // merged onto the stored suggestion, never a rebuild
+    // a ledger category default an earlier run stored goes with the old reading (a model's or a rule's would stay)
+    expect(acmeRow.suggestion.sql).toMatch(/case when suggestion ->> 'categorySource' = 'ledger' then coalesce\(suggestion, '\{\}'::jsonb\) - 'categoryId' - 'categoryName' - 'irsLine' - 'categorySource' else/);
     const merged = JSON.parse(acmeRow.suggestion.bindings[0]);
+    expect(merged.categoryId).toBeUndefined();
     // the note names the way out for a CREATED row (Bank Import has no unlink for it), and the stored reading follows the file
     expect(merged).toMatchObject({ review: true, note: expect.stringMatching(/^the ledger file now reads this row as personal \(Personal\); it was loaded as expense \(Supplies \(chemicals, equipment, hardware\), line 22\) and booked as an expense: delete that expense on the Expenses tab \(this row reopens\), then decide it here$/), ledgerClass: 'personal', ledgerCategory: 'Personal', schedCLine: '', ledgerConflict: expect.objectContaining({ loadedAs: expect.stringMatching(/^expense/), fileSays: 'personal (Personal)', line: expect.any(Number) }) });
     // the helper's row was ignored: its way out is an unignore
@@ -484,6 +487,22 @@ describe('run', () => {
     // a rerun of the same corrected file does not hold the rows again: the stored reading now matches the file (the fake stores the merged patch as the row's suggestion)
     for (const b of noted) b.suggestion = { ...JSON.parse(b.suggestion.bindings[0]) };
     expect((await run({ file, db })).counts).toMatchObject({ held: 0, duplicates: 8, inserted: 0 });
+  });
+
+  test('a parked row corrected to another business category on a rerun gets the corrected category as its default', async () => {
+    const db = makeFakeDb();
+    db.tables().expenses.push({ id: 'exp-hand', expense_date: '2025-03-14', amount: '12.50', vendor_name: 'Acme Supply', description: 'supplies' });
+    await run({ file, db }); // the Acme row parks (a hand expense of the same amount) with Supplies as its ledger default
+    const acmeRow = db.tables().bank_transactions.find(b => b.description === 'ACME SUPPLY 4471');
+    expect(acmeRow.suggestion).toMatchObject({ categoryName: 'Supplies', categorySource: 'ledger' });
+    const rows = parseLedgerCsv(fs.readFileSync(file, 'utf8'));
+    const edited = rows.map((r) => ({ ...r }));
+    const acme = edited.find((r) => r.description === 'ACME SUPPLY 4471'); acme.sched_c_line = '24b'; acme.category = 'Meals';
+    fs.writeFileSync(file, csv(...edited.map((r) => row({ source: r.source, date: r.date, description: r.description, amount: String(r.amount.toFixed(2)), direction: r.direction, class: r.class, category: r.category, sched_c_line: r.sched_c_line, flag: r.flag }))));
+    const { counts } = await run({ file, db });
+    expect(counts).toMatchObject({ held: 1 });
+    const merged = JSON.parse(acmeRow.suggestion.bindings[0]);
+    expect(merged).toMatchObject({ categoryId: 'cat-7', categoryName: 'Meals & Entertainment', categorySource: 'ledger', schedCLine: '24b', review: true });
   });
 
   test('a dry run lists the holds but writes no note', async () => {
@@ -958,6 +977,8 @@ describe('what the portal already holds', () => {
     const parkedRow = db.tables().bank_transactions.find(b => b.description === 'ACME SUPPLY 4471' && b.source === 'ledger-csv');
     expect(parkedRow.suggestion).toMatchObject({ review: true, manualLink: true, note: expect.stringMatching(/^already booked in the portal: .*: ignore this row if it is the same charge, or create the expense here if it is a different purchase$/) });
     expect(parkedRow.suggestion.candidates).toBeUndefined();
+    // the ledger's category rides along here too: a different purchase books under its own line
+    expect(parkedRow.suggestion).toMatchObject({ categoryId: 'cat-3', categoryName: 'Supplies', categorySource: 'ledger' });
   });
 
   test('after the commit the check runs once more on a fresh read (the matcher\'s post-claim verify): an expense that landed between the recheck and the insert reverts the booking into a park', async () => {
