@@ -151,6 +151,15 @@ it in live mode only, right under the status card, with the image and
 without the raw URL. Off, or nothing frozen, the field is `null` (the switch
 hides frozen posts too). Auth, headers and routes are unchanged.
 
+Typed narrative fallback flag (owner 2026-10-22, "say a thing once"): on the
+service-report payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), `summaryIsTemplate` is `true` only when `summarySource`
+is `typed_narrative` and that narrative is the fixed fallback summary
+(`isTypedNarrativeFallback`, rodent-report-narrative.js), not model prose; it
+is `false` otherwise. The termite and cockroach status cards leave such a
+narrative out, since their status line, rows and next-step section print each
+of its facts. Auth, headers and routes are unchanged.
+
 Pest Pressure technician direct score (owner ruling 2026-09-24): on the
 service-report payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), when the visit's rating was entered by staff

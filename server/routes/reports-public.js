@@ -465,6 +465,12 @@ async function buildServiceReportV1ResponseData(service, token, {
   // OPT-IN on the same terms (GATE_LAWN_WATER_IN_RAIN): only the /data render and the PDF render print the
   // lawn watering banner, so only they pay for the rain lookup. /ask and /map.svg never do.
   lawnWaterInRain = false,
+  // ADMIN REPORT PREVIEW (routes/admin-report-preview.js): `service` is an
+  // in-memory record for a visit that is not completed (id null, no token).
+  // Threaded into the builder so every durable write on the render path is
+  // skipped, and the record-keyed dynamic context (AI summary cache insert,
+  // pressure/neighborhood reads) is not built: it has no record to key on.
+  preview = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -487,6 +493,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     lawnPhotoFindings,
     lawnRainfastWatch,
     lawnWaterInRain,
+    preview,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -550,12 +557,14 @@ async function buildServiceReportV1ResponseData(service, token, {
   // but we pass the resolved value to avoid a redundant DB roundtrip
   // (the visibility check loads config + score row).
   const omitPestPressureContext = data.pestPressure === null;
-  const dynamicContext = await buildServiceReportDynamicContext({
-    recordId: service.id,
-    mode,
-    omitPestPressureContext,
-    pestPressureConfig,
-  });
+  const dynamicContext = preview
+    ? { mode }
+    : await buildServiceReportDynamicContext({
+      recordId: service.id,
+      mode,
+      omitPestPressureContext,
+      pestPressureConfig,
+    });
   // Suppressed typed reports (internal_only shadow / disabled kill switch)
   // reach this builder only for staff viewers — the param gate 404s everyone
   // else. No PDF exists for these records (renders are deferred until

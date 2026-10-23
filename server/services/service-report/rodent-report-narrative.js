@@ -1528,8 +1528,20 @@ async function applyTypedReportNarrative(input = {}, deps = {}) {
   return value;
 }
 
+// True when `text` is the fixed summary applyTypedReportNarrative falls back
+// to for these inputs (the model missed, failed or was refused), not prose the
+// model wrote. The termite and cockroach status cards already print every fact
+// that fallback states, so they leave it out (owner 2026-10-22: say a thing
+// once); written prose always prints.
+function isTypedNarrativeFallback(input = {}, text = '') {
+  const facts = groundingFacts(input);
+  if (!facts.recap && !facts.todaysResult) return false;
+  return cleanText(text) === cleanText(deterministicSummary(facts));
+}
+
 module.exports = {
   applyTypedReportNarrative,
+  isTypedNarrativeFallback,
   // Back-compat alias — the rodent refresh (GATE_RODENT_REPORT_REFRESH)
   // shipped against this name; same engine.
   applyRodentReportNarrative: applyTypedReportNarrative,

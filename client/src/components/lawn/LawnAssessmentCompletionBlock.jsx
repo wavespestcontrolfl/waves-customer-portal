@@ -181,6 +181,10 @@ function LawnAssessmentCompletionBlock({
   // Height measurement stays optional; separate lawn-length photo capture is retired.
   showGaugeReading = false,
   gaugeHeightIn = null,
+  // Admin hosts only (SchedulePage): once confirmed, a link to the customer
+  // report preview for this open visit (/admin/report-preview/:serviceId,
+  // read-only, sends nothing). The tech sheet leaves it off.
+  showReportPreview = false,
   onGaugeHeight,
   // The tech's free-text visit notes (owned by CompletionPanel) — passed through
   // so the AI photo analysis can factor them in alongside the images.
@@ -823,7 +827,18 @@ function LawnAssessmentCompletionBlock({
                 <span aria-hidden="true">{"\u2713"}</span>
                 Assessment confirmed
               </div>
-            ) : (
+            ) : null}
+            {confirmed && showReportPreview && service?.id ? (
+              <a
+                className={`${PILL_OUTLINE} inline-flex items-center justify-center`}
+                href={`/admin/report-preview/${encodeURIComponent(service.id)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Preview report
+              </a>
+            ) : null}
+            {confirmed ? null : (
               <Button
                 className={`flex-1 ${PILL}`}
                 onClick={confirm}
