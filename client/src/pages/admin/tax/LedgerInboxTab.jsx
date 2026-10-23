@@ -252,10 +252,13 @@ function RulesPanel({ categories }) {
     e.preventDefault();
     if (!form.pattern.trim()) { setError("Enter a pattern."); return; }
     if (form.kind === "expense" && !form.categoryId) { setError("Choose a category for an expense rule."); return; }
+    // 0 is a valid priority (lower runs first): only a blank field means the default
+    const priority = String(form.priority).trim() === "" ? 10 : Number(form.priority);
+    if (!Number.isFinite(priority)) { setError("Priority must be a number (lower runs first; blank means 10)."); return; }
     setBusy(true);
     setError("");
     try {
-      const body = { pattern: form.pattern.trim(), kind: form.kind, priority: Number(form.priority) || 10 };
+      const body = { pattern: form.pattern.trim(), kind: form.kind, priority };
       if (form.kind === "expense") body.categoryId = form.categoryId;
       if (form.note.trim()) body.note = form.note.trim();
       await post(`${T}/ledger/rules`, body);

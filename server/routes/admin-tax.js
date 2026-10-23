@@ -2310,13 +2310,21 @@ router.post('/bank-import/match', async (req, res, next) => {
 // show "internal transfer?" over the new category. The write repeats the
 // case it read: a flag that appeared, or a rule that went, during the
 // model call makes it miss instead.
+// With the gate off, every key the row's rule wrote goes with the rule,
+// its reason included: "personal per ledger rule" must not resurface next
+// to the model's category when the gate comes back on (no rule pass would
+// clear it: the pass only stamps a row no rule matches).
 function aiWriteFlagState(sug, ledgerOn) {
-  const ruleFlag = !ledgerOn && !!(sug && sug.ignore && sug.rule && sug.rule.kind === 'transfer');
+  const ruleOwned = !ledgerOn && !!(sug && sug.rule);
+  const ruleFlag = ruleOwned && !!sug.ignore && sug.rule.kind === 'transfer';
   if (ruleFlag) {
     return {
       flagState: "coalesce(suggestion->>'ignore','') = 'true' and (suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null",
       dropKeys: [...bankImport.LEDGER_RULE_KEYS, 'ignore', 'reason'],
     };
+  }
+  if (ruleOwned) {
+    return { flagState: "coalesce(suggestion->>'ignore','') <> 'true' and (suggestion->'rule') is not null", dropKeys: [...bankImport.LEDGER_RULE_KEYS, 'reason'] };
   }
   return { flagState: "coalesce(suggestion->>'ignore','') <> 'true'", dropKeys: bankImport.LEDGER_RULE_KEYS };
 }
@@ -2464,7 +2472,11 @@ async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnP
     const patch = { status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() };
     if (fromLedger) {
       claim = claim.whereRaw(taxLedgerRules.MATCHER_EXAMINED_SQL).whereRaw(taxLedgerRules.NO_LIVE_CANDIDATES_SQL).whereRaw(taxLedgerRules.NOT_DECIDED_OR_LATER_SQL);
-      patch.suggestion = bankImport.suggestionMerge({}, taxLedgerRules.LATER_KEYS);
+      // the owner's decision supersedes the rule reading the row carried
+      // (and the Later keys): a row reopened later (its expense deleted)
+      // starts clean, so the next rule pass classifies it afresh instead
+      // of skipping a stale stamp
+      patch.suggestion = bankImport.suggestionMerge({}, [...taxLedgerRules.LATER_KEYS, ...bankImport.LEDGER_RULE_KEYS]);
     }
     const claimed = await claim.update(patch);
     if (!claimed) {

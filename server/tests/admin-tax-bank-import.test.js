@@ -428,6 +428,8 @@ describe('create-expense (gate on)', () => {
     expect(claim.wheres).toContainEqual(["coalesce(suggestion ->> 'decision', '') <> 'income'", undefined]);
     // Business is offered on the Later shelf: the claim drops that decision and its shelf key with the booking
     for (const k of ['later', 'decision', 'decidedAt']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
+    // and the rule reading the row carried: the owner's decision supersedes it, so a reopened row (expense deleted) gets a fresh rule pass
+    for (const k of ['rule', 'rulesAt', 'examined']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
     // the plain Bank Import path: an Income item is never an expense; a Later row may still be booked
     state.bankUpdates = []; state.insertedExpenses = [];
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);
@@ -1358,6 +1360,17 @@ describe('AI suggest eligibility follows the ledger kill switch', () => {
     expect((await (await post('/admin/tax/bank-import/suggest', { ids: ['bt-9'] })).json()).results[0].applied).toBe(true);
     expect(String(state.bankUpdates[0].patch.suggestion.sql)).not.toContain("- 'ignore'");
     expect(state.bankUpdates[0].wheres).toContainEqual(["coalesce(suggestion->>'ignore','') <> 'true'", undefined]);
+  });
+  test('gate off: a personal rule\'s hidden reason goes with the rule when the model\'s category replaces it; the write requires the rule to still be there', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    state.listRows = [{ id: 'bt-10', description: 'STREAMING SVC 0042', amount: '15.49', suggestion: { personal: true, reason: 'personal per ledger rule', rule: { id: 'r', kind: 'personal' }, rulesAt: '2026-10-01T00:00:00Z' } }];
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+    state.bankUpdates = [];
+    expect((await (await post('/admin/tax/bank-import/suggest', { ids: ['bt-10'] })).json()).results[0].applied).toBe(true);
+    for (const k of ['rule', 'rulesAt', 'personal', 'reason']) expect(String(state.bankUpdates[0].patch.suggestion.sql)).toContain(`- '${k}'`);
+    expect(String(state.bankUpdates[0].patch.suggestion.sql)).not.toContain("- 'ignore'");
+    expect(state.bankUpdates[0].wheres).toContainEqual(["coalesce(suggestion->>'ignore','') <> 'true' and (suggestion->'rule') is not null", undefined]);
   });
   test('gate on: the AI write repeats the eligibility (no personal rule, no transfer flag) and reports applied only when it lands', async () => {
     process.env.GATE_TAX_LEDGER = 'true';

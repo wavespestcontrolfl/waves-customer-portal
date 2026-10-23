@@ -295,6 +295,34 @@ it('a full reload after an Always decision never brings back a row decided while
   expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument();
 });
 
+it('a rule saved with priority 0 keeps 0 (lower runs first); a blank priority is the default 10', async () => {
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    const method = opts.method || 'GET';
+    if (u.includes('/ledger/rules') && method === 'GET') return json({ rules: [] });
+    if (u.includes('/ledger/rules') && method === 'POST') { calls.push({ url: u, method, body: JSON.parse(opts.body) }); return json({ success: true, rule: { id: 'r9' } }); }
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByText('ACME HARDWARE 123');
+  fireEvent.click(screen.getByRole('button', { name: 'Rules' }));
+  await screen.findByRole('button', { name: 'Add rule' });
+  const saved = () => calls.filter((c) => c.method === 'POST' && c.url.includes('/ledger/rules'));
+  fireEvent.change(screen.getByLabelText('Pattern'), { target: { value: 'wawa' } });
+  fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'personal' } });
+  fireEvent.change(screen.getByLabelText('Priority'), { target: { value: '0' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add rule' }));
+  await waitFor(() => expect(saved()).toHaveLength(1));
+  expect(saved()[0].body).toEqual({ pattern: 'wawa', kind: 'personal', priority: 0 });
+  fireEvent.change(screen.getByLabelText('Pattern'), { target: { value: 'costco' } });
+  fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'personal' } });
+  fireEvent.change(screen.getByLabelText('Priority'), { target: { value: '' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add rule' }));
+  await waitFor(() => expect(saved()).toHaveLength(2));
+  expect(saved()[1].body.priority).toBe(10);
+});
+
 it('the Income view offers Recorded, which settles the row with the recorded decision; other views do not', async () => {
   const base = fetch;
   const credit = { ...row, direction: 'credit', amount: 120, suggestion: { noMatch: true, income: true, decision: 'income' } };
