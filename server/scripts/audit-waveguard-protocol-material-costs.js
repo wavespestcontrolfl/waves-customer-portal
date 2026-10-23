@@ -230,7 +230,7 @@ function buildCadenceReport(products, lawn = lawnProtocols(), v13Rows = new Map(
     ]) {
       const visits = (track.visits || []).filter((visit) => visit.tiers?.[protocolTier]);
       // A plan of this many applications runs its own step where the recipe has one
-      // (v13 April on 9x: Dimension 18-0-10, not the 24-0-11); the static allowance
+      // (v13 April on 9x: Dimension 18-0-10, not the 44-0-0 polymer bag); the static allowance
       // below still reads the calendar visit.
       const results = visits.map((visit) => analyzeVisit({
         trackKey, track, visit: visitForCadence(visit, applications).visit, products, lawnSqft: MATERIAL_REFERENCE_SQFT, v13Rows,

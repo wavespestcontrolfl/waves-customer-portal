@@ -2111,7 +2111,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const recipeVisit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
     ? null : selection.visit;
   // A visit whose step depends on the plan's cadence (v13 April: the 9x plan takes
-  // Dimension 18-0-10 where every other plan takes 24-0-11) reads the cadence
+  // Dimension 18-0-10 where every other plan takes the 44-0-0 polymer bag) reads the cadence
   // from the booked service; unknown keeps the 12x step and warns.
   const { visit: recipeStep, unknownCadence } = await visitForPlan(knex, recipeVisit, service);
   const assignedProtocol = summarizeProtocolContext(structuredProtocolContext);
