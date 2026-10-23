@@ -211,8 +211,13 @@ function sameAccount(source, accountLabel, masks) {
 // rows without that identity go by their label.
 function sameAccountRow(source, row, ids) {
   const code = String(source || '').trim().toLowerCase();
-  const byId = row.plaid_account_id ? ids.masksById.get(String(row.plaid_account_id)) : null;
-  if (byId) return byId.toLowerCase() === code;
+  const acct = row.plaid_account_id ? ids.accountsById.get(String(row.plaid_account_id)) : null;
+  if (acct) {
+    // a numeric source is the account's mask, nothing else; an alias (amex)
+    // has no mask to compare and is read from the account's CURRENT label
+    if (/^\d+$/.test(code)) return String(acct.mask || '').toLowerCase() === code;
+    return sameAccount(source, acct.label, ids.masks) || sameAccount(source, row.account_label, ids.masks);
+  }
   return sameAccount(source, row.account_label, ids.masks);
 }
 
@@ -494,14 +499,14 @@ async function loadPortalState(db, mapped, rows, skipExisting) {
   }
   const plaidAccounts = await db('plaid_accounts').select('account_id', 'account_label', 'mask');
   const masks = new Map(plaidAccounts.map(a => [String(a.account_label), String(a.mask || '')]));
-  const masksById = new Map(plaidAccounts.filter(a => a.account_id).map(a => [String(a.account_id), String(a.mask || '')]));
+  const accountsById = new Map(plaidAccounts.filter(a => a.account_id).map(a => [String(a.account_id), { mask: String(a.mask || ''), label: String(a.account_label || '') }]));
   const categories = await db('expense_categories').select('id', 'name');
-  return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, masksById, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
+  return { existing, existingBank, handExpenses, coveredExpenses, linkedRows, masks, accountsById, categoryIds: new Map(categories.map(c => [c.name, c.id])) };
 }
 
 // Pools of the portal's rows, consumed one-for-one as ledger rows match them.
-function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRows = [], masks = new Map(), masksById = new Map() }) {
-  const ids = { masks, masksById };
+function buildPools({ existingBank, handExpenses, coveredExpenses = [], linkedRows = [], masks = new Map(), accountsById = new Map() }) {
+  const ids = { masks, accountsById };
   const bankLeft = new Map();
   existingBank.forEach(f => { const k = tupleKey(f); if (!bankLeft.has(k)) bankLeft.set(k, []); bankLeft.get(k).push(f); });
   // A feed writes its own text for a transaction ("Wawa" against the
@@ -607,8 +612,8 @@ function openReason(row, m) {
 
 // Which ledger rows load, and which the portal already answers for.
 function reconcileRows(mapped, rows, portal) {
-  const { existing, masks, masksById, categoryIds } = portal;
-  const ids = { masks, masksById };
+  const { existing, masks, accountsById, categoryIds } = portal;
+  const ids = { masks, accountsById };
   const pools = buildPools(portal);
   const fresh = [];
   const unsure = [];

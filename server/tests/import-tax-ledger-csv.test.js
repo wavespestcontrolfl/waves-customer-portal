@@ -795,6 +795,18 @@ describe('--skip-existing and expenses', () => {
     db2.tables().plaid_accounts.push({ account_id: 'plaid-acct-2', account_label: 'savings 7777', mask: '7777' });
     db2.tables().bank_transactions.push({ id: 'pl-2', row_hash: 'h2', source: 'plaid', account_label: 'old label 3098', plaid_account_id: 'plaid-acct-2', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
     expect((await run({ file, db: db2, skipExisting: true })).counts).toMatchObject({ overlaps: 0, unsure: 1, inserted: 1 });
+    // the amex source has no mask to compare: the Plaid account's CURRENT label carries the alias
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', source: 'amex' })));
+    const db3 = makeFakeDb();
+    db3.tables().plaid_accounts.push({ account_id: 'plaid-amex', account_label: 'American Express Blue 1005', mask: '1005' });
+    db3.tables().bank_transactions.push({ id: 'pl-3', row_hash: 'h3', source: 'plaid', account_label: 'blue card', plaid_account_id: 'plaid-amex', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
+    expect((await run({ file, db: db3, skipExisting: true })).counts).toMatchObject({ overlaps: 1, held: 0, inserted: 0 });
+    // and a numeric source never matches a Plaid account whose label merely says amex
+    fs.writeFileSync(file, csv(row({ description: 'ACME SUPPLY 4471', amount: '12.50', source: '3098' })));
+    const db4 = makeFakeDb();
+    db4.tables().plaid_accounts.push({ account_id: 'plaid-amex', account_label: 'amex 3098 rewards', mask: '1005' });
+    db4.tables().bank_transactions.push({ id: 'pl-4', row_hash: 'h4', source: 'plaid', account_label: 'amex 3098 rewards', plaid_account_id: 'plaid-amex', txn_date: first.date, description: first.description, amount: first.amount, direction: 'debit', status: 'created_expense', matched_expense_id: 'exp-x' });
+    expect((await run({ file, db: db4, skipExisting: true })).counts).toMatchObject({ overlaps: 0, inserted: 1 });
   });
 
   test('a hand-entered expense a refund reduced is compared at its gross amount (applied or released refund), as the matcher does', async () => {
