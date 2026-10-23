@@ -83,7 +83,8 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
   });
 
   const samBids = () => mockPg('bid_opportunities').where({ source: 'sam_gov' }).orderBy('created_at');
-  const cursor = async () => JSON.parse((await mockPg('system_settings').where({ key: sam.CURSOR_KEY }).first('value')).value).from;
+  const cursorState = async () => JSON.parse((await mockPg('system_settings').where({ key: sam.CURSOR_KEY }).first('value')).value);
+  const cursor = async () => (await cursorState()).from;
 
   test('the migrations are reversible and the old sources still pass the check', async () => {
     await sourceActiveMigration.down(mockPg);
@@ -245,7 +246,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
   test('an open bid is re-read by notice id, so an archive outside the posted-date window still reaches it', async () => {
     await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-13')]), apiKey: 'test-key' });
     const [filed] = await samBids();
-    await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid', created_at: NOW });
+    await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: true, status: 'bid' });
     // Date-filtered like the API: the posted-date search finds nothing new; only the by-id read returns the notice.
     const later = new Date('2026-10-29T12:00:00Z');
     const fetchImpl = jest.fn(async (url) => {
@@ -257,7 +258,8 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     });
     expect(await sam.runSamGovPoll({ now: later, fetchImpl, apiKey: 'test-key' })).toMatchObject({ refreshed: 1, rung: 1 });
     const byId = fetchImpl.mock.calls.map(([u]) => new URL(u).searchParams).find((p) => p.get('noticeid'));
-    expect(byId.get('postedFrom')).toBe('10/21/2026');
+    // The whole one-year range: the notice may have been posted long before it was filed here.
+    expect(byId.get('postedFrom')).toBe('10/30/2025');
     expect(byId.get('ncode')).toBeNull();
     const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
     expect(bid.source_active).toBe(false);
@@ -267,6 +269,22 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     fetchImpl.mockClear();
     await sam.runSamGovPoll({ now: later, fetchImpl, apiKey: 'test-key' });
     expect(fetchImpl.mock.calls.some(([u]) => new URL(u).searchParams.get('noticeid'))).toBe(false);
+  });
+
+  test('the by-id refresh rotates through every open bid in batches', async () => {
+    const ids = Array.from({ length: sam.REFRESH_LIMIT + 3 }, (_, i) => `r-${String(i).padStart(3, '0')}`);
+    await mockPg('bid_opportunities').insert(ids.map((id) => ({ source: 'sam_gov', external_id: id, status: 'new', source_active: true })));
+    const read = async () => {
+      const fetchImpl = fakeFetch([]);
+      await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'test-key' });
+      return fetchImpl.mock.calls.map(([u]) => new URL(u).searchParams.get('noticeid')).filter(Boolean);
+    };
+    const first = await read();
+    expect(first).toEqual(ids.slice(0, sam.REFRESH_LIMIT));
+    expect((await cursorState()).refresh_after).toBe(ids[sam.REFRESH_LIMIT - 1]);
+    expect(await read()).toEqual(ids.slice(sam.REFRESH_LIMIT));
+    expect((await cursorState()).refresh_after).toBeNull();
+    expect(await read()).toEqual(ids.slice(0, sam.REFRESH_LIMIT));
   });
 
   test('a cursor older than a year is clamped to the API window', async () => {

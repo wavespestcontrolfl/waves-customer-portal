@@ -180,18 +180,22 @@ async function fetchAll({ apiKey, filter, postedFrom, postedTo, fetchImpl }) {
 
 // ---------- cursor ----------
 
+// { from, refreshAfter }: the next posted-from date, and the notice id the by-id refresh continues after (null = start).
 async function readCursor() {
   const row = await db('system_settings').where({ key: CURSOR_KEY }).first('value');
   try {
     const parsed = row?.value ? JSON.parse(row.value) : null;
-    return parsed && /^\d{4}-\d{2}-\d{2}$/.test(parsed.from || '') ? parsed.from : null;
+    return {
+      from: parsed && /^\d{4}-\d{2}-\d{2}$/.test(parsed.from || '') ? parsed.from : null,
+      refreshAfter: typeof parsed?.refresh_after === 'string' ? parsed.refresh_after : null,
+    };
   } catch {
-    return null;
+    return { from: null, refreshAfter: null };
   }
 }
 
-async function writeCursor(from) {
-  const value = JSON.stringify({ from });
+async function writeCursor({ from, refreshAfter }) {
+  const value = JSON.stringify({ from, refresh_after: refreshAfter });
   await db('system_settings').insert({ key: CURSOR_KEY, value, category: 'bid_desk', description: 'Bid Desk SAM.gov reader: next posted-from date' })
     .onConflict('key').merge({ value, updated_at: db.fn.now() });
 }
@@ -266,11 +270,11 @@ function safeError(err) {
   return `${err?.name || 'Error'}${err?.code ? ` ${err.code}` : ''}`;
 }
 
-// Every notice posted in the window, once per notice id across the NAICS codes, plus the latest version of each open
-// SAM.gov bid already filed. The posted-date window alone would never see an older notice again once it is archived
+// Every notice posted in the window, once per notice id across the NAICS codes, plus the latest version of open
+// SAM.gov bids already filed (one rotating batch a run). The posted-date window alone would never see an older notice again once it is archived
 // without a repost, so each run re-reads the open bids by notice id: republish, a removed deadline and an archive all
 // reach refreshPatch the same way. A failure on any call throws before the cursor moves, so the next run tries again.
-async function collectNotices({ apiKey, postedFrom, postedTo, now, fetchImpl }) {
+async function collectNotices({ apiKey, postedFrom, postedTo, refreshFrom, refreshAfter, fetchImpl }) {
   const seen = new Map();
   const add = (notices, onlyId = null) => {
     for (const notice of notices) {
@@ -281,22 +285,25 @@ async function collectNotices({ apiKey, postedFrom, postedTo, now, fetchImpl }) 
   for (const ncode of NAICS_CODES) {
     add(await fetchAll({ apiKey, filter: { ncode, state: 'FL' }, postedFrom, postedTo, fetchImpl }));
   }
-  const oldest = etDayOffset(now, -MAX_WINDOW_DAYS);
-  for (const bid of await openSamBids()) {
-    // From the day before the bid was filed (its notice was posted by then), inside the API's one-year range.
-    const filedFrom = etDayOffset(new Date(bid.created_at), -1);
-    const from = filedFrom < oldest ? oldest : filedFrom;
-    const { notices } = await fetchPage({ apiKey, filter: { noticeid: bid.external_id }, postedFrom: apiDate(from), postedTo, offset: 0, fetchImpl });
-    add(notices, bid.external_id);
+  // The by-id read needs a posted-date range too. The notice may have been posted long before it was filed here (the
+  // first run looks back 30 days), so it uses the API's whole one-year range.
+  const batch = await openSamBids(refreshAfter);
+  for (const externalId of batch) {
+    const { notices } = await fetchPage({ apiKey, filter: { noticeid: externalId }, postedFrom: refreshFrom, postedTo, offset: 0, fetchImpl });
+    add(notices, externalId);
   }
-  return [...seen.values()];
+  // A full batch continues after its last id next run; a short one wraps to the start, so every open bid is checked.
+  return { notices: [...seen.values()], nextRefreshAfter: batch.length === REFRESH_LIMIT ? batch[batch.length - 1] : null };
 }
 
-// Open SAM.gov bids whose notice is still listed active: the ones a change on SAM.gov could still affect.
-async function openSamBids() {
-  return db('bid_opportunities').where({ source: 'sam_gov', historical: false }).whereIn('status', OPEN_STATUSES)
+// Open SAM.gov bids whose notice is still listed active (the ones a change on SAM.gov could still affect), in notice-id
+// order after `after`, one batch a run.
+async function openSamBids(after) {
+  const rows = await db('bid_opportunities').where({ source: 'sam_gov', historical: false }).whereIn('status', OPEN_STATUSES)
     .whereNot('source_active', false).whereNotNull('external_id')
-    .orderBy('created_at').limit(REFRESH_LIMIT).select('external_id', 'created_at');
+    .modify((q) => { if (after) q.where('external_id', '>', after); })
+    .orderBy('external_id').limit(REFRESH_LIMIT).select('external_id');
+  return rows.map((r) => r.external_id);
 }
 
 async function fileNotices(notices, now) {
@@ -322,12 +329,15 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
   const today = etDateString(now);
   // The API refuses a posted-date range longer than a year, so an old cursor (the job off for a long time) is clamped.
   const oldest = etDayOffset(now, -MAX_WINDOW_DAYS);
-  const stored = (await readCursor()) || etDayOffset(now, -FIRST_RUN_LOOKBACK_DAYS);
+  const cursor = await readCursor();
+  const stored = cursor.from || etDayOffset(now, -FIRST_RUN_LOOKBACK_DAYS);
   let from = stored < oldest ? oldest : stored;
   if (from > today) from = today;
-  const notices = await collectNotices({ apiKey: key, postedFrom: apiDate(from), postedTo: apiDate(today), now, fetchImpl });
+  const { notices, nextRefreshAfter } = await collectNotices({
+    apiKey: key, postedFrom: apiDate(from), postedTo: apiDate(today), refreshFrom: apiDate(oldest), refreshAfter: cursor.refreshAfter, fetchImpl,
+  });
   const counts = await fileNotices(notices, now);
-  await writeCursor(etDayOffset(now, -CURSOR_OVERLAP_DAYS));
+  await writeCursor({ from: etDayOffset(now, -CURSOR_OVERLAP_DAYS), refreshAfter: nextRefreshAfter });
   // The bells go out through the Bid Desk's one owed-bell sweep (also run every 15 minutes, so a failure retries there).
   const rung = await deliverOwedAlerts();
   return { read: notices.length, ...counts, rung };
@@ -335,5 +345,5 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
 
 module.exports = {
   runSamGovPoll, mapOpportunity, refreshPatch, fetchPage, fetchAll, safeError, SamApiError, apiDate, parseDeadline,
-  CURSOR_KEY, NAICS_CODES, SERVICE_ZIP3, LOG, PAGE_LIMIT, MAX_PAGES,
+  CURSOR_KEY, NAICS_CODES, SERVICE_ZIP3, LOG, PAGE_LIMIT, MAX_PAGES, REFRESH_LIMIT,
 };
