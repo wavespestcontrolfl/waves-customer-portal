@@ -4160,6 +4160,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // a repointed service was already withdrawn by the writer that assigned it.
     // Both directions are fenced against a send in flight (the loser-side check
     // before the sweep, the winner-side one just above).
+    // A stamp the loser's invoices carried over (payer_billed:<payer>) is re-judged against the SURVIVOR's live owner
+    // first, as every Bill-To edit does (Codex #6472 P2): re-pointed to the payer that owns it now, or released when
+    // none does. The undo re-judges both records again after it splits them.
+    await require('./visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { customerId: winnerId });
     if (backfills.payer_id || winner.payer_id) {
       // Only invoices REPOINTED FROM THE LOSER can carry undo-relevant
       // reversals (local audit on r42): journaling the winner's own ledger
