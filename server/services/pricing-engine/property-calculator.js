@@ -84,7 +84,11 @@ function normalizeFeatureInputs(input = {}) {
 }
 
 function estimateHardscape(lotSqFt, propertyType, features = {}) {
-  const type = propertyType || 'single_family';
+  // Display-style types ('Townhome', 'Duplex', 'Condo') reach the public
+  // quote unnormalized; the client mirror lowercases before matching, so
+  // the server must too or a townhome prices single-family hardscape and
+  // the open-parcel T&S bed drifts from the mirror (Codex #6398 r17).
+  const type = String(propertyType || 'single_family').trim().toLowerCase() || 'single_family';
   let fn = HARDSCAPE.single_family;
   if (type === 'commercial') fn = HARDSCAPE.commercial;
   else if (type.includes('townhome') || type === 'duplex') fn = HARDSCAPE.townhome;
@@ -310,11 +314,35 @@ function computeTurfArea(input, fallback = {}) {
   };
 }
 
-function estimateBedArea(lotSqFt, shrubDensity = 'moderate', complexity = 'standard', options = {}) {
+// Tree & Shrub lot-based bed BASIS (owner audit 2026-10-21): landscape beds
+// sit in the OPEN part of the parcel, but the density percentage used to be
+// taken on the GROSS lot, so beds were billed under the house, the driveway
+// and the pool cage — a 10,000 sq ft lot with a 2,500 sq ft home, drive and
+// cage priced 1,800 sq ft of moderate beds where roughly 1,100 exist. The
+// basis is lot − building footprint − hardscape (estimateHardscape already
+// carries the pool / cage additions): the same subtraction the turf and
+// mosquito areas make. A non-positive result (footprint + hardscape swallow
+// the lot: bad or unit-scoped data) falls back to the gross lot so a real
+// property never prices zero beds. Shared by calculatePropertyProfile and
+// service-pricing.js#estimateTreeShrubBedAreaFromLot so the two paths agree.
+function treeShrubBedBasisSqFt(lotSqFt, footprint, hardscape) {
+  const lot = Number(lotSqFt) || 0;
+  if (lot <= 0) return 0;
+  const fp = Number(footprint);
+  const hs = Number(hardscape);
+  const open = lot
+    - (Number.isFinite(fp) && fp > 0 ? fp : 0)
+    - (Number.isFinite(hs) && hs > 0 ? hs : 0);
+  return open > 0 ? Math.round(open) : lot;
+}
+
+// basisSqFt is the OPEN-area basis from treeShrubBedBasisSqFt (callers pass
+// it in; a raw lot still works for callers with no footprint/hardscape).
+function estimateBedArea(basisSqFt, shrubDensity = 'moderate', complexity = 'standard', options = {}) {
   const density = BED_DENSITY[shrubDensity] || BED_DENSITY.moderate;
   let pct = density.basePct;
   if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
-  const raw = Math.round(lotSqFt * pct);
+  const raw = Math.round(basisSqFt * pct);
   // Owner ruling 2026-08-10: never clamped — large estimates price IN FULL
   // and the pricer routes them to review (bed_area_at_or_above_8000).
   return raw;
@@ -528,6 +556,11 @@ function calculatePropertyProfile(input) {
   // auto-pricing the lookup explicitly suppressed (codex P1 r4 #2721).
   const footprint = explicitFootprint
     || (input.footprintUnknown === true ? 0 : calculateFootprint(input.homeSqFt, input.stories || 1));
+  // The footprint the Tree & Shrub open-parcel basis prices on. A caller
+  // that cannot trust its own homeSqFt (the public quote) passes the
+  // server-measured one here; every other caller's footprint is its own.
+  const treeShrubFootprintSqFt = toPositiveNumber(input.treeShrubFootprintSqFt) || footprint;
+  const treeShrubFootprintTrusted = typeof input.treeShrubFootprintTrusted === 'boolean' ? input.treeShrubFootprintTrusted : null;
   const explicitPerimeter = toPositiveNumber(input.perimeterLF ?? input.perimeterLf ?? input.perimeter);
   const normalizedFeatures = normalizeFeatureInputs(input);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, normalizedFeatures);
@@ -600,8 +633,11 @@ function calculatePropertyProfile(input) {
     bedAreaSource = 'estimated';
     bedAreaPricingConfidence = 'medium';
   } else if (toPositiveNumber(input.lotSqFt) > 0) {
+    // A replayed pre-2026-10-21 quote keeps the GROSS-lot basis it was sent
+    // with (input.lotBedBasis from the stamped T&S knobs; Codex #6398 r2);
+    // fresh quotes price the open parcel.
     bedArea = estimateBedArea(
-      input.lotSqFt,
+      input.lotBedBasis === 'gross_lot' ? Number(input.lotSqFt) : treeShrubBedBasisSqFt(input.lotSqFt, treeShrubFootprintSqFt, hardscape),
       features.shrubs,
       features.complexity
     );
@@ -680,6 +716,18 @@ function calculatePropertyProfile(input) {
     storiesSource: input.storiesSource || null,
     propertyType: input.propertyType || 'single_family',
     features,
+    // Hedge / bed linear feet (owner 2026-10-21): the shrub line a tech
+    // sprays, kept on the profile so the stored engineRequest carries it for
+    // the spray-volume material model. Finite non-negative or null; nothing
+    // downstream prices from it yet.
+    hedgeLinearFt: Number.isFinite(Number(input.hedgeLinearFt)) && input.hedgeLinearFt !== null && input.hedgeLinearFt !== '' && Number(input.hedgeLinearFt) >= 0
+      ? Number(input.hedgeLinearFt)
+      : null,
+    hedgeLinearFtSource: input.hedgeLinearFtSource || null,
+    // The footprint the T&S lot-based basis used, and whether the caller
+    // vouched for it (null = the caller's own footprint, no verdict).
+    treeShrubFootprintSqFt,
+    treeShrubFootprintTrusted,
     // v2 enriched fields — consumed by modifiers.deriveModifiers()
     yearBuilt: input.yearBuilt || null,
     constructionMaterial: input.constructionMaterial || null,
@@ -713,7 +761,7 @@ function calculatePropertyProfile(input) {
 module.exports = {
   calculateFootprint, estimateHardscape, calculateComplexityScore,
   estimateLawnSqFt, computeTurfArea, toNonNegativeNumber,
-  estimateBedArea, calculatePerimeter,
+  estimateBedArea, treeShrubBedBasisSqFt, calculatePerimeter,
   getLotCategory, getMosquitoTreatableCategory, deriveMosquitoLotCategoryFromArea,
   // The engine's own presence rule (NO/NONE/FALSE/N/0/UNKNOWN are negative,
   // anything else present). Exported so a consumer replaying stored engine

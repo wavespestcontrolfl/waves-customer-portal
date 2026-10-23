@@ -708,6 +708,14 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
 // page shows that tick, not the eligibility instant (codex #4140 r4 P2).
 const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
+// GATE_REVIEW_SENDER_EVERY_5_MIN: the same job on every fifth minute of its
+// own offset (scheduler.js registers these minutes and runs only on the live table).
+const REVIEW_EVERY_5_TICK_MINUTES = [4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59];
+// The minutes processReviewSequences runs on now: one table for the cron
+// filter, the Reviews page ticks and the completion panel preview.
+function reviewCadenceTickMinutes() {
+  return require("../config/feature-gates").isEnabled("reviewSenderEvery5Min") ? REVIEW_EVERY_5_TICK_MINUTES : REVIEW_CADENCE_TICK_MINUTES;
+}
 // The legacy (cadences-off) path: processScheduled runs on the scheduler's
 // `*/15` cron (kept in step by review-sequences.test.js), and a legacy row's
 // scheduled_for is rebuilt from a later Date.now() after the target became a
@@ -756,11 +764,12 @@ function nextCadenceTickAt(from) {
   const tick = new Date(d.getTime());
   tick.setUTCSeconds(0, 0);
   // Minutes are zone-independent (every ET offset is a whole hour).
-  const next = REVIEW_CADENCE_TICK_MINUTES.find((m) => m > minute || (m === minute && !pastTheMinute));
+  const tickMinutes = reviewCadenceTickMinutes();
+  const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
   if (next != null) {
     tick.setUTCMinutes(next);
   } else {
-    tick.setUTCHours(tick.getUTCHours() + 1, REVIEW_CADENCE_TICK_MINUTES[0]);
+    tick.setUTCHours(tick.getUTCHours() + 1, tickMinutes[0]);
   }
   return tick;
 }
@@ -1962,17 +1971,97 @@ const ReviewService = {
     }
   },
 
+  // GATE_REVIEW_ASK_AFTER_REPORT for a report the send window held for the
+  // morning: enrollment kept the smart window (no confirmable text yet). When
+  // the held report's replay is accepted as a TEXT, the untouched Day-0 ask
+  // still planned on that window is re-planned to 10 minutes from now, in one
+  // conditional write: earlier when its window was later, later when its window
+  // was sooner (the 10-minute floor after a delayed replay). A row the runner
+  // has claimed (next_run_at NULL) is skipped; a re-run (finalize-only retry)
+  // finds the row already 'after_report' and does nothing. The channel is the
+  // replay's own (first pass) or read from the accepted provider id (a Twilio
+  // SMS/MMS SID; an App push has none), so crash recovery still applies it.
+  // Anything unconfirmed — the App, no provider proof, cadences off, an
+  // explicit or customer-requested timing, a decision another deferral
+  // rewrote — leaves the smart window. Never throws.
+  // GATE_REVIEW_ASK_AFTER_REPORT: when an untouched Day-0 post-service
+  // smart-window ask may go, given its own held report: still queued
+  // (completionSmsStatus 'deferred') -> re-check in 5 minutes; delivered under
+  // 10 minutes ago (completionSmsDeferredDeliveredAt, stamped by the replay's
+  // finalize) -> 10 minutes after that delivery. This is the 10-minute floor
+  // from the runner's side, so it holds even before (or without) the replay's
+  // pullAskAfterHeldReport. Null otherwise. Bounded at 24 hours from
+  // enrollment; a failed read never holds (the ask keeps today's behavior).
+  async _heldReportQueuedRetryAt(seq) {
+    if (!seq.service_record_id || seq.started_by !== "post_service" || Number(seq.current_step || 0) !== 0 || Number(seq.touches_sent || 0) !== 0) return null;
+    if (seq.customer_requested || parseDecision(seq.decision)?.reason !== "smart_window" || Date.now() - new Date(seq.started_at || 0).getTime() > 24 * 3600000) return null;
+    try {
+      if (!reviewAskAfterReportOn()) return null;
+      const row = await db("service_records").where({ id: seq.service_record_id }).first("structured_notes");
+      const notes = structuredNotesObject(row?.structured_notes);
+      if (notes.completionSmsStatus === "deferred") return new Date(Date.now() + 5 * 60000);
+      // An App replay (sentSmsChannel 'push') is not a report text: the ask
+      // keeps its smart window. An unknown channel keeps the floor.
+      if (notes.sentSmsChannel === "push") return null;
+      const readyMs = new Date(notes.completionSmsDeferredDeliveredAt || NaN).getTime() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000;
+      return readyMs > Date.now() ? new Date(readyMs) : null;
+    } catch (err) {
+      logger.warn(`[review] held-report check failed (sequenceId=${seq.id}): ${err.message}`);
+      return null;
+    }
+  },
+
+  // The channel a held report's replay went out on: the replay's own (first
+  // pass), else 'sms' when the accepted provider id is a Twilio SMS/MMS SID (an
+  // App push has none), else undefined (unknown).
+  heldReportReplayChannel({ channel = null, providerMessageId = null } = {}) {
+    if (channel) return channel;
+    return /^(SM|MM)[0-9a-f]{32}$/i.test(String(providerMessageId || "")) ? "sms" : undefined;
+  },
+
+  async pullAskAfterHeldReport(serviceRecordId, { channel = null, deliveredAt = Date.now() } = {}) {
+    if (!serviceRecordId || !["sms", "mms"].includes(channel)) return { pulled: 0 };
+    try {
+      if (!reviewAskAfterReportOn() || !require("../config/feature-gates").isEnabled("reviewSequences")) return { pulled: 0 };
+      const pending = () => db("review_sequences")
+        .where({ service_record_id: serviceRecordId, status: "active", current_step: 0, touches_sent: 0, started_by: "post_service" })
+        .whereNull("customer_requested")
+        .whereRaw("decision ->> 'reason' = 'smart_window'")
+        .whereNotNull("next_run_at");
+      const rows = await pending().select("id", "customer_id");
+      let pulled = 0;
+      for (const row of rows) {
+        // The customer's send lock, the one _runSequenceStep holds while it
+        // sends: the re-plan and a send never interleave. A held lock means
+        // that ask is being sent right now; it is left alone.
+        // 10 minutes after the delivery (a recovered finalize passes the stored
+        // acceptance time), never in the past.
+        const dueAt = new Date(Math.max(Date.now(), new Date(deliveredAt).getTime() + REVIEW_AFTER_REPORT_DELAY_MINUTES * 60000));
+        const result = await runExclusive(`review-send:${row.customer_id}`, () => pending().where({ id: row.id })
+          .update({ next_run_at: dueAt, decision: sequenceDecision({ reason: "after_report", plannedAt: dueAt, nextEvalAt: dueAt }), updated_at: new Date() }), { recordHealth: false });
+        if (!wasLockSkipped(result)) pulled += Number(result) || 0;
+      }
+      return { pulled };
+    } catch (err) {
+      logger.warn(`[review] held-report pull failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      return { pulled: 0 };
+    }
+  },
+
   // The same anchor for a combined visit (visit-completion-packets): its
   // completion_sms effect. Enrollment there runs only once the delivery legs
   // are sent or suppressed, so a 'sent' effect anchors the ask to that text; a
-  // suppressed, missing or held one keeps the smart window.
+  // suppressed or missing one keeps the smart window.
   async reportTextAnchorForVisit(visitId, database = db) {
     if (!visitId || !reviewAskAfterReportOn()) return null;
     try {
-      // A summary held by quiet hours (deferSummarySms sets scheduled_at, which
-      // its 8 AM replay keeps) keeps the smart window, like a held report.
-      const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at", "scheduled_at");
-      return effect?.status === "sent" && !effect.scheduled_at ? { status: "sent", at: effect.sent_at || new Date() } : null;
+      // A summary held by quiet hours counts too: its 8 AM replay is a plain
+      // text (deferSummarySms queues SMS, no App routing), and this enrollment
+      // waits until that leg is sent, so the ask goes 10 minutes after it (or
+      // after the payment, when an unpaid invoice held the enrollment: the
+      // summary is a confirmed text either way).
+      const effect = await database("visit_effects").where({ visit_id: visitId, effect_type: "completion_sms" }).first("status", "sent_at");
+      return effect?.status === "sent" ? { status: "sent", at: effect.sent_at || new Date() } : null;
     } catch (err) {
       logger.warn(`[review] visit report anchor lookup failed (visitId=${visitId}): ${err.message}`);
       return null;
@@ -6826,6 +6915,20 @@ const ReviewService = {
   async _runSequenceStepUnlocked(sequenceId) {
     const seq = await db("review_sequences").where({ id: sequenceId }).first();
     if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
+    // Re-read under the customer's send lock: a row moved to a later time
+    // after the runner selected it (pullAskAfterHeldReport takes the same
+    // lock) is not due yet.
+    if (seq.next_run_at && new Date(seq.next_run_at).getTime() > Date.now()) return { ran: false, deferred: true, reason: "not_due" };
+    // A smart-window ask whose report the send window still queues (worker
+    // downtime can bring this runner back before the scheduled-SMS rail)
+    // waits for that report; the reason stays smart_window so the replay's
+    // pullAskAfterHeldReport still finds it.
+    const reportQueuedUntil = await this._heldReportQueuedRetryAt(seq);
+    if (reportQueuedUntil) {
+      await db("review_sequences").where({ id: seq.id, status: "active" }).whereNull("customer_requested")
+        .update({ next_run_at: reportQueuedUntil, decision: sequenceDecision({ reason: "smart_window", plannedAt: reportQueuedUntil, nextEvalAt: reportQueuedUntil }), updated_at: new Date() });
+      return { ran: false, deferred: true, reason: "report_queued", retryAt: reportQueuedUntil };
+    }
     let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
     const customer = await db("customers").where({ id: seq.customer_id }).first();
 
@@ -8228,6 +8331,8 @@ ReviewService.__private = {
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
+  REVIEW_EVERY_5_TICK_MINUTES,
+  reviewCadenceTickMinutes,
   reportTextAnchorFromNotes,
   LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,

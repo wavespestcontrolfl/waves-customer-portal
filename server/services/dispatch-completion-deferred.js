@@ -143,9 +143,10 @@ function stripPayLinkLineFromBody(body, payUrl) {
   return stripped || null;
 }
 
-async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } = {}) {
+async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false, channel, deliveredAt = Date.now() } = {}) {
   const recordId = claimMeta.service_record_id || null;
-  const sentAtIso = new Date().toISOString();
+  // The provider's acceptance time (a finalize-only retry passes the stored one).
+  const sentAtIso = new Date(deliveredAt).toISOString();
   // ok covers the STATE steps (invoice flip, review mark, receipt claim).
   // All three are idempotent, so the executor can re-run this whole
   // function from a finalize_only retry row when any of them failed —
@@ -211,7 +212,9 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
         // retry look pre-send (codex #3847 P2).
         structured_notes: db.raw(
           "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb || CASE WHEN COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'completionSmsDeferredDeliveredAt' IS NULL THEN ?::jsonb ELSE '{}'::jsonb END",
-          [JSON.stringify({ completionSmsStatus: 'sent' }), JSON.stringify({ completionSmsDeferredDeliveredAt: sentAtIso })],
+          // The replay's channel (sms/mms, or push for the customer App) rides
+          // in the same once-only stamp; unknown = no key.
+          [JSON.stringify({ completionSmsStatus: 'sent' }), JSON.stringify({ completionSmsDeferredDeliveredAt: sentAtIso, sentSmsChannel: channel })],
         ),
       });
     } catch (err) {

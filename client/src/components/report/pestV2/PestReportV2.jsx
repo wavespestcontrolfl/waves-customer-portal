@@ -213,7 +213,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
                     : legacyOutlineMismatch ? 'Treatment map'
                       : 'Where we sprayed'}
                 </div>
-                <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '6px 0 10px' }}>
+                <p className="sr-v2-body" style={{ fontSize: 16, color: MUTED, lineHeight: 1.5, margin: '6px 0 10px' }}>
                   {outlineCoverage
                     ? (tracedMap.captureMode === 'lawn_highlight'
                       ? 'Today’s treated area — the highlighted zone shows the coverage your technician marked on-site.'
@@ -311,7 +311,7 @@ function PestPressureRating({ metric, token, live, onRefreshed, onSettled }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
         {[0, 1, 2, 3, 4, 5].map((n) => (
           <button key={n} type="button" disabled={busy} onClick={() => submit(n)} aria-label={`Rating ${n} of 5`}
-            style={{ padding: '10px 0', borderRadius: 9, border: `1px solid ${BORDER}`, background: COLORS.white, color: TEXT, fontWeight: 700, fontSize: 16, cursor: busy ? 'wait' : 'pointer' }}>{n}</button>
+            style={{ padding: '10px 0', borderRadius: 9, border: `1px solid ${BORDER}`, background: COLORS.white, color: TEXT, fontWeight: 600, fontSize: 16, cursor: busy ? 'wait' : 'pointer' }}>{n}</button>
         ))}
       </div>
       <div style={{ fontSize: 14, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>

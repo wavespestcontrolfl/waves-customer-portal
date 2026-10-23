@@ -911,6 +911,12 @@ const PROJECT_TYPES = {
       // silently vanish at the reconcile parse). The client renders unknown
       // types as a plain text input — no client change needed.
       { key: 'bed_sqft_serviced', label: 'Ornamental bed area serviced (sq ft)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 2400' },
+      // Spray mix actually used (owner 2026-10-21): the gallons of finished
+      // mix applied this visit, so the T&S material model can be re-derived
+      // from label carrier volume per 1,000 sq ft of foliage instead of a
+      // per-bed-sqft guess. Optional, internal costing data like bed sqft.
+      { key: 'spray_mix_gallons', label: 'Spray mix used (gallons)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 5' },
+      { key: 'hedge_linear_ft_serviced', label: 'Shrub / hedge line sprayed (linear ft)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 180' },
       { key: 'palm_count_total', label: 'Palms on property', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'tree_count_total', label: 'Trees on property (non-palm)', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'shrub_density', label: 'Shrub density', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Light', 'Moderate', 'Heavy'] },
@@ -1087,7 +1093,7 @@ const PROJECT_TYPES = {
   pre_treatment_termite_certificate: {
     label: 'Pre-Treatment Certificate of Compliance',
     short: 'Pre-Treat Cert',
-    description: 'Florida Building Code 1816.1.7 Certificate of Compliance for pre-construction subterranean termite soil treatment. Doubles as the FDACS Rule 5E-14.106 treatment record.',
+    description: 'Florida Building Code 1816.1 / R318.1 Certificate of Compliance for pre-construction subterranean termite soil treatment. Doubles as the FDACS Rule 5E-14.106 treatment record.',
     requiresFollowup: false,
     photoCategories: ['slab_prep', 'soil_treatment', 'perimeter', 'equipment', 'before', 'after', 'other'],
     // `section` groups the form into scannable blocks (rendered as inline
@@ -1170,11 +1176,11 @@ const PROJECT_TYPES = {
       { key: 'final_exterior_applicator_name', label: 'Final exterior applicator', type: 'text', section: 'Final exterior treatment (later visit; leave blank on slab day)', disableDictation: true },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text', section: 'Applicator certification', disableDictation: true },
       { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', section: 'Applicator certification', disableDictation: true },
-      // FBC 1816.1.7 requires an "authorized signature of the licensed
+      // The certificate needs an "authorized signature of the licensed
       // applicator." A typed attestation paired with the printed name +
       // FDACS ID + treatment date is the standard pattern for portal-
       // generated certificates accepted by Florida building departments.
-      { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', section: 'Applicator certification', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).'] },
+      { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', section: 'Applicator certification', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1 / R318.1 / FDACS Rule 5E-14.106).'] },
       { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', section: 'Warranty & notes', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'No warranty'] },
       { key: 'renewal_due', label: 'Renewal due by', type: 'text', section: 'Warranty & notes', placeholder: 'YYYY-MM-DD', disableDictation: true },
       { key: 'comments', label: 'Additional notes', type: 'textarea', section: 'Warranty & notes', placeholder: 'Pre-pour conditions, weather, retreatment triggers, etc.' },

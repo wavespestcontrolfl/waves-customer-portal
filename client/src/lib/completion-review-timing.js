@@ -72,14 +72,19 @@ function afterReportHint(preview, reportTextExpected, { afterPayment = false } =
   const lead = afterPayment ? "Review text waits for the invoice to be paid, then goes out" : "Review text goes out separately";
   if (reportTextExpected === false) return `${lead} at the smart send window, because no report text goes out to follow.`;
   // The ask is eligible 10 minutes after the report text (or the payment) and goes at the next
-  // :14/:44 review send; a target outside the 8 AM–8 PM window waits for the morning. Only a report
-  // texted at completion anchors it; the server keeps the smart window for any other (held for
-  // the morning, the Waves app, opted out, failed), which the panel cannot know ahead of time.
+  // :14/:44 review send; a target outside the 8 AM–8 PM window waits for the morning. A report
+  // held for the morning pulls the ask to 10 minutes after its replay goes out as a text
+  // (pullAskAfterHeldReport); the Waves app, opted-out and failed reports keep the smart window,
+  // which the panel cannot know ahead of time.
   const after = afterPayment ? "payment" : "the report text";
-  const ticks = (preview.cadenceTickMinutesOfHour || [14, 44]).map((m) => `:${String(m).padStart(2, "0")}`).join(" and ");
+  const tickList = preview.cadenceTickMinutesOfHour || [14, 44];
+  // GATE_REVIEW_SENDER_EVERY_5_MIN names twelve minutes; say it in words.
+  const ticks = tickList.length > 2 ? "every 5 minutes" : `${tickList.map((m) => `:${String(m).padStart(2, "0")}`).join(" and ")} each hour`;
   const windowNote = preview.smsSendWindowEnabled ? " A target after 8 PM waits for the next morning." : "";
-  const report = afterPayment ? "the report did not go out" : "the report does not go out";
-  return `${lead} at the first review send (${ticks} each hour) at least ${afterReportMinutes(preview)} minutes after ${after}.${windowNote} If ${report} as a text right away (held for the morning, sent by the Waves app, or texts turned off for this customer), it goes at the smart send window.`;
+  const held = afterPayment
+    ? " If the report was held for the morning: about 10 minutes after that report text or the payment, whichever is later (a single visit's held report that went out before the payment keeps the smart send window)."
+    : " If the report is held for the morning, it goes about 10 minutes after that report text goes out.";
+  return `${lead} at the first review send (${ticks}) at least ${afterReportMinutes(preview)} minutes after ${after}.${windowNote}${held} If the report goes by the Waves app, or texts are turned off for this customer, it goes at the smart send window.`;
 }
 export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected }) {
   // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel

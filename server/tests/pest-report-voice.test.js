@@ -127,6 +127,13 @@ describe('the one-voice prompt', () => {
     expect(PEST_REPORT_VOICE_PROMPT).not.toMatch(/keeps? pressure down|manage pressure|support long-term control/);
   });
 
+  // 2026-10-22 replay: "If ants are still trailing by the kitchen window … on Thursday,
+  // October 22, text or call us." was refused on every try ("window" reads as an arrival
+  // window). The REACH-OUT DATE sentence names the pest and the date and nothing else.
+  test('the REACH-OUT DATE sentence names the pest and the date and nothing else', () => {
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('With a REACH-OUT DATE, that sentence names the pest and the date and nothing else, no place and no "come back" ("If you still see ants on <the REACH-OUT DATE>, text or call us.")');
+  });
+
   // Codex #6466 r3: the stacked writer's v4 hard constraint 1 (minus "sweep", 2026-10-09)
   // carries over, so a HOW IT WORKS line's "crawling invaders" never reaches the report.
   test('bans the military language the v4 hard constraints banned', () => {

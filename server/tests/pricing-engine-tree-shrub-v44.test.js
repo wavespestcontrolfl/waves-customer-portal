@@ -50,14 +50,15 @@ describe('Tree & Shrub Pricing v4.4', () => {
 
     // materials = max(60, (15 + 4*0 + 0.055*2000) * 1) = 125
     // labor     = 35 * (25+10)/60 * 6 = 122.50
-    // annual    = (247.50 + 51) / 0.55 = 542.73/yr → 45.23/mo → 542.76
+    // annual    = (247.50 + 51) / 0.60 = 497.50/yr → 41.46/mo → 497.52
+    //             (÷ 0.55 → 45.23/mo until the 2026-10-21 owner audit)
     expect(quote.frequency).toBe(6);
     expect(quote.onSiteMin).toBe(25);
     expect(quote.costs.materialCost).toBeCloseTo(125, 2);
     expect(quote.costs.laborCost).toBeCloseTo(122.50, 2);
-    expect(quote.monthly).toBeCloseTo(45.23, 2);
-    expect(quote.annual).toBeCloseTo(542.76, 2);
-    expect(quote.baseMargin).toBeCloseTo(0.450, 3);
+    expect(quote.monthly).toBeCloseTo(41.46, 2);
+    expect(quote.annual).toBeCloseTo(497.52, 2);
+    expect(quote.baseMargin).toBeCloseTo(0.400, 3);
   });
 
   test('light 2,000 sqft worked example (v4.6)', () => {
@@ -68,20 +69,21 @@ describe('Tree & Shrub Pricing v4.4', () => {
 
     // materials = max(40, 125 * 0.75) = 93.75
     // labor     = 35 * (25+10)/60 * 4 = 81.67
-    // annual    = (175.42 + 51) / 0.55 = 411.67/yr → 34.31/mo → 411.72
+    // annual    = (175.42 + 51) / 0.60 = 377.36/yr → 31.45/mo → 377.40
     expect(quote.frequency).toBe(4);
     expect(quote.onSiteMin).toBe(25);
     expect(quote.costs.materialCost).toBeCloseTo(93.75, 2);
     expect(quote.costs.laborCost).toBeCloseTo(81.67, 2);
-    expect(quote.monthly).toBeCloseTo(34.31, 2);
-    expect(quote.annual).toBeCloseTo(411.72, 2);
-    expect(quote.baseMargin).toBeCloseTo(0.450, 3);
+    expect(quote.monthly).toBeCloseTo(31.45, 2);
+    expect(quote.annual).toBeCloseTo(377.40, 2);
+    expect(quote.baseMargin).toBeCloseTo(0.400, 3);
   });
 
-  test('audit reference quote: 350 sqft beds + 6 trees reprices from $100 to ~$76/application', () => {
+  test('audit reference quote: 350 sqft beds + 6 trees reprices from $100 to the $35/mo backstop ($70/application)', () => {
     // The June 2026 audit case (estimate token e9077c1f...): the v4.5 engine
-    // floored this property at $50/mo = $100/application. v4.6 prices it from
-    // the formula at a true 45% margin.
+    // floored this property at $50/mo = $100/application. v4.6 priced it from
+    // the formula at a true 45% margin (38.03/mo); at the 40% target (owner
+    // audit 2026-10-21) the formula lands under the $35 Standard backstop.
     const quote = priceTreeShrub(
       { bedArea: 350, treeCount: 6, lotSqFt: 10187 },
       { tier: 'standard' }
@@ -89,11 +91,13 @@ describe('Tree & Shrub Pricing v4.4', () => {
 
     // materials = max(60, 15 + 4*6 + 0.055*350 = 58.25) = 60
     // onSite    = max(25, 20 + 1 + 9) = 30 → labor 23.33/visit → 140/yr
-    // annual    = (200 + 51) / 0.55 = 456.36 → 38.03/mo → 76.06/application
-    expect(quote.monthly).toBeCloseTo(38.03, 2);
-    expect(quote.annual).toBeCloseTo(456.36, 2);
-    expect(quote.perApp).toBeCloseTo(76.06, 2);
-    expect(quote.baseMargin).toBeCloseTo(0.450, 3);
+    // annual    = (200 + 51) / 0.60 = 418.33 → 34.86/mo → backstop 35/mo
+    //             → 420/yr → 70/application; the binding floor lifts the
+    //             displayed margin a hair above the 40% target.
+    expect(quote.monthly).toBe(35);
+    expect(quote.annual).toBeCloseTo(420, 2);
+    expect(quote.perApp).toBeCloseTo(70, 2);
+    expect(quote.baseMargin).toBeCloseTo(0.402, 3);
   });
 
   test('treeCount adds a per-tree material term, not just labor minutes', () => {
@@ -111,9 +115,10 @@ describe('Tree & Shrub Pricing v4.4', () => {
       { tier: 'standard' }
     );
 
-    expect(quote.treeCount).toBe(6);
+    // Owner audit 2026-10-21: moderate density backstops 4 ornamental trees (was 6).
+    expect(quote.treeCount).toBe(4);
     expect(quote.treeCountSource).toBe('density_estimate');
-    expect(quote.warnings).toContain('Tree count was not provided; estimated 6 trees from moderate tree density.');
+    expect(quote.warnings).toContain('Tree count was not provided; estimated 4 trees from moderate tree density.');
   });
 
   test('features.trees density enum also feeds the treeCount fallback', () => {
@@ -122,7 +127,7 @@ describe('Tree & Shrub Pricing v4.4', () => {
       { tier: 'standard' }
     );
 
-    expect(quote.treeCount).toBe(10);
+    expect(quote.treeCount).toBe(6);
     expect(quote.treeCountSource).toBe('density_estimate');
   });
 
@@ -142,10 +147,10 @@ describe('Tree & Shrub Pricing v4.4', () => {
       },
     });
     const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
-    expect(ts.treeCount).toBe(6);
+    expect(ts.treeCount).toBe(4);
     expect(ts.treeCountSource).toBe('density_estimate');
-    // 6 density-estimated trees = +$24/yr materials over a bare 2,000 sqft bed.
-    expect(ts.costs.materialCost).toBeCloseTo(149, 2);
+    // 4 density-estimated trees = +$16/yr materials over a bare 2,000 sqft bed.
+    expect(ts.costs.materialCost).toBeCloseTo(141, 2);
   });
 
   test('generateEstimate path keeps an explicit service-line zero authoritative', () => {
@@ -175,18 +180,20 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.treeCountSource).toBe('explicit');
   });
 
-  test('unfloored quotes land exactly on the 45% admin-inclusive margin target', () => {
+  test('unfloored quotes land exactly on the 40% admin-inclusive margin target', () => {
+    // 350 sqft / 6 trees now sits on the $35 backstop (audit reference case
+    // above), so the smallest unfloored case here is 800 sqft.
     for (const input of [
-      { bedArea: 350, treeCount: 6 },
+      { bedArea: 800, treeCount: 6 },
       { bedArea: 2000, treeCount: 8 },
       { bedArea: 4000, treeCount: 10, access: 'moderate' },
     ]) {
       const quote = priceTreeShrub(input, { tier: 'standard' });
       const displayed = (quote.annual - quote.costs.directCost - quote.costs.adminCost) / quote.annual;
       // Rounding the monthly to cents moves the realized margin by <0.1pt.
-      expect(displayed).toBeGreaterThanOrEqual(0.449);
-      expect(displayed).toBeLessThanOrEqual(0.451);
-      expect(quote.marginTarget).toBe(0.45);
+      expect(displayed).toBeGreaterThanOrEqual(0.399);
+      expect(displayed).toBeLessThanOrEqual(0.401);
+      expect(quote.marginTarget).toBe(0.40);
     }
   });
 
@@ -228,8 +235,8 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(treeShrub.marginGuardApplied).toBe(false);
     expect(treeShrub.discountCapped).toBe(false);
     expect(treeShrub.actualDiscountPct).toBeCloseTo(0.40, 3);
-    expect(treeShrub.finalAnnual).toBeCloseTo(325.80, 2); // $543 list × (1 − 0.40), uncapped
-    expect(treeShrub.finalMargin).toBeCloseTo(0.084, 3); // well below 35%, price stands
+    expect(treeShrub.finalAnnual).toBeCloseTo(298.80, 2); // $498 list × (1 − 0.40), uncapped
+    expect(treeShrub.finalMargin).toBeCloseTo(0.001, 3); // 40% off a 40% list margin collects ~0%; price stands
     expect(treeShrub.belowMarginFloor).toBe(true);
     // Auto WaveGuard discounts still never raise margin warnings; the
     // warn-only path for MANUAL discounts in estimate-engine is unchanged.
@@ -256,7 +263,7 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.bedAreaSource).toBe('fallback');
     expect(quote.pricingConfidence).toBe('low');
     expect(quote.requiresManualReview).toBe(true);
-    expect(quote.annual).toBeCloseTo(462.72, 2);
+    expect(quote.annual).toBeCloseTo(424.20, 2);
     expect(quote.warnings).toContain('Tree & Shrub bed area was not provided; fallback 1,200 sqft was used.');
   });
 
@@ -343,13 +350,16 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(property.bedAreaSource).toBe('estimated');
 
     const quote = priceTreeShrub(property, { tier: 'standard' });
-    expect(quote.bedArea).toBe(1000);
+    // Open-parcel basis (owner audit 2026-10-21): light 10% of
+    // 10,000 − 0 footprint − 870 estimated hardscape = 913 (was 1,000 on the
+    // gross lot).
+    expect(quote.bedArea).toBe(913);
     // Lot-based fallthrough now reports its own source so admin tooling can
     // distinguish a customer-confirmed estimate from a lot-density inference.
     expect(quote.bedAreaSource).toBe('lot_based');
-    expect(quote.bedAreaUsed).toBe(1000);
-    // materials = max(60, 15 + 0.055*1000) = 70 (features.trees 'light' → 3-tree fallback adds $12)
-    expect(quote.costs.materialCost).toBeCloseTo(82, 2);
+    expect(quote.bedAreaUsed).toBe(913);
+    // materials = max(60, 15 + 0.055*913) = 65.2 (features.trees 'light' → 2-tree fallback adds $8)
+    expect(quote.costs.materialCost).toBeCloseTo(73.215, 2);
   });
 });
 
@@ -412,10 +422,11 @@ describe('Tree & Shrub estimator hardening', () => {
       const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
       const displayedMargin =
         (ts.finalAnnual - ts.costs.directCost - ts.costs.adminCost) / ts.finalAnnual;
-      // 40% off drives the collected margin to ~8.4%; the price stands and the
-      // shortfall is surfaced only via finalMargin / belowMarginFloor.
+      // 40% off a 40% list margin drives the collected margin to ~0%; the
+      // price stands and the shortfall is surfaced only via finalMargin /
+      // belowMarginFloor.
       expect(displayedMargin).toBeLessThan(constants.TREE_SHRUB.marginFloor);
-      expect(displayedMargin).toBeCloseTo(0.0838, 3);
+      expect(displayedMargin).toBeCloseTo(0.0010, 3);
       expect(ts.finalMargin).toBeCloseTo(displayedMargin, 3);
       expect(ts.belowMarginFloor).toBe(true);
     });
@@ -674,11 +685,16 @@ describe('Tree & Shrub estimator hardening', () => {
   describe('config parity (constants vs active DB migration)', () => {
     // Code constants stay authoritative; this test catches drift if anyone
     // edits one surface without the other. The active runtime config is the
-    // JSONB pricing_config updated by the v4.6 reprice migration.
+    // JSONB pricing_config updated by the v4.6 reprice migration (material
+    // model + floors) and the 2026-10-21 margin migration (target 0.40).
     const fs = require('fs');
     const path = require('path');
     const migrationSrc = fs.readFileSync(
       path.join(__dirname, '..', 'models', 'migrations', '20260612000025_tree_shrub_reprice_45_margin.js'),
+      'utf8'
+    );
+    const marginMigrationSrc = fs.readFileSync(
+      path.join(__dirname, '..', 'models', 'migrations', '20261021010000_tree_shrub_margin_target_40.js'),
       'utf8'
     );
     const legacySrc = fs.readFileSync(
@@ -714,7 +730,12 @@ describe('Tree & Shrub estimator hardening', () => {
     });
 
     test('margin target matches and carries the admin-inclusive semantics marker', () => {
-      expect(migrationNumber('value')).toBe(constants.TREE_SHRUB.marginTarget);
+      // The 2026-10-21 migration writes `writeValue(knex, loaded.data, 0.40, UP_REASON)`
+      // over the v4.6 row's 0.45 and re-stamps the semantics marker.
+      const m = marginMigrationSrc.match(/writeValue\(knex, loaded\.data, ([0-9.]+), UP_REASON\)/);
+      expect(m).not.toBeNull();
+      expect(Number(m[1])).toBe(constants.TREE_SHRUB.marginTarget);
+      expect(marginMigrationSrc).toContain("semantics: 'margin_admin_inclusive'");
       expect(migrationSrc).toContain("semantics: 'margin_admin_inclusive'");
     });
 
@@ -740,16 +761,18 @@ describe('Tree & Shrub estimator hardening', () => {
   });
 
   describe('monthly floor semantics (v4.6 backstops)', () => {
-    test('floors are backstops the formula minimum already clears', () => {
-      // Even the smallest possible job (minimum on-site labor + material
-      // floors) prices above the monthly floor from the formula, so the
-      // floor should never silently set the price.
+    test('floors are backstops: Standard binds on the bare-minimum job at the 40% target, Light clears', () => {
+      // At the 45% target the smallest job cleared the $35 Standard backstop
+      // (35.38). At 40% (owner audit 2026-10-21) the formula minimum is
+      // (60 material + 122.50 labor + 51) / 0.60 = 389.17 → 32.43/mo, so the
+      // backstop sets the price for beds under ~1,100 sq ft with no trees; a
+      // 1,200 sq ft bed prices from the formula again (35.35).
       const minimalStandard = priceTreeShrub({ bedArea: 1, treeCount: 0 }, { tier: 'standard' });
       const minimalLight = priceTreeShrub({ bedArea: 1, treeCount: 0 }, { tier: 'light' });
-      expect(minimalStandard.monthly).toBeGreaterThanOrEqual(constants.TREE_SHRUB.tiers.standard.monthlyFloor);
-      expect(minimalLight.monthly).toBeGreaterThanOrEqual(constants.TREE_SHRUB.tiers.light.monthlyFloor);
-      // And the price is the formula's, not the floor constant.
-      expect(minimalStandard.monthly).toBeCloseTo(35.38, 2);
+      expect(minimalStandard.monthly).toBe(constants.TREE_SHRUB.tiers.standard.monthlyFloor);
+      expect(minimalLight.monthly).toBeGreaterThan(constants.TREE_SHRUB.tiers.light.monthlyFloor);
+      expect(priceTreeShrub({ bedArea: 1200, treeCount: 0 }, { tier: 'standard' }).monthly)
+        .toBeGreaterThan(constants.TREE_SHRUB.tiers.standard.monthlyFloor);
     });
 
     test('light floor stays <= 2/3 of standard floor so a floored Light never exceeds Standard per month', () => {
@@ -758,7 +781,7 @@ describe('Tree & Shrub estimator hardening', () => {
     });
   });
 
-  describe('WaveGuard discount interaction at the 45% list margin', () => {
+  describe('WaveGuard discount interaction at the 40% list margin', () => {
     function estimateInput(services) {
       return {
         homeSqFt: 2000,
@@ -773,9 +796,10 @@ describe('Tree & Shrub estimator hardening', () => {
     }
 
     test('Platinum (20%) is no longer clamped — the 35% post-discount guard is report-only (owner ruling 2026-07-17)', () => {
-      // 1 - 0.55/0.80 = 31.25% collected margin — below the 35% floor. The
-      // old v4.6 policy clamped this; since the 2026-07-17 owner ruling the
-      // full 20% applies and the shortfall is only reported.
+      // 1 - 0.60/0.80 = 25% collected margin (31.25% at the pre-audit 45%
+      // target) — below the 35% floor. The old v4.6 policy clamped this;
+      // since the 2026-07-17 owner ruling the full 20% applies and the
+      // shortfall is only reported.
       const estimate = generateEstimate(estimateInput({
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', tier: 'enhanced' },
@@ -787,13 +811,15 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(ts.discountCapped).toBe(false);
       expect(ts.marginGuardApplied).toBe(false);
       expect(ts.actualDiscountPct).toBeCloseTo(0.20, 3);
-      expect(ts.finalMargin).toBeCloseTo(0.313, 3);
+      expect(ts.finalMargin).toBeCloseTo(0.251, 3);
       expect(ts.finalMargin).toBeLessThan(0.35);
       expect(ts.belowMarginFloor).toBe(true);
     });
 
-    test('Gold (15%) survives the guard uncapped', () => {
-      // 1 - 0.55/0.85 = 35.3% collected margin — clears the 35% guard.
+    test('Gold (15%) applies uncapped and is now flagged below the 35% floor', () => {
+      // 1 - 0.60/0.85 = 29.4% collected margin at the 40% target (35.3% at
+      // the pre-audit 45% cleared the floor). Report-only: the full discount
+      // applies and belowMarginFloor surfaces the shortfall.
       const estimate = generateEstimate(estimateInput({
         pest: { frequency: 'quarterly' },
         lawn: { track: 'st_augustine', tier: 'enhanced' },
@@ -803,7 +829,8 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(estimate.waveGuard.tier).toBe('gold');
       expect(ts.discountCapped).toBe(false);
       expect(ts.actualDiscountPct).toBeCloseTo(0.15, 3);
-      expect(ts.finalMargin).toBeGreaterThanOrEqual(0.35 - 1e-9);
+      expect(ts.finalMargin).toBeCloseTo(0.295, 3);
+      expect(ts.belowMarginFloor).toBe(true);
     });
   });
 });
@@ -917,7 +944,7 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
     // Unarmed: property palms don't price, so the inferred trees stay — the
     // unchanged pre-v4.7 charge.
     const unarmed = priceTreeShrub(property, { tier: 'standard' });
-    expect(unarmed.materialTreeCount).toBe(6);
+    expect(unarmed.materialTreeCount).toBe(4);
     // Armed: the reserve prices those palms, so the inference is suppressed.
     constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
     const armed = priceTreeShrub(property, { tier: 'standard' });
@@ -1242,15 +1269,15 @@ describe('Tree & Shrub v4.7 leg independence for inferred trees + tier-row parit
   test('half-armed configs suppress the inferred trees only on the ARMED leg (pre-push P0 r11)', () => {
     const property = { bedArea: 2000, access: 'easy', treeDensity: 'moderate', palmCount: 10 };
     const unarmed = priceTreeShrub(property, { tier: 'standard' });
-    expect(unarmed.materialTreeCount).toBe(6);
-    expect(unarmed.laborTreeCount).toBe(6);
+    expect(unarmed.materialTreeCount).toBe(4);
+    expect(unarmed.laborTreeCount).toBe(4);
 
     // LABOR-only armed: palm minutes come from the reserve, so the labor leg
     // drops the inferred trees — but the MATERIAL leg still bills them,
     // exactly as it did before the knob was touched.
     constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 1 };
     const laborOnly = priceTreeShrub(property, { tier: 'standard' });
-    expect(laborOnly.materialTreeCount).toBe(6);
+    expect(laborOnly.materialTreeCount).toBe(4);
     expect(laborOnly.laborTreeCount).toBe(0);
     expect(laborOnly.costs.materialCost).toBe(unarmed.costs.materialCost);
 
@@ -1258,7 +1285,7 @@ describe('Tree & Shrub v4.7 leg independence for inferred trees + tier-row parit
     constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 0 };
     const materialOnly = priceTreeShrub(property, { tier: 'standard' });
     expect(materialOnly.materialTreeCount).toBe(0);
-    expect(materialOnly.laborTreeCount).toBe(6);
+    expect(materialOnly.laborTreeCount).toBe(4);
     expect(materialOnly.onSiteMin).toBe(unarmed.onSiteMin);
   });
 
@@ -1319,7 +1346,8 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
     const neutral = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard' });
     expect(neutral.pricingKnobs).toEqual({
       densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0,
-      fallbackBedSqFt: 1200,
+      fallbackBedSqFt: 1200, marginTarget: 0.40,
+      lotBedBasis: 'open_parcel', treeDensityCounts: { none: 0, light: 2, moderate: 4, heavy: 6 },
     });
     constants.TREE_SHRUB.densityFactors.heavy = 1.3;
     constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5 };
@@ -1327,7 +1355,8 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
     const armed = priceTreeShrub({ bedArea: 2000, access: 'easy', shrubDensity: 'heavy' }, { tier: 'standard' });
     expect(armed.pricingKnobs).toEqual({
       densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5, callbackReservePerVisit: 2,
-      fallbackBedSqFt: 1200,
+      fallbackBedSqFt: 1200, marginTarget: 0.40,
+      lotBedBasis: 'open_parcel', treeDensityCounts: { none: 0, light: 2, moderate: 4, heavy: 6 },
     });
   });
 
@@ -1368,7 +1397,8 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
   test('legacy estimates (no stamp) replay NEUTRAL — they could only have been priced with the knobs off', () => {
     const { estimateTreeShrubKnobSignal: signal } = require('../routes/estimate-public');
     expect(signal({ result: { lineItems: [{ service: 'tree_shrub' }] } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000, marginTarget: 0.45,
+      lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
     });
     // A stamp from before the large-palm factor replays it neutral; a newer
     // stamp replays its own factor.
@@ -1446,7 +1476,8 @@ describe('Tree & Shrub v4.7 knob snapshot survives the mapped admin envelope', (
     const meta = mapV1ToLegacyShape(estimate).results.tsMeta;
     expect(meta.pricingKnobs).toEqual({
       densityFactor: 1, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 0,
-      fallbackBedSqFt: 1200,
+      fallbackBedSqFt: 1200, marginTarget: 0.40,
+      lotBedBasis: 'open_parcel', treeDensityCounts: { none: 0, light: 2, moderate: 4, heavy: 6 },
     });
     expect(meta.palmCount).toBe(10);
     expect(meta.palmCountSource).toBe('service_line');
@@ -1456,13 +1487,15 @@ describe('Tree & Shrub v4.7 knob snapshot survives the mapped admin envelope', (
     const { estimateTreeShrubKnobSignal: signal } = require('../routes/estimate-public');
     expect(signal({
       result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } },
-    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000 });
+    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } });
     // Mapped legacy T&S estimate saved before the knobs existed.
     expect(signal({ result: { results: { tsMeta: { eb: 2000, et: 3 } } } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000, marginTarget: 0.45,
+      lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
     });
     expect(signal({ result: { results: { ts: [{ tier: 'standard', ann: 600 }] } } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 2000, marginTarget: 0.45,
+      lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
     });
     // No T&S anywhere → inject nothing.
     expect(signal({ result: { results: { pest: {} } } })).toBeNull();
@@ -1491,7 +1524,8 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     expect(estimateTreeShrubKnobSignal).toBe(shared.treeShrubKnobSignalForReplay);
     const stamped = { result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } } };
     expect(shared.treeShrubKnobSignalForReplay(stamped)).toEqual({
-      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000,
+      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000, marginTarget: 0.45,
+      lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
     });
   });
 
@@ -1515,7 +1549,7 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     };
 
     // Membership-lapse reconcile: a DECLARED replay of a persisted row.
-    expect((await run({ replay: true }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1, fallbackBedSqFt: 2000 });
+    expect((await run({ replay: true }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1, fallbackBedSqFt: 2000, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } });
 
     // Create/revision save: estimateData is browser-controlled, so a posted
     // snapshot must NOT override the admin-only live pricing_config.
@@ -1527,11 +1561,101 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     forged.engineInputs.treeShrubPricingKnobs = {
       densityFactor: 0.5, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
     };
-    expect((await run({ replay: true, data: forged }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1, fallbackBedSqFt: 2000 });
+    expect((await run({ replay: true, data: forged }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1, fallbackBedSqFt: 2000, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } });
     // …and with no replay declared, the forged value is simply gone.
     const forgedNoReplay = estData();
     forgedNoReplay.engineInputs.treeShrubPricingKnobs = { densityFactor: 0.5 };
     expect((await run({ data: forgedNoReplay }))?.treeShrubPricingKnobs).toBeUndefined();
+  });
+});
+
+describe('Tree & Shrub margin target replays from the stamp (owner audit 2026-10-21; Codex #6398)', () => {
+  test('a quote sent at 0.45 replays at 0.45 after the live target moved to 0.40', () => {
+    const property = { bedArea: 2000, treeCount: 0, access: 'easy' };
+    const live = priceTreeShrub(property, { tier: 'standard' });
+    expect(live.pricingKnobs.marginTarget).toBe(0.40);
+    expect(live.monthly).toBeCloseTo(41.46, 2);
+    // The stored stamp of a quote priced before the audit.
+    const replayed = priceTreeShrub(property, { tier: 'standard', knobs: { marginTarget: 0.45 } });
+    expect(replayed.marginTarget).toBe(0.45);
+    expect(replayed.pricingKnobs.marginTarget).toBe(0.45);
+    expect(replayed.monthly).toBeCloseTo(45.23, 2);
+    expect(replayed.baseMargin).toBeCloseTo(0.450, 3);
+    // An out-of-range stamp is ignored, never priced.
+    expect(priceTreeShrub(property, { tier: 'standard', knobs: { marginTarget: 2 } }).marginTarget).toBe(0.40);
+  });
+
+  test('the replay signal recognizes a COMMERCIAL T&S line — raw or mapped recurring row — and replays its bed basis (Codex #6398 r6)', () => {
+    const { treeShrubKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    // Unstamped pre-change commercial line: the gross-lot basis it priced on.
+    expect(treeShrubKnobSignalForReplay({ result: { lineItems: [{ service: 'commercial_tree_shrub' }] } })).toMatchObject({ lotBedBasis: 'gross_lot' });
+    // Stamped fresh line (raw) and the mapped recurring row Admin V2 keeps.
+    expect(treeShrubKnobSignalForReplay({ engineResult: { lineItems: [{ service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'open_parcel' } }] } })).toMatchObject({ lotBedBasis: 'open_parcel' });
+    expect(treeShrubKnobSignalForReplay({ result: { recurring: { services: [{ service: 'commercial_pest' }, { service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } })).toMatchObject({ lotBedBasis: 'open_parcel' });
+    // No T&S line of either kind: nothing to inject.
+    expect(treeShrubKnobSignalForReplay({ result: { recurring: { services: [{ service: 'commercial_pest' }] } } })).toBeNull();
+    // A revision REMOVED T&S but left the agent draft's engineResult behind:
+    // the mapped envelope's absence is authoritative, so a T&S line the
+    // customer adds later resolves the LIVE knobs, not the removed quote's
+    // stamp (Codex #6398 r20 P1).
+    const removed = {
+      engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { marginTarget: 0.45, lotBedBasis: 'gross_lot' } }] },
+      result: { lineItems: [{ service: 'pest_control', monthly: 45 }], recurring: { services: [{ service: 'pest_control' }] }, results: { pestMeta: {} } },
+    };
+    expect(treeShrubKnobSignalForReplay(removed)).toBeNull();
+    // With NO mapped envelope the raw draft line still replays its stamp.
+    expect(treeShrubKnobSignalForReplay({ engineResult: removed.engineResult })).toMatchObject({ marginTarget: 0.45, lotBedBasis: 'gross_lot' });
+    // The CURRENT mapped commercial row beats a retained, older raw line —
+    // residential or commercial — exactly as tsMeta does (Codex #6398 r7).
+    const staleRaw = { engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { lotBedBasis: 'gross_lot', marginTarget: 0.45 } }] } };
+    const revised = { ...staleRaw, result: { recurring: { services: [{ service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'open_parcel' } }] } } };
+    expect(treeShrubKnobSignalForReplay(revised)).toMatchObject({ lotBedBasis: 'open_parcel' });
+    const staleCommercialRaw = { engineResult: { lineItems: [{ service: 'commercial_tree_shrub', pricingKnobs: { lotBedBasis: 'gross_lot' } }] }, result: revised.result };
+    expect(treeShrubKnobSignalForReplay(staleCommercialRaw)).toMatchObject({ lotBedBasis: 'open_parcel' });
+  });
+
+  test('the replay signal carries the stamped target and defaults an unstamped line to 0.45', () => {
+    const { treeShrubKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    expect(treeShrubKnobSignalForReplay({ result: { results: { tsMeta: { pricingKnobs: { marginTarget: 0.40 } } } } }).marginTarget).toBe(0.40);
+    expect(treeShrubKnobSignalForReplay({ result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1 } } } } }).marginTarget).toBe(0.45);
+    expect(treeShrubKnobSignalForReplay({ result: { lineItems: [{ service: 'tree_shrub' }] } }).marginTarget).toBe(0.45);
+  });
+
+  test('a pre-audit INFERRED quote (gross-lot bed, 3/6/10 trees, 0.45) replays its own price through the stamp (Codex #6398 r2)', () => {
+    const { treeShrubKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    // Inputs a stored pre-audit estimate replays: lot only, no bed, no count.
+    const input = { homeSqFt: 2500, stories: 1, lotSqFt: 10000, propertyType: 'single_family', poolCage: true, pool: true, features: { shrubs: 'moderate', trees: 'moderate', complexity: 'simple' }, services: { treeShrub: { tier: 'standard' } } };
+    // What the old engine priced: gross lot × 18% = 1,800 sf, 6 trees, 0.45.
+    const legacyKnobs = { densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 1200, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } };
+    const sent = generateEstimate({ ...input, treeShrubPricingKnobs: legacyKnobs }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(sent.bedAreaUsed).toBe(1800);
+    expect(sent.treeCount).toBe(6);
+    expect(sent.pricingKnobs).toMatchObject({ lotBedBasis: 'gross_lot', treeDensityCounts: { moderate: 6 }, marginTarget: 0.45 });
+    // A stored line with NO stamp at all (pre-knob quote) replays the same.
+    const unstamped = treeShrubKnobSignalForReplay({ result: { lineItems: [{ service: 'tree_shrub' }] } });
+    const replayUnstamped = generateEstimate({ ...input, treeShrubPricingKnobs: unstamped }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(replayUnstamped.annual).toBe(sent.annual);
+    // A stored line carrying the sent stamp replays the same.
+    const replayStamped = generateEstimate({ ...input, treeShrubPricingKnobs: treeShrubKnobSignalForReplay({ result: { lineItems: [{ service: 'tree_shrub', pricingKnobs: sent.pricingKnobs }] } }) }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(replayStamped.annual).toBe(sent.annual);
+    // A fresh quote prices the open parcel, 4 trees and 0.40 — and lower.
+    const fresh = generateEstimate(input).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(fresh.bedAreaUsed).toBeLessThan(1800);
+    expect(fresh.treeCount).toBe(4);
+    expect(fresh.pricingKnobs).toMatchObject({ lotBedBasis: 'open_parcel', treeDensityCounts: { none: 0, light: 2, moderate: 4, heavy: 6 }, marginTarget: 0.40 });
+    expect(fresh.annual).toBeLessThan(sent.annual);
+    // And its stamp replays it exactly.
+    const replayFresh = generateEstimate({ ...input, treeShrubPricingKnobs: treeShrubKnobSignalForReplay({ result: { lineItems: [{ service: 'tree_shrub', pricingKnobs: fresh.pricingKnobs }] } }) }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(replayFresh.annual).toBe(fresh.annual);
+  });
+
+  test('generateEstimate replays a stamped 0.45 through treeShrubPricingKnobs', () => {
+    const input = { homeSqFt: 2000, stories: 1, lotSqFt: 10000, bedArea: 2000, propertyType: 'single_family', services: { treeShrub: { tier: 'standard', treeCount: 0 } } };
+    const fresh = generateEstimate(input).lineItems.find((i) => i.service === 'tree_shrub');
+    const replay = generateEstimate({ ...input, treeShrubPricingKnobs: { marginTarget: 0.45 } }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(fresh.pricingKnobs.marginTarget).toBe(0.40);
+    expect(replay.pricingKnobs.marginTarget).toBe(0.45);
+    expect(replay.monthly).toBeGreaterThan(fresh.monthly);
   });
 });
 
@@ -1548,11 +1672,11 @@ describe('Tree & Shrub v4.7 GH review round 2 fixes', () => {
         results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } },
       },
     });
-    expect(signal).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000 });
+    expect(signal).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } });
     // With no mapped stamp, the raw line still answers.
     expect(treeShrubKnobSignalForReplay({
       engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } }] },
-    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000 });
+    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2, fallbackBedSqFt: 2000, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } });
   });
 });
 
@@ -1666,9 +1790,10 @@ describe('Tree & Shrub 1,200 sqft fallback bed (owner ruling 2026-10-05) and its
 
   test('a replayed OLD fallback quote reproduces its original 2,000 sqft price; a new one replays 1,200', () => {
     const input = { homeSqFt: 2000, services: { treeShrub: { tier: 'standard' } } };
-    // An old quote: priced at 2,000 and stored with a stamp that has no size.
+    // An old quote: priced at 2,000 (and, like every pre-2026-10-21 quote, at
+    // the 0.45 margin target) and stored with a stamp that has neither key.
     const oldStamp = { densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0 };
-    const original = generateEstimate({ ...input, treeShrubPricingKnobs: { ...oldStamp, fallbackBedSqFt: 2000 } })
+    const original = generateEstimate({ ...input, treeShrubPricingKnobs: { ...oldStamp, fallbackBedSqFt: 2000, marginTarget: 0.45 } })
       .lineItems.find((li) => li.service === 'tree_shrub');
     expect(original.bedArea).toBe(2000);
     const storedOld = { result: { lineItems: [{ service: 'tree_shrub', pricingKnobs: oldStamp }] } };
@@ -1720,11 +1845,11 @@ describe('Tree & Shrub lookup-sourced palms keep the density-estimated trees', (
     'heavy density + 1 lookup palm is never quoted below density alone (%s)',
     (_label, reserve) => {
       const densityOnly = price({}, reserve);
-      expect(densityOnly.treeCount).toBe(10);
+      expect(densityOnly.treeCount).toBe(6);
       // Stated/caller path keeps its documented suppression.
       const stated = price({ palmCount: 1 }, reserve);
       expect(stated.materialTreeCount + stated.laborTreeCount).toBeLessThanOrEqual(2);
-      // Lookup path: 9 non-palm trees stay, the palm prices as a palm.
+      // Lookup path: 5 non-palm trees stay, the palm prices as a palm.
       const lookup = price({ palmCount: 1, palmCountFromLookup: true }, reserve);
       expect(lookup.palmCountFromLookup).toBe(true);
       expect(lookup.annual).toBeGreaterThanOrEqual(densityOnly.annual);
@@ -1755,5 +1880,119 @@ describe('Tree & Shrub lookup-sourced palms keep the density-estimated trees', (
     expect(enhanced.ann).toBe(Math.round(direct.annual));
     const noFlag = priceTreeShrub({ bedArea: 2000, treeDensity: 'heavy' }, { tier: 'enhanced', palmCount: 1 });
     expect(enhanced.ann).toBeGreaterThan(Math.round(noFlag.annual));
+  });
+});
+
+describe('Tree & Shrub lot-based bed area prices the OPEN parcel (owner audit 2026-10-21)', () => {
+  test('footprint and hardscape come off the lot before the density percentage', () => {
+    // moderate 18% of (10,000 − 2,500 footprint − 1,000 hardscape) = 1,170
+    const quote = priceTreeShrub(
+      { lotSqFt: 10000, footprint: 2500, hardscape: 1000, features: { shrubs: 'moderate', complexity: 'simple' } },
+      { tier: 'standard', treeCount: 0 }
+    );
+    expect(quote.bedAreaSource).toBe('lot_based');
+    expect(quote.bedAreaUsed).toBe(1170);
+  });
+
+  test('a bare lot with no footprint still prices on the gross lot', () => {
+    const quote = priceTreeShrub(
+      { lotSqFt: 10000, features: { shrubs: 'moderate', complexity: 'simple' } },
+      { tier: 'standard', treeCount: 0 }
+    );
+    expect(quote.bedAreaUsed).toBe(1800);
+  });
+
+  test('footprint + hardscape swallowing the lot falls back to the gross lot, never zero beds', () => {
+    const quote = priceTreeShrub(
+      { lotSqFt: 3000, footprint: 2500, hardscape: 800, features: { shrubs: 'light', complexity: 'simple' } },
+      { tier: 'standard', treeCount: 0 }
+    );
+    expect(quote.bedAreaSource).toBe('lot_based');
+    expect(quote.bedAreaUsed).toBe(300);
+  });
+
+  test('an implausible footprint (over half the lot) still prices the open parcel but parks the line for review (Codex security P2)', () => {
+    // 22,000 sf lot: a 2,000 sf home prices clean; the same lot with a
+    // claimed 20,000 sf home shrinks the bed basis — the price is what the
+    // inputs say, but the line carries a review reason so the public quote
+    // never auto-sends it.
+    const base = { stories: 1, lotSqFt: 22000, propertyType: 'single_family', features: { shrubs: 'moderate', trees: 'light', complexity: 'simple' }, services: { treeShrub: { tier: 'standard', treeCount: 0 } } };
+    const honest = generateEstimate({ ...base, homeSqFt: 2000 }).lineItems.find((i) => i.service === 'tree_shrub');
+    const inflated = generateEstimate({ ...base, homeSqFt: 20000 }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(honest.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+    expect(inflated.bedAreaSource).toBe('lot_based');
+    expect(inflated.monthly).toBeLessThan(honest.monthly);
+    expect(inflated.manualReviewReasons).toContain('open_parcel_basis_footprint_over_half_lot');
+    expect(inflated.requiresManualReview).toBe(true);
+    expect(inflated.warnings.join(' ')).toMatch(/more than half the 22,000 sq ft lot/);
+    // A typed bed area is not a lot-based inference: no footprint guard.
+    const typed = generateEstimate({ ...base, homeSqFt: 20000, bedArea: 900 }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(typed.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+    // A pre-change quote replayed on its stamped GROSS-lot basis was never
+    // priced on the open parcel: the guard must not change its review state
+    // (Codex #6398 r6).
+    const legacyKnobs = { densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 1200, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } };
+    const replayed = generateEstimate({ ...base, homeSqFt: 20000, treeShrubPricingKnobs: legacyKnobs }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(replayed.bedAreaSource).toBe('lot_based');
+    expect(replayed.bedAreaUsed).toBe(22000 * 0.18);
+    expect(replayed.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+    expect(replayed.requiresManualReview).toBe(false);
+  });
+
+  test('a trusted (server-measured) footprint prices the open parcel regardless of the body homeSqFt; no trusted footprint parks the line (Codex #6398 security r11)', () => {
+    // 50,000 sf lot: a claimed 20,000 sf home covers only 45.6% of the lot,
+    // so the half-lot heuristic alone lets the inflated footprint shrink the
+    // bed. The public quote now hands the pricer the SERVER-measured
+    // footprint for the T&S basis; the body's homeSqFt still drives every
+    // other service but never the open-parcel bed.
+    const base = { stories: 1, lotSqFt: 50000, propertyType: 'single_family', features: { shrubs: 'moderate', trees: 'light', complexity: 'simple' }, services: { treeShrub: { tier: 'standard', treeCount: 0 } } };
+    const honest = generateEstimate({ ...base, homeSqFt: 2000 }).lineItems.find((i) => i.service === 'tree_shrub');
+    const inflatedUnguarded = generateEstimate({ ...base, homeSqFt: 20000 }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(inflatedUnguarded.bedAreaUsed).toBeLessThan(honest.bedAreaUsed);
+    expect(inflatedUnguarded.manualReviewReasons).not.toContain('open_parcel_basis_footprint_over_half_lot');
+    // Same inflated body, but the caller vouches for a 2,000 sf footprint.
+    const guarded = generateEstimate({ ...base, homeSqFt: 20000, treeShrubFootprintSqFt: 2000, treeShrubFootprintTrusted: true }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(guarded.bedAreaSource).toBe('lot_based');
+    expect(guarded.bedAreaUsed).toBe(honest.bedAreaUsed);
+    expect(guarded.monthly).toBe(honest.monthly);
+    // Same review state as the honest quote (both carry the large-bed gate
+    // on 8,141 sf of beds; neither carries a footprint reason).
+    expect(guarded.manualReviewReasons).toEqual(honest.manualReviewReasons);
+    expect(guarded.manualReviewReasons).not.toContain('open_parcel_basis_unconfirmed_footprint');
+    // The caller has NO trusted footprint: price what the inputs say, park it.
+    const untrusted = generateEstimate({ ...base, homeSqFt: 20000, treeShrubFootprintTrusted: false }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(untrusted.bedAreaUsed).toBe(inflatedUnguarded.bedAreaUsed);
+    expect(untrusted.requiresManualReview).toBe(true);
+    expect(untrusted.manualReviewReasons).toContain('open_parcel_basis_unconfirmed_footprint');
+    expect(untrusted.warnings.join(' ')).toMatch(/unconfirmed building footprint/);
+    // A typed bed is not a lot-based inference: the verdict is moot.
+    const typed = generateEstimate({ ...base, homeSqFt: 20000, bedArea: 900, treeShrubFootprintTrusted: false }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(typed.manualReviewReasons ?? []).not.toContain('open_parcel_basis_unconfirmed_footprint');
+    // A replay on the stamped GROSS-lot basis never priced the open parcel.
+    const legacyKnobs = { densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0, fallbackBedSqFt: 1200, marginTarget: 0.45, lotBedBasis: 'gross_lot', treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 } };
+    const replayed = generateEstimate({ ...base, homeSqFt: 20000, treeShrubFootprintTrusted: false, treeShrubPricingKnobs: legacyKnobs }).lineItems.find((i) => i.service === 'tree_shrub');
+    expect(replayed.manualReviewReasons ?? []).not.toContain('open_parcel_basis_unconfirmed_footprint');
+    expect(replayed.manualReviewReasons ?? []).not.toContain('open_parcel_basis_footprint_over_half_lot');
+  });
+
+  test('generateEstimate: a home with a pool cage prices fewer beds than the same lot bare, and matches the profile basis', () => {
+    const { treeShrubBedBasisSqFt } = require('../services/pricing-engine/property-calculator');
+    const base = {
+      stories: 1,
+      lotSqFt: 10000,
+      propertyType: 'single_family',
+      features: { shrubs: 'moderate', trees: 'light', complexity: 'simple' },
+      services: { treeShrub: { tier: 'standard', access: 'easy', treeCount: 0 } },
+    };
+    const caged = generateEstimate({ ...base, homeSqFt: 2500, poolCage: true, pool: true });
+    const bare = generateEstimate({ ...base, homeSqFt: 0 });
+    const tsCaged = caged.lineItems.find((i) => i.service === 'tree_shrub');
+    const tsBare = bare.lineItems.find((i) => i.service === 'tree_shrub');
+    expect(tsCaged.bedAreaSource).toBe('lot_based');
+    expect(tsCaged.bedAreaUsed).toBeLessThan(tsBare.bedAreaUsed);
+    expect(tsCaged.bedAreaUsed).toBeLessThan(1800);
+    const basis = treeShrubBedBasisSqFt(10000, caged.property.footprint, caged.property.hardscape);
+    expect(tsCaged.bedAreaUsed).toBe(Math.round(basis * 0.18));
+    expect(tsCaged.monthly).toBeLessThan(tsBare.monthly);
   });
 });

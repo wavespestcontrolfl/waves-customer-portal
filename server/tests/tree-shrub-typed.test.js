@@ -18,7 +18,7 @@ const {
   getActivityIndicator,
 } = require('../services/service-report/activity-indicators');
 const { PROJECT_TYPES } = require('../services/project-types');
-const { validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
+const { validateTreeShrubTypedCompliance, deriveTreeShrubTreatments, dropSprayGallonsWithoutLiquidApplication, hasLiquidApplication } = require('../services/tree-shrub-closeout');
 
 const BASE_VALUES = {
   plant_groups: 'Palms, Shrubs, Ornamentals',
@@ -85,11 +85,13 @@ describe('tree & shrub schema', () => {
     // so the required simplified closeout is untouched and none of it can
     // reach the customer report. Any other detail field on the primary
     // slice is a regression against the 2026-07-21 simplification.
+    // spray_mix_gallons + hedge_linear_ft_serviced: owner 2026-10-21
+    // spray-volume groundwork, same optional + internal shape as bed sqft.
     expect(schema.fields.filter((f) => f.detail).map((f) => f.key).sort()).toEqual([
-      'access_difficulty', 'bed_sqft_serviced', 'palm_count_total',
-      'shrub_density', 'tree_count_total',
+      'access_difficulty', 'bed_sqft_serviced', 'hedge_linear_ft_serviced', 'palm_count_total',
+      'shrub_density', 'spray_mix_gallons', 'tree_count_total',
     ]);
-    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'tree_count_total', 'shrub_density', 'access_difficulty']) {
+    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'tree_count_total', 'shrub_density', 'access_difficulty', 'spray_mix_gallons', 'hedge_linear_ft_serviced']) {
       expect({ key, internal: byKey[key].internal, required: byKey[key].required })
         .toEqual({ key, internal: true, required: false });
     }
@@ -148,6 +150,52 @@ describe('tree & shrub schema', () => {
 
   test('the schema slice no longer serves the retired next-step chip list', () => {
     expect(findingsSchemaForType('tree_shrub').nextStepChips).toBeUndefined();
+  });
+});
+
+describe('spray mix gallons need a liquid application (Codex #6398 r15)', () => {
+  const granular = { productId: 'g1', applicationMethod: 'granular_broadcast' };
+  const foliar = { productId: 'f1', applicationMethod: 'foliar_spray' };
+  const drench = { productId: 'd1', applicationMethod: 'soil_drench' };
+  test('the recorded method decides; the catalog default stands in when the input carries none', () => {
+    expect(hasLiquidApplication([granular], [{ id: 'g1', application_method: 'granular_broadcast' }])).toBe(false);
+    expect(hasLiquidApplication([granular, foliar], [])).toBe(true);
+    expect(hasLiquidApplication([drench], [])).toBe(true);
+    // Every spray method the full form offers counts; granular / bait /
+    // station / injection do not (Codex #6398 r17: liquid fertilizers
+    // default to broadcast_spray).
+    for (const method of ['broadcast_spray', 'perimeter_spray', 'spot_treatment', 'fog_ulv', 'pin_stream']) {
+      expect(hasLiquidApplication([{ productId: 'x', applicationMethod: method }], [])).toBe(true);
+    }
+    for (const method of ['granular_broadcast', 'bait_placement', 'station_check', 'trunk_injection']) {
+      expect(hasLiquidApplication([{ productId: 'x', applicationMethod: method }], [])).toBe(false);
+    }
+    // Catalog default foliar, tech recorded nothing → liquid.
+    expect(hasLiquidApplication([{ productId: 'c1' }], [{ id: 'c1', application_method: 'foliar_spray' }])).toBe(true);
+    // Tech recorded granular over a catalog foliar default → not liquid.
+    expect(hasLiquidApplication([{ productId: 'c1', applicationMethod: 'granular_broadcast' }], [{ id: 'c1', application_method: 'foliar_spray' }])).toBe(false);
+    expect(hasLiquidApplication([], [])).toBe(false);
+  });
+  test('a granular-only visit drops spray_mix_gallons from the typed values in place; a sprayed visit keeps them', () => {
+    const granularOnly = { plant_groups: 'Shrubs', spray_mix_gallons: '5', hedge_linear_ft_serviced: '120' };
+    expect(dropSprayGallonsWithoutLiquidApplication(granularOnly, [granular], [])).toBe(granularOnly);
+    expect(granularOnly).toEqual({ plant_groups: 'Shrubs', hedge_linear_ft_serviced: '120' });
+    const sprayed = { plant_groups: 'Shrubs', spray_mix_gallons: '5' };
+    dropSprayGallonsWithoutLiquidApplication(sprayed, [granular, foliar], []);
+    expect(sprayed.spray_mix_gallons).toBe('5');
+    // No gallons submitted: nothing to do, no key invented.
+    const none = { plant_groups: 'Shrubs' };
+    dropSprayGallonsWithoutLiquidApplication(none, [], []);
+    expect(none).toEqual({ plant_groups: 'Shrubs' });
+    expect(dropSprayGallonsWithoutLiquidApplication(null, [], [])).toBeNull();
+  });
+  test('companion T&S values (combined visit, shared products list) drop spray_mix_gallons even beside a liquid product (Codex #6398 r24)', () => {
+    const companion = { plant_groups: 'Shrubs', spray_mix_gallons: '5', hedge_linear_ft_serviced: '120' };
+    dropSprayGallonsWithoutLiquidApplication(companion, [foliar], [], { attributable: false });
+    expect(companion).toEqual({ plant_groups: 'Shrubs', hedge_linear_ft_serviced: '120' });
+    const primary = { plant_groups: 'Shrubs', spray_mix_gallons: '5' };
+    dropSprayGallonsWithoutLiquidApplication(primary, [foliar], [], { attributable: true });
+    expect(primary.spray_mix_gallons).toBe('5');
   });
 });
 

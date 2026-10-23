@@ -87,7 +87,12 @@ async function openPanel() {
   render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" />);
   await screen.findAllByText('Avery Customer');
   fireEvent.click(await screen.findByText('View routing & override recipients'));
-  return screen.findByTestId('contact-notification-choices');
+  const panel = await screen.findByTestId('contact-notification-choices');
+  // The panel mounts with "Loading…" before its own fetch resolves; under CI
+  // load that first paint can be the one findByTestId returns, so wait for the
+  // first contact row before any getBy* (flaked on main 2026-10-22, run 39857297728).
+  await within(panel).findByText('Sam Spouse');
+  return panel;
 }
 
 describe('Customer 360 → contacts\' own notification choices', () => {

@@ -4009,3 +4009,45 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(completeCalls()).toHaveLength(0);
   });
 });
+
+// GATE_ESTIMATE_LAWN_LIMITS: carpetgrass on the turf profile puts one line under a Celsius WG
+// row (the context's carpetgrassCelsiusWarning). No new tap and no new step; other products and
+// a context without the key are unchanged.
+describe('carpetgrass warning on a Celsius WG row', () => {
+  const P_CELSIUS = 'aaaaaaaa-0000-4000-8000-0000000000c1';
+  const WARNING = 'Carpetgrass on this lawn: Celsius kills it. Spot only, off the carpetgrass.';
+  const CELSIUS_CATALOG = [...CATALOG, { id: P_CELSIUS, name: 'Celsius WG', category: 'herbicide', formulation: 'WDG', service_lines: ['lawn'] }];
+  const CELSIUS = { productId: P_CELSIUS, name: 'Celsius WG', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'oz', approvedForReport: true, wateringRule: null, wateringSummary: 'No rule', mowHoldDays: null };
+  const withCelsius = (extra = {}) => context({
+    plannedProducts: { source: 'plan', items: [...PLANNED, CELSIUS] },
+    ...extra,
+  });
+  const open = (ctx) => openSheet({ request: makeRequest({ ctx }), props: { catalog: CELSIUS_CATALOG } });
+
+  test('flagged: the Celsius row shows the line, the other rows do not', async () => {
+    await open(withCelsius({ carpetgrassCelsiusWarning: WARNING }));
+    expect(within(await screen.findByRole('group', { name: 'Celsius WG' })).getByText(WARNING)).toBeTruthy();
+    expect(within(editorFor('Talak 7.9%')).queryByText(WARNING)).toBeNull();
+    expect(within(editorFor('Iron Plus')).queryByText(WARNING)).toBeNull();
+    expect(screen.getAllByText(WARNING)).toHaveLength(1);
+  });
+
+  test('no key in the context (gate off, no carpetgrass, or an older server): no line anywhere', async () => {
+    await open(withCelsius());
+    await screen.findByRole('group', { name: 'Celsius WG' });
+    expect(screen.queryByText(WARNING)).toBeNull();
+  });
+
+  test('flagged, no Celsius on the sheet: no line', async () => {
+    await open(context({ carpetgrassCelsiusWarning: WARNING }));
+    await screen.findByRole('group', { name: 'Talak 7.9%' });
+    expect(screen.queryByText(WARNING)).toBeNull();
+  });
+
+  test('flagged: a Celsius WG added by hand shows the line too, and Complete is not held by it', async () => {
+    await open(context({ carpetgrassCelsiusWarning: WARNING }));
+    await addProductByName('Celsius WG');
+    expect(within(await screen.findByRole('group', { name: 'Celsius WG' })).getByText(WARNING)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /acknowledge|confirm carpetgrass/i })).toBeNull();
+  });
+});

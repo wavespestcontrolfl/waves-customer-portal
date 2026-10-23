@@ -45,10 +45,11 @@ function chainFor(table, result) {
   for (const m of ['where', 'whereIn', 'whereNull', 'whereNotIn', 'whereNotNull', 'whereRaw', 'whereNot', 'andWhere', 'orWhere', 'orWhereRaw', 'leftJoin', 'select', 'orderBy', 'limit']) {
     chain[m] = jest.fn(() => chain);
   }
-  chain.first = jest.fn(async () => result);
+  chain.first = jest.fn(async () => (Array.isArray(result) ? result[0] : result));
   chain.update = jest.fn(async () => { writes.push(`${table}.update`); return 1; });
   chain.insert = jest.fn(async () => { writes.push(`${table}.insert`); return [1]; });
-  chain.then = undefined;
+  // A list result (customer_properties) resolves when the builder is awaited.
+  chain.then = Array.isArray(result) ? (resolve, reject) => Promise.resolve(result).then(resolve, reject) : undefined;
   return chain;
 }
 db.mockImplementation((table) => chainFor(table, dbRows[table]));
@@ -194,5 +195,50 @@ describe('the document input hash (codex #6343 r14)', () => {
     expect(a).not.toBe(b);
     expect(await hash(row, { validThrough: '2099-02-01T00:00:00.000Z', omitExpiry: true }))
       .toBe(await hash(row, { validThrough: '2099-03-01T00:00:00.000Z', omitExpiry: true }));
+  });
+});
+
+// GATE_ESTIMATE_LAWN_LIMITS: the document prints the lawn limits block, so it is part of the
+// input the delivery fence compares (Codex #6487 pre-push P1): a turf flag edited while the
+// attachment renders or waits for delivery changes the hash and invalidates the prepared PDF.
+describe('the document input hash covers the lawn limits block', () => {
+  const lawnRow = (extra = {}) => estimateRow({
+    estimate_data: {
+      proposal: PROPOSAL,
+      result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }] } },
+    },
+    ...extra,
+  });
+  const world = (flags) => ({
+    estimates: lawnRow(),
+    customers: customer(),
+    customer_properties: [{ id: 'prop-a', is_primary: true }],
+    customer_turf_profiles: { customer_id: 'cust-1', active: true, grass_type: 'st_augustine', ...flags },
+  });
+  afterEach(() => { delete process.env.GATE_ESTIMATE_LAWN_LIMITS; });
+
+  test('the projection carries the block, null when there is none', () => {
+    const block = { heading: 'h', paragraphs: [{ key: 'always', text: 't' }] };
+    expect(emailPdf.documentInputProjection({ lawnLimits: block }).lawnLimits).toEqual(block);
+    expect(emailPdf.documentInputProjection({}).lawnLimits).toBeNull();
+  });
+
+  test('a flag edit changes the hash, so a prepared attachment no longer matches', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    dbRows = world({ other_grasses: null });
+    const before = await hash(dbRows.estimates);
+    expect(await hash(dbRows.estimates)).toBe(before);
+    dbRows = world({ other_grasses: ['carpetgrass'] });
+    const flagged = await hash(dbRows.estimates);
+    expect(flagged).not.toBe(before);
+    dbRows = world({ other_grasses: null, virus_streaks_suspected: true });
+    expect(await hash(dbRows.estimates)).not.toBe(before);
+  });
+
+  test('gate off: the profile does not move the hash', async () => {
+    dbRows = world({ other_grasses: null });
+    const before = await hash(dbRows.estimates);
+    dbRows = world({ other_grasses: ['carpetgrass'], virus_streaks_suspected: true });
+    expect(await hash(dbRows.estimates)).toBe(before);
   });
 });

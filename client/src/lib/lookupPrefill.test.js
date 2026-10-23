@@ -23,6 +23,7 @@ describe("palm-count prefill gate", () => {
 describe("condo record on the development parcel (unit_parcel lot flag)", () => {
   const flagged = {
     lotSqFt: 400000, estimatedTurfSf: 25000, estimatedBedAreaSf: 6000, imperviousSurfacePercent: 35,
+    estimatedHedgeLinearFt: 900,
     shrubDensity: "HEAVY",
     fieldVerifyFlags: [{ field: "lotSize", scope: "unit_parcel", reason: "development parcel" }],
   };
@@ -40,6 +41,7 @@ describe("condo record on the development parcel (unit_parcel lot flag)", () => 
     expect(scoped.estimatedTurfSf).toBeUndefined();
     expect(scoped.estimatedBedAreaSf).toBeUndefined();
     expect(scoped.imperviousSurfacePercent).toBeUndefined();
+    expect(scoped.estimatedHedgeLinearFt).toBeUndefined();
     expect(scoped.shrubDensity).toBe("HEAVY");
     // The lot stays as display context — it is simply never prefilled.
     expect(scoped.lotSqFt).toBe(400000);

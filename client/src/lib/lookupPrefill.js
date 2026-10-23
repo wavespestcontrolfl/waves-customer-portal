@@ -112,6 +112,8 @@ const UNIT_PARCEL_AREA_READS = [
   "estimatedTurfSf", "turfSource", "turfCappedToParcel", "turfFallbackPreviewSf",
   "imperviousSurfacePercent", "imperviosSurfacePercent",
   "estimatedBedAreaSf", "estimatedBedAreaPercent", "bedAreaSource",
+  // The building's hedge line is a parcel-wide read too (Codex #6398 r5).
+  "estimatedHedgeLinearFt",
 ];
 
 // A priced profile still carrying the development parcel's turf, bed, or

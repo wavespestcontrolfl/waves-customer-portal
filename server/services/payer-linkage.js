@@ -94,7 +94,9 @@ async function loadPayerLinkage(customerId, dbh = db, { propagateCancellation = 
 // and LIVE_SCAN_MAX_RESOLUTIONS bounds the actual resolver lookups (distinct payers).
 const LIVE_SCAN_MAX_INVOICES = 1000;
 const LIVE_CANDIDATE_PAYER_SQL = `(EXISTS (SELECT 1 FROM customers c WHERE c.id = invoices.customer_id AND c.payer_id IS NOT NULL)
-  OR EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = invoices.scheduled_service_id AND ss.customer_id = invoices.customer_id AND ss.payer_id IS NOT NULL))`;
+  OR EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = invoices.scheduled_service_id AND ss.customer_id = invoices.customer_id AND ss.payer_id IS NOT NULL)
+  OR EXISTS (SELECT 1 FROM service_records sr JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+    WHERE invoices.scheduled_service_id IS NULL AND sr.id = invoices.service_record_id AND ss.customer_id = invoices.customer_id AND ss.payer_id IS NOT NULL))`;
 const LIVE_SCAN_MAX_RESOLUTIONS = 30;
 const LIVE_SETTLED_EXCLUSION_SQL = "lower(coalesce(invoices.status, '')) NOT IN ('paid', 'prepaid', 'refunded', 'partially_refunded', 'void', 'voided', 'canceled', 'cancelled', 'written_off')";
 async function loadLivePayerLinkage(customerId, dbh = db) {
@@ -115,7 +117,7 @@ async function loadLivePayerLinkage(customerId, dbh = db) {
     // Codex round-76 P2: only UNSETTLED invoices are re-resolved live - a settled self-pay invoice keeps the ownership it was paid under
     // (a payer assigned to the account later must not take the customer's own payment history with it)
     .whereRaw(LIVE_SETTLED_EXCLUSION_SQL)
-    .select('id', 'customer_id', 'scheduled_service_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
+    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
     .orderBy('created_at', 'desc')
     .limit(LIVE_SCAN_MAX_INVOICES + 1)
     .catch(() => { failed = true; return []; });

@@ -85,6 +85,8 @@ function invoiceData(overrides = {}) {
     id: 'inv-1',
     customer_id: 'cust-1',
     invoice_number: 'WPC-2026-0123',
+    // A full invoices row: no record link (invoice-payer-ownership re-reads a row read without the column).
+    service_record_id: null,
     status: 'sent',
     token: 'a'.repeat(64),
     subtotal: '150.00',

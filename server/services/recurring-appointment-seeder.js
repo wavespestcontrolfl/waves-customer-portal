@@ -1418,6 +1418,12 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
       }
     }
   }
+  // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit D4): a
+  // follow-up whose hour another stop already holds is seeded WINDOWLESS
+  // with its date as recurring_dispatch_due_date, and auto-dispatch places
+  // it (scheduling/plan-taken-hour.js). Gate off: no read, rows unchanged.
+  // The insert lines below stay untouched.
+  rows = await require('./scheduling/plan-taken-hour').handOffTakenHours(conn, rows, { cols: columns });
 
   if (!rows.length) {
     // Even with no NEW follow-up rows (series dates already exist), the parent

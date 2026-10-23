@@ -249,7 +249,7 @@ describe('pricing audit — one-time pest, discounts, tiers', () => {
 
 describe('pricing audit — tree & shrub and palm count', () => {
   test.each([[500, 0, 0, 'light'], [1000, 3, 0, 'standard'], [2000, 6, 4, 'standard'], [4000, 10, 0, 'enhanced'], [8000, 15, 0, 'standard'], [14000, 20, 0, 'standard']])(
-    'T&S bed %s sf, %s trees, %s palms, %s: cost buildup ÷ (1 − 0.45) reproduces the engine',
+    'T&S bed %s sf, %s trees, %s palms, %s: cost buildup ÷ (1 − marginTarget) reproduces the engine',
     (bedArea, treeCount, palmCount, tier) => {
       const exp = audit.expectTreeShrub({ bedArea, treeCount, palmCount, tier });
       const li = line(generateEstimate({ ...BASE, bedArea, services: { treeShrub: { tier, treeCount, ...(palmCount ? { palmCount } : {}), access: 'easy' } } }), 'tree_shrub');
@@ -409,9 +409,9 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     // tree & shrub tiers, palm injection, German roach, WDO — an edit to
     // TREE_SHRUB.tiers, PALM or SPECIALTY moves the engine AND the formula-parity
     // helper together; only a literal catches it.
-    ["tree & shrub standard 2,000 sf beds, 6 trees", { ...BASE, bedArea: 2000, services: { treeShrub: { tier: "standard", treeCount: 6 } } }, "tree_shrub", { perApp: 106.17, annual: 637, monthly: 53.08, visitsPerYear: 6 }],
-    ["tree & shrub enhanced 1,000 sf beds, 3 trees", { ...BASE, bedArea: 1000, services: { treeShrub: { tier: "enhanced", treeCount: 3 } } }, "tree_shrub", { perApp: 70.22, annual: 632, monthly: 52.67, visitsPerYear: 9 }],
-    ["tree & shrub light 4,000 sf beds, 10 trees, difficult access", { ...BASE, bedArea: 4000, services: { treeShrub: { tier: "light", treeCount: 10, access: "difficult" } } }, "tree_shrub", { perApp: 189, annual: 756, monthly: 63, visitsPerYear: 4 }],
+    ["tree & shrub standard 2,000 sf beds, 6 trees", { ...BASE, bedArea: 2000, services: { treeShrub: { tier: "standard", treeCount: 6 } } }, "tree_shrub", { perApp: 97.33, annual: 584, monthly: 48.67, visitsPerYear: 6 }],
+    ["tree & shrub enhanced 1,000 sf beds, 3 trees", { ...BASE, bedArea: 1000, services: { treeShrub: { tier: "enhanced", treeCount: 3 } } }, "tree_shrub", { perApp: 64.44, annual: 580, monthly: 48.33, visitsPerYear: 9 }],
+    ["tree & shrub light 4,000 sf beds, 10 trees, difficult access", { ...BASE, bedArea: 4000, services: { treeShrub: { tier: "light", treeCount: 10, access: "difficult" } } }, "tree_shrub", { perApp: 173.25, annual: 693, monthly: 57.75, visitsPerYear: 4 }],
     ["palm injection insecticide, 4 medium palms", { ...BASE, services: { palmInjection: { treatmentType: "insecticide", palmCount: 4, palmSize: "medium" } } }, "palm_injection", { pricePerPalm: 55, perVisit: 220, annual: 440, monthly: 36.67 }],
     ["palm injection Tree-Age, 1 palm at 12 in DBH", { ...BASE, services: { palmInjection: { treatmentType: "treeAge", palmCount: 1, dbhInches: 12 } } }, "palm_injection", { pricePerPalm: 85, perVisit: 85, annual: 42.5, monthly: 3.54 }],
     ["German roach moderate", { ...BASE, services: { germanRoach: { severity: "moderate" } } }, "german_roach", { price: 450, priceAfterDiscount: 450 }],
@@ -448,7 +448,7 @@ describe('pricing audit — FROZEN WaveGuard tier discounts (in-code constants, 
   const FROZEN_TIERS = [
     ['silver: pest + lawn', ['pest', 'lawn'], 'silver', 0.1, { pest_control: [403.2, 33.6], lawn_care: [518.4, 43.2] }],
     ['gold: pest + lawn + mosquito', ['pest', 'lawn', 'mosquito'], 'gold', 0.15, { pest_control: [380.8, 31.73], lawn_care: [489.6, 40.8], mosquito: [589.05, 49.09] }],
-    ['platinum: pest + lawn + mosquito + tree & shrub', ['pest', 'lawn', 'mosquito', 'treeShrub'], 'platinum', 0.2, { pest_control: [358.4, 29.87], lawn_care: [460.8, 38.4], mosquito: [554.4, 46.2], tree_shrub: [509.6, 42.47] }],
+    ['platinum: pest + lawn + mosquito + tree & shrub', ['pest', 'lawn', 'mosquito', 'treeShrub'], 'platinum', 0.2, { pest_control: [358.4, 29.87], lawn_care: [460.8, 38.4], mosquito: [554.4, 46.2], tree_shrub: [467.2, 38.93] }],
   ];
   test.each(FROZEN_TIERS)('%s prices exactly as frozen', (_name, keys, tier, pct, perLine) => {
     const res = generateEstimate({ ...BASE, bedArea: 2000, services: Object.fromEntries(keys.map((k) => [k, S[k]])) });

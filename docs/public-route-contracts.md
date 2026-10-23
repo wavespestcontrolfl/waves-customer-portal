@@ -2562,6 +2562,24 @@ frozen block is malformed, and once rain has covered the water-in
 completion through the LONG deadline against the larger amount, so rain after
 the short deadline still closes the later phase). No new route, token, privacy or
 rate-limit surface; `reportV2.aftercare` is unchanged by it.
+`GATE_LAWN_WATERING_EVERY_VISIT` (dark, owner 2026-10-22; needs
+`GATE_LAWN_WATERING_RULE`; gate off leaves this payload unchanged, key for key)
+changes only which instruction the same `reportV2.banner` fields carry, for an
+UNFROZEN build (a completion, or a visit that froze nothing); a frozen visit
+replays what it froze in either gate state. (1) A catalog rule with `by_target`
+entries picks the direction per logged target (`service_products.targets`), so
+one product can add a hold and a water-in; no covered target reads the product's
+top-level rule, or the first entry of a target-only rule. (2) A same-day water-in
+the label requires beside a hold that leaves it no deadline shortens each hold
+that carries a `label_minimum` to that minimum ("Skip your turf watering until
+today’s treatment has dried." or a nearer clock time), judged with a 2-hour
+drying allowance; a hold without one stays and the visit is no claim, as before.
+(3) A hold's `then_water_in` adds the long-window sentences ("Today’s treatment
+then needs about ½ inch of water by <date>." / "Rain and your regular watering
+both count.") whatever the window's length. No new key, state or route; the
+no-claim reason the office alert uses never enters the payload. The unfrozen PDF
+cache key adds the gate state and the logged targets (`:wr=1e:`); off, it is the
+same key as before. Rollback: unset the variable (frozen visits keep their text).
 `reportV2.aftercare` is a record of the visit and never changes by the clock
 (owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
 `wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
@@ -3207,14 +3225,17 @@ key to `GET /api/reports/:token/data`; it only removes or never writes color
 wording (the one added key is `initialScores.colorHidden` on the portal route,
 effect 6). A visit assessed before the gate
 has no light read, so its light is `unknown` and its color is never compared.
-Compatible light: full sun with full sun; overcast and open shade with each other;
-mixed sun and shade, low light and unknown are never compatible. A visit's light
+Compatible light: full sun and sun with shadows (`mixed_sun_shade`) with each other
+(owner 2026-10-22, option B: under the lighting prompt the model reads sunlit and
+shadowed turf each against its own light); overcast and open shade with each other;
+sun never with overcast or open shade; low light, mixed light (`mixed_light`) and
+unknown are never compatible. A visit's light
 comes from its usable photos whose shot has positive color weight in
 `shared/lawn-photo-shots.json` (front, back, side, untagged, and the half-weight
 shade and hot-edge shots; detail shots do not count) when the visit was read under
 the shot-list prompt, and from EVERY usable photo when it was read under the legacy
 prompt (one whole-visit color score from all photos); which prompt is decided from
-the run's own stored prompt version, never from today's gate. A mix is mixed light. Any prompt position with no stored photo row (its insert failed) or no
+the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
 Every code path that reads the gate (`lawnLightingLive()` in
@@ -5392,6 +5413,21 @@ season copy from it and never derives an interval itself. The `cadence`
 interval line and projected `months` the entry carried from #3755 were
 dropped on 2026-09-06 once the page stopped reading them (owner
 2026-09-05: education, not a schedule).
+`/data` carries an optional top-level `lawnLimits` block behind
+`GATE_ESTIMATE_LAWN_LIMITS` (prod dark): `{ heading, paragraphs: [{ key,
+text }] }` on a recurring lawn estimate only. `key` is `always`, one grass
+name (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) or
+`virus_streaks`, from the customer's turf profile flags. Fixed owner copy
+(`services/estimate-lawn-limits.js`), no prices, no customer data. The key is
+ABSENT with the gate off and on any non-lawn estimate. The React page and the
+browser-rendered PDF print it as given; the legacy server page and the pdfkit
+PDF print the same module's text.
+An accepted, declined, expired or otherwise terminal estimate carries only the
+block stored in `estimate_data.lawnLimitsAtAccept` when it was accepted (absent
+if none was stored), never the live profile.
+`/data` also carries `lawnLimitsHash` beside the block; `PUT /:token/accept` takes it back as
+`lawnLimitsHash` and answers 409 `LAWN_LIMITS_STALE` when the live block's hash differs
+(gate on only; no block on both sides matches).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that

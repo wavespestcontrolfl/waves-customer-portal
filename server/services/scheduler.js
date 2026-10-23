@@ -4911,7 +4911,7 @@ function initScheduledJobs() {
             // finalizers that settle once-ever claims key on the accepted
             // SID, and retrying without it would release a claim for a
             // message Twilio already delivered.
-            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null })) || { ok: true };
+            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null, deliveredAt: msg.created_at || null })) || { ok: true };
             if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
               // finalize_pending clears on BOTH outcomes or the stranded-
               // finalization sweep would convert this row forever.
@@ -5780,7 +5780,7 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, ...await readFreshMeta(), customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, ...await readFreshMeta(), customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channel: smsResult.channel || null });
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({
@@ -8032,13 +8032,22 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY 30 MIN (:14/:44 — own minutes) — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
+  // GATE_REVIEW_SENDER_EVERY_5_MIN: every 5 minutes on the same offset
+  // (:04 ... :59). The cron fires on all of those minutes; the body runs only
+  // on the minutes reviewCadenceTickMinutes() names, so the Reviews page and
+  // the completion panel show the ticks it really runs on. A late callback
+  // (a busy loop can push it past the minute) still counts as its minute.
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  cron.schedule('14,44 * * * *', async () => {
+  // An explicit list: node-cron 3 reads `4-59/5` as minutes divisible by 5.
+  cron.schedule('4,9,14,19,24,29,34,39,44,49,54,59 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
+    const minute = new Date().getUTCMinutes();
+    const ticks = require('./review-request').__private.reviewCadenceTickMinutes();
+    if (!ticks.includes(minute) && !ticks.includes((minute + 59) % 60)) return;
     try {
       await runExclusive('review-sequences', async () => {
         const ReviewService = require('./review-request');

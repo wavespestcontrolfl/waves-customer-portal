@@ -182,3 +182,79 @@ describe('the completion path freezes independently of completion-text delivery'
     expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(INSTRUCTION(40));
   });
 });
+
+// GATE_LAWN_WATERING_EVERY_VISIT (owner 2026-10-22): the gate hands back why a visit froze no instruction, for the
+// watering text's office alert; it writes nothing for it.
+describe('why no instruction froze', () => {
+  const saved = process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+  const savedPrereqs = { sms: process.env.GATE_LAWN_WATERING_SMS, rule: process.env.GATE_LAWN_WATERING_RULE };
+  // The gate reads as on only with both prerequisites on (feature-gates.js).
+  beforeEach(() => {
+    process.env.GATE_LAWN_WATERING_SMS = 'true';
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_LAWN_WATERING_EVERY_VISIT; else process.env.GATE_LAWN_WATERING_EVERY_VISIT = saved;
+    if (savedPrereqs.sms === undefined) delete process.env.GATE_LAWN_WATERING_SMS; else process.env.GATE_LAWN_WATERING_SMS = savedPrereqs.sms;
+    if (savedPrereqs.rule === undefined) delete process.env.GATE_LAWN_WATERING_RULE; else process.env.GATE_LAWN_WATERING_RULE = savedPrereqs.rule;
+  });
+  function noClaimInstruction() {
+    const instruction = { ...INSTRUCTION(40), state: null, lines: [] };
+    Object.defineProperty(instruction, 'noClaim', { value: { reason: 'unruled_product', products: ['Heritage Action Fungicide'] }, enumerable: false });
+    return instruction;
+  }
+  function buildOnce(instruction, productsLoadFailed = false, inputsFailed = false) {
+    buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+      opts.wateringInstructionOut.instruction = instruction;
+      opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed;
+      opts.wateringInstructionOut.inputsFailed = inputsFailed;
+      return { reportV2: { smsSummary: 'sms', snapshot: { statusHeadline: 'h' } } };
+    });
+  }
+
+  test('gate on: the reason comes back, nothing about it is stored', async () => {
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    buildOnce(noClaimInstruction());
+    const { knex, state } = fakeKnex({});
+    const result = await run(knex);
+    expect(result.wateringNoClaim).toEqual({ reason: 'unruled_product', products: ['Heritage Action Fungicide'] });
+    expect(state.statements.map((x) => x.keys)).toEqual([['lawnReportV2']]);
+  });
+
+  test('gate off: no reason', async () => {
+    delete process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    buildOnce(noClaimInstruction());
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toBeUndefined();
+    buildOnce(noClaimInstruction(), true);
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toBeUndefined();
+  });
+
+  test('gate on, products that could not be read: the read failure is the reason (the text step alerts the office)', async () => {
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    buildOnce(noClaimInstruction(), true);
+    const { knex, state } = fakeKnex({});
+    expect((await run(knex)).wateringNoClaim).toEqual({ reason: 'inputs_unreadable', products: [] });
+    expect(state.statements.map((x) => x.keys)).toEqual([['lawnReportV2']]);
+  });
+
+  test('gate on, an instruction build that threw (a settings read): the same reason, so the office hears of it', async () => {
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    buildOnce(null, false, true);
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toEqual({ reason: 'inputs_unreadable', products: [] });
+    delete process.env.GATE_LAWN_WATERING_EVERY_VISIT;
+    buildOnce(null, false, true);
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toBeUndefined();
+  });
+
+  test('gate on, a report build that failed or built no report: the office still hears of it', async () => {
+    process.env.GATE_LAWN_WATERING_EVERY_VISIT = 'true';
+    buildReportV1Data.mockImplementationOnce(async () => { throw new Error('boom'); });
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toEqual({ reason: 'report_not_built', products: [] });
+    buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+      opts.wateringInstructionOut.instruction = noClaimInstruction();
+      return {};
+    });
+    // No reportV2, but the instruction said why: that reason, not the generic one.
+    expect((await run(fakeKnex({}).knex)).wateringNoClaim).toEqual({ reason: 'unruled_product', products: ['Heritage Action Fungicide'] });
+  });
+});

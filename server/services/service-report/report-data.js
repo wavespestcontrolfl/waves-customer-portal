@@ -50,7 +50,7 @@ const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-se
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
-const { resolveWateringRule, validateRule } = require('./lawn-watering-rule');
+const { resolveWateringRule, validateRule, rulesForTargets, MODES: WATERING_MODES } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold, SETUP_INVITE_LINE } = require('./lawn-watering-instruction');
 const lawnWaterInRain = require('./lawn-water-in-rain');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
@@ -275,14 +275,26 @@ function approvedReportProductFacts(catalog = {}) {
 // use takes nothing, and facts of a product not approved for reports (null) stay null. The hold needs
 // a recorded target that is a caterpillar pest (the row's trigger): a grub, billbug or other target,
 // or no recorded target, takes nothing.
+// A catalog rule whose every labeled use is a by_target entry (no product-wide
+// direction) does not count as a rule here: the use's hold becomes the product
+// direction and the target entries ride along for GATE_LAWN_WATERING_EVERY_VISIT
+// (gate off, the hold alone is read, as before the entries existed).
 const CATERPILLAR_TARGET = /caterpillar|armyworm|webworm|looper|cutworm|grassworm/i;
 function withApplicationHold(facts, { hours, targets } = {}) {
   const wait = Number(hours);
-  if (!facts || facts.wateringRule || !(wait > 0)) return facts;
+  const rule = facts && facts.wateringRule;
+  if (!facts || (rule && WATERING_MODES.includes(rule.mode)) || !(wait > 0)) return facts;
   if (!(Array.isArray(targets) ? targets : []).some((target) => CATERPILLAR_TARGET.test(String(target)))) return facts;
+  // The caterpillar entry's label minimum rides along, so rule E can still
+  // shorten this hold beside a same-day water-in (Dylox).
+  const entries = rule && Array.isArray(rule.by_target) ? rule.by_target : null;
+  const caterpillar = entries && entries.find((entry) => entry.mode === 'hold' && entry.label_minimum
+    && entry.match.some((word) => CATERPILLAR_TARGET.test(word)));
   const checked = validateRule({
     mode: 'hold', hold_hours: wait, source: 'label',
     label_note: `Label: delay watering (irrigation) or mowing for ${wait} hours after application (caterpillar use).`,
+    ...(caterpillar ? { label_minimum: caterpillar.label_minimum } : {}),
+    ...(entries ? { by_target: entries } : {}),
   });
   if (!checked.valid) return facts;
   return { ...facts, wateringRule: checked.rule, mowHoldDays: facts.mowHoldDays ?? normalizeMowHoldDays(Math.ceil(wait / 24)) };
@@ -2788,14 +2800,19 @@ async function lawnWateringRuleStamp(service, knex) {
       ? await knex('products_catalog').whereIn('id', ids).select('id', 'updated_at')
       : [];
     const revisionOf = new Map(revisions.map((r) => [String(r.id), r.updated_at ? new Date(r.updated_at).toISOString() : '']));
+    // GATE_LAWN_WATERING_EVERY_VISIT resolves each use's targets and applies
+    // rule E: the gate state and the logged targets re-key the render. Off,
+    // the stamp is exactly the one before the gate existed.
+    const everyVisit = featureGates.lawnWateringEveryVisitLive();
     const pairs = (products || []).map((p) => {
       const id = canonicalProductId(p.product_id);
       // A label mow hold re-keys the render when it changes; no value adds
       // nothing, so visits without one keep their existing stamp.
       const mow = normalizeMowHoldDays(p.approved_report_product_facts?.mowHoldDays);
-      return `${id || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}${mow != null ? `|mow=${mow}` : ''}@${id ? (revisionOf.get(String(id)) || '') : ''}`;
+      const targets = everyVisit ? `|t=${JSON.stringify(parseJsonArray(p.targets).map(String).sort())}` : '';
+      return `${id || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}${mow != null ? `|mow=${mow}` : ''}${targets}@${id ? (revisionOf.get(String(id)) || '') : ''}`;
     }).sort();
-    return `:wr=1:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
+    return `:wr=1${everyVisit ? 'e' : ''}:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
   } catch {
     return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
   }
@@ -3915,16 +3932,40 @@ async function buildReportWateringInstruction({ products, service, completionTim
       };
     }
   }
+  // GATE_LAWN_WATERING_EVERY_VISIT: each logged use carries the rules its
+  // targets pick (a product whose label splits by target), and a same-day
+  // water-in the label requires wins over a hold that can wait less (rule E).
+  // Off: one rule per product, exactly as stored.
+  const everyVisit = featureGates.lawnWateringEveryVisitLive();
+  const labelTargets = everyVisit ? await loadLabelTargets(products, knex) : new Map();
   return buildWateringInstruction({
-    rules: (Array.isArray(products) ? products : []).map((p) => ({
-      name: p?.product_name || null,
-      rule: p?.approved_report_product_facts?.wateringRule || null,
-      mowHoldDays: p?.approved_report_product_facts?.mowHoldDays ?? null,
-    })),
+    rules: (Array.isArray(products) ? products : []).flatMap((p) => {
+      const name = p?.product_name || null;
+      const rule = p?.approved_report_product_facts?.wateringRule || null;
+      const mowHoldDays = p?.approved_report_product_facts?.mowHoldDays ?? null;
+      if (!everyVisit) return [{ name, rule, mowHoldDays }];
+      const picked = rulesForTargets(rule, p?.targets, { labelTargets: labelTargets.get(String(canonicalProductId(p?.product_id))) ?? null });
+      return picked.length ? picked.map((one) => ({ name, rule: one, mowHoldDays })) : [{ name, rule: null, mowHoldDays }];
+    }),
     completedAt: completionTime,
     runtime,
     plainWhenNoSetup: forCompletion,
+    labelFirst: everyVisit,
   });
+}
+
+// GATE_LAWN_WATERING_EVERY_VISIT: the catalog label targets (target_pests) of
+// each product whose rule splits by target, keyed by catalog id. The completion
+// form prefills a use's targets from them, so rulesForTargets reads an
+// untouched prefill as the product's main use. A failed read throws: the
+// caller treats the watering inputs as unreadable (no instruction, an office
+// alert), never a guess.
+async function loadLabelTargets(products, knex) {
+  const split = (p) => Array.isArray(p?.approved_report_product_facts?.wateringRule?.by_target);
+  const ids = [...new Set((Array.isArray(products) ? products : []).filter(split).map((p) => canonicalProductId(p.product_id)).filter(Boolean))];
+  if (!ids.length || !knex) return new Map();
+  const rows = await knex('products_catalog').whereIn('id', ids).select('id', 'target_pests');
+  return new Map(rows.map((row) => [String(row.id), parseJsonArray(row.target_pests)]));
 }
 
 // The instruction frozen at completion (lawn-report-write-gate.js, under
@@ -5784,6 +5825,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           opts.wateringInstructionOut.instruction = wateringInstruction;
           // A failed product read means the rules were unknown, not absent.
           opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed || rulesUnknown;
+          // The build itself threw (a settings read): no instruction, and the office must hear of it.
+          opts.wateringInstructionOut.inputsFailed = wateringInputsFailed;
         }
         // GATE_LAWN_WATER_IN_RAIN: the frozen instruction as it reads now (after the write gate's copy above, so the
         // freeze and the completion text never see it). A replay only.

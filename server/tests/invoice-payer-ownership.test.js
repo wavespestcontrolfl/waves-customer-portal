@@ -20,11 +20,26 @@ describe('invoicePayerOwnership', () => {
   test('no customer => unverifiable; resolver failure => unverifiable; live payer => payer_owned; none => null', async () => {
     expect(await invoicePayerOwnership({ id: 'i' })).toBe('payer_unverifiable');
     mockResolve.mockRejectedValueOnce(new Error('down'));
-    expect(await invoicePayerOwnership({ id: 'i', customer_id: 'c' })).toBe('payer_unverifiable');
+    expect(await invoicePayerOwnership({ id: 'i', customer_id: 'c', service_record_id: null })).toBe('payer_unverifiable');
     mockResolve.mockResolvedValueOnce({ payerId: 'p1' });
     expect(await invoicePayerOwnership({ id: 'i', customer_id: 'c', scheduled_service_id: 's1' })).toBe('payer_owned');
     expect(mockResolve).toHaveBeenLastCalledWith(expect.objectContaining({ customerId: 'c', scheduledServiceId: 's1', throwOnError: true }));
-    expect(await invoicePayerOwnership({ id: 'i', customer_id: 'c' })).toBeNull();
+    expect(await invoicePayerOwnership({ id: 'i', customer_id: 'c', service_record_id: null })).toBeNull();
+  });
+
+  // Owner ruling 2026-10-22 ("move"): a record-linked invoice is judged by the visit its service record names, the
+  // same visit the Bill-To withdrawal reads, so a pinned or own-payer visit is honored.
+  test('a record-linked invoice resolves through its record\'s visit; a narrow row is re-read; a failed read is unverifiable', async () => {
+    const db = require('../models/db');
+    const rows = { invoices: { service_record_id: 'r1' }, service_records: { scheduled_service_id: 'v9' } };
+    db.mockImplementation((table) => ({ where: () => ({ first: async () => rows[table] }) }));
+    expect(await invoicePayerOwnership({ id: 'i', customer_id: 'c', service_record_id: 'r1' })).toBeNull();
+    expect(mockResolve).toHaveBeenLastCalledWith(expect.objectContaining({ scheduledServiceId: 'v9' }));
+    mockResolve.mockClear();
+    await invoicePayerOwnership({ id: 'i', customer_id: 'c' });
+    expect(mockResolve).toHaveBeenLastCalledWith(expect.objectContaining({ scheduledServiceId: 'v9' }));
+    db.mockImplementation(() => { throw new Error('db down'); });
+    expect(await invoicePayerOwnership({ id: 'i', customer_id: 'c' })).toBe('payer_unverifiable');
   });
 });
 

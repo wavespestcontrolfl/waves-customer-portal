@@ -204,6 +204,39 @@ describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
     expect(instruction.mowHold.line).toMatch(/^Mowing: hold off until .*, 1 day after today's treatment\.$/);
   });
 
+  test('a target-only catalog rule (GATE_LAWN_WATERING_EVERY_VISIT data) still takes the caterpillar hold, entries kept', () => {
+    const { validateRule } = require('../services/service-report/lawn-watering-rule');
+    const targetOnly = validateRule({
+      by_target: [{ match: ['caterpillar'], mode: 'hold', hold_hours: 24 }, { match: ['grub'], mode: 'water_in' }],
+      source: 'owner',
+    }).rule;
+    const facts = withApplicationHold({ ...approvedReportProductFacts(acelepryn), wateringRule: targetOnly }, { hours: 24, targets: ['caterpillars'] });
+    expect(facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24, source: 'label', by_target: targetOnly.by_target });
+    expect(facts.mowHoldDays).toBe(1);
+    // A product-wide catalog rule stands as stored.
+    const ruled = { ...approvedReportProductFacts(acelepryn), wateringRule: { mode: 'none', source: 'owner' } };
+    expect(withApplicationHold(ruled, { hours: 24, targets: ['caterpillars'] })).toBe(ruled);
+  });
+
+  test('the caterpillar hold keeps the label minimum of the real Acelepryn rule, so Dylox the same day still gets its text', () => {
+    const { validateRule, rulesForTargets } = require('../services/service-report/lawn-watering-rule');
+    const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+    const migration = require('../models/migrations/20261022160000_watering_rule_lawn_targets_and_minimums');
+    const stored = validateRule(migration.FILL.find((item) => item.name === 'Acelepryn Insecticide').rule).rule;
+    const labelTargets = ['Tropical sod webworms', 'Fall armyworms', 'White grubs', 'Billbugs'];
+    const prefill = labelTargets.slice(0, 3);
+    const facts = withApplicationHold({ ...approvedReportProductFacts(acelepryn), wateringRule: stored }, { hours: 24, targets: prefill });
+    expect(facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24, label_minimum: { hold_until: 'dry' } });
+    const picked = rulesForTargets(facts.wateringRule, prefill, { labelTargets });
+    expect(picked).toEqual([expect.objectContaining({ mode: 'hold', label_minimum: { hold_until: 'dry' } })]);
+    const dylox = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'label' };
+    const ins = buildWateringInstruction({
+      rules: [...picked.map((rule) => ({ name: 'Acelepryn Insecticide', rule })), { name: 'Dylox 6.2 G', rule: dylox }],
+      completedAt: '2026-10-21T14:00:00Z', plainWhenNoSetup: true, labelFirst: true,
+    });
+    expect(ins.state).toBe('hold_then_water_in');
+  });
+
   test('a grub use (target says grubs) or a row with no gate is unchanged, so the water-in is not contradicted', () => {
     const base = approvedReportProductFacts(acelepryn);
     expect(withApplicationHold(base, { hours: 24, targets: ['White grubs'] })).toBe(base);

@@ -26,6 +26,7 @@ const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const NUTRA = 'LESCO Nutra-TECH T&O Micronutrient Package';
 const STONEWALL = 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+const F44 = 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer';
 const TETRINO = 'Tetrino Insecticide';
 const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
 const CATALOG = [
@@ -36,6 +37,8 @@ const CATALOG = [
   { id: 'cel', name: 'Celsius WG', aliases: [], default_rate_per_1000: 0.085, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [], default_rate_per_1000: 0.25, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
+  // The polymer bag has no price yet (available by request): the sheet still plans it, with no cost.
+  { id: 'f44', name: F44, aliases: [], analysis_n: 44, analysis_p: 0, analysis_k: 0, default_rate_per_1000: 2.27, rate_unit: 'lb', needs_pricing: true },
   { id: 'dim', name: DIMENSION, aliases: [], analysis_n: 18, analysis_k: 10, default_rate_per_1000: 2.78, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
 ];
 const V13_SUMMARY = {
@@ -44,6 +47,7 @@ const V13_SUMMARY = {
     { productId: 'nt', ratePer1000: 6, rateUnit: 'fl oz', gates: {} },
     { productId: 'stw', ratePer1000: 0.5, rateUnit: 'fl oz', gates: {} },
     { productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
+    { productId: 'f44', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
     { productId: 'dim', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
     { productId: 'are', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
     { productId: 'cel', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', gates: { annualCounter: 'celsius_oz_per_1000' } },
@@ -110,27 +114,36 @@ test('January tank sheet: Nutra-TECH is the v13 6 fl oz per 1,000, not the catal
   expect(stonewall.jobMix).toMatchObject({ ratePer1000: 0.5, rateSource: 'protocol_rate', amount: 5 });
 });
 
-test('a lb_n month derives from the N target: April 24-0-11 is 2.083 lb per 1,000, not the 4.2 lb catalog default', async () => {
-  const body = await lawnMix({ month: '4' });
+test('a lb_n month derives from the N target: February 24-0-11 is 3.125 lb per 1,000, not the 4.2 lb catalog default', async () => {
+  const body = await lawnMix({ month: '2' });
   expect(itemFor(body, F24).jobMix).toMatchObject({ rateSource: 'target_n_analysis', amountUnit: 'lb' });
-  expect(itemFor(body, F24).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
+  expect(itemFor(body, F24).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
 });
 
-test('April on a 9x plan (?visitsPerYear=9): Dimension 18-0-10 at 2.778 lb per 1,000 (0.5 lb N), no 24-0-11, no cadence warning', async () => {
+test('April 12x: the LESCO 44-0-0 polymer bag derives 2.273 lb per 1,000 from the 1.0 lb N target and shows no cost while unpriced', async () => {
+  const body = await lawnMix({ month: '4' });
+  expect(itemFor(body, F44).jobMix).toMatchObject({ rateSource: 'target_n_analysis', amountUnit: 'lb', targetNPer1000: 1, materialCost: null });
+  expect(itemFor(body, F44).jobMix.ratePer1000).toBeCloseTo(2.2727, 3);
+  expect(itemFor(body, F44).jobMix.amount).toBeCloseTo(22.727, 2);
+  expect(body.materialCostSummary).toMatchObject({ pricedLineCount: 0 });
+});
+
+test('April on a 9x plan (?visitsPerYear=9): Dimension 18-0-10 at 2.778 lb per 1,000 (0.5 lb N), no 44-0-0, no cadence warning', async () => {
   const body = await lawnMix({ month: '4', visitsPerYear: '9' });
   expect(body.selectedItems.map((item) => item.product.name)).toEqual([DIMENSION]);
   expect(itemFor(body, DIMENSION).jobMix).toMatchObject({ rateSource: 'target_n_analysis', amountUnit: 'lb' });
   expect(itemFor(body, DIMENSION).jobMix.ratePer1000).toBeCloseTo(2.7778, 3);
+  expect(itemFor(body, F44)).toBeUndefined();
   expect(itemFor(body, F24)).toBeUndefined();
   expect(body.warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
 });
 
-test('April on a 12x plan keeps the 24-0-11; with no plan given it keeps it too and warns, naming the 9x product', async () => {
+test('April on a 12x plan takes the 44-0-0 polymer bag; with no plan given it keeps it too given it keeps it too and warns, naming the 9x product', async () => {
   const twelve = await lawnMix({ month: '4', visitsPerYear: '12' });
-  expect(twelve.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+  expect(twelve.selectedItems.map((item) => item.product.name)).toEqual([F44]);
   expect(twelve.warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
   const unknown = await lawnMix({ month: '4' });
-  expect(unknown.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+  expect(unknown.selectedItems.map((item) => item.product.name)).toEqual([F44]);
   expect(unknown.warnings.find((w) => w.code === 'lawn_v13_plan_cadence_unknown').message).toContain(DIMENSION);
   // Months with one step never ask.
   expect((await lawnMix({ month: '1' })).warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
@@ -206,9 +219,9 @@ describe('the April step follows the visit the sheet is opened from (?scheduledS
     expect(body.warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
   });
 
-  test('a monthly visit keeps the 24-0-11; an explicit ?visitsPerYear outranks the visit', async () => {
+  test('a monthly visit keeps the 44-0-0 bag; an explicit ?visitsPerYear outranks the visit', async () => {
     visitRows = [{ service_id: null, service_type: 'Lawn Care', recurring_pattern: 'monthly', recurring_interval_days: null }];
-    expect(selected(await lawnMix({ month: '4', scheduledServiceId: VISIT }))).toEqual([F24]);
+    expect(selected(await lawnMix({ month: '4', scheduledServiceId: VISIT }))).toEqual([F44]);
     expect(selected(await lawnMix({ month: '4', scheduledServiceId: VISIT, visitsPerYear: '9' }))).toEqual([DIMENSION]);
   });
 
@@ -225,7 +238,7 @@ describe('the April step follows the visit the sheet is opened from (?scheduledS
       return q;
     });
     const other = await lawnMix({ month: '4', scheduledServiceId: VISIT }, { techRole: 'technician', technicianId: 'tech-B' });
-    expect(selected(other)).toEqual([F24]);
+    expect(selected(other)).toEqual([F44]);
     expect(other.warnings.map((w) => w.code)).toContain('lawn_v13_plan_cadence_unknown');
     const own = await lawnMix({ month: '4', scheduledServiceId: VISIT }, { techRole: 'technician', technicianId: 'tech-A' });
     expect(selected(own)).toEqual([DIMENSION]);
@@ -233,11 +246,11 @@ describe('the April step follows the visit the sheet is opened from (?scheduledS
     expect(selected(staff)).toEqual([DIMENSION]);
   });
 
-  test('a visit that states no plan, an unknown id and a malformed id all keep the 24-0-11 and warn', async () => {
+  test('a visit that states no plan, an unknown id and a malformed id all keep the 44-0-0 bag and warn', async () => {
     visitRows = [{ service_id: null, service_type: 'Lawn Care', recurring_pattern: null, recurring_interval_days: null }];
     for (const scheduledServiceId of [VISIT, 'not-a-uuid']) {
       const body = await lawnMix({ month: '4', scheduledServiceId });
-      expect(selected(body)).toEqual([F24]);
+      expect(selected(body)).toEqual([F44]);
       expect(body.warnings.map((w) => w.code)).toContain('lawn_v13_plan_cadence_unknown');
     }
     visitRows = [];

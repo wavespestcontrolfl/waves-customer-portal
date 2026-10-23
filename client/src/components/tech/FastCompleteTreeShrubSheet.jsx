@@ -145,6 +145,13 @@ const METHOD_CHOICES = [
   { value: 'granular_broadcast', label: 'Granular' },
 ];
 const DEFAULT_METHOD = 'foliar_spray';
+// Finished spray mix exists only for a liquid application; a granule
+// (Heritage G, palm fertilizer) applies no mix, so the gallons fact is
+// offered and sent only while a liquid product is on the visit (Codex #6398).
+// Mirrors LIQUID_APPLICATION_METHODS in server/services/tree-shrub-closeout.js
+// (the server drops the gallons when no recorded product used one of these).
+const LIQUID_METHODS = new Set(['foliar_spray', 'soil_drench', 'broadcast_spray', 'perimeter_spray', 'spot_treatment', 'fog_ulv', 'pin_stream']);
+const hasLiquidApplication = (rows) => rows.some((row) => row.active && LIQUID_METHODS.has(row.method));
 // The four customer-text flags the sheet posts while the Wrap-up is off.
 const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto' };
 
@@ -471,6 +478,13 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
         // Yes when the app ran the rotation check (the context loaded its
         // warnings) or the tech confirmed it by hand.
         ...(irac ? { irac_frac_logged: 'Yes' } : {}),
+        // Optional internal costing fact (project-types.js spray_mix_gallons);
+        // blank stays absent so the typed-findings validator never sees ''.
+        // Sent only while a LIQUID product is still on the visit: the field
+        // hides when the last one is removed or switched to granular, and a
+        // hidden stale value must not record spray volume against products
+        // that applied no mix (Codex #6398).
+        ...(hasLiquidApplication(active) && String(form.sprayGallons ?? '').trim() !== '' ? { spray_mix_gallons: String(form.sprayGallons).trim() } : {}),
       },
     },
     completionPhotos: photos.map((photo, index) => ({
@@ -583,6 +597,10 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     plantGroups: new Set(PLANT_GROUP_OPTIONS.filter((option) => (ctx.lastVisit?.plantGroups || []).includes(option))),
     areas: new Set(AREA_OPTIONS.filter((option) => (ctx.lastVisit?.areasTreated || []).includes(option))),
     condition: '', pollinator: '', irac: '', tipId: '', customTip: '',
+    // Gallons of finished spray mix used this visit (owner 2026-10-21): an
+    // optional costing fact for the spray-volume material model, never on
+    // the customer report.
+    sprayGallons: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
@@ -668,6 +686,9 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
           )}
           <PestCheckSection state={pestCheck} locked={locked} onRemoveBlocked={removeBlocked} />
           <ProductsSection ctx={ctx} products={products} neonicLines={neonicCap.lines} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          {hasLiquidApplication(rows) && (
+            <SprayGallonsSection value={form.sprayGallons} locked={locked} onChange={(value) => setField('sprayGallons', value)} />
+          )}
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
           )}
@@ -1162,6 +1183,32 @@ function ProductEditor({ row, warnings, neonicLine, locked, onChange, onRemove }
 
 // The compliance taps the server's checks need, only when a product on the
 // sheet calls for them.
+// Gallons of finished mix used on the visit (owner 2026-10-21): the one
+// number that lets the office re-derive Tree & Shrub material from label
+// carrier volume instead of a per-bed-sqft guess. Optional; office-only.
+function SprayGallonsSection({ value, locked, onChange }) {
+  const id = useId();
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title"><label htmlFor={id}>Spray mix used (gallons, office only)</label></h3>
+      </div>
+      <input
+        id={id}
+        className="ui-control tech-visit-control"
+        type="number"
+        inputMode="decimal"
+        min="0"
+        step="0.5"
+        value={value}
+        disabled={locked}
+        placeholder="e.g. 5"
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </section>
+  );
+}
+
 function ComplianceSection({ form, setField, insect, iracRows, manualIrac, locked }) {
   return (
     <>

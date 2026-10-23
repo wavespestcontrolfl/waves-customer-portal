@@ -316,7 +316,11 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     const alertLegs = src.match(/copyBillToFields\(data, parent, cols\);\n\s*copyStampedServiceAddressFields\(data, parent, cols\);/g) || [];
     expect(alertLegs.length).toBe(3);
     expect(src).toContain('copyBillToFields(nextData, parent, cols);');
-    expect(src).toContain('copyStampedServiceAddressFields(nextData, parent, cols);');
+    // The extension insert's address stamp is resolved once in the cadence
+    // walk (its placement, shared with the taken-hour probe) and applied to
+    // the insert row.
+    expect(src).toContain('copyStampedServiceAddressFields(placement, parent, cols);');
+    expect(src).toContain('Object.assign(nextData, placement);');
   });
 
   test('P1: a series cancel landing between the refill commit and the reminder registration cannot leave an armed reminder', async () => {

@@ -63,14 +63,27 @@ const PROFILE_COLUMNS = [
 const BERMUDA_COLUMNS = ['bermuda_removal', 'bermuda_removal_set_by', 'bermuda_removal_set_at'];
 // Admins only: a technician never sees the switch or its columns.
 const showsBermudaRemoval = (req) => featureGates.lawnBermudaRemovalLive?.() === true && req.techRole === 'admin';
+// GATE_ESTIMATE_LAWN_LIMITS: the two flags the office sets from the estimate photos
+// (other grasses on the lawn, suspected virus streaks). They ride the profile row,
+// and may be written by the general PUT, only while the gate is live; gate off, the
+// columns are neither read nor written here and the response is the old payload.
+const { OTHER_GRASSES, normalizeOtherGrasses } = require('../services/estimate-lawn-limits');
+const LAWN_LIMIT_COLUMNS = ['other_grasses', 'virus_streaks_suspected'];
+const lawnLimitsLive = () => featureGates.estimateLawnLimitsLive?.() === true;
 function profileForResponse(profile, req) {
-  if (!profile || showsBermudaRemoval(req)) return profile;
-  return Object.fromEntries(Object.entries(profile).filter(([key]) => !BERMUDA_COLUMNS.includes(key)));
+  if (!profile) return profile;
+  const hideBermuda = !showsBermudaRemoval(req);
+  const hideLawnLimits = !lawnLimitsLive();
+  if (!hideBermuda && !hideLawnLimits) return profile;
+  return Object.fromEntries(Object.entries(profile).filter(([key]) => !(
+    (hideBermuda && BERMUDA_COLUMNS.includes(key)) || (hideLawnLimits && LAWN_LIMIT_COLUMNS.includes(key))
+  )));
 }
 
 function pickProfileFields(body) {
   const out = {};
-  for (const k of PROFILE_COLUMNS) {
+  const columns = lawnLimitsLive() ? [...PROFILE_COLUMNS, ...LAWN_LIMIT_COLUMNS] : PROFILE_COLUMNS;
+  for (const k of columns) {
     if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
   }
   return out;
@@ -99,6 +112,16 @@ function validateProfile(payload) {
     if (!Number.isFinite(n) || n < 0 || n > 5) {
       errors.push('irrigation_inches_per_week must be between 0 and 5 inches');
     }
+  }
+  // Only present in the payload while GATE_ESTIMATE_LAWN_LIMITS is live (pickProfileFields).
+  if (payload.other_grasses != null) {
+    const list = payload.other_grasses;
+    if (!Array.isArray(list) || list.some((name) => !OTHER_GRASSES.includes(name))) {
+      errors.push(`other_grasses must be a list of: ${OTHER_GRASSES.join(', ')}`);
+    }
+  }
+  if (payload.virus_streaks_suspected != null && typeof payload.virus_streaks_suspected !== 'boolean') {
+    errors.push('virus_streaks_suspected must be true or false');
   }
   if (payload.lawn_sqft != null) {
     // The schema column is integer; the validator must enforce that
@@ -169,6 +192,8 @@ router.get('/:customerId/turf-profile', async (req, res, next) => {
       lawn_v13_no_program: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, customer.lawn_type),
       // Gate on and an admin only: tells the editor to show the bermuda removal switch.
       ...(showsBermudaRemoval(req) ? { bermudaRemovalAvailable: true } : {}),
+      // GATE_ESTIMATE_LAWN_LIMITS live: tells the editor to show the two lawn-limit flags.
+      ...(lawnLimitsLive() ? { lawnLimitsAvailable: true, otherGrassOptions: OTHER_GRASSES } : {}),
     });
   } catch (err) {
     next(err);
@@ -190,6 +215,11 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     const fields = pickProfileFields(req.body || {});
     const errors = validateProfile(fields);
     if (errors.length) return res.status(400).json({ error: 'Invalid payload', details: errors });
+    // Stored as a clean ordered list; an empty list is stored as NULL (nothing flagged).
+    if (Array.isArray(fields.other_grasses)) {
+      const clean = normalizeOtherGrasses(fields.other_grasses);
+      fields.other_grasses = clean.length ? clean : null;
+    }
 
     // Atomic upsert. The previous SELECT-then-conditional-INSERT/UPDATE
     // had a TOCTOU window: two concurrent PUTs could both observe

@@ -156,6 +156,10 @@ const {
 const featureGates = require('../config/feature-gates');
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
+const {
+  lawnLimitsBlock, lawnLimitsForEstimate, lawnLimitsToStampAtAccept, stampLawnLimitsAtAccept,
+  lawnLimitsHash, lawnLimitsAttestationStale,
+} = require('../services/estimate-lawn-limits');
 
 function lawnCalendarBlock(services) {
   if (!featureGates.isEnabled('estimateLawnCalendar')) return {};
@@ -7678,6 +7682,11 @@ ${shellTopBar()}
   </section>
   `}
 
+  ${opts.lawnLimits?.heading && Array.isArray(opts.lawnLimits.paragraphs) && opts.lawnLimits.paragraphs.length ? `<div class="card" data-lawn-limits="true">
+    <h2>${escapeHtml(opts.lawnLimits.heading)}</h2>
+    ${opts.lawnLimits.paragraphs.map((p) => `<p class="ai-blurb" data-lawn-limit="${escapeHtml(p.key)}">${escapeHtml(p.text)}</p>`).join('\n    ')}
+  </div>` : ''}
+
   ${quoteRequired || isOneTimeOnly || commercialManualAccept ? '' : `<div class="card" data-mode-only="recurring">
     <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
     <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
@@ -7800,6 +7809,7 @@ ${shellQuestionsBar()}
   const TOKEN = ${JSON.stringify(token)};
   const API = '/api/estimates/' + TOKEN;
   const ESTIMATE_ASK_TOKEN = ${JSON.stringify(estimateAskToken)};
+  const LAWN_LIMITS_HASH = ${JSON.stringify(lawnLimitsHash(opts.lawnLimits || null))};
   const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
   const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
   const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = ${JSON.stringify(requirePaymentSetupBeforeSlots)};
@@ -8430,6 +8440,7 @@ ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is comput
     try {
       const payload = { serviceMode: 'recurring' };
       if (isPrepay) payload.paymentMethodPreference = 'prepay_annual';
+      if (LAWN_LIMITS_HASH) payload.lawnLimitsHash = LAWN_LIMITS_HASH;
       const r = await fetch(API + '/accept', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -8889,6 +8900,7 @@ ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is comput
         payload.selectedFrequency = DEFAULT_RECURRING_FREQUENCY;
       }
       if (setupFeePromiseShown()) payload.setupFeeAfterFirstVisitShown = true;
+      if (LAWN_LIMITS_HASH) payload.lawnLimitsHash = LAWN_LIMITS_HASH;
       const r = await fetch(API + '/accept', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -8912,6 +8924,13 @@ ${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is comput
         toast(data.error || 'This account already has an active annual prepay plan. Please call or text us to adjust your coverage.');
         if (btn) btn.disabled = false;
         setBookingChoiceControlsDisabled(false);
+        return;
+      }
+      if (r.status === 409 && data.code === 'LAWN_LIMITS_STALE') {
+        // The lawn limits copy moved since this page loaded: nothing was booked. Reload so the
+        // page shows what the accept will record.
+        toast(data.error || 'This estimate was refreshed. Please reload the page and review it before accepting.');
+        setTimeout(() => location.reload(), 1200);
         return;
       }
       if (r.status === 409 && data.code === 'SETUP_FEE_TERMS_REFRESH') {
@@ -9944,6 +9963,8 @@ async function handleEstimateView(req, res, next) {
 
     let rateReviewTermsRendered = false;
     const legacyGreetingFirstName = await resolveEstimateGreetingFirstName(estimate, contact);
+    // GATE_ESTIMATE_LAWN_LIMITS: the same "What we can and can't fix" copy as /data (null = nothing printed).
+    const legacyLawnLimits = await lawnLimitsForEstimate(estimate);
     const renderLegacyPage = (renderOpts = {}) => renderEstimatePageHtml(req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
@@ -10005,6 +10026,7 @@ async function handleEstimateView(req, res, next) {
       committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
     }), {
       showYourWork,
+      ...(legacyLawnLimits ? { lawnLimits: legacyLawnLimits } : {}),
       prepayBaseRate,
       monthlyBilledEstimate,
       payAfterFirstVisitCopy,
@@ -10810,6 +10832,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(409).json({
         error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
         code: 'TERMS_VERSION_STALE',
+      });
+    }
+
+    // GATE_ESTIMATE_LAWN_LIMITS: the "What we can and can't fix" block as it reads at acceptance
+    // (null = none). Two uses: the render-bound attestation below, and the copy frozen onto the
+    // estimate in the accept transaction (terminal rows print only that stored block). Read before
+    // the transaction opens. The tab echoes the hash /data served with its block; a different
+    // block now (flags edited, copy changed, an old tab with no hash beside a block) is the same
+    // reloadable 409 as a stale terms version, before any write. Gate off: no check.
+    const lawnLimitsAtAccept = await lawnLimitsToStampAtAccept(estimate);
+    if (lawnLimitsAttestationStale(lawnLimitsAtAccept, req.body?.lawnLimitsHash)) {
+      return res.status(409).json({
+        error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
+        code: 'LAWN_LIMITS_STALE',
       });
     }
 
@@ -12840,6 +12876,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ),
         });
       }
+      await stampLawnLimitsAtAccept(trx, estimate.id, lawnLimitsAtAccept);
       if (recordAcceptanceTerms) {
         const [acceptanceRow] = await trx('estimate_acceptances').insert({
           estimate_id: estimate.id,
@@ -29379,9 +29416,12 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
+    // GATE_ESTIMATE_LAWN_LIMITS: the same "What we can and can't fix" copy the page prints (null = nothing printed).
+    const lawnLimits = await lawnLimitsForEstimate(documentEstimate);
     generateEstimateProposalPDF(documentEstimate, res, {
       ...documentBilling,
       ...(withholdRateReviewTerms ? { withholdRateReviewTerms: true } : {}),
+      ...(lawnLimits ? { lawnLimits } : {}),
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
       acceptance: await acceptanceRecordForEstimate(documentEstimate, { strict: true }),
@@ -30787,6 +30827,12 @@ async function composeEstimateDataPayload(estimate, {
       // an interval itself. A frequency with no catalog plan is omitted and
       // renders nothing; the key is absent when nothing resolves.
       ...lawnCalendarBlock(pricingBundle.services),
+      // "What we can and can't fix" (GATE_ESTIMATE_LAWN_LIMITS): the owner's fixed lawn
+      // paragraph plus one line per flag on the customer's turf profile, from the one
+      // copy module the PDF fallback also prints. Recurring lawn estimates only; the
+      // key is absent otherwise (and with the gate off), so those responses stay
+      // byte-identical. Copy only: no prices.
+      ...(await lawnLimitsBlock(estimate)),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.

@@ -73,6 +73,8 @@ const BOOKKEEPING_KEYS = new Set([
   'leadServiceHandoffAttempt', 'leadServiceHandoffAt', 'leadServiceRevertPending', 'reportCtaMint',
   'retiredBySentEstimate', 'automation', 'assessment_exception', 'scheduled_service_id',
   'addressUnverifiedClearedBy', 'addressUnverifiedFlag',
+  // The lawn limits block frozen at accept (estimate-lawn-limits.js): written once, with the accept.
+  'lawnLimitsAtAccept',
 ]);
 
 function parseData(row) {
@@ -151,6 +153,10 @@ function documentInputProjection(payload) {
     acceptance: payload?.acceptance ?? null,
     publicOrigin: payload?.publicOrigin ?? null,
     documentRender: payload?.documentRender ?? null,
+    // The "What we can and can't fix" block the document prints (GATE_ESTIMATE_LAWN_LIMITS): a turf
+    // flag edited while an attachment renders or waits must invalidate it. Absent (null) with the
+    // gate off or on a non-lawn estimate.
+    lawnLimits: payload?.lawnLimits ?? null,
   };
 }
 

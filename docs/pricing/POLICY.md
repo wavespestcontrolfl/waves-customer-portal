@@ -47,17 +47,24 @@ If a change is unavoidable, raise/lower in 0.025 (2.5pp) increments and
 re-run `/admin/pricing-config/margin-check` against representative property
 profiles before shipping.
 
-### `MARGIN_TARGET_TS = 0.45`
-**Where:** `constants.js` `GLOBAL.MARGIN_TARGET_TS`, used by
-`service-pricing.priceTreeShrub` as the default admin-inclusive margin target.
+### `MARGIN_TARGET_TS = 0.40`
+**Where:** `constants.js` `GLOBAL.MARGIN_TARGET_TS` / `TREE_SHRUB.marginTarget`,
+used by `service-pricing.priceTreeShrub` as the default admin-inclusive margin
+target. DB-authoritative: the `pricing_config` row `global_margin_target_ts`
+(semantics `margin_admin_inclusive`) overrides the constant; migration
+`20261021010000` moved it 0.45 → 0.40 and preserves an admin-tuned value.
 
 **Why higher than the global floor.** Tree & Shrub material costs are the
-most volatile in the catalog. The 45% target builds in a 10-point cushion
-above the 35% reporting floor to absorb material swings without re-pricing
-the whole bracket. The current default formula is
+most volatile in the catalog. The 40% target keeps a 5-point cushion above
+the 35% reporting floor to absorb material swings without re-pricing the
+whole bracket. It was 45% (a 10-point cushion) until the owner audit of
+2026-10-21 found T&S was the only recurring program priced above the floor
+and sent quotes read high; the extra five points came off together with the
+open-parcel bed basis and the 2/4/6 ornamental-tree backstop. The formula is
 `price = (annualDirectCost + ADMIN_ANNUAL) / (1 - marginTarget)`, subject to
 the existing tier list-price floor. The resulting displayed margin includes
-the annual admin allocation.
+the annual admin allocation. Sent quotes replay their stamped
+`pricingKnobs.marginTarget`; only new quotes price at the live target.
 
 ### Tree & Shrub program cadence (tiers)
 **Where:** `constants.js` `TREE_SHRUB.tiers`, `recommendedTier`.
@@ -92,8 +99,8 @@ area fallback. v4.5 retired both tiers and mapped their legacy requests to
 Standard. Enhanced was later reactivated as an explicit customer-selectable
 upsell; Premium remains retired and maps to Standard. At the v4.5 cadence
 change, the then-current 0.43 direct-cost-ratio setting was left unchanged;
-v4.6 later replaced that model with the current 45% admin-inclusive margin
-target.
+v4.6 later replaced that model with the 45% admin-inclusive margin target,
+which the 2026-10-21 owner audit lowered to the current 40%.
 
 **How to change.** Visit cadence is a customer-facing program contract: a tier
 change needs a `pricing_changelog` entry and a baseline regen
@@ -437,8 +444,8 @@ The following items are documented at a working level above but may
 benefit from deeper write-ups:
 - Composite discount cap policy decision at the application discount
   integration boundary; the pricing-engine helper does not enforce one.
-- Per-service margin rationale — Tree & Shrub uses an explicit 45%
-  admin-inclusive target, the global 35% value is a reporting threshold, and
+- Per-service margin rationale — Tree & Shrub uses an explicit 40%
+  admin-inclusive target (45% before 2026-10-21), the global 35% value is a reporting threshold, and
   some specialty pricers use their own margin divisors. Document why each
   service-specific target/divisor differs where the current write-up is thin.
 - Frequency-discount curves for pest (`v1` 0.85/0.70 vs `v2` 0.88/0.78).

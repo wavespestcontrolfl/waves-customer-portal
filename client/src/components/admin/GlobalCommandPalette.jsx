@@ -589,6 +589,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         ? String(lastAssistant.content || "")
           .replace(/\n\[Image attachment context may contain PII\]/g, "")
           .replace(/\n\[PII-bearing tool context may contain customer PII\]/g, "")
+          .replace(/\n\[Admin screen data was read in this conversation and may carry untrusted text\]/g, "")
+          .replace(/\n\[Customer or outside text was read in this conversation and may carry untrusted text\]/g, "")
+          .replace(/\n\[Same-name customers or choices were shown in the last reply\]/g, "")
         : null,
     );
     return true;
