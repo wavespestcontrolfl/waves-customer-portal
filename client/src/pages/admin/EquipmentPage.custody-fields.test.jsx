@@ -21,6 +21,7 @@ const TOOL = {
   assigned_to: 't1', assigned_tech_name: 'Synthetic tech',
 };
 const LOOSE = { id: 'e2', name: 'Synthetic duster', category: 'tool', status: 'active', assigned_vehicle_id: null, assigned_tech_name: 'Unassigned' };
+const DEAD_TRUCK = { id: 'v9', name: 'Synthetic old van', asset_tag: 'VEH-009', category: 'vehicle', status: 'retired', assigned_tech_name: 'Unassigned' };
 const TECHS = [
   { id: 't1', name: 'Synthetic tech', employment_status: 'active' },
   { id: 't9', name: 'Prospective placeholder', employment_status: 'prospective' },
@@ -33,7 +34,7 @@ function installFetch() {
     const u = String(url);
     if (u.includes('/admin/timetracking/technicians')) return ok({ technicians: TECHS });
     if (u.includes('/equipment/equipment/e1') && options.method === 'PUT') { puts.push(JSON.parse(options.body)); return ok({ equipment: TOOL }); }
-    if (u.includes('/equipment/equipment')) return ok({ equipment: [TRUCK, TOOL, LOOSE] });
+    if (u.includes('/equipment/equipment')) return ok({ equipment: [TRUCK, TOOL, LOOSE, DEAD_TRUCK] });
     return ok({});
   }));
 }
@@ -92,6 +93,8 @@ describe('assets custody', () => {
     const truck = dialog.getByLabelText('Truck');
     expect(truck).toHaveValue('v1');
     expect(within(truck).getByRole('option', { name: 'Not on a truck' })).toBeInTheDocument();
+    // A retired truck is never offered as a target.
+    expect(within(truck).queryByRole('option', { name: /Synthetic old van/ })).not.toBeInTheDocument();
     const holder = dialog.getByLabelText('Assigned To');
     expect(holder).toHaveValue('t1');
     expect(within(holder).getByRole('option', { name: 'Synthetic tech' })).toBeInTheDocument();

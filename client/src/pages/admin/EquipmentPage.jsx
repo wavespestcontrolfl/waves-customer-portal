@@ -358,7 +358,8 @@ function EquipmentTab({
     };
   }, [canEdit]);
   useEffect(() => setActionError(""), [editing?.id, !!editing]);
-  const vehicles = items.filter(e => e.category === "vehicle");
+  // Only a live truck can carry a kit: a retired, sold or lost vehicle is never offered.
+  const vehicles = items.filter(e => e.category === "vehicle" && !["retired", "sold", "lost"].includes(e.status));
   const visibleItems = vehicleFilter === "" ? items : vehicleFilter === "none" ? items.filter(e => !e.assigned_vehicle_id && e.category !== "vehicle") : items.filter(e => e.assigned_vehicle_id === vehicleFilter);
   const save = async () => {
     if (actionRef.current) return;

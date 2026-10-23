@@ -392,7 +392,16 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.serviceLinesFor('Pest Inspection Service')).toEqual([]);
     // The misting design visit is a consultation by the shared predicate; a misting service still needs the sprayer.
     expect(truckKit.serviceLinesFor('Mosquito Misting System', { serviceKey: 'mosquito_misting_system' })).toEqual([]);
-    expect(truckKit.serviceLinesFor('Mosquito Misting System Refill')).toEqual(['mosquito']);
+    // A keyless misting phase row is "not yet built" by the shared override: no program, no tools.
+    expect(truckKit.serviceLinesFor('Mosquito Misting System Refill')).toEqual([]);
+    // Registry lanes with no field tools: billing riders, the appointment placeholder, trunk injection.
+    expect(truckKit.serviceLinesFor('Termite Bond (1-Year Term)', { serviceKey: 'termite_bond_1yr' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Termite Warranty Renewal', { serviceKey: 'termite_renewal' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Waves Pest Control Appointment', { serviceKey: 'general_appointment' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Palm Injection Service', { serviceKey: 'palm_injection' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Semiannual Palm Injection Service')).toEqual([]);
+    // An unknown legacy key is NOT a lane: it still reads by name.
+    expect(truckKit.serviceLinesFor('Quarterly Pest Control', { serviceKey: 'some_old_key' })).toEqual(['pest']);
     // Catalog category "inspection" is NOT an exemption: the WDO letter needs the meter and probe.
     expect(truckKit.serviceLinesFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' })).toEqual(['termite']);
     expect(truckKit.serviceLinesFor('Lawn Health Inspection', { serviceKey: 'lawn_inspection' })).toEqual(['lawn']);
@@ -411,6 +420,9 @@ describe('tool gaps by kit key', () => {
     expect(truckKit.requirementsFor('Drill and Foam Treatment', { serviceKey: 'foam_drill' }).promote).toEqual(new Set(['foam_drill_kit']));
     expect(truckKit.requirementsFor('Termite Spot Treatment Service', { serviceKey: 'termite_spot_treatment' }).promote).toEqual(new Set(['foam_drill_kit']));
     expect(truckKit.requirementsFor('Termite Spot Treatment Service').promote).toEqual(new Set(['foam_drill_kit']));
+    // The matcher's bait_monitoring list covers the station install and the cartridge replacement.
+    expect(truckKit.requirementsFor('Termite Installation Setup', { serviceKey: 'termite_installation_setup' }).promote).toEqual(new Set(['bait_station_key']));
+    expect(truckKit.requirementsFor('Cartridge Replacement', { serviceKey: 'termite_cartridge_replacement' }).promote).toEqual(new Set(['bait_station_key']));
     // A promotion stays on its line: a lawn insect spot add-on never asks for the foam kit.
     expect(truckKit.requirementsFor('Termite Bait Station System', { serviceKey: 'termite_bait', addons: [{ name: 'Lawn Insect Spot Treatment', serviceKey: 'area_addon_lawn_insect_spot', category: 'lawn_care' }] }).promote).toEqual(new Set(['bait_station_key']));
     expect(truckKit.requirementsFor('WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection' }).promote).toEqual(new Set());

@@ -25,7 +25,7 @@ jest.mock('../models/db', () => {
       c.calls.push(['first', ...args]);
       if (table === 'equipment' && c.cond && c.cond.assigned_to && c.cond.category === 'vehicle') return state.trucksOf[c.cond.assigned_to] || null;
       if (table === 'equipment' && c.cond && c.cond.category === 'vehicle') return state.vehicles[c.cond.id] || null;
-      if (table === 'equipment' && c.cond && c.cond.id && c.cond.category === undefined) return state.rows[c.cond.id] || null;
+      if (table === 'equipment' && c.cond && c.cond.id && c.cond.category === undefined) return state.rows[c.cond.id] ? { ...state.rows[c.cond.id] } : null;
       if (table === 'equipment' && c.cond && c.cond.assigned_vehicle_id) return state.riders[c.cond.assigned_vehicle_id] || null;
       return null;
     });
@@ -173,7 +173,7 @@ describe('POST /equipment custody columns', () => {
   test('refuses a truck that is not a vehicle row, writing nothing', async () => {
     const res = await run('post', '/equipment', { body: { name: 'Synthetic duster', assigned_vehicle_id: OTHER } });
     expect(res.statusCode).toBe(400);
-    expect(res.body).toEqual({ error: 'assigned_vehicle_id must be a vehicle' });
+    expect(res.body).toEqual({ error: 'assigned_vehicle_id must be a live vehicle' });
     expect(db.__state.inserted).toBeNull();
   });
 
@@ -253,6 +253,16 @@ jest.mock('../services/truck-kit', () => ({
 const truckKit = require('../services/truck-kit');
 
 describe('a tool leaving a truck re-judges that truck\'s bell', () => {
+  test('a save that raced another move of the same item is refused', async () => {
+    // The first read says VEHICLE; under the locks the row already moved to OTHER.
+    let reads = 0;
+    db.__state.rows[TOOL] = { id: TOOL, category: 'tool', get assigned_vehicle_id() { return reads++ === 0 ? VEHICLE : OTHER; } };
+    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: null } });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/moved this item/);
+    expect(db.__state.updated).toBeNull();
+  });
+
   test('moving a tool to another truck locks both trucks and re-judges the old one, in the update transaction', async () => {
     db.__state.vehicles[OTHER] = { id: OTHER };
     const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { assigned_vehicle_id: OTHER } });

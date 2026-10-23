@@ -31,6 +31,9 @@ const { truncateAtWord } = require('./ops-digest');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { normalizeKitKey } = require('./kit-key');
 const { isMistingDesignConsultation } = require('../utils/mosquito-misting-system');
+const { matchServiceProtocol, MATCH_RULES } = require('./protocol-matcher');
+const { resolveTraceEligibility } = require('./service-report/trace-eligibility');
+const PROTOCOLS = require('../config/protocols.json');
 
 // A truck check is due this many days after the last one (owner decision 2,
 // docs/tool-inventory-tracker-scope.md: weekly plus ad hoc).
@@ -94,6 +97,29 @@ const isConsultation = (serviceType, serviceKey) => {
 // Catalog identity picks the line before the name does: a fire ant yard
 // add-on is lawn_care (a spreader job) whatever its name reads as.
 const CATEGORY_LINE = { lawn_care: 'lawn', pest_control: 'pest', tree_shrub: 'tree_shrub', termite: 'termite', mosquito: 'mosquito', rodent: 'rodent' };
+// The shared registries decide what a service IS (one classification for the
+// whole app, AGENTS.md): trace-eligibility names the lanes that are not field
+// work with tools (billing riders, the appointment placeholder, trunk
+// injection, compliance projects, sanitation), and the protocol matcher
+// resolves the program and the visit kind (bait monitoring, foam drill).
+const NO_TOOL_LANES = new Set(['billing_rider', 'appointment_lane', 'injection_lane', 'compliance_project_lane', 'sanitation_lane']);
+const PROGRAM_LINE = { lawn: 'lawn', pest: 'pest', cockroach: 'pest', bed_bug: 'pest', mosquito: 'mosquito', rodent: 'rodent', termite: 'termite', tree_shrub: 'tree_shrub' };
+// A program with no keyed kit (the Arborjet injection gear is not keyed).
+const PROGRAM_NO_KIT = new Set(['palm_injection']);
+const REASON_PROMOTES = { bait_monitoring: ['bait_station_key'], foam_drill: ['foam_drill_kit'] };
+const laneOf = (serviceType, serviceKey) => resolveTraceEligibility({ serviceKey: serviceKey || null, displayName: serviceType || '' }).reason;
+const matchOf = (serviceType, serviceKey) => matchServiceProtocol(PROTOCOLS, serviceType, { serviceKey: serviceKey || null });
+// A rule the matcher claims by catalog KEY names the program outright; a
+// term match or a bare default leaves the line to the category and the name.
+const keyedProgram = (serviceKey) => (serviceKey ? MATCH_RULES.find((rule) => rule.serviceKeys?.includes(serviceKey))?.programKey || null : null);
+// Not a field visit with tools: blank, a consultation, mechanical work, a
+// registry lane without tools, or a service the matcher gives no program
+// (the misting design visit, an unconfigured misting phase, trunk injection).
+function noToolService(serviceType, serviceKey, resolved) {
+  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey) || isMechanical(serviceType, serviceKey)) return true;
+  if (NO_TOOL_LANES.has(laneOf(serviceType, serviceKey))) return true;
+  return !resolved.programKey || PROGRAM_NO_KIT.has(resolved.programKey);
+}
 // Mechanical lawn work (job-card.js ADDON_PROGRAMS lawn_care.nonChemical)
 // and the web sweep use their own machines, not the spray checklist: no
 // treatment-tool hold. Legacy rows without a key match by name.
@@ -120,10 +146,14 @@ const isMechanical = (serviceType, serviceKey) =>
 
 // The checklist lines ONE service's tools come from: its line plus every
 // companion line its name mentions, in that order, once each.
-function linesForService(serviceType, serviceKey, serviceCategory = null) {
+function linesForService(serviceType, serviceKey, serviceCategory = null, match = null) {
   const lines = [];
-  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey) || isMechanical(serviceType, serviceKey)) return lines;
-  const primary = CATEGORY_LINE[String(serviceCategory || '').toLowerCase()] || detectServiceLine(serviceType);
+  const resolved = match || matchOf(serviceType, serviceKey);
+  if (noToolService(serviceType, serviceKey, resolved)) return lines;
+  const byCategory = CATEGORY_LINE[String(serviceCategory || '').toLowerCase()];
+  // Catalog key first (the matcher's keyed rule), then the catalog category,
+  // then the report's primary-line rule on the name.
+  const primary = PROGRAM_LINE[keyedProgram(serviceKey)] || byCategory || detectServiceLine(serviceType) || PROGRAM_LINE[resolved.programKey];
   if (primary) lines.push(primary);
   const text = String(serviceType || '').toLowerCase();
   for (const [line, re] of COMPANION_LINES) if (re.test(text) && !lines.includes(line)) lines.push(line);
@@ -141,8 +171,10 @@ const PROMOTED_KITS = [
   // (protocol-matcher.js; engine key termite_foam): same kit.
   { line: 'termite', keys: ['foam_drill_kit'], key: /foam|drill|termite_spot/i, name: /\b(foam|drill|termite\s*spot)\b/i },
 ];
-function promotedKeysFor(serviceType, serviceKey, lines = []) {
+function promotedKeysFor(serviceType, serviceKey, lines = [], match = null) {
   const out = [];
+  const resolved = match || matchOf(serviceType, serviceKey);
+  if (lines.includes('termite')) for (const key of REASON_PROMOTES[resolved.reason] || []) out.push(key);
   for (const kit of PROMOTED_KITS) {
     if (!lines.includes(kit.line)) continue;
     if ((serviceKey && kit.key.test(String(serviceKey))) || kit.name.test(String(serviceType || ''))) out.push(...kit.keys);
@@ -157,9 +189,10 @@ function promotedKeysFor(serviceType, serviceKey, lines = []) {
 // focused keys it is restricted to (null = the whole kit of its lines).
 function serviceRequirement(svc) {
   const focused = focusedKitFor(svc?.name, svc?.serviceKey);
-  const lines = focused ? [focused.line] : linesForService(svc?.name, svc?.serviceKey, svc?.category);
+  const match = matchOf(svc?.name, svc?.serviceKey);
+  const lines = focused ? [focused.line] : linesForService(svc?.name, svc?.serviceKey, svc?.category, match);
   if (!lines.length) return null;
-  return { lines, promote: promotedKeysFor(svc?.name, svc?.serviceKey, lines), restrict: focused ? focused.keys : null };
+  return { lines, promote: [...new Set(promotedKeysFor(svc?.name, svc?.serviceKey, lines, match))], restrict: focused ? focused.keys : null };
 }
 
 // `restrict` is per LINE: { line: Set(keys) } for a line only focused jobs

@@ -65,8 +65,9 @@ async function vehicleTarget(body, selfId) {
   if (raw === null || raw === '') return { value: null };
   const vehicleId = String(raw);
   if (!UUID_RE.test(vehicleId) || vehicleId === selfId) return { error: 'assigned_vehicle_id must be a vehicle' };
-  const vehicle = await db('equipment').where({ id: vehicleId, category: 'vehicle' }).first('id');
-  if (!vehicle) return { error: 'assigned_vehicle_id must be a vehicle' };
+  // ...and a live one: a retired, sold or lost truck carries no kit.
+  const vehicle = await db('equipment').where({ id: vehicleId, category: 'vehicle' }).whereNotIn('status', DEAD_ITEM_STATUSES).first('id');
+  if (!vehicle) return { error: 'assigned_vehicle_id must be a live vehicle' };
   let category = body.category;
   if (category === undefined && selfId) {
     const self = await db('equipment').where({ id: selfId }).first('category');
@@ -266,19 +267,21 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
     // trucks' locks, in the same transaction as the move (truck-kit.js).
     const record = await db.transaction(async (trx) => {
       const truckKit = require('../services/truck-kit');
-      const before = await trx('equipment').where({ id: req.params.id }).first('assigned_vehicle_id', 'category', 'assigned_to', 'status');
-      if (!before) return null;
-      let oldTruck = null;
-      if (updates.assigned_vehicle_id !== undefined) {
-        oldTruck = before.assigned_vehicle_id || null;
-        if (oldTruck === updates.assigned_vehicle_id) oldTruck = null;
-      }
+      const columns = ['assigned_vehicle_id', 'category', 'assigned_to', 'status'];
+      const first = await trx('equipment').where({ id: req.params.id }).first(...columns);
+      if (!first) return null;
       const dies = DEAD_ITEM_STATUSES.includes(updates.status);
-      // Every truck this write can touch is locked first (in one order), so a
-      // truck check in flight on it finishes before the item moves or dies.
-      // Any status change can move the item in or out of the live kit.
-      const trucks = new Set([oldTruck, updates.assigned_vehicle_id, updates.status !== undefined ? before.assigned_vehicle_id : null].filter(Boolean));
-      for (const truckId of [...trucks].sort()) await truckKit.lockTruck(trx, truckId);
+      // Every truck this write can touch (the item's truck on a move or any
+      // status change, and the target truck) is locked first, in one order,
+      // so a truck check in flight on it finishes before the item moves or
+      // dies. Then the row is read AGAIN under the locks: a save that raced
+      // another move of the same item is refused, never applied to a truck
+      // nobody locked.
+      const touches = (row) => [updates.assigned_vehicle_id, (updates.assigned_vehicle_id !== undefined || updates.status !== undefined) ? row.assigned_vehicle_id : null].filter(Boolean);
+      for (const truckId of [...new Set(touches(first))].sort()) await truckKit.lockTruck(trx, truckId);
+      const before = await trx('equipment').where({ id: req.params.id }).first(...columns);
+      if (!before || before.assigned_vehicle_id !== first.assigned_vehicle_id) return 'moved';
+      const oldTruck = updates.assigned_vehicle_id !== undefined && before.assigned_vehicle_id !== updates.assigned_vehicle_id ? (before.assigned_vehicle_id || null) : null;
       // An unresolved tool alert belongs to the truck it was found on and
       // closes only through the office's outcome (Found / Lost, Repaired /
       // Retired, routes/admin-equipment-maintenance.js): the item neither
@@ -300,6 +303,7 @@ router.put('/equipment/:id', requireAdmin, async (req, res, next) => {
       return row || null;
     });
 
+    if (record === 'moved') return res.status(409).json({ error: 'Another save moved this item to a different truck. Reload and try again.' });
     if (record === 'open-alert') return res.status(409).json({ error: 'This item has an open truck check alert. Resolve it on Equipment → Maintenance (Found / Lost or Repaired / Retired) first.' });
     if (record === 'second-truck') return res.status(409).json({ error: SECOND_TRUCK_ERROR });
     if (!record) return res.status(404).json({ error: 'Equipment not found' });
