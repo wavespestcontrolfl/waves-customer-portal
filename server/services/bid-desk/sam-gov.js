@@ -256,7 +256,8 @@ function refreshPatch(bid, row) {
   if (row.source_active !== bid.source_active) patch.source_active = row.source_active;
   if (!sameInstant(bid.source_due_at, row.due_at)) {
     patch.source_due_at = row.due_at;
-    if (row.due_at && !bid.due_confirmed) patch.due_at = row.due_at;
+    // A removed deadline clears an unconfirmed date too, so no reminder runs for a date SAM.gov no longer shows.
+    if (!bid.due_confirmed) patch.due_at = row.due_at;
   }
   const change = sourceChange(bid, row);
   if (!change) return patch;
@@ -344,14 +345,17 @@ async function collectNotices({ apiKey, postedFrom, postedTo, refreshFrom, refre
   const batch = await openSamBids(refreshAfter, limit);
   const missing = [];
   let lastRead = refreshAfter;
-  let stopped = false;
+  let refreshError = null;
   for (const externalId of batch) {
     let notices;
     try {
       ({ notices } = await fetchPage({ apiKey, filter: { noticeid: externalId }, postedFrom: refreshFrom, postedTo, offset: 0, fetchImpl: counted }));
     } catch (err) {
       if (!(err instanceof SamApiError)) throw err;
-      stopped = true;
+      refreshError = err;
+      // A quota refusal retries the same bid next run; any other failure moves past it, so one bad notice cannot
+      // hold back every bid after it. Either way the run is reported as failed.
+      if (err.status !== 429) lastRead = externalId;
       break;
     }
     add(notices, externalId);
@@ -362,8 +366,8 @@ async function collectNotices({ apiKey, postedFrom, postedTo, refreshFrom, refre
   // A stopped or full batch continues after the last bid read; a short one wraps to the start; no budget left keeps the
   // place. So every open bid is checked in turn.
   let nextRefreshAfter = null;
-  if (!(limit > 0) || stopped || batch.length === limit) nextRefreshAfter = lastRead;
-  return { notices: [...seen.values()], missing, nextRefreshAfter, refreshStopped: stopped };
+  if (!(limit > 0) || refreshError || batch.length === limit) nextRefreshAfter = lastRead;
+  return { notices: [...seen.values()], missing, nextRefreshAfter, refreshError };
 }
 
 // Open SAM.gov bids, open or closed on SAM.gov (a closed notice can be unarchived), in notice-id order after `after`.
@@ -403,7 +407,7 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
   const stored = cursor.from || etDayOffset(now, -FIRST_RUN_LOOKBACK_DAYS);
   let from = stored < oldest ? oldest : stored;
   if (from > today) from = today;
-  const { notices, missing, nextRefreshAfter } = await collectNotices({
+  const { notices, missing, nextRefreshAfter, refreshError } = await collectNotices({
     apiKey: key, postedFrom: apiDate(from), postedTo: apiDate(today), refreshFrom: apiDate(oldest), refreshAfter: cursor.refreshAfter, fetchImpl,
   });
   const counts = await fileNotices(notices, now);
@@ -412,7 +416,8 @@ async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, a
   await writeCursor({ from: etDayOffset(now, -CURSOR_OVERLAP_DAYS), refreshAfter: nextRefreshAfter });
   // The bells go out through the Bid Desk's one owed-bell sweep (also run every 15 minutes, so a failure retries there).
   const rung = await deliverOwedAlerts();
-  return { read: notices.length, ...counts, rung };
+  // The discovery work above is kept; a stopped re-read is still a failed run in job health (the scheduler throws).
+  return { read: notices.length, ...counts, rung, ...(refreshError ? { refreshFailed: refreshError.status } : {}) };
 }
 
 module.exports = {

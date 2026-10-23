@@ -312,10 +312,35 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
       const body = id ? { totalRecords: 1, opportunitiesData: [{ noticeId: id, type: 'Solicitation', active: 'Yes' }] } : { totalRecords: 1, opportunitiesData: [notice('d-2')] };
       return { ok: true, status: 200, json: async () => body };
     });
-    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: limited, apiKey: 'test-key' })).toMatchObject({ filed: 1 });
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: limited, apiKey: 'test-key' })).toMatchObject({ filed: 1, refreshFailed: 429 });
     expect((await mockPg('bid_opportunities').where({ external_id: 'd-2' })).length).toBe(1);
     const readIds = limited.mock.calls.map(([u]) => new URL(u).searchParams.get('noticeid')).filter(Boolean);
     expect((await cursorState()).refresh_after).toBe(readIds[1]);
+
+    // Any other failure (a 500 on one notice) is also a failed run, but moves past that bid so it cannot hold back
+    // every bid after it.
+    byId = 0;
+    const broken = jest.fn(async (url) => {
+      const id = new URL(url).searchParams.get('noticeid');
+      if (id && (byId += 1) === 1) return { ok: false, status: 500, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ totalRecords: 0, opportunitiesData: [] }) };
+    });
+    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl: broken, apiKey: 'test-key' })).toMatchObject({ refreshFailed: 500 });
+    const brokenIds = broken.mock.calls.map(([u]) => new URL(u).searchParams.get('noticeid')).filter(Boolean);
+    expect((await cursorState()).refresh_after).toBe(brokenIds[0]);
+  });
+
+  test('a deadline removed before anyone confirmed it clears the date, so no reminder runs for it', async () => {
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-31')]), apiKey: 'test-key' });
+    const [filed] = await samBids();
+    expect(filed.due_at).not.toBeNull();
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-31', { responseDeadLine: null })]), apiKey: 'test-key' });
+    const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
+    expect(bid.due_at).toBeNull();
+    expect(bid.source_due_at).toBeNull();
+    expect(bid.needs_date_confirmation).toBe(true);
+    await mockPg('bid_opportunities').where({ id: filed.id }).update({ needs_date_confirmation: false, due_confirmed: true });
+    expect(await service.sendDueReminders({ now: NOW })).toBe(0);
   });
 
   test('the by-id refresh rotates through every open bid in batches', async () => {

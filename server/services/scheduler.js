@@ -2129,6 +2129,8 @@ function initScheduledJobs() {
         // Both gates on with no key imports nothing: a failed run in job health, not a quiet success.
         if (result.skipped === 'no_api_key') throw new Error('SAM_GOV_API_KEY is not set');
         if (result.filed > 0) logger.info(`[bid-desk-sam] ${result.filed} new federal bid(s)`);
+        // Discovery was filed; a re-read that stopped on a SAM.gov error is still a failed run (HTTP status only).
+        if (result.refreshFailed) throw new (require('./bid-desk/sam-gov').SamApiError)(result.refreshFailed);
       });
       if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');

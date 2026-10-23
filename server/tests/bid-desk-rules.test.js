@@ -153,4 +153,15 @@ describe('notification copy follows the admin notification rule', () => {
     expect(reminderSpec(at(new Date(NOW.getTime() + 1 * DAY)), '7d', NOW).spec.action).toMatch(/due tomorrow/);
     expect(reminderSpec(at(new Date(NOW.getTime() + 3 * DAY)), '7d', NOW).spec.action).toMatch(/due in 3 days/);
   });
+
+  test('a closed SAM.gov notice asks for a decision, not a date', () => {
+    const closed = { ...dated, source: 'sam_gov', source_active: false, due_source_line: 'SAM.gov no longer lists this notice as active' };
+    const { spec, detail } = addendumSpec(closed, null);
+    expect(() => composeAdminAlert(spec)).not.toThrow();
+    expect(spec.doneWhen).toBe('bid_decided');
+    expect(spec.action).toMatch(/SAM\.gov closed/);
+    expect(detail).not.toMatch(/confirm the due date/);
+    // A moved deadline on an active notice is still a date question.
+    expect(addendumSpec({ ...closed, source_active: true }, null).spec.doneWhen).toBe('due_date_confirmed');
+  });
 });
