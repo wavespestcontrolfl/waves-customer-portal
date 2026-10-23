@@ -7,6 +7,7 @@ import {
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
+import BidChecklistPanel from "./BidChecklistPanel";
 
 // Bid Desk (GATE_BID_DESK, dark). Bid invites the email sync stored, filed by a job. The page only reads them and
 // records the operator's decisions; nothing here sends a message to a buyer or a contractor.
@@ -95,7 +96,7 @@ function DueCell({ bid }) {
   );
 }
 
-function BidTable({ bids, selectedId, onSelect }) {
+function BidTable({ bids, selectedId, onSelect, checklistLive }) {
   return (
     <Table>
       <THead>
@@ -117,6 +118,11 @@ function BidTable({ bids, selectedId, onSelect }) {
                 {titleOf(bid)}
               </button>
               {bid.historical && <Badge className="ml-2">Earlier</Badge>}
+              {checklistLive && bid.checklist_progress?.required > 0 && (
+                <Badge className="ml-2" tone={bid.checklist_progress.checked === bid.checklist_progress.required ? "strong" : "neutral"} title="Required checklist lines checked">
+                  {bid.checklist_progress.checked}/{bid.checklist_progress.required}
+                </Badge>
+              )}
             </TD>
             <TD>{SOURCE_LABEL[bid.source] || bid.source}</TD>
             <TD><DueCell bid={bid} /></TD>
@@ -129,8 +135,8 @@ function BidTable({ bids, selectedId, onSelect }) {
   );
 }
 
-function BidDetail({ bidId, onChanged, onClose }) {
-  const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [] });
+function BidDetail({ bidId, onChanged, onClose, onProgress }) {
+  const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
   const [dueInput, setDueInput] = useState("");
   // The bid version the date field was typed against: a date save is fenced on it, so a decision saved in between
   // (which moves the version) cannot carry a date typed against the older bid.
@@ -144,13 +150,17 @@ function BidDetail({ bidId, onChanged, onClose }) {
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
-      setState({ loading: false, error: "", bid: data.bid, emails: data.emails });
+      // The checklist fields arrive only while GATE_BID_CHECKLIST is on; without them the panel is not shown.
+      const extras = data.checklist_live
+        ? { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] }
+        : null;
+      setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
       setDueInput(etDatetimeLocalValue(data.bid.due_at));
       setDueEditedAt(null);
       setStatus(data.bid.status);
       setNote(data.bid.decision_note || "");
     } catch (err) {
-      setState({ loading: false, error: err.message, bid: null, emails: [] });
+      setState({ loading: false, error: err.message, bid: null, emails: [], extras: null });
     }
   }, [bidId]);
   useEffect(() => { setMessage(""); load(); }, [load]);
@@ -171,14 +181,16 @@ function BidDetail({ bidId, onChanged, onClose }) {
       }
       setMessage(done);
       onChanged();
+      return true;
     } catch (err) {
       setMessage(`Not saved: ${err.message}`);
+      return false;
     } finally {
       setBusy(false);
     }
   };
 
-  const { bid, emails } = state;
+  const { bid, emails, extras } = state;
   if (state.loading && !bid) return <Card><CardBody>Loading…</CardBody></Card>;
   if (state.error) return <ActionFeedback error onRetry={load}>{state.error}</ActionFeedback>;
   if (!bid) return null;
@@ -239,7 +251,11 @@ function BidDetail({ bidId, onChanged, onClose }) {
 
         {message && <ActionFeedback error={message.startsWith("Not saved")} className="mb-3">{message}</ActionFeedback>}
 
-        {showEmailHeading(bid, emails) && <h3 className="mb-1 text-ui-body font-medium text-zinc-900">Emails on this bid</h3>}
+        {extras && (
+          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} />
+        )}
+
+        {showEmailHeading(bid, emails) && <h3 className={`mb-1 text-ui-body font-medium text-zinc-900${extras ? " mt-4" : ""}`}>Emails on this bid</h3>}
         <ul className="grid gap-1">
           {emails.map((email) => (
             <li key={email.email_id} className="flex flex-wrap items-center gap-2 text-ui-body">
@@ -290,6 +306,7 @@ function MarkEmail({ onMarked }) {
 export default function BidDeskPage() {
   const [params, setParams] = useSearchParams();
   const [bids, setBids] = useState([]);
+  const [checklistLive, setChecklistLive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState({ text: "", off: false });
   const [filter, setFilter] = useState("open");
@@ -301,6 +318,7 @@ export default function BidDeskPage() {
     try {
       const data = await api("/");
       setBids(data.bids);
+      setChecklistLive(data.checklist_live === true);
       setError({ text: "", off: false });
     } catch (err) {
       setError({ text: err.message, off: err.status === 404 });
@@ -309,6 +327,12 @@ export default function BidDeskPage() {
     }
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  // A checklist change in the open bid moves its chip in the list at once.
+  const setProgress = useCallback((id, progress) => {
+    if (!progress) return;
+    setBids((rows) => rows.map((row) => (row.id === id ? { ...row, checklist_progress: { checked: progress.checked, required: progress.required } } : row)));
+  }, []);
 
   const select = (id) => setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
 
@@ -325,7 +349,9 @@ export default function BidDeskPage() {
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
         Bid invites that reached the shared inbox (BuildingConnected, Procore, city and HOA requests). A due date is read from the invite
-        and shows as Unconfirmed until you confirm or type it. Reminders go to the bell 7 and 2 days before a confirmed date. Nothing here
+        and shows as Unconfirmed until you confirm or type it. {checklistLive
+          ? "Reminders go to the bell 14, 7 and 2 days before a confirmed date, and 2 days before the questions date and the site visit."
+          : "Reminders go to the bell 7 and 2 days before a confirmed date."} Nothing here
         is sent to a buyer or a contractor.
       </div>
 
@@ -351,11 +377,11 @@ export default function BidDeskPage() {
           {!loading && !error.text && shown.length === 0 && (
             <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">No bids here.</div>
           )}
-          {shown.length > 0 && <BidTable bids={shown} selectedId={selectedId} onSelect={select} />}
+          {shown.length > 0 && <BidTable bids={shown} selectedId={selectedId} onSelect={select} checklistLive={checklistLive} />}
 
           {selectedId && (
             <div className="mt-4">
-              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => select("")} />
+              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => select("")} onProgress={setProgress} />
             </div>
           )}
         </>

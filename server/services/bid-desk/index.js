@@ -7,16 +7,17 @@
  *   runBackfill()         one-time, last 180 days; rows are `historical` (listed, never notified, never reminded)
  *   markEmailAsBid()      an operator marks one email as a bid by hand (source 'manual')
  *   ingestEmail()         detect, parse, group by thread else sender org + project title, attach or create
- *   sendDueReminders()    7 and 2 days before a due date the operator CONFIRMED; each fires once
+ *   sendDueReminders()    7 and 2 days before a due date the operator CONFIRMED; each fires once. With
+ *                         GATE_BID_CHECKLIST also 14 days before it, and 2 days before the questions date and the job walk
  *
  * No AI call, no change to leads or to the email classifier, and nothing is ever sent to a buyer or a contractor:
  * the only output is a row here and an admin notification. Inert unless bidDeskLive().
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { bidDeskLive } = require('../../config/feature-gates');
+const { bidDeskLive, bidChecklistLive } = require('../../config/feature-gates');
 const { detectBidEmail, parseBidEmail, classifyKind } = require('./detector');
-const { attachPatch, reminderDue, OPEN_STATUSES } = require('./rules');
+const { attachPatch, reminderDue, datesDue, OPEN_STATUSES } = require('./rules');
 const alerts = require('./alerts');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
@@ -65,6 +66,12 @@ const BID_COLUMNS = [
   'due_at', 'due_source_line', 'due_confirmed', 'job_walk_at', 'questions_due_at', 'status', 'decision_note',
   'historical', 'needs_date_confirmation', 'first_email_id', 'gmail_thread_id', 'external_url', 'source_active', 'created_at', 'updated_at',
 ];
+
+// The columns GATE_BID_CHECKLIST adds, read only when the gate is on (the Bid Desk reads exactly BID_COLUMNS without it).
+const BID_CHECKLIST_COLUMNS = [
+  'solicitation_type', 'scored', 'job_walk_mandatory', 'job_walk_confirmed', 'estimate_id', 'submitted_at', 'submission_confirmation',
+];
+const columnsFor = () => (bidChecklistLive() ? [...BID_COLUMNS, ...BID_CHECKLIST_COLUMNS] : BID_COLUMNS);
 
 // ---------- one email ----------
 
@@ -375,10 +382,16 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
 
 // ---------- reminders ----------
 
-/** One reminder per bid per window, only for a confirmed due date on an open, non-historical bid. */
+/**
+ * One reminder per bid per window, only for a confirmed due date on an open, non-historical bid. With GATE_BID_CHECKLIST
+ * a 14-day window comes before the 7-day one, and the questions and job-walk dates get their own reminders
+ * (sendDateReminders). Gate off: exactly the 7-day and 2-day reminders.
+ */
 async function sendDueReminders({ now = new Date() } = {}) {
   if (!bidDeskLive()) return 0;
-  const horizon = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const checklist = bidChecklistLive();
+  const horizon = new Date(now.getTime() + (checklist ? 14 : 7) * 24 * 60 * 60 * 1000);
+  const sevenDays = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
   const twoDays = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
   const candidates = await db('bid_opportunities')
     // A date waiting on an addendum check is not reminded until it is confirmed again.
@@ -388,8 +401,11 @@ async function sendDueReminders({ now = new Date() } = {}) {
     .whereIn('status', ['new', 'bid'])
     .where('due_at', '>', now).where('due_at', '<=', horizon)
     // Only bids still owed a window, so already-reminded rows cannot fill the limit and starve later ones.
-    .where((q) => q.where((w) => w.whereNull('reminder_2d_sent_at').where('due_at', '<=', twoDays))
-      .orWhere((w) => w.whereNull('reminder_7d_sent_at').where('due_at', '>', twoDays)))
+    .where((q) => {
+      q.where((w) => w.whereNull('reminder_2d_sent_at').where('due_at', '<=', twoDays))
+        .orWhere((w) => w.whereNull('reminder_7d_sent_at').where('due_at', '>', twoDays).where('due_at', '<=', sevenDays));
+      if (checklist) q.orWhere((w) => w.whereNull('reminder_14d_sent_at').where('due_at', '>', sevenDays));
+    })
     .orderBy('due_at').limit(REMINDER_LIMIT).select('id');
   let sent = 0;
   for (const { id } of candidates) {
@@ -397,21 +413,73 @@ async function sendDueReminders({ now = new Date() } = {}) {
       const done = await db.transaction(async (trx) => {
         // Re-read under a row lock: a double tick or a status change between the list and here sends nothing.
         const bid = await trx('bid_opportunities').where({ id }).forUpdate().first();
-        const window = reminderDue(bid, now);
+        // The gate is read again under the lock: a kill between the list and here sends no 14-day reminder.
+        const window = reminderDue(bid, now, { checklist: checklist && bidChecklistLive() });
         if (!window) return false;
         // The due date is in the key: a changed date (PATCH clears the stamps) gets its own reminders.
         await alerts.raiseReopening(alerts.reminderSpec(bid, window, now), `bid-desk:remind:${bid.id}:${window}:${new Date(bid.due_at).toISOString()}`, trx);
-        // Inside 2 days the 7-day reminder is moot: stamp both so it can never fire late.
-        await trx('bid_opportunities').where({ id }).update({
-          reminder_2d_sent_at: window === '2d' ? trx.fn.now() : bid.reminder_2d_sent_at,
-          reminder_7d_sent_at: bid.reminder_7d_sent_at || trx.fn.now(),
-          updated_at: trx.fn.now(),
-        });
+        // Inside 2 days the 7-day reminder is moot: stamp both so it can never fire late. The 14-day reminder stamps
+        // only itself (the 7-day window is still ahead).
+        const stamps = window === '14d'
+          ? { reminder_14d_sent_at: trx.fn.now() }
+          : {
+            reminder_2d_sent_at: window === '2d' ? trx.fn.now() : bid.reminder_2d_sent_at,
+            reminder_7d_sent_at: bid.reminder_7d_sent_at || trx.fn.now(),
+          };
+        // updated_at is the version the operator's date save is fenced on; a reminder stamp is not an edit of the bid, so
+        // it leaves it alone (an open page must not get a 409 because a reminder fired).
+        await trx('bid_opportunities').where({ id }).update(stamps);
         return true;
       });
       if (done) sent += 1;
     } catch (err) {
       logger.error(`${LOG} reminder for bid ${id} failed: ${safeError(err)}`);
+    }
+  }
+  if (checklist) sent += await sendDateReminders({ now });
+  return sent;
+}
+
+/**
+ * GATE_BID_CHECKLIST: one reminder 2 days before the questions date and one 2 days before the job walk, each once for
+ * the date it was computed for (the dates are in the keys; the route clears a stamp when its date changes). Admin bell
+ * only. Returns the number rung.
+ */
+async function sendDateReminders({ now = new Date() } = {}) {
+  if (!bidChecklistLive()) return 0;
+  const twoDays = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
+  const window = (column, stamp) => (q) => q.whereNull(stamp).where(column, '>', now).where(column, '<=', twoDays);
+  const candidates = await db('bid_opportunities')
+    .where({ historical: false, needs_date_confirmation: false })
+    .whereRaw('source_active IS DISTINCT FROM false')
+    .whereIn('status', ['new', 'bid'])
+    // A questions date is typed (confirmed); a job-walk date needs the operator's confirmation.
+    .where((q) => q.where(window('questions_due_at', 'questions_reminder_sent_at'))
+      .orWhere((w) => w.where('job_walk_confirmed', true).where(window('job_walk_at', 'job_walk_reminder_sent_at'))))
+    .orderBy('updated_at').limit(REMINDER_LIMIT).select('id');
+  let sent = 0;
+  for (const { id } of candidates) {
+    try {
+      const rung = await db.transaction(async (trx) => {
+        const bid = await trx('bid_opportunities').where({ id }).forUpdate().first();
+        if (!bidChecklistLive()) return 0;
+        const owed = datesDue(bid, now);
+        const stamps = {};
+        if (owed.includes('questions')) {
+          await alerts.raiseReopening(alerts.questionsReminderSpec(bid, now), `bid-desk:remind-questions:${bid.id}:${new Date(bid.questions_due_at).toISOString()}`, trx);
+          stamps.questions_reminder_sent_at = trx.fn.now();
+        }
+        if (owed.includes('job_walk')) {
+          await alerts.raiseReopening(alerts.jobWalkReminderSpec(bid, now), `bid-desk:remind-jobwalk:${bid.id}:${new Date(bid.job_walk_at).toISOString()}`, trx);
+          stamps.job_walk_reminder_sent_at = trx.fn.now();
+        }
+        if (!owed.length) return 0;
+        await trx('bid_opportunities').where({ id }).update(stamps); // not an edit: updated_at stays (see above)
+        return owed.length;
+      });
+      sent += rung;
+    } catch (err) {
+      logger.error(`${LOG} date reminder for bid ${id} failed: ${safeError(err)}`);
     }
   }
   return sent;
@@ -492,5 +560,5 @@ async function markEmailAsBid(emailId) {
 }
 
 module.exports = {
-  ingestEmail, runBidDeskTick, sendDueReminders, deliverOwedAlerts, deliverOwedBidAlert, runBackfill, markEmailAsBid, BID_COLUMNS, EMAIL_COLUMNS, WATERMARK_KEY,
+  ingestEmail, runBidDeskTick, sendDueReminders, sendDateReminders, deliverOwedAlerts, deliverOwedBidAlert, runBackfill, markEmailAsBid, BID_COLUMNS, BID_CHECKLIST_COLUMNS, columnsFor, EMAIL_COLUMNS, WATERMARK_KEY,
 };
