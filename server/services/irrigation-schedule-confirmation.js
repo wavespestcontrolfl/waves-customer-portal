@@ -141,10 +141,17 @@ async function confirmIrrigationFields(conn, customerId, fields) {
     );
     const n = await trx('property_preferences').where({ customer_id: customerId }).update({ irrigation_confirmed_fields: union });
     if (n) return n;
+    // Inside ON CONFLICT DO UPDATE the bare column name is ambiguous between the table and EXCLUDED (Postgres
+    // 42702), so the union for the upsert path names the table. Hit only for a customer with no preferences row
+    // (every new website customer, once the lawn-area stamp lands at estimate acceptance — CI on #6498).
+    const unionQualified = trx.raw(
+      "(SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM jsonb_array_elements_text(COALESCE(property_preferences.irrigation_confirmed_fields, '[]'::jsonb) || ?::jsonb) AS t(v))",
+      [JSON.stringify(list)],
+    );
     await trx('property_preferences')
       .insert({ customer_id: customerId, irrigation_confirmed_fields: JSON.stringify(list) })
       .onConflict('customer_id')
-      .merge({ irrigation_confirmed_fields: union });
+      .merge({ irrigation_confirmed_fields: unionQualified });
     return 1;
   };
   return conn.isTransaction ? run(conn) : conn.transaction(run);

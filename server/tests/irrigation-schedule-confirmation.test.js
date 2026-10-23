@@ -69,6 +69,11 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
     expect(await confirmIrrigationFields(conn, 'c2', ['turf_county'])).toBe(1);
     expect(calls.find((c) => c[0] === 'insert')[2]).toEqual({ customer_id: 'c2', irrigation_confirmed_fields: JSON.stringify(['turf_county']) });
     expect(calls.find((c) => c[0] === 'onConflict')[1]).toBe('customer_id');
+    // The upsert's union names the table: a bare column inside ON CONFLICT DO UPDATE is ambiguous with EXCLUDED
+    // (Postgres 42702; CI on #6498 for a customer with no preferences row).
+    const merged = calls.find((c) => c[0] === 'merge')[1].irrigation_confirmed_fields;
+    expect(merged.sql).toMatch(/COALESCE\(property_preferences\.irrigation_confirmed_fields, '\[\]'::jsonb\)/);
+    expect(merged.b).toEqual([JSON.stringify(['turf_county'])]);
     expect(await confirmIrrigationFields(conn, 'c3', [])).toBe(0);
     // Given a transaction, JOINS it (no nested conn.transaction) — the caller's write and the confirmation commit together.
     calls.length = 0;
