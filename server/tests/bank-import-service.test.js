@@ -38,6 +38,11 @@ function makeBuilder(table) {
     const wheres = b.where.mock.calls.map(c => c[0]);
     if (!wheres.some(w => w && typeof w === 'object' && 'id' in w)) return Promise.resolve(0);
     const u = { table, where: wheres, patch, raws: b.whereRaw.mock.calls.map(c => String(c[0])) };
+    if (state.beforeUpdate) state.beforeUpdate(u); // a concurrent writer, just before this UPDATE lands
+    // the claim's manualLink predicate: a row marked for the owner's own link meanwhile is not claimed
+    const target = wheres.find(w => w && typeof w === 'object' && 'id' in w);
+    const stored = table === 'bank_transactions' ? state.bankRows.find(r => r.id === target.id) : null;
+    if (stored && stored.suggestion && stored.suggestion.manualLink && u.raws.some(r => r.includes("coalesce(suggestion->>'manualLink','') <> 'true'"))) return Promise.resolve(0);
     state.updates.push(u);
     if (state.onUpdate) state.onUpdate(u); // concurrency hooks for race tests
     return Promise.resolve(1);
@@ -516,6 +521,7 @@ describe('runDeterministicMatching', () => {
     expect(summary.expensesLinked).toBe(1);
     expect(state.updates.find(u => u.patch.status === 'matched_expense').patch.matched_expense_id).toBe('exp-1');
     expect(state.updates.find(u => u.patch.status === 'matched_expense').raws.some(r => r.includes("(suggestion->'plaidModified') is null"))).toBe(true);
+    expect(state.updates.find(u => u.patch.status === 'matched_expense').raws.some(r => r.includes("coalesce(suggestion->>'manualLink','') <> 'true'"))).toBe(true); // manualLink re-checked at the claim
     // the claim locked the candidate expense and revalidated it
     expect(state.builders.some(x => x.table === 'expenses' && x.b.forUpdate.mock.calls.length > 0)).toBe(true);
 
@@ -554,6 +560,22 @@ describe('runDeterministicMatching', () => {
     expect(summary.ambiguous).toBe(1);
     expect(state.updates.find(u => u.patch.status)).toBeUndefined();
     expect(sugOf(state.updates.find(u => sugOf(u))).candidates).toHaveLength(1); // offered, for the owner to link
+  });
+
+  test('a manualLink marker set after the pass read the row (a ledger rerun holding it) makes the claim land nothing: the row is left for the next pass, and the pass does not report done', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: { review: true } },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }];
+    state.beforeUpdate = (u) => { if (u.patch.status === 'matched_expense') state.bankRows[0].suggestion = { ...state.bankRows[0].suggestion, manualLink: true }; };
+    try {
+      const summary = await runDeterministicMatching();
+      expect(summary.expensesLinked).toBe(0);
+      expect(summary.moreRemaining).toBe(true);
+      expect(state.updates.find(u => u.patch.status === 'matched_expense')).toBeUndefined();
+    } finally {
+      state.beforeUpdate = null;
+    }
   });
 
   test('a second strong candidate anywhere in the set blocks auto-link (no cap can hide it)', async () => {

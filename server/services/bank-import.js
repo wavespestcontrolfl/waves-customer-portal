@@ -1373,6 +1373,9 @@ function hasUnresolvedBankChange(row) {
 function manualLinkOnly(row) {
   return !!(row && row.suggestion && row.suggestion.manualLink);
 }
+// the same rule at the claim: a marker set after the pass read the row (a
+// ledger rerun holding it for the owner) makes the claim UPDATE land nothing
+const NO_MANUAL_LINK_SQL = "coalesce(suggestion->>'manualLink','') <> 'true'";
 
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
@@ -1805,6 +1808,8 @@ async function runDeterministicMatching({ limit } = {}) {
             // re-checked at the claim: the row may have been linked, got a
             // bank change parked, and been unlinked since this pass read it
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            // ...or been marked for the owner's own link (manualLinkOnly)
+            .whereRaw(NO_MANUAL_LINK_SQL)
             .update({
               status: 'matched_expense',
               matched_expense_id: strong[0].id,
@@ -1819,6 +1824,7 @@ async function runDeterministicMatching({ limit } = {}) {
               suggestion: suggestionMerge({ verifyPending: true }),
             });
           if (changed) claimedExpense = true;
+          else summary.moreRemaining = true; // the row changed under the pass: the next pass re-judges it
         });
         if (!claimedExpense && recheckPlural) {
           // the locked recheck turned plural — park the FULL rechecked list
