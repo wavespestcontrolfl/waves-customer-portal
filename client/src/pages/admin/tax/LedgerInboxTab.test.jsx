@@ -172,3 +172,22 @@ it('a money-in row offers no Business button', async () => {
   expect(within(card).getByRole('button', { name: 'Income' })).toBeInTheDocument();
   expect(within(card).getByText('+$42.50')).toBeInTheDocument();
 });
+
+it('a shelf view does not offer its own shelf again: no Later button in the Later view, no Income button in the Income view', async () => {
+  const base = fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/inbox') && u.includes('view=income')) return json({ rows: [{ ...row, id: 'row-3', direction: 'credit', suggestion: { income: true } }], total: 1 });
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByTestId('ledger-row-row-1');
+  fireEvent.click(screen.getByRole('button', { name: 'Later view' }));
+  const laterCard = await screen.findByTestId('ledger-row-row-1');
+  await waitFor(() => expect(within(laterCard).queryByRole('button', { name: 'Later' })).not.toBeInTheDocument());
+  expect(within(laterCard).getByRole('button', { name: 'Personal' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Income view' }));
+  const incomeCard = await screen.findByTestId('ledger-row-row-3');
+  expect(within(incomeCard).queryByRole('button', { name: 'Income' })).not.toBeInTheDocument();
+  expect(within(incomeCard).getByRole('button', { name: 'Later' })).toBeInTheDocument();
+});

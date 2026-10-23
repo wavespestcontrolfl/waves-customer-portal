@@ -58,7 +58,7 @@ function fmtAmount(r) {
   return `${r.direction === "credit" ? "+" : "-"}$${txt}`;
 }
 
-function InboxRow({ row, categories, busy, error, onAct }) {
+function InboxRow({ row, categories, busy, error, onAct, view = "open" }) {
   const sug = row.suggestion || null;
   const [categoryId, setCategoryId] = useState(sug?.categoryId || "");
   const [always, setAlways] = useState(false);
@@ -109,7 +109,9 @@ function InboxRow({ row, categories, busy, error, onAct }) {
       </div>
       )}
       <div style={s.row}>
-        {["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), "later"].map((d) => (
+        {["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), "later"]
+          .filter((d) => d !== view) // a row on a shelf is not offered that same shelf again
+          .map((d) => (
           <button
             key={d}
             type="button"
@@ -327,8 +329,15 @@ export default function LedgerInboxTab() {
       } else {
         await post(`${T}/ledger/decide`, { id: row.id, decision, always: !!always });
       }
-      setRows((prev) => prev.filter((r) => r.id !== row.id));
-      setTotal((t) => Math.max(0, t - 1));
+      // a decision that keeps the row on the current shelf reloads the view
+      // instead of hiding the row (an unrecorded receipt must stay visible)
+      const stays = decision === view;
+      if (stays) {
+        await loadRows(view, 0);
+      } else {
+        setRows((prev) => prev.filter((r) => r.id !== row.id));
+        setTotal((t) => Math.max(0, t - 1));
+      }
       loadStatus();
     } catch (e) {
       setRowErrors((p) => ({ ...p, [row.id]: e.message }));
@@ -416,6 +425,7 @@ export default function LedgerInboxTab() {
         <InboxRow
           key={r.id}
           row={r}
+          view={view}
           categories={categories}
           busy={busyId === r.id}
           error={rowErrors[r.id]}
