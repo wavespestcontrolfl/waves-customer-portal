@@ -37,3 +37,11 @@ describe('nextVisitShownInPlanCard with another visit (status card, dashboards)'
     expect(nextVisitShownInPlanCard(data, 'live', null)).toBe(false);
   });
 });
+
+describe('nextVisitShownInPlanCard needs the same window', () => {
+  it('a same-day, same-service visit in another window is a different visit', () => {
+    const data = { nextSameServiceAppointment: NEXT, upcomingVisitsCard: { visits: [{ ...NEXT, windowStart: '14:00' }] } };
+    expect(nextVisitShownInPlanCard(data, 'live')).toBe(false);
+    expect(nextVisitShownInPlanCard({ ...data, upcomingVisitsCard: { visits: [{ ...NEXT, windowStart: '10:00:00' }] } }, 'live')).toBe(true);
+  });
+});

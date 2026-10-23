@@ -3149,9 +3149,13 @@ function PlanSummaryCard({ data, mode }) {
 // service in its visits list, or as the plan card's "Your next … visit" line.
 export function nextVisitShownInPlanCard(data, mode, next = data?.nextSameServiceAppointment) {
   if (mode !== 'live' || !next?.scheduledDate) return false;
+  // Date, service AND window: two same-day visits of one service (two
+  // properties) differ only by window, and the status card's visit is the
+  // customer-wide pick while the list is property-scoped (Codex P2 on #6491).
   const sameVisit = (visit) => Boolean(visit)
     && String(visit.scheduledDate || '').slice(0, 10) === String(next.scheduledDate).slice(0, 10)
-    && String(visit.serviceType || '') === String(next.serviceType || '');
+    && String(visit.serviceType || '') === String(next.serviceType || '')
+    && String(visit.windowStart || '').slice(0, 5) === String(next.windowStart || '').slice(0, 5);
   const listed = Array.isArray(data.upcomingVisitsCard?.visits) ? data.upcomingVisitsCard.visits : [];
   if (listed.some(sameVisit)) return true;
   const plan = data.planSummary;
