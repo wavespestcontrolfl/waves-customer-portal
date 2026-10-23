@@ -135,6 +135,9 @@ function mappedContext(estimateData) {
 // that changed them left the raw line stale.
 function rawAgreesWithMapped(raw, ctx) {
   const { tsMeta, mappedService } = ctx;
+  // A revision that reclassified the property leaves a raw line of the
+  // OTHER program behind; the mapped program is authoritative (Codex #6398 r18).
+  if (ctx.service && raw.service !== ctx.service) return false;
   // A commercial raw line has no tsMeta; it agrees while the mapped
   // commercial row (if any) carries the same price.
   if (raw.service === 'commercial_tree_shrub') {
@@ -258,8 +261,13 @@ function extractTreeShrub(estimateData) {
 // admin-tuned global_margin_target_ts (preserved by 20261021010000) makes a
 // fresh quote stamp 0.42 or 0.35, so a threshold on it would misfile both
 // cohorts (Codex #6398 r4).
+// A compact row (quote wizard / lead automation, stored through
+// compactLineItem) carries no pricingKnobs at all, so an absent stamp there
+// is not evidence of the pre-change engine: it is unknown (Codex #6398 r18).
 function regimeOf(ts) {
-  return ts.lotBedBasis === 'open_parcel' ? 'after_2026_10_21' : 'before_2026_10_21';
+  if (ts.lotBedBasis === 'open_parcel') return 'after_2026_10_21';
+  if (ts.lotBedBasis === 'gross_lot') return 'before_2026_10_21';
+  return ts.shape === 'compact' ? 'unknown' : 'before_2026_10_21';
 }
 
 const median = (xs) => {
@@ -289,14 +297,18 @@ function summarize(rows) {
   for (const r of rows) treeSources[r.treeSource] = (treeSources[r.treeSource] || 0) + 1;
   const byService = {};
   for (const r of rows) byService[r.service || 'tree_shrub'] = (byService[r.service || 'tree_shrub'] || 0) + 1;
-  const regimes = { before: rows.filter((r) => r.regime === 'before_2026_10_21').length, after: rows.filter((r) => r.regime === 'after_2026_10_21').length };
+  const regimes = {
+    before: rows.filter((r) => r.regime === 'before_2026_10_21').length,
+    after: rows.filter((r) => r.regime === 'after_2026_10_21').length,
+    unknown: rows.filter((r) => r.regime === 'unknown').length,
+  };
   return { bySource, treeSources, byService, regimes, total: rows.length };
 }
 
 function printReport(args, rows, excluded, windowStart) {
   const s = summarize(rows);
   console.log(`Tree & Shrub estimates since ${windowStart.slice(0, 10)} — ${s.total} quotes (${excluded} internal/test excluded)`);
-  console.log(`priced under the pre-2026-10-21 engine (no lotBedBasis stamp, or a replayed gross_lot stamp): ${s.regimes.before}; under the repriced engine (open_parcel stamp): ${s.regimes.after}`);
+  console.log(`priced under the pre-2026-10-21 engine (no lotBedBasis stamp, or a replayed gross_lot stamp): ${s.regimes.before}; under the repriced engine (open_parcel stamp): ${s.regimes.after}; unknown (compact quote-wizard / lead rows carry no stamp): ${s.regimes.unknown}`);
   console.log('');
   console.log('By bed-area source (explicit = typed, estimated = aerial/estimate field, lot_based = % of lot, fallback = 1,200 default; inferred/measured = older mapped-only rows)');
   console.log('source        quotes  sent  accepted  accept%  median bed sqft  median $/mo  density-tree quotes  review-flagged');

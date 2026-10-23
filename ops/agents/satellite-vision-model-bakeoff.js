@@ -238,6 +238,9 @@ function scoreRead(m, c, r) {
   if (!r.ok) {
     m.misses++;
     for (const f of FIELDS) scoreField(m.fields[f], numericRead(c.known[f]), null);
+    // A known density is a miss too, never a denominator the failure
+    // escapes (Codex #6398 r18).
+    if (typeof c.known.shrubDensity === 'string') m.shrubDensityKnown++;
     return;
   }
   for (const f of FIELDS) scoreField(m.fields[f], numericRead(c.known[f]), r.values[f]);

@@ -41,6 +41,21 @@ describe('tree-shrub-estimates-report extraction', () => {
     expect(regimeOf({ marginTarget: 0.35, lotBedBasis: 'gross_lot' })).toBe('before_2026_10_21');
     expect(regimeOf({ marginTarget: 0.40, lotBedBasis: null })).toBe('before_2026_10_21');
     expect(regimeOf({ marginTarget: null, lotBedBasis: undefined })).toBe('before_2026_10_21');
+    // A compact row carries no stamp at all, so an absent stamp there is
+    // unknown rather than pre-change (Codex #6398 r18); a stamped compact row
+    // still classifies.
+    expect(regimeOf({ shape: 'compact', lotBedBasis: null })).toBe('unknown');
+    expect(regimeOf({ shape: 'compact', lotBedBasis: 'open_parcel' })).toBe('after_2026_10_21');
+    expect(regimeOf({ shape: 'raw', lotBedBasis: null })).toBe('before_2026_10_21');
+  });
+
+  test('a raw line of the OTHER program is stale once the mapped envelope names one (Codex #6398 r18)', () => {
+    const rawCommercial = { engineResult: { lineItems: [{ service: 'commercial_tree_shrub', bedArea: 4680, bedAreaSource: 'lot_based', treeCount: 4, monthly: 112.5 }] } };
+    const mappedResidential = { result: { results: { tsMeta: { eb: 900, et: 2, bedAreaIsEstimated: false }, ts: [{ tier: 'standard', mo: 38.5, selected: true }] } } };
+    expect(extractTreeShrub({ ...rawCommercial, ...mappedResidential })).toMatchObject({ shape: 'mapped', service: 'tree_shrub', bedSqFt: 900 });
+    const rawResidential = { engineResult: { lineItems: [{ service: 'tree_shrub', bedAreaUsed: 1800, bedAreaSource: 'lot_based', treeCount: 6, monthly: 51.44 }] } };
+    const mappedCommercial = { result: { recurring: { services: [{ service: 'commercial_tree_shrub', mo: 112.5, monthly: 112.5 }] } } };
+    expect(extractTreeShrub({ ...rawResidential, ...mappedCommercial })).toMatchObject({ shape: 'compact', service: 'commercial_tree_shrub', monthly: 112.5 });
   });
 
   test('a mapped-only envelope reports the review flags mapV1ToLegacyShape put on the recurring row (Codex #6398 r4)', () => {
@@ -149,6 +164,6 @@ describe('tree-shrub-estimates-report extraction', () => {
     expect(s.bySource.explicit).toMatchObject({ quotes: 3, sent: 2, accepted: 1 });
     expect(median(s.bySource.lot_based.beds)).toBe(1800);
     expect(s.treeSources).toEqual({ density_estimate: 3, explicit: 3 });
-    expect(s.regimes).toEqual({ before: 3, after: 3 });
+    expect(s.regimes).toEqual({ before: 3, after: 3, unknown: 0 });
   });
 });
