@@ -436,10 +436,12 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx.monthProducts.every((m) => m.lastAmount === undefined)).toBe(true);
   });
 
+  // The zone comes from the visit's stamped address, the customer's city only when the visit carries none; the server
+  // reads the same fields, so a multi-property customer no longer takes the full form for a zone mismatch.
   test.each([
-    ['a Bradenton property for a North Port customer', 'North Port', 'Bradenton'],
-    ['a North Port property for a Bradenton customer', 'Bradenton', 'North Port'],
-  ])('%s takes the full form (the server checks the customer-city zone)', async (_label, custCity, visitCity) => {
+    ['a Bradenton property for a North Port customer', 'North Port', 'Bradenton', true],
+    ['a North Port property for a Bradenton customer', 'Bradenton', 'North Port', false],
+  ])('%s: the stamped visit address sets the blackout zone', async (_label, custCity, visitCity, blackout) => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit({
         scheduled_date: '2026-07-10', cust_city: custCity,
@@ -447,8 +449,17 @@ describe('buildTreeShrubFastContext', () => {
       }),
       products_catalog: catalog,
     }));
-    expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'zone_mismatch', service: { address: { city: visitCity } } });
-    expect(ctx.products).toBeUndefined();
+    expect(ctx).toMatchObject({ ok: true, eligible: true, service: { address: { city: visitCity } } });
+    expect(ctx.products.find((p) => p.id === 'orn').tsFlags.npBlackout).toBe(blackout);
+  });
+
+  test('a visit with no stamped address takes the customer city zone', async () => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit({ scheduled_date: '2026-07-10', cust_city: 'North Port' }),
+      products_catalog: catalog,
+    }));
+    expect(ctx).toMatchObject({ ok: true, eligible: true });
+    expect(ctx.products.find((p) => p.id === 'orn').tsFlags.npBlackout).toBe(false);
   });
 
   test('history: incomplete records feed amounts but never become the last visit', async () => {
