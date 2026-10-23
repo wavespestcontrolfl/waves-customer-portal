@@ -2796,8 +2796,8 @@ router.post('/bank-import/:id/unignore', async (req, res, next) => {
     // The rule's own keys go too (rule, rulesAt, the override marker): the
     // reopened row shows no stale rule label and is unstamped, so the next
     // ordinary rule pass reads it again.
-    if (['personal', 'transfer'].includes(row.suggestion?.decision)) {
-      patch.suggestion = bankImport.suggestionMerge({}, ['decision', 'decidedAt', 'personal', 'ignore', 'reason', 'rule', 'rulesAt', 'examined']);
+    if (['personal', 'transfer', 'recorded'].includes(row.suggestion?.decision)) {
+      patch.suggestion = bankImport.suggestionMerge({}, ['decision', 'decidedAt', 'personal', 'income', 'ignore', 'reason', 'rule', 'rulesAt', 'examined']);
     }
     const changed = await db('bank_transactions')
       .where({ id: req.params.id, status: 'ignored' })

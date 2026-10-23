@@ -28,7 +28,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { SEED_RULES, CATEGORY_LINES } = require('./tax-ledger-seed-rules');
 
 const KINDS = ['expense', 'personal', 'transfer', 'income', 'review'];
-const DECISIONS = ['expense', 'personal', 'transfer', 'income', 'later'];
+const DECISIONS = ['expense', 'personal', 'transfer', 'income', 'later', 'recorded'];
 const MAX_PATTERN = 240;
 const OWNER_PRIORITY = 10;
 const PAGE = 500;
@@ -113,7 +113,7 @@ function httpError(status, message) {
 // backreference, no lookaround, no anchors. Every seed and every pattern
 // the Inbox writes fits.
 const GRAMMAR_TOKEN = /\\[bB]|\\[WwsSdD][*?]?|\\[.*+?()[\]{}|\\\/$^-]\??|\.[*?]?|[A-Za-z0-9 _&',\/#:;@%!=-]\??|\(|\)\??|\||\[\^?(?:\\.|[^\]\\])+\]\??/y;
-const GRAMMAR_HELP = 'allowed: words and spaces, |, (…) or (…)?, \\b, \\W* \\s* \\d*, . .* .?, an escaped literal such as \\., a [class], ? after one character, at most 2 wildcards, 3 optional parts and 2 groups per alternative, and every alternative needs some text that must match; not allowed: + * {} on a word, class or group, backreferences, lookarounds, anchors';
+const GRAMMAR_HELP = 'allowed: words and spaces, |, (…) or (…)?, \\b, \\W* \\s* \\d*, . .* .?, an escaped literal such as \\., a [class], ? after one character, at most 2 wildcards, 3 optional parts and 2 groups per alternative, every alternative needs some text that must match, and two wildcards need such text between them; not allowed: + * {} on a word, class or group, backreferences, lookarounds, anchors';
 // Per top-level alternative the ambiguous parts are capped too: at most
 // MAX_STARS wildcards (.* \W* \s* \d* \w*), MAX_OPTIONAL optional parts
 // (x? .? (…)? [..]?) and MAX_GROUPS groups, so the worst case on one
@@ -133,33 +133,71 @@ function consumes(t) {
   if (t === '\\?') return true;
   return !/[*?]$/.test(t);
 }
+// Two wildcards with nothing that must match between them (".*.*x",
+// "\\W*\\s*x", "(.*a)?.*b") make every position try every split: cubic on a
+// 300-character description. Each alternative, at each depth, needs
+// consuming text between one wildcard and the next; a group that ends in a
+// wildcard (or an optional group holding one) hands that state to its parent.
+// The scan keeps, per depth: consuming tokens in the current alternative
+// (solid), whether a wildcard is still "open" (nothing consuming since it),
+// and whether the group holds a wildcard at all (starred).
+class GrammarScan {
+  constructor() {
+    this.solid = [0]; this.open = [false]; this.starred = [false];
+    this.stars = 0; this.optional = 0; this.groups = 0;
+  }
+  get d() { return this.solid.length - 1; }
+  enter() { this.groups += 1; this.solid.push(0); this.open.push(false); this.starred.push(false); return true; }
+  leave(optionalGroup) {
+    const d = this.d;
+    if (d < 1 || this.solid[d] === 0) return false;
+    const endsOpen = this.open.pop();
+    const held = this.starred.pop();
+    this.solid.pop();
+    if (!optionalGroup) { this.solid[d - 1] += 1; if (!endsOpen) this.open[d - 1] = false; }
+    if (endsOpen || (optionalGroup && held)) { if (this.open[d - 1]) return false; this.open[d - 1] = true; }
+    if (held) this.starred[d - 1] = true;
+    return true;
+  }
+  alternative() {
+    const d = this.d;
+    if (this.solid[d] === 0) return false;
+    this.solid[d] = 0; this.open[d] = false;
+    if (d === 0) { this.stars = 0; this.optional = 0; this.groups = 0; }
+    return true;
+  }
+  wildcard() {
+    const d = this.d;
+    if (this.open[d]) return false;
+    this.open[d] = true; this.starred[d] = true; this.stars += 1;
+    return true;
+  }
+  consume(t) {
+    if (consumes(t)) { this.solid[this.d] += 1; this.open[this.d] = false; }
+    if (t.endsWith('?') && t !== '\\?') this.optional += 1;
+    return true;
+  }
+  token(t) {
+    if (t === '(') return this.enter();
+    if (t[0] === ')') return this.leave(t === ')?');
+    if (t === '|') return this.alternative();
+    if (t.endsWith('*')) return this.wildcard();
+    return this.consume(t);
+  }
+  withinCaps() { return this.stars <= MAX_STARS && this.optional <= MAX_OPTIONAL && this.groups <= MAX_GROUPS; }
+  complete() { return this.solid.length === 1 && this.solid[0] > 0; }
+}
 function fitsGrammar(p) {
+  const scan = new GrammarScan();
   let i = 0;
-  let stars = 0;
-  let optional = 0;
-  let groups = 0;
-  const solid = [0]; // per depth: consuming tokens in the current alternative
   while (i < p.length) {
     GRAMMAR_TOKEN.lastIndex = i;
     const m = GRAMMAR_TOKEN.exec(p);
     if (!m) return false;
-    const t = m[0];
-    if (t === '(') { groups += 1; solid.push(0); }
-    else if (t[0] === ')') {
-      if (solid.length < 2 || solid[solid.length - 1] === 0) return false;
-      solid.pop();
-      if (t === ')') solid[solid.length - 1] += 1; // a required group counts for its parent
-    } else if (t === '|') {
-      if (solid[solid.length - 1] === 0) return false;
-      solid[solid.length - 1] = 0;
-      if (solid.length === 1) { stars = 0; optional = 0; groups = 0; }
-    } else if (consumes(t)) solid[solid.length - 1] += 1;
-    if (t.endsWith('*')) stars += 1;
-    else if (t.endsWith('?') && t !== '\\?') optional += 1;
-    if (stars > MAX_STARS || optional > MAX_OPTIONAL || groups > MAX_GROUPS) return false;
-    i += t.length;
+    if (!scan.token(m[0]) || !scan.withinCaps()) return false;
+    i += m[0].length;
   }
-  return solid.length === 1 && solid[0] > 0;
+  return scan.complete();
 }
 // maxLength caps what the owner types; a stored rule (seeds are long
 // alternations of literals) is checked for safety only.
@@ -168,6 +206,37 @@ function fitsGrammar(p) {
 // "wawa" are one rule under the unique constraint.
 function canonicalPattern(pattern) {
   return String(pattern || '').trim().replace(/\\.|[A-Z]/g, (m) => (m.length === 2 ? m : m.toLowerCase()));
+}
+// A pattern the owner types is also PROVED fast before it is saved: a worker
+// thread runs it against long adversarial descriptions (every character
+// class the grammar admits, repeated to MAX_DESCRIPTION, with and without a
+// late match) under a hard budget, and is terminated when it overruns. The
+// grammar bounds the shape; this bounds the time, whatever the shape.
+const PROBE_BUDGET_MS = 150;
+function probeStrings(pattern) {
+  const n = MAX_DESCRIPTION;
+  const fills = [' ', 'a', '1', '-', 'a ', 'a1', ' -', '\t'];
+  const literal = (pattern.match(/[a-z]{2,}/i) || ['x'])[0];
+  const out = [];
+  for (const f of fills) {
+    const base = f.repeat(Math.ceil(n / f.length)).slice(0, n);
+    out.push(base, base.slice(0, n - literal.length) + literal, literal + base.slice(literal.length));
+  }
+  return out;
+}
+async function assertPatternFast(pattern, { budgetMs = PROBE_BUDGET_MS } = {}) {
+  const { Worker } = require('worker_threads');
+  const worker = new Worker(require.resolve('./tax-ledger-pattern-probe-worker'), { workerData: { pattern: String(pattern), strings: probeStrings(String(pattern)) } });
+  const verdict = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ slow: true }), budgetMs);
+    worker.once('message', (msg) => { clearTimeout(timer); resolve(msg); });
+    worker.once('error', (err) => { clearTimeout(timer); resolve({ error: err.message }); });
+    worker.once('exit', () => { clearTimeout(timer); resolve({ exited: true }); });
+  });
+  await worker.terminate().catch(() => {});
+  if (verdict.slow) throw httpError(400, `pattern is too slow on a long description (it must finish within ${budgetMs} ms); simplify it`);
+  if (verdict.error) throw httpError(400, `pattern is not a valid regular expression: ${verdict.error}`);
+  return true;
 }
 function compilePattern(pattern, { maxLength = MAX_PATTERN } = {}) {
   const p = String(pattern || '').trim();
@@ -386,18 +455,10 @@ function rulePassPage({ pageSize, force, after }) {
 // (writes). The matcher's own transfer flag (ignore without a rule) holds
 // against a seed; an owner rule outranks it, replaces it, and records the
 // examination evidence itself (examined) because the flag was that evidence.
-function ruleVerdict(sug, rule, pattern) {
+function ruleVerdict(sug, rule, pattern, force) {
   const matcherFlag = hasKey(sug, 'ignore') && !hasKey(sug, 'rule');
-  const ownerWins = !!rule && rule.source === 'owner';
-  const writes = !!rule && (!matcherFlag || ownerWins) && (!pattern || rule.pattern === pattern);
-  return { matcherFlag, writes };
-}
-function classifyRow(row, compiled, { pattern, force, stamp }) {
-  const sug = row.suggestion || {};
-  if (sug.decision || !matcherExamined(row)) return { skip: true };
-  const rule = matchRule(row.description, compiled, row.direction);
-  const verdict = ruleVerdict(sug, rule, pattern);
-  const { matcherFlag } = verdict;
+  const ownerRule = !!rule && rule.source === 'owner';
+  const fits = !!rule && (!matcherFlag || ownerRule) && (!pattern || rule.pattern === pattern);
   // An owner rule that overrode the matcher's transfer flag left 'examined'
   // as the row's only examination evidence. When that rule is gone and a
   // SEED would take the row, the seed does not write: the row is cleared
@@ -406,10 +467,17 @@ function classifyRow(row, compiled, { pattern, force, stamp }) {
   // seed would leave a rule with no evidence under it, and a row the Inbox
   // never shows again.
   const ownerHeld = hasKey(sug, 'rule') && sug.rule.source === 'owner';
-  const fellToSeed = verdict.writes && ownerHeld && rule.source !== 'owner' && !!sug.examined;
-  const writes = verdict.writes && !fellToSeed;
+  const fellToSeed = fits && ownerHeld && !ownerRule && !!sug.examined;
+  const writes = fits && !fellToSeed;
+  const stale = fellToSeed || (!writes && !pattern && !!force && hasKey(sug, 'rule') && !matcherFlag);
+  return { matcherFlag, writes, stale };
+}
+function classifyRow(row, compiled, { pattern, force, stamp }) {
+  const sug = row.suggestion || {};
+  if (sug.decision || !matcherExamined(row)) return { skip: true };
+  const rule = matchRule(row.description, compiled, row.direction);
+  const { matcherFlag, writes, stale } = ruleVerdict(sug, rule, pattern, force);
   if (pattern && !writes) return { skip: true };
-  const stale = fellToSeed || (!writes && !pattern && force && hasKey(sug, 'rule') && !matcherFlag);
   const patch = writes ? { ...suggestionFor(rule), rulesAt: stamp } : { rulesAt: stamp };
   if (writes && matcherFlag) patch.examined = true;
   // a stale clear drops the override marker with the classification
@@ -557,6 +625,7 @@ async function resolveCategory(categoryId, conn = db) {
 
 async function createRule({ pattern, kind, categoryId = null, note = null, priority = OWNER_PRIORITY, source = 'owner', conn = db }) {
   compilePattern(pattern);
+  await assertPatternFast(pattern);
   if (!KINDS.includes(kind)) throw httpError(400, `kind must be one of ${KINDS.join(', ')}`);
   const cat = await resolveCategory(categoryId, conn);
   if (kind === 'expense' && !cat) throw httpError(400, 'an expense rule needs a categoryId');
@@ -573,7 +642,7 @@ async function createRule({ pattern, kind, categoryId = null, note = null, prior
 
 async function ruleUpdatePatch(patch) {
   const row = {};
-  if (patch.pattern !== undefined) { compilePattern(patch.pattern); row.pattern = canonicalPattern(patch.pattern); }
+  if (patch.pattern !== undefined) { compilePattern(patch.pattern); await assertPatternFast(patch.pattern); row.pattern = canonicalPattern(patch.pattern); }
   if (patch.kind !== undefined) { if (!KINDS.includes(patch.kind)) throw httpError(400, `kind must be one of ${KINDS.join(', ')}`); row.kind = patch.kind; }
   if (patch.categoryId !== undefined) { const cat = await resolveCategory(patch.categoryId); row.category_id = cat ? cat.id : null; row.irs_line = cat ? cat.irs_line : null; }
   if (patch.note !== undefined) row.note = patch.note ? String(patch.note).slice(0, 500) : null;
@@ -623,6 +692,12 @@ function decisionWrite(decision, row, now) {
     if (sug.ignore) patch.examined = true;
     return { action: 'income', write: { suggestion: bankImport.suggestionMerge(patch, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now } };
   }
+  if (decision === 'recorded') {
+    // the receipt has been recorded as a sale (invoice + payment): the row
+    // leaves the Income shelf as settled; Undo in Bank Import reopens it
+    const patch = { income: true, reason: 'income recorded as a sale per the owner', decision, decidedAt: now.toISOString() };
+    return { action: 'ignored', write: { status: 'ignored', suggestion: bankImport.suggestionMerge(patch, ['ignore', 'personal', 'review', 'note', 'later']), updated_at: now } };
+  }
   const patch = { reason: `${decision} per the owner`, decision, decidedAt: now.toISOString() };
   if (decision === 'transfer') patch.ignore = true; else patch.personal = true;
   return { action: 'ignored', write: { status: 'ignored', suggestion: bankImport.suggestionMerge(patch, ['categoryId', 'categoryName', 'irsLine', 'categorySource', 'ignore', 'personal', 'income', 'review', 'note', 'later']), updated_at: now } };
@@ -645,10 +720,13 @@ async function decide({ id, decision, categoryId = null, always = false }) {
   const row = await loadDecidableRow(id);
   if (decision === 'expense' && !categoryId) throw httpError(400, 'an expense needs a categoryId');
   if (decision === 'income' && row.direction !== 'credit') throw httpError(400, 'only money in can be income; this row is a payment out');
+  if (decision === 'recorded' && !(row.suggestion && row.suggestion.decision === 'income')) throw httpError(400, 'only a row on the Income shelf can be marked recorded');
   // an Always the pattern builder cannot honour is refused up front: the
   // owner must not believe the payee is handled from now on
-  const rule = always && decision !== 'later' ? ownerRuleFor(row, decision, categoryId) : null;
-  if (always && decision !== 'later' && !rule) throw httpError(400, NO_RULE_MESSAGE);
+  // later and recorded are about this row only: Always writes no rule for them
+  const rulable = decision !== 'later' && decision !== 'recorded';
+  const rule = always && rulable ? ownerRuleFor(row, decision, categoryId) : null;
+  if (always && rulable && !rule) throw httpError(400, NO_RULE_MESSAGE);
   if (decision === 'expense') return { success: true, action: 'create-expense', createExpense: true, ruleCreated: false };
 
   const now = new Date();
@@ -674,7 +752,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 
 module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON,
-  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
+  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, assertPatternFast, probeStrings, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
   isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };

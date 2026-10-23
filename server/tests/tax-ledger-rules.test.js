@@ -129,11 +129,13 @@ describe('compileRules / matchRule', () => {
       // too many variable-length parts in one alternative
       'a?'.repeat(35) + 'b', 'a?b?c?d?', '.*a.*b.*c', '\\W*\\s*\\d*x', '(a)?(b)?(c)?(d)?', '(a|aa)'.repeat(30) + 'b', '(a|aa)(b|bb)(c|cc)',
       // an alternative with nothing that must match would match every description
-      'wawa|', '|wawa', 'wawa||shell', '(wawa|)', '(|wawa) gas', '.*', 'x?', '\\b', '(wawa)?', '\\W*', '()']) {
+      'wawa|', '|wawa', 'wawa||shell', '(wawa|)', '(|wawa) gas', '.*', 'x?', '\\b', '(wawa)?', '\\W*', '()',
+      // two wildcards with nothing that must match between them: cubic on a long description
+      '.*.*x', '.*\\W*x', '\\W*\\s*x', '(.*a)?.*b', '(a.*).*b', 'a.*(b.*)?.*c', 'nic\\W*-?\\s*fl']) {
       expect([bad, () => svc.compilePattern(bad)]).toEqual([bad, expect.any(Function)]);
       expect(() => svc.compilePattern(bad)).toThrow(expect.objectContaining({ status: 400 }));
     }
-    for (const ok of ['costco\\W*gas', '\\bwawa\\b', 'google\\W*ads|facebk|meta ads', 'o.?reilly auto', 'wu\\b.*\\bco\\b', '(ab|cd)e', '(mobile )?ach', 'usps po\\b', 'check deposit \\(mobile\\) reversal', 'cash app \\*', 'x corp\\.? paid', 'nic\\W*-?\\s*fl', 'colou?r', "o'reilly", 'at&t', 'apple\\.com/bill', '[a-z]ar', 'take 5',
+    for (const ok of ['costco\\W*gas', '\\bwawa\\b', 'google\\W*ads|facebk|meta ads', 'o.?reilly auto', 'wu\\b.*\\bco\\b', '(ab|cd)e', '(mobile )?ach', 'usps po\\b', 'check deposit \\(mobile\\) reversal', 'cash app \\*', 'x corp\\.? paid', 'nic\\W*fl', 'colou?r', "o'reilly", 'at&t', 'apple\\.com/bill', '[a-z]ar', 'take 5', '.*a.*b', '(.*a)b.*',
       // the caps are per alternative
       'a?b?c?x|d?e?f?y', '.*a.*|.*b.*', '\\bsiteone\\W*landscape\\W*supply\\b', '(a|aa)(b|bb)c', '(a|aa)b|(c|cc)d|(e|ee)f']) {
       expect([ok, svc.compilePattern(ok)]).toEqual([ok, expect.any(RegExp)]);
@@ -276,6 +278,19 @@ describe('seed rules', () => {
     expect(hit).not.toBeNull();
     expect(hit.kind).toBe(kind);
     expect(hit.category || null).toBe(category);
+  });
+});
+
+describe('assertPatternFast (worker probe)', () => {
+  test('every seed and a plain owner pattern finish within the budget; an overrun is a 400 and the worker is stopped', async () => {
+    await expect(svc.assertPatternFast('wawa')).resolves.toBe(true);
+    for (const r of seeds.SEED_RULES) await expect(svc.assertPatternFast(r.pattern)).resolves.toBe(true);
+    await expect(svc.assertPatternFast('wawa', { budgetMs: 0 })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/too slow/) });
+    // the adversarial strings cover every character class the grammar admits, at full length
+    const strings = svc.probeStrings('costco\\W*gas');
+    expect(strings.length).toBeGreaterThan(20);
+    for (const s of strings) expect(s).toHaveLength(300);
+    expect(strings.some((s) => s.endsWith('costco'))).toBe(true);
   });
 });
 
@@ -611,6 +626,18 @@ describe('decide', () => {
     state.updates = []; state.bankRow = { ...moneyIn(), suggestion: { noMatch: true } };
     await svc.decide({ id: 'b1', decision: 'income' });
     expect(state.updates[0].patch.suggestion.merged.examined).toBeUndefined();
+  });
+
+  test('recorded settles a row on the Income shelf (ignored, income kept, no rule) and is refused elsewhere', async () => {
+    state.bankRow = { ...moneyIn(), suggestion: { noMatch: true, income: true, decision: 'income', decidedAt: '2026-01-02T00:00:00Z' } };
+    const out = await svc.decide({ id: 'b1', decision: 'recorded', always: true });
+    expect(out).toEqual(expect.objectContaining({ action: 'ignored', ruleCreated: false }));
+    const w = state.updates[0];
+    expect(w.patch.status).toBe('ignored');
+    expect(w.patch.suggestion.merged).toEqual(expect.objectContaining({ income: true, decision: 'recorded', reason: expect.stringMatching(/recorded as a sale/) }));
+    expect(state.inserted).toHaveLength(0);
+    state.updates = []; state.bankRow = { ...moneyIn(), suggestion: { noMatch: true } };
+    await expect(svc.decide({ id: 'b1', decision: 'recorded' })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/Income shelf/) });
   });
 
   test.each([

@@ -230,6 +230,26 @@ it('a row stays busy until its own request finishes, whatever happens on another
   await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
 });
 
+it('the Income view offers Recorded, which settles the row with the recorded decision; other views do not', async () => {
+  const base = fetch;
+  const credit = { ...row, direction: 'credit', amount: 120, suggestion: { noMatch: true, income: true, decision: 'income' } };
+  vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/ledger/inbox')) return json({ rows: [credit], total: 1 });
+    if (u.includes('/ledger/decide')) { calls.push({ url: u, method: 'POST', body: JSON.parse(opts.body) }); return json({ success: true, action: 'ignored', ruleCreated: false }); }
+    return base(url, opts);
+  }));
+  render(<LedgerInboxTab />);
+  await screen.findByText('ACME HARDWARE 123');
+  expect(screen.queryByRole('button', { name: 'Recorded' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Income view' }));
+  await screen.findByText('ACME HARDWARE 123');
+  fireEvent.click(await screen.findByRole('button', { name: 'Recorded' }));
+  await waitFor(() => expect(calls.find((c) => c.url.includes('/ledger/decide'))).toBeTruthy());
+  expect(calls.find((c) => c.url.includes('/ledger/decide')).body).toEqual({ id: 'row-1', decision: 'recorded', always: false });
+  await waitFor(() => expect(screen.queryByText('ACME HARDWARE 123')).not.toBeInTheDocument());
+});
+
 it('a money-out row offers no Income button', async () => {
   render(<LedgerInboxTab />);
   const card = await screen.findByTestId('ledger-row-row-1');

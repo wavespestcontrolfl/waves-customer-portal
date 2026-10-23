@@ -73,7 +73,7 @@ const SEED_RULES = [
   x('amazon|amzn', 'review', S, 'mixed orders: confirm it is a business item', 80),
   x('\\btemu\\b', 'review', S, 'mixed: confirm it is a business item', 80),
   // ── taxes and licences (line 23)
-  x('nic\\W*-?\\s*fl|sunbiz|fdacs|fl dept of agri|myfloridalicense|dept of revenue|business tax receipt|tax collector', 'expense', T, null, 90),
+  x('nic\\W*fl|sunbiz|fdacs|fl dept of agri|myfloridalicense|dept of revenue|business tax receipt|tax collector', 'expense', T, null, 90),
   x('manatee county|sarasota county|charlotte county', 'review', T, 'business tax receipt (deductible) or a utility bill?'),
   // ── utilities (line 25) and home office (line 30): business share decided at year end
   x('verizon|vzwrlss|t-mobile|at&t', 'review', U, 'phone: business share'),

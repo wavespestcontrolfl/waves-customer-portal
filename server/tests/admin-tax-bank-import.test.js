@@ -991,6 +991,11 @@ describe('apply-refund (gate on)', () => {
     const write = JSON.stringify(state.bankUpdates[0].patch.suggestion);
     // the rule's keys go too: no stale rule label, unstamped for the next ordinary pass
     for (const key of ['decision', 'decidedAt', 'personal', 'ignore', 'reason', 'rule', 'rulesAt', 'examined']) expect(write).toContain(key);
+    // a recorded receipt reopens to the Open shelf: decision and income keys go
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { noMatch: true, income: true, decision: 'recorded', decidedAt: '2026-09-01T00:00:00Z' } };
+    state.bankUpdates = [];
+    expect((await post('/admin/tax/bank-import/bt-1/unignore', {})).status).toBe(200);
+    for (const key of ['decision', 'income']) expect(JSON.stringify(state.bankUpdates[0].patch.suggestion)).toContain(key);
     // the matcher's own flag is a reading, not a decision: the row reopens with it
     state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { ignore: true, reason: 'looks like an internal transfer' } };
     state.bankUpdates = [];

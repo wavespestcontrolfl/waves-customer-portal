@@ -122,8 +122,10 @@ function BusinessAction({ row, categories, categoryId, onCategory, busy, onAct }
 // The shelf and park actions a row may take: no Income on money out, no
 // Later while Always is checked (Later never makes a rule), and never the
 // shelf the row is already on.
+// A receipt on the Income shelf can also be marked recorded once its sale
+// (invoice and payment) is in the portal: that settles the row.
 function shelfActions(row, view, always) {
-  const all = ["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), ...(always ? [] : ["later"])];
+  const all = ["personal", "transfer", ...(row.direction === "credit" ? ["income"] : []), ...(always ? [] : ["later"]), ...(view === "income" ? ["recorded"] : [])];
   return all.filter((d) => d !== view);
 }
 
