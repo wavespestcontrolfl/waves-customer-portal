@@ -921,6 +921,13 @@ async function assertApprovedChildUnchanged(trx, parentServiceId, childId, want)
 }
 
 // A typed refusal inside a child's transaction -> the reason the report carries; null = an unexpected failure.
+// A child cancel that failed for a reason other than a deliberate refusal. Opt-in report: an approved linked visit that failed
+// to cancel stays active, and the receipt must say so. Recovery sweep only (parentFence): it is also not a finished step.
+function noteChildCancelFailure({ childId, approved, report, parentFence }) {
+  if (parentFence) parentFence.hits.push('child_cancel_error');
+  if (approved && report && Array.isArray(report.skipped)) report.skipped.push({ id: childId, reason: 'cancel_failed' });
+}
+
 function childRefusalReason(err) {
   if (err && err.code === 'LINKED_CHILD_CHANGED') return err.reason;
   if (err && err.code === 'CANCEL_FENCE') return `parent_${err.fenceReason}`;
@@ -1004,8 +1011,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
       const refusal = childRefusalReason(childErr);
       if (refusal) { skip(child.id, refusal); continue; }
       logger.error(`[call-booking] call follow-up cancel cascade failed for child ${child.id} of ${parentServiceId}: ${childErr.message}`);
-      // Opt-in report: an approved linked visit that failed to cancel stays active, and the receipt must say so.
-      if (approved && report && Array.isArray(report.skipped)) report.skipped.push({ id: child.id, reason: 'cancel_failed' });
+      noteChildCancelFailure({ childId: child.id, approved, report, parentFence });
     }
   }
   return cancelled;

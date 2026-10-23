@@ -577,10 +577,24 @@ postgres('ib_cancel_effect_bundles (PostgreSQL)', () => {
       expect(await read(fresh)).toMatchObject({ from: 'request' });
     });
 
-    test('a row completed 3 minutes ago, and one completed past the hard stop, are not reconciled', async () => {
+    test('a gap found after the hard stop is still reconciled (late, needs-you), and the 90-day prune keeps a bundle that still owes a receipt', async () => {
+      mockRecordResult.mockImplementation(writeLikeRecordResult);
+      const late = await completeWithoutReceipt({ finished_at: app.raw("now() - interval '30 hours'") });
+      const owed = await completeWithoutReceipt({
+        finished_at: app.raw("now() - interval '100 days'"), created_at: app.raw("now() - interval '101 days'"),
+        lease_owner: 'other-pod', lease_until: app.raw("now() + interval '1 hour'"),
+      });
+      const checked = await completeWithoutReceipt({ finish_note: 'request+receipt', finished_at: app.raw("now() - interval '100 days'"), created_at: app.raw("now() - interval '101 days'") });
+      expect(await svc.sweepIbCancelBundles()).toMatchObject({ receipts: 1 });
+      expect(await app(TABLE).where({ id: late.id }).first()).toMatchObject({ finish_note: 'request+receipt' });
+      expect(mockRaise.mock.calls[0][1].severity).toBe('needs-you');
+      expect(await app(TABLE).where({ id: owed.id }).first()).toBeTruthy();
+      expect(await app(TABLE).where({ id: checked.id }).first()).toBeUndefined();
+    });
+
+    test('a row completed 3 minutes ago is left to the request', async () => {
       mockRecordResult.mockImplementation(writeLikeRecordResult);
       await completeWithoutReceipt({ finished_at: app.raw("now() - interval '3 minutes'") });
-      await completeWithoutReceipt({ finished_at: app.raw("now() - interval '26 hours'") });
       expect(await svc.sweepIbCancelBundles()).toMatchObject({ receipts: 0 });
       expect(mockRaise).not.toHaveBeenCalled();
     });

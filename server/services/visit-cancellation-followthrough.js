@@ -103,7 +103,7 @@ async function closeVisitInvoices(id, pinned, moneyReport, cancelFence = null) {
   // an unverifiable PI, and still-collectible invoices all need review.
   const unresolvedInvoice = await InvoiceService.unresolvedInvoicesForCancelledService(db, id).first('id');
   if (unresolvedInvoice) {
-    throw new Error('Service invoice still needs money handling; fee requires review');
+    throw Object.assign(new Error('Service invoice still needs money handling; fee requires review'), { code: 'MONEY_REVIEW' });
   }
 }
 
@@ -120,7 +120,7 @@ async function cancellationInstant(id, { now, waiveFee }) {
   }
   const feeTime = new Date(cancelledAt || NaN);
   if (!Number.isFinite(feeTime.getTime())) {
-    throw new Error('Cancellation time unavailable; fee requires review');
+    throw Object.assign(new Error('Cancellation time unavailable; fee requires review'), { code: 'MONEY_REVIEW' });
   }
   return feeTime;
 }
@@ -131,7 +131,7 @@ async function cancellationInstant(id, { now, waiveFee }) {
 async function settlePinnedFee(id, feeTime) {
   const { previewCancelFee, feeRailClear } = require('./appointment-cancel-impact');
   if (!feeRailClear(await previewCancelFee(id, feeTime))) {
-    throw new Error('A card fee agreement appeared since the confirmed card; fee requires review');
+    throw Object.assign(new Error('A card fee agreement appeared since the confirmed card; fee requires review'), { code: 'MONEY_REVIEW' });
   }
   return { released: true, reason: 'pinned_no_card_rail' };
 }
@@ -167,6 +167,9 @@ async function settleVisitMoney(id, ctx) {
     });
   } catch (e) {
     logger.error(`[${ctx.source}] cancellation money handling failed (target ${id}): ${e.message}`);
+    // Recovery sweep only: an unexpected failure (a database error) is NOT a finished step: it is a hit, so the sweep retries the
+    // bundle. A deliberate review verdict (MONEY_REVIEW) stays a reported skip.
+    if (ctx.cancelFence && e && e.code !== 'MONEY_REVIEW' && e.code !== 'CANCEL_FENCE') ctx.cancelFence.hits.push('money_step_error');
     if (pinned && ctx.moneyReport && Array.isArray(ctx.moneyReport.skipped)) ctx.moneyReport.skipped.push({ kind: 'follow_through', reason: e.message });
     return { released: false, reason: 'fee_step_error' };
   }
@@ -189,6 +192,13 @@ async function cancelVisitTracker(id, { actorId, reason, source, linkedChildren,
     reportLinkedCascadeNotRun(linkedChildren, linkedChildReport);
     if (e && e.code === 'CANCEL_FENCE') return;
     logger.error(`[${source}] cancel track transition failed for ${id}: ${e.message}`);
+    // Recovery sweep only: a failed tracker cancel is NOT done. It is recorded as a hit so the sweep retries the bundle
+    // (and reports it if the attempts run out) instead of saving the follow-through as finished. No dispatch alert per
+    // retry. Every other caller keeps the best-effort alert.
+    if (cancelFence) {
+      cancelFence.hits.push('tracker_error');
+      return;
+    }
     await recordTrackTransitionFailure({ jobId: id, action: 'cancel', actorId, error: e, cancelFence });
   }
 }

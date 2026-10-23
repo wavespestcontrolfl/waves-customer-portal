@@ -519,6 +519,29 @@ describe('cancelFence (the cancel recovery sweep)', () => {
     expect(voidedIds()).toEqual([]);
   });
 
+  test('an UNEXPECTED failure while voiding (not a fence refusal) is a retryable hit; without a fence it stays swallowed as before', async () => {
+    const hitFence = { ...FENCE, hits: [] };
+    mockFence.mockRejectedValue(new Error('connection terminated'));
+    mockInvoiceRows = [INV_B];
+    const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+    const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned, cancelFence: hitFence });
+    expect([...voided]).toEqual([]);
+    expect(hitFence.hits).toContain('invoice_void_error');
+    // A fence REFUSAL records its own hit (in the fence), never this one.
+    const refused = { ...FENCE, hits: [] };
+    mockFence.mockReset();
+    mockFence.mockRejectedValue(refuse('visit_is_confirmed'));
+    await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned, cancelFence: refused });
+    expect(refused.hits).not.toContain('invoice_void_error');
+  });
+
+  test('a credit reversal that THROWS is a retryable hit', async () => {
+    const hitFence = { ...FENCE, hits: [] };
+    mockReverse.mockRejectedValueOnce(new Error('connection terminated'));
+    await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { cancelFence: hitFence });
+    expect(hitFence.hits).toContain('credit_reversal_error');
+  });
+
   test('without a fence nothing consults it (the request, Dispatch and every other caller are unchanged)', async () => {
     await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
     expect(mockFence).not.toHaveBeenCalled();

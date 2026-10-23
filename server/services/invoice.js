@@ -6250,6 +6250,8 @@ async function voidOneCancelledServiceCandidate(candidate, ctx) {
     logger.error(
       `[invoice] Failed to void invoice ${candidate.id} for cancelled service ${scheduledServiceId}: ${e.message}`,
     );
+    // Recovery sweep only: an unexpected failure is not a finished step (a fence refusal already recorded its own hit).
+    if (ctx.cancelFence && e && e.code !== "CANCEL_FENCE") ctx.cancelFence.hits.push("invoice_void_error");
     return null;
   } finally {
     await releaseCombinedLock(combinedLock);
@@ -6274,6 +6276,7 @@ async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId
     logger.error(
       `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
     );
+    if (cancelFence) cancelFence.hits.push("credit_reversal_error");
   }
 }
 

@@ -1542,6 +1542,8 @@ async function cascadeCallFollowUpCancel(serviceId, actorId = null, approval = n
     });
   } catch (err) {
     logger.error(`[track-transitions] call follow-up cancel cascade failed for ${serviceId}: ${err.message}`);
+    // Recovery sweep only: a failed cascade is not a finished step; the sweep retries the bundle.
+    if (cancelFence) cancelFence.hits.push('cascade_error');
     if (approval && approval.linkedChildReport && Array.isArray(approval.linkedChildReport.skipped)) {
       for (const child of approval.linkedChildren) approval.linkedChildReport.skipped.push({ id: child.id, reason: 'cascade_failed' });
     }

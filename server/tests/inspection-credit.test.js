@@ -730,6 +730,26 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(res).toEqual({ reversed: 1 });
   });
 
+  // A failure that is swallowed by the per-offer catch is not a finished step for the recovery sweep.
+  it('a reversal that FAILS (not a spent credit) is a retryable hit under a fence; a spent credit is not', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      expires_at: new Date('2099-01-01'), credit_ledger_id: 'ledger-1',
+    }];
+    const fence = { visitId: 'svc-2', restorations: 0, hits: [] };
+    mockFence.mockReset();
+    mockPostCreditMovement.mockRejectedValueOnce(new Error('connection terminated'));
+    await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: fence });
+    expect(fence.hits).toEqual(['credit_reversal_error']);
+    const spentFence = { visitId: 'svc-2', restorations: 0, hits: [] };
+    mockPostCreditMovement.mockRejectedValueOnce(Object.assign(new Error('Insufficient account credit'), { code: 'INSUFFICIENT_CREDIT' }));
+    await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'], cancelFence: spentFence });
+    expect(spentFence.hits).toEqual([]);
+    // Unfenced callers: the failure is only logged, as before.
+    mockPostCreditMovement.mockRejectedValueOnce(new Error('connection terminated'));
+    await expect(reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' })).resolves.toEqual({ reversed: 0 });
+  });
+
   it('a lapsed offer closes out instead of dangling reopened', async () => {
     mockOffers = [{
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',

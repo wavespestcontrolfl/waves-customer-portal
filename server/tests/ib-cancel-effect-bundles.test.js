@@ -53,7 +53,11 @@ jest.mock('../models/db', () => {
     }
     where(a, b, c) { return this._where('and', a, b, c); }
     orWhere(a, b, c) { return this._where('or', a, b, c); }
-    whereNot(col, val) { return this._push('and', (r) => !same(r[strip(col)], val)); }
+    whereNot(col, val) {
+      if (typeof col === 'function') { const sub = new Query(this.table); col.call(sub); return this._push('and', (r) => !sub._match(r)); }
+      return this._push('and', (r) => !same(r[strip(col)], val));
+    }
+    whereNotNull(col) { return this._push('and', (r) => r[strip(col)] !== null && r[strip(col)] !== undefined); }
     whereNull(col) { return this._push('and', (r) => r[strip(col)] === null || r[strip(col)] === undefined); }
     orWhereNull(col) { return this._push('or', (r) => r[strip(col)] === null || r[strip(col)] === undefined); }
     whereIn(col, vals) { return this._push('and', (r) => vals.some((v) => same(r[strip(col)], v))); }
@@ -133,7 +137,6 @@ jest.mock('../models/db', () => {
       candidate = mockStore.bundles
         .filter((x) => x.status === 'complete' && x.finish_note === 'request' && x.pending_action_id
           && new Date(x.finished_at) <= new Date(mockNow.getTime() - a)
-          && new Date(x.finished_at) > new Date(mockNow.getTime() - b)
           && leaseFree(x))
         .sort((x, y) => new Date(x.finished_at) - new Date(y.finished_at))[0];
       if (candidate) Object.assign(candidate, { lease_owner: token, lease_until: new Date(mockNow.getTime() + leaseMs) });
@@ -819,6 +822,34 @@ describe('races and a lost lease', () => {
   });
 });
 
+describe('an exhausted bundle reports what it saved', () => {
+  test('every step finished but finalization kept failing: the result says so and keeps the skipped lists and the text state', async () => {
+    seedBundle({
+      attempts: svc.MAX_ATTEMPTS, lease_owner: null, lease_until: null,
+      followthrough_done_at: new Date(mockNow.getTime() - 5 * MIN),
+      followthrough_outcome: { money_skipped: [{ kind: 'invoice', id: 'inv-1', reason: 'paid_since_card' }], linked_skipped: [{ id: CHILD, reason: 'no_longer_linked' }] },
+      notice_outcome: { state: 'partial', note: 'one recipient not reached', by: 'sweep' },
+    });
+    await svc.sweepIbCancelBundles();
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.warning).toMatch(/Every approved step finished, but the recovery could not be finalized/);
+    expect(result.warning).not.toMatch(/could not be confirmed/);
+    expect(result.warning).toMatch(/invoice inv-1/);
+    expect(result.warning).toMatch(/Do not send it again to those reached/);
+    expect(result).toMatchObject({ customer_text_sent: true, customer_text_partial: true, money_skipped: [{ id: 'inv-1', kind: 'invoice', reason: 'paid_since_card' }], linked_visits_skipped: [{ id: CHILD, reason: 'no_longer_linked' }] });
+    expect(mockRaised[0].spec.why).toMatch(/finished, but the recovery could not be finalized/);
+  });
+
+  test('steps still open are named as not confirmed; nothing is claimed about them', async () => {
+    seedBundle({ attempts: svc.MAX_ATTEMPTS, lease_owner: null, lease_until: null });
+    await svc.sweepIbCancelBundles();
+    const result = mockRecordResult.mock.calls[0][1];
+    expect(result.warning).toMatch(/could not be confirmed \(repeated failures\)/);
+    expect(result.warning).toMatch(/Not confirmed finished: the invoice, credit and linked-visit steps and the approved customer text/);
+    expect(result.customer_text_sent).toBeUndefined();
+  });
+});
+
 describe('the hard stop and a visit that is no longer cancelled', () => {
   test('older than 24 hours: reported only, nothing runs', async () => {
     seedBundle({ created_at: new Date(mockNow.getTime() - 25 * HOUR), lease_until: new Date(mockNow.getTime() - 24 * HOUR) });
@@ -1068,14 +1099,31 @@ describe('a complete bundle whose receipt was never saved', () => {
     expect(mockRecordResult).not.toHaveBeenCalled();
   });
 
-  test('a row finished by the sweep itself, or past the hard stop, is not reconciled', async () => {
+  test('a row finished by the sweep itself is not reconciled', async () => {
     completed({ id: 'a', finish_note: 'sweep', status: 'recovered', pending_action_id: ACTION });
-    completed({ id: 'b', pending_action_id: '00000000-0000-4000-8000-0000000000b2', finished_at: new Date(mockNow.getTime() - 25 * HOUR) });
     action(null);
-    mockStore.actions.push({ id: '00000000-0000-4000-8000-0000000000b2', result: null });
     const summary = await svc.sweepIbCancelBundles();
     expect(summary.receipts).toBe(0);
     expect(mockRecordResult).not.toHaveBeenCalled();
+  });
+
+  test('a gap found after the hard stop (the scheduler was down) is still closed: receipt from the saved outcome and a needs-you note', async () => {
+    const row = completed({ followthrough_outcome: { money_skipped: [], linked_skipped: [] }, finished_at: new Date(mockNow.getTime() - 30 * HOUR) });
+    action(null);
+    const summary = await svc.sweepIbCancelBundles();
+    expect(summary.receipts).toBe(1);
+    expect(mockRecordResult).toHaveBeenCalledTimes(1);
+    expect(mockRaised[0].spec.severity).toBe('needs-you');
+    expect(mockRaised[0].spec.why).toMatch(/over a day/);
+    expect(row.finish_note).toBe('request+receipt');
+  });
+
+  test('a complete bundle that still owes a receipt is never pruned, however old; a checked one is', async () => {
+    const owed = completed({ id: 'owed', finished_at: new Date(mockNow.getTime() - 120 * 24 * HOUR), created_at: new Date(mockNow.getTime() - 121 * 24 * HOUR) });
+    owed.lease_until = new Date(mockNow.getTime() + HOUR); // held, so this pass cannot reconcile it first
+    completed({ id: 'checked', finish_note: 'request+receipt', finished_at: new Date(mockNow.getTime() - 120 * 24 * HOUR), created_at: new Date(mockNow.getTime() - 121 * 24 * HOUR) });
+    await svc.sweepIbCancelBundles();
+    expect(mockStore.bundles.map((b) => b.id)).toEqual(['owed']);
   });
 
   test('a pending action that is gone: marked checked, nothing alerted', async () => {

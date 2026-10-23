@@ -1436,6 +1436,17 @@ describe('cancel with a cancelFence (the cancel recovery sweep)', () => {
     expect(await trackTransitions.cancel('job-1', { reason: 'x' })).toMatchObject({ ok: true, state: 'cancelled' });
   });
 
+  test('a cascade that THROWS is a retryable hit under a fence (and only logged without one)', async () => {
+    db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
+    jest.spyOn(require('../services/call-booking-catalog'), 'cancelCallFollowUpsForParentCancel').mockRejectedValue(new Error('connection terminated'));
+    const fence = { ...FENCE, hits: [] };
+    db.mockReturnValueOnce(query({ ...svc, track_state: 'cancelled', status: 'cancelled', cancelled_at: new Date() }));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x', cancelFence: fence })).toMatchObject({ ok: true });
+    expect(fence.hits).toEqual(['cascade_error']);
+    db.mockReturnValueOnce(query({ ...svc, track_state: 'cancelled', status: 'cancelled', cancelled_at: new Date() }));
+    expect(await trackTransitions.cancel('job-1', { reason: 'x' })).toMatchObject({ ok: true });
+  });
+
   test('without a fence the already-cancelled path still does not touch the technician state (unchanged)', async () => {
     db.transaction = jest.fn(async (callback) => callback(jest.fn(() => query(1))));
     db.mockReturnValueOnce(query({ ...svc, technician_id: 'tech-1', track_state: 'cancelled', cancelled_at: new Date() }));

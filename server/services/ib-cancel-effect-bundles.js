@@ -308,7 +308,8 @@ async function claimUnactable(token) {
 }
 
 // A row the request completed whose receipt may be missing: complete, request-finished, 10 minutes ago or more, and inside
-// the hard stop (so a receipt that can never be saved is retried for a day, not forever). Claimed like the others.
+// the hard stop or not: a gap found late (the scheduler was down, or reconciling kept failing) is still closed, with a
+// needs-you alert. Claimed like the others.
 async function claimReceiptGap(token) {
   const result = await db.raw(
     `UPDATE ${TABLE}
@@ -319,13 +320,12 @@ async function claimReceiptGap(token) {
            AND finish_note = '${FINISH_REQUEST}'
            AND pending_action_id IS NOT NULL
            AND finished_at <= now() - (? * interval '1 millisecond')
-           AND finished_at > now() - (? * interval '1 millisecond')
            AND (lease_until IS NULL OR lease_until < now())
          ORDER BY finished_at
          LIMIT 1
          FOR UPDATE SKIP LOCKED)
       RETURNING *`,
-    [token, LEASE_MS, GRACE_MS, HARD_STOP_MS],
+    [token, LEASE_MS, GRACE_MS],
   );
   return (result && result.rows && result.rows[0]) || null;
 }
@@ -794,6 +794,24 @@ async function releaseReceiptClaim(bundle, token) {
     .catch(() => {});
 }
 
+// The receipt for a bundle that is only reported: built from what the bundle SAVED (skipped-effect lists, text delivery),
+// so a bundle whose steps all finished but whose finalization kept failing still says every step finished.
+function unactableResult(bundle, { why, open, done, notice }) {
+  const reason = why === 'hard_stop' ? 'too much time passed' : 'repeated failures';
+  const head = open.length
+    ? `The approved follow-on steps of this cancel could not be confirmed (${reason}). Not confirmed finished: ${open.join(' and ')}.`
+    : `Every approved step finished, but the recovery could not be finalized (${reason}).`;
+  return {
+    success: true,
+    appointment_id: bundle.scheduled_service_id,
+    ran_dispatch_cancel: true,
+    recovered_after_interruption: true,
+    ...(notice ? noticeFlags(notice) : {}),
+    ...savedSkips(bundle),
+    warning: [head, ...followThroughLines(done), ...(notice && notice.state !== 'sent' ? noticeLines(bundle, notice) : []), "Check the visit's invoices, linked visits and message history."].join(' '),
+  };
+}
+
 // A bundle past the hard stop or out of attempts is only REPORTED: nothing runs, the office checks the visit by hand.
 async function reportUnactable(bundle, token) {
   const why = bundle.attempts >= MAX_ATTEMPTS && new Date(bundle.created_at).getTime() > Date.now() - HARD_STOP_MS
@@ -807,7 +825,7 @@ async function reportUnactable(bundle, token) {
   ];
   const lines = [
     `Approved on the card: ${pinnedSummary(bundle)}.`,
-    open.length ? `Not confirmed finished: ${open.join(' and ')}. Nothing more will run on its own.` : 'All steps finished; only the receipt was missing.',
+    open.length ? `Not confirmed finished: ${open.join(' and ')}. Nothing more will run on its own.` : 'All steps finished; only the finishing note could not be saved.',
     ...followThroughLines(done),
     ...noticeLines(bundle, notice),
     'Check the visit, its invoices, its linked visits and the customer message history.',
@@ -815,20 +833,14 @@ async function reportUnactable(bundle, token) {
   // Each write below is guarded on the report claim: if it is gone, nothing is recorded or told.
   await assertStillOwned(bundle.id, token);
   const info = await visitInfo(bundle);
-  await recordOnPendingAction(bundle, withVisitFacts({
-    success: true,
-    appointment_id: bundle.scheduled_service_id,
-    ran_dispatch_cancel: true,
-    recovered_after_interruption: true,
-    warning: `The approved follow-on steps of this cancel could not be confirmed (${why === 'hard_stop' ? 'too much time passed' : 'repeated failures'}). Check the visit's invoices, linked visits and message history.`,
-  }, info));
+  await recordOnPendingAction(bundle, withVisitFacts(unactableResult(bundle, { why, open, done, notice }), info));
   await assertStillOwned(bundle.id, token);
   await tellOffice(bundle, info, {
     review: true,
     action: (name) => `check ${name}'s cancelled visit`,
     why: open.length
       ? 'Approved cancel steps were not confirmed finished and will not run on their own.'
-      : 'The approved cancel steps finished, but their receipt was missing.',
+      : 'The approved cancel steps finished, but the recovery could not be finalized.',
     lines,
   });
   await ownedUpdate(bundle.id, token, { status: 'expired', finished_at: db.fn.now(), finish_note: why, lease_owner: null, lease_until: null });
@@ -860,6 +872,9 @@ async function reconcileReceipt(bundle, token) {
         ? { state: 'uncertain', note: 'the app stopped before it recorded whether the text went out' }
         : { state: 'no_text' });
     const receipt = buildReceipt(bundle, bundle.followthrough_outcome || {}, notice, { receiptOnly: true });
+    // Found after the hard stop: even a clean outcome gets a needs-you note, because nobody saw the result for a day or more.
+    const late = Date.now() - new Date(bundle.finished_at).getTime() > HARD_STOP_MS;
+    if (late) receipt.needsReview = true;
     await assertCompleteOwned(bundle.id, token);
     const info = await visitInfo(bundle);
     await recordOnPendingAction(bundle, withVisitFacts(receipt.result, info));
@@ -868,7 +883,7 @@ async function reconcileReceipt(bundle, token) {
       review: receipt.needsReview,
       action: receipt.needsReview ? (name) => `check ${name}'s cancelled visit` : (name) => `${name}'s cancel finished`,
       why: receipt.needsReview
-        ? 'The cancel finished, but the app stopped before saving its result, and some steps need a look.'
+        ? (late ? 'The cancel finished, but its result was not saved for over a day, so check the visit.' : 'The cancel finished, but the app stopped before saving its result, and some steps need a look.')
         : 'The cancel finished; only its saved result was missing, and it is saved now.',
       lines: receipt.lines.length ? receipt.lines : ['All approved steps are done.'],
     });
@@ -882,6 +897,10 @@ async function reconcileReceipt(bundle, token) {
 async function pruneFinished() {
   await db(TABLE)
     .whereNot('status', 'pending')
+    // A complete bundle whose receipt has not been checked yet is never pruned (the receipt reconcile still owes it).
+    .whereNot(function receiptStillOwed() {
+      this.where({ status: 'complete', finish_note: FINISH_REQUEST }).whereNotNull('pending_action_id');
+    })
     .where('finished_at', '<', nowMinusMs(db, RETENTION_DAYS * 24 * 60 * 60 * 1000))
     .del();
 }

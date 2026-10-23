@@ -1706,6 +1706,8 @@ async function deferForUnresolvedInvoice(offer, scheduledServiceId, cancelFence)
     }
   } catch (checkErr) {
     logger.error(`[inspection-credit] invoice-state check failed for offer ${offer.id} — reversal deferred: ${checkErr.message}`);
+    // Recovery sweep only: a deferral caused by a failed check is not a finished step (the sweep retries the bundle).
+    if (cancelFence) cancelFence.hits.push('credit_check_error');
     return true;
   }
   return false;
@@ -1797,6 +1799,9 @@ async function handleOfferReversalError(err, offer, scheduledServiceId, cancelFe
     return;
   }
   logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
+  // Recovery sweep only: a failure other than the typed spent-credit refusal (which raises its own office alert) is not a
+  // finished step; the sweep retries the bundle instead of reporting the credit as handled.
+  if (cancelFence && err?.code !== 'INSUFFICIENT_CREDIT') cancelFence.hits.push('credit_reversal_error');
   // The office alert is reserved for the one failure that is a
   // BILLING fact, not an operational one (PR #3178 r18 P2): the
   // typed insufficient-balance refusal from postCreditMovement —
@@ -1869,6 +1874,7 @@ async function reverseInspectionCreditForBooking({
     return { reversed };
   } catch (err) {
     logger.error(`[inspection-credit] reversal sweep FAILED for booking ${scheduledServiceId}: ${err.message}`);
+    if (cancelFence) cancelFence.hits.push('credit_reversal_error');
     return { reversed: 0, reason: 'error', error: err.message };
   }
 }

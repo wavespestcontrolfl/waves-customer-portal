@@ -518,6 +518,39 @@ describe('cancelFence (the cancel recovery sweep)', () => {
     expect(require('../services/track-transitions').cancel).not.toHaveBeenCalled();
   });
 
+  it('an unexpected failure in the money step is a retryable hit (no fee alert, no tracker); a deliberate review verdict stays a reported skip', async () => {
+    const invoice = require('../services/invoice');
+    const tracker = require('../services/track-transitions').cancel;
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    invoice.voidOpenInvoicesForCancelledService.mockRejectedValueOnce(new Error('connection terminated'));
+    const hitFence = { ...FENCE, hits: [] };
+    const moneyReport = { skipped: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: hitFence, moneyReport }));
+    expect(hitFence.hits).toEqual(['money_step_error']);
+    expect(mockAlertUnresolved).not.toHaveBeenCalled();
+    expect(tracker).not.toHaveBeenCalled();
+    // The review verdict (an invoice that still needs money handling) is a deliberate outcome, not a failure.
+    mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
+    const reviewFence = { ...FENCE, hits: [] };
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: reviewFence }));
+    expect(reviewFence.hits).toEqual([]);
+    expect(mockAlertUnresolved).toHaveBeenCalledTimes(1);
+  });
+
+  it('a tracker cancel that THROWS (not a fence refusal) is a retryable hit for the sweep, with no per-retry dispatch alert; unfenced keeps the alert', async () => {
+    const tracker = require('../services/track-transitions').cancel;
+    const alerts = require('../services/track-transition-alerts');
+    tracker.mockRejectedValueOnce(new Error('connection terminated'));
+    const hitFence = { ...FENCE, hits: [] };
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough(fenced({ cancelFence: hitFence }));
+    expect(hitFence.hits).toEqual(['tracker_error']);
+    expect(alerts.recordTrackTransitionFailure).not.toHaveBeenCalled();
+    tracker.mockRejectedValueOnce(new Error('connection terminated'));
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL, creditReversalOfferIds: [] } } });
+    expect(alerts.recordTrackTransitionFailure).toHaveBeenCalledTimes(1);
+  });
+
   it('with no refusal the same unresolved invoice still raises the fee alert (the suppression is only for fence hits)', async () => {
     mockInvoices = [{ id: 'inv-1', scheduled_service_id: 'svc-1', status: 'sent' }];
     const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
