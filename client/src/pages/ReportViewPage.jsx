@@ -10680,7 +10680,8 @@ export default function ReportViewPage({ previewServiceId = null } = {}) {
   const mapErrorRefetched = useRef(false);
   // Identity of the report on screen: an in-flight map refresh for a report the
   // reader has since navigated away from must not touch the new one.
-  const reportKey = `${token}|${mode}`;
+  // Every preview shares one placeholder token, so the previewed visit is part of the identity.
+  const reportKey = `${token}|${previewServiceId || ''}|${mode}`;
   const dataUrlFor = useCallback(
     () => (isPreview
       ? `${API_BASE}/admin/report-preview/${encodeURIComponent(previewServiceId)}/data`
@@ -10778,7 +10779,7 @@ export default function ReportViewPage({ previewServiceId = null } = {}) {
   const refreshReportMaps = useCallback(() => {
     if (mode !== 'live' || mapsRefreshing.current) return;
     mapsRefreshing.current = true;
-    const requestedFor = `${token}|${mode}`;
+    const requestedFor = reportKey;
     let staffToken = null;
     try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     fetch(dataUrlFor(), {
@@ -10799,7 +10800,7 @@ export default function ReportViewPage({ previewServiceId = null } = {}) {
       })
       .catch(() => {})
       .finally(() => { mapsRefreshing.current = false; });
-  }, [token, mode, dataUrlFor]);
+  }, [reportKey, mode, dataUrlFor]);
   useEffect(() => {
     if (mode !== 'live' || !dataHasMaps) return undefined;
     const onVisible = () => {
