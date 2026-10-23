@@ -1,9 +1,10 @@
 // customers.property_sqft is the LAWN mirror; the public quote used to write the HOUSE size into it (owner
 // 2026-10-23). The repair clears a value only when it is proven to be the house and no lawn writer has set a size.
-const { classify, homeSqFtFromEstimate, parseArgs } = require('../scripts/repair-house-sqft-in-lawn-mirror');
+const { classify, homeSqFtFromEstimate, parseArgs, QUOTE_WRITE_WINDOW_MS } = require('../scripts/repair-house-sqft-in-lawn-mirror');
 
 const ADDR = { address_line1: '100 Main St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
-const quoteEstimate = (homeSqFt, over = {}) => ({ id: 'e1', status: 'draft', source: 'quote_wizard', property_id: 'p1', address: '100 Main St, Bradenton, FL 34205', estimate_data: { engineRequest: { profile: { homeSqFt, estimatedTurfSf: 2900, turfSource: 'vision' } } }, ...over });
+const T0 = '2026-10-08T20:33:19.652Z';
+const quoteEstimate = (homeSqFt, over = {}) => ({ id: 'e1', status: 'draft', source: 'quote_wizard', property_id: 'p1', address: '100 Main St, Bradenton, FL 34205', created_at: T0, estimate_data: { engineRequest: { profile: { homeSqFt, estimatedTurfSf: 2900, turfSource: 'vision' } } }, ...over });
 
 describe('homeSqFtFromEstimate', () => {
   test('reads every carrier the quote and the engine write, as a JSON string or an object', () => {
@@ -17,7 +18,7 @@ describe('homeSqFtFromEstimate', () => {
 });
 
 describe('classify', () => {
-  const base = { customer: { id: 'c1', property_sqft: 2614, lead_source: 'website_quote', ...ADDR }, turf: { lawn_sqft: null }, primary: { id: 'p1', property_sqft: 2614, service_area_measurements: null, ...ADDR }, estimates: [quoteEstimate(2614)] };
+  const base = { customer: { id: 'c1', property_sqft: 2614, created_at: '2026-10-08T20:33:05.000Z', lead_source: 'website_quote', ...ADDR }, turf: { lawn_sqft: null }, primary: { id: 'p1', property_sqft: 2614, service_area_measurements: null, ...ADDR }, estimates: [quoteEstimate(2614)] };
 
   test('house value proven by the estimate, no lawn anywhere → house_in_lawn_mirror (primary cleared with it)', () => {
     expect(classify(base)).toEqual({ class: 'house_in_lawn_mirror', houseField: 'engineRequest.profile.homeSqFt', estimateId: 'e1', propertySqft: 2614, primaryMatches: true });
@@ -39,7 +40,7 @@ describe('classify', () => {
   });
 
   test('the quote\'s own lead row proves the house when the estimate upsert failed after the customer update (codex #6520 r2 P2)', () => {
-    const lead = (homeSqFt, over = {}) => ({ id: 'l1', lead_type: 'quote_wizard', extracted_data: JSON.stringify({ stage: 'quote_calculated', homeSqFt }), ...over });
+    const lead = (homeSqFt, over = {}) => ({ id: 'l1', lead_type: 'quote_wizard', created_at: T0, extracted_data: JSON.stringify({ stage: 'quote_calculated', homeSqFt }), ...over });
     expect(classify({ ...base, estimates: [], leads: [lead(2614)] })).toMatchObject({ class: 'house_in_lawn_mirror', houseField: 'lead.extracted_data.homeSqFt', leadId: 'l1' });
     expect(classify({ ...base, estimates: [], leads: [lead(2614, { extracted_data: { homeSqFt: 2614 } })] }).class).toBe('house_in_lawn_mirror');
     expect(classify({ ...base, estimates: [], leads: [lead(1900)] }).class).toBe('unproven');
@@ -60,6 +61,27 @@ describe('classify', () => {
   test('the quote default (2,000) counts only when the estimate records it as the home size', () => {
     expect(classify({ ...base, customer: { ...base.customer, property_sqft: 2000 }, estimates: [quoteEstimate(2000)] }).class).toBe('house_in_lawn_mirror');
     expect(classify({ ...base, customer: { ...base.customer, property_sqft: 2000 }, estimates: [quoteEstimate(2614)] }).class).toBe('unproven');
+  });
+});
+
+describe('write provenance (pre-push audit on 75ecf0d2f9)', () => {
+  const ADDR2 = { address_line1: '100 Main St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
+  const est = (homeSqFt, createdAt) => ({ id: 'e1', status: 'draft', source: 'quote_wizard', property_id: 'p1', address: '100 Main St, Bradenton, FL 34205', created_at: createdAt, estimate_data: { engineRequest: { profile: { homeSqFt } } } });
+  const row = (customerCreatedAt, sqft, estimateCreatedAt) => ({
+    customer: { id: 'c1', property_sqft: sqft, created_at: customerCreatedAt, ...ADDR2 },
+    turf: { lawn_sqft: null },
+    primary: { id: 'p1', property_sqft: sqft, service_area_measurements: null, ...ADDR2 },
+    estimates: [est(sqft, estimateCreatedAt)],
+  });
+
+  test('a customer the quote created (same request window) is cleared; an older customer with a legacy lawn that a later quote happens to match is review only', () => {
+    expect(classify(row('2026-10-08T20:33:05Z', 2614, '2026-10-08T20:33:19Z')).class).toBe('house_in_lawn_mirror');
+    // Legacy 2,000 lawn on a 2025 customer; a 2026 quote with the 2,000 default home size must not clear it.
+    const legacy = classify(row('2025-03-01T12:00:00Z', 2000, '2026-10-08T20:33:19Z'));
+    expect(legacy).toMatchObject({ class: 'legacy_ambiguous_review', propertySqft: 2000, estimateId: 'e1' });
+    // Just outside the window is review too; a missing timestamp never proves anything.
+    expect(classify(row(new Date(Date.parse('2026-10-08T20:33:19Z') - QUOTE_WRITE_WINDOW_MS - 1000).toISOString(), 2614, '2026-10-08T20:33:19Z')).class).toBe('legacy_ambiguous_review');
+    expect(classify(row(null, 2614, '2026-10-08T20:33:19Z')).class).toBe('legacy_ambiguous_review');
   });
 });
 
