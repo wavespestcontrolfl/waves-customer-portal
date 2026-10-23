@@ -26,6 +26,8 @@ const DETAIL_LABEL = {
 const INSURANCE_KEYS = ["insurance_certificate", "pollution_coverage"];
 const ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+const CONFLICT_MESSAGE = "Someone else changed this item. Here is the latest version; make your change again.";
+
 class ApiError extends Error {
   constructor(message, status) {
     super(message);
@@ -315,7 +317,7 @@ function Row({ entry, busy, editing, highlighted, onEdit, onCancel, onSave, onAr
         </div>
       </div>
       {row && <RowDetails row={row} item={item} />}
-      {editing && <Editor entry={entry} busy={busy} onSave={(body, extra) => onSave(entry, body, extra)} onArchive={() => onArchive(row)} onCancel={onCancel} />}
+      {editing && <Editor key={row ? row.updated_at : "new"} entry={entry} busy={busy} onSave={(body, extra) => onSave(entry, body, extra)} onArchive={() => onArchive(row)} onCancel={onCancel} />}
     </li>
   );
 }
@@ -361,8 +363,17 @@ export default function BidKitPage() {
       await load();
       return true;
     } catch (err) {
-      setMessage({ text: err.status === 409 ? err.message : `Not saved: ${err.message}`, error: true });
-      if (err.status === 409) await load();
+      if (err.status === 409) {
+        // Someone else changed the item (or it already exists). The open editors hold fields from the old version, and a
+        // later Save would send them with the new version token and overwrite the other change, so every editor closes
+        // and the list is read again. The owner makes the change again on the latest version.
+        setEditing("");
+        setAdding(false);
+        setMessage({ text: CONFLICT_MESSAGE, error: true });
+        await load();
+      } else {
+        setMessage({ text: `Not saved: ${err.message}`, error: true });
+      }
       return false;
     } finally {
       setBusy(false);

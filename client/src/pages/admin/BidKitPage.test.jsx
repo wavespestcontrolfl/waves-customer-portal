@@ -115,7 +115,9 @@ it("Sign off posts the version the owner looked at, then reads the kit again", a
   expect(screen.getByText("Signed off")).toBeInTheDocument();
 });
 
-it("a sign-off the server refuses as out of date says so and reloads", async () => {
+const CONFLICT = "Someone else changed this item. Here is the latest version; make your change again.";
+
+it("a sign-off the server refuses as out of date says so, closes any open editor and reloads", async () => {
   let reads = 0;
   route({
     "GET /admin/bid-kit/": () => { reads += 1; return reply(payload()); },
@@ -123,9 +125,75 @@ it("a sign-off the server refuses as out of date says so and reloads", async () 
   });
   renderPage();
   await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("W-9")).getByRole("button", { name: "Edit" })); // an editor open on another row
+  expect(screen.getByRole("form", { name: "Edit W-9" })).toBeInTheDocument();
   fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Sign off" }));
-  expect(await screen.findByText(/changed since you opened it/)).toBeInTheDocument();
+  expect(await screen.findByText(CONFLICT)).toBeInTheDocument();
   expect(reads).toBe(2);
+  expect(screen.queryByRole("form", { name: "Edit W-9" })).toBeNull();
+});
+
+it("a 409 on save closes the editor, shows the latest version, and a second save cannot send the old fields", async () => {
+  const theirs = ITEMS.map((item) => (item.id === "i1" ? { ...item, source_document: "Other admin's letter", updated_at: "2026-10-23T18:00:00.000Z" } : item));
+  let reads = 0;
+  const patch = vi.fn()
+    .mockImplementationOnce(() => reply({ error: "This item changed since you opened it. Reload and check it again." }, { ok: false, status: 409 }))
+    .mockImplementation(() => reply({ item: theirs[0] }));
+  route({ "GET /admin/bid-kit/": () => reply(payload(reads++ === 0 ? ITEMS : theirs)), "PATCH /admin/bid-kit/i1": patch });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Source document"), { target: { value: "My own letter" } });
+  fireEvent.change(screen.getByLabelText("Number or note"), { target: { value: "MY-NUMBER" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+  expect(await screen.findByText(CONFLICT)).toBeInTheDocument();
+  expect(patch).toHaveBeenCalledTimes(1);
+  expect(patch.mock.calls[0][0].body).toMatchObject({ source_document: "My own letter", expected_updated_at: "2026-10-02T12:00:00.000Z" });
+  // The editor is closed: there is no Save button that could send the old fields with the new version.
+  expect(screen.queryByRole("form", { name: "Edit FDACS business license copy" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  // The row shows the latest version.
+  await waitFor(() => expect(within(rowFor("FDACS business license copy")).getByText(/Other admin's letter/)).toBeInTheDocument());
+  expect(screen.queryByText(/My own letter/)).toBeNull();
+
+  // Opening Edit again starts from the fresh row; saving sends fresh values with the fresh version.
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Edit" }));
+  expect(screen.getByLabelText("Source document")).toHaveValue("Other admin's letter");
+  expect(screen.getByLabelText("Number or note")).toHaveValue("");
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
+  expect(patch.mock.calls[1][0].body).toMatchObject({ source_document: "Other admin's letter", expected_updated_at: "2026-10-23T18:00:00.000Z" });
+  expect(JSON.stringify(patch.mock.calls[1][0].body)).not.toMatch(/My own letter|MY-NUMBER/);
+});
+
+it("a 409 when adding a new item (it already exists) also closes the editor and says what happened", async () => {
+  const create = vi.fn(() => reply({ error: "This item already exists. Edit it instead." }, { ok: false, status: 409 }));
+  route({ "GET /admin/bid-kit/": () => reply(payload()), "POST /admin/bid-kit/": create });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("Notarized statement: the certified operator in charge works full-time for us")).getByRole("button", { name: "Add details" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText(CONFLICT)).toBeInTheDocument();
+  expect(screen.queryAllByRole("button", { name: "Save" })).toHaveLength(0);
+});
+
+it("an editor never outlives the version it was opened on: a reload that moves the row resets its fields", async () => {
+  const signed = ITEMS.map((item) => (item.id === "i1" ? { ...item, status: "ready", attested_at: "2026-10-23T16:00:00.000Z", updated_at: "2026-10-23T16:00:00.000Z", source_document: "Newer letter" } : item));
+  let reads = 0;
+  route({
+    "GET /admin/bid-kit/": () => reply(payload(reads++ === 0 ? ITEMS : signed)),
+    "POST /admin/bid-kit/i1/attest": () => reply({ item: signed[0] }),
+    "POST /admin/bid-kit/i1/file": () => reply({ item: signed[0] }),
+  });
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Source document"), { target: { value: "Typed but not saved" } });
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Sign off" }));
+  await waitFor(() => expect(within(rowFor("FDACS business license copy")).getByText("Ready")).toBeInTheDocument());
+  expect(screen.getByLabelText("Source document")).toHaveValue("Newer letter"); // fresh row, not the typed text
 });
 
 it("Edit saves against the loaded version and warns that a change clears the sign-off", async () => {
