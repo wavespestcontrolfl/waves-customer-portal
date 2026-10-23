@@ -486,6 +486,12 @@ describe('tool gaps by kit key', () => {
     expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Lawn Assessment', missing: ['Soil probe (thatch)'] }]);
     // The catalog's own fire ant service is the same spreader job, never the pest kit.
     expect(truckKit.requirementsFor('Fire Ant Treatment', { serviceKey: 'fire_ant', serviceCategory: 'pest_control' })).toEqual({ lines: ['lawn'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']) } });
+    // Flea work is the same yard gear; nest work and any other specialty row without a focused entry has no keyed kit.
+    expect(truckKit.requirementsFor('Flea & Tick Treatment', { serviceKey: 'flea_tick', serviceCategory: 'specialty' }).restrict).toEqual({ lawn: new Set(['push_spreader']), tree_shrub: new Set(['backpack_sprayer']) });
+    expect(truckKit.serviceLinesFor('Bee & Wasp Removal', { serviceKey: 'bee_wasp_removal', serviceCategory: 'specialty' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Mud Dauber Removal', { serviceKey: 'mud_dauber_removal' })).toEqual([]);
+    expect(truckKit.serviceLinesFor('Yellow Jacket Nest Removal')).toEqual([]);
+    expect(truckKit.serviceLinesFor('Some Specialty Job', { serviceKey: 'specialty_misc', serviceCategory: 'specialty' })).toEqual([]);
     // Tick control is the yard gear: the spreader and the backpack, nothing interior.
     expect(truckKit.requirementsFor('Tick Control', { serviceKey: 'tick_control', serviceCategory: 'specialty' })).toEqual({ lines: ['lawn', 'tree_shrub'], promote: new Set(), restrict: { lawn: new Set(['push_spreader']), tree_shrub: new Set(['backpack_sprayer']) } });
     // The fire ant yard add-on is a spreader job, never the probe.

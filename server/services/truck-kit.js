@@ -113,6 +113,15 @@ const TRAP_KEYS = new Set(['wildlife_trapping', 'rodent_trapping']);
 const TRAP_NAME = /\b(wildlife|trapping)\b/i;
 const isTrapping = (serviceType, serviceKey) =>
   (serviceKey ? TRAP_KEYS.has(String(serviceKey).toLowerCase()) : false) || TRAP_NAME.test(String(serviceType || ''));
+// Localized nest work (bees, wasps, hornets, mud daubers, yellow jackets):
+// its gear is not keyed. By key, or by name for a legacy row.
+const NEST_KEYS = new Set(['bee_wasp_removal', 'mud_dauber_removal']);
+const NEST_NAME = /\b(bee|bees|wasp|wasps|hornet|hornets|mud\s*dauber|yellow\s*jacket)s?\b/i;
+const isNestWork = (serviceType, serviceKey) =>
+  (serviceKey ? NEST_KEYS.has(String(serviceKey).toLowerCase()) : false) || NEST_NAME.test(String(serviceType || ''));
+// The catalog's specialty grab-bag is one-tool or no-tool work: a specialty
+// row gets a kit only through a focused entry, never the whole pest list.
+const isSpecialty = (serviceCategory) => String(serviceCategory || '').toLowerCase() === 'specialty';
 const PROGRAM_LINE = { lawn: 'lawn', pest: 'pest', cockroach: 'pest', bed_bug: 'pest', mosquito: 'mosquito', rodent: 'rodent', termite: 'termite', tree_shrub: 'tree_shrub' };
 // Programs with no keyed kit: the Arborjet injection gear is not keyed, and
 // bed bug work (chemical, heat or both) has no kit of its own represented.
@@ -130,7 +139,8 @@ const keyedProgram = (serviceKey) => (serviceKey ? MATCH_RULES.find((rule) => ru
 // registry lane without tools, or a service the matcher gives no program
 // (the misting design visit, an unconfigured misting phase, trunk injection).
 function noToolService(serviceType, serviceKey, resolved) {
-  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey) || isMechanical(serviceType, serviceKey) || isTrapping(serviceType, serviceKey)) return true;
+  if (!String(serviceType || '').trim() || isConsultation(serviceType, serviceKey) || isMechanical(serviceType, serviceKey)) return true;
+  if (isTrapping(serviceType, serviceKey) || isNestWork(serviceType, serviceKey)) return true;
   if (NO_TOOL_LANES.has(laneOf(serviceType, serviceKey))) return true;
   return !resolved.programKey || PROGRAM_NO_KIT.has(resolved.programKey);
 }
@@ -154,8 +164,8 @@ const FOCUSED_KITS = [
   // Fire ant work (the catalog's fire_ant service and the yard add-on) is
   // broadcast bait plus a mound drench: the spreader, not the pest kit.
   { restrict: { lawn: ['push_spreader'] }, key: /^fire_ant$|fire_ant_yard/i, name: /\bfire\s*ant\b/i },
-  // Tick control: granular broadcast plus a perimeter spray, the yard gear.
-  { restrict: { lawn: ['push_spreader'], tree_shrub: ['backpack_sprayer'] }, key: /^tick_control$/i, name: /\btick\s*(control|treatment|service)\b/i },
+  // Tick and flea control: granular broadcast plus a perimeter spray, the yard gear.
+  { restrict: { lawn: ['push_spreader'], tree_shrub: ['backpack_sprayer'] }, key: /^(tick_control|flea_tick)$/i, name: /\b(tick|flea)\b/i },
   // The lawn assessment (catalog lawn_inspection: pH, thatch, moisture, pest
   // pressure, density) is a diagnostic: the instruments, never the spreader.
   { restrict: { lawn: ['soil_probe', 'soil_thermometer'] }, key: /^lawn_inspection$/i, name: /\blawn\s*(health\s*)?(assessment|inspection)\b/i },
@@ -215,6 +225,7 @@ function promotedKeysFor(serviceType, serviceKey, lines = [], match = null) {
 function serviceRequirement(svc) {
   const focused = focusedKitFor(svc?.name, svc?.serviceKey);
   const match = matchOf(svc?.name, svc?.serviceKey);
+  if (!focused && isSpecialty(svc?.category)) return null;
   const lines = focused ? Object.keys(focused.restrict) : linesForService(svc?.name, svc?.serviceKey, svc?.category, match);
   if (!lines.length) return null;
   return { lines, promote: [...new Set(promotedKeysFor(svc?.name, svc?.serviceKey, lines, match))], restrict: focused ? focused.restrict : null };
