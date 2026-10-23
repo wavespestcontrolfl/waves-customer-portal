@@ -68,22 +68,27 @@ async function fillRenewalDates(conn) {
 // A renewal date before today moves to its next anniversary on or after
 // today; its open reminder closes and the next year's starts fresh.
 async function rollPastRenewals(conn, today) {
-  const rows = await signedWarranties(conn).where('renewal_date', '<', today)
-    .select('id', conn.raw("to_char(renewal_date, 'YYYY-MM-DD') as day"));
-  if (!rows.length) return 0;
-  await conn('customer_contracts').whereIn('id', rows.map((row) => row.id)).update({
-    // Whole years since the date, plus one only when that anniversary is
-    // still before today: an anniversary that falls today is kept.
-    renewal_date: conn.raw(`(renewal_date + make_interval(years => date_part('year', age(?::date, renewal_date))::int
-      + CASE WHEN (renewal_date + make_interval(years => date_part('year', age(?::date, renewal_date))::int))::date >= ?::date THEN 0 ELSE 1 END))::date`,
-    [today, today, today]),
-    auto_renewal_notice_sent_at: null,
-    updated_at: conn.fn.now(),
+  // One transaction: the rows are locked, moved and their old reminders
+  // closed together, so a failure leaves neither a moved date with an open
+  // reminder nor a closed reminder on an unmoved date.
+  return conn.transaction(async (trx) => {
+    const rows = await signedWarranties(trx).where('renewal_date', '<', today).forUpdate()
+      .select('id', trx.raw("to_char(renewal_date, 'YYYY-MM-DD') as day"));
+    if (!rows.length) return 0;
+    await trx('customer_contracts').whereIn('id', rows.map((row) => row.id)).update({
+      // Whole years since the date, plus one only when that anniversary is
+      // still before today: an anniversary that falls today is kept.
+      renewal_date: trx.raw(`(renewal_date + make_interval(years => date_part('year', age(?::date, renewal_date))::int
+        + CASE WHEN (renewal_date + make_interval(years => date_part('year', age(?::date, renewal_date))::int))::date >= ?::date THEN 0 ELSE 1 END))::date`,
+      [today, today, today]),
+      auto_renewal_notice_sent_at: null,
+      updated_at: trx.fn.now(),
+    });
+    await closeAdminAlertKeys(trx, rows.map((row) => alertKey(row.id, row.day)), 'renewal_date_passed', {
+      resolution: 'The renewal date passed; next year\'s reminder starts on its own.',
+    });
+    return rows.length;
   });
-  await closeAdminAlertKeys(conn, rows.map((row) => alertKey(row.id, row.day)), 'renewal_date_passed', {
-    resolution: 'The renewal date passed; next year\'s reminder starts on its own.',
-  });
-  return rows.length;
 }
 
 function alertSpec(row) {
