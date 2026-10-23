@@ -171,3 +171,18 @@ export function warrantyContractBasis({ kind, builder = '', date = '' }) {
   }
   return `Signed by the owner or authorized agent before treatment, on ${text(date)}.`;
 }
+
+// What blocks Create in the issue dialog: every office field filled, both
+// dates real and on or before treatment, and a plan with a treatment date.
+export function warrantyIssueReadiness(base, office) {
+  const initial = base.treatment.initial_date;
+  const basisProblem = text(office.basisDate) ? basisDateProblem(office.basisDate, initial) : '';
+  const noticeProblem = text(office.noticeDate) ? basisDateProblem(office.noticeDate, initial) : '';
+  const filled = Object.values(office).every((v) => text(v));
+  return {
+    basisProblem,
+    noticeProblem,
+    ready: Boolean(filled && !basisProblem && !noticeProblem && base.warranty.term_end && initial),
+  };
+}
+

@@ -9,9 +9,9 @@ import {
   NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY,
   pretreatWarrantyValues,
   warrantyContractBasis,
-  basisDateProblem,
   daysSinceTreatment,
   warrantyEligible,
+  warrantyIssueReadiness,
 } from "../../lib/pretreatWarrantyValues";
 
 const fieldStyle = {
@@ -51,11 +51,10 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [error, setError] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
 
-  const basisProblem = basisDate.trim() ? basisDateProblem(basisDate, base.treatment.initial_date) : "";
-  const noticeProblem = noticeDate.trim() ? basisDateProblem(noticeDate, base.treatment.initial_date) : "";
+  const { basisProblem, noticeProblem, ready } = warrantyIssueReadiness(base, {
+    basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures,
+  });
   const lateDays = daysSinceTreatment(base.treatment.initial_date, base.warranty.issue_date);
-  const ready = [basisDate, treatmentPrice, planPrice, renewalFee, noticeDate, issuerName, issuerTitle, structures]
-    .every((v) => v.trim()) && !basisProblem && !noticeProblem && base.warranty.term_end && base.treatment.initial_date;
 
   const issue = async () => {
     setBusy(true);
