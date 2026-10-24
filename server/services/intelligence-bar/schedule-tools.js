@@ -2178,7 +2178,7 @@ async function findAvailableSlotsTool(input) {
   if (customer_id && !address && (!lat || !lng)) {
     const c = await db('customers').where('id', customer_id).select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
     if (c?.latitude && c?.longitude) { lat = parseFloat(c.latitude); lng = parseFloat(c.longitude); }
-    else if (c && !address) address = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
+    else if (c) address = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');
   }
 
   // Geocode if still needed
@@ -2204,15 +2204,9 @@ async function findAvailableSlotsTool(input) {
 
   // The visit length comes from the catalog when the operator named a
   // service: a model-guessed length on a packed day silently hides slots.
-  let service = null;
-  if (service_name) {
-    service = await resolveSlotService(service_name);
-    if (service?.error) return service;
-  }
-  const explicitMinutes = Number(duration_minutes);
-  const durationMinutes = service ? service.duration_minutes
-    : (Number.isFinite(explicitMinutes) && explicitMinutes > 0 ? Math.round(explicitMinutes) : 60);
-  const durationSource = service ? 'catalog' : (durationMinutes === Math.round(explicitMinutes) ? 'operator' : 'default');
+  const length = await resolveVisitLength(service_name, duration_minutes);
+  if (length.error) return length;
+  const { service, serviceType, durationMinutes, durationSource } = length;
 
   const today = etDateString();
   const weekOut = etDateString(addETDays(new Date(), 7));
@@ -2224,7 +2218,7 @@ async function findAvailableSlotsTool(input) {
     techStartPoints: true,
     lat, lng,
     durationMinutes,
-    ...(service ? { serviceType: service.name } : {}),
+    serviceType,
     dateFrom,
     dateTo,
     technicianId: technician_id,
@@ -2239,7 +2233,7 @@ async function findAvailableSlotsTool(input) {
     includeWeekends: true,
     includeBlackoutDates: true,
   });
-  if (!result || result.error) return result;
+  if (result.error) return result;
   return describeSlotSearch(result, {
     dateFrom, dateTo, today, durationMinutes, durationSource, service, technicianId: technician_id,
     topN: top_n || 10,
@@ -2257,30 +2251,34 @@ function slotDayLabel(date) {
   return d.toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }).replace(',', '');
 }
 
-// Catalog service for a slot search: exact name / short name / key first,
-// then a single partial match. Several partial matches refuse with the
-// choices so the model picks one instead of guessing a length.
-async function resolveSlotService(serviceName) {
+// Visit length for a slot search. A named service takes its catalog
+// length: exact name / short name / key, else a single partial match; several
+// matches (a shared short name included) refuse with the choices so the
+// model picks one. With no service, a stated length, else 60 minutes.
+async function resolveVisitLength(serviceName, statedMinutes) {
+  const wanted = String(serviceName || '').trim().toLowerCase();
+  if (!wanted) {
+    const stated = Math.round(Number(statedMinutes)) || 0;
+    return { service: null, serviceType: undefined, durationMinutes: stated > 0 ? stated : 60, durationSource: stated > 0 ? 'operator' : 'default' };
+  }
   const { serviceDurationMinutes } = require('../service-library');
-  const wanted = String(serviceName).trim().toLowerCase();
-  if (!wanted) return null;
   const rows = await db('services').where({ is_active: true })
     .select('id', 'service_key', 'name', 'short_name', 'default_duration_minutes', 'scheduling_duration_policy');
-  const keyOf = (value) => String(value || '').trim().toLowerCase();
-  const exact = rows.filter((row) => [row.name, row.short_name, row.service_key].some((v) => keyOf(v) === wanted));
-  const partial = exact.length ? exact : rows.filter((row) => [row.name, row.short_name, row.service_key]
-    .some((v) => keyOf(v) && (keyOf(v).includes(wanted) || wanted.includes(keyOf(v)))));
-  if (partial.length === 1) {
-    const row = partial[0];
-    return { name: row.name, service_key: row.service_key, duration_minutes: serviceDurationMinutes(row, 60) };
+  const namesOf = (row) => [row.name, row.short_name, row.service_key].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean);
+  const exact = rows.filter((row) => namesOf(row).includes(wanted));
+  const matches = exact.length ? exact : rows.filter((row) => namesOf(row).some((v) => v.includes(wanted) || wanted.includes(v)));
+  const choice = (row) => ({ name: row.name, duration_minutes: serviceDurationMinutes(row, 60) });
+  if (matches.length === 1) {
+    const { name, duration_minutes } = choice(matches[0]);
+    return { service: { name, service_key: matches[0].service_key }, serviceType: name, durationMinutes: duration_minutes, durationSource: 'catalog' };
   }
-  if (!partial.length) {
+  if (!matches.length) {
     return { error: `No active catalog service matches "${serviceName}". Ask the operator which service, or pass duration_minutes they state.`, code: 'service_not_found' };
   }
   return {
     error: `"${serviceName}" matches several catalog services. Call again with one exact service_name.`,
     code: 'service_ambiguous',
-    choices: partial.slice(0, 8).map((row) => ({ name: row.name, duration_minutes: serviceDurationMinutes(row, 60) })),
+    choices: matches.slice(0, 8).map(choice),
   };
 }
 
@@ -2306,11 +2304,13 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
     // Same occupancy rule as the engine: an expired slot hold is not a stop.
     const dayRows = await db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
-      .whereIn('technician_id', techs.map((tech) => tech.id))
+      // Unassigned bookings and holds block every technician's route in the
+      // engine (arrival-route fixed blockers), so they count here too.
+      .where((q) => q.whereIn('technician_id', techs.map((tech) => tech.id)).orWhereNull('technician_id'))
       .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
       .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
       .groupBy('scheduled_date')
-      .select('scheduled_date', db.raw('count(*)::int as stops'),
+      .select('scheduled_date', db.raw('count(*)::int as stops'), db.raw('count(*) filter (where technician_id is null)::int as unassigned'),
         db.raw('left(min(window_start)::text, 5) as first_start'), db.raw('left(max(window_end)::text, 5) as last_end'));
     byDay = new Map(dayRows.map((row) => [dateOnlyString(row.scheduled_date), row]));
   } catch (err) {
@@ -2321,6 +2321,7 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
     const day = byDay?.get(date);
     const feasible = slotCount.get(date) || 0;
     const row = { date, day_label: slotDayLabel(date), stops_booked: byDay ? Number(day?.stops || 0) : null,
+      unassigned_stops: byDay ? Number(day?.unassigned || 0) : null,
       first_start: day?.first_start || null, last_end: day?.last_end || null, feasible_slots: feasible };
     if (feasible) return row;
     // Only the engine's own rejection counts are a reason; without them (the

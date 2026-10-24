@@ -44,7 +44,7 @@ beforeEach(() => {
     ],
     // The per-day aggregate the count query returns (holds already filtered in SQL).
     scheduled_services: [
-      { scheduled_date: '2026-10-24', stops: 2, first_start: '08:00', last_end: '17:00' },
+      { scheduled_date: '2026-10-24', stops: 2, unassigned: 1, first_start: '08:00', last_end: '17:00' },
       { scheduled_date: '2026-10-28', stops: 1, first_start: '10:00', last_end: '11:00' },
     ],
   };
@@ -94,7 +94,8 @@ test('no service: a stated length is used and labeled, else the 60-minute defaul
 test('a day with no slot says why, from the engine reasons or the booked stops', async () => {
   const out = await search({ date_from: '2026-10-24', date_to: '2026-10-28' });
   const [sat, wed] = out.days;
-  expect(sat).toMatchObject({ stops_booked: 2, first_start: '08:00', last_end: '17:00', feasible_slots: 0 });
+  // Unassigned bookings block the engine's routes, so the day reports them.
+  expect(sat).toMatchObject({ stops_booked: 2, unassigned_stops: 1, first_start: '08:00', last_end: '17:00', feasible_slots: 0 });
   expect(sat.no_slot_reason).toContain('gave no rejection reason');
   expect(wed).toMatchObject({ feasible_slots: 2 });
   expect(wed.no_slot_reason).toBeUndefined();
