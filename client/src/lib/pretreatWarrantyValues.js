@@ -57,9 +57,7 @@ function additionalApplications(value) {
     .filter((row) => row && typeof row === 'object' && Object.values(row).some((v) => text(v)));
 }
 
-// The warranty text describes one preventive soil treatment. A borate wood
-// treatment, a bait system (its own program agreement) or a combined job
-// needs other wording, so only a single soil-barrier application qualifies.
+// A legacy "Other" pick keeps the real method in treatment_method_other.
 function treatmentMethod(findings) {
   const method = text(findings.treatment_method);
   return method === 'Other' ? text(findings.treatment_method_other) : method;
@@ -75,11 +73,25 @@ function targetsSubterranean(value) {
   return (Array.isArray(targets) ? targets : [targets]).some((target) => SUBTERRANEAN_TARGETS.includes(text(target)));
 }
 
+// The methods the warranty has wording for (the server's rule): a soil
+// barrier alone, Bora-Care alone, or a soil barrier with one Bora-Care
+// application as its secondary treatment. A bait system has its own program
+// agreement; any other mix has no wording.
+const SOIL = 'Soil barrier (chemical)';
+const BORATE = 'Wood treatment (borate)';
+function warrantyMethod(findings = {}) {
+  const extras = additionalApplications(findings.additional_applications);
+  const first = treatmentMethod(findings);
+  if (first === SOIL && extras.length === 0) return 'soil';
+  if (first === BORATE && extras.length === 0) return 'borate';
+  if (first === SOIL && extras.length === 1 && treatmentMethod(extras[0]) === BORATE) return 'combined';
+  return null;
+}
+
 export function warrantyEligible(findings = {}) {
   return Boolean(warrantyPlanYears(findings.warranty_type))
-    && treatmentMethod(findings) === 'Soil barrier (chemical)'
-    && targetsSubterranean(findings.wdo_target)
-    && additionalApplications(findings.additional_applications).length === 0;
+    && Boolean(warrantyMethod(findings))
+    && targetsSubterranean(findings.wdo_target);
 }
 
 // The certificate's own values; '' where the certificate has nothing, so the
@@ -100,8 +112,9 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
   const years = warrantyPlanYears(findings.warranty_type);
   const finalDate = parseDateOnly(findings.final_exterior_date);
   // A builder lot under the master agreement runs from its final treatment
-  // date; an owner contract from the initial one (the server's rule).
-  const start = basisKind === 'master' ? finalDate : initial;
+  // date; an owner contract from the initial one (the server's rule). A
+  // Bora-Care only job has one treatment, so it is also the final one.
+  const start = basisKind === 'master' && warrantyMethod(findings) !== 'borate' ? finalDate : initial;
   const termEnd = start && years ? formatUs(addYears(start, years)) : '';
   const lot = [text(findings.lot_block), text(findings.subdivision)].filter(Boolean).join(', ');
   // A legacy "Other" pick keeps the real product in product_name_other, as

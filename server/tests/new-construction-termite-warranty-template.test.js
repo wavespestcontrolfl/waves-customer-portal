@@ -119,6 +119,61 @@ describe('new construction termite warranty template', () => {
     expect(calls).toEqual(['lock:document_templates', 'active:v-existing']);
   });
 
+  test('version 9 swaps only the section 3 paragraph and three conditions for method fields', () => {
+    const { BODY_V8 } = require('../models/migrations/20261024211000_new_construction_warranty_start_date');
+    const { BODY_V9, VARIABLES_V9 } = require('../models/migrations/20261024230000_new_construction_warranty_methods');
+    const v9Vars = [...new Set([...BODY_V9.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
+    expect(v9Vars).toEqual([...VARIABLES_V9].sort());
+    const changed = BODY_V9.split('\n').filter((line, i) => line !== BODY_V8.split('\n')[i]);
+    expect(changed).toEqual(['{{treatment.description}}', '- {{conditions.first}}', '- {{conditions.second}}', '- {{conditions.third}}']);
+    expect(BODY_V9.split('\n')).toHaveLength(BODY_V8.split('\n').length);
+    expect(BODY_V9).toContain('**COVERS: SUBTERRANEAN TERMITES, INCLUDING FORMOSAN AND ASIAN SUBTERRANEAN TERMITES.');
+  });
+
+  test('the version 9 migration takes the next free number, and its rollback restores version 8 only while 9 is active', async () => {
+    const v9 = require('../models/migrations/20261024230000_new_construction_warranty_methods');
+    const calls = [];
+    const rows = { mine: null, previous: { id: 'v8' }, active: 'v9', issued: null };
+    const knex = (table) => {
+      const q = {
+        _where: {},
+        where(arg) { Object.assign(q._where, arg); return q; },
+        forUpdate() { return q; },
+        max() { return q; },
+        first: async () => {
+          if (table === 'document_templates') return { id: 't1', template_key: TEMPLATE.template_key };
+          if (table === 'customer_contracts') return rows.issued;
+          if (q._where.body === v9.BODY_V9) return rows.mine;
+          if (q._where.body) return rows.previous;
+          return { n: 11 };
+        },
+        insert(row) { calls.push(`insert:${row.version_number}`); return { returning: async () => [{ id: 'v9', ...row }] }; },
+        update: async (patch) => {
+          if (q._where.active_version_id && q._where.active_version_id !== rows.active) return 0;
+          calls.push(`active:${patch.active_version_id}`);
+          return 1;
+        },
+        del: async () => { calls.push('delete'); return 1; },
+      };
+      return q;
+    };
+    knex.fn = { now: () => 'now()' };
+    await v9.up(knex);
+    expect(calls).toEqual(['insert:12', 'active:v9']);
+    calls.length = 0;
+    rows.mine = { id: 'v9' };
+    await v9.down(knex);
+    expect(calls).toEqual(['active:v8', 'delete']);
+    calls.length = 0;
+    rows.issued = { id: 'contract-1' };
+    await v9.down(knex);
+    expect(calls).toEqual(['active:v8']);
+    calls.length = 0;
+    rows.active = 'v10';
+    await v9.down(knex);
+    expect(calls).toEqual([]);
+  });
+
   test('the metadata migration makes a reused row an active, customer-facing, signed service agreement', async () => {
     const meta = require('../models/migrations/20261023260000_new_construction_termite_warranty_metadata');
     const updates = [];

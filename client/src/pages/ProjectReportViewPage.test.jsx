@@ -318,6 +318,29 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('No retreatment contract covers this treatment');
   });
 
+  it('both layouts print the Bora-Care record, and a later Bora-Care application scopes the signature', async () => {
+    const borate = {
+      ...findings,
+      applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
+      framing_inspection_date: '2026-06-20',
+      wood_base_plate_pct: '85',
+      borate_treatment_date: '2026-07-15',
+    };
+    for (const pretreatStickerReport of [false, true]) {
+      const { findByText, getByText, unmount } = renderProjectReport(payload('pre_treatment_termite_certificate', { pretreatStickerReport, findings: borate }));
+      expect(await findByText('Final framing inspection 06/20/2026 · Wood base plates 85% of all base plates · Bora-Care applied 07/15/2026')).toBeInTheDocument();
+      expect(getByText('This signature covers the initial treatment only. The Bora-Care application is recorded separately above.')).toBeInTheDocument();
+      unmount();
+    }
+    // A share the server would refuse never prints.
+    const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+      findings: { ...findings, framing_inspection_date: '2026-06-20', wood_base_plate_pct: '120' },
+    }));
+    await findAllByText(/Pre-Construction Termite Protection/i);
+    expect(queryByText('Final framing inspection 06/20/2026')).toBeInTheDocument();
+    expect(queryByText(/120/)).not.toBeInTheDocument();
+  });
+
   it('gate on: a later exterior visit gets its own record line and the signature is scoped to the initial treatment', async () => {
     const { findByText, getByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       pretreatStickerReport: true,
