@@ -324,8 +324,11 @@ function refundsToCSV(refunds) {
 }
 
 function homeOfficeToCSV(homeOffice, deduction) {
-  const lines = [row(['tax_year', 'method', 'sq_ft', 'months', 'deduction'])];
-  lines.push(row([homeOffice.tax_year, homeOffice.method, homeOffice.sq_ft, homeOffice.months, Number(deduction || 0).toFixed(2)]));
+  // the actual-method columns come last, empty for the simplified method
+  const lines = [row(['tax_year', 'method', 'sq_ft', 'months', 'deduction', 'home_sq_ft', 'rent', 'utilities', 'insurance', 'other'])];
+  const amount = (v) => (v == null ? '' : Number(v).toFixed(2));
+  lines.push(row([homeOffice.tax_year, homeOffice.method, homeOffice.sq_ft, homeOffice.months, Number(deduction || 0).toFixed(2),
+    homeOffice.home_sq_ft ?? '', amount(homeOffice.rent), amount(homeOffice.utilities), amount(homeOffice.insurance), amount(homeOffice.other)]));
   return lines.join('\n');
 }
 
