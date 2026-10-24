@@ -1129,6 +1129,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 30 MIN — reply outcome signals (GATE_SMS_REPLY_OUTCOMES, read in the
+  // sweep too): records what each customer did after a Waves text reply.
+  // Measurement only; the unique reply key makes a repeated tick harmless.
+  cron.schedule('13,43 * * * *', async () => {
+    if (!isEnabled('smsReplyOutcomes')) return;
+    try {
+      await runExclusive('sms-reply-outcomes', async () => {
+        await require('./sms-reply-outcomes').sweepReplyOutcomes();
+      });
+    } catch (err) {
+      logger.error(`[sms-reply-outcomes] sweep failed (code ${err?.code || err?.name || 'unknown'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — retry committed route-quality refreshes, including dates
   // outside the nightly optimizer's six-day band. The durable row claim
   // fences overlapping ticks/deploys; no second cron lease is needed.
