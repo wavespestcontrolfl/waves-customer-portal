@@ -611,17 +611,15 @@ router.get('/customers/search', async (req, res, next) => {
 });
 
 // GET /customers/:customerId/properties — the saved properties a line item may
-// name on a multi-property invoice. Customer-facing-safe columns only. Empty
-// while GATE_INVOICE_MULTI_PROPERTY_LINES is off, so the editor shows no picker.
+// name on a multi-property invoice (owner 2026-10-24: no gate). Customer-facing-
+// safe columns only; the editor shows its picker only with 2+ properties.
 router.get('/customers/:customerId/properties', async (req, res, next) => {
   try {
-    const enabled = require('../config/feature-gates').gateEnvValue('GATE_INVOICE_MULTI_PROPERTY_LINES');
-    if (!enabled) return res.json({ enabled: false, properties: [] });
     const properties = await db('customer_properties')
       .where({ customer_id: req.params.customerId, active: true })
       .select('id', 'label', 'is_primary', 'address_line1', 'address_line2', 'city', 'state', 'zip')
       .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
-    res.json({ enabled: true, properties });
+    res.json({ properties });
   } catch (err) { next(err); }
 });
 

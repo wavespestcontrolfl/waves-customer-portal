@@ -6007,8 +6007,8 @@ function CreateInvoice({
   const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   // Multi-property invoices: the customer's saved properties a service line
-  // may name (GATE_INVOICE_MULTI_PROPERTY_LINES off → always []). The picker
-  // renders only with 2+ properties; one property needs no choice.
+  // may name. The picker renders only with 2+ properties; one property needs
+  // no choice.
   const [customerProperties, setCustomerProperties] = useState([]);
   const primaryPropertyId =
     customerProperties.find((p) => p.is_primary)?.id ||
