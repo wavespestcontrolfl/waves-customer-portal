@@ -297,7 +297,7 @@ function estimateSendableAmount(estimate = {}) {
 // Commercial proposals are accepted manually (no online checkout), so the
 // "accept it online" next-step copy would point the customer at a flow that
 // is intentionally rejected for them. Use proposal-specific copy instead.
-const PROPOSAL_NEXT_STEP_SUMMARY = 'Your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement. Call (941) 297-5749 anytime.';
+const PROPOSAL_NEXT_STEP_SUMMARY = 'To get started, reply to this email or call us at (941) 297-5749. We will confirm your start date and send your service agreement to sign.';
 
 // The PDF-copy decision helpers live with the rest of the feature (the review
 // preview, the verdict check and the send all use these).
@@ -848,29 +848,34 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   };
 }
 
+// The SMTP fallback (SendGrid not configured) says the same as the approved estimate.proposal_delivery template
+// (owner 2026-10-24): the same intro sentence, next step, button label and closing note.
+const PROPOSAL_FALLBACK_NOTE = `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
+const proposalFallbackIntro = (firstName) => `Hi ${firstName}, thank you for calling Waves Pest Control. Your proposal is attached as a PDF, and you can also open it online.`;
+
 function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode }) {
   const heading = proposalMode ? 'Your Waves proposal is ready' : 'Your Waves estimate is ready';
   const intro = proposalMode
-    ? `Hi ${firstName}, your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement.`
+    ? `${proposalFallbackIntro(firstName)} ${PROPOSAL_NEXT_STEP_SUMMARY}`
     : `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
   const html = wrapEmail({
     preheader: proposalMode
-      ? 'Your Waves commercial proposal is attached.'
+      ? 'Your proposal is attached. Here is how to get started.'
       : (priceLine && priceLine.startsWith('$') ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
     heading,
     intro,
     ctaHref: viewUrl,
-    ctaLabel: proposalMode ? 'View Proposal Details' : 'View Your Estimate',
+    ctaLabel: proposalMode ? 'View your proposal' : 'View Your Estimate',
+    ...(proposalMode ? { footerNote: PROPOSAL_FALLBACK_NOTE } : {}),
   });
   const text = plainText(proposalMode ? [
-    `Hi ${firstName},`,
+    proposalFallbackIntro(firstName),
     '',
-    'Your formal commercial proposal is attached as a PDF.',
-    'There is no online checkout for a commercial bid — your Waves account manager will follow up to finalize the agreement.',
+    PROPOSAL_NEXT_STEP_SUMMARY,
     '',
-    `Proposal details: ${viewUrl}`,
+    `View your proposal: ${viewUrl}`,
     '',
-    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+    PROPOSAL_FALLBACK_NOTE,
     '- Waves Pest Control',
   ] : [
     `Hi ${firstName},`,
@@ -882,7 +887,7 @@ function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode }) {
     `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     '- Waves Pest Control',
   ]);
-  return { subject: 'Your Waves Pest Control Estimate is Ready', html, text };
+  return { subject: proposalMode ? 'Your pest control proposal from Waves' : 'Your Waves Pest Control Estimate is Ready', html, text };
 }
 
 function estimateEmailPriceLine(estimate) {
@@ -6106,6 +6111,7 @@ router.delete('/:id', async (req, res, next) => {
 // not a standing route.
 
 router._internals = {
+  estimateSmtpContent,
   perApplicationLinesForRow,
   perApplicationByEstimateId,
   acceptanceRecordIdSet,

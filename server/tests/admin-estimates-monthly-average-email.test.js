@@ -68,7 +68,7 @@ const db = require('../models/db');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 
-const { moneySummary, estimateEmailPayload } = router._internals;
+const { moneySummary, estimateEmailPayload, estimateSmtpContent } = router._internals;
 const { emailAverageParts } = require('../services/estimate-monthly-average');
 
 const DEFAULT_NEXT = 'When you are ready, open the estimate and accept it online. We will collect the final setup details after that.';
@@ -211,6 +211,34 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     });
     expect(payload.price_summary).toBe('$2361.00/mo');
     expect(payload.next_step_summary).not.toContain('Averaged');
+  });
+
+  // Owner-approved 2026-10-24: the proposal email says how to get started, not that there is no checkout.
+  test('a commercial proposal payload carries the approved next-step sentence and no "no online checkout" text', () => {
+    const payload = estimateEmailPayload({ estimate: pestEstimate, firstName: 'Pat', viewUrl: 'u', priceLine: '$2361.00/mo', proposalMode: true });
+    expect(payload.next_step_summary).toBe('To get started, reply to this email or call us at (941) 297-5749. We will confirm your start date and send your service agreement to sign.');
+    expect(JSON.stringify(payload)).not.toMatch(/online checkout/i);
+  });
+
+  // The SMTP fallback (SendGrid not configured) says the same as the approved estimate.proposal_delivery email.
+  test('the proposal SMTP fallback carries the approved intro, next step, button and note, and no "online checkout" text', () => {
+    const { subject, html, text } = estimateSmtpContent({ firstName: 'Pat', viewUrl: 'https://example.test/estimate/x', priceLine: '$2361.00/mo', proposalMode: true });
+    const INTRO = 'Hi Pat, thank you for calling Waves Pest Control. Your proposal is attached as a PDF, and you can also open it online.';
+    const NEXT = 'To get started, reply to this email or call us at (941) 297-5749. We will confirm your start date and send your service agreement to sign.';
+    const NOTE = 'Questions? Reply to this email or call (941) 297-5749.';
+    expect(text).toContain(INTRO);
+    expect(text).toContain(NEXT);
+    expect(text).toContain(NOTE);
+    expect(text).toContain('View your proposal: https://example.test/estimate/x');
+    expect(html).toContain(INTRO);
+    expect(html).toContain(NEXT);
+    expect(html).toContain(NOTE);
+    expect(html).toContain('View your proposal');
+    expect(subject).toBe('Your pest control proposal from Waves');
+    for (const body of [subject, html, text]) expect(body).not.toMatch(/online checkout|account manager will follow up/i);
+    // The estimate (non-proposal) fallback is untouched.
+    const estimate = estimateSmtpContent({ firstName: 'Pat', viewUrl: 'u', proposalMode: false });
+    expect(estimate.text).toContain('Your customized service estimate is ready for review.');
   });
 
   test('a stored total that no longer matches the lines withholds the average', async () => {

@@ -11,6 +11,7 @@ import ProposalBidForm from '../../components/estimates/ProposalBidForm';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
 import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
 import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
+import { AGREEMENT_TERMS } from '@commercial-agreement-terms';
 import { formatETDateTime } from '../../lib/timezone';
 
 // Commercial proposal builder — the full-page surface for authoring the
@@ -78,6 +79,24 @@ function taxAutofillPct({ locked, operatorEdited, currentPct, anyTaxable, sugges
   const rate = Number(suggestedRate);
   if (!Number.isFinite(rate) || rate <= 0) return null;
   return String(roundMoney(rate * 10000) / 100);
+}
+
+// Prefill for the structured terms (owner 2026-10-24). A proposal that never had terms starts with the agreement's own
+// texts (shared/commercial-agreement-terms.cjs, the same constants online signing checks against), so the operator edits
+// from the standard instead of typing it. Net 30 only on a Bill-by-invoice proposal: the server rejects a payment term
+// on any other (the select stays "Not set"). Returns null when the proposal is locked or ANY term is already authored.
+const TERM_FIELDS = ['paymentTerms', 'initialTermMonths', 'renewal', 'priceAdjustment', 'cancellation', 'accessRequirements'];
+function commercialTermsPrefill({ locked, saved, billByInvoice }) {
+  if (locked) return null;
+  if (TERM_FIELDS.some((key) => saved?.[key] != null && saved[key] !== '')) return null;
+  return {
+    paymentTerms: billByInvoice ? AGREEMENT_TERMS.paymentTerms : '',
+    initialTermMonths: String(AGREEMENT_TERMS.initialTermMonths),
+    renewal: AGREEMENT_TERMS.renewal,
+    priceAdjustment: AGREEMENT_TERMS.priceAdjustment,
+    cancellation: AGREEMENT_TERMS.cancellation,
+    accessRequirements: '',
+  };
 }
 
 const lineAmount = proposalLineAmount;
@@ -225,6 +244,8 @@ function CommercialProposalEditor() {
   const [suggestedTaxRate, setSuggestedTaxRate] = useState(null);
   const [taxAutoFilled, setTaxAutoFilled] = useState(false);
   const taxOperatorEditedRef = React.useRef(false);
+  // The estimate whose terms prefill already ran (first load only; see applyLoaded).
+  const termsPrefilledForRef = React.useRef(null);
   const [terms, setTerms] = useState('');
   const [validThrough, setValidThrough] = useState('');
   const [projectCosting, setProjectCosting] = useState({ revenueYears: 1, rows: [] });
@@ -379,7 +400,12 @@ function CommercialProposalEditor() {
       includesText: (w.includes || []).join('\n'),
     })));
     setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));
-    setCommercialTerms({
+    // Prefill only on the first load of an estimate: a reload after Save must not put back terms the operator cleared.
+    const prefill = est && termsPrefilledForRef.current !== est.id
+      ? commercialTermsPrefill({ locked: lockReason(est), saved: p.commercialTerms, billByInvoice: !!est.billByInvoice })
+      : null;
+    if (est) termsPrefilledForRef.current = est.id;
+    setCommercialTerms(prefill || {
       paymentTerms: p.commercialTerms?.paymentTerms || '',
       initialTermMonths: p.commercialTerms?.initialTermMonths != null ? String(p.commercialTerms.initialTermMonths) : '',
       renewal: p.commercialTerms?.renewal || '',
@@ -395,7 +421,8 @@ function CommercialProposalEditor() {
     buildingsEditedRef.current = false;
     persistedBuildingsRef.current = p.enabled === true && p.synthesized !== true
       && (p.buildings || []).some((b) => (b.lineItems || []).length > 0);
-    setDirty(false);
+    // Dirty only when the prefill actually filled: the terms are not saved until the operator saves.
+    setDirty(prefill !== null);
   }, []);
 
   const reload = useCallback(() => {

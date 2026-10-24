@@ -87,14 +87,17 @@ describe('estimate PDF Before you book page', () => {
     expect(extractPdfText(await render(fixture('byb-c3', [], [{ name: 'Rodent Trapping' }])))).not.toContain(PHRASE.contract);
   });
 
-  test('a commercial or unknown-category estimate never prints the no-contract line, only the neutral agreement line', async () => {
+  test('a commercial or unknown-category estimate never prints the no-contract line; without an authored proposal it prints the neutral agreement line', async () => {
     const NEUTRAL = 'follow the agreement you sign';
-    // Single building, recurring pest, but category COMMERCIAL: the case a building count would miss.
+    // Single building, recurring pest, but category COMMERCIAL and no authored proposal: the case a building count would
+    // miss. It keeps the current page (owner 2026-10-24: only an authored proposal reads the commercial page).
     const commercial = { ...fixture('byb-com1', [pest]), category: 'COMMERCIAL' };
     const commercialText = extractPdfText(await render(commercial));
     expect(commercialText).not.toContain(PHRASE.contract);
     expect(commercialText).not.toContain('first visit includes an inside spray');
     expect(commercialText).toContain(NEUTRAL);
+    expect(commercialText).toContain('Before you book');
+    expect(commercialText).not.toContain('Before you start service');
     // No category at all: unknown fails closed.
     const unknown = { ...fixture('byb-com2', [pest]), category: undefined };
     const unknownText = extractPdfText(await render(unknown));
@@ -103,7 +106,9 @@ describe('estimate PDF Before you book page', () => {
     // An authored (enabled) commercial proposal on a RESIDENTIAL-labelled row.
     const authored = fixture('byb-com3', [pest]);
     authored.estimate_data.proposal = { enabled: true, buildings: [{ name: 'Site', lineItems: [{ description: 'Pest Control', unitPrice: 100, frequency: 'monthly' }] }] };
-    expect(extractPdfText(await render(authored))).not.toContain(PHRASE.contract);
+    const authoredText = extractPdfText(await render(authored));
+    expect(authoredText).not.toContain(PHRASE.contract);
+    expect(authoredText).toContain('Before you start service');
     // Known residential keeps the claim and drops the neutral line.
     const residentialText = extractPdfText(await render(fixture('byb-res', [pest])));
     expect(residentialText).toContain(PHRASE.contract);
@@ -282,5 +287,148 @@ describe('Before you book trim and payload block', () => {
     const block = beforeYouBookBlock(est).beforeYouBook;
     expect(block.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
     expect(block.sections.every((s) => s.lines.every((l) => typeof l === 'string'))).toBe(true);
+  });
+});
+
+// Owner 2026-10-24: a KNOWN commercial proposal reads "Before you start service"; residential is byte-identical.
+describe('Before you book: commercial page', () => {
+  const crypto = require('crypto');
+  const { beforeYouBookBlock, beforeYouBookForEstimate } = require('../services/estimate-before-you-book');
+  const { normalizeProposal } = require('../services/estimate-proposal');
+  const sha = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+  const SCHEDULING = [
+    'We set your service day and time with you, around your business hours.',
+    'There is no deposit.',
+    "Your service agreement runs 12 months and renews each year. Either side can cancel with 30 days' written notice.",
+    'We can send a certificate of insurance and name your business as an additional insured on request.',
+  ];
+  const PEST = [
+    'For inside service, someone needs to let us in, or set up access with us ahead of time.',
+    'Some activity for up to two weeks after a treatment is normal, as pests are flushed out. If it has not slowed after two weeks, tell us.',
+    'Please keep people off treated areas until they are dry.',
+    'Before the first visit, tell us about sensitive areas: food handling, equipment, or staff with sensitivities.',
+  ];
+  const authored = (descriptions, extra = {}) => ({
+    ...fixture('byb-auth', []),
+    category: 'COMMERCIAL',
+    estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Site', lineItems: descriptions.map((description) => ({ description, unitPrice: 100, frequency: 'monthly' })) }], ...extra } },
+  });
+  const pageOf = (estimate) => beforeYouBookForEstimate(estimate, normalizeProposal(estimate));
+  const textsOf = (page) => page.sections.map((section) => ({ key: section.key, heading: section.heading, lines: section.lines.map((line) => line.text) }));
+
+  test('the 12-month agreement line prints only while the proposal terms agree with the agreement (blank or aligned)', () => {
+    const AGREEMENT_LINE = SCHEDULING[2];
+    const linesOf = (estimate) => textsOf(pageOf(estimate)).find((section) => section.key === 'scheduling').lines;
+    // Blank terms: the agreement governs.
+    expect(linesOf(authored(['Monthly pest service']))).toContain(AGREEMENT_LINE);
+    // Aligned terms (payment term set aside): still prints.
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { initialTermMonths: 12 } }))).toContain(AGREEMENT_LINE);
+    // Authored custom terms: the line drops so the document does not contradict itself.
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { initialTermMonths: 24 } }))).not.toContain(AGREEMENT_LINE);
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { cancellation: 'Cancel any time.' } }))).not.toContain(AGREEMENT_LINE);
+    // The rest of the scheduling section stays.
+    expect(linesOf(authored(['Monthly pest service'], { commercialTerms: { initialTermMonths: 24 } }))).toEqual(SCHEDULING.filter((line) => line !== AGREEMENT_LINE));
+  });
+
+  test('residential output is byte-identical to the page before this change (hash of the original build)', () => {
+    // sha256 of JSON.stringify(buildBeforeYouBook(signals, { phone: '(941) 555-0100' })) on origin/main before the commercial page.
+    const phone = { phone: '(941) 555-0100' };
+    expect(sha(buildBeforeYouBook({ planTerms: true }, phone))).toBe('54326bc1f28b7e713fb8b3cbe284b85daddf91b14b87d662057c5b3b56951461');
+    expect(sha(buildBeforeYouBook({ planTerms: false }, phone))).toBe('f6514f9f8c27b27b3895e2ae6e050d786772a1911a9e7e88424ebd094d0dee70');
+    // A known residential estimate still reads the residential page end to end.
+    const residential = pageOf(fixture('byb-res-same', [pest, lawn]));
+    expect(residential.title).toBe('Before you book');
+    expect(residential.sections.map((s) => s.key)).toEqual(['scheduling', 'pest', 'lawn', 'termite', 'rodent']);
+    expect(residential.closing.text).toMatch(/^Questions before you book\?/);
+  });
+
+  test('a commercial pest-only proposal prints exactly the approved strings', () => {
+    const page = pageOf(authored(['Commercial pest control, monthly service']));
+    expect(page.title).toBe('Before you start service');
+    expect(page.closing).toBeNull();
+    expect(textsOf(page)).toEqual([
+      { key: 'scheduling', heading: 'Scheduling and paying', lines: SCHEDULING },
+      { key: 'pest', heading: 'If your service includes pest control', lines: PEST },
+    ]);
+  });
+
+  test('only an enabled authored proposal reads the commercial page; auto-priced commercial and unknown categories keep the current page byte-identical', () => {
+    const current = sha(buildBeforeYouBook({ planTerms: false }, { phone: '(941) 297-5749' }));
+    for (const category of ['COMMERCIAL', undefined, null, '', 'LAWN']) {
+      const estimate = { ...fixture('byb-unk', [pest]), category };
+      const page = pageOf(estimate);
+      expect(page.title).toBe('Before you book');
+      expect(sha(page)).toBe(current);
+    }
+    // The commercial category with a proposal that is not enabled (the synthesized, auto-priced shape) is the same page.
+    const autoPriced = { ...authored(['Commercial pest control']), estimate_data: { proposal: { enabled: false, buildings: [{ name: 'Site', lineItems: [{ description: 'Commercial pest control', unitPrice: 100, frequency: 'monthly' }] }] } } };
+    expect(sha(pageOf(autoPriced))).toBe(current);
+    // An enabled authored proposal reads the commercial page whatever the row's category label says.
+    for (const category of ['COMMERCIAL', 'RESIDENTIAL', undefined]) {
+      expect(pageOf({ ...authored(['Commercial pest control']), category }).title).toBe('Before you start service');
+    }
+  });
+
+  test('termite, rodent and lawn sections print only when the proposal includes that service', () => {
+    const keys = (descriptions, extra) => pageOf(authored(descriptions, extra)).sections.map((s) => s.key);
+    expect(keys(['Commercial pest control'])).toEqual(['scheduling', 'pest']);
+    expect(keys(['Commercial pest control', 'Monthly rate adjustment for the tenant'])).toEqual(['scheduling', 'pest']);
+    expect(keys(['Commercial pest control', 'Lawn fertilization and weed control'])).toEqual(['scheduling', 'pest', 'lawn']);
+    expect(keys(['Commercial pest control', 'Termite bait monitoring'])).toEqual(['scheduling', 'pest', 'termite']);
+    expect(keys(['Commercial pest control', 'Rodent bait stations'])).toEqual(['scheduling', 'pest', 'rodent']);
+    // A service program carries its family directly.
+    expect(keys([], { programs: [{ service: 'termite', label: 'Program', frequencyPerYear: 4, pricePerApplication: 100 }], buildings: [] })).toEqual(['scheduling', 'termite']);
+    // Nothing printed that names a family: no lawn, termite or rodent section, and the pest default prints.
+    expect(keys([])).toEqual(['scheduling', 'pest']);
+    expect(keys(['Monthly service'])).toEqual(['scheduling', 'pest']);
+  });
+
+  test('the pest section prints when pest work is named or no family is detected; lawn-only, termite-only and rodent-only proposals do not get it', () => {
+    const keys = (descriptions) => pageOf(authored(descriptions)).sections.map((s) => s.key);
+    expect(keys(['Lawn fertilization and weed control'])).toEqual(['scheduling', 'lawn']);
+    expect(keys(['Termite bait monitoring'])).toEqual(['scheduling', 'termite']);
+    expect(keys(['Rodent bait stations'])).toEqual(['scheduling', 'rodent']);
+    expect(keys(['General pest control', 'Lawn care'])).toEqual(['scheduling', 'pest', 'lawn']);
+    expect(keys(['Quarterly roach and ant service'])).toEqual(['scheduling', 'pest']);
+    expect(keys(['Mosquito reduction'])).toEqual(['scheduling']);
+    // A pest program row by family key, and a lawn-only program row.
+    const program = (service) => ({ programs: [{ service, label: 'Program', frequencyPerYear: 4, pricePerApplication: 100 }], buildings: [] });
+    expect(pageOf(authored([], program('pest'))).sections.map((s) => s.key)).toEqual(['scheduling', 'pest']);
+    expect(pageOf(authored([], program('lawn'))).sections.map((s) => s.key)).toEqual(['scheduling', 'lawn']);
+  });
+
+  test('a commercial page never prints the two-hour window, card saving, or the lanai and pool cage line', () => {
+    const all = authored(['Pest control', 'Lawn care', 'Termite monitoring', 'Rodent trapping']);
+    const text = JSON.stringify(pageOf(all));
+    expect(text).not.toMatch(/two-hour window|save your card|lanai|pool cage|Questions before you book|prepaid year|13649 Luxe/);
+  });
+
+  test('both renderers pick up the commercial page: the browser /data block and the pdfkit PDF', async () => {
+    const estimate = authored(['Commercial pest control']);
+    const block = beforeYouBookBlock(estimate, { open: true }).beforeYouBook;
+    expect(block.title).toBe('Before you start service');
+    expect(block.closing).toBeNull();
+    expect(block.sections.map((s) => s.lines)).toEqual([SCHEDULING, PEST]);
+    const pdfText = extractPdfText(await buildEstimateProposalPDFBuffer(estimate, { billsPerApplication: false }));
+    expect(pdfText).toContain('Before you start service');
+    expect(pdfText).toContain('There is no deposit.');
+    expect(pdfText).toContain('Please keep people off treated areas until they are dry.');
+    expect(pdfText).not.toContain('Before you book');
+  });
+
+  test('copy rules hold and trimByRank still works with the commercial ranks', () => {
+    const page = pageOf(authored(['Pest control', 'Lawn care', 'Termite monitoring', 'Rodent trapping']));
+    const { hasBannedCustomerCopy } = require('../services/sms-shadow-drafter');
+    for (const section of page.sections) for (const line of section.lines) {
+      expect([1, 2, 3, 4, 5]).toContain(line.rank);
+      expect(hasBannedCustomerCopy(line.text)).toBe(false);
+    }
+    const { trimByRank } = require('../services/estimate-before-you-book');
+    const fitted = trimByRank(page, { lineHeight: () => 10, headingH: 20, closingGap: 5, available: 120 });
+    const kept = fitted.sections.flatMap((s) => s.lines);
+    expect(kept.length).toBeLessThan(page.sections.flatMap((s) => s.lines).length);
+    expect(fitted.sections[0].lines[0].text).toBe(SCHEDULING[0]);
+    expect(fitted.closing).toBeNull();
   });
 });
