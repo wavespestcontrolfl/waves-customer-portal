@@ -16,11 +16,13 @@ jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n2', deduped: false })),
 }));
 jest.mock('../services/invoice-followups', () => ({ latePaymentCheckerRetiredLive: jest.fn(() => true) }));
+jest.mock('../services/workflows/balance-reminder', () => ({ latePaymentCheckRetired: jest.fn(async () => true) }));
 
 const gates = require('../config/feature-gates');
 const episodes = require('../services/admin-alert-episodes');
 const NotificationService = require('../services/notification-service');
 const InvoiceFollowUps = require('../services/invoice-followups');
+const BalanceReminder = require('../services/workflows/balance-reminder');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const Quiet = require('../services/quiet-overdue-invoices');
 
@@ -64,9 +66,8 @@ beforeEach(() => {
   gates.quietOverdueListLive.mockReturnValue(true);
   gates.alertEpisodesLive.mockReturnValue(true);
   InvoiceFollowUps.latePaymentCheckerRetiredLive.mockReturnValue(true);
-  process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+  BalanceReminder.latePaymentCheckRetired.mockResolvedValue(true);
 });
-afterAll(() => { delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF; });
 
 describe('which states are quiet', () => {
   test.each([
@@ -177,8 +178,10 @@ describe('runQuietOverdueList', () => {
     InvoiceFollowUps.latePaymentCheckerRetiredLive.mockReturnValue(false);
     await expect(Quiet.runQuietOverdueList({ now: NOW, database })).resolves.toEqual({ skipped: 'legacy_sender_live' });
     InvoiceFollowUps.latePaymentCheckerRetiredLive.mockReturnValue(true);
-    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'false';
+    BalanceReminder.latePaymentCheckRetired.mockResolvedValue(false);
     await expect(Quiet.runQuietOverdueList({ now: NOW, database })).resolves.toEqual({ skipped: 'legacy_sender_live' });
+    // Its own full retirement rule, read without its log lines.
+    expect(BalanceReminder.latePaymentCheckRetired).toHaveBeenCalledWith({ log: false });
     expect(database).not.toHaveBeenCalled();
     expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();

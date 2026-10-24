@@ -15,6 +15,7 @@ const { randomUUID } = require('crypto');
 
 // The legacy senders are retired in production; the run requires it.
 jest.mock('../services/invoice-followups', () => ({ latePaymentCheckerRetiredLive: () => true }));
+jest.mock('../services/workflows/balance-reminder', () => ({ latePaymentCheckRetired: async () => true }));
 
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
@@ -34,13 +35,11 @@ maybeDescribe('quiet overdue invoices bell (live Postgres)', () => {
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
-    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
     db = require('../models/db');
     Quiet = require('../services/quiet-overdue-invoices');
     NotificationService = require('../services/notification-service');
   });
   afterAll(async () => {
-    delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
     if (db) await rows().del();
   });
 

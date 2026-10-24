@@ -36,10 +36,10 @@
 // is still ahead (staff chose that wait).
 //
 // Only while both legacy senders are retired (late-payment-checker.js, and
-// balance-reminder.js's account late check): either one can still contact an
-// invoice with no sequence, a finished one or a stopped one, so "no overdue
-// reminder is scheduled" would not hold. Otherwise the run is skipped and the
-// standing row is left as it is.
+// balance-reminder.js's account late check, by its own full rule): either one
+// can still contact an invoice with no sequence, a finished one or a stopped
+// one, so "no overdue reminder is scheduled" would not hold. Otherwise the run
+// is skipped and the standing row is left as it is.
 //
 // GATE_QUIET_OVERDUE_LIST (strict 'true', read at call time). Off = the
 // weekday cron returns before any read.
@@ -270,11 +270,13 @@ async function closeList(database, dedupeKey) {
   });
 }
 
-// Both legacy senders retired: the late-payment checker (its own reader) and
-// the balance reminder's account late check (GATE_BALANCE_REMINDER_LEGACY_OFF).
-function legacySendersRetired() {
-  return require('./invoice-followups').latePaymentCheckerRetiredLive()
-    && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true';
+// Both legacy senders retired, each by its own rule: the late-payment checker
+// and the balance reminder's account late check (its full retirement test:
+// gate, ladder, orphan adoption, no legacy `unpaid` invoice, an unreadable
+// count reads as running).
+async function legacySendersRetired() {
+  if (!require('./invoice-followups').latePaymentCheckerRetiredLive()) return false;
+  return require('./workflows/balance-reminder').latePaymentCheckRetired({ log: false });
 }
 
 /**
@@ -286,7 +288,7 @@ function legacySendersRetired() {
  */
 async function runQuietOverdueList({ now = new Date(), database = db, gateEnabled, loadRows = candidatesQuery, dedupeKey = DEDUPE_KEY } = {}) {
   if (!(gateEnabled ?? quietOverdueListLive())) return { skipped: 'disabled' };
-  if (!legacySendersRetired()) return { skipped: 'legacy_sender_live' };
+  if (!(await legacySendersRetired())) return { skipped: 'legacy_sender_live' };
   const items = listItems(await loadRows(now, database), now);
   if (!items.length) {
     const closed = Number(await closeList(database, dedupeKey)) || 0;
