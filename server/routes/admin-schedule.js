@@ -2118,6 +2118,9 @@ async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceA
     }
     if (editedMoves) return;
   }
+  // The placement rule again, under the lock (dry audit round 13 P1): a service-only save judged "no refill to strand" before the
+  // transaction, and a refill another editor attached in between would otherwise ride the service change onto a non-plan visit.
+  await assertRefillPlacementOnEdit(trx, visitId, { updates, addonsPosted: Array.isArray(lines) });
   const priced = (lines || []).filter((line) => line.refillPricedForProperty !== undefined);
   if (!priced.length) return;
   const row = await trx('scheduled_services').where({ id: visitId }).first('property_id', 'service_key_snapshot', 'service_id');

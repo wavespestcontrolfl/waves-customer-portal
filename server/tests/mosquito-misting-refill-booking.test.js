@@ -414,6 +414,17 @@ describe('Update Details that moves the visit to another house never carries a r
         .resolves.toBeUndefined();
     });
 
+    test('a service-only save is judged again under the lock: a refill attached meanwhile stops the change away from the plan', async () => {
+      const away = { service_key_snapshot: 'pest_control' };
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: null, replaceAddons: undefined, updates: away }))
+        .rejects.toMatchObject({ status: 400, code: 'MISTING_REFILL_WRONG_PARENT' });
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [] }), VISIT, { addressPlan: null, replaceAddons: undefined, updates: away }))
+        .resolves.toBeUndefined();
+      // Lines posted: they decide, the stored rows are not consulted here.
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: null, replaceAddons: [{ serviceKey: 'pest_control' }], updates: away }))
+        .resolves.toBeUndefined();
+    });
+
     test('no priced refill line and no address change: no read at all', async () => {
       const trx = trxFor();
       await assertRefillPropertyCurrent(trx, VISIT, { addressPlan: null, replaceAddons: [{ serviceKey: 'pest_control' }, null] });
