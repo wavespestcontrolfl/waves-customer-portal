@@ -1504,7 +1504,7 @@ const TIPS = Object.freeze([
     yard: { irrigation: 'system' },
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-soil-moisture-sensor', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/wq142' }],
-    copy: "If your sprinklers run on a plain timer, a soil moisture sensor is worth asking your irrigation company about. UF/IFAS research found Florida homes saved 44 to 50 percent of their irrigation with one, without the landscape looking any worse.",
+    copy: "If your sprinklers run on a plain timer, a soil moisture sensor is worth asking your irrigation company about. UF/IFAS research found 44 to 50 percent irrigation savings with one, without the landscape looking any worse.",
   },
   {
     id: 'lawn_why_summer_ban', group: 'lawn', label: 'Why the summer fertilizer ban exists',
@@ -1513,7 +1513,7 @@ const TIPS = Object.freeze([
     yard: { county: ['Charlotte'] },
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-why-summer-ban', label: 'SWFWMD', url: 'https://www.swfwmd.state.fl.us/residents/water-101/fertilizer-restrictions-county' }, { fact: 'fact-tip-lawn-why-summer-ban', label: 'Charlotte County', url: 'https://charlottecountyfl.gov/one-charlotte-one-water/improving-water-quality/fertilizers-pesticides-irrigation.stml' }],
-    copy: "Heavy summer rain can wash fertilizer off lawns into the streets and on to local waters, SWFWMD says, and Charlotte County ties the extra nutrients to algae blooms and red tide in Charlotte Harbor.",
+    copy: "Heavy rain can wash fertilizer off lawns into the streets and on to local waters, SWFWMD says, and Charlotte County ties the extra nutrients to algae blooms and red tide in Charlotte Harbor.",
   },
   {
     id: 'lawn_weeds_fill_voids', group: 'lawn', label: 'Weeds fill a gap',
@@ -1521,7 +1521,7 @@ const TIPS = Object.freeze([
     findings: ['broadleaf_weeds', 'crabgrass', 'dollarweed', 'sedges'],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-weeds-fill-voids', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP141' }],
-    copy: "UF/IFAS puts it simply: weeds don't create a void, they fill one. Weeds follow a weak, thin lawn rather than cause it, so a thick lawn mowed at the right height goes a long way against them.",
+    copy: "UF/IFAS puts it simply: weeds don't create a void, they fill one. Weeds follow a weakened lawn rather than cause it, so a stronger lawn is more competitive against them.",
   },
   {
     id: 'lawn_mushrooms_after_rain', group: 'lawn', label: 'Mushrooms after rain',
@@ -1536,7 +1536,7 @@ const TIPS = Object.freeze([
     keywords: ['slime mold', 'crust', 'gray', 'powder'], lines: ['lawn'], season: 'wet',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-slime-mold', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/topics/slime_molds' }],
-    copy: "That gray or yellow crust on the grass after wet weather is slime mold. UF/IFAS says it's rarely harmful, and it disappears on its own once the weather changes.",
+    copy: "That crust on the grass after wet weather can be slime mold. UF/IFAS says it's rarely harmful, and it disappears on its own once the weather changes.",
   },
   {
     id: 'lawn_reclaimed_water', group: 'lawn', label: 'Reclaimed water carries nutrients',
@@ -1552,7 +1552,7 @@ const TIPS = Object.freeze([
     yard: { grass: ['st_augustine'] },
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-iron-yellowing', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH010' }],
-    copy: "Yellow St. Augustine on alkaline soil or high-pH water is often short on iron or manganese, UF/IFAS says, and a micronutrient application greens it up. The color boost is temporary.",
+    copy: "Yellow grass on alkaline soil or high-pH water can be short on iron or manganese, UF/IFAS says, and a micronutrient application greens it up. The color boost is temporary.",
   },
   {
     id: 'lawn_frost_wait', group: 'lawn', label: 'After a frost, wait for spring',
@@ -1577,7 +1577,7 @@ const TIPS = Object.freeze([
     yard: { irrigation: 'system' },
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-water-signs', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/LH025' }],
-    copy: "How to tell if your weekly watering was enough: blades folding in half lengthwise, a blue-gray tint, or footprints that stay visible all mean the lawn is thirsty. If you see them before your next watering day, that run isn't putting down enough.",
+    copy: "How to tell the lawn is thirsty: blades folding in half lengthwise, a blue-gray tint, or footprints that stay visible. UF/IFAS says those are the signs it's time to water.",
   },
   {
     id: 'lawn_seasonal_timer', group: 'lawn', label: 'Turn the timer down for the rainy season',
@@ -1612,7 +1612,7 @@ const TIPS = Object.freeze([
     findings: ['take_all'],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-take-all-weeks', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/LH079' }],
-    copy: "Take-all root rot works underground first. By the time yellow patches show, UF/IFAS says the fungus has been on the roots for at least two to three weeks, probably longer.",
+    copy: "Take-all root rot works underground first. By the time yellow patches show, UF/IFAS says the fungus has already been on the roots for weeks.",
   },
   {
     id: 'ts_palm_hurricane_cut', group: 'tree_shrub', label: 'Skip the hurricane cut',
@@ -1650,7 +1650,7 @@ const TIPS = Object.freeze([
     showMonths: [1, 2],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-ts-crape-myrtle-topping', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP399' }],
-    copy: "Skip topping the crape myrtle. UF/IFAS doesn't recommend it; if pruning is needed, it suggests tipping or pollarding instead, and notes heavy cuts can delay flowering by up to a month.",
+    copy: "Skip topping the crape myrtle. UF/IFAS doesn't recommend it; if pruning is needed, it suggests tipping or pollarding instead, and notes that topping or pollarding can delay flowering by up to a month.",
   },
   {
     id: 'ts_stakes_and_flare', group: 'tree_shrub', label: 'Stakes off in a year, flare above the soil',
@@ -1750,7 +1750,7 @@ const TIPS = Object.freeze([
     keywords: ['mosquitoes', 'neighbors', 'containers', 'nearby', 'breeding'], lines: ['mosquito'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-mq-few-blocks', label: 'CDC', url: 'https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html' }],
-    copy: "The mosquitoes biting you probably hatched close by. The CDC says these container mosquitoes only fly a few blocks in their lifetime, so tipping out water on your own property, and asking the neighbors to do the same, is where the difference gets made.",
+    copy: "The mosquitoes biting you probably hatched close by. The CDC says these mosquitoes only fly a few blocks in their lifetime, so tipping out water on your own property, and asking the neighbors to do the same, is where the difference gets made.",
   },
   {
     id: 'mq_daytime_biters', group: 'water', label: 'Bitten in the daytime?',
@@ -1793,7 +1793,7 @@ const TIPS = Object.freeze([
     services: ['german_roach', 'german_roach_initial', 'pest_initial_german_knockdown'],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-gr-egg-case', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN128' }],
-    copy: "A German roach carries her egg case until just before it hatches, and UF/IFAS says a typical case holds 30 to 40 eggs. That's why one roach riding in on a grocery bag can start a problem.",
+    copy: "A German roach carries her egg case until just before it hatches, and UF/IFAS says a typical case holds 30 to 40 eggs.",
   },
   {
     id: 'bb_not_dirt', group: 'bed_bugs', label: "Bed bugs aren't about dirt",
@@ -1815,7 +1815,7 @@ const TIPS = Object.freeze([
     keywords: ['tick', 'dog', 'indoors', 'brown dog tick', 'walls'], lines: ['pest'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-tick-brown-dog-indoors', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/IN378' }],
-    copy: "Unlike most ticks, the brown dog tick can live its whole life indoors. UF/IFAS says the first sign is often ticks crawling up walls or curtains, and each stage can go three to five months without feeding. Ask your vet about keeping your dog on a preventive.",
+    copy: "Unlike most ticks, the brown dog tick can live its whole life indoors. UF/IFAS says the first sign is often ticks crawling up walls or curtains, and each stage can go three to five months without feeding. Tell me if you see one.",
   },
   {
     id: 'bb_skip_home_remedies', group: 'bed_bugs', label: 'Skip the freezer and the thermostat',
@@ -1823,14 +1823,14 @@ const TIPS = Object.freeze([
     services: ['bed_bug_treatment'],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-bb-skip-home-remedies', label: 'EPA', url: 'https://www.epa.gov/bedbugs/do-it-yourself-bed-bug-control' }],
-    copy: "Two home remedies to skip. The EPA says many home freezers aren't cold enough to kill bed bugs, and that turning up the thermostat or running a space heater to kill them doesn't work. Leave the heat to the dryer and the treatment.",
+    copy: "Two home remedies to skip. The EPA says many home freezers aren't cold enough to kill bed bugs, and that turning up the thermostat or running a space heater to kill them doesn't work.",
   },
   {
     id: 'palmetto_bugs_weather', group: 'roaches', label: 'Why palmetto bugs come in',
     keywords: ['palmetto bug', 'american cockroach', 'storm', 'cold snap', 'big roach'], lines: ['pest'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-palmetto-bugs-weather', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN298' }],
-    copy: "The big palmetto bugs live outdoors. UF/IFAS says American cockroaches wander inside looking for food and water or to get away from extreme weather, so you may see more right after a storm or a cold snap.",
+    copy: "The big palmetto bugs live outdoors. UF/IFAS says American cockroaches wander inside looking for food and water or to get away from extreme weather, so you may see more around extreme weather.",
   },
 ]);
 
