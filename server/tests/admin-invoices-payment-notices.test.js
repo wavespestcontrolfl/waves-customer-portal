@@ -11,7 +11,10 @@
  *     closes it (processing → applied); a settlement failure hands it back
  *     to the queue as apply_failed;
  *   - refusals from the settlement path keep their status codes;
- *   - ignore is a CAS: parked → ignored, 409 otherwise, 404 when missing.
+ *   - ignore is a CAS: parked → ignored, 409 otherwise, 404 when missing;
+ *   - a bank-feed notice (GATE_ZELLE_BANK_RECONCILE) has no email to stamp
+ *     and settles only while the bank still lists its transaction;
+ *   - resolving a notice (apply or ignore) closes its review alert.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -40,6 +43,7 @@ jest.mock('../services/open-balance', () => ({
   openSelfPayInvoicesByAmountDue: jest.fn(async () => []),
   rowIsSelfPayDue: jest.fn(async () => true),
 }));
+jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: jest.fn(async () => 1) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -47,6 +51,7 @@ const { requireAdmin } = require('../middleware/admin-auth');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
 const OpenBalance = require('../services/open-balance');
+const { closeAdminAlertKeys } = require('../services/admin-alert-episodes');
 const router = require('../routes/admin-invoices');
 // The apply handler lazy-requires the reconciler on its first call. Loading its
 // module graph cold (~1 s idle, several under a parallel run) inside the first
@@ -87,7 +92,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   tables = {};
   db.mockImplementation((table) => {
-    if (['inbound_payment_notices', 'emails', 'invoices'].includes(table)) return builder(table);
+    if (['inbound_payment_notices', 'emails', 'invoices', 'bank_transactions'].includes(table)) return builder(table);
     throw new Error(`unexpected table ${table}`);
   });
 });
@@ -143,6 +148,36 @@ describe('POST /payment-notices/:id/apply', () => {
     expect(await recordManualPayment.mock.calls[0][1].settlementFence(fenceTrx)).toBe(false);
     expect(fenceTrx.where).toEqual({ id: 'notice-1', status: 'processing', claim_token: updates[0].claim_token });
     expect(tables.emails.calls.find(([m]) => m === 'update')[1]).toMatchObject({ auto_action: 'zelle_notice_applied:WPC-2026-0500' });
+    expect(closeAdminAlertKeys).toHaveBeenCalledWith(db, ['zelle-notice:notice-1'], 'zelle notice applied', { resolution: 'Recorded on WPC-2026-0500' });
+  });
+
+  const bankParked = (over = {}) => parked({ email_id: null, plaid_transaction_id: 'ptx-1', source: 'plaid_zelle', memo: null, ...over });
+
+  test('a bank-feed notice settles the same way, stamps no email and closes its review alert', async () => {
+    tables.inbound_payment_notices = { firsts: [bankParked()], selects: [], updates: [], calls: [] };
+    tables.bank_transactions = { firsts: [{ id: 'bt-1', suggestion: null }], selects: [], updates: [], calls: [] };
+    liveExact();
+    await withServer(async (call) => { expect((await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' })).status).toBe(200); });
+    expect(tables.bank_transactions.calls).toContainEqual(['where', { plaid_transaction_id: 'ptx-1' }]);
+    expect(recordManualPayment).toHaveBeenCalledWith('inv-1', expect.objectContaining({ method: 'zelle', reference: 'Pat Doe', note: '', sendReceipt: true, via: 'both', expectedAmountCents: 11700 }));
+    expect(tables.emails).toBeUndefined();
+    expect(closeAdminAlertKeys).toHaveBeenCalledWith(db, ['zelle-notice:notice-1'], 'zelle notice applied', { resolution: 'Recorded on WPC-2026-0500' });
+  });
+
+  test.each([
+    ['gone (plaid-sync deleted the open row)', null],
+    ['flagged withdrawn on a reviewed row', { id: 'bt-1', suggestion: { plaidRemoved: true } }],
+  ])('a bank-feed notice whose transaction the bank withdrew is refused before any claim: %s', async (_label, bankRow) => {
+    tables.inbound_payment_notices = { firsts: [bankParked()], selects: [], updates: [], calls: [] };
+    tables.bank_transactions = { firsts: [bankRow], selects: [], updates: [], calls: [] };
+    await withServer(async (call) => {
+      const r = await call('POST', '/payment-notices/notice-1/apply', { invoiceId: 'inv-1' });
+      expect(r.status).toBe(409);
+      expect(r.body.error).toMatch(/no longer lists this Zelle payment/);
+    });
+    expect(recordManualPayment).not.toHaveBeenCalled();
+    expect(OpenBalance.openSelfPayInvoicesByAmountDue).not.toHaveBeenCalled();
+    expect(tables.inbound_payment_notices.calls.some(([m]) => m === 'update')).toBe(false);
   });
 
   test('a stored candidate is NOT enough — the live exact-cent check decides (a ±$5 lead or a since-paid invoice is refused before any claim)', async () => {
@@ -292,5 +327,14 @@ describe('POST /payment-notices/:id/ignore', () => {
       expect((await call('POST', '/payment-notices/nope/ignore')).status).toBe(404);
     });
     expect(tables.inbound_payment_notices.calls[0]).toEqual(['where', { id: 'notice-1', status: 'parked' }]);
+    // Only the resolved notice closes its review alert.
+    expect(closeAdminAlertKeys).toHaveBeenCalledTimes(1);
+    expect(closeAdminAlertKeys).toHaveBeenCalledWith(db, ['zelle-notice:notice-1'], 'zelle notice ignored', { resolution: 'Ignored on the Invoices page' });
+  });
+
+  test('an alert close that fails never fails the resolution', async () => {
+    tables.inbound_payment_notices = { firsts: [], selects: [], updates: [1], calls: [] };
+    closeAdminAlertKeys.mockRejectedValueOnce(new Error('notifications table locked'));
+    await withServer(async (call) => { expect((await call('POST', '/payment-notices/notice-1/ignore')).body).toEqual({ ok: true }); });
   });
 });

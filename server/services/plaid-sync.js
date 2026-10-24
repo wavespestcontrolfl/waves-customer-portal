@@ -140,12 +140,16 @@ function mapTransaction(txn, account, { correction = false } = {}) {
   const failed = SKIP_RULES.find(([, fails]) => fails(ctx));
   if (failed) return { skip: failed[0] };
   const description = String(txn.name || txn.merchant_name || 'Plaid transaction').replace(/\s+/g, ' ').trim().slice(0, 500) || 'Plaid transaction';
+  // The bank's own wording (where Capital One names a Zelle payer); not a
+  // money field, so a change to it alone never rewrites a staged row.
+  const originalDescription = String(txn.original_description || '').replace(/\s+/g, ' ').trim().slice(0, 500) || null;
   return {
     row: {
       account_label: account ? account.account_label : null,
       account_type: account ? account.account_type : null,
       txn_date: txn.date,
       description,
+      original_description: originalDescription,
       amount: ctx.amount,
       direction: n > 0 ? 'debit' : 'credit',
       source: 'plaid',
@@ -747,6 +751,9 @@ async function supersedeUnmatchedRow(trx, rowId, values) {
     amount: values.amount,
     direction: values.direction,
     description: String(values.description).slice(0, 500),
+    // A parked correction the operator accepts (admin-tax.js) carries only the
+    // money fields: the row keeps the bank wording it had.
+    original_description: values.original_description !== undefined ? values.original_description : (old.original_description || null),
     suggestion: Object.keys(carried).length ? carried : null,
   }).returning(['id']);
   return row.id;

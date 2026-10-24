@@ -1,30 +1,47 @@
 /**
- * Zelle payment-notice reconciler (GATE_ZELLE_NOTICE_RECONCILE).
+ * Zelle payment reconciler — two sources, one decision table, one money path.
  *
- * A Capital One "Someone sent you money with Zelle" notice reaches contact@
- * through the owner's Gmail forwarding filter. The email sync calls
- * maybeHandleZelleNotice(email) as a DETERMINISTIC pre-classify step (money
- * never rides an LLM verdict). Decision order — hands-off rule (CLAUDE.md
- * 14): the one exact, corroborated match auto-applies silently with a full
- * audit trail; every exception parks for a human with the candidates it
- * found.
+ *   - Email notices (GATE_ZELLE_NOTICE_RECONCILE): a Capital One "Someone sent
+ *     you money with Zelle" notice reaches contact@ through the owner's Gmail
+ *     forwarding filter; the email sync calls maybeHandleZelleNotice(email) as
+ *     a DETERMINISTIC pre-classify step. (No notice ever arrived; the owner
+ *     dropped this route 2026-09-27 and the gate stays unset.)
+ *   - The Plaid bank feed (GATE_ZELLE_BANK_RECONCILE): the hourly Plaid sync
+ *     stages the account's posted transactions, then reconcileZelleBankFeed()
+ *     reads each new Zelle credit on a bank account ("Zelle money received
+ *     from <payer>", services/zelle-notice.js parseZelleBankPayer). The feed is
+ *     the trust — the row came from the bank through Plaid — and a bank line
+ *     carries no memo, so only the amount + name rule can auto-apply.
+ *
+ * Money never rides an LLM verdict. Decision order — hands-off rule
+ * (CLAUDE.md 14): the one exact, corroborated match auto-applies silently with
+ * a full audit trail; every exception parks for a human with the candidates
+ * it found.
  *
  *   1. gate off                         → false (nothing read, email flows as today)
+ *                                         / the bank feed is not scanned
  *   2. not a notice (marker text)       → false
  *      initial-sync history (backfill)  → false (old notices are never a live
  *                                         money signal against today's invoices)
- *   3. untrusted sender                 → parked `sender_unverified`, return FALSE
+ *      bank feed: only credits dated in the last 14 days and no earlier than
+ *      2 days before the account was linked are read, so the first sync's
+ *      history never becomes a notice
+ *   3. untrusted sender (email only)    → parked `sender_unverified`, return FALSE
  *                                         (normal classification / spam handling still runs)
- *   4. template not parseable           → parked `parse_failed`
+ *   4. template not parseable           → parked `parse_failed` (bank feed: the line
+ *                                         names no payer; the amount still lists candidates)
  *   5. same payer + amount applied <14d → parked `possible_duplicate`
  *      (re-checked right before settlement; one invoice takes one notice —
- *      partial UNIQUE index — so two copies of one transfer never both settle);
+ *      partial UNIQUE index — so two copies of one transfer never both settle,
+ *      whichever source each copy came from);
  *      the matched customer already has a Zelle-paid invoice at these cents
  *      <14d (the operator recorded the transfer by hand before the sync saw
- *      the notice)               → parked `possible_duplicate`
- *      notice older than 48h when first decided (a sync outage, an expired
- *      Gmail history cursor)      → parked `stale_notice` — never auto-settled
- *                                   against today's invoices
+ *      it)                         → parked `possible_duplicate`
+ *      too old when first decided (email: received more than 48h ago — a sync
+ *      outage, an expired Gmail history cursor; bank feed: posted on a day
+ *      that began more than 72h ago — the feed carries the posting DAY, and
+ *      Plaid can deliver a day or more late) → parked `stale_notice` — never
+ *      auto-settled against today's invoices
  *   6. exact-cent open self-pay invoices (services/open-balance.js):
  *        memo carries exactly one of them → apply (memo_invoice_number)
  *        memo carries several of them     → parked `multiple_matches` (never
@@ -38,15 +55,24 @@
  *      (owner ruling 2026-09-02, recorded on the gate). A refusal (PI in
  *      flight, lost race, …) parks `apply_failed` with the reason.
  *
- * At-most-once: the inbound_payment_notices row is claimed FIRST (email_id
- * UNIQUE, status 'processing', a fresh claim_token) and only the claimant
- * decides; a second sync of the same message can never apply twice. Every
- * settle / close / park update requires the claim_token, so a worker whose
- * claim was swept and RECLAIMED by the operator can never consume the new
- * claim. The notice row + emails.
- * auto_action stamp + the payments ledger row from recordManualPayment are
- * the audit trail. Silent on success (category 'payment' is bell-silent by
- * default); a parked notice raises the same silent feed row for the owner.
+ * At-most-once: the inbound_payment_notices row is claimed FIRST (email_id or
+ * plaid_transaction_id UNIQUE, status 'processing', a fresh claim_token) and
+ * only the claimant decides; a second sync of the same message or transaction
+ * can never apply twice. A bank row whose claim insert failed has no notice,
+ * so the next hourly pass reads it again; a claim left `processing` is
+ * parked by the stale sweep. Every settle / close / park update requires the
+ * claim_token, so a worker whose claim was swept and RECLAIMED by the
+ * operator can never consume the new claim. The notice row + (email) the
+ * emails.auto_action stamp + the payments ledger row from recordManualPayment
+ * are the audit trail.
+ *
+ * Alerts (docs/admin-notifications.md): a parked notice is a needs-you Billing
+ * row, one per notice, closed by the Invoices-page Apply / Ignore. A bank-feed
+ * notice with no candidate invoice at all is FYI: a mixed personal account's
+ * transfers would otherwise ring every time; it waits on the Invoices page
+ * card. An auto-applied notice is good news — FYI, no row; the notice, the
+ * invoice and the payments ledger are the record — unless its receipt
+ * outcome is unknown, which is a needs-you row.
  */
 const { randomUUID } = require('crypto');
 const db = require('../models/db');
@@ -54,12 +80,18 @@ const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const {
   isZelleNoticeCandidate, noticeText, parseZelleNotice, memoInvoiceNumbers, isTrustedZelleSender,
+  bankZelleText, isZelleBankCredit, parseZelleBankPayer,
 } = require('./zelle-notice');
 const { normalizeNamePart, payerNameCorroborates } = require('../utils/name-match');
 const { openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, MAX_AMOUNT_CANDIDATES } = require('./open-balance');
 const { invoiceAmountDue } = require('./invoice-helpers');
+const { raiseAdminAlert } = require('./admin-alert-compose');
+const { fitAction } = require('./admin-alert-names');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
 const RECORDED_BY = 'zelle-notice-reconciler';
+const EMAIL_SOURCE = 'capitalone_zelle';
+const BANK_SOURCE = 'plaid_zelle';
 // emails.auto_action value the sync hook writes when the reconciler threw
 // before its claim row existed — the durable retry record (see
 // reofferMarkedEmails). Overwritten by the reconciler's own stamp.
@@ -68,6 +100,12 @@ const RETRY_BATCH = 25;
 const DUPLICATE_WINDOW_DAYS = 14;
 const STALE_NOTICE_MS = 48 * 60 * 60 * 1000;
 const NEAR_AMOUNT_TOLERANCE_CENTS = 500;
+const BANK_STALE_MS = 72 * 60 * 60 * 1000;
+const BANK_LOOKBACK_DAYS = 14;
+const BANK_LINK_GRACE_DAYS = 2;
+// Rows one hourly pass reads (Zelle credits in the 14-day window): a bound,
+// not a budget — a quiet business sees a handful.
+const BANK_SCAN_LIMIT = 500;
 
 // Same parser as the feature-gates registry entry (call-time, so unsetting
 // the Railway var is a live kill switch). Prod: explicit 'true' only.
@@ -75,6 +113,12 @@ function isZelleReconcileEnabled(env = process.env) {
   return env.NODE_ENV === 'production'
     ? gateEnvValue('GATE_ZELLE_NOTICE_RECONCILE')
     : env.GATE_ZELLE_NOTICE_RECONCILE !== 'false';
+}
+
+function isZelleBankReconcileEnabled(env = process.env) {
+  return env.NODE_ENV === 'production'
+    ? gateEnvValue('GATE_ZELLE_BANK_RECONCILE')
+    : env.GATE_ZELLE_BANK_RECONCILE !== 'false';
 }
 
 function customerName(row) {
@@ -117,7 +161,9 @@ async function buildCandidates(parsed, exactRows) {
   return [...exact, ...near];
 }
 
+// A bank-feed notice has no email row — nothing to stamp.
 async function stampEmail(emailId, autoAction) {
+  if (!emailId) return;
   await db('emails').where({ id: emailId }).update({
     auto_action: autoAction,
     classification: 'other',
@@ -125,21 +171,107 @@ async function stampEmail(emailId, autoAction) {
   }).catch((err) => logger.warn(`[zelle-notice] auto_action stamp failed for ${emailId}: ${err.message}`));
 }
 
-// `needsReview`: a PARKED notice is an exception the owner must act on, so
-// its feed row defaults ON under the admin bell policy (bellDefault — the
-// owner's saved 'payment' override still silences it); the applied FYI keeps
-// the policy default (silent).
-async function notifyOwner(title, body, noticeId, { needsReview = false } = {}) {
-  try {
-    const NotificationService = require('./notification-service');
-    await NotificationService.notifyAdmin('payment', title, body, {
+// ── Admin alerts (docs/admin-notifications.md) ─────────────────────────────
+
+const usd = (cents) => `$${(cents / 100).toFixed(2)}`;
+const noticeAmount = (notice) => (notice.amount_cents != null ? usd(notice.amount_cents) : null);
+// One alert per notice; the Apply / Ignore routes close it by this key.
+const noticeAlertKey = (noticeId) => `zelle-notice:${noticeId}`;
+
+// "review Pat Doe's $117.00 Zelle": the payer and the amount lead the
+// headline; fitAction keeps a long payer name inside the 60 characters.
+function zelleAction(notice, verb) {
+  const amount = noticeAmount(notice);
+  if (!notice.payer_name) return amount ? `${verb} a ${amount} Zelle payment` : `${verb} a Zelle payment`;
+  return fitAction('Billing', notice.payer_name, [
+    ...(amount ? [(name) => `${verb} ${name}'s ${amount} Zelle`] : []),
+    (name) => `${verb} ${name}'s Zelle`,
+  ]);
+}
+
+const PARK_WHY = {
+  no_match: (amount) => `No open invoice is ${amount}, so the portal did not record it.`,
+  multiple_matches: (amount) => `More than one open invoice could be ${amount}, so the portal did not pick one.`,
+  name_mismatch: (amount) => `An open invoice is ${amount}, but its customer name does not match the payer.`,
+  possible_duplicate: (amount) => `A Zelle for ${amount} from this payer was already recorded in the last 14 days.`,
+  sender_unverified: () => 'The email did not prove it came from Capital One.',
+  parse_failed: (amount, notice) => (notice.source === BANK_SOURCE
+    ? 'The bank line does not say who sent it.'
+    : 'The portal could not read the payer and the amount in the email.'),
+  apply_failed: () => 'Recording it on the invoice failed, and the Invoices page shows why.',
+  stale_notice: () => 'It reached the portal too late to be recorded on its own.',
+};
+
+// Pure: the alert for a parked notice, or null when it is FYI (a bank-feed
+// transfer with no open invoice anywhere near its amount is most likely not a
+// customer payment — it waits on the Invoices page card without ringing).
+function parkedAlert(notice, reason, { candidates = null, applyError = null, why = null } = {}) {
+  const bank = notice.source === BANK_SOURCE;
+  if (bank && !(candidates && candidates.length) && (reason === 'no_match' || reason === 'parse_failed')) return null;
+  return {
+    spec: {
+      area: 'Billing',
+      action: zelleAction(notice, 'review'),
+      why: why || (PARK_WHY[reason] || PARK_WHY.apply_failed)(noticeAmount(notice) || 'this amount', notice),
+      severity: 'needs-you',
       link: '/admin/invoices',
-      dedupeKey: `zelle-notice:${noticeId}`,
-      metadata: { noticeId },
-      ...(needsReview ? { bellDefault: true } : {}),
-    });
+      subject: { type: 'check', id: String(notice.id) },
+      doneWhen: 'zelle_notice_resolved',
+      who: 'person',
+    },
+    opts: {
+      dedupeKey: noticeAlertKey(notice.id),
+      // A parked notice is an exception the owner must act on: it rings under
+      // the admin bell policy unless the owner's saved 'payment' override
+      // silences it.
+      bellDefault: true,
+      metadata: { noticeId: notice.id },
+      detail: [applyError && `Reason: ${applyError}`, bank ? 'Source: the bank feed.' : 'Source: a Capital One email.'].filter(Boolean).join(' '),
+    },
+  };
+}
+
+// Pure: settled, but whether the receipt went out is unknown.
+function receiptCheckAlert(notice, invoice) {
+  return {
+    spec: {
+      area: 'Billing',
+      action: zelleAction(notice, 'check the receipt for'),
+      why: `It was recorded on ${invoice.invoice_number || 'the invoice'}, but the portal could not confirm the receipt went out.`,
+      severity: 'needs-you',
+      link: `/admin/invoices?invoice=${invoice.id}`,
+      subject: { type: 'invoice', id: String(invoice.id) },
+      doneWhen: 'receipt_checked',
+      who: 'person',
+    },
+    opts: { dedupeKey: `${noticeAlertKey(notice.id)}:receipt`, bellDefault: true, metadata: { noticeId: notice.id, invoiceId: invoice.id } },
+  };
+}
+
+// Pure: a late settlement landed after the operator reclaimed the notice.
+function lateSettlementAlert(notice, invoice) {
+  return {
+    spec: {
+      area: 'Billing',
+      action: zelleAction(notice, 'check'),
+      why: `It was recorded on ${invoice.invoice_number || 'an invoice'} after someone reopened it, so check it was not recorded twice.`,
+      severity: 'needs-you',
+      link: `/admin/invoices?invoice=${invoice.id}`,
+      subject: { type: 'invoice', id: String(invoice.id) },
+      doneWhen: 'double_record_checked',
+      who: 'person',
+    },
+    opts: { dedupeKey: `${noticeAlertKey(notice.id)}:late`, bellDefault: true, metadata: { noticeId: notice.id, invoiceId: invoice.id } },
+  };
+}
+
+// An alert must never break the money path it reports on.
+async function raise(alert, noticeId) {
+  if (!alert) return;
+  try {
+    await raiseAdminAlert('payment', alert.spec, alert.opts);
   } catch (err) {
-    logger.warn(`[zelle-notice] owner notification failed for ${noticeId}: ${err.message}`);
+    logger.warn(`[zelle-notice] owner alert failed for ${noticeId}: ${err.message}`);
   }
 }
 
@@ -157,18 +289,14 @@ async function finishParked(notice, email, reason, { candidates = null, applyErr
   if (!moved) {
     // Our claim is gone (swept, or reclaimed and decided by someone else):
     // the row's current owner wrote the outcome — never overwrite their
-    // email stamp or raise a false review bell.
+    // email stamp or raise a false review alert.
     logger.warn(`[zelle-notice] notice ${notice.id}: park (${reason}) skipped — the claim is no longer ours`);
     return { status: 'lost_claim', reason };
   }
-  await stampEmail(email.id, `zelle_notice_parked:${reason}`);
-  const amount = notice.amount_cents != null ? ` $${(notice.amount_cents / 100).toFixed(2)}` : '';
-  await notifyOwner(
-    'Zelle payment needs review',
-    `${notice.payer_name || 'Unknown payer'} sent${amount} — ${reason.replace(/_/g, ' ')}${applyError ? `: ${applyError}` : ''}`,
-    notice.id,
-    { needsReview: true },
-  );
+  await stampEmail(email?.id, `zelle_notice_parked:${reason}`);
+  const alert = parkedAlert(notice, reason, { candidates, applyError });
+  if (!alert) logger.info(`[zelle-notice] notice ${notice.id} parked ${reason} with no candidate invoice — listed on the Invoices page, no alert`);
+  await raise(alert, notice.id);
   return { status: 'parked', reason };
 }
 
@@ -204,23 +332,18 @@ async function finishApplied(notice, email, invoice, matchMethod, receipt) {
       });
     } else {
       logger.error(`[zelle-notice] notice ${notice.id} was RECLAIMED (${current?.status || 'gone'}) before ${invoice.invoice_number}'s late settlement closed — leaving the new claim alone`);
-      await stampEmail(email.id, `zelle_notice_applied:${invoice.invoice_number}`);
-      await notifyOwner(
-        'Zelle payment needs review',
-        `${notice.payer_name} · $${(notice.amount_cents / 100).toFixed(2)} settled ${invoice.invoice_number} in a late sync AFTER the notice was reclaimed — verify the notice was not applied to a second invoice`,
-        `${notice.id}:late`,
-        { needsReview: true },
-      );
+      await stampEmail(email?.id, `zelle_notice_applied:${invoice.invoice_number}`);
+      await raise(lateSettlementAlert(notice, invoice), notice.id);
       return { status: 'auto_applied', invoiceNumber: invoice.invoice_number, reclaimed: true };
     }
   }
-  await stampEmail(email.id, `zelle_notice_applied:${invoice.invoice_number}`);
-  const legs = receipt === null ? 'unknown — check the invoice' : receipt?.queued ? 'queued on the receipt queue' : ([receipt?.email?.ok && 'email', receipt?.sms?.ok && 'sms'].filter(Boolean).join(' + ') || 'no receipt delivered');
-  await notifyOwner(
-    'Zelle payment applied',
-    `${notice.payer_name} · $${(notice.amount_cents / 100).toFixed(2)} → ${invoice.invoice_number} (${matchMethod.replace(/_/g, ' ')}; receipt: ${legs})`,
-    notice.id,
-  );
+  await stampEmail(email?.id, `zelle_notice_applied:${invoice.invoice_number}`);
+  if (receipt === null) {
+    await raise(receiptCheckAlert(notice, invoice), notice.id);
+  } else {
+    const legs = receipt?.queued ? 'queued on the receipt queue' : ([receipt?.email?.ok && 'email', receipt?.sms?.ok && 'sms'].filter(Boolean).join(' + ') || 'no receipt delivered');
+    logger.info(`[zelle-notice] notice ${notice.id} → ${invoice.invoice_number} (${matchMethod}; receipt: ${legs})`);
+  }
   return { status: 'auto_applied', invoiceNumber: invoice.invoice_number };
 }
 
@@ -231,7 +354,7 @@ async function claimNotice(email, parsed) {
   const [row] = await db('inbound_payment_notices')
     .insert({
       email_id: email.id,
-      source: 'capitalone_zelle',
+      source: EMAIL_SOURCE,
       payer_name: parsed?.payerName || null,
       payer_name_norm: parsed ? normalizeNamePart(parsed.payerName) : null,
       amount_cents: parsed?.amountCents ?? null,
@@ -248,21 +371,21 @@ async function claimNotice(email, parsed) {
 }
 
 // A claim the sync never finished (process exit, DB blip after the insert)
-// would otherwise sit in `processing` forever: the email row is stored, so
-// no later sync re-enters the hook. Park anything older than the window as
-// apply_failed for the operator — never re-run the money path blind. An
-// in-flight settlement is protected by AGE, not a lock (no transaction is
-// held across recordManualPayment): a claim is re-stamped (updated_at) right
-// before settling, so only a settlement slower than the window can be
-// swept — and then closeIfSettled / finishApplied's forced close still make
-// the row match the ledger.
+// would otherwise sit in `processing` forever: neither the stored email nor
+// the bank row (it now has a notice) re-enters the decision. Park anything
+// older than the window as apply_failed for the operator — never re-run the
+// money path blind. An in-flight settlement is protected by AGE, not a lock
+// (no transaction is held across recordManualPayment): a claim is re-stamped
+// (updated_at) right before settling, so only a settlement slower than the
+// window can be swept — and then closeIfSettled / finishApplied's forced
+// close still make the row match the ledger.
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 async function recoverStaleClaims() {
   const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
   const stale = await db('inbound_payment_notices')
     .where({ status: 'processing' })
     .where('updated_at', '<', cutoff)
-    .select('id', 'email_id', 'payer_name', 'amount_cents', 'matched_invoice_id', 'applied_by', 'claim_token');
+    .select('id', 'email_id', 'source', 'payer_name', 'amount_cents', 'matched_invoice_id', 'applied_by', 'claim_token');
   for (const row of stale) {
     if (await closeIfSettled(row)) continue;
     const took = await db('inbound_payment_notices')
@@ -277,9 +400,9 @@ async function recoverStaleClaims() {
         updated_at: new Date(),
       });
     if (!took) continue;
-    logger.warn(`[zelle-notice] recovered a stale processing claim ${row.id} (email ${row.email_id}) → parked`);
+    logger.warn(`[zelle-notice] recovered a stale processing claim ${row.id} (${row.email_id ? `email ${row.email_id}` : 'bank feed'}) → parked`);
     await stampEmail(row.email_id, 'zelle_notice_parked:apply_failed');
-    await notifyOwner('Zelle payment needs review', `${row.payer_name || 'Unknown payer'} sent${row.amount_cents != null ? ` $${(row.amount_cents / 100).toFixed(2)}` : ''} — sync interrupted before settlement`, row.id, { needsReview: true });
+    await raise(parkedAlert(row, 'apply_failed', { why: 'The portal stopped before it finished recording it, so check the invoice before you apply it.' }), row.id);
   }
   return stale.length;
 }
@@ -308,11 +431,7 @@ async function closeIfSettled(row) {
   if (!moved) return true; // closed by its own path meanwhile — nothing to park
   logger.error(`[zelle-notice] claim ${row.id} had settled ${inv.invoice_number} but never closed — closed to match the ledger (receipt unknown)`);
   await stampEmail(row.email_id, `zelle_notice_applied:${inv.invoice_number}`);
-  await notifyOwner(
-    'Zelle payment applied',
-    `${row.payer_name || 'Unknown payer'} · $${((row.amount_cents || 0) / 100).toFixed(2)} → ${inv.invoice_number} (closed after an interrupted sync; receipt unknown — check the invoice)`,
-    row.id,
-  );
+  await raise(receiptCheckAlert(row, inv), row.id);
   return true;
 }
 
@@ -450,27 +569,44 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
   }
 
   const receivedAt = new Date(notice.received_at || email.received_at || Date.now()).getTime();
+  const ageMs = Date.now() - receivedAt;
+  return settleOrPark(notice, email, parsed, {
+    // Only debt that EXISTED when the bank sent the notice can be what the
+    // payer meant (GH codex r8 P1).
+    cutoffMs: receivedAt,
+    stale: Number.isFinite(receivedAt) && ageMs > STALE_NOTICE_MS,
+    ageMs,
+    ref: email.id,
+  });
+}
+
+// The decision both sources share once a notice is claimed and parsed
+// ({ payerName, amountCents, memo }): match, then settle or park. `email` is
+// the source email (null for a bank-feed notice); `cutoffMs` the latest
+// moment the money can have arrived; `stale` whether the notice is too old
+// to auto-settle. Always returns true (the notice is handled).
+async function settleOrPark(notice, email, parsed, { cutoffMs, stale, ageMs, ref }) {
   const { rows: exactAll, truncated } = await exactOpenInvoices(parsed);
   const candidates = await buildCandidates(parsed, exactAll);
-  // Only debt that EXISTED when the bank sent the notice can be what the
-  // payer meant (GH codex r8 P1): an invoice issued during a sync delay —
-  // the next same-amount recurring visit — is never auto-settled by an
-  // older transfer. It stays in the parked candidates, where the operator's
-  // Apply is the explicit override. Unknown created_at ⇒ not auto-matched.
+  // Only debt that EXISTED when the money arrived can be what the payer
+  // meant: an invoice issued during a sync delay — the next same-amount
+  // recurring visit — is never auto-settled by an older transfer. It stays
+  // in the parked candidates, where the operator's Apply is the explicit
+  // override. Unknown created_at ⇒ not auto-matched.
   const exact = exactAll.filter((r) => {
     const createdAt = r.created_at == null ? NaN : new Date(r.created_at).getTime();
-    return Number.isFinite(createdAt) && createdAt <= receivedAt;
+    return Number.isFinite(createdAt) && createdAt <= cutoffMs;
   });
   if (exact.length !== exactAll.length) {
-    logger.warn(`[zelle-notice] ${email.id}: ${exactAll.length - exact.length} exact-amount invoice(s) created after the notice — excluded from auto-match`);
+    logger.warn(`[zelle-notice] ${ref}: ${exactAll.length - exact.length} exact-amount invoice(s) created after the payment — excluded from auto-match`);
   }
 
   if (await recentlyApplied(parsed)) {
     await finishParked(notice, email, 'possible_duplicate', { candidates });
     return true;
   }
-  if (Number.isFinite(receivedAt) && Date.now() - receivedAt > STALE_NOTICE_MS) {
-    logger.warn(`[zelle-notice] ${email.id} is ${Math.round((Date.now() - receivedAt) / 3600000)}h old at first decision — parking as stale_notice`);
+  if (stale) {
+    logger.warn(`[zelle-notice] ${ref} is ${Math.round(ageMs / 3600000)}h old at first decision — parking as stale_notice`);
     await finishParked(notice, email, 'stale_notice', { candidates });
     return true;
   }
@@ -593,7 +729,7 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
       await finishApplied(notice, email, paid, matchMethod, null);
       return true;
     }
-    logger.error(`[zelle-notice] apply failed for ${match.invoice_number} (email ${email.id}): ${err.message}`);
+    logger.error(`[zelle-notice] apply failed for ${match.invoice_number} (${ref}): ${err.message}`);
     await finishParked(notice, email, 'apply_failed', {
       candidates,
       applyError: isRefusal(err) ? err.message : `Settlement outcome uncertain (${err.message}) — check the invoice before applying`,
@@ -605,8 +741,126 @@ async function maybeHandleZelleNotice(email, { backfill = false } = {}) {
   return true;
 }
 
+// ── Plaid bank feed (GATE_ZELLE_BANK_RECONCILE) ────────────────────────────
+
+// Integer cents from a numeric(12,2) amount as pg returns it ("117.00") —
+// never a float.
+function amountCentsOf(amount) {
+  const m = String(amount ?? '').trim().match(/^(\d+)(?:\.(\d{1,2}))?$/);
+  if (!m) return null;
+  const dollars = Number(m[1]);
+  if (!Number.isSafeInteger(dollars)) return null;
+  const cents = dollars * 100 + Number((m[2] || '').padEnd(2, '0'));
+  return cents > 0 ? cents : null;
+}
+
+const etDayStartMs = (day) => parseETDateTime(`${day}T00:00`).getTime();
+function nextDay(day) {
+  const [y, m, d] = day.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+}
+
+// The Zelle credits a pass decides: Plaid rows on a bank account that read
+// "zelle" (the precise test is isZelleBankCredit), not ignored, with no notice
+// yet, dated inside the lookback window and no earlier than LINK_GRACE days
+// before the account was linked (the first sync's history is not live money).
+function bankRowsToDecide(nowMs) {
+  const floor = etDateString(addETDays(new Date(nowMs), -BANK_LOOKBACK_DAYS));
+  return db('bank_transactions as bt')
+    .join('plaid_accounts as pa', 'pa.account_id', 'bt.plaid_account_id')
+    .where('bt.source', 'plaid')
+    .where('bt.direction', 'credit')
+    .where('bt.account_type', 'bank')
+    .whereNot('bt.status', 'ignored')
+    .whereNotNull('bt.plaid_transaction_id')
+    .where((q) => q.where('bt.original_description', 'ilike', '%zelle%').orWhere('bt.description', 'ilike', '%zelle%'))
+    .where('bt.txn_date', '>=', floor)
+    .whereRaw("bt.txn_date >= (timezone('America/New_York', pa.created_at))::date - ?::int", [BANK_LINK_GRACE_DAYS])
+    .whereNotExists(function noNoticeYet() {
+      this.select(db.raw('1')).from('inbound_payment_notices as n').whereRaw('n.plaid_transaction_id = bt.plaid_transaction_id');
+    })
+    .orderBy([{ column: 'bt.txn_date', order: 'asc' }, { column: 'bt.created_at', order: 'asc' }])
+    .limit(BANK_SCAN_LIMIT)
+    .select('bt.plaid_transaction_id', 'bt.account_label', db.raw('bt.txn_date::text as txn_date'), 'bt.amount', 'bt.description', 'bt.original_description', 'bt.created_at');
+}
+
+// Claim the notice row for this transaction. Returns null when another pass
+// already owns it (plaid_transaction_id UNIQUE).
+async function claimBankNotice(row, { payerName, amountCents }) {
+  const [notice] = await db('inbound_payment_notices')
+    .insert({
+      plaid_transaction_id: row.plaid_transaction_id,
+      source: BANK_SOURCE,
+      payer_name: payerName,
+      payer_name_norm: payerName ? normalizeNamePart(payerName) : null,
+      amount_cents: amountCents,
+      memo: null,
+      // The posting day (the feed has no time): what the Invoices card shows.
+      received_at: new Date(etDayStartMs(row.txn_date)),
+      status: 'processing',
+      claim_token: randomUUID(),
+      candidates: null,
+    })
+    .onConflict('plaid_transaction_id')
+    .ignore()
+    .returning('*');
+  return notice || null;
+}
+
+async function decideBankRow(row, nowMs) {
+  const amountCents = amountCentsOf(row.amount);
+  if (!amountCents) return 'skipped';
+  const payerName = parseZelleBankPayer(bankZelleText(row));
+  const notice = await claimBankNotice(row, { payerName, amountCents });
+  if (!notice) return 'owned';
+  if (!payerName) {
+    // The amount is known, so the operator still gets the candidates.
+    const parsed = { payerName: null, amountCents, memo: null };
+    const { rows } = await exactOpenInvoices(parsed);
+    await finishParked(notice, null, 'parse_failed', { candidates: await buildCandidates(parsed, rows) });
+    return 'decided';
+  }
+  const dayStart = etDayStartMs(row.txn_date);
+  const stagedAt = new Date(row.created_at).getTime();
+  const dayEnd = etDayStartMs(nextDay(row.txn_date));
+  const ageMs = nowMs - dayStart;
+  await settleOrPark(notice, null, { payerName, amountCents, memo: null }, {
+    // The money arrived on its posting day and before the sync staged it.
+    cutoffMs: Number.isFinite(stagedAt) ? Math.min(dayEnd, stagedAt) : dayEnd,
+    stale: ageMs > BANK_STALE_MS,
+    ageMs,
+    ref: `bank transaction ${row.plaid_transaction_id}`,
+  });
+  return 'decided';
+}
+
+// Hourly entry point, after the Plaid sync stages the hour's rows
+// (services/scheduler.js). Stale-claim recovery runs even with the gate off,
+// as in sweepStaleClaims. One row's failure never stops the next: a row whose
+// claim never landed is read again next hour; a claim left `processing` is
+// parked by the sweep.
+async function reconcileZelleBankFeed({ now = Date.now() } = {}) {
+  await recoverStaleClaims().catch((err) => logger.warn(`[zelle-notice] stale-claim recovery failed: ${err.message}`));
+  if (!isZelleBankReconcileEnabled()) return { skipped: 'gate_off' };
+  const rows = await bankRowsToDecide(now);
+  const counts = { read: rows.length, decided: 0, owned: 0, skipped: 0, failed: 0 };
+  for (const row of rows) {
+    if (!isZelleBankCredit(row)) { counts.skipped += 1; continue; }
+    try {
+      counts[await decideBankRow(row, now)] += 1;
+    } catch (err) {
+      counts.failed += 1;
+      logger.error(`[zelle-notice] bank transaction ${row.plaid_transaction_id} failed: ${err.message}`);
+    }
+  }
+  if (counts.decided || counts.failed) logger.info(`[zelle-notice] bank feed pass: ${JSON.stringify(counts)}`);
+  return counts;
+}
+
 module.exports = {
   RECORDED_BY,
+  EMAIL_SOURCE,
+  BANK_SOURCE,
   ZELLE_RETRY_MARK,
   STALE_CLAIM_MS,
   reofferMarkedEmails,
@@ -616,10 +870,18 @@ module.exports = {
   directZelleRecentlyRecorded,
   settledInvoiceFor,
   zelleReference,
+  noticeAlertKey,
   DUPLICATE_WINDOW_DAYS,
   STALE_NOTICE_MS,
+  BANK_STALE_MS,
+  BANK_LOOKBACK_DAYS,
+  BANK_LINK_GRACE_DAYS,
   NEAR_AMOUNT_TOLERANCE_CENTS,
   isZelleReconcileEnabled,
+  isZelleBankReconcileEnabled,
   maybeHandleZelleNotice,
+  reconcileZelleBankFeed,
   buildCandidates,
+  amountCentsOf,
+  _private: { parkedAlert, receiptCheckAlert, lateSettlementAlert, bankRowsToDecide },
 };

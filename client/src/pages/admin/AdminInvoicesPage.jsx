@@ -1176,7 +1176,7 @@ const NOTICE_REASON_LABELS = {
   sender_unverified: "Sender could not be verified",
   parse_failed: "Notice could not be read",
   apply_failed: "Recording failed",
-  stale_notice: "Over 48 hours old when first processed",
+  stale_notice: "Too old to record on its own",
 };
 // Red only for the two reasons that are genuine alerts (a spoof or a failed
 // settlement) — everything else is an ordinary review item.
@@ -1209,6 +1209,12 @@ export function noticeCandidateLabel(c = {}) {
     .filter(Boolean)
     .join(", ");
   return `${c.invoice_number || c.invoice_id} · ${c.customer_name || "—"} · ${due}${flags ? ` (${flags})` : ""}`;
+}
+// A bank-feed notice (GATE_ZELLE_BANK_RECONCILE) has no memo: the line names
+// its source instead. Exported for the vitest.
+export function noticeMemoLine(n = {}) {
+  if (n.memo) return `Memo: ${n.memo}`;
+  return n.source === "plaid_zelle" ? "From the bank feed" : "No memo";
 }
 function noticeAmount(n) {
   return n?.amount_cents == null
@@ -1354,8 +1360,7 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
           Zelle payments to review{notices.length ? ` (${notices.length})` : ""}
         </div>
         <div className="text-ui-body text-ink-secondary">
-          Capital One notices the portal could not match to one invoice on its
-          own.
+          Zelle payments the portal could not match to one invoice on its own.
         </div>
       </div>
       {error && (
@@ -1404,7 +1409,7 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
                 }}
                 className="text-ui-body text-ink-secondary"
               >
-                {n.memo ? `Memo: ${n.memo}` : "No memo"}
+                {noticeMemoLine(n)}
                 {n.received_at
                   ? ` · ${formatETDate(n.received_at, {
                       month: "short",

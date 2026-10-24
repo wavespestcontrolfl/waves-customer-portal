@@ -1298,6 +1298,11 @@ function initScheduledJobs() {
         const out = await require('./plaid-sync').syncAllItems();
         const failed = (out.results || []).filter(r => r.error);
         if (failed.length) logger.warn(`[plaid-sync] hourly sync: ${failed.length}/${out.items} connection(s) failed`);
+        // Zelle credits the sync just staged → their invoices
+        // (GATE_ZELLE_BANK_RECONCILE, read inside). Its own failure never
+        // fails the sync job.
+        await require('./zelle-notice-reconciler').reconcileZelleBankFeed()
+          .catch((err) => logger.error(`[zelle-notice] hourly bank-feed pass failed: ${err.message}`));
       });
     } catch (err) {
       logger.error(`[plaid-sync] hourly sync failed: ${err.message}`);

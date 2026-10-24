@@ -17,6 +17,7 @@ import {
   invoiceListRowDate,
   isAllowedAttachmentFile,
   noticeCandidateLabel,
+  noticeMemoLine,
   orderNoticeCandidates,
   persistedSendDisposition,
   sendErrorMessage,
@@ -45,6 +46,12 @@ describe("AdminInvoicesPage Zelle notice candidates", () => {
   it("labels a candidate with number, customer, amount due and its match flags", () => {
     expect(noticeCandidateLabel(best)).toBe("WPC-2026-0001 · Pat Doe · $117.00 (exact amount, name match)");
     expect(noticeCandidateLabel(near)).toBe("WPC-2026-0003 · Sam Roe · $120.00");
+  });
+
+  it("names the bank feed instead of a missing memo on a bank-feed notice", () => {
+    expect(noticeMemoLine({ source: "plaid_zelle", memo: null })).toBe("From the bank feed");
+    expect(noticeMemoLine({ source: "capitalone_zelle", memo: null })).toBe("No memo");
+    expect(noticeMemoLine({ source: "capitalone_zelle", memo: "WPC-2026-0001" })).toBe("Memo: WPC-2026-0001");
   });
 });
 

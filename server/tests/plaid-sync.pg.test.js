@@ -106,6 +106,9 @@ async function activate(itemId, overrides = {}) {
       '20260813000032_bank_txn_refund_status',
       '20260928020000_plaid_bank_sync',
       '20260928020100_bank_txn_plaid_account_id',
+      // bank_transactions.original_description (the Zelle bank-feed lane);
+      // its inbound_payment_notices half skips here (no such table in SCHEMA)
+      '20261024233000_zelle_bank_feed_notices',
     ]) {
       await require(`../models/migrations/${m}`).up(mockPg);
     }

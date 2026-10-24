@@ -117,8 +117,11 @@ async function getAccounts(accessToken) {
   };
 }
 
+// include_original_description: the bank's own wording rides along with
+// Plaid's cleaned `name` — Capital One names a Zelle payer only there
+// (services/zelle-notice.js parseZelleBankPayer).
 async function transactionsSync(accessToken, cursor, count = 500) {
-  const body = { access_token: accessToken, count };
+  const body = { access_token: accessToken, count, options: { include_original_description: true } };
   if (cursor) body.cursor = cursor;
   return call('/transactions/sync', body);
 }

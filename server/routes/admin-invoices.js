@@ -679,6 +679,17 @@ router.post('/email-message/ai', requireAdmin, async (req, res, next) => {
 // staff exemption above does not apply (admin only). These stay live with
 // the gate off so parked history remains actionable after a kill.
 const PAYMENT_NOTICE_LIST_MAX = 100;
+// The reconciler raises one review alert per parked notice; resolving the
+// notice here is its done-when (docs/admin-notifications.md). Never fails
+// the resolution itself.
+async function closeZelleNoticeAlert(noticeId, reason, resolution) {
+  try {
+    const { noticeAlertKey } = require('../services/zelle-notice-reconciler');
+    await require('../services/admin-alert-episodes').closeAdminAlertKeys(db, [noticeAlertKey(noticeId)], reason, { resolution });
+  } catch (err) {
+    logger.warn(`[admin-invoices:payment-notices] alert close failed for ${noticeId}: ${err.message}`);
+  }
+}
 router.get('/payment-notices', requireAdmin, async (req, res, next) => {
   try {
     const status = req.query.status === 'all' ? null : 'parked';
@@ -709,6 +720,15 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
     }
     if (notice.amount_cents == null) {
       return res.status(400).json({ error: 'This notice carries no amount — record the payment from the invoice instead' });
+    }
+    // A bank-feed notice settles only money the bank still lists: Plaid can
+    // withdraw a transaction (plaid-sync deletes an open row and flags a
+    // reviewed one; a correction keeps the same Plaid id).
+    if (notice.plaid_transaction_id) {
+      const bankRow = await db('bank_transactions').where({ plaid_transaction_id: notice.plaid_transaction_id }).first('id', 'suggestion');
+      if (!bankRow || bankRow.suggestion?.plaidRemoved) {
+        return res.status(409).json({ error: 'The bank no longer lists this Zelle payment — check the account before recording it, then ignore this notice' });
+      }
     }
     // LIVE eligibility, never the stored list (which is only the dropdown and
     // deliberately includes ±$5 leads and may be stale): the invoice must be
@@ -841,8 +861,12 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
           .catch((e) => logger.warn(`[admin-invoices:payment-notices] owner notification failed: ${e.message}`));
       }
     }
-    await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
-      .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
+    // A bank-feed notice has no email row to stamp.
+    if (notice.email_id) {
+      await db('emails').where({ id: notice.email_id }).update({ auto_action: `zelle_notice_applied:${invoice?.invoice_number || exact.invoice_number}`, updated_at: new Date() })
+        .catch((err) => logger.warn(`[admin-invoices:payment-notices] auto_action stamp failed: ${err.message}`));
+    }
+    await closeZelleNoticeAlert(id, 'zelle notice applied', `Recorded on ${invoice?.invoice_number || exact.invoice_number}`);
     res.json({ ok: true, invoice, receipt });
   } catch (err) {
     if ([400, 404, 409].includes(err.statusCode)) {
@@ -867,6 +891,7 @@ router.post('/payment-notices/:id/ignore', requireAdmin, async (req, res, next) 
       if (!notice) return res.status(404).json({ error: 'Payment notice not found' });
       return res.status(409).json({ error: `Payment notice is ${notice.status}, not parked`, status: notice.status });
     }
+    await closeZelleNoticeAlert(id, 'zelle notice ignored', 'Ignored on the Invoices page');
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

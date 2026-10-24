@@ -105,6 +105,5 @@
   "services/voice-agent/relay-reservice.js": 1,
   "services/voice-agent/relay-transfer.js": 1,
   "services/voice-profile-distiller.js": 1,
-  "services/wdo-report-attention.js": 1,
-  "services/zelle-notice-reconciler.js": 1
+  "services/wdo-report-attention.js": 1
 }
