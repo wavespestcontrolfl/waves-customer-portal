@@ -213,6 +213,13 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     expect(payload.next_step_summary).not.toContain('Averaged');
   });
 
+  // Owner-approved 2026-10-24: the proposal email says how to get started, not that there is no checkout.
+  test('a commercial proposal payload carries the approved next-step sentence and no "no online checkout" text', () => {
+    const payload = estimateEmailPayload({ estimate: pestEstimate, firstName: 'Pat', viewUrl: 'u', priceLine: '$2361.00/mo', proposalMode: true });
+    expect(payload.next_step_summary).toBe('To get started, reply to this email or call us at (941) 297-5749. We will confirm your start date and send your service agreement to sign.');
+    expect(JSON.stringify(payload)).not.toMatch(/online checkout/i);
+  });
+
   test('a stored total that no longer matches the lines withholds the average', async () => {
     expect(await emailAverageParts({ ...pestEstimate, monthly_total: '40.00' })).toBeNull();
   });

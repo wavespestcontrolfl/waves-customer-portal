@@ -297,7 +297,7 @@ function estimateSendableAmount(estimate = {}) {
 // Commercial proposals are accepted manually (no online checkout), so the
 // "accept it online" next-step copy would point the customer at a flow that
 // is intentionally rejected for them. Use proposal-specific copy instead.
-const PROPOSAL_NEXT_STEP_SUMMARY = 'Your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement. Call (941) 297-5749 anytime.';
+const PROPOSAL_NEXT_STEP_SUMMARY = 'To get started, reply to this email or call us at (941) 297-5749. We will confirm your start date and send your service agreement to sign.';
 
 // The PDF-copy decision helpers live with the rest of the feature (the review
 // preview, the verdict check and the send all use these).

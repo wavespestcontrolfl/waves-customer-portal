@@ -11,6 +11,7 @@
 // missed). Only the no-contract line depends on THIS estimate, and it reads the
 // canonical verdict (known residential + proposalCarriesPlanTerms). The 90-day
 // prepay refund line always prints.
+// A known commercial proposal reads the commercial page (COMMERCIAL_SECTIONS below); everything else reads this one.
 // Copy is the owner's answer book: no prices, no product brand names, no fixed
 // dry or re-entry times.
 //
@@ -82,18 +83,52 @@ const SECTIONS = [
   },
 ];
 
+// The commercial page (owner 2026-10-24): a KNOWN commercial proposal reads this page instead of the residential
+// one. Scheduling and pest are commercial copy; lawn, termite and rodent reuse the residential sections above, but print
+// only when the proposal includes that service (`signals.families`). It has no closing line and never prints the
+// two-hour window, card saving, or the lanai and pool cage lines.
+const COMMERCIAL_TITLE = 'Before you start service';
+const COMMERCIAL_SECTIONS = [
+  {
+    key: 'scheduling',
+    heading: 'Scheduling and paying',
+    lines: [
+      { rank: 1, text: 'We set your service day and time with you, around your business hours.' },
+      { rank: 1, text: 'There is no deposit.' },
+      { rank: 2, text: "Your service agreement runs 12 months and renews each year. Either side can cancel with 30 days' written notice." },
+      { rank: 3, text: 'We can send a certificate of insurance and name your business as an additional insured on request.' },
+    ],
+  },
+  {
+    key: 'pest',
+    heading: 'If your service includes pest control',
+    lines: [
+      { rank: 1, text: 'For inside service, someone needs to let us in, or set up access with us ahead of time.' },
+      { rank: 1, text: 'Some activity for up to two weeks after a treatment is normal, as pests are flushed out. If it has not slowed after two weeks, tell us.' },
+      { rank: 2, text: 'Please keep people off treated areas until they are dry.' },
+      { rank: 2, text: 'Before the first visit, tell us about sensitive areas: food handling, equipment, or staff with sensitivities.' },
+    ],
+  },
+  ...['lawn', 'termite', 'rodent'].map((key) => {
+    const section = SECTIONS.find((candidate) => candidate.key === key);
+    return { ...section, lines: section.lines.map((line) => ({ ...line, when: (s) => s.families?.has(key) === true })) };
+  }),
+];
+
 const CLOSING = { rank: 3, text: (phone) => `Questions before you book? Call us at ${phone} and we will help.` };
 
 // The page: { title, sections: [{ key, heading, lines: [{ rank, text }] }], closing }.
-// `signals.planTerms` = the estimate-wide plan terms apply; `opts.phone` = the support number.
+// `signals.planTerms` = the estimate-wide plan terms apply; `signals.commercial` = a KNOWN commercial proposal
+// (commercial copy; `signals.families` = the service families it includes); `opts.phone` = the support number.
 function buildBeforeYouBook(signals = {}, opts = {}) {
-  const sections = SECTIONS
+  const commercial = signals.commercial === true;
+  const sections = (commercial ? COMMERCIAL_SECTIONS : SECTIONS)
     .map((section) => ({ key: section.key, heading: section.heading, lines: section.lines
       .filter((line) => !line.when || line.when(signals))
       .map(({ rank, text }) => ({ rank, text })) }))
     .filter((section) => section.lines.length);
-  const closing = opts.phone ? { rank: CLOSING.rank, text: CLOSING.text(opts.phone), closing: true } : null;
-  return { title: TITLE, sections, closing };
+  const closing = !commercial && opts.phone ? { rank: CLOSING.rank, text: CLOSING.text(opts.phone), closing: true } : null;
+  return { title: commercial ? COMMERCIAL_TITLE : TITLE, sections, closing };
 }
 
 // Residential is KNOWN only from the same authoritative signals the rest of the estimate code uses
@@ -109,6 +144,39 @@ function isKnownResidential(estimate, proposal) {
   } catch {
     return false;
   }
+}
+
+// Commercial is KNOWN from an authored (enabled) proposal or the COMMERCIAL category. A missing or other
+// category with no authored proposal is unknown and fails closed to the residential page.
+function isKnownCommercial(estimate, proposal) {
+  if (proposal?.enabled === true) return true;
+  return String(estimate?.category || '').toUpperCase() === 'COMMERCIAL';
+}
+
+// The service families a commercial proposal includes, read from the rows its document prints: building lines,
+// service programs and corrective work. Whole-word matches only ("rate" is not rodent work, "tenant" is not
+// pest work). A row that names no family adds none, so an undeterminable proposal omits the optional sections.
+const FAMILY_PATTERNS = [
+  ['lawn', /\b(lawn|turf|fertili[sz]\w*|weed control|top\s?dress\w*|dethatch\w*|overseed\w*)\b/],
+  ['termite', /\b(termites?|wdo|bora\s?care|termidor|trelona|trench\w*)\b/],
+  ['rodent', /\b(rodents?|rats?|mouse|mice)\b/],
+];
+
+function proposalServiceFamilies(proposal) {
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const rows = [
+    ...list(proposal?.buildings).flatMap((building) => list(building?.lineItems)),
+    ...list(proposal?.programs),
+    ...list(proposal?.correctiveWork),
+  ];
+  const families = new Set();
+  for (const row of rows) {
+    const text = [row?.service, row?.serviceKey, row?.label, row?.name, row?.description]
+      .filter((part) => typeof part === 'string').join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+    for (const [family, pattern] of FAMILY_PATTERNS) if (pattern.test(text)) families.add(family);
+    if (row?.service === 'lawn' || row?.service === 'termite' || row?.service === 'rodent') families.add(row.service);
+  }
+  return families;
 }
 
 // The page is for an estimate still being decided: not accepted, declined or expired (a "Before you
@@ -136,6 +204,9 @@ function planTermsApply(estimate, proposal) {
 // estimate offers a prepaid year", so it needs no prepay verdict (Codex #6504 r1/r4 kept finding prepay
 // shapes a local verdict missed).
 function estimateSignals(estimate, proposal) {
+  if (isKnownCommercial(estimate, proposal)) {
+    return { planTerms: false, commercial: true, families: proposalServiceFamilies(proposal) };
+  }
   return { planTerms: planTermsApply(estimate, proposal) };
 }
 
@@ -203,4 +274,4 @@ function beforeYouBookBlock(estimate, { open = estimateIsOpen(estimate) } = {}) 
   }
 }
 
-module.exports = { TITLE, SECTIONS, estimateIsOpen, isKnownResidential, buildBeforeYouBook, beforeYouBookForEstimate, trimByRank, beforeYouBookBlock };
+module.exports = { TITLE, COMMERCIAL_TITLE, SECTIONS, COMMERCIAL_SECTIONS, isKnownCommercial, proposalServiceFamilies, estimateIsOpen, isKnownResidential, buildBeforeYouBook, beforeYouBookForEstimate, trimByRank, beforeYouBookBlock };

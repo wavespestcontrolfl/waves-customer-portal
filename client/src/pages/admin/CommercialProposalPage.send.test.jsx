@@ -192,6 +192,8 @@ it('saves edits before review and sends only the explicitly reviewed channel/ver
 });
 
 it('keeps a changed saved offer blocked and cancel sends nothing', async () => {
+  // Authored terms: a proposal with none opens prefilled and unsaved, and review would save it first.
+  saved.proposal.commercialTerms = { initialTermMonths: 12 };
   mount(); await screen.findByDisplayValue('Synthetic proposal'); previewVersion = 'concurrent-version';
   fireEvent.click(screen.getByRole('button', { name: 'Review and send' }));
   fireEvent.click(await screen.findByLabelText('Email'));

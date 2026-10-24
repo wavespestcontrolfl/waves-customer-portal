@@ -146,6 +146,12 @@ describe('GET /:token/data - before you book', () => {
       expect(body.beforeYouBook).toBeDefined();
       const lines = body.beforeYouBook.sections.flatMap((s) => s.lines).join(' ');
       expect(lines).not.toContain('no long-term contract');
+      // A known commercial estimate reads the commercial page (owner 2026-10-24).
+      expect(body.beforeYouBook.title).toBe('Before you start service');
+      expect(keysOf(body)).toEqual(['scheduling', 'pest']);
+      expect(body.beforeYouBook.closing).toBeNull();
+      expect(lines).toContain('There is no deposit.');
+      expect(lines).not.toMatch(/two-hour window|lanai/);
     });
   });
 

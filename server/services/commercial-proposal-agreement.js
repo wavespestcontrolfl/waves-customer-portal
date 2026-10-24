@@ -136,13 +136,7 @@ function signableProposal(estimate) {
 // to the agreement, they do not contradict a fixed term.
 //
 // These are the agreement-aligned texts the builder will prefill; a field is also fine blank (the agreement governs).
-const AGREEMENT_TERMS = Object.freeze({
-  paymentTerms: 'net30',
-  initialTermMonths: 12,
-  renewal: 'Renews automatically for 12-month terms unless either party gives written notice at least 30 days before the term ends.',
-  priceAdjustment: "Pricing may be adjusted at renewal or with at least 30 days' written notice.",
-  cancellation: "Either party may cancel with 30 days' written notice. Charges for services already performed remain due.",
-});
+const { AGREEMENT_TERMS } = require('../../shared/commercial-agreement-terms.cjs');
 
 // Case, whitespace and apostrophe style do not matter ("30 days\u2019" typed on a phone equals "30 days'").
 const normalizeTermText = (value) => String(value).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();

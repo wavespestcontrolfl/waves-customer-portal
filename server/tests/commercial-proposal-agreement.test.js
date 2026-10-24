@@ -242,6 +242,17 @@ describe('quote fingerprint: an open agreement is reused only for the identical 
 });
 
 describe('agreement terms: online signing only when EVERY structured term agrees with the agreement (one chokepoint)', () => {
+  test('the server reads the same constants the proposal builder prefills (shared module), word for word', () => {
+    expect(AGREEMENT_TERMS).toBe(require('../../shared/commercial-agreement-terms.cjs').AGREEMENT_TERMS);
+    expect(AGREEMENT_TERMS).toEqual({
+      paymentTerms: 'net30',
+      initialTermMonths: 12,
+      renewal: 'Renews automatically for 12-month terms unless either party gives written notice at least 30 days before the term ends.',
+      priceAdjustment: "Pricing may be adjusted at renewal or with at least 30 days' written notice.",
+      cancellation: "Either party may cancel with 30 days' written notice. Charges for services already performed remain due.",
+    });
+  });
+
   const withTerms = (commercialTerms) => estimateRow({}, { commercialTerms });
   const NOTE = (detail) => `Online signing needs the proposal terms to match the agreement: ${detail}.`;
   const ALIGNED = {
