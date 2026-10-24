@@ -1318,18 +1318,15 @@ describe('topUpRecurringSeriesLocked — off-hour window_start normalization (Co
   });
 });
 
-describe('topUpRecurringSeriesLocked — occupancy clashes are advisory only in top-up mode (Codex GitHub guards follow-up P2)', () => {
-  // seriesCandidateDateClashes is tech-blind, so on a busy calendar a hard
+describe('topUpRecurringSeriesLocked — occupancy clashes are advisory only (Codex GitHub guards follow-up P2)', () => {
+  // The series clash probe (seriesCandidateDateClashRows) is tech-blind, so on a busy calendar a hard
   // skip-to-next-cadence-step can drop whole months of candidates from an
   // unattended run (a prod monthly-lawn dry run lost Nov/Dec/Feb/May/Aug/Sep
   // to one recurring conflict). guardRecurrenceDestination's own ruling for
   // every OTHER admin write path is that an overlap is advisory (owner
-  // ruling 2026-08-25) — top-up's insert loop now matches that instead of
-  // reinventing a stricter rule for itself. Completion mode is unaffected:
-  // recurring-series-maintenance.test.js's own 'P1: auto-extend skips a
-  // candidate day another visit already occupies' pins that a clash still
-  // advances to the next cadence step there, since opts.overlapAdvisoryOnly
-  // is never set on that path.
+  // ruling 2026-08-25) — every series extension now matches that (the
+  // completion path too: recurring-series-maintenance.test.js 'auto-extend
+  // books the cadence date even when another visit occupies it').
   test('a clash on the very first candidate still inserts that date, never advancing to the next cadence step', async () => {
     const fixtureArgs = {
       parentOverrides: {
@@ -1391,6 +1388,27 @@ describe('topUpRecurringSeriesLocked — a taken hour hands the visit off withou
     expect(result.spawnedVisits[0].windowStart).toBeNull();
     expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({ windowStart: '09:00', windowEnd: '10:00', includeInterviews: true });
     expect(findConflictingVisits.mock.calls[0][0].excludeCustomerId).toBeUndefined();
+  });
+
+  test('gate on: the completion-time extend hands a taken hour off the same way — cadence date, no time, due that date', async () => {
+    findConflictingVisits.mockReset().mockResolvedValue([]);
+    const baseline = topupScenario(fixtureArgs);
+    const baselineCols = await baseline.conn('scheduled_services').columnInfo();
+    await adminScheduleRouter._test.extendSeriesOnceLocked(baseline.conn, baseline.parent, 10, baselineCols, baseline.parent);
+
+    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    findConflictingVisits.mockReset()
+      .mockResolvedValueOnce([{ id: 'occupied-1', customer_id: 77 }])
+      .mockResolvedValue([]);
+    const handed = topupScenario(fixtureArgs);
+    const cols = await handed.conn('scheduled_services').columnInfo();
+    // Completion path: no options (no horizon, no off-hour floor).
+    const spawned = await adminScheduleRouter._test.extendSeriesOnceLocked(handed.conn, handed.parent, 10, cols, handed.parent);
+
+    expect(handed.inserted).toHaveLength(1);
+    expect(handed.inserted[0].scheduled_date).toBe(baseline.inserted[0].scheduled_date);
+    expect(handed.inserted[0]).toMatchObject({ window_start: null, window_end: null, recurring_dispatch_due_date: handed.inserted[0].scheduled_date });
+    expect(spawned.windowStart).toBeNull();
   });
 
   test('gate on: an hour only a booked interview holds is taken too (the advisory probe never sees it)', async () => {

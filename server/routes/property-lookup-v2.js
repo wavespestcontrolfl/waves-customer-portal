@@ -5326,6 +5326,29 @@ function areaAddOnServices(options, ctx) {
   return areaAddOns ? { areaAddOns, areaAddOnVisit: areaAddOnVisitFromOptions(options) } : {};
 }
 
+// Mosquito misting system (GATE_MOSQUITO_MISTING, misting PR 2b). The estimator posts selectedServices MOSQUITO_MISTING plus
+// options.mosquitoMisting = { tier, nozzles, risers, solution, refillsPerYear } and this is the ONE place it becomes engine
+// services.mosquitoMisting. Requested-while-dark fails CLOSED with a 400 (like the area add-ons), and the save-replay rethrows it
+// (failClosed). Values pass through exactly as typed: the pricer owns the validation (a fractional or non-numeric count is recorded
+// as a reason and falls back, never silently rounded into another quote), so this boundary only refuses a malformed envelope.
+const MISTING_OPTION_KEYS = ['tier', 'nozzles', 'risers', 'solution', 'refillsPerYear'];
+function mistingInputError(message, code = 'MOSQUITO_MISTING_INPUT_INVALID') {
+  const err = new Error(message);
+  err.statusCode = 400;
+  err.code = code;
+  err.failClosed = true;
+  return err;
+}
+function mosquitoMistingFromOptions(options) {
+  if (!require('../config/feature-gates').mosquitoMistingLive()) {
+    throw mistingInputError('The mosquito misting system is not enabled on this environment (GATE_MOSQUITO_MISTING) - remove it or flip the gate.', 'MOSQUITO_MISTING_GATED');
+  }
+  const raw = options.mosquitoMisting;
+  if (raw === undefined || raw === null) return true;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw mistingInputError('mosquitoMisting must be an object of { tier, nozzles, risers, solution, refillsPerYear }.');
+  return Object.fromEntries(MISTING_OPTION_KEYS.filter((key) => raw[key] !== undefined && raw[key] !== null && raw[key] !== '').map((key) => [key, raw[key]]));
+}
+
 // An association's common-area job (HOA / multifamily), by the operator's
 // business type or the property's subtype. One predicate for the lookup's
 // suite scope and the translate-time refusal; the estimate tool's
@@ -6026,6 +6049,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12, urgency, afterHours };
   }
   Object.assign(services, areaAddOnServices(o, { track, grassChosen: !!o.grassType }));
+  if (sel.has('MOSQUITO_MISTING')) services.mosquitoMisting = mosquitoMistingFromOptions(o);
   if (sel.has('RODENT_SANITATION')) {
     services.sanitation = {
       tier: o.sanitationTier || 'standard',

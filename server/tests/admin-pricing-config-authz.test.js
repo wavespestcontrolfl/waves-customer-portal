@@ -173,6 +173,48 @@ test('lawn_pricing_v2 offers bahia as a new lawn plan only while GATE_LAWN_V13 i
   }
 });
 
+// The misting estimator section reads its gate, labels and limits from this row's GET (GATE_MOSQUITO_MISTING, request time).
+test('misting availability follows the gate at request time and carries labels and limits but no price', async () => {
+  const prior = process.env.GATE_MOSQUITO_MISTING;
+  mockPricingConfigRow = { config_key: 'mosquito_misting_pricing', data: { plan: { monthly: 59 } } };
+  try {
+    await withServer(async (baseUrl) => {
+      process.env.GATE_MOSQUITO_MISTING = 'false';
+      const off = await call(baseUrl, 'GET', '/mosquito_misting_pricing', { role: 'admin' });
+      expect(off.status).toBe(200);
+      expect(off.json.featureAvailable).toBe(false);
+      expect(off.json.misting.enabled).toBe(false);
+      process.env.GATE_MOSQUITO_MISTING = 'true';
+      const on = await call(baseUrl, 'GET', '/mosquito_misting_pricing', { role: 'admin' });
+      expect(on.json.featureAvailable).toBe(true);
+      expect(on.json.misting).toEqual({
+        enabled: true,
+        tiers: [{ key: 'essential', label: 'Essential system (drum)' }, { key: 'smart', label: 'Smart system (tankless + app)' }],
+        solutions: [
+          { key: 'standard', label: expect.stringContaining('permethrin') },
+          { key: 'natural', label: expect.stringContaining('botanical') },
+          { key: 'premium', label: expect.stringContaining('pyrethrins') },
+        ],
+        limits: {
+          minNozzles: 10, maxNozzles: 80, maxRisers: 80, maxRefillsPerYear: 24,
+          defaultTier: 'smart', defaultSolution: 'standard', defaultRefillsPerYear: 4,
+        },
+      });
+      // Labels and limits only: the descriptor never carries a price.
+      expect(JSON.stringify(on.json.misting)).not.toMatch(/price|monthly|\$\d/i);
+      // Another key never gets the block.
+      mockPricingConfigRow = { config_key: 'termite_install', data: {} };
+      const other = await call(baseUrl, 'GET', '/termite_install', { role: 'admin' });
+      expect(other.json.misting).toBeUndefined();
+      // A technician is refused, like every pricing read.
+      expect((await call(baseUrl, 'GET', '/mosquito_misting_pricing', { role: 'technician' })).status).toBe(403);
+    });
+  } finally {
+    if (prior === undefined) delete process.env.GATE_MOSQUITO_MISTING;
+    else process.env.GATE_MOSQUITO_MISTING = prior;
+  }
+});
+
 test('annual availability follows both prerequisite gates at request time', async () => {
   const keys = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
   const prior = keys.map((key) => process.env[key]);

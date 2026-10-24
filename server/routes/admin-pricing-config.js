@@ -1389,8 +1389,30 @@ function areaAddOnsAvailability() {
   };
 }
 
+// Mosquito misting system (GATE_MOSQUITO_MISTING, read at request time like the gates above): the estimator learns from the SAME
+// mosquito_misting_pricing read whether to offer the system, and which tiers / solutions / limits it has, so the screen never hardcodes
+// a label or a bound. Labels and limits only: no price leaves this block (the quote response carries every price).
+function mistingAvailability() {
+  const { MOSQUITO_MISTING: M } = require('../services/pricing-engine/constants');
+  return {
+    enabled: require('../config/feature-gates').mosquitoMistingLive(),
+    tiers: Object.entries(M.tiers).map(([key, tier]) => ({ key, label: tier.label })),
+    solutions: Object.entries(M.refills).map(([key, refill]) => ({ key, label: refill.label })),
+    limits: {
+      minNozzles: M.minNozzles,
+      maxNozzles: M.maxNozzles,
+      maxRisers: M.maxRisers,
+      maxRefillsPerYear: M.maxRefillsPerYear,
+      defaultTier: M.defaultTier,
+      defaultSolution: M.defaultSolution,
+      defaultRefillsPerYear: M.defaultRefillsPerYear,
+    },
+  };
+}
+
 function configKeyFeatureAvailable(key) {
   if (key === 'termite_annual_plan') return termiteAnnualPlanSelectionEnabled();
+  if (key === 'mosquito_misting_pricing') return require('../config/feature-gates').mosquitoMistingLive();
   const gate = CONFIG_KEY_FEATURE_GATES[key];
   if (!gate) return true;
   return gateEnvOn(gate);
@@ -1468,6 +1490,7 @@ router.get('/:key', async (req, res, next) => {
       featureAvailable: configKeyFeatureAvailable(req.params.key),
       ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
       ...(req.params.key === 'lawn_pricing_v2' ? { areaAddOns: areaAddOnsAvailability() } : {}),
+      ...(req.params.key === 'mosquito_misting_pricing' ? { misting: mistingAvailability() } : {}),
       ...(req.params.key === 'termite_install' ? { effective: await effectiveTermiteInstallBasis() } : {}),
     });
   } catch (err) { next(err); }

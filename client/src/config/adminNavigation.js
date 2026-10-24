@@ -232,7 +232,7 @@ export const ADMIN_NAV_ITEMS = {
   // only carries it while the gate is on, so the entry is hidden everywhere (and fails closed) otherwise.
   bidDesk: {
     id: "bidDesk",
-    keywords: ["bid", "bids", "rfp", "rfq", "invitation to bid", "buildingconnected", "procore", "proposal"],
+    keywords: ["bid", "bids", "rfp", "rfq", "invitation to bid", "buildingconnected", "procore", "blue book", "proposal"],
     path: "/admin/bid-desk",
     label: "Bid Desk",
     icon: Gavel,

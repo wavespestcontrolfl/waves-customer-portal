@@ -1,10 +1,12 @@
 /**
- * Series EXTENSION and the customer's own stop. Grouping is retired
- * (2026-10-22), so when the next cadence date already holds the customer's
- * OWN visit, admin-schedule.js#extendSeriesOnceLocked treats it like any other
- * clash: the new row moves to a later date and joins nothing. The top-up keeps
- * its advisory overlap policy (inserts on the cadence date). Real Postgres on
- * the migrated schema, synthetic customers, every test rolled back.
+ * Series EXTENSION and a visit already on the cadence date. Grouping is
+ * retired (2026-10-22) and a clash never skips a cadence slot (2026-10-23), so
+ * admin-schedule.js#extendSeriesOnceLocked puts the new row on its cadence
+ * date and joins nothing: the customer's own stop at the same place keeps the
+ * hour (one trip); another customer's stop in the hour hands it off without a
+ * time (GATE_PLAN_TAKEN_HOUR_HANDOFF) or, gate off, books through with the
+ * overlap logged. Real Postgres on the migrated schema, synthetic customers,
+ * every test rolled back.
  */
 jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
   get: (_, key) => (typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key]),
@@ -152,7 +154,7 @@ postgres('series extension and the customer\'s own stop', () => {
   const extensionRows = (trx, parentId) => trx('scheduled_services').where({ recurring_parent_id: parentId }).orderBy('scheduled_date');
 
 
-  describe('own lawn visit on the candidate date is a clash', () => {
+  describe('a visit on the candidate date never moves the extension', () => {
     async function alignedPest(trx, opts = {}) {
       const w = await world(trx, opts);
       const date = await cadenceDate(trx, w.pestParent.id);
@@ -164,41 +166,63 @@ postgres('series extension and the customer\'s own stop', () => {
       service_key_snapshot: 'lawn_care_6week', scheduled_date: date, status: 'pending',
       window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, ...extra,
     }).returning('*');
+    const otherCustomersVisit = async (trx, w, date) => {
+      const other = await customer(trx);
+      await trx('scheduled_services').insert({
+        customer_id: other.customerId, property_id: other.propertyId, technician_id: w.techLawn,
+        service_id: ids.lawn_care_6week, service_type: 'Every 6 Weeks Lawn Care Service',
+        scheduled_date: date, status: 'pending', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
+      });
+    };
+    afterEach(() => { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; });
 
-    test('pushes the extension past the customer\'s own lawn visit and joins nothing', async () => {
+    test('books the date of the customer\'s own lawn visit, keeps the hour (one trip) and joins nothing', async () => {
+      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
       const trx = await mockPg.transaction();
       try {
         const { w, date } = await alignedPest(trx);
         const [lawn] = await lawnVisit(trx, w, date);
         const spawned = await extend(trx, w.pestParent.id);
-        expect(spawned && spawned.scheduledDate).not.toBe(date);
+        expect(spawned && spawned.scheduledDate).toBe(date);
         const rows = await extensionRows(trx, w.pestParent.id);
         expect(rows).toHaveLength(1);
-        expect(dateOf(rows[0].scheduled_date)).not.toBe(date);
+        expect(dateOf(rows[0].scheduled_date)).toBe(date);
+        expect(String(rows[0].window_start).slice(0, 5)).toBe('09:00');
         expect(rows[0].visit_id).toBeNull();
         expect((await trx('scheduled_services').where({ id: lawn.id }).first()).visit_id).toBeNull();
         expect(await trx('service_visits').where({ customer_id: w.customerId }).first()).toBeUndefined();
       } finally { await trx.rollback(); }
     });
 
-    test('another customer\'s visit on the date still pushes the extension', async () => {
+    test('another customer\'s visit in the hour, hand-off off: books through on the cadence date with the hour', async () => {
       const trx = await mockPg.transaction();
       try {
         const { w, date } = await alignedPest(trx);
-        const other = await customer(trx);
-        await trx('scheduled_services').insert({
-          customer_id: other.customerId, property_id: other.propertyId, technician_id: w.techLawn,
-          service_id: ids.lawn_care_6week, service_type: 'Every 6 Weeks Lawn Care Service',
-          scheduled_date: date, status: 'pending', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
-        });
+        await otherCustomersVisit(trx, w, date);
         await extend(trx, w.pestParent.id);
         const rows = await extensionRows(trx, w.pestParent.id);
         expect(rows).toHaveLength(1);
-        expect(dateOf(rows[0].scheduled_date)).not.toBe(date);
+        expect(dateOf(rows[0].scheduled_date)).toBe(date);
+        expect(String(rows[0].window_start).slice(0, 5)).toBe('09:00');
       } finally { await trx.rollback(); }
     });
 
-    test('top-up (advisory overlap) keeps inserting on the cadence date, ungrouped', async () => {
+    test('another customer\'s visit in the hour, hand-off on: the cadence date without a time, due that date', async () => {
+      process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await alignedPest(trx);
+        await otherCustomersVisit(trx, w, date);
+        await extend(trx, w.pestParent.id);
+        const rows = await extensionRows(trx, w.pestParent.id);
+        expect(rows).toHaveLength(1);
+        expect(dateOf(rows[0].scheduled_date)).toBe(date);
+        expect(rows[0].window_start).toBeNull();
+        expect(dateOf(rows[0].recurring_dispatch_due_date)).toBe(date);
+      } finally { await trx.rollback(); }
+    });
+
+    test('top-up keeps inserting on the cadence date, ungrouped', async () => {
       const trx = await mockPg.transaction();
       try {
         const { w, date } = await alignedPest(trx);
@@ -246,7 +270,7 @@ postgres('series extension and the customer\'s own stop', () => {
       return { apply, fired, file };
     }
 
-    test('an own-lawn clash files one alert, for the pushed row, after the commit', async () => {
+    test('an own lawn visit on the date files one alert, for the new row on that date, after the commit', async () => {
       const trx = await mockPg.transaction();
       const { apply, fired, file } = spies();
       try {
@@ -264,10 +288,10 @@ postgres('series extension and the customer\'s own stop', () => {
           scope.executionPromise.then(() => fired.push(String(scopes.length)), () => {});
         });
         const spawned = await extend(trx, w.pestParent.id);
-        expect(spawned.scheduledDate).not.toBe(date);
+        expect(spawned.scheduledDate).toBe(date);
         outer.commit();
         await settle();
-        // One coverage pass: the pushed row's. Nothing is attempted on the clash date.
+        // One coverage pass: the new row's, on the cadence date.
         expect(scopes.length).toBe(1);
         expect(fired).toEqual(['1']);
       } finally { apply.mockRestore(); file.mockRestore(); await trx.rollback(); }

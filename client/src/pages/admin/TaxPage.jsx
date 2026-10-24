@@ -38,6 +38,7 @@ import {
 import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import LedgerInboxTab from "./tax/LedgerInboxTab";
+import SharedBillsPanel from "./tax/SharedBillsPanel";
 function useTaxRead(path, setData, field) {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -7217,6 +7218,7 @@ export default function TaxPage() {
         </>
       )}
       {activeTab === "rates" && <TaxRatesTab />}
+      {activeTab === "rates" && <SharedBillsPanel />}
       {activeTab === "services" && <ServiceTaxabilityTab />}
       {activeTab === "exemptions" && <ExemptionsTab />}
       {activeTab === "equipment" && <EquipmentTab />}

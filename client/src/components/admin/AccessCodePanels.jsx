@@ -64,7 +64,8 @@ export function sourceLabel(row) {
   // Copied from the customer's profile field by the one-list sweep.
   if (row.sourceType === "profile") return "From the profile";
   const day = fmtDay(dayKey(row.sourceAt));
-  return day ? `Text, ${day}` : "Text";
+  const what = row.sourceType === "call" ? "Call" : "Text";
+  return day ? `${what}, ${day}` : what;
 }
 
 // The customer's visits a one-visit code may be tied to: not over, and inside

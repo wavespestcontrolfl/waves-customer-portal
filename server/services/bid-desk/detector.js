@@ -13,6 +13,10 @@
  *   VendorLink          "SOLICITATION NOTIFICATION", then the agency's name and address, then "BID NUMBER: <x>",
  *                       "BID TITLE: <x>", "BID OPENING DUE DATE/TIME: <mm/dd/yyyy> at <h:mm AM>, Local Time, <city>"
  *                       (or SOLICITATION NUMBER / TITLE / OPENING DUE DATE/TIME)
+ *   Blue Book (ONETEAM) "Bid is due by <h:mm AM> (<Eastern|Central|Mountain|Pacific>) on <Month d, yyyy>",
+ *                       "You've been invited to bid on a - <Project> in <City, ST>.", "We are looking for <trade>.",
+ *                       "<GC> is sharing this project opportunity with you through The Blue Book Network's ONETEAM."
+ * A Blue Book "Project Notification" (the network's own pick of a project, not a contractor's invite) is never a bid.
  * A VendorLink broadcast can come from any agency in the country, so one is a bid only when the agency's address is
  * in the Tampa Bay to Southwest Florida ZIP areas (the same ones the SAM.gov reader files). Its "Vendor Commodity
  * Code Changed" list (every open bid that loosely matches, sent when the codes change) is never a bid.
@@ -26,6 +30,7 @@ const OWN_ADDRESS = 'contact@wavespestcontrol.com';
 const BC_DOMAIN = 'buildingconnected.com';
 const PROCORE_DOMAIN = 'procoretech.com';
 const VENDORLINK_DOMAIN = 'myvendorlink.com';
+const BLUEBOOK_DOMAIN = 'thebluebook.com';
 const PORTAL_DOMAINS = ['bonfirehub.com', 'opengov.com', 'demandstar.com', 'bidnetdirect.com', 'internationaleprocurement.com', 'myflorida.com'];
 const GOV_SUFFIXES = ['.gov', '.fl.us'];
 const INTERNAL_SUBJECT = /^\s*(?:FIX|ACT|FYI|OK)\s*:/;
@@ -39,6 +44,13 @@ const VENDORLINK_NOTICE = /^\s*SOLICITATION NOTIFICATION\s*$/im;
 const VENDORLINK_CATCH_UP = /\bVendor Commodity Code Changed\b/i;
 // The agency address block, before the first labelled field: "<City>, FL 34231". ZIP areas as the SAM.gov reader.
 const AREA_ZIP = /\b(?:FL|FLORIDA)\.?,?\s+(33[5-9]\d\d|34[12]\d\d)(?:-\d{4})?\b/i;
+// Blue Book invite lines. The apostrophe may be straight or curly; the "a -" before the project is the template's.
+const BB_INVITED = /^You[\u2019']ve been invited to bid on\s+(?:an?\s*-\s*)?(.+?)\.?$/i;
+const BB_DUE = /^Bid is due by (\d{1,2}):(\d{2})\s*([AP])\.?M\.?\s*\((Eastern|Central|Mountain|Pacific)\)\s+on\s+(.+)$/i;
+const BB_SHARING = /^(.{2,160}?) is sharing this project opportunity with you\b/i;
+const BB_LOOKING = /^We are looking for:?\s*(.*)$/i;
+// Hours to add to the GC's wall time to reach Eastern time (the US zones change clocks on the same dates).
+const BB_ZONE_HOURS = { eastern: 0, central: 1, mountain: 2, pacific: 3 };
 const REMINDER_WORDS = /\breminder\b|\bdue (?:soon|tomorrow|today)\b|\bclosing soon\b|\blast chance\b/i;
 
 const MONTH_INDEX = {
@@ -119,6 +131,13 @@ function bodyLines(email) {
   return text.split(/\r?\n/).map((line) => line.replace(/[ \t ]+/g, ' ').trim()).filter(Boolean);
 }
 
+// Blue Book's text part is only a stub ("IF you can't see this email login to ..."); the invite is in the HTML
+// part. Its lines are both parts, text first.
+function bluebookLines(email) {
+  const html = htmlToText(email.body_html).split(/\r?\n/).map((line) => line.replace(/[ \t\u00a0]+/g, ' ').trim()).filter(Boolean);
+  return [...(String(email.body_text || '').trim() ? bodyLines(email) : []), ...html];
+}
+
 const domainOf = (address) => {
   const at = String(address || '').toLowerCase().trim().lastIndexOf('@');
   return at === -1 ? '' : String(address).toLowerCase().trim().slice(at + 1).replace(/[>\s]+$/, '');
@@ -134,6 +153,7 @@ function senderKind(email) {
   if (inDomain(domain, BC_DOMAIN)) return verified ? 'buildingconnected' : null;
   if (inDomain(domain, PROCORE_DOMAIN)) return verified ? 'procore' : null;
   if (inDomain(domain, VENDORLINK_DOMAIN)) return verified ? 'vendorlink' : null;
+  if (inDomain(domain, BLUEBOOK_DOMAIN)) return verified ? 'bluebook' : null;
   if (PORTAL_DOMAINS.some((root) => inDomain(domain, root)) || GOV_SUFFIXES.some((suffix) => domain.endsWith(suffix))) {
     return 'gov_email';
   }
@@ -178,6 +198,12 @@ function bidSource(email, sender, bidWords) {
     const notice = vendorlinkNotice(bodyLines(email));
     if (!notice) return { reason: 'provider_not_bid' };
     return notice.inArea ? { source: 'gov_email' } : { reason: 'outside_area' };
+  }
+  if (sender === 'bluebook') {
+    // A contractor's invite, reminder or addendum carries the invite line; the network's own "Project Notification"
+    // and account mail do not.
+    return bluebookLines(email).some((line) => BB_INVITED.test(line) || BB_DUE.test(line))
+      ? { source: 'bluebook' } : { reason: 'provider_not_bid' };
   }
   if (bidWords) return { source: sender === 'gov_email' ? 'gov_email' : 'email_subject' };
   return { reason: 'not_bid' };
@@ -325,10 +351,46 @@ function vendorlinkDue(lines) {
   return firstDate([{ line, value: rest || line }], '23:59');
 }
 
+// "You've been invited to bid on a - Gas Station Project in Sampleton, FL." The whole phrase is the title (one GC
+// can invite to two gas stations); the place after the last " in " is the location.
+function parseBlueBook(lines) {
+  const out = {};
+  const invited = lines.map((line) => BB_INVITED.exec(line)).find(Boolean);
+  if (invited) {
+    out.project_title = invited[1].trim();
+    const place = / in ([^,]{2,80},\s*[A-Z]{2})$/i.exec(out.project_title);
+    if (place) out.location = place[1];
+  }
+  const sharing = lines.map((line) => BB_SHARING.exec(line)).find(Boolean);
+  if (sharing) out.gc_or_agency = sharing[1].trim();
+  // "We are looking for" with the trade on the same line or alone on the next one.
+  const looking = lines.findIndex((line) => BB_LOOKING.test(line));
+  if (looking !== -1) {
+    const trade = BB_LOOKING.exec(lines[looking])[1].trim() || lines[looking + 1] || '';
+    out.package_name = trade.replace(/\.$/, '').trim() || null;
+  }
+  return out;
+}
+
+// "Bid is due by 5:00 PM (Pacific) on September 14, 2026": the GC's time zone is named, so the time is moved to ET.
+function bluebookDue(lines) {
+  for (const line of lines) {
+    const m = BB_DUE.exec(line);
+    if (!m) continue;
+    const parsed = parseDateET(`${m[5]} ${m[1]}:${m[2]} ${m[3]}m`);
+    if (!parsed || !parsed.hasTime) return null;
+    const hours = BB_ZONE_HOURS[m[4].toLowerCase()];
+    return { at: new Date(parsed.at.getTime() + hours * 3600 * 1000), hasTime: true, line };
+  }
+  return null;
+}
+
 const normalizeTitle = (title) => String(title || '')
   .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-const TEMPLATE_PARSERS = { buildingconnected: parseBuildingConnected, procore: parseProcore, vendorlink: parseVendorLink };
+const TEMPLATE_PARSERS = {
+  buildingconnected: parseBuildingConnected, procore: parseProcore, vendorlink: parseVendorLink, bluebook: parseBlueBook,
+};
 
 // The cross-thread identity of a bid. Only a provider template names the GC and the project (read only when the
 // sender is the provider's own domain), so only a template email groups across threads: every other email (a city
@@ -350,9 +412,10 @@ function groupKeys(fields) {
 
 function templateFields(template, lines) {
   if (!template) return { fields: {}, due: null, jobWalk: null };
+  const due = { vendorlink: vendorlinkDue, bluebook: bluebookDue }[template];
   return {
     fields: TEMPLATE_PARSERS[template](lines),
-    due: template === 'vendorlink' ? vendorlinkDue(lines) : firstDate(labelledValues(lines, 'Bid Due', { allowBare: template === 'procore' }), '23:59'),
+    due: due ? due(lines) : firstDate(labelledValues(lines, 'Bid Due', { allowBare: template === 'procore' }), '23:59'),
     jobWalk: firstDate(labelledValues(lines, 'Job Walk'), '23:59'),
   };
 }
@@ -365,7 +428,8 @@ function parseBidEmail(email = {}) {
   const detected = detectBidEmail(email);
   const kindOfSender = senderKind(email);
   const template = TEMPLATE_PARSERS[kindOfSender] ? kindOfSender : null;
-  const { fields, due, jobWalk } = templateFields(template, template ? bodyLines(email) : []);
+  const lines = { bluebook: bluebookLines }[template] || (template ? bodyLines : () => []);
+  const { fields, due, jobWalk } = templateFields(template, lines(email));
   const pick = (key) => fields[key] || null;
   return {
     template,
@@ -386,7 +450,12 @@ function parseBidEmail(email = {}) {
   };
 }
 
+// Gmail files Blue Book invites as spam (every one through Oct 2026). Only a Blue Book email whose signature passes
+// the STRICT check (`gmail_spam_verified`, set by the intake) may be read past Gmail's SPAM label: the loose check
+// can be fooled by a sender-typed MAIL FROM. The detector still decides whether it is a bid.
+const passesGmailSpam = (email = {}) => email.gmail_spam_verified === true && senderKind(email) === 'bluebook';
+
 module.exports = {
-  detectBidEmail, parseBidEmail, parseDateET, htmlToText, normalizeTitle, classifyKind, domainOf,
+  detectBidEmail, passesGmailSpam, parseBidEmail, parseDateET, htmlToText, normalizeTitle, classifyKind, domainOf,
   BID_WORDS, ADDENDUM_WORDS,
 };

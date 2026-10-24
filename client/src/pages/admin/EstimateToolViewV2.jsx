@@ -60,6 +60,7 @@ import {
   recurringDiscountApplies,
   savedAreaAddOns,
 } from "../../lib/areaAddOns";
+import { MISTING_FORM_DEFAULTS, NO_MISTING, defaultMistingLabel, mistingOption, readMistingAvailability } from "../../lib/mosquitoMisting";
 import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
 
 const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
@@ -1125,6 +1126,13 @@ function serviceDetailText(item = {}) {
   return unique.join(" · ");
 }
 
+// A misting row that priced on a fallback (a blank or invalid layout input) carries its
+// reasons without being a manual quote; the rep must see them to correct the input.
+function mistingReasonNotes(item = {}) {
+  if (item.service !== "mosquito_misting" || item.quoteRequired) return [];
+  return (Array.isArray(item.manualReviewReasons) ? item.manualReviewReasons : []).map(humanizeQuoteReason).filter(Boolean);
+}
+
 function InputV2({ k, id = `estimate-${k}`, ...rest }) {
   const { form, set } = useContext(FormCtx);
   return <Input id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest} />;
@@ -1596,6 +1604,7 @@ export default function EstimateToolViewV2({
     svcInjection: false,
     svcMosquito: false,
     svcTermiteBait: false,
+    ...MISTING_FORM_DEFAULTS,
     svcWdo: false,
     svcRodentBait: false,
     svcOnetimePest: false,
@@ -1754,6 +1763,9 @@ export default function EstimateToolViewV2({
   // preview memo re-runs once the live rows land (the bracket helper reads
   // the same freshly-applied module state on that re-run).
   const [rodentWaveguardPosture, setRodentWaveguardPosture] = useState(() => rodentBaitWaveguardFlags());
+  // Misting system availability + labels (GATE_MOSQUITO_MISTING), read from the
+  // mosquito_misting_pricing row. Declared here because the preview counts it.
+  const [mistingAvailability, setMistingAvailability] = useState(NO_MISTING);
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
     const commercialDetected = isCommercialEstimateInput(form);
@@ -1771,7 +1783,10 @@ export default function EstimateToolViewV2({
       // refreshes after the live row applies (codex #3591 r34 P1).
       ...(rodentWaveguardPosture.tierQualifier !== false ? ["svcRodentBait"] : []),
     ];
-    const separateRecurringKeys = ["svcInjection", "svcFoamRecurring"];
+    // The misting system is a flat plan outside the WaveGuard tiers, so it counts like palm injection.
+    // It counts whenever the toggle is on, gate or not: a reopened estimate that carries it must
+    // not read as "no service selected" while the gate is down (pre-push P1, PR 2b).
+    const separateRecurringKeys = ["svcInjection", "svcFoamRecurring", "svcMisting"];
     // ALL commercial pest-family services now auto-price as recurring lines
     // (lawn, pest, tree/shrub, mosquito, termite-bait, rodent-bait). None collapse
     // to a manual commercial quote.
@@ -2414,7 +2429,7 @@ export default function EstimateToolViewV2({
       // as a pest-only choice path).
       const OTHER_RECURRING_KEYS = [
         "svcLawn", "svcTs", "svcInjection", "svcMosquito",
-        "svcTermiteBait", "svcRodentBait",
+        "svcTermiteBait", "svcRodentBait", "svcMisting",
       ];
       const pestBoth = next.svcPest && next.svcOnetimePest;
       const onlyPestRecurring = OTHER_RECURRING_KEYS.every((k) => !next[k]);
@@ -3358,6 +3373,23 @@ export default function EstimateToolViewV2({
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/mosquito_misting_pricing");
+        if (!r.ok) return;
+        const row = await r.json();
+        if (active) setMistingAvailability(readMistingAvailability(row));
+      } catch {
+        /* ignore — stays hidden */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   function applyDiscountPreset(key) {
     setEstimate(null);
     setSavedId(null);
@@ -3894,6 +3926,10 @@ export default function EstimateToolViewV2({
       if (form.svcInjection) selectedServices.push("PALM_INJECTION");
       if (form.svcMosquito) selectedServices.push("MOSQUITO");
       if (form.svcTermiteBait) selectedServices.push("TERMITE_BAIT");
+      // Forwarded whenever the toggle is on, like the area add-ons: a reopened estimate whose
+      // gate is now off, or whose availability read failed, is refused loudly by the server
+      // (400 MOSQUITO_MISTING_GATED) instead of losing its plan and install here (pre-push P1).
+      if (form.svcMisting) selectedServices.push("MOSQUITO_MISTING");
       if (form.svcWdo) selectedServices.push("WDO");
       if (form.svcRodentBait) selectedServices.push("RODENT_BAIT");
       if (form.svcOnetimePest) selectedServices.push("OT_PEST");
@@ -4123,6 +4159,7 @@ export default function EstimateToolViewV2({
         // forwarded, like the Bermuda option, so a gate turned off mid-session
         // is refused loudly by the server rather than dropped here.
         ...areaAddOnOption(form.areaAddOns, areaAddOnCatalog, form.areaAddOnVisit),
+        ...mistingOption(form, mistingAvailability),
         dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
         dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
         dethatchingAccess: form.dethatchingAccess || "easy",
@@ -6746,6 +6783,67 @@ export default function EstimateToolViewV2({
                   )}
                 </div>
               )}
+              {/* Hidden until the gate read says yes, except for an estimate that already carries
+                  the system: that one keeps its toggle (and its inputs) so the operator sees it and
+                  removes it on purpose; regenerating with it on is refused by the server. */}
+              {(mistingAvailability.available || form.svcMisting) && (
+                <>
+                  <CheckboxV2 k="svcMisting" label="Mosquito Misting System" />
+                  {form.svcMisting && !mistingAvailability.available && (
+                    <div data-testid="misting-unavailable" role="status" className="ml-7 mb-2 text-13 text-amber-800">
+                      The mosquito misting system is not enabled on this server. Untick it to drop it from this estimate; regenerating with it on will be refused.
+                    </div>
+                  )}
+                  {form.svcMisting && (
+                    <div data-testid="misting-inputs" className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <Field label="System" id="estimate-mistingTier" className="mb-4">
+                          <SelectV2
+                            k="mistingTier"
+                            options={[
+                              { value: "", label: defaultMistingLabel(mistingAvailability.tiers, mistingAvailability.limits.defaultTier) },
+                              ...mistingAvailability.tiers.map((t) => ({ value: t.key, label: t.label })),
+                            ]}
+                          />
+                        </Field>
+                        <Field label="Refill solution" id="estimate-mistingSolution" className="mb-4">
+                          <SelectV2
+                            k="mistingSolution"
+                            options={[
+                              { value: "", label: defaultMistingLabel(mistingAvailability.solutions, mistingAvailability.limits.defaultSolution) },
+                              ...mistingAvailability.solutions.map((x) => ({ value: x.key, label: x.label })),
+                            ]}
+                          />
+                        </Field>
+                        <Field
+                          label="Nozzles"
+                          id="estimate-mistingNozzles"
+                          help={`Whole number, ${mistingAvailability.limits.minNozzles}-${mistingAvailability.limits.maxNozzles}. Blank uses the included count.`}
+                          className="mb-4"
+                        >
+                          <InputV2 k="mistingNozzles" type="number" inputMode="numeric" min={String(mistingAvailability.limits.minNozzles ?? "")} step="1" />
+                        </Field>
+                        <Field
+                          label="Risers"
+                          id="estimate-mistingRisers"
+                          help={`Whole number, 0-${mistingAvailability.limits.maxRisers}. Blank is none.`}
+                          className="mb-4"
+                        >
+                          <InputV2 k="mistingRisers" type="number" inputMode="numeric" min="0" step="1" />
+                        </Field>
+                        <Field
+                          label="Refills per year"
+                          id="estimate-mistingRefillsPerYear"
+                          help={`Whole number, up to ${mistingAvailability.limits.maxRefillsPerYear}. Billed per refill application, not in the monthly plan.`}
+                          className="mb-4"
+                        >
+                          <InputV2 k="mistingRefillsPerYear" type="number" inputMode="numeric" min="0" step="1" />
+                        </Field>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
               <CheckboxV2 k="svcTermiteBait" label="Termite Bait Stations" />{" "}
               <CheckboxV2 k="svcRodentBait" label="Rodent Bait Station" />
               {livePreview.recurringCount > 0 && (
@@ -8179,7 +8277,9 @@ export default function EstimateToolViewV2({
                                 <div className="text-14 text-ink-secondary">
                                   {E.oneTime.tmInstall > 0
                                     ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)`
-                                    : "Recurring Membership"}
+                                    : (E.oneTime.items || []).some((item) => item.service === "mosquito_misting_installation")
+                                      ? "One-Time (misting install)"
+                                      : "Recurring Membership"}
                                 </div>{" "}
                               </div>
                             )}
@@ -8988,6 +9088,33 @@ export default function EstimateToolViewV2({
                       );
                     })()}
 
+                    {/* The misting plan is flat and outside the WaveGuard count, so a misting-only
+                        estimate has serviceCount 0 and no bundle card. With another service the bundle
+                        card already lists the plan row. An oversize quote has no totals at all. */}
+                    {E.recurring.serviceCount === 0
+                      && (E.recurring.services || []).some((x) => x.service === "mosquito_misting") && (
+                      <div data-testid="misting-plan" className="bg-zinc-50 border-hairline border-zinc-300 rounded-sm p-5 mb-6">
+                        <div className="text-18 font-medium text-zinc-900">Mosquito misting system</div>
+                        <div className="grid grid-cols-[1fr_auto] gap-y-1 gap-x-4 text-14 mt-3 p-3 bg-white rounded-xs border-hairline border-zinc-200">
+                          {E.recurring.services.filter((x) => x.service === "mosquito_misting").map((x, i) => (
+                            <React.Fragment key={i}>
+                              <div className="text-ink-secondary">
+                                <div>{x.displayName || x.name}</div>
+                                {serviceDetailText(x) && (
+                                  <div className="text-14 text-ink-tertiary leading-snug mt-0.5">{serviceDetailText(x)}</div>
+                                )}
+                                {mistingReasonNotes(x).map((note) => (
+                                  <div key={note} className="text-14 text-ink-tertiary leading-snug mt-0.5">{note}</div>
+                                ))}
+                              </div>
+                              <div className="text-zinc-900 text-right u-nums">
+                                {x.quoteRequired ? "Quote Required" : `${fmt(x.mo)}/mo`}
+                              </div>
+                            </React.Fragment>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     {/* Bundle + Totals */}
                     {(E.recurring.serviceCount > 0 ||
                       Number(E.recurring.monthlyTotal) > 0 ||
@@ -9025,14 +9152,21 @@ export default function EstimateToolViewV2({
                                   <div className="text-ink-secondary">
                                     {" "}
                                     <div>{s.displayName || s.name}</div>
-                                    {s.detail && (
+                                    {/* A manual-quote row also names its reason in words, as the one-time
+                                        list does; priced rows keep their plain detail line. */}
+                                    {(s.quoteRequired ? serviceDetailText(s) : s.detail) && (
                                       <div className="text-14 text-ink-tertiary leading-snug mt-0.5">
-                                        {s.detail}
+                                        {s.quoteRequired ? serviceDetailText(s) : s.detail}
                                       </div>
                                     )}
+                                    {mistingReasonNotes(s).map((note) => (
+                                      <div key={note} className="text-14 text-ink-tertiary leading-snug mt-0.5">{note}</div>
+                                    ))}
                                   </div>{" "}
                                   <div className="text-zinc-900 text-right u-nums">
-                                    {fmt(s.mo)}/mo
+                                    {/* A manual-quote row (an oversize misting layout) carries mo 0 as a
+                                        placeholder; never show an unpriced system as free (pre-push P1). */}
+                                    {s.quoteRequired ? "Quote Required" : `${fmt(s.mo)}/mo`}
                                   </div>{" "}
                                 </React.Fragment>
                               ))}

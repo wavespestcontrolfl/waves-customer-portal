@@ -1,6 +1,8 @@
 // Bid Desk detector and parser (GATE_BID_DESK): pure, no database, no AI. Every name, address and email below is
 // invented; the bodies copy the SHAPE of the BuildingConnected and Procore templates, not any real message.
-const { detectBidEmail, parseBidEmail, parseDateET, htmlToText } = require('../services/bid-desk/detector');
+const {
+  detectBidEmail, parseBidEmail, parseDateET, htmlToText, passesGmailSpam,
+} = require('../services/bid-desk/detector');
 
 // provider_verified is what the intake sets after checking aligned SPF/DKIM; fixtures are verified unless a test
 // says otherwise (see "a forged provider email").
@@ -370,5 +372,84 @@ describe('VendorLink solicitation broadcasts', () => {
     for (const from of ['notices@ha.internationaleprocurement.com', 'MFMP.NoReply@dms.myflorida.com']) {
       expect(detectBidEmail(email({ from_address: from, subject: 'New RFP: Pest Control' }))).toMatchObject({ bid: true, source: 'gov_email' });
     }
+  });
+});
+
+// The SHAPE of a Blue Book Network ONETEAM invite (htmlToText of the delivered HTML); invented contractor and place.
+const BB_LINES = (due = 'Bid is due by 5:00 PM (Pacific) on September 14, 2026') => [
+  '96', 'Invitation to Bid', due,
+  'You\u2019ve been invited to bid on a - Government Building Project in Sampleport, FL.',
+  'We are looking for', 'Pest Control--Exterminating.',
+  'View Full Project Details & Files', 'Bid Due Date', '09/14/26 5:00 PM (Pacific)',
+  'You are receiving this email because you are registered in The Blue Book Network. www.thebluebook.com',
+  "Fixture & Honor LLC is sharing this project opportunity with you through The Blue Book Network's ONETEAM. For help & training on how to view and respond to this ITB call 888-555-0100 .",
+];
+const bbInvite = (over = {}) => email({
+  from_address: 'FixtureHonor.oneteam.build@bbbid.thebluebook.com', from_name: 'Fixture & Honor LLC',
+  subject: 'Invitation to Bid', body_text: BB_LINES().join('\n'), ...over,
+});
+
+describe('Blue Book ONETEAM invites', () => {
+  test('reads the contractor, project, place, trade and due time (moved from the named zone to ET)', () => {
+    expect(parseBidEmail(bbInvite())).toMatchObject({
+      template: 'bluebook', source: 'bluebook', kind: 'invite',
+      gc_or_agency: 'Fixture & Honor LLC', project_title: 'Government Building Project in Sampleport, FL',
+      location: 'Sampleport, FL', package_name: 'Pest Control--Exterminating', solicitation_number: null,
+      due_source_line: 'Bid is due by 5:00 PM (Pacific) on September 14, 2026',
+    });
+    // 5:00 PM Pacific = 8:00 PM Eastern (EDT) = 00:00 UTC the next day.
+    expect(parseBidEmail(bbInvite()).due_at.toISOString()).toBe('2026-09-15T00:00:00.000Z');
+    const eastern = bbInvite({ body_text: BB_LINES('Bid is due by 4:00 PM (Eastern) on May 12, 2026').join('\n') });
+    expect(parseBidEmail(eastern).due_at.toISOString()).toBe('2026-05-12T20:00:00.000Z');
+    // A zone the template does not name gives no date (never a guess).
+    const other = bbInvite({ body_text: BB_LINES('Bid is due by 4:00 PM (Hawaii) on May 12, 2026').join('\n') });
+    expect(parseBidEmail(other).due_at).toBeNull();
+  });
+
+  test('the invite, its reminder and its addendum group as one bid; another project of the same contractor does not', () => {
+    const invite = parseBidEmail(bbInvite());
+    const reminder = parseBidEmail(bbInvite({ subject: 'Reminder to Bid' }));
+    const addendum = parseBidEmail(bbInvite({ subject: 'Notice of Addenda #:  - #1234567 Termite Fumigation' }));
+    expect(reminder).toMatchObject({ kind: 'reminder', group_key: invite.group_key });
+    expect(addendum).toMatchObject({ kind: 'addendum', group_key: invite.group_key });
+    const otherSite = BB_LINES().map((line) => line.replace('Sampleport', 'Fixtureville'));
+    expect(parseBidEmail(bbInvite({ body_text: otherSite.join('\n') })).group_key).not.toBe(invite.group_key);
+  });
+
+  test('reads the HTML when there is no text part, with a straight apostrophe', () => {
+    const html = BB_LINES().map((line) => `<div>${line.replace('\u2019', "'").replace('&', '&amp;')}</div>`).join('');
+    expect(parseBidEmail(bbInvite({ body_text: '', body_html: html }))).toMatchObject({
+      source: 'bluebook', gc_or_agency: 'Fixture & Honor LLC', package_name: 'Pest Control--Exterminating',
+    });
+  });
+
+  test('reads the HTML part when the text part is only the "can\'t see this email" stub (as delivered)', () => {
+    const html = BB_LINES().map((line) => `<div>${line.replace('&', '&amp;')}</div>`).join('');
+    const stub = " IF you can't see this email login to http://www.thebluebook.com/_bbbid.htm?ABCDEF or call the Blue Book Product Support Staff at 888-555-0100. ";
+    expect(parseBidEmail(bbInvite({ body_text: stub, body_html: html }))).toMatchObject({
+      source: 'bluebook', template: 'bluebook', gc_or_agency: 'Fixture & Honor LLC',
+      project_title: 'Government Building Project in Sampleport, FL', package_name: 'Pest Control--Exterminating',
+      due_source_line: 'Bid is due by 5:00 PM (Pacific) on September 14, 2026',
+    });
+    expect(detectBidEmail(bbInvite({ body_text: stub, body_html: '<div>Project Notification</div>' })).bid).toBe(false);
+  });
+
+  test("the network's own Project Notification and account mail are not bids", () => {
+    const notice = bbInvite({
+      from_address: 'bbbid400@bbbid.thebluebook.com', subject: 'Project Notification from Sample County',
+      body_text: ['Project Notification', 'Sample Creek Dredging', 'Bids Due: 10/28/2026 at (Eastern)', 'GC Bidder: Sample County'].join('\n'),
+    });
+    expect(detectBidEmail(notice)).toEqual({ bid: false, reason: 'provider_not_bid' });
+    expect(detectBidEmail(bbInvite({ subject: 'Your Blue Book profile', body_text: 'Update your company profile.' })).bid).toBe(false);
+  });
+
+  test('a forged Blue Book email is read like any plain email and may pass Gmail Spam only when verified', () => {
+    const forged = bbInvite({ provider_verified: false });
+    expect(parseBidEmail(forged)).toMatchObject({ template: null, source: 'email_subject', gc_or_agency: null, due_at: null, group_key: null });
+    expect(passesGmailSpam({ ...forged, gmail_spam_verified: true })).toBe(false);
+    // Past Gmail Spam only on the STRICT signature check, not the loose one alone.
+    expect(passesGmailSpam(bbInvite())).toBe(false);
+    expect(passesGmailSpam(bbInvite({ gmail_spam_verified: true }))).toBe(true);
+    expect(passesGmailSpam(bcInvite({ gmail_spam_verified: true }))).toBe(false);
   });
 });

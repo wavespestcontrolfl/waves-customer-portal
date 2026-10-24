@@ -770,9 +770,14 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   // date_exception_cadence_date recorded (pre-dates the column) — fall back
   // to scheduled_date exactly like rebooker.dateExceptionStamp's own
   // COALESCE-equivalent (rebooker.js:323-334), never to today's date.
+  // Likewise a handed-off row (no time, recurring_dispatch_due_date = its
+  // cadence date) that the night tool placed up to three days away keeps
+  // that due date — the night tool never stamps an exception — so the next
+  // extension projects from the due date, not the placement; otherwise every
+  // hand-off could shift the plan by up to three days, compounding.
   const anchorDate = (latest?.date_exception && latest?.date_exception_cadence_date)
     ? latest.date_exception_cadence_date
-    : latest?.scheduled_date;
+    : (latest?.recurring_dispatch_due_date || latest?.scheduled_date);
   const latestStr = dateOnly(anchorDate) || '';
   if (!latestStr) return etDateString();
   return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
@@ -1047,14 +1052,20 @@ function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, n
 // services/scheduling/window-rules.js (shared with the recurring seeder's
 // taken-hour hand-off, plan-taken-hour.js).
 //
-// Best-effort destination probe for the maintenance / alert-action series
-// extension walks: the blackout nudge can move a candidate onto an adjacent
-// day that already holds an overlapping visit, and those walks insert
-// directly (their series-date dedupe only covers their OWN series). Probe
-// each candidate through the shared tech-blind occupancy check and skip a
-// clashing date — the walks advance to the next cadence step. Windowless
-// templates carry no occupancy and skip the probe (module convention).
-// NOT a commit gate — DELIBERATELY probe-only: these writers run under the
+// Every series extension walk (completion, nightly top-up, plan-alert
+// actions) books its cadence date even when another visit sits in that slot:
+// skipping to the next cadence step silently drops whole visits on a busy
+// one-technician calendar (a quarterly plan lost two quarters to it,
+// 2026-10-22). Staff writes never block on conflicts (owner 2026-08-25,
+// guardRecurrenceDestination), and a plan visit whose hour another stop holds
+// goes in WITHOUT a time for auto-dispatch to place (owner 2026-10-22, audit
+// D4; GATE_PLAN_TAKEN_HOUR_HANDOFF, scheduling/plan-taken-hour.js). Returns
+// the hand-off fields to merge into the insert, or none, logging what it
+// books through: the customer's own stop in the hour (one trip) or, gate off
+// or too near, another visit. Windowless templates carry no occupancy and
+// probe nothing (module convention). `tag` names the writer in the log
+// ([recurring], [recurring-topup], [recurring-alerts]).
+// DELIBERATELY probe-only, never a commit gate: these writers run under the
 // per-parent maintenance advisory lock, and the candidate date is only known
 // mid-trx, after the rung-6 comms lock. Taking rung 1 here inverts the
 // ORDERING CONTRACT and is a real deadlock, not a style point: a booking
@@ -1063,12 +1074,23 @@ function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, n
 // on that rung 1 — a cycle. The safe alternative (pre-trx candidate peek →
 // rung 1 first → re-verify under the lock, the update-details idiom) needs
 // the whole maintenance/alert flow restructured around a peeked lock set;
-// until then the per-parent lock + this probe close the practical window
-// (pre-probe, these walks inserted with NO cross-series check at all), and a
-// same-instant booking commit is the accepted residual. The update-details
-// path keeps its full peek → rung-1 → guardRecurrenceDestination gate.
-async function seriesCandidateDateClashes(conn, template, date) {
-  return (await seriesCandidateDateClashRows(conn, template, date)).length > 0;
+// until then the per-parent lock + this probe close the practical window,
+// and a same-instant booking commit is the accepted residual. The
+// update-details path keeps its full peek → rung-1 →
+// guardRecurrenceDestination gate.
+async function cadenceSlotHandoffFields(conn, row, date, cols, tag) {
+  const parentId = row.recurring_parent_id || row.id;
+  if (await planTakenHour.takenHourHandoff(conn, row, { date })) {
+    logger.info(`[${tag}] parent=${parentId} candidate ${date}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
+    return planTakenHour.handoffFields(date, cols);
+  }
+  const clashes = await seriesCandidateDateClashRows(conn, row, date);
+  if (clashes.length && clashes.every((c) => c.customer_id != null && String(c.customer_id) === String(row.customer_id))) {
+    logger.info(`[${tag}] parent=${parentId} candidate ${date}: the customer's own visit is in the hour — inserting alongside it`);
+  } else if (clashes.length) {
+    logger.warn(`[${tag}] parent=${parentId} candidate ${date} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
+  }
+  return {};
 }
 
 // In-trx half of the plan: a destination the pre-trx peek did not predict
@@ -19151,13 +19173,15 @@ function latestLiveSeriesVisit(conn, parentId) {
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .where('is_recurring', true)
     .whereNotIn('status', ['cancelled', 'rescheduled'])
-    // Order by cadence POSITION, not the raw (possibly one-off-moved) date —
-    // a "this visit only" exception row occupies date_exception_cadence_date
-    // in the series, same as rescheduleSeries.readSiblings (rebooker.js) and
+    // Order by cadence POSITION, not the raw (possibly moved) date — a "this
+    // visit only" exception row occupies date_exception_cadence_date in the
+    // series, same as rescheduleSeries.readSiblings (rebooker.js) and
     // recurring-schedule-audit.recurringCadenceDate already treat it
-    // (ADMIN-BUG-R30). Matters only when 2+ live rows compete for "latest"
-    // (e.g. a booster sitting past an exception's raw moved date).
-    .orderBy(conn.raw('COALESCE(date_exception_cadence_date, scheduled_date)'), 'desc')
+    // (ADMIN-BUG-R30), and a handed-off row the night tool placed up to three
+    // days away still occupies its recurring_dispatch_due_date. Matters only
+    // when 2+ live rows compete for "latest" (e.g. a booster sitting past an
+    // exception's raw moved date).
+    .orderBy(conn.raw('COALESCE(date_exception_cadence_date, recurring_dispatch_due_date, scheduled_date)'), 'desc')
     .first();
 }
 
@@ -20269,15 +20293,8 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // rows from a legacy template (AGENTS.md: windows start on the hour); a
 // windowless template is untouched either way. Omitted (the completion
 // path), the window is copied verbatim, byte-identical to before this
-// extraction. `opts.overlapAdvisoryOnly` (bool), when true, never lets a
-// seriesCandidateDateClashes hit skip a candidate to the next cadence
-// step — it inserts on the cadence date and logs the overlap instead,
-// matching guardRecurrenceDestination's own ruling that every other admin
-// write treats an overlap as advisory, never a hard block. Top-up only: a
-// tech-blind clash probe on a busy calendar can otherwise skip most of a
-// year's cadence slots for one recurring conflict. Omitted (the
-// completion path), a clash still advances to the next cadence step,
-// byte-identical to before this extraction. `opts.onSkip` (function),
+// extraction. An occupancy clash never skips a candidate on either path
+// (cadenceSlotHandoffFields). `opts.onSkip` (function),
 // called with a reason string ('unbillable' today) instead of silently
 // returning null when opts.checkUnbillable refuses the very first
 // candidate — lets topUpRecurringSeriesLocked report an honest skip
@@ -20336,7 +20353,7 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
 
 // The next-date search of extendSeriesOnceLocked: the cadence walk. Returns
 // { nextStr, hitMaxDate, placement } for the caller to insert: `placement` is
-// the technician, place and (on a top-up's taken hour) no-time hand-off the
+// the technician, place and (on a taken hour) no-time hand-off the
 // child gets on nextStr, read once for the taken-hour probe and the insert.
 async function walkExtensionCandidates(ctx) {
   const {
@@ -20381,23 +20398,8 @@ async function walkExtensionCandidates(ctx) {
       continue;
     }
     if (existingDates.has(candidate)) { attempt++; continue; }
-    // The blackout nudge can land a candidate on an adjacent day
-    // another visit already occupies (the series dedupe above only
-    // covers THIS series) — probe global occupancy before accepting,
-    // skipping clashing dates to the next cadence step. opts.overlapAdvisoryOnly
-    // (top-up only — never set by the completion path, so its own
-    // behavior is unchanged): seriesCandidateDateClashes is tech-blind
-    // (it has no idea which technician the office actually intends), and
-    // guardRecurrenceDestination's own ruling for every OTHER admin write
-    // path is that an overlap is advisory, never a hard block (staff-side
-    // saves never block on schedule conflicts, owner ruling 2026-08-25).
-    // Treating a clash as a hard skip here on an unattended nightly loop
-    // silently drops whole cadence slots on a busy calendar — a monthly
-    // series can lose most of a year's candidates to one recurring
-    // conflict. Insert on the cadence date and log the overlap instead.
-    if (!opts.overlapAdvisoryOnly && await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
-      attempt++; continue;
-    }
+    // Another visit in the slot never skips it: the visit goes in on its
+    // cadence date (cadenceSlotHandoffFields, below).
     nextStr = candidate;
     break;
   }
@@ -20414,21 +20416,7 @@ async function walkExtensionCandidates(ctx) {
   };
   copyStampedServiceAddressFields(placement, parent, cols);
   await anchorSoleProperty(placement, cols, conn);
-  if (opts.overlapAdvisoryOnly) {
-    // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit D4):
-    // when another stop holds the plan's hour — the night tool's own rule
-    // (scheduling/plan-taken-hour.js), booked interviews included — the
-    // visit goes in on its cadence date WITHOUT a time and auto-dispatch
-    // places it, instead of on top of it. Otherwise (gate off, too near, or
-    // only the customer's own stop at the same place) a clash is logged and
-    // the visit inserted, as before.
-    if (await planTakenHour.takenHourHandoff(conn, { ...clashProbeTemplate, ...placement }, { date: nextStr })) {
-      Object.assign(placement, planTakenHour.handoffFields(nextStr, cols));
-      logger.info(`[recurring-topup] parent=${parentId} candidate ${nextStr}: the plan's hour is taken — inserting without a time for auto-dispatch to place`);
-    } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, nextStr)) {
-      logger.warn(`[recurring-topup] parent=${parentId} candidate ${nextStr} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
-    }
-  }
+  Object.assign(placement, await cadenceSlotHandoffFields(conn, { ...clashProbeTemplate, ...placement }, nextStr, cols, opts.maxDate ? 'recurring-topup' : 'recurring'));
   return { nextStr, hitMaxDate, placement };
 }
 
@@ -21292,13 +21280,8 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // extendSeriesOnceLocked (price varies by date), not a coarse upfront
     // guess — a series can fill partway then stop exactly where billability
     // breaks down, same as running out of horizon or hitting the cap.
-    // overlapAdvisoryOnly: a tech-blind occupancy clash on a busy calendar
-    // must never silently drop a whole cadence slot — insert on the
-    // cadence date and log it, matching every other admin write's own
-    // advisory-only posture (guardRecurrenceDestination).
     const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, {
-      maxDate: effectiveHorizon, checkUnbillable: true, normalizeOffHourStart: true,
-      overlapAdvisoryOnly: true, onSkip,
+      maxDate: effectiveHorizon, checkUnbillable: true, normalizeOffHourStart: true, onSkip,
     });
     if (!spawned) break;
     spawnedVisits.push(spawned);
@@ -21687,7 +21670,7 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
 // same predicate + status exclusions as the parent move probe and the
 // top-up's advisory probe. ADVISORY (owner ruling 2026-08-25: admin writes
 // never block on a clash). Probe-only for the same lock-contract reason as
-// seriesCandidateDateClashes: the date is only known mid-trx, after the
+// cadenceSlotHandoffFields: the date is only known mid-trx, after the
 // rung-6 comms lock, so rung 1 cannot be taken here. Excludes the row it
 // just inserted; a hit names the date only.
 async function probeReseedOverlaps(trx, { parent, parentId, added }) {
@@ -27909,11 +27892,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension must still only ever land on future dates.
         if (nd <= etDateString()) continue;
         if (seen.has(nd)) continue;
-        // The blackout nudge can land a candidate on an adjacent day another
-        // visit already occupies (`seen` only covers THIS series) — probe
-        // global occupancy before accepting; a clashing date is skipped to
-        // the next cadence step.
-        if (await seriesCandidateDateClashes(trx, parent, nd)) continue;
         seen.add(nd);
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
@@ -27934,6 +27912,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
         await anchorSoleProperty(data, cols, conn);
+        // Another visit in the slot never skips it: the visit goes in on its
+        // cadence date, without a time when another stop holds the hour.
+        Object.assign(data, await cadenceSlotHandoffFields(trx, { ...parent, ...data }, nd, cols, 'recurring-alerts'));
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'runRecurringAlertAction:extend');
         // Anchored-split provenance governs the per-visit amount on EVERY
@@ -27963,7 +27944,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           throw Object.assign(httpError(409, unbillableAction.error), { code: unbillableAction.code });
         }
         const [row] = await trx('scheduled_services').insert(data).returning('*');
-        spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
+        spawned.push({ id: row?.id, date: nd, windowStart: data.window_start, serviceType: childIdentity.service_type });
         inserted++;
         created++;
       }
@@ -28008,9 +27989,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension must still only ever land on future dates.
         if (nd <= etDateString()) continue;
         if (seen.has(nd)) continue;
-        // Same global occupancy probe as the extend loop above — a nudged
-        // candidate must not double-book an adjacent day.
-        if (await seriesCandidateDateClashes(trx, parent, nd)) continue;
         seen.add(nd);
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
@@ -28032,6 +28010,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
         await anchorSoleProperty(data, cols, conn);
+        // Another visit in the slot never skips it: the visit goes in on its
+        // cadence date, without a time when another stop holds the hour.
+        Object.assign(data, await cadenceSlotHandoffFields(trx, { ...parent, ...data }, nd, cols, 'recurring-alerts'));
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'runRecurringAlertAction:convert_ongoing');
         // Anchored-split provenance governs the per-visit amount on EVERY
@@ -28061,7 +28042,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           throw Object.assign(httpError(409, unbillableAction.error), { code: unbillableAction.code });
         }
         const [row] = await trx('scheduled_services').insert(data).returning('*');
-        spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
+        spawned.push({ id: row?.id, date: nd, windowStart: data.window_start, serviceType: childIdentity.service_type });
         inserted++;
         created++;
       }
@@ -28174,7 +28155,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       scheduledServiceId: row.id,
       customerId: parent.customer_id,
       scheduledDate: row.date,
-      windowStart: parent.window_start,
+      // The inserted start: a handed-off visit has none, so its reminder
+      // registers as the non-delivering windowless placeholder.
+      windowStart: row.windowStart,
       serviceType: row.serviceType || parent.service_type,
       source: 'recurring_alert_action',
     });
