@@ -506,7 +506,9 @@ async function setupFeeSettledElsewhere(conn, {
         return { settled: true, reason: 'waived', invoiceId: row.id };
       }
       if (status !== 'paid') continue;
-      if (/annual prepay/i.test(String(li?.category || '')) && cents > 0
+      // A termite (or bait/install) prepay never waives the WaveGuard fee, the
+      // same exclusion the term lookup below applies (annual_plan_version).
+      if (/annual prepay/i.test(String(li?.category || '')) && cents > 0 && waveguardFeeLine(li)
         && row.created_at && Date.now() - new Date(row.created_at).getTime() <= SETUP_FEE_SETTLED_PREPAY_WINDOW_MS) {
         return { settled: true, reason: 'annual_prepay', invoiceId: row.id };
       }
