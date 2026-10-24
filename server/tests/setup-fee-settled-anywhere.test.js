@@ -285,6 +285,11 @@ describe('the detector behind the alert and the completion hold', () => {
       expect(src).toContain('partialElsewhereCents(settledNowTerm.partial, termFeeRows)');
       expect(src).toContain('partialElsewhereCents(settledNow.partial, [...liveStampedRows');
       expect(src).not.toContain('settledElsewherePartial, ');
+      // A fee settled in the race window must NOT drop the alert (the hold already suppressed
+      // the application mint): it folds into feeCovered so the application checks still run.
+      expect(src).toContain('const feeSettledNow = settledNow.settled === true;');
+      expect(src).toContain('const feeCovered = feeSettledNow || (expectedSetupFeeCents > 0');
+      expect(src).not.toContain('is settled on another invoice (${settledNow.reason})');
     });
   });
 

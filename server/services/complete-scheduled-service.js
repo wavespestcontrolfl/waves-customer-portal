@@ -11154,19 +11154,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             visitDate: await SetupFeeObligationFresh.settledVisitDate(trx, svc.id),
             lock: true,
           });
-          if (settledNow.settled) {
-            logger.warn(`[dispatch] visit ${svc.id}: setup fee for estimate ${feeEstimateRef} is settled on another invoice (${settledNow.reason}) — setup-fee alert ${already ? 'rewritten as resolved' : 'skipped'}`);
-            if (already) {
-              await trx('notifications').where({ id: already.id }).update({
-                ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: the setup fee for estimate ${feeEstimateRef} is already settled on another invoice. The earlier manual-billing instruction no longer applies; do NOT bill the setup fee.`),
-                ...require('../services/notification-service')._private.doneColumns({
-                  by: 'setup-fee-alert', resolution: 'The setup fee is settled on another invoice', keepExisting: true, conn: trx,
-                }),
-                metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
-              });
-            }
-            return true;
-          }
+          // A fee settled in the race window is treated as COVERED below, never as a reason to
+          // drop the alert: the hold already suppressed this visit's application mint, so the
+          // application-coverage checks must still run (an application-only alert stands).
+          const feeSettledNow = settledNow.settled === true;
           const stampedNowRows = await trx('invoices')
             .where({ customer_id: svc.customer_id })
             .where('notes', 'ilike', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
@@ -11225,10 +11216,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0)
             // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
             + require('../services/setup-fee-obligation').partialElsewhereCents(settledNow.partial, [...liveStampedRows, ...liveOnVisitRows, ...stampedNowRows, ...onVisitLockedRows]);
-          const feeCovered = expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents;
+          const feeCovered = feeSettledNow || (expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents);
           const feeCoveredBy = feeCovered
             ? (liveStampedRows.find(invoiceHasPositiveSetupFeeLine)
-              || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine) || uniqueLiveNow[0] || null)
+              || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine)
+              || (feeSettledNow
+                ? { id: settledNow.invoiceId || settledNow.termId || 'another invoice', invoice_number: null, status: 'settled elsewhere' }
+                : uniqueLiveNow[0])
+              || null)
             : null;
           // Only the durable base-application identity counts on every
           // row (Codex P0, round 18), and stamped first-application
