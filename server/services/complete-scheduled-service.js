@@ -2540,6 +2540,7 @@ function shouldCaptureApplicationConditions({
 // All coverage guards still apply, and autopayCoversVisit already requires
 // !hasVisitPrice, so a price-free autopay-covered visit is never billed here.
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const SeriesPriceGuards = require('../services/series-price-guards');
 
 function completionSavedCardFallbackPolicy({
   suppressAlternateCollection,
@@ -12879,6 +12880,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
           ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
           serviceRecordId: record.id,
         } });
+      }
+    }
+
+    // A performed visit that billed nothing, on ANY lane, with no prepay,
+    // dues, paid or minted invoice behind it rings the office once per visit
+    // (GATE_SERIES_PRICE_GUARDS; off = the two log lines above only).
+    // Non-blocking: the closeout is already committed.
+    if (!packetEffects && !recapReviewOnly && !systemQuietCloseout && !isBackfillCompletion
+      && SeriesPriceGuards.seriesPriceGuardsLive()
+      && SeriesPriceGuards.unbilledCompletionAlertDue({
+        visitPerformed, isCallback: svc.is_callback, serviceType: svc.service_type, reviewedVisitPrice,
+        authoritativeZeroPrice: hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price),
+        invoiceAmount: mintInvoiceAmount, prepaidCovered, autopayCoversVisit, alreadyPaid, invoice, invoiceCreated,
+      })) {
+      try {
+        const created = await SeriesPriceGuards.raiseUnbilledCompletionAlert(svc);
+        if (!created) logger.error(`[dispatch] unbilled-completion alert NOT recorded for visit ${svc.id}`);
+      } catch (alertErr) {
+        logger.error(`[dispatch] unbilled-completion alert failed for visit ${svc.id} (non-blocking): ${alertErr.message}`);
       }
     }
 

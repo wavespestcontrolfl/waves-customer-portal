@@ -917,6 +917,16 @@ const gates = {
   // when it flips.
   editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
 
+  // Series price guards (services/series-price-guards.js). On: a series
+  // extension (completion auto-extend, nightly top-up) whose price is more
+  // than 25% over the series' last PAID visit still inserts but rings the
+  // office; one templated from a CANCELLED root that the last paid visit
+  // does not back is skipped and rings the office; a performed visit that
+  // completes with no billable amount and nothing covering it rings the
+  // office. Off = no extra reads, no skip, no alert. Kill switch: delete the
+  // env var. Ships dark.
+  seriesPriceGuards: process.env.GATE_SERIES_PRICE_GUARDS === 'true',
+
   // Multiple discounts on one service, and the one rule for how they combine
   // (owner ruling 2026-09-11, "the lesser of the two"): dollar credits come
   // off first, then percentages compound on what is left (10% then 5% off
