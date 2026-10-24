@@ -583,37 +583,26 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
         className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 flex items-center justify-between"
         style={{ padding: '8px 14px', height: 36 }}
       >
-        <span className="flex items-center" style={{ gap: 8 }}>
-          <span
-            className={
-              'uppercase tracking-label font-medium ' +
-              (today ? 'text-zinc-900' : 'text-ink-secondary')
-            }
-            style={{ fontSize: 11 }}
-          >
+        <span className="flex items-center u-nums font-bold text-zinc-900" style={{ gap: 8, fontSize: 13 }}>
+          <span className="uppercase tracking-label">
             {headerLabel(dateStr)}
           </span>
-          {/* Exception-based rain chip: only at ≥40% (amber), ≥50 alert-red —
-              same thresholds as the week grids / dispatch weather bar. */}
+          {/* Exception-based rain figure: shown only at ≥40%, alert-red at ≥50
+              (same thresholds as the week grids / dispatch weather bar); below
+              that it reads in the header's own color. */}
           {rainChance != null && rainChance >= 40 && (
             <span
-              className={
-                'u-nums font-bold ' +
-                (rainChance >= 50 ? 'text-alert-fg' : 'text-amber-700')
-              }
-              style={{ fontSize: 13 }}
+              className={rainChance >= 50 ? 'text-alert-fg' : undefined}
               title={`${rainChance}% chance of rain`}
             >
               {rainChance}% rain
             </span>
           )}
         </span>
-        <span className="u-nums font-bold text-ink-tertiary" style={{ fontSize: 13 }}>
+        <span className="u-nums font-bold text-zinc-900" style={{ fontSize: 13 }}>
           {sorted.length} {sorted.length === 1 ? 'appt' : 'appts'}
-          {openHours.length > 0 && (
-            <span className="text-zinc-900"> · {openHours.length} open {openHours.length === 1 ? 'hr' : 'hrs'}</span>
-          )}
-          {driveLabel && <span> · {driveLabel} driving</span>}
+          {openHours.length > 0 && ` · ${openHours.length} open ${openHours.length === 1 ? 'hr' : 'hrs'}`}
+          {driveLabel && ` · ${driveLabel} driving`}
         </span>
       </header>
       {rows.length === 0 ? (
