@@ -9,7 +9,8 @@
 
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
+const { isMistingSystemIdentity, mistingInstallInvoiceLines } = require('../utils/mosquito-misting-system');
+const { ANNUAL_PREPAY_COVERAGE_LINE_KIND } = require('../utils/annual-prepay-line-kinds');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
@@ -2225,6 +2226,177 @@ function normalizeEstimateData(value) {
   return value;
 }
 
+const MISTING_INSTALL_FALLBACK_NAME = 'Mosquito Misting System Installation';
+const MISTING_PROPOSAL_SECTIONS = ['buildings', 'programs', 'correctiveWork'];
+
+// The priced amount of a stored row (first positive of the money fields), or null.
+function mistingRowPrice(row) {
+  return firstPositiveNumber(row.price, row.amount, row.total, row.priceAfterDiscount, row.totalAfterDiscount);
+}
+
+// Several sold installs -> { amount: total, description, lines: [{ amount, description }] }; none -> null. The invoices emit one marked
+// line per entry; every total, preview and divider uses the total.
+function packMistingInstall(entries) {
+  if (!entries.length) return null;
+  const amount = roundMoney(entries.reduce((sum, entry) => sum + entry.amount, 0));
+  const description = entries.length === 1 ? entries[0].description : `${MISTING_INSTALL_FALLBACK_NAME} (${entries.length} systems)`;
+  return { amount, description, lines: entries };
+}
+
+// An AUTHORED itemized proposal is the accepted quote and may sell an install per building: every line of the proposal sections, each
+// line object once (a line listed under two containers is the same line).
+function isItemizedAuthoredProposal(proposal) {
+  return !!proposal && proposal.enabled === true
+    && MISTING_PROPOSAL_SECTIONS.some((key) => Array.isArray(proposal[key]) && proposal[key].length > 0);
+}
+
+function proposalLineObjects(proposal) {
+  const lines = [
+    ...(proposal.buildings || []).flatMap((building) => (building && building.lineItems) || []),
+    ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+  ];
+  return [...new Set(lines.filter((line) => line && typeof line === 'object'))];
+}
+
+// Every priced install line of an authored proposal.
+function mistingInstallFromProposal(proposal) {
+  const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
+  const entries = [];
+  for (const line of proposalLineObjects(proposal)) {
+    if (mistingProposalIdentity(line) !== 'mosquito_misting_installation') continue;
+    const amount = firstPositiveNumber(line.amount, Number(line.unitPrice) * (Number(line.quantity) || 1), line.price);
+    if (amount != null) entries.push({ amount: roundMoney(amount), description: String(line.description || line.label || line.name || MISTING_INSTALL_FALLBACK_NAME) });
+  }
+  return packMistingInstall(entries);
+}
+
+// A mapped `mosquito_misting_installation` one-time item (priced, not quote-required). The engine prices ONE system per estimate and the
+// same install is mirrored across containers as distinct objects, so the first priced one is the install (never summed with its mirrors).
+function mistingInstallFromMappedItems(rows) {
+  for (const row of rows) {
+    if (String(row.service || '').toLowerCase() !== 'mosquito_misting_installation' || row.quoteRequired === true) continue;
+    const amount = mistingRowPrice(row);
+    if (amount != null) return packMistingInstall([{ amount: roundMoney(amount), description: String(row.name || row.label || MISTING_INSTALL_FALLBACK_NAME) }]);
+  }
+  return null;
+}
+
+// The raw engine `mosquito_misting` line's installation.price (the shape an engine-origin estimate stores at engineResult.lineItems),
+// when the line is priced (quoteRequired !== true).
+function mistingInstallFromRawLine(rows) {
+  for (const row of rows) {
+    if (String(row.service || '').toLowerCase() !== 'mosquito_misting' || row.quoteRequired === true) continue;
+    const amount = firstPositiveNumber(row.installation && row.installation.price);
+    if (amount != null) {
+      return packMistingInstall([{ amount: roundMoney(amount), description: row.tierLabel ? `${row.tierLabel} Installation` : MISTING_INSTALL_FALLBACK_NAME }]);
+    }
+  }
+  return null;
+}
+
+// The one-time install of an accepted mosquito misting system (GATE_MOSQUITO_MISTING, misting PR 2a), read from the STORED estimate so
+// the invoice bills exactly the figure the quote was sent at (never a live constant: frozen-disclosure rule, same as
+// frozenSetupFeeAmount / frozenRodentBaitSetupAmount). It resolves through the SAME authoritative container logic the misting guards use
+// (estimate-result-container storedMistingRows / storedEstimateContainer), in this order:
+//   1. an AUTHORED, itemized proposal: its priced install lines (the accepted quote; a mapped or raw copy is never added to it);
+//   2. a mapped `mosquito_misting_installation` one-time item (not quoteRequired);
+//   3. the raw engine `mosquito_misting` line's installation.price when the line is priced;
+//   4. any mapped item in the bare data (older / unwrapped shapes), only when no stored misting rows exist.
+// Null when the estimate carries no priced install (an oversize layout is an unpriced quote-required row and bills nothing).
+// Returns { amount, description, lines }.
+function frozenMistingInstall(estimateData = {}, { pricingAuthority = null } = {}) {
+  const data = normalizeEstimateData(estimateData);
+  if (isItemizedAuthoredProposal(data && data.proposal)) return mistingInstallFromProposal(data.proposal);
+  let stored = [];
+  try { stored = require('./estimate-result-container').storedMistingRows(data, { pricingAuthority }); } catch { stored = []; }
+  const fromStored = mistingInstallFromMappedItems(stored) || mistingInstallFromRawLine(stored);
+  if (fromStored || stored.length) return fromStored;
+  return mistingInstallFromMappedItems(estimateOneTimeItemsFromData(data, { collapseMirrored: true }));
+}
+
+// One-time lines that ride an annual-prepay invoice beside the coverage amount but are NOT coverage money: the disclosed rodent
+// bait-station setup and the misting installation. THE helper every customer-facing prepay total is built from (the accept
+// route's quoted/acknowledged total and the operator preview), so the quote can never differ from the minted invoice. The commercial
+// tax blend takes only `rodentSetup` as its taxable one-time share, exactly as the converter's own invoice does.
+function frozenPrepayOneTimeLines(estimateData = {}) {
+  const rodentSetup = Number(frozenRodentBaitSetupAmount(estimateData)) || 0;
+  const install = frozenMistingInstall(estimateData);
+  const mistingInstall = install ? install.amount : 0;
+  return {
+    rodentSetup,
+    mistingInstall,
+    mistingInstallDescription: install ? install.description : null,
+    total: roundMoney(rodentSetup + mistingInstall),
+  };
+}
+
+// Mosquito misting install office bell (misting PR 2a). The install amount is already a named line on the acceptance invoice
+// (frozenMistingInstall); no install visit row is created here (a scheduled install visit with a proper billed-on-invoice link is a
+// later PR). The office books the install day with the customer after the design visit, before the first plan application. Composed
+// with the canonical admin-alert helper; dispatched post-commit by the caller that dispatches the other accept bells, so a rolled-back
+// accept never pages. Dedupe key: one bell per estimate. Pure.
+function mistingInstallSchedulePayload({ estimateId, customerId, customerName = '', amount, firstPlanDate = null } = {}) {
+  const who = String(customerName || '').trim();
+  const money = `$${Number(amount).toFixed(2)}`;
+  const spec = {
+    area: 'Schedule',
+    action: who ? `Book ${who}'s misting install` : 'Book the misting install',
+    why: `The ${money} install is on the acceptance invoice; book the install day after the design visit.`,
+    severity: 'needs-you',
+    who: 'person',
+    subject: { type: 'estimate', id: String(estimateId) },
+    doneWhen: 'misting_install_booked',
+    link: `/admin/customers?customerId=${customerId}`,
+  };
+  const options = {
+    link: spec.link,
+    bell: true,
+    dedupeKey: `misting_install_schedule:${estimateId}`,
+    metadata: { estimateId, customerId, amount: Number(amount), firstPlanDate },
+  };
+  const body = `Estimate #${estimateId} was accepted with a misting system. The ${money} installation is on the acceptance invoice; `
+    + `book the install day with the customer after the design visit, before the first plan application on ${firstPlanDate || 'the first plan visit'}. No install visit was created.`;
+  try {
+    const { composeAdminAlert } = require('./admin-alert-compose');
+    const composed = composeAdminAlert(spec);
+    options.metadata = { ...options.metadata, ...composed.metadata };
+    return { type: 'estimate_converted', title: composed.headline, body: `${composed.why} ${body}`, finalBody: true, options };
+  } catch (err) {
+    logger.warn(`[estimate-converter] misting install alert compose failed (raw payload used): ${err.message}`);
+    return { type: 'estimate_converted', title: `Schedule — ${spec.action}`.slice(0, 60), body, finalBody: true, options };
+  }
+}
+
+// Raises the misting install office bell and writes the activity note (no install visit row is created). Returns the payload for an
+// in-transaction caller to dispatch after commit (opts.deferCommercialScheduleNotification), else null. Never throws: a failure is
+// logged and never blocks the accept.
+async function raiseMistingInstallBell(database, fx, opts, { estimateId, customerId, customer, estimateData, firstPlanDate = null } = {}) {
+  const install = frozenMistingInstall(estimateData);
+  if (!install) return null;
+  let deferred = null;
+  try {
+    const payload = mistingInstallSchedulePayload({
+      estimateId,
+      customerId,
+      customerName: customer?.first_name ? `${customer.first_name} ${customer.last_name || ''}`.trim() : '',
+      amount: install.amount,
+      firstPlanDate: firstPlanDate ? String(firstPlanDate).slice(0, 10) : null,
+    });
+    deferred = dispatchOrDeferAcceptBell(fx, opts || {}, {
+      target: 'misting_install_schedule', payload, failLabel: 'misting install admin notify',
+    });
+    await database('activity_log').insert({
+      customer_id: customerId,
+      action: 'misting_install_schedule_needed',
+      description: `Estimate #${estimateId}: the $${install.amount.toFixed(2)} misting installation is on the acceptance invoice. No install visit was created; the office books the install day.`,
+      metadata: JSON.stringify({ estimateId, amount: install.amount }),
+    });
+  } catch (installErr) {
+    logger.error(`[estimate-converter] Failed to raise the misting install bell for estimate ${estimateId}: ${installErr.message}`);
+  }
+  return deferred;
+}
+
 function estimateLineItemsFromData(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
   return data.lineItems
@@ -3778,6 +3950,9 @@ function remainingUnitCatalogKey(svc = {}, acceptedPlanFrequency = null) {
   // name, so legacy name-only lines link too. Absent row (env not yet
   // migrated) degrades to the existing name-only warn path.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  // Mosquito misting service plan (misting PR 2a): the catalog row ships in migration 20261023100000. An absent row (env not yet
+  // migrated) degrades to the existing name-only warn path; the plan's name equals the catalog name exactly.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito_misting') return 'mosquito_misting_service';
   // Recurring palm (owner ruling 2026-08-11): the semiannual program row
   // ships in the same PR (20260811000010). Estimator palm lines carry the
   // label 'Palm Injection', which the completion resolver's short-name
@@ -4129,6 +4304,14 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
     if (pattern === 'semiannual') return (visits == null && !visitCountFieldsInvalid(svc)) || visits === 2;
     return false;
   }
+  // Mosquito misting service plan (misting PR 2a): 12 monthly applications a year. The only supported cadence is monthly with
+  // 12 (or an unstated count, like the barrier monthly program); any other cadence or count keeps office scheduling.
+  if (key === 'mosquito_misting') {
+    if (isCommercialRecurringLine(svc, parentRow)) return false;
+    if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)) return false;
+    const visits = visitsPerYearForRecurringService(svc);
+    return pattern === 'monthly' && (visits == null || visits === 12);
+  }
   // Mosquito (owner 2026-07-27). Neither program seeded before this, so a sold
   // plan booked its FIRST visit and never created the rest — the customer was
   // billed monthly for a series they did not get. Same failure the T&S audit
@@ -4406,6 +4589,16 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
   }
+  // Mosquito misting service plan (misting PR 2a): 12 applications a year has exactly ONE cadence, monthly. Resolve it before
+  // generic inference, which would otherwise take the accepted PLAN's fallback cadence (a misting line beside a quarterly pest plan
+  // inherits quarterly) and the monthly gate would decline it, silently leaving the plan with no series. Same shape as the
+  // forced seasonal mosquito rule above; any other count falls through to the gate and keeps office scheduling.
+  if (seedingFamilyKey(svc, parentRow) === 'mosquito_misting'
+    && !isCommercialRecurringLine(svc, parentRow)
+    && !visitCountFieldsConflict(svc) && !visitCountFieldsInvalid(svc)
+    && visitsPerYearForRecurringService(svc) === 12) {
+    return 'monthly';
+  }
   // Palm Injection (owner ruling 2026-08-11): the estimate builder's palm
   // supplement carries visitsPerYear 2 but NO frequency field
   // (estimate-public upsertSupplement 'palm_injection'), so generic
@@ -4480,6 +4673,14 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFr
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
+  // Mirror of the forced monthly misting rule in converterFollowUpSeedingPattern (the prepay term must record the cadence the
+  // series actually seeds).
+  if (seedingFamilyKey(svc) === 'mosquito_misting'
+    && !isCommercialRecurringLine(svc)
+    && !visitCountFieldsConflict(svc) && !visitCountFieldsInvalid(svc)
+    && visitsPerYearForRecurringService(svc) === 12) {
+    return 'monthly';
   }
   // Same forced-palm rule as converterFollowUpSeedingPattern above (owner
   // ruling 2026-08-11): a builder palm line has no frequency field, so raw
@@ -7731,6 +7932,18 @@ const EstimateConverter = {
       if (earliestScheduledUnitDate) termStartDate = earliestScheduledUnitDate;
     }
 
+    // Mosquito misting install (misting PR 2a, GATE_MOSQUITO_MISTING): the install is billed on the acceptance invoice; the office
+    // gets ONE bell to book the install day (no install visit row is created). Bell eligibility is separate from auto scheduling:
+    // the CALLER says explicitly (opts.mistingInstallBilled) that this acceptance bills the install (the public standard accept,
+    // invoice-mode and annual-prepay accepts, a manual annual-prepay accept). A manual Mark Won that bills nothing, and a one-tap
+    // purchase, pass nothing and raise nothing. A one-time selection (suppressRecurringConversion) bills no install. In-transaction
+    // callers get the payload back and dispatch it after commit. A failure is logged and never blocks the accept.
+    const mistingInstallNotification = (opts.mistingInstallBilled === true && !suppressRecurringConversion)
+      ? await raiseMistingInstallBell(database, fx, opts, {
+        estimateId, customerId, customer, estimateData, firstPlanDate: earliestScheduledUnitDate || termStartDate || null,
+      })
+      : null;
+
     // B06/B17 office alert: a multi-program accept whose auto-scheduled series
     // could not be priced per unit. The single-unit park bell above needs
     // recurringUnitCount === 1 and the route's completeness alert only reads
@@ -7868,9 +8081,12 @@ const EstimateConverter = {
       // acceptance (frozenSetupFeeAmount below), so every charging path
       // bills exactly what the quote disclosed.
       const setupFeeAmount = frozenSetupFeeAmount(estimateData);
+      // Mosquito misting system install (misting PR 2a): billed on the acceptance invoice, standard and annual prepay alike,
+      // from the frozen one-time row. Null for every estimate without a priced misting install.
+      const mistingInstall = frozenMistingInstall(estimateData);
       const hasDraftAmount = billingTerm === 'prepay_annual'
-        ? annualPrepayAmount > 0
-        : setupFeeApplies || standardFirstApplicationAmount > 0;
+        ? annualPrepayAmount > 0 || !!mistingInstall
+        : setupFeeApplies || standardFirstApplicationAmount > 0 || !!mistingInstall;
       // Sign-before-pay (slice 3a restructure, owner ruling 2026-09-24, dark
       // behind GATE_TERMITE_ANNUAL_PLAN): an accepted Subterranean Termite
       // Protection annual plan never reaches this point at accept time at
@@ -8067,6 +8283,9 @@ const EstimateConverter = {
                   : prepayLineDescription,
                 quantity: 1,
                 unit_price: annualAmount,
+                // Durable identity of the coverage line: the readers that slice this invoice across the covered visits
+                // (seededVisitPriceForTerm) take the per-visit basis from it, never from description text.
+                kind: ANNUAL_PREPAY_COVERAGE_LINE_KIND,
               },
               ...(prepayRodentSetupAmount > 0 ? [{
                 description: 'Bait Station Setup — one-time setup fee',
@@ -8077,7 +8296,8 @@ const EstimateConverter = {
                 description: annualPlanSetupDescription,
                 quantity: 1,
                 unit_price: annualPlanSetupFeeAmount,
-              }] : [])],
+              }] : []),
+              ...mistingInstallInvoiceLines(mistingInstall)],
               notes: prepayNotes,
               dueDate: etDateString(),
               ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
@@ -8312,7 +8532,7 @@ const EstimateConverter = {
               // estimate is never also a rodent bait estimate).
               prepayAmount: draftInvoiceAmount != null
                 ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit
-                  - (prepayRodentSetupAmount + annualPlanSetupFeeAmount)
+                  - (prepayRodentSetupAmount + annualPlanSetupFeeAmount + (mistingInstall ? mistingInstall.amount : 0))
                     * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
@@ -8380,6 +8600,7 @@ const EstimateConverter = {
               unit_price: setupFeeAmount,
             });
           }
+          lineItems.push(...mistingInstallInvoiceLines(mistingInstall));
           if (firstApplicationAmount > 0) {
             lineItems.push({
               description: 'First service application',
@@ -8400,11 +8621,15 @@ const EstimateConverter = {
           // fresh, possibly shrunken balance. Never a discounted invoice
           // beside an unconsumed deposit row.
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
-          const invoiceSubtotal = (setupFeeApplies ? setupFeeAmount : 0) + firstApplicationAmount;
-          const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
+          const invoiceSubtotal = (setupFeeApplies ? setupFeeAmount : 0) + (mistingInstall ? mistingInstall.amount : 0) + firstApplicationAmount;
+          const invoiceTitle = mistingInstall
+            ? (includesFirstApplicationLine ? 'Mosquito Misting System Installation + First Application' : 'Mosquito Misting System Installation')
+            : setupFeeApplies && includesFirstApplicationLine
             ? 'WaveGuard Membership Setup + First Application'
             : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
-          const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
+          const invoiceNotes = mistingInstall
+            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${mistingInstall.amount.toFixed(2)} system installation${includesFirstApplicationLine ? ' plus first application' : ''}${setupFeeApplies ? ` plus $${setupFeeAmount.toFixed(2)} setup fee` : ''}.`
+            : setupFeeApplies && includesFirstApplicationLine
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${setupFeeAmount.toFixed(2)} setup fee plus first application.`
             : (setupFeeApplies
                 ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $${setupFeeAmount.toFixed(2)} setup fee only.`
@@ -8916,6 +9141,8 @@ const EstimateConverter = {
       commercialScheduleNotification,
       // Same deferral contract as commercialScheduleNotification (DATA-001).
       perApplicationFeeNotification,
+      // Misting install office bell: same deferral contract as commercialScheduleNotification.
+      mistingInstallNotification,
       // Same deferral contract as commercialScheduleNotification.
       tierUpgradeNotification,
       planRateReviewNotification,
@@ -9100,3 +9327,7 @@ module.exports.funnelKeyForEstimateId = funnelKeyForEstimateId;
 // One-time row classifiers (area add-on rows classify by key), exported for server/tests/area-addon-flow.test.js.
 module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
 module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
+module.exports.frozenMistingInstall = frozenMistingInstall;
+module.exports.frozenPrepayOneTimeLines = frozenPrepayOneTimeLines;
+module.exports.mistingInstallSchedulePayload = mistingInstallSchedulePayload;
+module.exports.raiseMistingInstallBell = raiseMistingInstallBell;

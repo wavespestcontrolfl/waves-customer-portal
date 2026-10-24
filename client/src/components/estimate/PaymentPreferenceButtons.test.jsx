@@ -282,6 +282,23 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.queryByText('WaveGuard Membership Setup')).not.toBeInTheDocument();
   });
 
+  it('previews the misting installation row, labeled by tier, in the invoice total and the prepay rows (misting PR 2a)', () => {
+    render(
+      <PaymentPreferenceButtons
+        onSelect={vi.fn()}
+        disabled={false}
+        serviceMode="recurring"
+        setupFee={null}
+        annualPrepayEligible
+        extraInvoiceRows={[{ label: 'Essential system (drum) Installation', amount: 4595 }]}
+        selectedFrequency={{ key: 'monthly', monthly: 59, annual: 708, perServiceTreatments: [{ service: 'mosquito_misting', displayPrice: 59 }] }}
+      />,
+    );
+    // the standard invoice box and the prepay box both show the install row (never prepay-waived)
+    expect(screen.getAllByText('Essential system (drum) Installation').length).toBe(2);
+    expect(screen.getAllByText('$4,595.00').length).toBeGreaterThan(1);
+  });
+
   it('prefers discounted treatment rows for the per-application amount', () => {
     render(
       <PaymentPreferenceButtons

@@ -13,6 +13,7 @@ describe('shared protocol reader', () => {
       'cockroach',
       'lawn',
       'mosquito',
+      'mosquito_misting',
       'palm_injection',
       'pest',
       'rodent',

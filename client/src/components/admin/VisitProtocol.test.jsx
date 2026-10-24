@@ -47,3 +47,32 @@ it('does not offer a readable SOP for a missing published procedure', () => {
   expect(screen.getByText('No published procedure is available for this booked service.')).toBeVisible();
   expect(screen.queryByRole('button', { name: 'Read SOP' })).not.toBeInTheDocument();
 });
+
+it('shows a procedure Safety section on the card and in the SOP, and writes it into the text download (misting rules, no field guide)', async () => {
+  const safety = protocols.mosquito_misting.safety_rules;
+  const misting = { ...procedure, name: 'Mosquito Misting System Protocol', safety };
+  render(<VisitProtocol card={{ ...card, protocol: { procedure: misting, addons: [] } }} D={D} onJobCard={() => {}} />);
+  expect(screen.getByText('Safety')).toBeVisible();
+  for (const rule of safety) expect(screen.getByText(rule)).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Read SOP' }));
+  const sheet = screen.getByRole('dialog', { name: 'Service SOP' });
+  for (const rule of safety) expect(within(sheet).getByText(rule)).toBeVisible();
+  let blob = null;
+  vi.stubGlobal('URL', { createObjectURL: (value) => { blob = value; return 'blob:test'; }, revokeObjectURL: () => {} });
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  fireEvent.click(within(sheet).getByRole('button', { name: 'Download text' }));
+  const text = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsText(blob);
+  });
+  expect(text).toContain('Safety');
+  for (const rule of safety) expect(text).toContain(rule);
+  vi.restoreAllMocks();
+});
+
+it('a procedure without safety rules renders no Safety section', () => {
+  render(<VisitProtocol card={card} D={D} onJobCard={() => {}} />);
+  expect(screen.queryByText('Safety')).not.toBeInTheDocument();
+});

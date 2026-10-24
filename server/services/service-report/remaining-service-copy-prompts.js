@@ -272,6 +272,11 @@ const SERVICE_KEY_BINDINGS = Object.freeze({
   mosquito_event: ['mosquito', 'mosquito_event'],
   mosquito_one_time: ['mosquito', 'mosquito_event'],
   mosquito_seasonal: ['mosquito', null],
+  // Misting system (PR 2a): the plan visit and the one-time install are generic
+  // lanes by design and keep the mosquito module's claims (no bite-free yard
+  // promise). The refill is a billing rider with no report of its own.
+  mosquito_misting_service: ['mosquito', null],
+  mosquito_misting_install: ['mosquito', null],
   rodent_bait: ['rodent_bait', 'rodent_bait_station'],
   rodent_bait_quarterly: ['rodent_bait', 'rodent_bait_station'],
   rodent_bait_setup: ['rodent_bait', 'rodent_bait_station'],

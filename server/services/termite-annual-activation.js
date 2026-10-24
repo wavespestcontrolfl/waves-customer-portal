@@ -559,7 +559,7 @@ async function dispatchDeferredConversionEffects({ estimateId, customerId, conve
     }
   }
   const NotificationService = require('./notification-service');
-  for (const key of ['commercialScheduleNotification', 'perApplicationFeeNotification', 'tierUpgradeNotification', 'planRateReviewNotification']) {
+  for (const key of ['commercialScheduleNotification', 'perApplicationFeeNotification', 'tierUpgradeNotification', 'planRateReviewNotification', 'mistingInstallNotification']) {
     const n = conversion?.[key];
     if (!n) continue;
     try {

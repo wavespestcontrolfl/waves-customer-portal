@@ -1994,15 +1994,19 @@ endpoints: `PUT /:token/accept` (pre-transaction check and the locked in-transac
 `"code": "MOSQUITO_MISTING_GATED"` (reason `mosquito_misting_disabled`). Precedence among gated add-ons: Bermuda, then misting,
 then area add-ons. A gated misting estimate is never priced for the park check (its replay throws a fail-closed 400 carrying the
 same code); the deposit webhook records nothing for it (reason `mosquito_misting_disabled`). `GET /:token/data` is unchanged.
-**Misting acceptance pending (misting PR 1, code-owned `MOSQUITO_MISTING_CONVERSION_READY = false`).** Even with the gate ON,
-an estimate that carries a PRICED misting system (the mapped plan row, the install item, the raw engine line, an itemized
-proposal line, or a selected stored input when no stored row exists; an unpriced quote-required-only row, such as an oversize
-layout, does not count) cannot be accepted: the series seeding, the install on the acceptance invoice and the refill billing
-are not built until misting PR 2. The same endpoints as above answer HTTP 409 with the same customer text and
-`"code": "MOSQUITO_MISTING_ACCEPT_PENDING"` (reason `mosquito_misting_conversion_pending`); Mark Won / manual acceptance and the
-schedule booking preflight refuse it with the staff text; the deposit webhook records nothing for it (reason
-`mosquito_misting_conversion_pending`). `GET /:token/data` and staff send stay allowed so the quote can be shown. Precedence:
-Bermuda, misting gated (gate off), misting acceptance pending, then area add-ons. Lifted by misting PR 2.
+**Misting acceptance pending (code-owned `MOSQUITO_MISTING_CONVERSION_READY`; lifted by misting PR 2a, #6543).** Misting PR 1
+refused, even with the gate ON, any estimate that carries a PRICED misting system (the mapped plan row, the install item, the raw
+engine line, an itemized proposal line, or a selected stored input when no stored row exists; an unpriced quote-required-only row, such
+as an oversize layout, does not count) because the conversion was not built. Misting PR 2a ships the conversion (catalog rows
+`mosquito_misting_install` and `mosquito_misting_service`, plus a dormant `mosquito_misting_refill` row (refill billing: misting PR 2c); the plan converts to a monthly series of 12
+applications; the install is a named line on the acceptance invoice and one office bell books the install day, with no install visit row; see `docs/gates-and-env.md`), so the constant
+is now `true` and an accepted misting estimate converts. The refusal is KEPT reachable through the constant, not deleted: with it `false`
+the same endpoints answer HTTP 409 with the same customer text and `"code": "MOSQUITO_MISTING_ACCEPT_PENDING"` (reason
+`mosquito_misting_conversion_pending`); Mark Won / manual acceptance and the schedule booking preflight refuse it with the staff text; the
+deposit webhook records nothing for it (reason `mosquito_misting_conversion_pending`). `GET /:token/data` and staff send are never
+blocked. **Misting install unresolved (fail closed).** A stored quote that carries a PRICED misting plan (a priced plan row or raw engine line in the authoritative container, or a priced plan line of an authored itemized proposal) but whose installation amount cannot be read from the same stored data is refused at the same endpoints as accept-pending (accept, reserve, slots, card intents, the deposit webhook with reason `mosquito_misting_install_unresolved`; manual acceptance and the schedule booking preflight with the staff text "This estimate's misting installation amount cannot be read from the stored quote; re-send the estimate so the install is frozen before accepting.") with the same customer text and `"code": "MOSQUITO_MISTING_INSTALL_UNRESOLVED"` (reason `mosquito_misting_install_unresolved`); `GET /:token/data` and staff send are never blocked. An engineInputs-only estimate is not refused: the accept replays the engine and carries the install into the accepted data. Precedence: Bermuda, misting gated (gate off), misting acceptance pending, misting install unresolved, then area add-ons. With the constant `true` and the gate ON the
+standard accept's first invoice carries the install as its own line (`<tier label> Installation`, the stored quote figure) beside the first
+application, and the annual-prepay invoice carries it beside the prepay line; no WaveGuard setup fee is charged for a misting-only plan.
 With the gate on and no priced misting row, or with no misting row on the estimate, every body and status on these routes is
 unchanged. The gate is off by default, so today no public response changes.
 

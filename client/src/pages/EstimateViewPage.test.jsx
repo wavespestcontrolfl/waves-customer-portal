@@ -2508,6 +2508,32 @@ describe('oneTimeExtrasForPaymentNote', () => {
     expect(oneTimeExtrasForPaymentNote(labeled, {}, 'recurring')).toBe(50);
   });
 
+  it('subtracts the misting installation too — it is invoiced up front beside the first application, not after completion (misting PR 2a)', () => {
+    const misting = {
+      oneTimeBreakdown: {
+        total: 4844,
+        items: [
+          { service: 'flea_treatment', name: 'Flea treatment', price: 249 },
+          { service: 'mosquito_misting_installation', name: 'Essential system (drum) Installation', price: 4595 },
+        ],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(misting, {}, 'recurring')).toBe(249);
+    expect(oneTimeExtrasForPaymentNote({ oneTimeBreakdown: { total: 4595, items: [{ service: 'mosquito_misting_installation', price: 4595 }] } }, {}, 'recurring')).toBe(0);
+  });
+
+  it('previews the misting installation as its own up-front invoice row in the payment choices (labeled by the tier)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const src = readFileSync(join(process.cwd(), 'src/pages/EstimateViewPage.jsx'), 'utf8');
+    expect(src).toContain('const rodentSetupInvoiceRows = [');
+    expect(src).toContain("Number(pricing?.mistingInstallFee?.amount) > 0");
+    expect(src).toContain("label: pricing.mistingInstallFee.label || 'Mosquito Misting System Installation', amount: Number(pricing.mistingInstallFee.amount)");
+    // the same rows feed the payment choices and the after-visit shape checks (rows beyond the WaveGuard setup)
+    expect(src.match(/extraInvoiceRows=\{rodentSetupInvoiceRows\}/g)).toHaveLength(2);
+    expect(src.match(/extraInvoiceRows: rodentSetupInvoiceRows,/g)).toHaveLength(2);
+  });
+
   it('matches setup rows by label when the service key is missing', () => {
     const labeled = {
       oneTimeBreakdown: {
