@@ -69,7 +69,7 @@ const { countRestorations } = require('../services/cancel-generation-fence');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 const { deliverMoveNoticeEmail } = AppointmentReminders;
-const { moveNoticeEmailKey, bouncedNoticeKind, cancellationNoticeReport } = AppointmentReminders._test;
+const { moveNoticeEmailKey, cancellationNoticeStamp, bouncedNoticeKind, cancellationNoticeReport } = AppointmentReminders._test;
 
 // Synthetic customer. Far-future slot so "the slot is ahead" holds.
 const CUSTOMER = { id: 'cust-1', first_name: 'Pat', last_name: 'Example', phone: '+19415550101', email: 'pat@example.com', is_primary_profile: true, account_id: null };
@@ -98,6 +98,7 @@ const args = (over = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  countRestorations.mockResolvedValue(0);
   process.env.GATE_MOVE_NOTICE_EMAIL = 'true';
   base();
 });
@@ -124,10 +125,10 @@ describe('deliverMoveNoticeEmail', () => {
     expect(appointmentSendHeld).toHaveBeenCalledWith('svc-1', SLOT.getTime());
   });
 
-  test('a cancellation text that reached nobody: the cancellation email, keyed by the restoration count', async () => {
+  test('a cancellation text that reached nobody: the cancellation email, keyed by its restoration count', async () => {
     base({ status: 'cancelled' });
-    countRestorations.mockResolvedValueOnce(2);
-    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', arrivalWindow: undefined, noticeAt: undefined }))).toBe(true);
+    countRestorations.mockResolvedValue(2);
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', arrivalWindow: undefined, noticeAt: undefined, restorations: 2 }))).toBe(true);
     expect(AppointmentEmail.sendAppointmentCancelledEmail).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1', scheduledServiceId: 'svc-1', idempotencyKey: 'appointment.cancelled:svc-1:r2',
     }));
@@ -156,7 +157,7 @@ describe('deliverMoveNoticeEmail', () => {
     base({ prefs: { appointment_confirmation: false } });
     expect(await deliverMoveNoticeEmail(args())).toBe(false);
     base({ status: 'cancelled', prefs: { appointment_confirmation: false } });
-    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled' }))).toBe(true);
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', restorations: 0 }))).toBe(true);
   });
 
   test('unreadable settings: no email', async () => {
@@ -185,6 +186,19 @@ describe('deliverMoveNoticeEmail', () => {
 
   test('a cancellation notice for a visit restored since sends nothing', async () => {
     base({ status: 'confirmed' });
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', restorations: 0 }))).toBe(false);
+    expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
+  });
+
+  test('restored and cancelled again since the text: the old notice sends nothing (the newer cancellation owns its notice, or asked for none)', async () => {
+    base({ status: 'cancelled' });
+    countRestorations.mockResolvedValue(1);
+    expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled', restorations: 0 }))).toBe(false);
+    expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
+  });
+
+  test('a cancellation with no stamp (its text went out with the gate off, or the stamp read failed) sends nothing', async () => {
+    base({ status: 'cancelled' });
     expect(await deliverMoveNoticeEmail(args({ kind: 'cancelled' }))).toBe(false);
     expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
   });
@@ -217,12 +231,19 @@ describe('deliverMoveNoticeEmail', () => {
 });
 
 describe('helpers', () => {
-  test('moveNoticeEmailKey: a reschedule by its stamp, a cancellation by its restoration count', async () => {
-    expect(await moveNoticeEmailKey('rescheduled', 'svc-9', '2099-10-24T12:00:00.000Z')).toBe(`appointment.rescheduled:svc-9:${Date.parse('2099-10-24T12:00:00.000Z')}`);
-    countRestorations.mockResolvedValueOnce(0);
-    expect(await moveNoticeEmailKey('cancelled', 'svc-9')).toBe('appointment.cancelled:svc-9:r0');
-    countRestorations.mockResolvedValueOnce(1);
-    expect(await moveNoticeEmailKey('cancelled', 'svc-9')).toBe('appointment.cancelled:svc-9:r1');
+  test('moveNoticeEmailKey: a reschedule by its stamp, a cancellation by its restoration count', () => {
+    expect(moveNoticeEmailKey('rescheduled', 'svc-9', { noticeAt: '2099-10-24T12:00:00.000Z' })).toBe(`appointment.rescheduled:svc-9:${Date.parse('2099-10-24T12:00:00.000Z')}`);
+    expect(moveNoticeEmailKey('cancelled', 'svc-9', { restorations: 0 })).toBe('appointment.cancelled:svc-9:r0');
+    expect(moveNoticeEmailKey('cancelled', 'svc-9', { restorations: 1 })).toBe('appointment.cancelled:svc-9:r1');
+  });
+
+  test('cancellationNoticeStamp: the restoration count with the gate on; nothing with it off or on a failed read', async () => {
+    countRestorations.mockResolvedValueOnce(3);
+    expect(await cancellationNoticeStamp('svc-9')).toEqual({ cancel_restorations: 3 });
+    countRestorations.mockRejectedValueOnce(new Error('read failed'));
+    expect(await cancellationNoticeStamp('svc-9')).toEqual({});
+    delete process.env.GATE_MOVE_NOTICE_EMAIL;
+    expect(await cancellationNoticeStamp('svc-9')).toEqual({});
   });
 
   test('bouncedNoticeKind: gate on, the two texts own their email; off, today\'s mapping', () => {
@@ -255,7 +276,7 @@ describe('handleUndeliveredSms: a carrier bounced a reschedule or cancellation t
   };
   const cancelAudit = {
     channel: 'sms', purpose: 'appointment_cancellation', customer_id: 'cust-1', created_at: '2099-10-24T12:00:05.000Z',
-    metadata: { original_message_type: 'appointment_cancelled', scheduled_service_id: 'svc-1' },
+    metadata: { original_message_type: 'appointment_cancelled', scheduled_service_id: 'svc-1', cancel_restorations: 0 },
   };
   const bounce = (errorCode = '30003') => AppointmentReminders.handleUndeliveredSms({ sid: 'SM1', status: 'undelivered', errorCode, to: '+19415550199' });
 
@@ -307,6 +328,15 @@ describe('handleUndeliveredSms: a carrier bounced a reschedule or cancellation t
     expect(AppointmentEmail.sendAppointmentCancelledEmail).toHaveBeenCalledWith(expect.objectContaining({
       scheduledServiceId: 'svc-1', appointmentTime: SLOT, serviceLabel: 'Pest Control', idempotencyKey: 'appointment.cancelled:svc-1:r0',
     }));
+  });
+
+  test('gate on: a late bounce of an older cancellation\'s text (restored and cancelled again since) sends nothing', async () => {
+    base({ status: 'cancelled' });
+    mockDb.first.messaging_audit_log = cancelAudit;
+    mockDb.first.appointment_reminders = { appointment_time: '2099-11-04T21:00:00.000Z', service_type: 'Pest Control', cancelled: true };
+    countRestorations.mockResolvedValue(1);
+    await bounce();
+    expect(AppointmentEmail.sendAppointmentCancelledEmail).not.toHaveBeenCalled();
   });
 
   test('gate on: a 30006 bounce of a cancellation text on the primary phone also learns the landline', async () => {
