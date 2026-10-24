@@ -290,19 +290,20 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
   });
 
   const outcome = await database.transaction(async (trx) => {
-    // estimates → leads → call_log (blockedFor) → comms fence → customers → template → contracts:
-    // the order the accept path and the contract sign route already hold.
-    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
-    if (!locked || await blockedFor(trx, locked)) return refusal(404, 'not_signable', 'Estimate not found');
-    const lockedFound = signEligibility(locked);
-    if (!lockedFound.ok) return refusal(404, 'not_signable', 'Estimate not found');
-    if (!locked.customer_id) return refusal(409, 'no_customer', 'We need to set up your account before you can sign online. Please call us and we will get you started.');
-
-    await lockCustomerComms(trx, locked.customer_id);
-    const customer = await trx('customers').where({ id: locked.customer_id }).whereNull('deleted_at').forUpdate().first();
+    // CUSTOMER FIRST, like every customer contact write (applyOperatorCustomerEmail locks the customer, then its
+    // fanout updates open estimates): comms fence → customers → estimates → leads → call_log (blockedFor) → template →
+    // contracts. The customer comes from the unlocked read the route made; the locked estimate must still belong to
+    // that customer, or the pair is stale and nothing proceeds (never lock-and-write on a mismatched pair).
+    await lockCustomerComms(trx, estimate.customer_id);
+    const customer = await trx('customers').where({ id: estimate.customer_id }).whereNull('deleted_at').forUpdate().first();
     if (!customer || customer.active === false) {
       return refusal(409, 'customer_unavailable', 'Online signing is not available right now. Please call us.');
     }
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+    if (!locked || String(locked.customer_id) !== String(customer.id)) return refusal(404, 'not_signable', 'Estimate not found');
+    if (await blockedFor(trx, locked)) return refusal(404, 'not_signable', 'Estimate not found');
+    const lockedFound = signEligibility(locked);
+    if (!lockedFound.ok) return refusal(404, 'not_signable', 'Estimate not found');
     await lockActiveVersionForIssue(trx, { template, activeVersion: version });
 
     const values = buildAgreementValues(locked, lockedFound.proposal, lockedFound.totals);
@@ -410,14 +411,17 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
 
 const STALE_PROPOSAL_MESSAGE = 'This proposal was updated. Please open the latest proposal to sign.';
 
-// Sign boundary, step 1 (contracts-public POST /:token/sign, BEFORE it locks the customer row): for a contract this
-// feature issued, lock the estimate row and run the issuer's own locked re-check. Lock order is the issuer's:
-// estimates → leads → call_log → customers → contracts, so the two paths cannot deadlock. null = not ours.
+// Sign boundary, step 1 (contracts-public POST /:token/sign, AFTER it has locked the contract's customer row and
+// BEFORE it locks the contract row): for a contract this feature issued, lock the estimate row and run the issuer's own
+// locked re-check. Lock order is the issuer's, customer first (customers → estimates → leads → call_log → contracts),
+// so the two paths cannot deadlock with each other or with a customer contact update. An estimate that no longer
+// belongs to the locked customer is never checked further: customerMoved, and the signature is refused. null = not ours.
 async function lockEstimateForSign(trx, contractPeek) {
   if (contractPeek?.document_template_key !== TEMPLATE_KEY) return null;
   const snapEstimate = parseJson(contractPeek.document_variables_snapshot)?.estimate;
   if (snapEstimate?.source !== SNAPSHOT_SOURCE || !snapEstimate.id) return null;
   const estimate = await trx('estimates').where({ id: snapEstimate.id }).forUpdate().first();
+  if (estimate && String(estimate.customer_id) !== String(contractPeek.customer_id)) return { estimate, blocked: true, customerMoved: true };
   const { commercialAgreementBlockedFor } = require('../routes/estimate-public');
   return { estimate, blocked: !estimate || await commercialAgreementBlockedFor(trx, estimate) };
 }
@@ -430,6 +434,7 @@ async function refuseStaleSignature({ trx, contract, estimateLock, req = {} }) {
   let reason = null;
   const { estimate } = estimateLock;
   if (!require('../config/feature-gates').commercialProposalSignLive()) reason = 'gate_off';
+  else if (estimateLock.customerMoved) reason = 'customer_changed';
   else if (estimateLock.blocked) reason = 'estimate_closed';
   else {
     const eligibility = signEligibility(estimate);

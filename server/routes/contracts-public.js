@@ -156,16 +156,17 @@ router.post('/:token/sign', async (req, res, next) => {
         response = { status: 404, body: { error: 'Contract not found' } };
         return;
       }
-      // Commercial proposal agreement (GATE_COMMERCIAL_PROPOSAL_SIGN): the estimate row is locked FIRST, before the
-      // customer row, the order the agreement issuer holds (estimates → leads → call_log → customers → contracts), so
-      // the two paths cannot deadlock. Null for every other contract (the service is not even loaded).
+      if (contractPeek.customer_id) {
+        await trx('customers').where({ id: contractPeek.customer_id }).forUpdate().first('id');
+      }
+      // Commercial proposal agreement (GATE_COMMERCIAL_PROPOSAL_SIGN): the estimate row is locked right after the
+      // customer row and before the contract row, the agreement issuer's order (customers → estimates → leads →
+      // call_log → template → contracts; customer first, like every customer contact write), so the paths cannot
+      // deadlock. Null for every other contract (the service is not even loaded).
       const commercial = contractPeek.document_template_key === COMMERCIAL_AGREEMENT_TEMPLATE_KEY
         ? require('../services/commercial-proposal-agreement')
         : null;
       const estimateLock = commercial ? await commercial.lockEstimateForSign(trx, contractPeek) : null;
-      if (contractPeek.customer_id) {
-        await trx('customers').where({ id: contractPeek.customer_id }).forUpdate().first('id');
-      }
       const locked = await trx('customer_contracts')
         .where({ id: contractPeek.id })
         .forUpdate()

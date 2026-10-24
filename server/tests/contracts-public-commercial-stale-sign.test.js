@@ -158,12 +158,27 @@ test.each([
   expect(writesTo('customer_contracts', 'update')[0].payload.status).toBe('cancelled');
 });
 
-test('the estimate row is locked before the customer row (the issuer\'s order, so the two cannot deadlock)', async () => {
+test('the customer row is locked before the estimate row, and the estimate before the contract row (the issuer\'s order: customer first, so none can deadlock with a customer contact update)', async () => {
   const { token } = await issueAndWire();
   await sign(token);
-  expect(mockTableOrder.indexOf('estimates')).toBeGreaterThan(-1);
-  expect(mockTableOrder.indexOf('customers')).toBeGreaterThan(-1);
-  expect(mockTableOrder.indexOf('estimates')).toBeLessThan(mockTableOrder.indexOf('customers'));
+  const order = mockTableOrder;
+  expect(order.indexOf('customers')).toBeGreaterThan(-1);
+  expect(order.indexOf('estimates')).toBeGreaterThan(-1);
+  expect(order.indexOf('customers')).toBeLessThan(order.indexOf('estimates'));
+  // The contract row's own lock (the second customer_contracts read) comes after the estimate lock.
+  const contractLocks = order.map((t, i) => (t === 'customer_contracts' ? i : -1)).filter((i) => i >= 0);
+  expect(contractLocks[1]).toBeGreaterThan(order.indexOf('estimates'));
+});
+
+test('the estimate moved to another customer before the lock: the signature is refused, the contract cancelled, nothing signed', async () => {
+  const { made, token } = await issueAndWire();
+  made.state.estimate = estimateRow({ customer_id: 'cust-2' });
+  const res = await sign(token);
+  expect(res).toMatchObject({ status: 409, body: { error: MESSAGE, code: 'proposal_changed' } });
+  expect(writesTo('customer_contracts', 'update').some((w) => w.payload.status === 'signed')).toBe(false);
+  expect(writesTo('customer_contracts', 'update')[0].payload.status).toBe('cancelled');
+  expect(writesTo('customer_contract_events', 'insert').map((w) => JSON.parse(w.payload.metadata).cause)).toEqual(['customer_changed']);
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
 });
 
 test('control: the quote is unchanged, so the contract signs, the copy sends and the office is alerted once', async () => {

@@ -41,7 +41,7 @@ const CUSTOMER = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', email: 
 
 // A tiny in-memory stand-in for the tables the service touches.
 function makeDb({ estimate = estimateRow(), customer = CUSTOMER, contracts = [], template = TEMPLATE, version = VERSION } = {}) {
-  const state = { estimate, customer, template, version, contracts: contracts.map((c) => ({ ...c })), events: [], writes: [] };
+  const state = { estimate, customer, template, version, contracts: contracts.map((c) => ({ ...c })), events: [], writes: [], order: [] };
   const snapshotEstimateId = (row) => {
     const snap = typeof row.document_variables_snapshot === 'string' ? JSON.parse(row.document_variables_snapshot) : row.document_variables_snapshot;
     return snap?.estimate?.id;
@@ -55,7 +55,7 @@ function makeDb({ estimate = estimateRow(), customer = CUSTOMER, contracts = [],
       whereNotIn(col, vals) { if (col === 'status') q.statusNotIn = vals; return api; },
       whereRaw(_sql, binds) { q.estimateId = binds[0]; return api; },
       orderByRaw() { return api; },
-      forUpdate() { q.locked = true; return api; },
+      forUpdate() { q.locked = true; state.order.push(table); return api; },
       async first() {
         if (table === 'document_templates') return q.where.template_key ? state.template : { active_version_id: state.template.active_version_id, status: state.template.status, template_key: state.template.template_key };
         if (table === 'document_template_versions') return state.version;

@@ -350,6 +350,50 @@ describe('agreement terms: online signing only when EVERY structured term agrees
   });
 });
 
+describe('lock order: customer first, like every customer contact write', () => {
+  test('issue locks comms fence, customer, estimate, template, then the contract row (no estimate-before-customer)', async () => {
+    const { database, state } = makeDb();
+    lockCustomerComms.mockImplementationOnce(async () => { state.order.push('comms'); });
+    await ensureAgreement({ estimate: estimateRow(), req, database });
+    expect(state.order).toEqual(['comms', 'customers', 'estimates', 'document_templates', 'customer_contracts']);
+  });
+
+  test('the estimate moved to another customer between the unlocked read and the lock: refused, nothing written', async () => {
+    const { database, state } = makeDb({ estimate: estimateRow({ customer_id: 'cust-2' }) });
+    // The route read the estimate under cust-1; by the time it is locked it belongs to cust-2.
+    const result = await ensureAgreement({ estimate: estimateRow({ customer_id: 'cust-1' }), req, database });
+    expect(result).toMatchObject({ ok: false, status: 404, code: 'not_signable' });
+    expect(state.writes).toEqual([]);
+    expect(state.contracts).toHaveLength(0);
+    // The customer lock was taken, the mismatched estimate was locked, and nothing went further.
+    expect(state.order).toEqual(['customers', 'estimates']);
+  });
+
+  test('the estimate lost its customer (unlinked) before the lock: refused, nothing written', async () => {
+    const { database, state } = makeDb({ estimate: estimateRow({ customer_id: null }) });
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: false, status: 404 });
+    expect(state.writes).toEqual([]);
+  });
+
+  test('sign boundary: the estimate lock comes after the customer lock the route already holds, and an estimate that moved is refused without the open check', async () => {
+    const { commercialAgreementBlockedFor } = require('../routes/estimate-public');
+    commercialAgreementBlockedFor.mockReset().mockResolvedValue(false);
+    const made = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database: made.database });
+    made.state.order.length = 0;
+    made.state.estimate = estimateRow({ customer_id: 'cust-2' });
+    const contract = made.state.contracts[0];
+    const estimateLock = await lockEstimateForSign(made.database, contract);
+    expect(estimateLock).toMatchObject({ blocked: true, customerMoved: true });
+    expect(commercialAgreementBlockedFor).not.toHaveBeenCalled();
+    expect(made.state.order).toEqual(['estimates']);
+    expect(await refuseStaleSignature({ trx: made.database, contract, estimateLock, req })).toBe('This proposal was updated. Please open the latest proposal to sign.');
+    expect(made.state.contracts[0].status).toBe('cancelled');
+    expect(JSON.parse(made.state.events.find((e) => e.event_type === 'cancelled').metadata)).toMatchObject({ cause: 'customer_changed' });
+    expect(made.state.contracts[0].signed_at).toBeUndefined();
+  });
+});
+
 describe('sign boundary: a contract may be signed only for the quote it shows', () => {
   const { commercialAgreementBlockedFor } = require('../routes/estimate-public');
   const MESSAGE = 'This proposal was updated. Please open the latest proposal to sign.';
