@@ -124,6 +124,21 @@ describe('linePriceOverrides', () => {
     ]));
   });
 
+  test('an override drops the engine figures from the line detail and keeps rates for extra work', () => {
+    // Codex P2 on #6614: the flea package kept "$225 initial + $125 follow-up"
+    // under a $600 price on the customer estimate.
+    const flea = line(price(['FLEA'], { linePriceOverrides: { flea_package: { price: 600 } } }), 'flea_package');
+    expect(flea.total).toBe(600);
+    expect(flea.engineTotal).toBe(350);
+    expect(flea.detail).toBe('Initial + follow-up');
+    expect(flea.display.detail).toBe('Initial + follow-up');
+    const trap = line(price(['RODENT_TRAP'], { linePriceOverrides: { rodent_trapping: { price: 500 } } }), 'rodent_trapping');
+    expect(trap.price).toBe(500);
+    expect(trap.detail).toMatch(/Additional trap checks are \$95 each\./);
+    // Without an override nothing changes.
+    expect(line(price(['FLEA']), 'flea_package').detail).toBe('$225 initial + $125 follow-up');
+  });
+
   test('every row stamped priceOverridable takes the override; a mapper-built row is not stamped', () => {
     // The builder offers only stamped rows. The legacy mapper also builds
     // one-time rows from nested engine fields (the misting installation)
@@ -145,6 +160,10 @@ describe('linePriceOverrides', () => {
           const again = mapV1ToLegacyShape(price([key], { ...OPTIONS[key], linePriceOverrides: { [row.service]: { price: target } } }));
           const hit = rows(again).find((r) => r.service === row.service);
           expect({ key, service: row.service, price: hit?.price }).toEqual({ key, service: row.service, price: target });
+          // No engine dollar figure left beside the typed price (rates for extra work may stay).
+          const detail = [hit?.det, hit?.detail].filter((t) => typeof t === 'string').join(' ');
+          expect({ service: row.service, figures: detail.match(/\$\s?\d[\d,]*(?:\.\d+)?(?![\d,.])(?!\s*(?:each\b|per\b|\/))/g) })
+            .toEqual({ service: row.service, figures: null });
         }
       }
       expect(offered).toBeGreaterThanOrEqual(10);

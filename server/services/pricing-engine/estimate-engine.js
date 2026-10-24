@@ -179,6 +179,54 @@ function linePriceOverrideEligible(item) {
   return (Number(item.price) > 0) || (Number(item.total) > 0);
 }
 
+// A detail the pricer built from its own amounts ("$225 initial + $125
+// follow-up", "+ $75 inspect", "One-time $99 setup") would contradict the
+// typed price on the customer estimate, so an overridden line drops those
+// figures and keeps the words. A rate for extra work the override does not
+// cover ("Additional trap checks are $95 each") stays. `(?![\d,.])` makes the
+// rate check see the whole number, never a backtracked prefix of it.
+const OVERRIDDEN_LINE_PRICE_FIGURE = /\$\s?\d[\d,]*(?:\.\d+)?(?![\d,.])(?!\s*(?:each\b|per\b|\/))\s?/g;
+
+function withoutPriceFigures(text) {
+  if (typeof text !== 'string') return text;
+  const out = text.replace(OVERRIDDEN_LINE_PRICE_FIGURE, '').replace(/\s{2,}/g, ' ').trim();
+  if (out === text) return text;
+  return out ? out.charAt(0).toUpperCase() + out.slice(1) : out;
+}
+
+// What a validated override does to its line: the typed amount replaces the
+// engine number (kept as enginePrice / engineTotal for the audit trail) and
+// the engine's dollar figures leave the detail text.
+function overrideLinePrice(item, price, reason) {
+  if (Number(item.price) > 0) {
+    item.enginePrice = item.price;
+    item.price = price;
+  }
+  if (Number(item.total) > 0) {
+    item.engineTotal = item.total;
+    item.total = price;
+  }
+  if (typeof item.detail === 'string') item.detail = withoutPriceFigures(item.detail);
+  if (typeof item.invoiceDescription === 'string') item.invoiceDescription = withoutPriceFigures(item.invoiceDescription);
+  if (item.display && typeof item.display.detail === 'string') {
+    item.display = { ...item.display, detail: withoutPriceFigures(item.display.detail) };
+  }
+  // The typed amount IS the line price the customer sees: the automatic
+  // one-time perk (WaveGuard / recurring-customer 15%) is not re-applied
+  // on top of it, whether the pricer baked that perk into `price` itself
+  // or step 5 would have applied it by service key. Routing the line
+  // through the "handled by pricer" branch with a zero rate makes
+  // before/after read as the override on every consumer. An estimate-
+  // level manual discount (step 6) still applies — the operator sets both
+  // deliberately.
+  item.discountHandledByPricingFunction = true;
+  item.subtotalBeforeRecurringCustomerDiscount = price;
+  item.recurringCustomerDiscountAmount = 0;
+  item.recurringCustomerDiscountRate = 0;
+  item.priceOverridden = true;
+  item.priceOverrideReason = reason || null;
+}
+
 function applyLinePriceOverrides(lineItems, raw, addRoutingWarning) {
   // The builder offers an override only on a line stamped here: the legacy
   // mapper also synthesizes one-time rows from nested engine fields (the
@@ -209,28 +257,7 @@ function applyLinePriceOverrides(lineItems, raw, addRoutingWarning) {
       ]);
       continue;
     }
-    if (Number(item.price) > 0) {
-      item.enginePrice = item.price;
-      item.price = rounded;
-    }
-    if (Number(item.total) > 0) {
-      item.engineTotal = item.total;
-      item.total = rounded;
-    }
-    // The typed amount IS the line price the customer sees: the automatic
-    // one-time perk (WaveGuard / recurring-customer 15%) is not re-applied
-    // on top of it, whether the pricer baked that perk into `price` itself
-    // or step 5 would have applied it by service key. Routing the line
-    // through the "handled by pricer" branch with a zero rate makes
-    // before/after read as the override on every consumer. An estimate-
-    // level manual discount (step 6) still applies — the operator sets both
-    // deliberately.
-    item.discountHandledByPricingFunction = true;
-    item.subtotalBeforeRecurringCustomerDiscount = rounded;
-    item.recurringCustomerDiscountAmount = 0;
-    item.recurringCustomerDiscountRate = 0;
-    item.priceOverridden = true;
-    item.priceOverrideReason = reason || null;
+    overrideLinePrice(item, rounded, reason);
   }
   overrides.forEach((_entry, service) => {
     if (!matched.has(service)) {

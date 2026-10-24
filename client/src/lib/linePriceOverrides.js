@@ -34,7 +34,8 @@ export function overridableLines(estimate) {
       service,
       name: item.name || service,
       price,
-      enginePrice: item.priceOverridden ? Number(item.enginePrice) : price,
+      // A total-priced line (flea_package) keeps its engine number as engineTotal.
+      enginePrice: item.priceOverridden ? Number(item.enginePrice ?? item.engineTotal) : price,
       priceOverridden: item.priceOverridden === true,
       reason: item.priceOverrideReason || "",
     });

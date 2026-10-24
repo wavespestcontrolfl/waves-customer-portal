@@ -318,6 +318,16 @@ describe("what the result shows", () => {
     });
   });
 
+  it("drops typed, unapplied amounts when a new estimate arrives (another estimate or a plain regenerate)", async () => {
+    await generateMisting(WITH_OVERRIDABLE_LINE);
+    fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));
+    fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "400" } });
+    await generate();
+    expect(calculateBodies()[1].options.linePriceOverrides).toBeUndefined();
+    await screen.findByRole("button", { name: "Override a line price" });
+    expect(screen.queryByLabelText("Override ($)")).not.toBeInTheDocument();
+  });
+
   it("refuses an invalid override amount in place, keeping the estimate and sending nothing", async () => {
     await generateMisting(WITH_OVERRIDABLE_LINE);
     fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));

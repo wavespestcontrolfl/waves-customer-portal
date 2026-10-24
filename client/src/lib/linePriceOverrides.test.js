@@ -31,6 +31,15 @@ describe("overridableLines", () => {
     ]);
   });
 
+  it("reads the engine number of a total-priced line from engineTotal", () => {
+    const estimate = {
+      specItems: [{
+        service: "flea_package", name: "Flea", price: 600, priceOverridable: true, priceOverridden: true, engineTotal: 350,
+      }],
+    };
+    expect(overridableLines(estimate)[0]).toMatchObject({ price: 600, enginePrice: 350, priceOverridden: true });
+  });
+
   it("is empty without an estimate", () => {
     expect(overridableLines(null)).toEqual([]);
   });

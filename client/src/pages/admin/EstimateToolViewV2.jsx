@@ -1335,6 +1335,14 @@ function LinePriceOverridesCard({ estimate, generating, onApply }) {
   const [drafts, setDrafts] = useState(() => form.linePriceOverrides || {});
   const [opened, setOpened] = useState(false);
   const [error, setError] = useState(null);
+  // Another estimate opened in place (grouped estimates' Edit) swaps the form
+  // and the result while this card stays mounted: start again from that
+  // estimate's applied overrides so typed amounts never carry across.
+  useEffect(() => {
+    setDrafts(form.linePriceOverrides || {});
+    setOpened(false);
+    setError(null);
+  }, [estimate, form.linePriceOverrides]);
   const inUse = lines.some((line) => line.priceOverridden || String(drafts[line.service]?.price ?? "").trim() !== "");
   if (lines.length === 0) return null;
   if (!opened && !inUse) {
@@ -9140,7 +9148,7 @@ export default function EstimateToolViewV2({
                                 <div className="text-14 text-ink-secondary mt-1">
                                   {item.service === "pest_initial_roach"
                                     ? `Fee manually overridden — engine bracket price is ${fmtInt(item.bracketPrice)}.`
-                                    : `Price manually overridden — engine price is ${fmtInt(item.enginePrice)}.${item.priceOverrideReason ? ` Reason: ${item.priceOverrideReason}` : ""}`}
+                                    : `Price manually overridden — engine price is ${fmtInt(item.enginePrice ?? item.engineTotal)}.${item.priceOverrideReason ? ` Reason: ${item.priceOverrideReason}` : ""}`}
                                 </div>
                               )}
                             </div>
@@ -9174,7 +9182,7 @@ export default function EstimateToolViewV2({
                               )}{" "}
                               {s.priceOverridden && (
                                 <div className="text-14 text-ink-secondary mt-1">
-                                  Price manually overridden — engine price is {fmtInt(s.enginePrice)}.
+                                  Price manually overridden — engine price is {fmtInt(s.enginePrice ?? s.engineTotal)}.
                                   {s.priceOverrideReason ? ` Reason: ${s.priceOverrideReason}` : ""}
                                 </div>
                               )}
