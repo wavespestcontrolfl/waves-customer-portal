@@ -555,6 +555,23 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     });
   });
 
+  describe('a close whose witness a full thread page hides', () => {
+    test('stays closed until a newer customer text arrives, then reopens', async () => {
+      const w = await world({ kind: 'send_report' });
+      const reply = await addCustomerText(w, 'Got the report, thanks!');
+      say(w, (payload) => (payload.text.includes(THREAD_PROMPT)
+        ? { ok: true, json: { verdict: 'completed', record_ref: `sms:${reply}`, quote: 'Got the report' } } : { ok: true, json: { verdict: 'open', record_ref: null, quote: null } }));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      // 30 later staff texts push the confirming text out of the newest-30 page.
+      for (let i = 0; i < 30; i += 1) await addSms(w, { message_body: `Follow-up note ${i}`, created_at: new Date(Date.now() - 2 * 60 * 60 * 1000 + i * 1000) });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      await addSms(w, { direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, message_type: null, status: 'received', metadata: null, message_body: 'Never mind, still nothing', created_at: new Date(Date.now() - 60 * 1000) });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+  });
+
   describe('cost', () => {
     test('an unchanged promise with unchanged evidence is never asked twice; a new record is asked again', async () => {
       const w = await world();

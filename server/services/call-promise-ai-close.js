@@ -251,21 +251,22 @@ async function witnessState(conn, row, { ref, thread = false, now = new Date() }
   const from = associationFrom(joined, after);
   if (from.getTime() >= now.getTime()) return { missing: true };
   const { current, message } = await subjectOf(conn, joined, from, null);
+  // Read first: a close whose witness a truncated source hides is still reopened by a newer customer text.
+  const lastInbound = await latestCustomerInbound(conn, message);
   if (thread) {
     const { records } = await loadThreadMessages(conn, message, null);
     const found = records.find((r) => r.ref === ref);
-    if (found) return { fingerprint: md5(stringifySmsEvidence({ ref, who: found.who, at: found.created_at, text: found.text })), customerId: call.customer_id,
-      lastInbound: await latestCustomerInbound(conn, message) };
+    if (found) return { fingerprint: md5(stringifySmsEvidence({ ref, who: found.who, at: found.created_at, text: found.text })), customerId: call.customer_id, lastInbound };
     // The thread loader keeps the newest THREAD_LIMIT texts: a full page may have pushed an older one out.
-    return records.length >= THREAD_LIMIT ? { unknown: true } : { missing: true };
+    return records.length >= THREAD_LIMIT ? { unknown: true, lastInbound } : { missing: true };
   }
   const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
   const hard = evidence.failures.filter((f) => !f.endsWith('_truncated'));
   if (hard.length) throw Object.assign(new Error('evidence source failed'), { code: 'evidence_source_failed' });
   const found = evidence.records.find((r) => r.ref === ref);
-  if (!found) return evidence.failures.includes(`${ref.split(':')[0]}_truncated`) ? { unknown: true } : { missing: true };
+  if (!found) return evidence.failures.includes(`${ref.split(':')[0]}_truncated`) ? { unknown: true, lastInbound } : { missing: true };
   if (!admissibleWitness(found, current, evidence.records)) return { missing: true };
-  return { fingerprint: witnessFingerprint(found), customerId: call.customer_id, lastInbound: await latestCustomerInbound(conn, message) };
+  return { fingerprint: witnessFingerprint(found), customerId: call.customer_id, lastInbound };
 }
 
 const refOf = (checkerType, id) => `${checkerType}:${id}`;
@@ -332,7 +333,7 @@ async function aiCloseStands(conn, commitment, call, prior) {
   // A customer text after the cited record (and after everything the close read) reopens it: the later
   // conversation is judged again, which closes it once more if the customer confirms.
   const contradicted = laterThan(state.lastInbound, new Date(Math.max(new Date(prior.matched_at).getTime() || 0, new Date(prior.read_through).getTime() || 0)));
-  const stands = state.unknown === true || (!!state.fingerprint && state.fingerprint === prior.witness_fp && !contradicted);
+  const stands = (state.unknown === true || (!!state.fingerprint && state.fingerprint === prior.witness_fp)) && !contradicted;
   // Bookkeeping only (never bumps updated_at): when this close was last read again, for the recheck selector.
   if (stands) {
     await conn('call_commitments').where({ id: commitment.id }).update({
