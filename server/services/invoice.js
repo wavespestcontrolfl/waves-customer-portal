@@ -3070,7 +3070,15 @@ async function calculateUpdateFinancials({
     err.code = "DISCOUNT_STACKING_GATE_DIVERGED";
     throw err;
   }
-  const items = normalizeInvoiceLineItems(lineItems);
+  // Multi-property invoices: a line whose property is unchanged keeps the
+  // address frozen at creation; a new or changed property is checked against
+  // the invoice's customer and frozen now (400 otherwise).
+  const items = await require("./invoice-property-lines").attachInvoiceLineProperties(
+    db,
+    invoice?.customer_id || customer?.id || null,
+    normalizeInvoiceLineItems(lineItems),
+    { existingLineItems: parseInvoiceLineItems(invoice?.line_items) },
+  );
   const subtotal =
     Math.round(
       items.reduce((sum, item) => {
@@ -6752,16 +6760,22 @@ const InvoiceService = {
     }
 
     // Calculate financials
-    const items = (lineItems || []).map((item) => {
-      const quantity = Number(item.quantity) || 1;
-      const unitPrice = Number(item.unit_price) || 0;
-      return {
-        ...item,
-        quantity,
-        unit_price: unitPrice,
-        amount: Math.round(quantity * unitPrice * 100) / 100,
-      };
-    });
+    // Multi-property invoices: a line's property_id must be this customer's
+    // saved property; its address is frozen onto the line here (400 otherwise).
+    const items = await require("./invoice-property-lines").attachInvoiceLineProperties(
+      database,
+      customerId,
+      (lineItems || []).map((item) => {
+        const quantity = Number(item.quantity) || 1;
+        const unitPrice = Number(item.unit_price) || 0;
+        return {
+          ...item,
+          quantity,
+          unit_price: unitPrice,
+          amount: Math.round(quantity * unitPrice * 100) / 100,
+        };
+      }),
+    );
     const serviceSubtotal = items.reduce((sum, item) => {
       const amount = Number(
         item.amount ??

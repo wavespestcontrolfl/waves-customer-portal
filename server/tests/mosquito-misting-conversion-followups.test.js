@@ -50,7 +50,8 @@ describe('P0: the install line has a durable identity and prepay coverage exclud
     expect((conv.match(/mistingInstallInvoiceLines\(mistingInstall\)/g) || [])).toHaveLength(2); // prepay + standard
     expect(read('routes/estimate-public.js')).toContain(".mistingInstallInvoiceLines(acceptedMistingInstall)");
     // the invoice writer spreads the whole line (no field whitelist), so kind and service reach line_items
-    expect(read('services/invoice.js')).toMatch(/const items = \(lineItems \|\| \[\]\)\.map\(\(item\) => \{[\s\S]{0,200}return \{\s*\.\.\.item,/);
+    // (the normalized map may be wrapped by the multi-property attach, which also spreads every line)
+    expect(read('services/invoice.js')).toMatch(/const items = (?:await [^\n]+\([\s\S]{0,80})?\(lineItems \|\| \[\]\)\.map\(\(item\) => \{[\s\S]{0,200}return \{\s*\.\.\.item,/);
   });
 
   test('the term coverage basis leaves the install out, like the setup line', () => {
