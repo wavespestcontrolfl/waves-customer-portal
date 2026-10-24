@@ -79,7 +79,7 @@ const call = (over = {}) => ({
 });
 const SLOT = { dateET: '2026-11-04', minutes: 16 * 60, name: 'Sam Sample', service: 'Waves Assessment' };
 const visit = (over = {}) => ({
-  id: 'visit-1', customer_id: 'cust-1', status: 'confirmed', sched_date: '2026-11-04', window_start: '16:00:00',
+  id: 'visit-1', customer_id: 'cust-1', status: 'confirmed', service_type: 'Waves Assessment', sched_date: '2026-11-04', window_start: '16:00:00',
   created_at: AFTER_CALL, source_call_log_id: null, notes: null, internal_notes: null, ...over,
 });
 const bell = (id, minute, over = {}) => ({
@@ -129,6 +129,7 @@ describe('classifyOpenBookingMiss', () => {
     expect(plan.mismatch).toEqual({ visit_id: 'visit-9', date: '2026-10-28', time: '16:00' });
     // A wrong-day booking is a new episode: raise a fresh bell, then close the old one.
     expect(plan.raise).toEqual(plan.mismatch);
+    expect(plan.replaces).toBe('n1');
     expect(plan.closes).toEqual([{ ids: ['n1'], resolution: 'Replaced by a date check' }]);
     expect(plan.keep).toBeNull();
   });
@@ -160,6 +161,21 @@ describe('classifyOpenBookingMiss', () => {
   test('a visit more than the match window from the agreed day is not the answer', () => {
     const far = new Date(Date.parse('2026-11-04T12:00:00Z') + (OTHER_DAY_MATCH_DAYS + 1) * 86400000).toISOString().slice(0, 10);
     expect(classify([visit({ sched_date: far }), visit({ id: 'v2', status: 'completed', sched_date: far })]).verdict).toBe('still_missed');
+  });
+
+  test('a later visit for another service never answers the call (pre-push P1)', () => {
+    for (const status of ['completed', 'confirmed']) {
+      expect(classify([visit({ status, sched_date: '2026-10-29', service_type: 'Every 6 Weeks Lawn Care Service' })]).verdict).toBe('still_missed');
+    }
+    // No agreed service known: no other-day verdict either.
+    expect(classify([visit({ sched_date: '2026-10-29' })], [bell('n1', '10')], { slot: { ...SLOT, service: null } }).verdict).toBe('still_missed');
+  });
+
+  test('the service name matches whatever its spacing and case; a title cut with an ellipsis matches by prefix', () => {
+    expect(classify([visit({ sched_date: '2026-10-28', service_type: '  waves   ASSESSMENT ' })]).verdict).toBe('booked_other_day');
+    const cut = { ...SLOT, service: 'Waves Assess…' };
+    expect(classify([visit({ sched_date: '2026-10-28' })], [bell('n1', '10')], { slot: cut }).verdict).toBe('booked_other_day');
+    expect(classify([visit({ sched_date: '2026-10-28', service_type: 'Waves' })], [bell('n1', '10')], { slot: cut }).verdict).toBe('still_missed');
   });
 
   test('a visit created before the call is not a later visit', () => {
@@ -198,7 +214,7 @@ describe('close pass', () => {
   const { closeResolvedBookingMissBells } = require('../services/call-booking-miss-watchdog');
   const stamp = { confirmed_date_et: '2026-11-04', confirmed_time_et: '16:00' };
   const wrongWeek = () => [visit({ id: 'visit-9', sched_date: '2026-10-28' })];
-  const DATE_KEY = `call-booking-miss-date:${CALL_ID}:visit-9:2026-10-28:16:00`;
+  const DATE_KEY = `call-booking-miss-date:${CALL_ID}:n2:visit-9:2026-10-28:16:00`;
   beforeEach(() => {
     mockState.calls = [call()];
     mockState.booked = [];
@@ -259,6 +275,16 @@ describe('close pass', () => {
     const result = await tick();
     expect(result).toMatchObject({ closed: 1, raised: 0 });
     expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['n1'], payload: { done_by: 'call-booking-miss', resolution: 'Replaced by a date check' } }]);
+  });
+
+  test('a visit moved A -> B -> A rings a fresh date check for A again (pre-push P1: no stale key match)', async () => {
+    // Back on A while the open bell is B's date check: the key names the bell it replaces.
+    mockState.open = [open('d2', '30', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-30', mismatch_time: '16:00' })];
+    mockState.booked = wrongWeek();
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 1, raised: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe(`call-booking-miss-date:${CALL_ID}:d2:visit-9:2026-10-28:16:00`);
+    expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['d2'], payload: { done_by: 'call-booking-miss', resolution: 'Replaced by a date check' } }]);
   });
 
   test('a raise that fails closes nothing: the alert is never lost', async () => {

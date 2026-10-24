@@ -317,6 +317,8 @@ const newestFirst = (a, b) => (new Date(b.created_at) - new Date(a.created_at)) 
 // mismatch_date, mismatch_time }), `namesakes` as computeBookingMisses takes it.
 // Returns { verdict, row, mismatch, closes: [{ ids, resolution }], keep, raise }:
 //   booked           the visit is on the agreed slot -> close every bell
+//   ("later visit" = created after the call, within OTHER_DAY_MATCH_DAYS of the
+//   agreed day, and for the service the call agreed: sameService)
 //   done_other_day   the call's own customer had a later visit completed on
 //                    another day -> close every bell (a namesake may be another
 //                    person, so a namesake's completed visit never closes)
@@ -335,7 +337,7 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
   const ordered = [...openRows].sort(newestFirst);
   const newest = ordered[0] || null;
   const closeAll = (resolution) => (ordered.length ? [{ ids: ordered.map((r) => r.id), resolution }] : []);
-  const result = (verdict, row, extra = {}) => ({ verdict, row, mismatch: null, closes: [], keep: null, raise: null, ...extra });
+  const result = (verdict, row, extra = {}) => ({ verdict, row, mismatch: null, closes: [], keep: null, raise: null, replaces: null, ...extra });
   const keepNewest = () => (ordered.length > 1 ? [{ ids: ordered.slice(1).map((r) => r.id), resolution: REPLACED }] : []);
 
   const sameName = namesakes.get(call.id);
@@ -348,7 +350,10 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
     return result('booked', cleared, { closes: closeAll(`Visit booked${label}${cancelled}`) });
   }
 
-  const later = bookedRows.filter((r) => r.sched_date && rowCreatedAfterCall(r, call) && daysApart(r.sched_date, slot.dateET) <= OTHER_DAY_MATCH_DAYS);
+  // A later visit answers the call only when it is for the service the call agreed: a
+  // routine lawn visit must never close or relabel a pest booking miss.
+  const later = bookedRows.filter((r) => r.sched_date && rowCreatedAfterCall(r, call)
+    && daysApart(r.sched_date, slot.dateET) <= OTHER_DAY_MATCH_DAYS && sameService(r.service_type, slot.service));
   const own = later.filter((r) => (!!call.customer_id && r.customer_id === call.customer_id) || rowCarriesCall(r, call));
   const done = nearestTo(own.filter((r) => r.status === 'completed'), slot.dateET);
   if (done) return result('done_other_day', done, { closes: closeAll(`Visit done ${spokenSlot(done.sched_date, null).day}`) });
@@ -364,7 +369,9 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
       && String(newest.mismatch_visit_id ?? '') === String(mismatch.visit_id ?? '')
       && (newest.mismatch_date ?? '') === mismatch.date
       && (newest.mismatch_time ?? '') === (mismatch.time ?? '');
-    if (newest && !same) return result('booked_other_day', live, { mismatch, raise: mismatch, closes: closeAll(REPLACED_BY_DATE_CHECK) });
+    // `replaces` (the bell this one supersedes) keys the new bell, so each episode gets its own
+    // key: a visit moved A -> B -> A rings again for A instead of matching A's closed bell.
+    if (newest && !same) return result('booked_other_day', live, { mismatch, raise: mismatch, replaces: newest.id, closes: closeAll(REPLACED_BY_DATE_CHECK) });
     return result('booked_other_day', live, { mismatch, closes: keepNewest(), keep: newest && newest.id });
   }
 
@@ -375,6 +382,18 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
 }
 
 const squashName = (v) => String(v || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+
+// Same service: the visit's service_type equals the call's agreed service name
+// (whitespace and case aside). A name cut short with "…" (an old bell's title)
+// matches by its prefix. No agreed service, no match.
+function sameService(visitServiceType, agreedService) {
+  const raw = String(agreedService || '');
+  const cut = raw.endsWith('…');
+  const want = squashName(cut ? raw.slice(0, -1) : raw);
+  if (!want) return false;
+  const have = squashName(visitServiceType);
+  return cut ? have.startsWith(want) : have === want;
+}
 
 // One comparable name that keeps the first/last boundary: "first|last",
 // trimmed, whitespace-collapsed, lower-cased. Both parts are required. The
@@ -534,7 +553,7 @@ async function loadBookingRows(entries, namesakes) {
       }
     })
     .select(
-      'id', 'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes', 'internal_notes',
+      'id', 'customer_id', 'status', 'service_type', 'window_start', 'created_at', 'source_call_log_id', 'notes', 'internal_notes',
       db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
     );
 }
@@ -612,11 +631,12 @@ async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false 
       const stamped = rows.find((r) => r.confirmed_date_et && /^\d{2}:\d{2}/.test(r.confirmed_time_et || ''));
       if (!stamped) continue;
       const nameInTitle = /^Schedule — (?:book|check) (.+?)'s /.exec(stamped.title || '');
+      const serviceInTitle = /^Schedule — book .+?'s (.+)$/.exec(stamped.title || '');
       slot = {
         dateET: stamped.confirmed_date_et,
         minutes: Number(stamped.confirmed_time_et.slice(0, 2)) * 60 + Number(stamped.confirmed_time_et.slice(3, 5)),
         name: nameInTitle ? nameInTitle[1] : null,
-        service: null,
+        service: serviceInTitle ? serviceInTitle[1] : null,
       };
     }
     entries.push({ call, slot, rows });
@@ -650,7 +670,7 @@ async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false 
       const { visit_id: visitId, date, time } = plan.raise;
       const outcome = await ringMiss(
         { call, slot, mismatch: plan.raise },
-        { dedupeKey: `${BELL_DEDUPE_PREFIX}-date:${call.id}:${visitId}:${date}:${time ?? 'none'}`, repeat: false },
+        { dedupeKey: `${BELL_DEDUPE_PREFIX}-date:${call.id}:${plan.replaces}:${visitId}:${date}:${time ?? 'none'}`, repeat: false },
       ).catch((err) => { logger.warn(`[call-booking-miss] failed to raise the date check for call ${call.id}: ${err.message}`); return 'failed'; });
       // Close the old bells only once the date check stands ('rung' or an
       // existing row under the same key). A suppressed or failed raise keeps them.

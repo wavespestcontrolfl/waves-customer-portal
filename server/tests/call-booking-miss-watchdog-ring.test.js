@@ -269,7 +269,7 @@ describe('booked on another account with the same name', () => {
 describe('a later visit on another day', () => {
   const afterCall = '2026-09-28T22:15:00Z';
   const otherDay = (over = {}) => ({
-    id: 'visit-7', customer_id: 'cust-9', status: 'confirmed', sched_date: '2026-10-11', window_start: '16:00:00',
+    id: 'visit-7', customer_id: 'cust-9', status: 'confirmed', service_type: 'Wasp Nest Removal', sched_date: '2026-10-11', window_start: '16:00:00',
     created_at: afterCall, source_call_log_id: null, notes: null, ...over,
   });
 
@@ -307,6 +307,15 @@ describe('a later visit on another day', () => {
     mockState.booked = [otherDay({ customer_id: 'cust-first', status: 'completed' })];
     await runCallBookingMissWatchdog({ now: NOW });
     expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe("Schedule — book Robin Example's Wasp Nest Removal");
+  });
+
+  test('a later visit for another service is not the answer: the usual bell rings, done or live', async () => {
+    for (const status of ['completed', 'confirmed']) {
+      NotificationService.notifyAdmin.mockClear();
+      mockState.booked = [otherDay({ status, service_type: 'Every 6 Weeks Lawn Care Service' })];
+      await runCallBookingMissWatchdog({ now: NOW });
+      expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe("Schedule — book Robin Example's Wasp Nest Removal");
+    }
   });
 
   test('a visit created before the call is not a later visit: the usual bell rings', async () => {
