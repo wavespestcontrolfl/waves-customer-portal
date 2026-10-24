@@ -4,13 +4,16 @@
  * without a time so the tool picks a free one"). Dark behind
  * GATE_PLAN_TAKEN_HOUR_HANDOFF, read at call time (unset = live kill).
  *
- * Two plan writers copy the plan's hour onto a new visit without asking
- * whether it is free, and the 10-22 audit traced double bookings to them:
+ * Two kinds of plan writer copy the plan's hour onto a new visit without
+ * asking whether it is free, and the 10-22 audit traced double bookings to
+ * them:
  *   - the follow-up seeder (recurring-appointment-seeder.js
  *     seedFollowUpsForParent: booking, estimate conversion, admin create),
  *     which has no clash check at all;
- *   - the nightly top-up (routes/admin-schedule.js walkExtensionCandidates,
- *     overlapAdvisoryOnly), which inserts on a clash and logs it.
+ *   - the series extensions (routes/admin-schedule.js: the nightly top-up and
+ *     the completion-time extend through walkExtensionCandidates, and the
+ *     plan-alert extend/convert actions), which insert on a clash and log it
+ *     (cadenceSlotHandoffFields).
  * Gate on, a new plan visit whose hour another customer's live visit already
  * holds is written WINDOWLESS and handed to auto-dispatch with its cadence
  * date as recurring_dispatch_due_date: the shape a series move gives a
@@ -39,7 +42,7 @@
  * Only from HANDOFF_MIN_DAYS_OUT days ahead: the night tool never moves a
  * visit inside its 73-hour freeze, so a nearer visit keeps its hour and the
  * double booking reaches a person through the needs-a-person notice, as
- * before. The completion-time extend is unchanged (it skips a clashing date).
+ * before.
  *
  * CALL FOLLOW-UP FREE HOUR (owner 2026-10-22, "fix", after the Oct 30 call
  * follow-up landed on another customer's 10 AM): the call pipeline's visit 2
