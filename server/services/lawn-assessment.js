@@ -617,7 +617,12 @@ async function assessInsertFields({ customerId, scheduledService, preAnalysisMov
 async function setBaselineFlag(customerId, scope, target, knex) {
   const history = require('./lawn-assessment-history');
   const rows = await history.assessmentQuery(customerId, knex, { confirmed: false });
-  const ids = rows.filter((row) => history.isEligible(row, scope)).map((row) => row.id);
+  // Each score scale keeps its own baseline (GATE_LAWN_SCORE_SCALE_V2): installing a
+  // scale-2 baseline never clears a scale-1 row, whose flag is part of the history
+  // identity that earlier reports and their signed pins were built on.
+  const scale = target ? history.scoreScaleOf(target) : null;
+  const ids = rows.filter((row) => history.isEligible(row, scope)
+    && (scale === null || history.scoreScaleOf(row) === scale)).map((row) => row.id);
   if (ids.length) {
     const clear = knex('lawn_assessments').whereIn('id', ids).where({ is_baseline: true });
     if (target) clear.whereNot('id', target.id);

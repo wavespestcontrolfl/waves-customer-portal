@@ -19,6 +19,12 @@ const { decodedBase64Bytes } = require('../utils/request-photo-validation');
 const shotListLive = () => require('../config/feature-gates').gateEnvValue('GATE_LAWN_SHOT_LIST');
 // GATE_LAWN_PHOTO_LABEL_PICK: the technician's customer-facing label for a photo (shot-list captures only).
 const labelPickLive = () => shotListLive() && require('../config/feature-gates').lawnPhotoLabelPickLive();
+// GATE_LAWN_SCORE_SCALE_V2 (owner 2026-10-24): the scale a new lawn read uses. A
+// partial gates module (route test doubles) reads as off.
+const scoreScaleV2Live = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.lawnScoreScaleV2Live === 'function' && gates.lawnScoreScaleV2Live();
+};
 const visitResult = require('../services/lawn-visit-result');
 const visitScores = require('../services/lawn-visit-scores');
 const visitRuns = require('../services/lawn-visit-runs');
@@ -828,7 +834,10 @@ router.post('/assess', async (req, res, next) => {
     let mergedComposite;
     let displayScores;
     if (visitAssessmentEnabled) {
-      visitAnalysis = await visitAssessment.analyzeVisit({ photos, visionContext, shotList: shotListEnabled, timeoutMs: aiTimeoutMs() });
+      // Score scale 2 (GATE_LAWN_SCORE_SCALE_V2) reads only where the row can carry
+      // its scale: an unstamped scale-2 row would compare as scale 1.
+      const scale2 = scoreScaleV2Live() && await db.schema.hasColumn('lawn_assessments', 'score_scale');
+      visitAnalysis = await visitAssessment.analyzeVisit({ photos, visionContext, shotList: shotListEnabled, scale2, timeoutMs: aiTimeoutMs() });
       let allPoor;
       ({ qualityResults, resultByPhotoIndex, allPoor } = visitResult.photoRowInputs(visitAnalysis));
       // The model answered but called every photo unusable: the legacy
@@ -895,6 +904,9 @@ router.post('/assess', async (req, res, next) => {
       isBaseline = (await visitRuns.priorAssessmentCount(customerId, db)) === 0;
     }
     const canStampProperty = await db.schema.hasColumn('lawn_assessments', 'property_id');
+    // Score scale 2 (GATE_LAWN_SCORE_SCALE_V2): the row says which scale its scores
+    // are on, so property history never compares it with a scale-1 visit.
+    const scaleStamp = visitAnalysis?.scoreScale === 2 ? { score_scale: 2 } : {};
 
     // Collect divergence flags from all photo analyses
     const allDivergences = validResults.flatMap(r => r.divergenceFlags || []);
@@ -957,6 +969,7 @@ router.post('/assess', async (req, res, next) => {
       season,
       photos: JSON.stringify(photoMeta),
       ...scoreFields,
+      ...scaleStamp,
       // A run-backed assessment stays pending here. The run-aware /confirm
       // transaction installs its baseline only after all required scores are
       // complete; unknown scores remain NULL until the technician supplies them.
@@ -1185,9 +1198,23 @@ router.post('/assess', async (req, res, next) => {
       }
     }
 
+    // The read-only Last visit row on THIS read's score scale (GATE_LAWN_SCORE_SCALE_V2):
+    // a retake can change the scale, so the screen takes the row from this response,
+    // never from its earlier lookup. A failed read leaves the key out, never fails Analyze.
+    let lastVisit;
+    if (visitAssessmentEnabled && scheduledService) {
+      try {
+        lastVisit = await require('../services/lawn-last-visit-scores')
+          .lastVisitScores(scheduledService, db, { scoreScale: visitAnalysis?.scoreScale === 2 ? 2 : 1 });
+      } catch (err) {
+        logger.warn(`[lawn-assessment] last visit scores failed after analyze for ${serviceId}: ${err.message}`);
+      }
+    }
+
     res.json({
       success: true,
       assessment: { ...assessment, overall_score: overallScore, best_photo_id: bestPhotoId },
+      ...(lastVisit === undefined ? {} : { lastVisit }),
       rawComposite: mergedComposite,
       detectedGrassType: mergedComposite.grass_type || null,
       displayScores,
@@ -1532,20 +1559,23 @@ router.get('/service/:serviceId', async (req, res, next) => {
     } else {
       visit = await db('scheduled_services').where({ id: req.params.serviceId }).first().catch(() => null);
     }
+    const assessment = await applyServiceAssessmentOrder(
+      db('lawn_assessments').where({ service_id: req.params.serviceId }),
+    ).first();
     // The last confirmed lawn visit's four scores and overall score, read-only
     // on the completion screens (owner 2026-10-23). A failed read leaves the
     // key out (the screen then shows no row) and never fails this lookup.
+    // GATE_LAWN_SCORE_SCALE_V2: the last visit on the same score scale as this
+    // visit's read (its assessment's, else the scale a new read uses now).
     let lastVisit;
     try {
-      lastVisit = visit ? await require('../services/lawn-last-visit-scores').lastVisitScores(visit, db) : undefined;
+      const scoreScale = assessment ? require('../services/lawn-assessment-history').scoreScaleOf(assessment) : (scoreScaleV2Live() ? 2 : 1);
+      lastVisit = visit ? await require('../services/lawn-last-visit-scores').lastVisitScores(visit, db, { scoreScale }) : undefined;
     } catch (err) {
       logger.warn(`[lawn-assessment] last visit scores failed for ${req.params.serviceId}: ${err.message}`);
       lastVisit = undefined;
     }
     const lastVisitPart = lastVisit === undefined ? {} : { lastVisit };
-    const assessment = await applyServiceAssessmentOrder(
-      db('lawn_assessments').where({ service_id: req.params.serviceId }),
-    ).first();
 
     if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), ...(labelPickLive() ? { labelPickEnabled: true } : {}), ...lastVisitPart, assessment: null });
 

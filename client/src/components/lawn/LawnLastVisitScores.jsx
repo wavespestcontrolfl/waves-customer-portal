@@ -37,7 +37,9 @@ export default function LawnLastVisitScores({ lastVisit }) {
         {lastVisit && <div className="text-14 text-zinc-500">{formatDay(lastVisit.date)}</div>}
       </div>
       {!lastVisit ? (
-        <div className="text-14 text-zinc-500">No earlier confirmed assessment. Today sets the baseline.</div>
+        // True both at a lawn's first visit and at its first visit on a new score
+        // scale (GATE_LAWN_SCORE_SCALE_V2), where the earlier scores do not compare.
+        <div className="text-14 text-zinc-500">No earlier visit to compare. Today sets the baseline.</div>
       ) : (
         <>
           <div className="mt-1 flex items-baseline justify-between gap-3">

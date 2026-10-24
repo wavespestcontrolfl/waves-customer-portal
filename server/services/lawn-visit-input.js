@@ -18,6 +18,11 @@ const SHOT_LIST_PROMPT_VERSION = `${PROMPT_VERSION}-shot-list`;
 // a replay never mixes a read that recorded the light with one that did not.
 const LIGHTING_PROMPT_VERSION = `${PROMPT_VERSION}-lighting`;
 const SHOT_LIST_LIGHTING_PROMPT_VERSION = `${SHOT_LIST_PROMPT_VERSION}-lighting`;
+// Score scale 2 (GATE_LAWN_SCORE_SCALE_V2, owner 2026-10-24, lawn scoring review):
+// any of the four variants above with the SCORES block replaced by four 0-100
+// ratings with written anchors. Its own suffix so a replay or a comparison never
+// mixes a scale-2 read with a scale-1 one.
+const SCALE2_SUFFIX = '-scale2';
 const MAX_VISIT_PHOTOS = 6;
 const MAX_OUTPUT_TOKENS = 16384;
 // Owner ruling 2026-09-24: three named slots, all optional (no photo-count
@@ -402,6 +407,57 @@ const LIGHTING_RESPONSE_SCHEMA = withLightRead(RESPONSE_SCHEMA);
 const SHOT_LIST_LIGHTING_SYSTEM_PROMPT = withLight(SHOT_LIST_SYSTEM_PROMPT);
 const SHOT_LIST_LIGHTING_RESPONSE_SCHEMA = withLightRead(SHOT_LIST_RESPONSE_SCHEMA);
 
+// Score scale 2 (GATE_LAWN_SCORE_SCALE_V2, owner 2026-10-24, lawn scoring review).
+// Scale 1 asked weed_coverage as the share of the lawn carrying weeds: the model
+// read 0-5% on 16 of 18 production visits, so weed control (100 minus it) sat at
+// 95-99 and the technician lowered it on 10 of 14 confirmed visits. Color was a
+// 1-10 step and Condition a word map (none 95 / moderate thatch 60 ...). Scale 2
+// asks the model for the four numbers the technician reviews, each a 0-100 rating
+// against written anchors; the server keeps them as read. The four variants above
+// are untouched, so gate-off reads stay byte-identical.
+const SCORES_BLOCK_V1 = `# SCORES (whole visit — the units the technician reviews today)
+- turf_density 0-100: canopy fill and stand density across the lawn shown.
+- weed_coverage 0-100: share of the visible lawn carrying weeds.
+- color_health 1-10: 10 = uniformly deep green for the season.`;
+const SCORES_BLOCK_V2 = `# SCORES (whole visit — four 0-100 ratings the technician reviews today)
+These are ratings, not measurements, counts or percentages: give a whole number 0-100
+for each, using the examples below as anchors (any number between two anchors is fine).
+Rate what a customer standing at the curb would see on the lawn the photos show.
+- turf_density: how full and even the turf stand is. 100 thick, even turf everywhere
+  shown; 90 full with a few thin spots; 75 thin areas in several places; 50 thin or
+  bare across much of the lawn; 25 mostly bare or sparse.
+- weed_control: how free of weeds the lawn is (higher means fewer weeds). 100 no weeds
+  visible; 90 a few scattered weeds; 75 weeds noticeable in several spots; 50 weedy
+  patches across the lawn; 25 weeds dominate the turf.
+- color_health: turf color for the season (normal seasonal color is not a fault). 100
+  uniformly deep green for the season; 90 good color, slightly uneven; 75 noticeably
+  pale or uneven areas; 50 widespread yellowing or off-color; 25 mostly discolored.
+- condition: visible stress and damage (disease, insects, drought, wear, thatch). 100
+  no visible stress or damage; 90 minor, isolated stress; 75 stress or damage in
+  several spots; 50 damage across a large part of the lawn; 25 severe, widespread
+  damage. Count thatch only where a photo shows the thatch layer; never lower
+  condition for a problem the photos cannot show.`;
+// The shot guide names the scale-1 keys; scale 2 names its own and adds condition.
+const SHOT_AREA_V1 = 'Area scores (turf_density, weed_coverage, color_health) come from the overview shots';
+const SHOT_AREA_V2 = 'Area scores (turf_density, weed_control, color_health) come from the overview shots';
+const SHOT_STRESS_V1 = '- Stress and damage signals (severities): the worst level across all photos.';
+const SHOT_STRESS_V2 = '- Stress and damage signals (severities) and the condition score: the worst across all photos.';
+if (SYSTEM_PROMPT.split(SCORES_BLOCK_V1).length !== 2 || SHOT_LIST_SYSTEM_PROMPT.split(SHOT_AREA_V1).length !== 2
+  || SHOT_LIST_SYSTEM_PROMPT.split(SHOT_STRESS_V1).length !== 2) {
+  throw new Error('lawn-visit-input: score-scale-2 prompt anchors moved');
+}
+const withScale2 = (system) => system.replace(SCORES_BLOCK_V1, () => SCORES_BLOCK_V2)
+  .replace(SHOT_AREA_V1, () => SHOT_AREA_V2).replace(SHOT_STRESS_V1, () => SHOT_STRESS_V2);
+const withScale2Scores = (schema) => {
+  const copy = JSON.parse(JSON.stringify(schema));
+  copy.properties.scores = obj({ turf_density: score(0, 100), weed_control: score(0, 100), color_health: score(0, 100), condition: score(0, 100) });
+  return copy;
+};
+const scale2Variant = (version, system, schema) => {
+  const scaled = { system: withScale2(system), schema: withScale2Scores(schema) };
+  return Object.freeze({ version: `${version}${SCALE2_SUFFIX}`, ...scaled, digest: digestOf(scaled.system, scaled.schema) });
+};
+
 // The composed system prompt and the response schema, digested once per mode.
 // The prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
 // FALSE_PRECISION_RULE): editing one changes what the
@@ -412,13 +468,25 @@ const PROMPT_DIGEST = digestOf(SYSTEM_PROMPT, RESPONSE_SCHEMA);
 const SHOT_LIST_PROMPT_DIGEST = digestOf(SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA);
 const LIGHTING_PROMPT_DIGEST = digestOf(LIGHTING_SYSTEM_PROMPT, LIGHTING_RESPONSE_SCHEMA);
 const SHOT_LIST_LIGHTING_PROMPT_DIGEST = digestOf(SHOT_LIST_LIGHTING_SYSTEM_PROMPT, SHOT_LIST_LIGHTING_RESPONSE_SCHEMA);
+const SCALE2_VARIANTS = Object.freeze({
+  base: scale2Variant(PROMPT_VERSION, SYSTEM_PROMPT, RESPONSE_SCHEMA),
+  shotList: scale2Variant(SHOT_LIST_PROMPT_VERSION, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA),
+  lighting: scale2Variant(LIGHTING_PROMPT_VERSION, LIGHTING_SYSTEM_PROMPT, LIGHTING_RESPONSE_SCHEMA),
+  shotListLighting: scale2Variant(SHOT_LIST_LIGHTING_PROMPT_VERSION, SHOT_LIST_LIGHTING_SYSTEM_PROMPT, SHOT_LIST_LIGHTING_RESPONSE_SCHEMA),
+});
 
 // Everything a call needs that differs by capture mode: the version label, the
 // system prompt, the schema and the digest the context hash seeds with.
 // `lighting: true` (GATE_LAWN_LIGHTING, decided by the caller) selects the variant
 // that also reads each photo's light; off, the two original variants are returned
 // exactly as before.
-function promptFor({ shotList: shotListOn = false, lighting = false } = {}) {
+function promptFor({ shotList: shotListOn = false, lighting = false, scale2 = false } = {}) {
+  // `scale2: true` (GATE_LAWN_SCORE_SCALE_V2, decided by the caller) selects the
+  // same capture and light variant with the 0-100 scores block.
+  if (scale2) {
+    if (lighting) return shotListOn ? SCALE2_VARIANTS.shotListLighting : SCALE2_VARIANTS.lighting;
+    return shotListOn ? SCALE2_VARIANTS.shotList : SCALE2_VARIANTS.base;
+  }
   if (lighting) {
     return shotListOn
       ? { version: SHOT_LIST_LIGHTING_PROMPT_VERSION, system: SHOT_LIST_LIGHTING_SYSTEM_PROMPT, schema: SHOT_LIST_LIGHTING_RESPONSE_SCHEMA, digest: SHOT_LIST_LIGHTING_PROMPT_DIGEST }
@@ -432,9 +500,13 @@ function promptFor({ shotList: shotListOn = false, lighting = false } = {}) {
 // The capture mode and light mode a stored prompt version was read under (the
 // eval groups replays by version and digests each one).
 function variantOfVersion(version) {
+  const scale2 = typeof version === 'string' && version.endsWith(SCALE2_SUFFIX);
+  const base = scale2 ? version.slice(0, -SCALE2_SUFFIX.length) : version;
   return {
-    shotList: version === SHOT_LIST_PROMPT_VERSION || version === SHOT_LIST_LIGHTING_PROMPT_VERSION,
-    lighting: version === LIGHTING_PROMPT_VERSION || version === SHOT_LIST_LIGHTING_PROMPT_VERSION,
+    shotList: base === SHOT_LIST_PROMPT_VERSION || base === SHOT_LIST_LIGHTING_PROMPT_VERSION,
+    lighting: base === LIGHTING_PROMPT_VERSION || base === SHOT_LIST_LIGHTING_PROMPT_VERSION,
+    // Present only on a scale-2 version, so a scale-1 version's variant is unchanged.
+    ...(scale2 ? { scale2: true } : {}),
   };
 }
 
@@ -442,9 +514,9 @@ function variantOfVersion(version) {
 // and schema (PROMPT_DIGEST), the context lines' inputs, and each photo's
 // bytes with its position, zone and media type. The eval replays by
 // assessment id and compares hashes to prove it rebuilt the same input.
-function contextHash({ photos = [], photoZones = [], visionContext = {}, shotList: shotListOn = false, lighting = false } = {}) {
+function contextHash({ photos = [], photoZones = [], visionContext = {}, shotList: shotListOn = false, lighting = false, scale2 = false } = {}) {
   const c = visionContext || {};
-  const prompt = promptFor({ shotList: shotListOn, lighting });
+  const prompt = promptFor({ shotList: shotListOn, lighting, scale2 });
   const hash = crypto.createHash('sha256');
   hash.update(prompt.version).update('\n').update(prompt.digest).update('\n');
   // The rendered user text too: its safety instructions and context
@@ -464,5 +536,5 @@ function contextHash({ photos = [], photoZones = [], visionContext = {}, shotLis
 }
 
 module.exports = {
-  GATE, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION, LIGHTING_PROMPT_VERSION, SHOT_LIST_LIGHTING_PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA, LIGHTING_RESPONSE_SCHEMA, SHOT_LIST_LIGHTING_RESPONSE_SCHEMA, LIGHTING_SYSTEM_PROMPT, SHOT_LIST_LIGHTING_SYSTEM_PROMPT, PROMPT_DIGEST, SHOT_LIST_PROMPT_DIGEST, LIGHTING_PROMPT_DIGEST, SHOT_LIST_LIGHTING_PROMPT_DIGEST, promptFor, variantOfVersion, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
+  GATE, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION, LIGHTING_PROMPT_VERSION, SHOT_LIST_LIGHTING_PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA, LIGHTING_RESPONSE_SCHEMA, SHOT_LIST_LIGHTING_RESPONSE_SCHEMA, LIGHTING_SYSTEM_PROMPT, SHOT_LIST_LIGHTING_SYSTEM_PROMPT, PROMPT_DIGEST, SHOT_LIST_PROMPT_DIGEST, LIGHTING_PROMPT_DIGEST, SHOT_LIST_LIGHTING_PROMPT_DIGEST, SCALE2_SUFFIX, SCALE2_VARIANTS, promptFor, variantOfVersion, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
 };
