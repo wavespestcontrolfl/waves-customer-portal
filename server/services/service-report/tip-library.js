@@ -1513,7 +1513,7 @@ const TIPS = Object.freeze([
     yard: { county: ['Charlotte'] },
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-why-summer-ban', label: 'SWFWMD', url: 'https://www.swfwmd.state.fl.us/residents/water-101/fertilizer-restrictions-county' }, { fact: 'fact-tip-lawn-why-summer-ban', label: 'Charlotte County', url: 'https://charlottecountyfl.gov/one-charlotte-one-water/improving-water-quality/fertilizers-pesticides-irrigation.stml' }],
-    copy: "Heavy summer rain can wash fertilizer off lawns into the streets and on to local waters, SWFWMD says, and Charlotte County ties the extra nutrients to algae blooms and red tide in Charlotte Harbor. That's why nitrogen and phosphorus stop from June through September.",
+    copy: "Heavy summer rain can wash fertilizer off lawns into the streets and on to local waters, SWFWMD says, and Charlotte County ties the extra nutrients to algae blooms and red tide in Charlotte Harbor.",
   },
   {
     id: 'lawn_weeds_fill_voids', group: 'lawn', label: 'Weeds fill a gap',
@@ -1596,7 +1596,7 @@ const TIPS = Object.freeze([
     yard: { county: ['Sarasota'], city: ['sarasota', 'venice', 'north venice', 'nokomis', 'osprey', 'laurel', 'siesta key', 'lake sarasota', 'englewood', 'longboat key'] },
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-fertilizer-season', label: 'UF/IFAS', url: 'https://sfyl.ifas.ufl.edu/media/sfylifasufledu/sarasota/documents/pdf/hortres/keydocs/2025_HortRes_brochureSacoFertilizerCodes_FINAL_ADA.pdf' }],
-    copy: "Summer feedings skip nitrogen on purpose. Sarasota County's ordinance bars fertilizer with nitrogen or phosphorus on residential lawns and landscapes from June 1 through September 30, so the lawn gets potassium and micronutrients instead.",
+    copy: "Summer feedings skip nitrogen on purpose. Sarasota County's ordinance bars fertilizer with nitrogen or phosphorus on residential lawns and landscapes from June 1 through September 30.",
   },
   {
     id: 'lawn_chinch_can_test', group: 'lawn', label: 'See chinch bugs for yourself',
@@ -1612,7 +1612,7 @@ const TIPS = Object.freeze([
     findings: ['take_all'],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-take-all-weeks', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/LH079' }],
-    copy: "Take-all root rot works underground first. By the time yellow patches show, UF/IFAS says the fungus has been on the roots for weeks, so recovery takes a while even after the cause is handled.",
+    copy: "Take-all root rot works underground first. By the time yellow patches show, UF/IFAS says the fungus has been on the roots for at least two to three weeks, probably longer.",
   },
   {
     id: 'ts_palm_hurricane_cut', group: 'tree_shrub', label: 'Skip the hurricane cut',
@@ -1706,7 +1706,7 @@ const TIPS = Object.freeze([
     keywords: ['citrus', 'greening', 'psyllid', 'mottle', 'orange tree'], lines: ['tree_shrub'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-ts-citrus-greening', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/HS141' }],
-    copy: "If you have citrus, watch the leaves. UF/IFAS says there's no cure for citrus greening, which psyllids spread from tree to tree, and an early sign is a blotchy mottle on the leaves. Tell me if you see it.",
+    copy: "If you have citrus, watch the leaves. UF/IFAS says there's no cure for citrus greening, which psyllids spread from tree to tree, and one sign is a blotchy mottle on the leaves. Tell me if you see it.",
   },
   {
     id: 'ts_ficus_whitefly', group: 'tree_shrub', label: 'Ficus hedges and whitefly',
@@ -1736,7 +1736,7 @@ const TIPS = Object.freeze([
     keywords: ['ants', 'spray', 'trail', 'colony', 'budding', 'raid'], lines: ['pest'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-nr-spray-splits-colony', label: 'PubMed', url: 'https://pubmed.ncbi.nlm.nih.gov/40834271/' }],
-    copy: "Store-bought ant sprays can backfire. A 2025 study of household aerosols found pyrethroid sprays raised the chance of an ant colony budding, splitting off new nests. If you see a trail between visits, wipe it up and tell me instead of spraying it.",
+    copy: "Ant sprays can backfire. A study found pyrethroid-based sprays raised the chance of an ant colony budding, splitting off new nests. If you see a trail between visits, wipe it up and tell me instead of spraying it.",
   },
   {
     id: 'tl_fdacs_diy', group: 'termite', label: 'What Florida recommends for termites',
