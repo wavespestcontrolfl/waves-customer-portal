@@ -11,7 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const {
   groupInvoiceLinesByProperty, invoicePropertyLabels, propertyAddressLabel,
 } = require('@waves/invoice-property-groups');
-const { attachInvoiceLineProperties } = require('../services/invoice-property-lines');
+const { attachInvoiceLineProperties, techSafeInvoiceLineItems } = require('../services/invoice-property-lines');
 
 const CUSTOMER = '11111111-1111-4111-8111-111111111111';
 const PALM = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -112,6 +112,17 @@ describe('attachInvoiceLineProperties (write path)', () => {
     expect(items[1]).not.toHaveProperty('property_id');
     expect(items[2]).toMatchObject({ category: 'deposit_credit', amount: -50 });
   });
+});
+
+test('techSafeInvoiceLineItems drops property metadata from every line (array or stored JSON) and keeps the money', () => {
+  const lines = [{ client_id: 'a', description: 'Service', quantity: 1, unit_price: 149, amount: 149, property_id: PALM, property_address: { address_line1: 'x' } },
+    { client_id: 'a-d', _kind: 'discount', discount_for: 'a', amount: -14.9, property_id: PALM, property_address: { address_line1: 'x' } }];
+  for (const input of [lines, JSON.stringify(lines)]) {
+    const safe = techSafeInvoiceLineItems(input);
+    expect(safe).toEqual([{ client_id: 'a', description: 'Service', quantity: 1, unit_price: 149, amount: 149 }, { client_id: 'a-d', _kind: 'discount', discount_for: 'a', amount: -14.9 }]);
+  }
+  expect(techSafeInvoiceLineItems('not json')).toEqual([]);
+  expect(techSafeInvoiceLineItems(null)).toEqual([]);
 });
 
 describe('groupInvoiceLinesByProperty (documents)', () => {

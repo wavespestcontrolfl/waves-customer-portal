@@ -19,7 +19,7 @@ const { generateInvoiceSummary, generateThankYouMessage } = require('../services
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+const { technicianServicesCustomer, isTechnicianRequest } = require('../services/technician-visit-scope');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: the invoice workspace is owner-only, with ONE
@@ -929,6 +929,13 @@ router.get('/:id', async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     if (!(await technicianServicesCustomer(req, invoice.customer_id))) {
       return res.status(404).json({ error: 'Not found' });
+    }
+    // A technician is authorised per customer by an assignment at ONE
+    // property: a multi-property invoice's frozen line addresses would name
+    // the customer's other homes, so they are dropped (money fields kept),
+    // like accountProperties on the technician Customer 360 payload.
+    if (isTechnicianRequest(req)) {
+      invoice.line_items = require('../services/invoice-property-lines').techSafeInvoiceLineItems(invoice.line_items);
     }
     // Coverage-service suggestion for the annual-prepay modal (real recurring
     // service, not the invoice title). Modal-only; safe to attach for all GETs.

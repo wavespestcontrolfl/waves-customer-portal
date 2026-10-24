@@ -117,4 +117,22 @@ async function attachInvoiceLineProperties(conn, customerId, items = [], { exist
   });
 }
 
-module.exports = { attachInvoiceLineProperties, linePropertyError, _private: { UUID_RE } };
+/**
+ * A technician's read of an invoice (the tap-to-pay re-read of their own
+ * checkout) is authorised per CUSTOMER by a current assignment at ONE
+ * property; the frozen addresses on the lines may name the customer's OTHER
+ * homes. Same rule as the technician Customer 360 payload (accountProperties
+ * is stripped): drop the property metadata, keep every money field.
+ */
+function techSafeInvoiceLineItems(lineItems) {
+  const items = Array.isArray(lineItems) ? lineItems : (() => {
+    try { return JSON.parse(lineItems || '[]'); } catch { return []; }
+  })();
+  return (Array.isArray(items) ? items : []).map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const { property_id: _pid, property_address: _addr, ...rest } = item;
+    return rest;
+  });
+}
+
+module.exports = { attachInvoiceLineProperties, techSafeInvoiceLineItems, linePropertyError, _private: { UUID_RE } };
