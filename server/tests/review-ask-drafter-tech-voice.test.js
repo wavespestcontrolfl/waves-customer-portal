@@ -1118,3 +1118,84 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({ body: `Marta, I know you had to get to work. ${'More words. '.repeat(60)}` }, e)).toBe('too_long');
   });
 });
+
+describe('numbers and exact quotes (#5893 follow-up; owner 2026-10-05: fix it in the prompts, keep the code checks)', () => {
+  const MOUNDS = { ...REPORT, observations: 'We treated 3 mounds by the pool.' };
+  const draft = (sentence) => ({
+    body: `It's Adam. ${sentence} A Google review would really help: {review_url}`,
+    details: [{ text: 'mounds by the pool', source_quote: 'We treated 3 mounds by the pool' }],
+  });
+  // The checker vouches for the mounds sentence with the record's own line.
+  const vouch = () => mockFactCheck.mockImplementation(async (_p, req) => ({
+    ok: true,
+    json: {
+      sentences: factInput(req).sentences.map((sentence) => (/^It's Adam/.test(sentence)
+        ? { sentence, ask_only: false, greeting_only: true, off_limits: false, supported: false, quotes: [] }
+        : /google review/i.test(sentence)
+          ? { sentence, ask_only: true, greeting_only: false, off_limits: false, supported: false, quotes: [] }
+          : { sentence, ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ['We treated 3 mounds by the pool'] })),
+    },
+  }));
+
+  beforeEach(() => { mockTables.service_records = [{ structured_notes: JSON.stringify(MOUNDS) }]; });
+  afterEach(() => { delete mockGates.reviewAskExactQuotes; });
+
+  test('a number the cited line does not hold is refused, though every word matches; the same number passes (gate off too)', async () => {
+    vouch();
+    mockDispatch.mockResolvedValue(reply(draft('I treated 2 mounds by the pool.')));
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence: ');
+    mockDispatch.mockReset().mockResolvedValue(reply(draft('I treated 3 mounds by the pool.')));
+    expect(await Drafter.draftTechVoice(INPUT)).toBe(draft('I treated 3 mounds by the pool.').body);
+    // A number word reads as its digits.
+    mockDispatch.mockReset().mockResolvedValue(reply(draft('I treated three mounds by the pool.')));
+    expect(await Drafter.draftTechVoice(INPUT)).toBe(draft('I treated three mounds by the pool.').body);
+  });
+
+  test("the writer's cited detail is held to its quote's numbers", () => {
+    const { detailSupportedByQuote } = Drafter.__private;
+    expect(detailSupportedByQuote('2 mounds by the pool', 'We treated 3 mounds by the pool')).toBe(false);
+    expect(detailSupportedByQuote('3 mounds by the pool', 'We treated 3 mounds by the pool')).toBe(true);
+    expect(detailSupportedByQuote('three mounds by the pool', 'We treated 3 mounds by the pool')).toBe(true);
+    expect(detailSupportedByQuote('mounds by the pool', 'We treated 3 mounds by the pool')).toBe(true);
+  });
+
+  test("gate on: the checker is asked for one line's bare words and the writer for the source's own words; off: today's prompts", async () => {
+    const { buildTechVoiceSystemPrompt } = Drafter.__private;
+    const offWriter = buildTechVoiceSystemPrompt('followup', 7);
+    vouch();
+    mockDispatch.mockResolvedValueOnce(reply(draft('I treated 3 mounds by the pool.')));
+    await Drafter.draftTechVoice(INPUT);
+    const offChecker = mockFactCheck.mock.calls[0][1].system;
+    expect(offChecker).toContain('copy the exact words from the record that back that claim (the most specific line); otherwise an empty list.');
+    expect(offWriter).not.toContain("SOURCE's own words");
+
+    mockGates.reviewAskExactQuotes = true;
+    mockFactCheck.mockClear();
+    mockDispatch.mockResolvedValueOnce(reply(draft('I treated 3 mounds by the pool.')));
+    await Drafter.draftTechVoice(INPUT);
+    const onChecker = mockFactCheck.mock.calls[0][1].system;
+    expect(onChecker).not.toBe(offChecker);
+    expect(onChecker).toContain('exactly as they appear in ONE record line');
+    expect(onChecker).toContain('no label such as "Visit report:"');
+    // Only the quotes rule changed; the rest of the checker's prompt is as before.
+    const rest = (s) => s.replace(/- quotes: when supported[^\n]*?otherwise an empty list\./, '');
+    expect(rest(onChecker)).toBe(rest(offChecker));
+    const onWriter = buildTechVoiceSystemPrompt('followup', 7);
+    expect(onWriter).toContain("SOURCE's own words");
+    expect(onWriter.replace(/\n- Say each fact in its SOURCE's own words[^\n]*/, '')).toBe(offWriter);
+  });
+
+  test('gate on: words the customer sent twice are dated by both messages; off: by the older one, as before', () => {
+    const { timingUnsupported } = Drafter.__private;
+    const today = require('../utils/datetime-et').etCalendarDayOf(new Date());
+    const lines = ['- [customer, 2026-09-10] ants by the door', `- [customer, ${today}] ants by the door`];
+    const sentence = 'You mentioned ants by the door today.';
+    expect(timingUnsupported(sentence, ['ants by the door'], lines, '2026-09-10')).toBe(true);
+    mockGates.reviewAskExactQuotes = true;
+    expect(timingUnsupported(sentence, ['ants by the door'], lines, '2026-09-10')).toBe(false);
+    // The old line alone still never proves "today", and a header line never dates a quote.
+    expect(timingUnsupported(sentence, ['ants by the door'], lines.slice(0, 1), '2026-09-10')).toBe(true);
+    expect(timingUnsupported(sentence, ['ants by the door'], [`Today: ${today} ants by the door`, lines[0]], '2026-09-10')).toBe(true);
+  });
+});
