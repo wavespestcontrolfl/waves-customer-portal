@@ -953,7 +953,7 @@ describe('label first (rule E), second steps and no-claim reasons', () => {
   test('without label first the same pair is no claim, and says why', () => {
     const ins = build({ rules: rules(DYLOX, CELSIUS), completedAt: AT_10AM, plainWhenNoSetup: true });
     expect(ins.state).toBeNull();
-    expect(ins.noClaim).toEqual({ reason: 'water_in_conflict', products: ['P0', 'P1'] });
+    expect(ins.noClaim).toEqual({ reason: 'water_in_conflict', products: ['P0', 'P1'], holdProducts: ['P1'], waterInProducts: ['P0'] });
     expect(JSON.parse(JSON.stringify(ins)).noClaim).toBeUndefined();
   });
 
@@ -970,8 +970,16 @@ describe('label first (rule E), second steps and no-claim reasons', () => {
   });
 
   test('a same-day water-in too late for a run says so', () => {
+    // 9:01 PM ET: less than the full three-hour run before midnight.
+    const ins = build({ rules: rules(DYLOX), completedAt: '2026-10-22T01:01:00Z', plainWhenNoSetup: true, labelFirst: true });
+    expect(ins.noClaim).toEqual({ reason: 'same_day_too_late', products: ['P0'], holdProducts: [], waterInProducts: ['P0'] });
+  });
+
+  test('a same-day water-in at 9 PM still fits: the day runs to 11:59 PM with the full run', () => {
     const ins = build({ rules: rules(DYLOX), completedAt: '2026-10-22T01:00:00Z', plainWhenNoSetup: true, labelFirst: true });
-    expect(ins.noClaim).toEqual({ reason: 'same_day_too_late', products: ['P0'] });
+    expect(ins.lines[0]).toBe('Water in today’s treatment with about ¼ inch by 11:59 PM tonight.');
+    // Gate off: the 11 PM end, as before.
+    expect(build({ rules: rules(DYLOX), completedAt: '2026-10-22T01:00:00Z', plainWhenNoSetup: true }).noClaim.reason).toBe('same_day_too_late');
   });
 
   test('a rain-counting second step reads as a long window even at seven days', () => {
@@ -989,7 +997,7 @@ describe('label first (rule E), second steps and no-claim reasons', () => {
     const week = { mode: 'hold', hold_hours: 168, source: 'label' };
     const ins = build({ rules: rules(week, later), completedAt: '2026-10-21T14:30:00Z', plainWhenNoSetup: true, labelFirst: true });
     expect(ins.state).toBeNull();
-    expect(ins.noClaim).toEqual({ reason: 'water_in_conflict', products: ['P0', 'P1'] });
+    expect(ins.noClaim).toEqual({ reason: 'water_in_conflict', products: ['P0', 'P1'], holdProducts: ['P0'], waterInProducts: ['P1'] });
     // A hold that ends first still reads as before.
     expect(build({ rules: rules(THREE_WAY, later), completedAt: AT_10AM, plainWhenNoSetup: true, labelFirst: true }).state).toBe('hold_then_water_in');
   });
@@ -1022,5 +1030,121 @@ describe('label first (rule E), second steps and no-claim reasons', () => {
     expect(build({ rules: [{ name: 'Heritage Action Fungicide', rule: null }, { name: 'P1', rule: DYLOX }], completedAt: AT_10AM }).noClaim)
       .toEqual({ reason: 'unruled_product', products: ['Heritage Action Fungicide'] });
     expect(build({ rules: [], completedAt: AT_10AM }).noClaim).toEqual({ reason: 'no_products', products: [] });
+  });
+});
+
+// Owner 2026-10-24: "if products clash, we need to develop a strategy ... check labels", and
+// no office alert for a clash. The label ladder: a label direction beats a "for best results"
+// line, which beats our own rule; a hold shortens only to its own label minimum.
+describe('label ladder for clashing products (rule E, Y, H)', () => {
+  const at = (iso) => ({ completedAt: iso, plainWhenNoSetup: true, labelFirst: true });
+  const TUE_9AM = '2026-10-27T13:00:00Z';
+  const TUE_5PM = '2026-10-27T21:00:00Z';
+  const TUE_6PM = '2026-10-27T22:00:00Z';
+  const TUE_830PM = '2026-10-28T00:30:00Z';
+  const named = (...list) => list.map(([name, rule]) => ({ name, rule }));
+  const GRUBS = ['Grubs', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, label_window: 'directs', source: 'label' }];
+  const T_STORM = ['TStorm', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, label_window: 'best_results', source: 'label' }];
+  const DYLOX = ['Dylox', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'owner' }];
+  const FERTILIZER = ['Fertilizer', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'owner' }];
+  const HUMECTANT = ['Humectant', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 2, beside_hold_by_hours: 24, source: 'owner' }];
+  const TALAK = ['Talak', { mode: 'hold', hold_hours: 24, label_minimum: { hold_until: 'dry' }, label_best_results: true, source: 'label' }];
+  const SEDGEHAMMER = ['Sedgehammer', { mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 4 }, source: 'owner' }];
+  const SPEEDZONE = ['SpeedZone', { mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 3 }, source: 'owner' }];
+  const ANUEW = ['Anuew', { mode: 'hold', hold_hours: 4, source: 'label' }];
+  const MEDALLION = ['Medallion', { mode: 'hold', hold_until: 'dry', source: 'label' }];
+  const BAIT = ['Bait', { mode: 'hold', hold_hours: 72, yields_to_label_water_in: true, source: 'owner' }];
+  const linesOf = (rules, when, extra = {}) => build(rules, { ...at(when), ...extra }).lines;
+
+  test('a label water-in window counts from the application: a best-results hold shortens to dry', () => {
+    expect(linesOf(named(GRUBS, TALAK), TUE_9AM)).toEqual([
+      'Skip your turf watering until today’s treatment has dried.',
+      'After that, water in today’s treatment with about ¼ inch by Wed 9 AM.',
+      'Run it even if it is not your usual day.',
+    ]);
+    // Our own window still follows the hold (rule C), and gate off nothing changes.
+    const own = ['Grubs', { ...GRUBS[1], label_window: undefined }];
+    expect(linesOf(named(own, TALAK), TUE_9AM)[1]).toBe('After that, water in today’s treatment with about ¼ inch by Thu 9 AM.');
+    expect(linesOf(named(GRUBS, TALAK), TUE_9AM, { labelFirst: false })[1]).toBe('After that, water in today’s treatment with about ¼ inch by Thu 9 AM.');
+  });
+
+  test('a label window a hold with no minimum reaches is no claim, naming the hold and the water-in', () => {
+    const long = ['Long', { mode: 'hold', hold_hours: 48, source: 'label' }];
+    const ins = build(named(GRUBS, long), at(TUE_9AM));
+    expect(ins.state).toBeNull();
+    expect(ins.noClaim).toEqual({ reason: 'water_in_conflict', products: ['Grubs', 'Long'], holdProducts: ['Long'], waterInProducts: ['Grubs'] });
+  });
+
+  test('a best-results window shortens our own hold to its label minimum', () => {
+    expect(linesOf(named(T_STORM, SEDGEHAMMER), TUE_9AM)).toEqual([
+      'Skip your turf watering until 1 PM today.',
+      'After that, water in today’s treatment with about ¼ inch by Wed 9 AM.',
+      'Run it even if it is not your usual day.',
+    ]);
+  });
+
+  test('a best-results window beside a label best-results hold: the hold goes first, then the window', () => {
+    const drive = ['Drive', TALAK[1]];
+    expect(linesOf(named(T_STORM, drive), TUE_9AM)).toEqual([
+      'Skip your turf watering until Wed 9 AM.',
+      'After that, water in today’s treatment with about ¼ inch by Thu 9 AM.',
+      'Run it even if it is not your usual day.',
+    ]);
+    // Our own hold beside it does not move the hold that stays.
+    expect(linesOf(named(T_STORM, drive, SEDGEHAMMER), TUE_9AM)[0]).toBe('Skip your turf watering until Wed 9 AM.');
+    // Nor does a bait hold give way to it: only a label direction moves a bait.
+    expect(linesOf(named(T_STORM, BAIT), TUE_9AM)[1]).toBe('After that, water in today’s treatment with about ¼ inch by Sat 9 AM.');
+  });
+
+  test('a bait hold gives way to a water-in the label directs, and the instruction names both', () => {
+    const ins = build(named(DYLOX, BAIT), at(TUE_9AM));
+    expect(ins.state).toBe('water_in');
+    expect(ins.lines[0]).toBe('Water in today’s treatment with about ¼ inch by 11 PM tonight.');
+    expect(JSON.parse(JSON.stringify(ins)).yielded).toEqual({ holds: ['Bait'], waterIns: ['Dylox'] });
+    // Our own window follows the bait hold; gate off the pair stays a clash.
+    const fertilizer = build(named(FERTILIZER, BAIT), at(TUE_9AM));
+    expect(fertilizer.lines[0]).toBe('Skip your turf watering until Fri 9 AM.');
+    expect(fertilizer.yielded).toBeUndefined();
+    expect(build(named(DYLOX, BAIT), { ...at(TUE_9AM), labelFirst: false }).noClaim.reason).toBe('water_in_conflict');
+  });
+
+  test('a humectant beside a hold takes its one-day window; alone it keeps its own', () => {
+    expect(linesOf(named(HUMECTANT, TALAK), TUE_9AM)[1]).toBe('After that, water in today’s treatment with about ¼ inch by Thu 9 AM.');
+    expect(linesOf(named(HUMECTANT, MEDALLION), TUE_9AM)[1]).toBe('After that, water in today’s treatment with about ¼ inch by Wed 9 AM.');
+    expect(linesOf(named(HUMECTANT), TUE_9AM)[0]).toBe('Water in today’s treatment with about ¼ inch by 11 AM today.');
+    expect(linesOf(named(HUMECTANT, TALAK), TUE_9AM, { labelFirst: false })[1]).toBe('After that, water in today’s treatment with about ¼ inch by Wed 11 AM.');
+  });
+
+  test('late day: an hours minimum ends by 9 PM so a full run fits before midnight', () => {
+    for (const hold of [SPEEDZONE, SEDGEHAMMER]) {
+      expect(linesOf(named(DYLOX, hold), TUE_6PM)).toEqual([
+        'Skip your turf watering until 9 PM tonight.',
+        'After that, water in today’s treatment with about ¼ inch by 11:59 PM tonight.',
+        'Run it even if it is not your usual day.',
+      ]);
+    }
+    // Too late even for that: no claim.
+    expect(build(named(DYLOX, SEDGEHAMMER), at(TUE_830PM)).noClaim.reason).toBe('water_in_conflict');
+  });
+
+  test('two label musts that cannot both be met late in the day are no claim, for the technician', () => {
+    expect(linesOf(named(DYLOX, ANUEW), TUE_5PM)[1]).toBe('After that, water in today’s treatment with about ¼ inch by 11:59 PM tonight.');
+    const late = build(named(DYLOX, ANUEW), at(TUE_6PM));
+    expect(late.state).toBeNull();
+    expect(late.noClaim).toEqual({ reason: 'water_in_conflict', products: ['Dylox', 'Anuew'], holdProducts: ['Anuew'], waterInProducts: ['Dylox'] });
+    expect(JSON.parse(JSON.stringify(late)).noClaim).toBeUndefined();
+  });
+
+  test('every ladder line passes the customer-copy guards', () => {
+    const cases = [
+      [named(GRUBS, TALAK), TUE_9AM], [named(T_STORM, SEDGEHAMMER), TUE_9AM], [named(DYLOX, BAIT), TUE_9AM],
+      [named(HUMECTANT, MEDALLION), TUE_9AM], [named(DYLOX, SPEEDZONE), TUE_6PM],
+    ];
+    for (const [rules, when] of cases) {
+      for (const line of build(rules, at(when)).lines) {
+        expect(findBannedCustomerCopy(line)).toEqual([]);
+        expect(reentrySafetyClaimFinding(line)).toBeFalsy();
+      }
+    }
   });
 });
