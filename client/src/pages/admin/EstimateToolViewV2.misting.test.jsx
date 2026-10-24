@@ -286,22 +286,40 @@ describe("what the result shows", () => {
     expect(screen.queryByText("Recurring Membership")).not.toBeInTheDocument();
   });
 
-  it("keeps the line price override closed until opened, then sends the typed amount on regenerate", async () => {
+  // The misting result plus one row the engine stamped overridable.
+  const WITH_OVERRIDABLE_LINE = {
+    ...MISTING_PRICED,
+    oneTime: {
+      ...MISTING_PRICED.oneTime,
+      items: [
+        ...MISTING_PRICED.oneTime.items,
+        { service: "one_time_pest", name: "One-Time Pest", price: 224, priceOverridable: true },
+      ],
+    },
+  };
+
+  it("offers no price override for the misting installation: no engine line carries its key", async () => {
     await generateMisting(MISTING_PRICED);
+    expect(screen.queryByRole("button", { name: "Override a line price" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the line price override closed until opened, then sends the typed amount on regenerate", async () => {
+    await generateMisting(WITH_OVERRIDABLE_LINE);
     // One button on a regular estimate, not a second copy of every line.
     expect(screen.queryByLabelText("Override ($)")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));
-    fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "5200" } });
-    fireEvent.change(screen.getByLabelText("Reason (internal)"), { target: { value: "longer run" } });
+    // Only the stamped row: the installation row gets no input.
+    fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "400" } });
+    fireEvent.change(screen.getByLabelText("Reason (internal)"), { target: { value: "carpenter ant infestation" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply overrides & regenerate" }));
     await waitFor(() => expect(calculateBodies()).toHaveLength(2));
     expect(calculateBodies()[1].options.linePriceOverrides).toEqual({
-      mosquito_misting_installation: { price: 5200, reason: "longer run" },
+      one_time_pest: { price: 400, reason: "carpenter ant infestation" },
     });
   });
 
   it("refuses an invalid override amount in place, keeping the estimate and sending nothing", async () => {
-    await generateMisting(MISTING_PRICED);
+    await generateMisting(WITH_OVERRIDABLE_LINE);
     fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));
     fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "-5" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply overrides & regenerate" }));

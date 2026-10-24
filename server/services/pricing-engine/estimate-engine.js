@@ -180,6 +180,12 @@ function linePriceOverrideEligible(item) {
 }
 
 function applyLinePriceOverrides(lineItems, raw, addRoutingWarning) {
+  // The builder offers an override only on a line stamped here: the legacy
+  // mapper also synthesizes one-time rows from nested engine fields (the
+  // misting installation, for one) whose keys no engine line carries.
+  for (const item of lineItems) {
+    if (linePriceOverrideEligible(item)) item.priceOverridable = true;
+  }
   const overrides = normalizeLinePriceOverrides(raw);
   if (overrides.size === 0) return;
   const matched = new Set();

@@ -8,19 +8,17 @@
 // engine service key; these helpers turn them into the request payload and
 // list which lines of a generated estimate can be overridden.
 
-const ROACH_LINE = "pest_initial_roach"; // has its own fee-override input
-
 function parsePositiveNumber(value) {
   if (value === undefined || value === null || value === "") return undefined;
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-// Lines on a generated estimate that accept an override: priced (not quote-
-// required, not an included $0 row), one-time or specialty, with an engine
-// service key. The roach fee line keeps its dedicated input; a retainer
-// (retainerBilling, billed yearly) is refused by the engine, so it is not
-// offered here either.
+// Lines on a generated estimate that accept an override: the ones the engine
+// stamped `priceOverridable` (a priced one-time / specialty line it can
+// replace — never recurring, retainer, quote-required or the roach fee line).
+// A row the mapper builds from a nested engine field (the misting
+// installation) carries no stamp: its key matches no engine line.
 export function overridableLines(estimate) {
   const oneTime = Array.isArray(estimate?.oneTime?.items) ? estimate.oneTime.items : [];
   const specialty = Array.isArray(estimate?.specItems) ? estimate.specItems : [];
@@ -28,8 +26,7 @@ export function overridableLines(estimate) {
   const out = [];
   for (const item of [...oneTime, ...specialty]) {
     const service = String(item?.service || "").trim();
-    if (!service || service === ROACH_LINE || seen.has(service)) continue;
-    if (item.quoteRequired || item.onProg || item.retainerBilling) continue;
+    if (!service || item.priceOverridable !== true || seen.has(service)) continue;
     const price = Number(item.price);
     if (!(price > 0)) continue;
     seen.add(service);

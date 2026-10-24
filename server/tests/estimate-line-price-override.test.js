@@ -124,6 +124,41 @@ describe('linePriceOverrides', () => {
     ]));
   });
 
+  test('every row stamped priceOverridable takes the override; a mapper-built row is not stamped', () => {
+    // The builder offers only stamped rows. The legacy mapper also builds
+    // one-time rows from nested engine fields (the misting installation)
+    // whose keys match no engine line, so an override there applied nothing
+    // (pre-push codex P1).
+    const prev = process.env.GATE_MOSQUITO_MISTING;
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    try {
+      const OPTIONS = {
+        MOSQUITO_MISTING: { mosquitoMisting: { tier: 'smart', nozzles: 24, risers: 3, solution: 'natural', refillsPerYear: 6 } },
+      };
+      const rows = (mapped) => [...(mapped.oneTime?.items || []), ...(mapped.specItems || [])];
+      let offered = 0;
+      for (const key of ['OT_PEST', 'OT_MOSQUITO', 'WDO', 'STING', 'EXCLUSION', 'FOAM', 'FLEA', 'RODENT_TRAP',
+        'RODENT_SANITATION', 'RODENT_WIRE_MESH', 'RODENT_BAIT', 'TRAP_ONLY_RETAINER', 'PEST', 'MOSQUITO_MISTING']) {
+        for (const row of rows(mapV1ToLegacyShape(price([key], OPTIONS[key]))).filter((r) => r.priceOverridable === true)) {
+          offered += 1;
+          const target = Math.round((Number(row.price) + 111.11) * 100) / 100;
+          const again = mapV1ToLegacyShape(price([key], { ...OPTIONS[key], linePriceOverrides: { [row.service]: { price: target } } }));
+          const hit = rows(again).find((r) => r.service === row.service);
+          expect({ key, service: row.service, price: hit?.price }).toEqual({ key, service: row.service, price: target });
+        }
+      }
+      expect(offered).toBeGreaterThanOrEqual(10);
+
+      const install = rows(mapV1ToLegacyShape(price(['MOSQUITO_MISTING'], OPTIONS.MOSQUITO_MISTING)))
+        .find((r) => r.service === 'mosquito_misting_installation');
+      expect(install.price).toBeGreaterThan(0);
+      expect(install.priceOverridable).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.GATE_MOSQUITO_MISTING;
+      else process.env.GATE_MOSQUITO_MISTING = prev;
+    }
+  });
+
   test.each([
     ['non-numeric', 'abc'],
     ['negative', -50],
@@ -168,9 +203,11 @@ describe('linePriceOverrides', () => {
     });
     const mapped = mapV1ToLegacyShape(result);
     const otp = mapped.oneTime.items.find((i) => i.service === 'one_time_pest');
-    expect(otp).toMatchObject({ price: 400, priceOverridden: true, enginePrice: expect.any(Number), priceOverrideReason: 'carpenter ant infestation' });
+    expect(otp).toMatchObject({
+      price: 400, priceOverridden: true, priceOverridable: true, enginePrice: expect.any(Number), priceOverrideReason: 'carpenter ant infestation',
+    });
     const wdo = mapped.specItems.find((i) => i.service === 'wdo_inspection');
-    expect(wdo).toMatchObject({ price: 300, priceOverridden: true, enginePrice: 250 });
+    expect(wdo).toMatchObject({ price: 300, priceOverridden: true, priceOverridable: true, enginePrice: 250 });
     expect(mapped.oneTime.total).toBe(700);
   });
 });

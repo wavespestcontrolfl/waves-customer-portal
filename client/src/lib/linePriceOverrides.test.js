@@ -2,21 +2,26 @@ import { describe, expect, it } from "vitest";
 import { buildLinePriceOverridesPayload, overridableLines } from "./linePriceOverrides";
 
 describe("overridableLines", () => {
-  it("lists priced one-time + specialty lines, skipping quote-required, included, retainer and roach-fee rows", () => {
+  it("lists only the rows the engine stamped priceOverridable, once each", () => {
     const estimate = {
       oneTime: {
         items: [
-          { service: "one_time_pest", name: "One-Time Pest", price: 240 },
+          { service: "one_time_pest", name: "One-Time Pest", price: 240, priceOverridable: true },
           { service: "pest_initial_roach", name: "Cockroach Treatment", price: 199 },
-          { service: "wdo_inspection", name: "WDO", price: 300, priceOverridden: true, enginePrice: 250, priceOverrideReason: "owner" },
+          {
+            service: "wdo_inspection", name: "WDO", price: 300, priceOverridable: true,
+            priceOverridden: true, enginePrice: 250, priceOverrideReason: "owner",
+          },
+          // Mapper-built from a nested engine field: priced, but no engine line carries the key.
+          { service: "mosquito_misting_installation", name: "Smart system Installation", price: 4595 },
         ],
       },
       specItems: [
-        { service: "stinging_insect", name: "Wasp", price: 250 },
+        { service: "stinging_insect", name: "Wasp", price: 250, priceOverridable: true },
         { service: "exclusion", name: "Exclusion", price: null, quoteRequired: true },
         { service: "rodent_inspection", name: "Inspection", price: 0, onProg: true },
         { service: "trap_only_retainer", name: "Trap-Only Retainer", price: 495, retainerBilling: "annual" },
-        { service: "wdo_inspection", name: "WDO dup", price: 300 },
+        { service: "wdo_inspection", name: "WDO dup", price: 300, priceOverridable: true },
       ],
     };
     expect(overridableLines(estimate)).toEqual([

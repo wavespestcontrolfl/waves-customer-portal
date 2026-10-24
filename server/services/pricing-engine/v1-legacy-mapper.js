@@ -340,6 +340,7 @@ function measurementMetadataFields(li = {}) {
     'enginePrice',
     'engineTotal',
     'priceOverrideReason',
+    'priceOverridable',
     'severity',
     'severitySource',
     'pricingModel',
