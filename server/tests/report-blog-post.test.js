@@ -1031,9 +1031,12 @@ describe('the post a tip fills in (tips with facts, GATE_TECH_TIP_SOURCES, owner
       'Manatee County Watering Days', 'Pest Control in Palmetto, FL', 'Termites near Osprey', 'Myakka City Fire Ants',
       // every served locality, not only the whole-county cities (local Codex P2 on 849035c271)
       'Clogged Gutters and Mosquitoes in University Park', 'Ruskin Fire Ant Season', 'Cortez Termite Swarms', 'Apollo Beach Mosquito Guide', 'Lakewood Ranch Lawn Care', 'Fruitville Roof Rats',
+      // a town that is also a word, used as the town with no "in", "near" or ", FL" (local Codex P2 on 6fbfefdcc8)
+      'Palmetto Mosquito Prevention Guide', 'Osprey Termite Season', 'Why Laurel Gutters Breed Mosquitoes', 'Myakka Fire Ant Guide', 'Saw Palmetto Removal for Palmetto Homes',
     ]) expect([title, isTownTitled(title)]).toEqual([title, true]);
     for (const title of [
       'Palmetto Bugs vs. Cockroaches', 'Osprey Nests and Your Roof', 'Laurel Wilt in Avocado Trees', 'Myakka River Mosquitoes After Rain',
+      'Saw Palmetto in Your Landscape', 'Ospreys Return to Southwest Florida', 'Bay Laurel Pests', 'Myakka State Park Ticks', 'Palmetto Weevils in Cabbage Palms',
       'How to Get Rid of Mice in Southwest Florida', 'Get Rid of Mosquitoes: Mosquito Control for Southwest Florida Homes', 'Manatees and Lawn Fertilizer', '', null,
     ]) expect([title, isTownTitled(title)]).toEqual([title, false]);
   });
