@@ -26,6 +26,20 @@ const FRIENDLY_QUOTE_REASONS = {
     "Waves could not check this property’s treatment history — Waves will confirm this treatment and its price before it’s finalized.",
   area_addon_grass_not_covered_by_label_rate:
     "This treatment is priced for St. Augustine lawns only — Waves will confirm the right option and price for your grass before it’s finalized.",
+  mosquito_misting_invalid_nozzles:
+    "The nozzle count must be a whole number in range, so the included count was priced instead. Correct it before this goes out.",
+  mosquito_misting_invalid_risers:
+    "The riser count must be a whole number of zero or more, so none were priced. Correct it before this goes out.",
+  mosquito_misting_invalid_refills:
+    "The refills per year must be a whole number in range, so the standard count was used. Correct it before this goes out.",
+  mosquito_misting_unknown_tier:
+    "The misting system choice was not recognized, so the default system was priced. Correct it before this goes out.",
+  mosquito_misting_unknown_solution:
+    "The refill solution was not recognized, so the default solution was priced. Correct it before this goes out.",
+  mosquito_misting_oversize:
+    "This misting layout has more nozzles than our standard system — Waves will confirm the price with you before it’s finalized.",
+  mosquito_misting_oversize_risers:
+    "This misting layout has more risers than our standard system — Waves will confirm the price with you before it’s finalized.",
 };
 
 export function humanizeQuoteReason(value) {
