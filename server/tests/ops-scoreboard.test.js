@@ -1,6 +1,6 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const {
   computeOpsScoreboard,
   classifyCall,
@@ -17,6 +17,9 @@ describe('classifyCall', () => {
   });
   test('a transferred AI call is NOT counted as AI-handled', () => {
     expect(classifyCall({ answered_by: 'ai_agent', call_outcome: 'ai_transferred' })).toBe('transferred');
+  });
+  test('a finished transfer (the staff leg set answered_by human, the outcome kept) is still a transfer (pre-push P1)', () => {
+    expect(classifyCall({ answered_by: 'human', call_outcome: 'ai_transferred' })).toBe('transferred');
   });
   test('human and voicemail are their own buckets', () => {
     expect(classifyCall({ answered_by: 'human', call_outcome: null })).toBe('human');
@@ -126,6 +129,11 @@ describe('resolveWindow', () => {
     const { from, to } = resolveWindow({ from: '2020-01-01', to: '2020-12-31' });
     const days = Math.round((parseETDateTime(`${to}T12:00`) - parseETDateTime(`${from}T12:00`)) / 86400000) + 1;
     expect(days).toBeLessThanOrEqual(92);
+  });
+  test('a range wholly in the future clamps to today, never an inverted window (pre-push P1)', () => {
+    const { from, to } = resolveWindow({ from: '2099-01-01', to: '2099-01-07' });
+    expect(from <= to).toBe(true);
+    expect(to).toBe(etDateString());
   });
   test('an invalid date falls back to the default rather than reaching SQL', () => {
     const { from, to } = resolveWindow({ from: 'not-a-date', to: 'also-not-a-date' });

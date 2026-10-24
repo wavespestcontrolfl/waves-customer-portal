@@ -57,6 +57,9 @@ function resolveWindow({ from, to } = {}) {
   let resolvedTo = validCalendarDate(to) || defaultTo;
   if (resolvedFrom > resolvedTo) [resolvedFrom, resolvedTo] = [resolvedTo, resolvedFrom];
   if (resolvedTo > today) resolvedTo = today;
+  // A range wholly in the future clamps to today, never to an inverted
+  // window (pre-push P1).
+  if (resolvedFrom > resolvedTo) resolvedFrom = resolvedTo;
   const spanDays = Math.round(
     (Date.parse(`${resolvedTo}T00:00:00Z`) - Date.parse(`${resolvedFrom}T00:00:00Z`)) / 86400000,
   ) + 1;
@@ -131,15 +134,16 @@ async function computeDriveMinutesPerStop({ from, to }, conn) {
 // whereNotSandboxCall (relay-protocol.js) and are excluded here the same
 // way. answered_by / call_outcome vocabulary verified against the writers in
 // server/routes/twilio-voice-webhook.js: answered_by IN
-// ('human','ai_agent','voicemail'); a transferred AI call keeps
-// answered_by='ai_agent' and gets call_outcome='ai_transferred' (the
-// transfer does not change answered_by), so "AI-handled, no transfer" is
-// answered_by='ai_agent' AND call_outcome IS DISTINCT FROM 'ai_transferred'.
+// ('human','ai_agent','voicemail'); a transferred AI call gets
+// call_outcome='ai_transferred', and once the staff leg finishes,
+// /call-complete sets answered_by='human' and keeps that outcome. So the
+// outcome decides before answered_by does (pre-push P1: a finished transfer
+// read as a human-answered call), and "AI-handled, no transfer" is
+// answered_by='ai_agent' with any other outcome.
 function classifyCall(row) {
   if (row.answered_by === 'voicemail') return 'voicemail';
-  if (row.answered_by === 'ai_agent') {
-    return row.call_outcome === 'ai_transferred' ? 'transferred' : 'ai_handled';
-  }
+  if (row.call_outcome === 'ai_transferred') return 'transferred';
+  if (row.answered_by === 'ai_agent') return 'ai_handled';
   if (row.answered_by === 'human') return 'human';
   return 'other';
 }
