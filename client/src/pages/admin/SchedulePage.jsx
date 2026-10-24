@@ -188,6 +188,7 @@ import { completionInvoiceFields } from "../../lib/completion-invoice-fields";
 import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-next-visit-note";
 import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups, techTipYardLine, techTipSourceLabels } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
+import { directionsHref } from "../../lib/directionsHref";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -19961,7 +19962,7 @@ export function CompletionPanel({
               )}
               {service.address ? (
                 <a
-                  href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(service.address)}`}
+                  href={directionsHref(service.address, service.gateWaypoint)}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{ display: "block", fontFamily: font, fontSize: 13, color: M.ink, textDecoration: "underline", marginTop: 2 }}

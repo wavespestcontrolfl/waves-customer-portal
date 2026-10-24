@@ -235,6 +235,62 @@ postgres('admin neighborhood gate-code routes', () => {
     expect((await call('POST', '/not-a-uuid/entries', { access_type: 'keypad', code: '1234' })).status).toBe(404);
   });
 
+  test('gate location: a pasted link or lat, lng is stored and read back; blank clears; a label-only edit keeps it; nonsense is 400', async () => {
+    const n = await neighborhood('Pinned Pines');
+    const added = await call('POST', `/${n}/entries`, {
+      access_type: 'keypad', code: '2468', gate_location: 'https://www.google.com/maps/place/Main+Gate/@27.432100,-82.456700,17z/data=!3m1!4b1',
+    });
+    expect(added.status).toBe(201);
+    const id = added.body.id;
+    expect(await trx('neighborhood_access').where({ id }).first('gate_lat', 'gate_lng')).toEqual({ gate_lat: '27.432100', gate_lng: '-82.456700' });
+    let shown = byName(await list(`?neighborhood=${n}`), 'Pinned Pines').entries[0];
+    expect(shown.gateLocation).toEqual({ lat: 27.4321, lng: -82.4567 });
+    // Moving the pin is not a code change: status, confirmation and source stay.
+    await trx('neighborhood_access').where({ id }).update({ status: 'needs_confirm', source: 'profile' });
+    const moved = await call('PATCH', `/entries/${id}`, { gate_location: '27.5, -82.6' });
+    expect(moved).toMatchObject({ status: 200, body: { status: 'needs_confirm' } });
+    expect(await trx('neighborhood_access').where({ id }).first('gate_lat', 'gate_lng', 'source')).toEqual({ gate_lat: '27.500000', gate_lng: '-82.600000', source: 'profile' });
+    // An edit that does not carry the field leaves the pin alone.
+    expect((await call('PATCH', `/entries/${id}`, { gate_label: 'Front gate' })).status).toBe(200);
+    expect(await trx('neighborhood_access').where({ id }).first('gate_lat')).toEqual({ gate_lat: '27.500000' });
+    expect((await call('PATCH', `/entries/${id}`, { gate_location: 'the big gate on the left' })).status).toBe(400);
+    expect((await call('PATCH', `/entries/${id}`, { gate_location: 'https://maps.app.goo.gl/AbCdEf' })).status).toBe(400);
+    expect((await call('PATCH', `/entries/${id}`, { gate_location: 12 })).status).toBe(400);
+    expect(await trx('neighborhood_access').where({ id }).first('gate_lat')).toEqual({ gate_lat: '27.500000' });
+    for (const blank of [null, '', '   ']) {
+      await trx('neighborhood_access').where({ id }).update({ gate_lat: 27.5, gate_lng: -82.6 });
+      expect((await call('PATCH', `/entries/${id}`, { gate_location: blank })).status).toBe(200);
+      expect(await trx('neighborhood_access').where({ id }).first('gate_lat', 'gate_lng')).toEqual({ gate_lat: null, gate_lng: null });
+    }
+    shown = byName(await list(`?neighborhood=${n}`), 'Pinned Pines').entries[0];
+    expect(shown.gateLocation).toBeNull();
+    expect((await call('POST', `/${n}/entries`, { access_type: 'guard', instructions: 'Stop at the booth', gate_location: 'nowhere' })).status).toBe(400);
+    expect(await trx('neighborhood_access').where({ neighborhood_id: n })).toHaveLength(1);
+  });
+
+  test('gate location: one pinned live entry per neighborhood; a second pin is 409 until the first is cleared or retired', async () => {
+    const n = await neighborhood('Two Gates');
+    const main = await entry(n, { code: '1111', gate_lat: 27.4321, gate_lng: -82.4567 });
+    const back = await entry(n, { code: '2222', gate_label: 'Back gate' });
+    const second = await call('PATCH', `/entries/${back}`, { gate_location: '27.5, -82.6' });
+    expect(second).toMatchObject({ status: 409, body: { error: expect.stringContaining('already has a location') } });
+    expect((await call('POST', `/${n}/entries`, { access_type: 'guard', instructions: 'Booth', gate_location: '27.5, -82.6' })).status).toBe(409);
+    expect(await trx('neighborhood_access').where({ id: back }).first('gate_lat')).toEqual({ gate_lat: null });
+    // Re-pinning the pinned entry itself is fine; so is a pin-less edit of the other.
+    expect((await call('PATCH', `/entries/${main}`, { gate_location: '27.44, -82.46' })).status).toBe(200);
+    expect((await call('PATCH', `/entries/${back}`, { gate_label: 'Rear gate' })).status).toBe(200);
+    // Cleared, the other gate may take the pin; a retired pinned entry does not block either.
+    expect((await call('PATCH', `/entries/${main}`, { gate_location: null })).status).toBe(200);
+    expect((await call('PATCH', `/entries/${back}`, { gate_location: '27.5, -82.6' })).status).toBe(200);
+    expect((await call('PATCH', `/entries/${back}`, { action: 'retire' })).status).toBe(200);
+    expect((await call('PATCH', `/entries/${main}`, { gate_location: '27.44, -82.46' })).status).toBe(200);
+    // The schema backstop (neighborhood_access_pin_uniq) holds for any writer, not just these routes.
+    await expect(trx('neighborhood_access').insert({
+      neighborhood_id: n, gate_label: 'Side gate', access_type: 'keypad', code: '3333', status: 'active', source: 'office',
+      gate_lat: 27.5, gate_lng: -82.6,
+    })).rejects.toMatchObject({ code: '23505', constraint: 'neighborhood_access_pin_uniq' });
+  });
+
   test('add: stores a keypad code without inner spaces, office source, confirmed now; duplicate live code is 409', async () => {
     const n = await neighborhood('Rowan Bend');
     const ok = await call('POST', `/${n}/entries`, { access_type: 'keypad', code: '# 4821', gate_label: 'North gate' });

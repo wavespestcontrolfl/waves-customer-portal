@@ -35,6 +35,7 @@ import { useCustomerCards } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
 import { describeCardRequestState, describeCardRequestResult, canSendCardRequest } from './cardLinkStatus';
 import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+import { directionsHref } from '../../lib/directionsHref';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -119,13 +120,6 @@ function durationHrs(svc) {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${h} hr ${m} min`;
-}
-
-function mapDeepLink(address) {
-  if (!address) return '';
-  const isIos = /iPhone|iPad|iPod/.test(navigator.userAgent);
-  const encoded = encodeURIComponent(address);
-  return isIos ? `maps://?q=${encoded}` : `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
 export default function MobileAppointmentDetailSheet({
@@ -936,7 +930,7 @@ export default function MobileAppointmentDetailSheet({
                 </div>
               </div>
               <a
-                href={mapDeepLink(service.address)}
+                href={directionsHref(service.address, service.gateWaypoint)}
                 target="_blank"
                 rel="noreferrer"
                 aria-label="Open in Maps"

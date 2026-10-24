@@ -44,7 +44,13 @@ function fmtDate(value) {
   return date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" });
 }
 
-const BLANK_FORM = { gateLabel: "Main gate", accessType: "keypad", code: "", instructions: "" };
+const BLANK_FORM = { gateLabel: "Main gate", accessType: "keypad", code: "", instructions: "", gateLocation: "" };
+
+// "27.4321, -82.4567": the stored pin as the office typed it, and as it reads
+// back in the form.
+const locationText = (point) => (point ? `${point.lat}, ${point.lng}` : "");
+// Where the pin opens on a map, for the office to check it is the main gate.
+const locationMapHref = (point) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${point.lat},${point.lng}`)}`;
 
 function formFromEntry(entry) {
   return {
@@ -52,13 +58,16 @@ function formFromEntry(entry) {
     accessType: entry.accessType,
     code: entry.code || "",
     instructions: entry.instructions || "",
+    gateLocation: locationText(entry.gateLocation),
   };
 }
 
 // The request body for an add or an edit. A code travels only with a keypad
-// entry; every other type is instructions only (passes are never stored).
+// entry; every other type is instructions only (passes are never stored). The
+// gate's map point always travels (null clears it), so the office can take a
+// pin off as easily as it set one.
 function bodyFromForm(form) {
-  const body = { gate_label: form.gateLabel, access_type: form.accessType };
+  const body = { gate_label: form.gateLabel, access_type: form.accessType, gate_location: form.gateLocation.trim() || null };
   if (form.accessType === "keypad") body.code = form.code;
   else body.instructions = form.instructions;
   return body;
@@ -93,6 +102,13 @@ function EntryForm({ initial, submitLabel, busy, error, onSubmit, onCancel, idPr
           <Textarea rows={3} value={form.instructions} onChange={set("instructions")} maxLength={1000} />
         </Field>
       )}
+      <Field
+        id={`${idPrefix}-location`}
+        label="Gate location"
+        help="Where this gate is on the map: paste a Google Maps link to it, or type lat, lng. Directions for every visit in the neighborhood then route through this gate first. Leave blank for none."
+      >
+        <Input value={form.gateLocation} onChange={set("gateLocation")} maxLength={2048} autoComplete="off" placeholder="27.4321, -82.4567 or a Google Maps link" />
+      </Field>
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap items-center gap-2">
         <Button type="submit" size="sm" disabled={busy}>{submitLabel}</Button>
@@ -143,6 +159,15 @@ function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCanc
         )}
         {entry.instructions && (
           <div className="mt-1 break-words whitespace-pre-line text-ui-body text-zinc-900">{entry.instructions}</div>
+        )}
+        {entry.gateLocation && (
+          <div className="mt-1 text-ui-body text-ink-secondary">
+            Directions route through this gate
+            {" · "}
+            <a className="u-nums text-zinc-900 underline" href={locationMapHref(entry.gateLocation)} target="_blank" rel="noopener noreferrer">
+              {locationText(entry.gateLocation)}
+            </a>
+          </div>
         )}
         <div className="mt-1 text-ui-body text-ink-secondary">
           {entry.lastConfirmedAt ? `Last confirmed ${fmtDate(entry.lastConfirmedAt)}` : "Never confirmed"}
