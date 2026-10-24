@@ -120,6 +120,7 @@ const PAST_AFTER_DAYS = 14;
 const BELL_DEDUPE_PREFIX = 'call-booking-miss';
 const REPLACED = 'Replaced by a newer alert for this call';
 const REPLACED_BY_DATE_CHECK = 'Replaced by a date check';
+const REPLACED_VISIT_GONE = 'The booked visit is gone; replaced by a new alert to book it';
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
@@ -330,14 +331,16 @@ const newestFirst = (a, b) => (new Date(b.created_at) - new Date(a.created_at)) 
 //                    once that bell is raised.
 //   past             nothing booked and the agreed day was PAST_AFTER_DAYS ago
 //                    or more -> close every bell
-//   still_missed     keep the newest bell, close older duplicates
+//   still_missed     keep the newest bell, close older duplicates; when the
+//                    newest is a date check whose visit is gone, `rebook`: ring a
+//                    fresh "book it" bell, then close the date check
 // With no `openRows` it is the ring path's verdict. `row` is the visit behind
 // the verdict; `mismatch` is { visit_id, date, time } for booked_other_day.
 function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = new Date(), namesakes = new Map() } = {}) {
   const ordered = [...openRows].sort(newestFirst);
   const newest = ordered[0] || null;
   const closeAll = (resolution) => (ordered.length ? [{ ids: ordered.map((r) => r.id), resolution }] : []);
-  const result = (verdict, row, extra = {}) => ({ verdict, row, mismatch: null, closes: [], keep: null, raise: null, replaces: null, ...extra });
+  const result = (verdict, row, extra = {}) => ({ verdict, row, mismatch: null, closes: [], keep: null, raise: null, rebook: false, replaces: null, ...extra });
   const keepNewest = () => (ordered.length > 1 ? [{ ids: ordered.slice(1).map((r) => r.id), resolution: REPLACED }] : []);
 
   const sameName = namesakes.get(call.id);
@@ -350,18 +353,26 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
     return result('booked', cleared, { closes: closeAll(`Visit booked${label}${cancelled}`) });
   }
 
-  // A later visit answers the call only when it is for the service the call agreed: a
-  // routine lawn visit must never close or relabel a pest booking miss.
-  const later = bookedRows.filter((r) => r.sched_date && rowCreatedAfterCall(r, call)
-    && daysApart(r.sched_date, slot.dateET) <= OTHER_DAY_MATCH_DAYS && sameService(r.service_type, slot.service));
-  const own = later.filter((r) => (!!call.customer_id && r.customer_id === call.customer_id) || rowCarriesCall(r, call));
-  const done = nearestTo(own.filter((r) => r.status === 'completed'), slot.dateET);
+  // A later visit answers the call only when it is for the service the call agreed (a
+  // routine lawn visit must never close or relabel a pest booking miss), on the call's
+  // own customer or a namesake account, created after the call.
+  const isOwn = (r) => (!!call.customer_id && r.customer_id === call.customer_id) || rowCarriesCall(r, call);
+  const eligible = (r) => !!r.sched_date && rowCreatedAfterCall(r, call) && sameService(r.service_type, slot.service)
+    && (isOwn(r) || (!!sameName && sameName.has(r.customer_id)));
+  // A standing date check tracks ONE visit and follows it wherever it moves, even past
+  // the match window; when that visit is gone the bell turns back into "book it" below.
+  const tracked = newest && newest.mismatch_visit_id
+    ? bookedRows.find((r) => String(r.id) === String(newest.mismatch_visit_id) && eligible(r)) || null
+    : null;
+  const later = bookedRows.filter((r) => eligible(r) && daysApart(r.sched_date, slot.dateET) <= OTHER_DAY_MATCH_DAYS);
+  const done = tracked && tracked.status === 'completed' && isOwn(tracked)
+    ? tracked
+    : nearestTo(later.filter((r) => isOwn(r) && r.status === 'completed'), slot.dateET);
   if (done) return result('done_other_day', done, { closes: closeAll(`Visit done ${spokenSlot(done.sched_date, null).day}`) });
 
-  const live = nearestTo(
-    later.filter((r) => LIVE_VISIT_STATUSES.has(r.status) && (own.includes(r) || (!!sameName && sameName.has(r.customer_id)))),
-    slot.dateET,
-  );
+  const live = tracked && LIVE_VISIT_STATUSES.has(tracked.status)
+    ? tracked
+    : nearestTo(later.filter((r) => LIVE_VISIT_STATUSES.has(r.status)), slot.dateET);
   if (live) {
     const startMinutes = windowStartMinutes(live.window_start);
     const mismatch = { visit_id: live.id ?? null, date: live.sched_date, time: startMinutes == null ? null : clockOf(startMinutes) };
@@ -377,6 +388,11 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
 
   if (dayNumber(etDateString(now)) - dayNumber(slot.dateET) >= PAST_AFTER_DAYS) {
     return result('past', null, { closes: closeAll('Agreed day passed with no visit booked') });
+  }
+  // The visit a standing date check named is gone (cancelled, deleted): the bell must stop
+  // saying a visit is booked. Ring a fresh "book it" bell, then close the date check.
+  if (newest && newest.mismatch_visit_id) {
+    return result('still_missed', null, { rebook: true, replaces: newest.id, closes: closeAll(REPLACED_VISIT_GONE) });
   }
   return result('still_missed', null, { closes: keepNewest(), keep: newest && newest.id });
 }
@@ -606,6 +622,7 @@ async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false 
       db.raw("metadata->>'call_log_id' AS call_log_id"),
       db.raw("metadata->>'confirmed_date_et' AS confirmed_date_et"),
       db.raw("metadata->>'confirmed_time_et' AS confirmed_time_et"),
+      db.raw("metadata->>'confirmed_service' AS confirmed_service"),
       db.raw("metadata->'mismatch'->>'visit_id' AS mismatch_visit_id"),
       db.raw("metadata->'mismatch'->>'date' AS mismatch_date"),
       db.raw("metadata->'mismatch'->>'time' AS mismatch_time"),
@@ -636,7 +653,9 @@ async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false 
         dateET: stamped.confirmed_date_et,
         minutes: Number(stamped.confirmed_time_et.slice(0, 2)) * 60 + Number(stamped.confirmed_time_et.slice(3, 5)),
         name: nameInTitle ? nameInTitle[1] : null,
-        service: serviceInTitle ? serviceInTitle[1] : null,
+        // The service each bell stamps (confirmed_service) survives a date check's title;
+        // older bells only carry it in a "book" title.
+        service: rows.find((r) => r.confirmed_service)?.confirmed_service || (serviceInTitle ? serviceInTitle[1] : null),
       };
     }
     entries.push({ call, slot, rows });
@@ -655,7 +674,7 @@ async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false 
         closeIds: plan.closes.flatMap((c) => c.ids),
         keepId: plan.keep,
         mismatch: plan.mismatch,
-        wouldRaise: !!plan.raise,
+        wouldRaise: !!plan.raise || plan.rebook,
       })),
     };
   }
@@ -674,6 +693,14 @@ async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false 
       ).catch((err) => { logger.warn(`[call-booking-miss] failed to raise the date check for call ${call.id}: ${err.message}`); return 'failed'; });
       // Close the old bells only once the date check stands ('rung' or an
       // existing row under the same key). A suppressed or failed raise keeps them.
+      if (outcome !== 'rung' && outcome !== 'deduped') continue;
+      if (outcome === 'rung') raised += 1;
+    } else if (plan.rebook) {
+      const outcome = await ringMiss(
+        { call, slot },
+        { dedupeKey: `${BELL_DEDUPE_PREFIX}-rebook:${call.id}:${plan.replaces}`, repeat: false },
+      ).catch((err) => { logger.warn(`[call-booking-miss] failed to raise the book-it bell for call ${call.id}: ${err.message}`); return 'failed'; });
+      // Same order: the date check closes only once the "book it" bell stands.
       if (outcome !== 'rung' && outcome !== 'deduped') continue;
       if (outcome === 'rung') raised += 1;
     }
@@ -862,6 +889,7 @@ async function ringMiss(m, { dedupeKey, repeat }) {
         customer_id: m.call.customer_id || null,
         confirmed_date_et: m.slot.dateET,
         confirmed_time_et: slotClock,
+        confirmed_service: m.slot.service || null,
         ...(m.mismatch ? { mismatch: m.mismatch } : {}),
         ...(repeat ? { repeat: true } : {}),
       },

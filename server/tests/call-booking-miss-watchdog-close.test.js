@@ -163,6 +163,39 @@ describe('classifyOpenBookingMiss', () => {
     expect(classify([visit({ sched_date: far }), visit({ id: 'v2', status: 'completed', sched_date: far })]).verdict).toBe('still_missed');
   });
 
+  describe('a standing date check follows its own visit (pre-push P1)', () => {
+    const check = (over = {}) => bell('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00', ...over });
+
+    test('its visit cancelled or deleted: the bell turns back into "book it" (raise first, then close)', () => {
+      for (const rows of [[visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })], []]) {
+        const plan = classify(rows, [bell('n1', '10'), check()]);
+        expect(plan.verdict).toBe('still_missed');
+        expect(plan.rebook).toBe(true);
+        expect(plan.replaces).toBe('d1');
+        expect(plan.raise).toBeNull();
+        expect(plan.closes).toEqual([{ ids: ['d1', 'n1'], resolution: 'The booked visit is gone; replaced by a new alert to book it' }]);
+      }
+    });
+
+    test('its visit moved beyond the match window is still followed: a new date check, not "book it"', () => {
+      const plan = classify([visit({ id: 'visit-9', sched_date: '2026-12-02' })], [check()]);
+      expect(plan.verdict).toBe('booked_other_day');
+      expect(plan.raise).toEqual({ visit_id: 'visit-9', date: '2026-12-02', time: '16:00' });
+      expect(plan.rebook).toBe(false);
+    });
+
+    test('its visit completed on the wrong day closes the bell, even beyond the match window', () => {
+      const plan = classify([visit({ id: 'visit-9', sched_date: '2026-12-02', status: 'completed' })], [check()]);
+      expect(plan.verdict).toBe('done_other_day');
+      expect(plan.closes).toEqual([{ ids: ['d1'], resolution: 'Visit done Wed Dec 2' }]);
+    });
+
+    test('a plain "book it" bell with nothing booked stays as it is (no rebook)', () => {
+      const plan = classify([], [bell('n1', '10')]);
+      expect(plan).toMatchObject({ verdict: 'still_missed', rebook: false, keep: 'n1', closes: [] });
+    });
+  });
+
   test('a later visit for another service never answers the call (pre-push P1)', () => {
     for (const status of ['completed', 'confirmed']) {
       expect(classify([visit({ status, sched_date: '2026-10-29', service_type: 'Every 6 Weeks Lawn Care Service' })]).verdict).toBe('still_missed');
@@ -256,7 +289,7 @@ describe('close pass', () => {
       dedupeKey: DATE_KEY,
       link: '/admin/dispatch?tab=schedule&date=2026-10-28',
       metadata: {
-        call_log_id: CALL_ID, customer_id: 'cust-1', confirmed_date_et: '2026-11-04', confirmed_time_et: '16:00',
+        call_log_id: CALL_ID, customer_id: 'cust-1', confirmed_date_et: '2026-11-04', confirmed_time_et: '16:00', confirmed_service: 'Waves Assessment',
         mismatch: { visit_id: 'visit-9', date: '2026-10-28', time: '16:00' }, doneWhen: 'visit_booked', subject: { type: 'call', id: CALL_ID },
       },
     });
@@ -285,6 +318,33 @@ describe('close pass', () => {
     expect(result).toMatchObject({ closed: 1, raised: 1 });
     expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe(`call-booking-miss-date:${CALL_ID}:d2:visit-9:2026-10-28:16:00`);
     expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['d2'], payload: { done_by: 'call-booking-miss', resolution: 'Replaced by a date check' } }]);
+  });
+
+  test('a date check whose visit was cancelled rings a fresh "book it" bell, then closes', async () => {
+    mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
+    mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 1, raised: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — book Sam Sample's Waves Assessment");
+    expect(why).toBe('Confirmed Wed Nov 4 at 4:00 PM on a call; nothing is on the calendar.');
+    expect(opts.dedupeKey).toBe(`call-booking-miss-rebook:${CALL_ID}:d1`);
+    expect(opts.metadata).toMatchObject({ confirmed_service: 'Waves Assessment' });
+    expect(opts.metadata).not.toHaveProperty('mismatch');
+    expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['d1'], payload: { done_by: 'call-booking-miss', resolution: 'The booked visit is gone; replaced by a new alert to book it' } }]);
+  });
+
+  test('second pass after the replacement: with the call reprocessed, the date check still closes when its visit is done', async () => {
+    // The call no longer confirms a slot; the date check's own stamps (date, time, service) stand in.
+    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } } })];
+    mockState.open = [open('d1', '40', {
+      title: "Schedule — check Sam Sample's visit date", confirmed_service: 'Waves Assessment',
+      mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00',
+    })];
+    mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'completed' })];
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 1, raised: 0 });
+    expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['d1'], payload: { done_by: 'call-booking-miss', resolution: 'Visit done Wed Oct 28' } }]);
   });
 
   test('a raise that fails closes nothing: the alert is never lost', async () => {
