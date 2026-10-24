@@ -96,6 +96,8 @@ import {
 } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
+import PropertyLineGroups from '../components/billing/PropertyLineGroups';
+import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
@@ -2685,6 +2687,8 @@ export default function PayPageV2() {
 
   const { invoice, service, customer, payer } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
+  // Multi-property invoice (lines at 2+ saved properties): grouped rows; else null.
+  const propertyGroups = groupInvoiceLinesByProperty(invoice.lineItems);
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const invoiceAttachments = invoice.attachments || [];
   const annualPrepay = invoice.annualPrepay || null;
@@ -2817,7 +2821,13 @@ export default function PayPageV2() {
                   </>
                 )}
               </DetailBlock>
-              {payer && (
+              {propertyGroups ? (
+                <DetailBlock label="Service addresses">
+                  {propertyGroups.map((group) => (
+                    <div key={`${group.property_id}|${group.label}`}>{group.label}</div>
+                  ))}
+                </DetailBlock>
+              ) : payer && (
                 <DetailBlock label="Service address">
                   <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
@@ -2848,7 +2858,9 @@ export default function PayPageV2() {
                     <div style={{ textAlign: 'right' }}>Qty</div>
                     <div style={{ textAlign: 'right', minWidth: 82 }}>Amount</div>
                   </div>
-                  {visibleLineItems.map((item, idx) => (
+                  {propertyGroups ? (
+                    <PropertyLineGroups groups={propertyGroups} fmtCurrency={fmtCurrency} />
+                  ) : visibleLineItems.map((item, idx) => (
                     <div
                       key={idx}
                       style={{

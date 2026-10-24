@@ -1,0 +1,141 @@
+/**
+ * Property links on invoice line items (multi-property invoices).
+ *
+ * A service line may carry `property_id` (a saved customer_properties row of
+ * the invoice's customer). At every write — create and line-item edit — this
+ * module checks that each named property belongs to the customer and freezes
+ * the property's address onto the line as `property_address`, so the
+ * documents stay historical if the property is later edited or removed.
+ * Discount rows inherit the property of the service line they belong to.
+ *
+ * Rendering is data-driven (@waves/invoice-property-groups): lines without a
+ * property, or all at one property, render exactly as before.
+ */
+
+const {
+  PROPERTY_ADDRESS_FIELDS, isDiscountLine, propertyAddressSnapshot,
+} = require('@waves/invoice-property-groups');
+
+const crypto = require('crypto');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function linePropertyError(message) {
+  return Object.assign(new Error(message), {
+    status: 400, statusCode: 400, isOperational: true, code: 'invalid_line_property',
+  });
+}
+
+function cleanPropertyId(value) {
+  const id = String(value ?? '').trim();
+  return id ? id : null;
+}
+
+/** The frozen snapshot a stored line already carries, when it names this same property. */
+function storedSnapshotFor(item, existingByClientId) {
+  const stored = item.client_id ? existingByClientId.get(String(item.client_id)) : null;
+  if (!stored || cleanPropertyId(stored.property_id) !== cleanPropertyId(item.property_id)) return null;
+  const snapshot = stored.property_address;
+  return snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) && snapshot.address_line1
+    ? propertyAddressSnapshot(snapshot)
+    : null;
+}
+
+/**
+ * Validates and snapshots the property links on `items` (already normalized
+ * line items). Returns a new array; throws a 400 when a property is not the
+ * customer's. Lines that name no property lose any stale `property_address`.
+ *
+ * `existingLineItems` (an edit): a line whose property is unchanged keeps the
+ * snapshot it was written with — the document stays historical, and a property
+ * that was since edited or removed never blocks the edit. Only a new or
+ * changed property is looked up.
+ */
+async function attachInvoiceLineProperties(conn, customerId, items = [], { existingLineItems = [] } = {}) {
+  const existingByClientId = new Map(
+    (Array.isArray(existingLineItems) ? existingLineItems : [])
+      .filter((line) => line && line.client_id && !isDiscountLine(line))
+      .map((line) => [String(line.client_id), line]),
+  );
+  const services = items.filter((item) => !isDiscountLine(item));
+  // Kept snapshots are per LINE (an unchanged line keeps its own history); a
+  // new or changed assignment is always looked up and frozen from the live
+  // row, even when another unchanged line names the same property.
+  const keptByLine = new Map();
+  for (const item of services) {
+    const kept = storedSnapshotFor(item, existingByClientId);
+    if (kept) keptByLine.set(item, kept);
+  }
+  const wanted = [...new Set(services.filter((item) => !keptByLine.has(item))
+    .map((item) => cleanPropertyId(item.property_id)).filter(Boolean))];
+  if (wanted.some((id) => !UUID_RE.test(id))) {
+    throw linePropertyError('A line item names an invalid property.');
+  }
+
+  const snapshots = new Map();
+  if (wanted.length) {
+    if (!customerId) throw linePropertyError('A line item names a property but the invoice has no customer.');
+    // Active only: a removed (deactivated) property can no longer be chosen
+    // for a new or changed line, matching the editor's properties endpoint.
+    // Unchanged lines keep their frozen address above without this lookup.
+    const rows = await conn('customer_properties')
+      .where({ customer_id: customerId, active: true })
+      .whereIn('id', wanted)
+      .select('id', ...PROPERTY_ADDRESS_FIELDS);
+    for (const row of rows) snapshots.set(String(row.id), propertyAddressSnapshot(row));
+    const missing = wanted.filter((id) => !snapshots.has(id));
+    if (missing.length) {
+      throw linePropertyError('A line item names a property that is not saved on this customer.');
+    }
+  }
+
+  const parentByClientId = new Map();
+  const stamped = items.map((item) => {
+    if (isDiscountLine(item)) return item;
+    const { property_address: _stale, ...rest } = item;
+    const propertyId = cleanPropertyId(item.property_id);
+    // A property-tagged line gets a stable identity when it has none (an API
+    // create without client_ids), so a later edit can recognise it as
+    // unchanged and keep its frozen address instead of re-reading the property.
+    const next = propertyId
+      ? {
+        ...rest,
+        ...(rest.client_id ? {} : { client_id: `li_${crypto.randomUUID()}` }),
+        property_id: propertyId,
+        property_address: keptByLine.get(item) || snapshots.get(propertyId),
+      }
+      : (() => { const { property_id: _none, ...bare } = rest; return bare; })();
+    if (next.client_id) parentByClientId.set(String(next.client_id), next);
+    return next;
+  });
+
+  // Discount rows take their parent line's property so a grouped document can
+  // place each discount under the house it applies to.
+  return stamped.map((item) => {
+    if (!isDiscountLine(item)) return item;
+    const { property_id: _pid, property_address: _addr, ...rest } = item;
+    const parent = item.discount_for ? parentByClientId.get(String(item.discount_for)) : null;
+    if (!parent || !parent.property_id) return rest;
+    return { ...rest, property_id: parent.property_id, property_address: parent.property_address };
+  });
+}
+
+/**
+ * A technician's read of an invoice (the tap-to-pay re-read of their own
+ * checkout) is authorised per CUSTOMER by a current assignment at ONE
+ * property; the frozen addresses on the lines may name the customer's OTHER
+ * homes. Same rule as the technician Customer 360 payload (accountProperties
+ * is stripped): drop the property metadata, keep every money field.
+ */
+function techSafeInvoiceLineItems(lineItems) {
+  const items = Array.isArray(lineItems) ? lineItems : (() => {
+    try { return JSON.parse(lineItems || '[]'); } catch { return []; }
+  })();
+  return (Array.isArray(items) ? items : []).map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const { property_id: _pid, property_address: _addr, ...rest } = item;
+    return rest;
+  });
+}
+
+module.exports = { attachInvoiceLineProperties, techSafeInvoiceLineItems, linePropertyError, _private: { UUID_RE } };
