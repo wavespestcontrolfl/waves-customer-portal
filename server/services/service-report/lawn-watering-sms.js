@@ -31,6 +31,7 @@ const {
 const { etDateString } = require('../../utils/datetime-et');
 const { textForecastLine } = require('./lawn-watering-forecast');
 const { shortWateringText, shortForecastSentence } = require('./lawn-watering-short-text');
+const { sendWateringTechNote } = require('./lawn-watering-tech-note');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
 // GATE_LAWN_WATERING_SHORT_TEXT (owner 2026-10-23): the short steps go out
@@ -182,7 +183,8 @@ function lawnWateringSmsPlan({
  * @param {string} args.deliveryMode  typedDeliveryMode
  * @param {boolean} args.internalOnly
  * @param {object} args.noClaim      write-gate wateringNoClaim (GATE_LAWN_WATERING_EVERY_VISIT): why the visit froze no instruction
- * @param {object} deps               { db, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified, raiseAdminAlert? }
+ *                                   ({ reason, products, waterInProducts?, holdProducts? })
+ * @param {object} deps               { db, sendCustomerMessage, getTemplate, mergeNotes, throwIfDeliveryUnverified, raiseAdminAlert?, sendTechNotification? }
  * @returns {Promise<{ status: string }>} never throws
  */
 async function sendLawnWateringSms(args, deps) {
@@ -406,8 +408,8 @@ function noInstructionWhy(noClaim) {
 const NO_INSTRUCTION_DETAIL = {
   unruled_product: (products) => `${products} has no watering rule in the product catalog`,
   unchecked_rules: (products) => `${products} has only a guessed watering rule`,
-  water_in_conflict: (products) => `${products} ask for watering that cannot be done together (a hold the label requires beside a water-in the label requires)`,
-  same_day_too_late: (products) => `${products} must be watered in the same day, and the visit ended too late to fit a run before 11 PM`,
+  water_in_conflict: (products) => `${products} ask for watering that cannot be done together`,
+  same_day_too_late: (products) => `${products} must be watered in the same day, and the visit ended too late to fit a run that day`,
   inputs_unreadable: () => 'The visit\'s products or watering settings could not be read when the visit was completed',
   report_not_built: () => 'The lawn report for this visit could not be built when the visit was completed',
 };
@@ -418,6 +420,12 @@ async function alertNoInstruction({ record, svc, notes, noClaim }, deps) {
   if (!noClaim || !ALERT_REASONS.includes(noClaim.reason) || !Array.isArray(noClaim.products)) {
     return { status: 'skip_no_instruction' };
   }
+  // Owner 2026-10-24: a clash the technician fixes on site (water_in_conflict,
+  // same_day_too_late) is a Today-screen note to the visit's technician, not an
+  // office alert. The alert below is its fallback (no technician, or the card
+  // could not be written) and every other reason's path.
+  const noted = await sendWateringTechNote({ record, svc, notes, noClaim }, deps);
+  if (noted) return { status: noted };
   // The alert first: its dedupe key makes a retry safe, so the visit is marked
   // handled only once the alert is on record (never a marker with no alert).
   const dedupeKey = `lawn-watering-no-instruction:${record.id}`;
