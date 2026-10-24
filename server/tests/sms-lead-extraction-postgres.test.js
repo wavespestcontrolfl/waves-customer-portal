@@ -153,6 +153,28 @@ postgres('text-thread lead reader', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
+  test('a customer known by a secondary number is skipped', async () => {
+    await trx('customers').insert({ id: randomUUID(), first_name: 'Known', last_name: 'Spouse', phone: '+19415550111', secondary_phone: TEXTER, email: `${randomUUID()}@example.invalid` });
+    await text('Is the tech still coming?', { minutesAgo: 10 });
+    expect((await sweep()).counts).toEqual({ known_customer: 1 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('a lead this reader inserted before a crash is recognised and filled on the retry', async () => {
+    // What a process exit right after the insert leaves: the marked lead, a stale running read.
+    const leadId = randomUUID();
+    await trx('leads').insert({ id: leadId, phone: TEXTER, first_name: null, last_name: '', lead_type: 'inbound_sms', first_contact_channel: 'sms', status: 'new', extracted_data: JSON.stringify({ source: 'sms_agent' }) });
+    const smsId = await text('Rats in the attic, quote please. Sam Example', { minutesAgo: 30 });
+    await trx('sms_lead_extractions').insert({ phone_last10: TEXTER10, through_sms_log_id: smsId, through_at: ago(30), status: 'running', attempts: 1, updated_at: ago(20) });
+    modelSays(answer({ first_name: 'Sam', last_name: 'Example' }));
+
+    expect((await sweep()).counts).toEqual({ lead_updated: 1 });
+    const all = await leads();
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ id: leadId, first_name: 'Sam', last_name: 'Example' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('a pitch, an out-of-scope service and a low-confidence read make no lead', async () => {
     const senders = ['+19415550191', '+19415550192', '+19415550193'];
     for (const from of senders) await text('Hello there', { minutesAgo: 10, from });

@@ -777,6 +777,10 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       };
       if (opts.callSid) insert.twilio_call_sid = opts.callSid;
       if (viaSms && opts.messageSid) insert.twilio_message_sid = opts.messageSid;
+      // The reader's ownership mark rides the INSERT itself, so a process exit
+      // before the merge below still leaves a lead the next read recognises
+      // as its own and fills (sms-lead-extraction.js knownState).
+      if (viaSms) insert.extracted_data = JSON.stringify({ source: captureSource });
       if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
       const [newLead] = await q('leads').insert(insert).returning('*');
       leadId = newLead.id;

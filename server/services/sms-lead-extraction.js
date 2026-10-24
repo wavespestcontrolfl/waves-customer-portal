@@ -156,18 +156,20 @@ async function finish(id, fields) {
 
 const PHONE_SQL = "RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?";
 
-// Who already owns this number. A lead made by an earlier read of this number
-// is ours to fill; any other lead (a web form, a call, staff) is not.
-async function knownState(phone10) {
-  const customer = await db('customers').whereNull('deleted_at').whereRaw(PHONE_SQL, [phone10]).first('id');
-  if (customer) return { status: 'known_customer' };
-  const leads = await db('leads').whereNull('deleted_at').whereRaw(PHONE_SQL, [phone10]).select('id');
-  if (!leads.length) return { status: null, ownLeadId: null };
-  const ours = await db('sms_lead_extractions')
-    .where({ phone_last10: phone10 })
-    .whereIn('lead_id', leads.map((l) => l.id))
-    .first('lead_id');
-  if (leads.length === 1 && ours) return { status: null, ownLeadId: ours.lead_id };
+// Who already owns this number. A customer is matched on every identity phone
+// column (known-caller-phone.js, the call pipeline's set). A lead this reader
+// made (marked sms_agent on its insert) is ours to fill; any other lead (a web
+// form, a call, staff) is not.
+async function knownState(phone, phone10) {
+  const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
+  if (await knownCallerPhoneExists(db, phone)) return { status: 'known_customer' };
+  const leads = await db('leads').whereNull('deleted_at').whereRaw(PHONE_SQL, [phone10]).select('id', 'extracted_data');
+  if (!leads.length) return { status: null };
+  const source = (row) => {
+    const data = typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data;
+    return data?.source || null;
+  };
+  if (leads.length === 1 && source(leads[0]) === 'sms_agent') return { status: null };
   return { status: 'existing_lead' };
 }
 
@@ -287,7 +289,7 @@ async function processCandidate(candidate) {
   const id = await claim(candidate);
   if (!id) return { status: 'claimed_elsewhere' };
   try {
-    const known = await knownState(candidate.phone_last10);
+    const known = await knownState(candidate.from_phone, candidate.phone_last10);
     if (known.status) {
       await finish(id, { status: known.status });
       return { status: known.status };
@@ -323,12 +325,15 @@ async function processCandidate(candidate) {
     const status = out.created ? 'lead_created' : 'lead_updated';
     await finish(id, { status, kind, confidence, lead_id: out.leadId, extracted: JSON.stringify(extracted) });
     await ringLeadBell(out.leadId, extracted)
-      .catch((err) => logger.warn(`[sms-lead-extraction] bell failed for lead ${out.leadId}: ${err.message}`));
+      .catch((err) => logger.warn(`[sms-lead-extraction] bell failed for lead ${out.leadId} (${err.code || err.name || 'error'})`));
     logger.info(`[sms-lead-extraction] ${status} ${out.leadId} for ${maskPhone(candidate.from_phone)}`);
     return { status, leadId: out.leadId };
   } catch (err) {
-    logger.error(`[sms-lead-extraction] read failed for ${maskPhone(candidate.from_phone)}: ${err.message}`);
-    await finish(id, { status: 'failed', error: String(err.message || 'error').slice(0, 200) }).catch(() => {});
+    // Never err.message: knex puts the SQL with its bound values (names,
+    // addresses) in it. A code is enough to find the failure.
+    const code = String(err.code || err.name || 'error').slice(0, 60);
+    logger.error(`[sms-lead-extraction] read ${id} failed (${code}) for ${maskPhone(candidate.from_phone)}`);
+    await finish(id, { status: 'failed', error: code }).catch(() => {});
     return { status: 'failed' };
   }
 }
