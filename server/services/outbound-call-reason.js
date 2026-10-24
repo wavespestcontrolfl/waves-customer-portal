@@ -242,8 +242,8 @@ async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
 }
 
 // Call-derived first_contact_channel values (codex pre-push r5 P1): the
-// call pipeline (call-recording-processor.js Step 4b, lead-attribution.js's
-// attributeInboundContact) writes 'call' for EVERY phone-call-minted lead —
+// call pipeline (call-recording-processor.js Step 4b) writes 'call' for EVERY
+// phone-call-minted lead —
 // voicemail-sourced leads included, per call-recording-processor.js's own
 // comment ("first_contact_channel stays 'call'") — regardless of the call's
 // DIRECTION. A lead minted from a COLD OUTBOUND call we placed gets the

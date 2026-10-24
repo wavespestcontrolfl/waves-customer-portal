@@ -192,7 +192,6 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/contact-correction.js': 'keyed by id',
     'services/call-sentiment.js': 'keyed by id',
     'services/call-intelligence.js': 'keyed by id',
-    'services/lead-attribution.js': 'keyed by CallSid',
     'services/customer-properties.js': 'keyed by id / ownership token',
     'services/ads/call-attribution.js': 'keyed by id / a marker the processor stamps',
     'services/call-field-candidates.js': 'keyed by id',
