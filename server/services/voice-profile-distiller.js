@@ -391,6 +391,22 @@ async function getApprovedVoiceProfile({ dbi = db } = {}) {
 }
 
 /**
+ * A specific profile version, for GATE_SMS_VOICE_PROFILE_PIN (owner 2026-10-24). Only a version that was once APPROVED
+ * counts: 'approved', or 'superseded' (reviewVoiceProfile flips the old approved row to superseded when a newer one is
+ * approved, so a pin on last week's profile must keep working after the nightly run approves a new one). 'pending' was
+ * never reviewed and 'rejected' also covers a REVOKED profile (the operator kill switch), so neither can be pinned.
+ * Same columns as getApprovedVoiceProfile. Errors propagate (the caller decides what an unknowable state means).
+ */
+async function getPinnedVoiceProfile(version, { dbi = db } = {}) {
+  if (!Number.isInteger(version) || version <= 0) return null;
+  const row = await dbi('voice_profiles')
+    .where({ version })
+    .whereIn('status', ['approved', 'superseded'])
+    .first('id', 'version', 'profile_text');
+  return row || null;
+}
+
+/**
  * One-click review. approve/reject act on a PENDING profile; revoke acts on
  * the APPROVED one — that's the operator kill switch now that green profiles
  * auto-apply: revoke → rejected → getApprovedVoiceProfile returns null → the
@@ -485,5 +501,6 @@ module.exports = {
   evaluateAutoApproval,
   distillVoiceProfile,
   getApprovedVoiceProfile,
+  getPinnedVoiceProfile,
   reviewVoiceProfile,
 };
