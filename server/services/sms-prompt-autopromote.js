@@ -280,6 +280,12 @@ async function findFreshBaseline({ dbi, now }) {
  * ended without a usable run; otherwise { run } is the finished run row.
  */
 async function sitExam({ dbi, runner, lock, args }) {
+  if (!args.runId) {
+    // The nightly sweep's spend rail also gates a NEW sitting here (a resume of a paid run is exempt).
+    const [{ count }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
+    if (Number(count) > require('./sms-sealed-eval').AUTO_EXAM_MAX_ITEMS) return { skipped: 'spend_cap' };
+    if (Number(count) < MIN_PAIRED_ITEMS) return { skipped: 'pool_too_small' };
+  }
   let result;
   try {
     result = await lock(LOCK_NAME, () => runner({ providerLeg: EXAM_LEG, dbi, ...args }), { recordHealth: false });
@@ -552,7 +558,9 @@ async function examCheck({ dbi, patch }) {
     .select('r.id', 'r.provider_leg', 'r.significance', 'r.unsafe_count', 'r.items_judged', 'b.unsafe_count as base_unsafe', 'b.items_judged as base_judged');
   for (const r of runs) {
     const sig = parseScores(r.significance);
-    const rise = r.items_judged && r.base_judged ? r.unsafe_count / r.items_judged - r.base_unsafe / r.base_judged : null;
+    // The rate rule needs a real sample on both runs and a few unsafe drafts, like the live checks.
+    const enough = r.items_judged >= MIN_PAIRED_ITEMS && r.base_judged >= MIN_PAIRED_ITEMS && r.unsafe_count >= LIVE_MIN_UNSAFE;
+    const rise = enough ? r.unsafe_count / r.items_judged - r.base_unsafe / r.base_judged : null;
     if ((sig && sig.significant && sig.direction === 'regressed') || (rise !== null && rise >= EXAM_UNSAFE_RISE)) {
       return { reason: 'exam_regression', detail: { runId: r.id, leg: r.provider_leg, rise: rise === null ? null : Number(rise.toFixed(3)) } };
     }

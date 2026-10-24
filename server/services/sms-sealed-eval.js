@@ -1703,6 +1703,7 @@ module.exports = {
   LIVE_EXAM_LEGS,
   EXAM_LEG_ROUTES,
   SEALED_EVAL_TARGET,
+  AUTO_EXAM_MAX_ITEMS,
   _test: {
     hasRenderedMissedCase,
     missedVisitCoverage,

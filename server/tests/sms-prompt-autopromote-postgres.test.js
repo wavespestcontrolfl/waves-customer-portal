@@ -403,10 +403,10 @@ postgres('SMS prompt auto-promote', () => {
       expect(notify).not.toHaveBeenCalled();
     });
 
-    test('a pool smaller than the minimum cannot promote', async () => {
-      const items = await seedItems(auto.MIN_PAIRED_ITEMS - 1);
+    test('fewer paired items than the minimum cannot promote (a big pool where most items were not graded)', async () => {
+      const items = await seedItems(auto.MIN_PAIRED_ITEMS + 4);
       const patch = await insertPatch();
-      const out = await auto.examineCandidate({ dbi: trx, now: NOW, runner: stubRunner({ items }).runner, lock: lockThrough });
+      const out = await auto.examineCandidate({ dbi: trx, now: NOW, runner: stubRunner({ items: items.slice(0, auto.MIN_PAIRED_ITEMS - 1) }).runner, lock: lockThrough });
       expect(out).toEqual({ rejected: patch.id, reason: 'too_few_items' });
     });
 
@@ -442,6 +442,22 @@ postgres('SMS prompt auto-promote', () => {
       expect((await rowOf(second.id)).exam_attempts).toBe(0);
       await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 8 * DAY), runner, lock: lockThrough });
       expect(runner).toHaveBeenCalled();
+    });
+
+    test('a pool over the nightly spend cap, or under the promotion minimum, starts no new sitting', async () => {
+      const patch = await insertPatch();
+      const runner = jest.fn();
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ skipped: 'pool_too_small' });
+      await seedItems(24);
+      const cap = sealed.AUTO_EXAM_MAX_ITEMS;
+      try {
+        sealed.AUTO_EXAM_MAX_ITEMS = 10;
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ skipped: 'spend_cap' });
+      } finally {
+        sealed.AUTO_EXAM_MAX_ITEMS = cap;
+      }
+      expect(runner).not.toHaveBeenCalled();
+      expect(await rowOf(patch.id)).toMatchObject({ exam_attempts: 0, status: 'candidate' });
     });
 
     test('a busy exam lock uses no attempt and records nothing', async () => {
@@ -769,6 +785,13 @@ postgres('SMS prompt auto-promote', () => {
       const row = await rowOf(active.id);
       expect(row.retired_reason).toBe('exam_regression');
       expect(row.decision_detail.rollback).toMatchObject({ runId: bad.id, leg: 'openai' });
+    });
+
+    test('a tiny exam never trips the unsafe-rate rollback (the promotion bar needed 20 items; so does the rollback)', async () => {
+      const items = await seedItems(10);
+      const baseline = await insertRun({ items, version: baseVersion(), unsafe: 0 });
+      await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 5 }); // 50% on 10 items
+      expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
     });
 
     test('an exam INFRASTRUCTURE failure (a failed run) is not a patch failure', async () => {
