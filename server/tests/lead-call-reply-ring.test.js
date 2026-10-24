@@ -98,6 +98,8 @@ test.each([
   ['a longer message', () => {}, { body: 'call me tomorrow about ants' }, 'not_call'],
   ['after 8 PM', () => {}, { now: NIGHT }, 'after_hours'],
   ['no customer row', () => {}, { customer: null }, 'no_customer'],
+  ['a foreign number sharing the last 10 digits', () => {}, { fromPhone: '+449415550100' }, 'bad_phone'],
+  ['a number without the +1', () => {}, { fromPhone: '9415550100' }, 'bad_phone'],
   ['an existing customer', () => {}, { customer: { ...LEAD, pipeline_stage: 'active_customer' } }, 'existing_customer'],
   ['no lead text in 7 days', () => { mockState.leadText = null; }, {}, 'no_lead_text'],
   ['a ring already today', () => { mockState.priorRing = { id: 'old' }; }, {}, 'rang_today'],

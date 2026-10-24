@@ -149,8 +149,10 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
     if (parseCallTextReply(body) !== 'call') return { rang: false, reason: 'not_call' };
     if (!customer?.id) return { rang: false, reason: 'no_customer' };
     if (!inRingHours(now)) return { rang: false, reason: 'after_hours' };
+    // US / Canada only: the 10-digit suffix match below would let a foreign
+    // number borrow a US number's history.
+    if (!/^\+1\d{10}$/.test(String(fromPhone || ''))) return { rang: false, reason: 'bad_phone' };
     const digits = phoneDigits(fromPhone);
-    if (digits.length !== 10) return { rang: false, reason: 'bad_phone' };
 
     // The lock is held until the bridge's call_log row exists (placeBridgeCall
     // inserts it on its own connection before this transaction commits), so
