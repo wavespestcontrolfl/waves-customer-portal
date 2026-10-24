@@ -258,6 +258,8 @@ const LANE_RUNTIME = {
   estimate_assistant: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M3' },
   estimator_sms_signal: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   sms_solicitation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  // internal_write: a texted service request becomes a lead row + one admin bell (sms-lead-extraction.js); nothing is sent.
+  sms_lead_extraction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
   // draft_for_human + M2 (Codex r22): the composed intent is priced deterministically by draft-builder into an estimate draft nobody sends until an operator reviews it.
   intent_composer: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M2', expected_duration_ms: 120_000 },
   // M2 (Codex r20): persists the brief + an unpriced, disabled estimate scaffold; the operator prices, enables and sends.

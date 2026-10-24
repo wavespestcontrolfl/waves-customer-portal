@@ -1812,6 +1812,13 @@ const gates = {
   // service classifier (always, by design: it names no service).
   leadCallTextPreference: process.env.GATE_LEAD_CALL_TEXT_PREFERENCE === 'true',
 
+  // Text-thread lead reader (owner 2026-10-23): every 5 minutes a model reads
+  // the text thread of a number with no customer and no lead, once the number
+  // has been quiet for 5 minutes, and makes a lead (name, address, email,
+  // service) through the call path's lead writer, with one admin bell per
+  // lead. Sends nothing to the texter. Off unless exactly 'true'.
+  smsLeadExtraction: process.env.GATE_SMS_LEAD_EXTRACTION === 'true',
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
