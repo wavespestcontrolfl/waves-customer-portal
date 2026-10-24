@@ -71,8 +71,9 @@ function makeDb() {
   return db;
 }
 
-// A St. Augustine estimate as production writes it: the grass in inputs.grassType and the
-// bermuda suppression add-on flag elsewhere in the same JSON.
+// A St. Augustine estimate as the admin form writes it (production shape, read-only 10-24): the
+// lawn line in inputs (svcLawn + grassType), the saved request, the stored lawn meta, and the
+// bermuda suppression add-on flag in the same inputs.
 function estimateWith(estimateData, extra = {}) {
   return {
     id: 'estimate-1',
@@ -83,7 +84,14 @@ function estimateWith(estimateData, extra = {}) {
     ...extra,
   };
 }
-const ST_AUG_ESTIMATE = estimateWith({ inputs: { grassType: 'st_augustine', bermudaSuppression: false }, engineRequest: { options: { grassType: 'st_augustine' } } });
+const formLawn = (grassType) => ({
+  inputs: { svcLawn: true, grassType, bermudaSuppression: false },
+  engineRequest: { selectedServices: ['LAWN'], options: { grassType } },
+  result: { results: { lawnMeta: { grassType } } },
+});
+// The estimator engine, quote wizard and one-tap shape: engine inputs with a lawn line and its track.
+const engineLawn = (track) => ({ engineInputs: { services: { lawn: { track } } } });
+const ST_AUG_ESTIMATE = estimateWith(formLawn('st_augustine'));
 
 const build = (estimate, input = {}) => outline.buildOutline({ db: makeDb(), estimate, input, now: new Date('2026-10-24T12:00:00Z') });
 const section = (result, key) => result.content.sections.find((s) => s.key === key);
@@ -127,13 +135,31 @@ describe('the grass is the one the estimate recorded', () => {
     });
   });
 
-  test('the composer pick wins, and the pricing codes map (A, C1, C2)', async () => {
+  test('every stored lawn shape the send path reads: engine inputs, form inputs, the saved request, stored results', async () => {
+    await withGates(BOTH, async () => {
+      expect((await build(estimateWith(engineLawn('zoysia')))).meta.turf.turfType).toBe('zoysia');
+      expect((await build(estimateWith({ engineInput: { services: { lawn: { track: 'bermuda' } } } }))).meta.turf.turfType).toBe('bermuda');
+      expect((await build(estimateWith({ inputs: { svcLawn: true, grassType: 'C2' } }))).meta.turf.turfType).toBe('zoysia');
+      expect((await build(estimateWith({ engineRequest: { selectedServices: ['LAWN'], options: { grassType: 'C1' } } }))).meta.turf.turfType).toBe('bermuda');
+      expect((await build(estimateWith({ result: { results: { lawnMeta: { grassType: 'A' } } } }))).meta.turf.turfType).toBe('st_augustine');
+      const zoysiaCards = await build(estimateWith(engineLawn('zoysia')), { includeProductCards: true });
+      expect(zoysiaCards.validation.errors.join(' ')).not.toMatch(/turf type is confirmed/);
+    });
+  });
+
+  test('the composer pick wins over the recorded grass', async () => {
     await withGates(BOTH, async () => {
       expect((await build(ST_AUG_ESTIMATE, { turfType: 'zoysia' })).meta.turf.turfType).toBe('zoysia');
-      expect((await build(estimateWith({ inputs: { grassType: 'A' } }))).meta.turf.turfType).toBe('st_augustine');
-      expect((await build(estimateWith({ inputs: { grassType: 'C1' } }))).meta.turf.turfType).toBe('bermuda');
-      expect((await build(estimateWith({ inputs: { grassType: 'C2' } }))).meta.turf.turfType).toBe('zoysia');
-      expect((await build(estimateWith({ result: { results: { lawnMeta: { grassType: 'zoysia' } } } }))).meta.turf.turfType).toBe('zoysia');
+      const picked = await build(estimateWith({ ...engineLawn('st_augustine'), result: { results: { lawnMeta: { grassType: 'bahia' } } } }), { turfType: 'st_augustine' });
+      expect(picked.meta.turf.turfType).toBe('st_augustine');
+      expect(picked.validation.status).toBe('passed');
+    });
+  });
+
+  test("a pest-only estimate's default grassType is not a lawn plan: unknown", async () => {
+    await withGates(BOTH, async () => {
+      const pestOnly = estimateWith({ inputs: { grassType: 'st_augustine' }, engineRequest: { selectedServices: ['PEST'], options: { grassType: 'st_augustine' } } });
+      expect((await build(pestOnly)).meta.turf.turfType).toBe('unknown');
     });
   });
 
@@ -156,9 +182,15 @@ describe('the grass is the one the estimate recorded', () => {
     });
   });
 
-  test.each(['bahia', 'D', 'Argentine bahia'])('bahia (%s) is blocked: v13 has no bahia program', async (grass) => {
+  test.each([
+    ['form inputs, bahia', formLawn('bahia')],
+    ['form inputs, D', formLawn('D')],
+    ['form inputs, Argentine bahia', formLawn('Argentine bahia')],
+    ['engine inputs, bahia', engineLawn('bahia')],
+    ['engine inputs St. Augustine, stored result bahia', { ...engineLawn('st_augustine'), result: { results: { lawnMeta: { grassType: 'bahia' } } } }],
+  ])('bahia (%s) is blocked: v13 has no bahia program', async (_label, estimateData) => {
     await withGates(BOTH, async () => {
-      const result = await build(estimateWith({ inputs: { grassType: grass } }), { month: 10 });
+      const result = await build(estimateWith(estimateData), { month: 10 });
       expect(result.meta.turf.turfType).toBe('bahia');
       expect(result.validation.status).toBe('blocked');
       expect(result.validation.errors.join(' ')).toMatch(/no lawn program/i);
@@ -168,7 +200,7 @@ describe('the grass is the one the estimate recorded', () => {
 
   test('a mixed lawn gets the one program and no staff wording', async () => {
     await withGates(BOTH, async () => {
-      const result = await build(estimateWith({ lawn: { grassType: 'mixed' } }), { month: 6 });
+      const result = await build(estimateWith(formLawn('mixed')), { month: 6 });
       expect(result.meta.turf.turfType).toBe('mixed');
       expect(section(result, 'mixed_turf_caution').bullets).toEqual(['Spot treatments follow the product label for the grass in each area.']);
       expect(JSON.stringify(result.content)).not.toMatch(/admin confirmation/i);
@@ -215,7 +247,7 @@ describe('the sections', () => {
     await withGates(BOTH, async () => {
       for (const grass of ['st_augustine', 'bermuda', 'zoysia', 'mixed', 'unknown']) {
         for (const month of MONTHS) {
-          const result = await build(estimateWith({ inputs: { grassType: grass } }), { month });
+          const result = await build(estimateWith(formLawn(grass)), { month });
           expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
           const texts = [result.content.title, ...result.content.sections.flatMap((s) => [s.title, s.body, ...s.bullets])].filter(Boolean);
           for (const text of texts) {
@@ -287,7 +319,7 @@ describe('the month bullets cover every v13 line', () => {
     await withGates({ ...BOTH, GATE_LAWN_BERMUDA_REMOVAL: 'true' }, async () => {
       for (const grass of ['st_augustine', 'bermuda', 'zoysia']) {
         for (const month of MONTHS) {
-          const bullets = section(await build(estimateWith({ inputs: { grassType: grass } }), { month }), 'season_focus').bullets;
+          const bullets = section(await build(estimateWith(formLawn(grass)), { month }), 'season_focus').bullets;
           for (const bullet of bullets) {
             expect(bullet).not.toMatch(/\d/);
             for (const name of productNames) {

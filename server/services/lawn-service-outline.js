@@ -6,6 +6,7 @@ const {
   lawnV13AnyGrassTrack,
 } = require('./lawn-program');
 const { PROGRAM_DETAIL_V13, PROGRAM_LINES_V13 } = require('./service-report/lawn-program-line');
+const { estimateHasBahiaLawn, estimateLawnGrassValues } = require('./estimate-bahia-review');
 const featureGates = require('../config/feature-gates');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -189,31 +190,6 @@ function resolveTurf({ estimate = {}, estimateData = {}, input = {} }) {
   };
 }
 
-// GATE_LAWN_OUTLINE_V13: the grass the estimate recorded, the composer's pick first. Never a
-// guess from the rest of the estimate: a scan of the whole estimate read the
-// bermudaSuppression add-on flag as Bermuda on most St. Augustine estimates, and a note can
-// name a grass the lawn does not have.
-function recordedTurfSourceV13({ estimate = {}, estimateData = {}, input = {} }) {
-  return firstNonEmpty(
-    input.turfType,
-    input.turf_type,
-    estimate.turf_type,
-    estimate.turfType,
-    estimateData.inputs?.grassType,
-    estimateData.engineRequest?.options?.grassType,
-    estimateData.result?.results?.lawnMeta?.grassType,
-    estimateData.turfType,
-    estimateData.turf_type,
-    estimateData.grassType,
-    estimateData.grass_type,
-    estimateData.lawnTurfType,
-    estimateData.lawn?.turfType,
-    estimateData.lawn?.grassType,
-    estimateData.property?.turfType,
-    estimateData.property?.grassType,
-  );
-}
-
 const squashGrass = (value) => String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 // Bahia by the one lawn-program check (D, Argentine, Pensacola), then the pricing engine's grass
@@ -227,9 +203,17 @@ function normalizeTurfTypeV13(value) {
   return coded || normalizeTurfType(value);
 }
 
-function resolveTurfV13(args) {
-  const source = recordedTurfSourceV13(args);
-  const turfType = source ? normalizeTurfTypeV13(source) : 'unknown';
+// GATE_LAWN_OUTLINE_V13: the composer's pick, else the grass the estimate records for its lawn plan,
+// read from the stored shapes the send path's bahia review reads (estimate-bahia-review.js). Never a
+// guess from the rest of the estimate: a scan of the whole estimate read the bermudaSuppression
+// add-on flag as Bermuda on most St. Augustine estimates, and a note can name a grass the lawn does
+// not have. A pest-only estimate's default grassType is not a lawn plan and is not read.
+function resolveTurfV13({ estimateData = {}, input = {} }) {
+  const picked = firstNonEmpty(input.turfType, input.turf_type);
+  const source = picked || firstNonEmpty(...estimateLawnGrassValues(estimateData));
+  // With no composer pick, any bahia record is the bahia lawn the send path parks for review.
+  const recordedBahia = !picked && estimateHasBahiaLawn(estimateData);
+  const turfType = recordedBahia ? 'bahia' : (source ? normalizeTurfTypeV13(source) : 'unknown');
   return {
     turfType,
     label: TURF_LABELS[turfType] || TURF_LABELS.unknown,
