@@ -3370,7 +3370,7 @@ async function listLapsedAssociationCloses(conn) {
               AND NOT ${promiseMediumSql('text', 'judge')})
           OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'call_log'
               AND NOT ${promiseMediumSql('call', 'judge')})
-          OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
+          OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service' AND (cc.fulfillment ->> 'basis') IS DISTINCT FROM 'ai_check'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           -- A close resting on a call (the customer phoning in): the evidence
           -- call was relinked to another customer (or is gone), so it no

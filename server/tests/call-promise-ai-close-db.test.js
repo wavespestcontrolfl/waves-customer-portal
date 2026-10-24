@@ -247,6 +247,66 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     });
   });
 
+  describe('review fixes', () => {
+    test('a promise to cancel a visit stays kept by the cancellation, and reopens if the visit comes back', async () => {
+      const w = await world({ kind: 'other', description: null });
+      const visit = await addVisit(w, { status: 'cancelled', created_at: new Date(Date.now() - 30 * DAY) });
+      await db('job_status_history').insert({ job_id: visit, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: later(20) });
+      say(w, fulfilledBy(`visit:${visit}`, 'cancelled after the request'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_type: 'scheduled_service', visit_cancel: true });
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      await db('scheduled_services').where({ id: visit }).update({ status: 'confirmed' });
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('every page of candidates is read: a full page of older promises never crowds a newer one out', async () => {
+      const worlds = [];
+      for (let i = 0; i < 3; i += 1) {
+        const w = await world();
+        await db('call_log').where({ id: w.call.id }).update({ created_at: new Date(Date.now() - (5 - i) * DAY) });
+        worlds.push(w);
+      }
+      const newest = worlds[2];
+      const text = await addSms(newest, { created_at: new Date(Date.now() - 3 * DAY + 60 * 60 * 1000) });
+      say(newest, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+      const result = await run(worlds, { pageSize: 2 });
+      expect(result.candidates).toBe(3);
+      expect(result.closed).toBe(1);
+      expect((await row(newest.commitment.id)).status).toBe('fulfilled');
+    });
+
+    test('the existing contact checker keeps the AI-close cache when it writes its own verdict', async () => {
+      const w = await world();
+      await addSms(w);
+      await run(w);
+      const cached = (await row(w.commitment.id)).contact_check.ai_close;
+      expect(cached).toMatchObject({ version: close.VERSION });
+      process.env.GATE_CALL_COMMITMENTS = 'true';
+      await require('../services/call-commitment-contact-check').runPromiseContactCheck({ now: new Date() }).catch(() => {});
+      const after = (await row(w.commitment.id)).contact_check;
+      expect(after.evidence_hash).toBeTruthy();
+      expect(after.ai_close).toEqual(cached);
+    });
+
+    test('a call whose timing was corrected while the model ran does not close on the old evidence floor', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+      const [candidate] = await close.listCandidates(db, { callIds: [w.call.id] });
+      const judged = await close.judgeCandidate(db, candidate, { now: new Date(), budget: { left: 5 } });
+      expect(judged.verdict.verdict).toBe('fulfilled');
+      // The call now ends after the cited text.
+      await db('call_log').where({ id: w.call.id }).update({ duration_seconds: 3 * 60 * 60 });
+      expect(await close.closeOnVerdict(db, candidate, judged, { now: new Date() })).toBe(false);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+  });
+
   describe('cost', () => {
     test('an unchanged promise with unchanged evidence is never asked twice; a new record is asked again', async () => {
       const w = await world();
@@ -316,6 +376,9 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       const visit = await addVisit(booked);
       say(booked, fulfilledBy(`visit:${visit}`, 'status confirmed'));
       expect(await run(booked)).toMatchObject({ closed: 1 });
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(booked.call.id);
+      // A rescheduled visit still keeps it (the lapse scan's older visit clause does not apply to this proof).
+      await db('scheduled_services').where({ id: visit }).update({ status: 'rescheduled' });
       expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(booked.call.id);
       await db('scheduled_services').where({ id: visit }).update({ status: 'skipped' });
       expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(booked.call.id);

@@ -456,7 +456,10 @@ async function checkOne(conn, row, { now, budget }) {
     // A provider that failed (or stalled past its deadline) is not asked again this run.
     if (verdict.reason === 'provider_failed') budget.left = 0;
     // Bookkeeping only: never bumps updated_at, the version the write above guards on.
-    await conn('call_commitments').where({ id: row.id }).update({ contact_check: JSON.stringify(verdict) });
+    await conn('call_commitments').where({ id: row.id }).update({
+      // The AI close pass (call-promise-ai-close.js) keeps its own verdicts beside this one: carry them over.
+      contact_check: conn.raw("?::jsonb || CASE WHEN contact_check -> 'ai_close' IS NOT NULL THEN jsonb_build_object('ai_close', contact_check -> 'ai_close') ELSE '{}'::jsonb END", [JSON.stringify(verdict)]),
+    });
   }
   const model = !cached && !evidence.failures.length;
   if (verdict.verdict !== 'fulfilled') return { outcome: 'judged', model, providerFailed: model && verdict.reason === 'provider_failed' };

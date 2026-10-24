@@ -65,7 +65,7 @@ const AGENT = 'ai-check';
 // queue read, which runs beside a staff member, a handful.
 const MAX_MODEL_CALLS = 60;
 const QUEUE_MODEL_CALLS = 5;
-const CANDIDATE_LIMIT = 1000;
+const CANDIDATE_LIMIT = 200;
 // No new candidate starts after this long: a stalled provider never pins the watchdog's lock for the whole backlog.
 const MAX_RUN_MS = 20 * 60 * 1000;
 // verifyThreadCompletion needs a message to anchor on; a call has no sms row.
@@ -79,10 +79,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const LEDGER_RECORD_TYPE = { sms: 'sms_log', call: 'call_log', visit: 'scheduled_service', estimate: 'estimate',
   email_reply: 'email', email_delivery: 'email_message' };
 // A visit that was cancelled, skipped or never happened after it kept a promise no longer keeps it (a
-// rescheduled one still does: moving the visit is the booking act).
-const DEAD_VISIT_STATUSES = ['cancelled', 'canceled', 'skipped', 'no_show'];
+// rescheduled one still does: moving the visit is the booking act). The one exception is a promise TO
+// CANCEL a visit, which the cancellation itself kept: its proof carries visit_cancel and stands only
+// while the visit stays cancelled.
+const CANCELLED_VISIT_STATUSES = ['cancelled', 'canceled'];
+const DEAD_VISIT_STATUSES = [...CANCELLED_VISIT_STATUSES, 'skipped', 'no_show'];
+const sqlList = (values) => values.map((v) => `'${v}'`).join(', ');
 const RECORD_TABLES = { sms_log: ['sms_log', 'customer_id'], call_log: ['call_log', 'customer_id'],
-  scheduled_service: ['scheduled_services', 'customer_id', (q) => q.whereNotIn('status', DEAD_VISIT_STATUSES)],
+  scheduled_service: ['scheduled_services', 'customer_id', (q, prior) => (prior?.visit_cancel
+    ? q.whereIn('status', CANCELLED_VISIT_STATUSES) : q.whereNotIn('status', DEAD_VISIT_STATUSES))],
   estimate: ['estimates', null], email: ['emails', null], email_message: ['email_messages', null] };
 
 const callEnd = (call) => require('./call-booking-link-text').callEndFor(call);
@@ -100,7 +105,7 @@ const parsed = (value) => (typeof value === 'string' ? JSON.parse(value) : value
 
 // ── Candidates ──────────────────────────────────────────────────────────────
 
-function listCandidates(conn, { callIds = null, limit = CANDIDATE_LIMIT } = {}) {
+function listCandidates(conn, { callIds = null, limit = CANDIDATE_LIMIT, cursor = null } = {}) {
   return conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .where({ 'cc.party': 'waves', 'cc.status': 'open' })
@@ -109,10 +114,12 @@ function listCandidates(conn, { callIds = null, limit = CANDIDATE_LIMIT } = {}) 
     .whereNotNull('cl.customer_id')
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b, 'cl.source'))
     .modify((b) => { if (callIds) b.whereIn('cc.call_log_id', callIds); })
+    // The page after the last row read (its call start as text keeps microseconds, so a boundary never skips a row).
+    .modify((b) => { if (cursor) b.whereRaw('(cl.created_at, cc.id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]); })
     .orderBy([{ column: 'cl.created_at', order: 'asc' }, { column: 'cc.id', order: 'asc' }])
     .limit(limit)
     .select('cc.*', 'cl.customer_id as call_customer_id', 'cl.from_phone as call_from_phone', 'cl.to_phone as call_to_phone',
-      ...CALL_TIMING.map((c) => `cl.${c} as call_${c}`));
+      ...CALL_TIMING.map((c) => `cl.${c} as call_${c}`), conn.raw('cl.created_at::text as cursor_at'));
 }
 
 const callOf = (row) => ({ id: row.call_log_id, customer_id: row.call_customer_id,
@@ -192,12 +199,15 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
 
 // ── The close ───────────────────────────────────────────────────────────────
 
-function proofOf(row, verdict) {
+function proofOf(row, verdict, evidence) {
+  // The cited visit was kept by its cancellation (a promise to cancel it), not by a booking or field progress.
+  const record = verdict.record_type === 'visit' && evidence?.records.find((r) => r.ref === `visit:${verdict.record_id}`);
+  const visitCancel = !!record?.cancelled_at && !record.progressed_at && !record.booked_at && !record.moved_at;
   const matchedAt = verdict.matched_at ? iso(verdict.matched_at) : iso(new Date());
   return storedProof({ strength: 'association', kind: AI_CHECK_KIND, basis: AI_CHECK_BASIS, closed_agent: AGENT,
     record_type: LEDGER_RECORD_TYPE[verdict.record_type] || verdict.record_type, record_id: verdict.record_id, matched_at: matchedAt,
     quote: verdict.quote, check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
-    promise_md5: promiseMd5(row), evidence_hash: verdict.evidence_hash, extractor_version: VERSION }, row.call_customer_id);
+    promise_md5: promiseMd5(row), evidence_hash: verdict.evidence_hash, extractor_version: VERSION, ...(visitCancel ? { visit_cancel: true } : {}) }, row.call_customer_id);
 }
 
 // One transaction: the promise (never waiting: a busy row fails the close and
@@ -216,9 +226,15 @@ async function closeOnVerdict(conn, row, judged, { now }) {
     const snapshot = (q) => q.where({ id: row.id, status: 'open' }).whereNull('human_state')
       .whereRaw(...refreshableVerdictSql()).whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at]);
     if (!await snapshot(trx('call_commitments')).forUpdate().skipLocked().first('id')) return false;
-    if (!await trx('call_log').where({ id: row.call_log_id, customer_id: row.call_customer_id }).forShare().first('id')) return false;
+    const lockedCall = await trx('call_log').where({ id: row.call_log_id, customer_id: row.call_customer_id }).forShare()
+      .first('id', 'customer_id', ...CALL_TIMING);
+    if (!lockedCall) return false;
+    // The evidence floor, from the call's timing as locked now: a corrected duration or customer-leg end that
+    // moved it takes the verdict away (the next run judges from the new floor).
+    const after = await evidenceBoundary(trx, row, lockedCall, { endOf: callEnd });
+    if (!after || associationFrom(row, after).getTime() !== new Date(message.created_at).getTime()) return false;
     if (!await revalidateSmsFulfillment(trx, current, message, verdict, now)) return false;
-    const proof = proofOf(row, verdict);
+    const proof = proofOf(row, verdict, judged.evidence);
     const written = await snapshot(trx('call_commitments'))
       .whereExists(function callStillHasThatCustomer() {
         this.select(trx.raw('1')).from('call_log').where({ id: row.call_log_id, customer_id: row.call_customer_id }).forShare();
@@ -240,7 +256,7 @@ async function aiCloseStands(conn, commitment, call, prior) {
   if (!table || !UUID_RE.test(String(prior.record_id))) return false;
   return !!await conn(table).where({ id: prior.record_id })
     .modify((q) => { if (customerColumn) q.where(customerColumn, call.customer_id); })
-    .modify((q) => { if (stillCounts) stillCounts(q); }).first('id');
+    .modify((q) => { if (stillCounts) stillCounts(q, prior); }).first('id');
 }
 
 // The watchdog's lapse scan (listLapsedAssociationCloses) asks, per closed row of
@@ -250,7 +266,7 @@ async function aiCloseStands(conn, commitment, call, prior) {
 // closed row's alias (its fulfillment), `cl` its call.
 function aiCheckLapsedSql(cc = 'cc', cl = 'cl') {
   const branches = Object.entries(RECORD_TABLES).map(([type, [table, customerColumn, stillCounts]]) => {
-    const dead = stillCounts ? ` AND r.status NOT IN (${DEAD_VISIT_STATUSES.map((status) => `'${status}'`).join(', ')})` : '';
+    const dead = stillCounts ? ` AND (CASE WHEN (${cc}.fulfillment ->> 'visit_cancel') = 'true' THEN r.status IN (${sqlList(CANCELLED_VISIT_STATUSES)}) ELSE r.status NOT IN (${sqlList(DEAD_VISIT_STATUSES)}) END)` : '';
     const owner = customerColumn ? ` AND r.${customerColumn} = ${cl}.customer_id` : '';
     return `WHEN '${type}' THEN NOT EXISTS (SELECT 1 FROM ${table} r WHERE r.id = (${cc}.fulfillment ->> 'record_id')::uuid${owner}${dead})`;
   });
@@ -270,31 +286,40 @@ async function storeCache(conn, row, cache, now) {
   });
 }
 
-async function runCallPromiseAiClose({ conn = require('../models/db'), now = new Date(), maxModelCalls = MAX_MODEL_CALLS, callIds = null, verify, verifyThread } = {}) {
+async function runCallPromiseAiClose({ conn = require('../models/db'), now = new Date(), maxModelCalls = MAX_MODEL_CALLS, callIds = null, pageSize = CANDIDATE_LIMIT, verify, verifyThread } = {}) {
   if (!callPromiseAiCloseLive() || !isEnabled('callCommitments') || !promiseEvidenceCloseLive()) return { skipped: true, reason: 'gated_off' };
   const budget = { left: maxModelCalls };
   const tally = { candidates: 0, model_calls: 0, closed: 0, lost: 0, deferred: 0, skipped: 0, failed: 0 };
-  const rows = await listCandidates(conn, { callIds });
-  tally.candidates = rows.length;
   const stopAt = Date.now() + MAX_RUN_MS;
-  for (const row of rows) {
-    if (Date.now() > stopAt) { tally.deferred += 1; continue; }
-    try {
-      const judged = await judgeCandidate(conn, row, { now, budget, verify, verifyThread });
-      if (judged.outcome === 'deferred') { tally.deferred += 1; continue; }
-      if (judged.outcome === 'skipped') { tally.skipped += 1; continue; }
-      tally.model_calls += judged.model;
-      await storeCache(conn, row, judged.cache, now);
-      if (judged.verdict.verdict !== 'fulfilled') continue;
-      if (await closeOnVerdict(conn, row, judged, { now })) tally.closed += 1; else tally.lost += 1;
-    } catch (err) {
-      tally.failed += 1;
-      // The code only: a query error's message can carry its bound values.
-      logger.warn(`[call-promise-ai-close] check failed for commitment ${row.id}: ${err.code || err.name}`);
-    }
+  // Every page, oldest first, inside the run's time and model bounds: promises already judged cost only reads,
+  // so a full page of them never crowds a newer promise out.
+  for (let cursor = null; ;) {
+    const rows = await listCandidates(conn, { callIds, cursor, limit: pageSize });
+    tally.candidates += rows.length;
+    for (const row of rows) await checkRow(conn, row, { now, budget, stopAt, tally, verify, verifyThread });
+    if (rows.length < pageSize || Date.now() > stopAt) break;
+    const last = rows[rows.length - 1];
+    cursor = { at: last.cursor_at, id: last.id };
   }
   logger.info(`[call-promise-ai-close] run: ${JSON.stringify(tally)}`);
   return tally;
+}
+
+async function checkRow(conn, row, { now, budget, stopAt, tally, verify, verifyThread }) {
+  if (Date.now() > stopAt) { tally.deferred += 1; return; }
+  try {
+    const judged = await judgeCandidate(conn, row, { now, budget, verify, verifyThread });
+    if (judged.outcome === 'deferred') { tally.deferred += 1; return; }
+    if (judged.outcome === 'skipped') { tally.skipped += 1; return; }
+    tally.model_calls += judged.model;
+    await storeCache(conn, row, judged.cache, now);
+    if (judged.verdict.verdict !== 'fulfilled') return;
+    if (await closeOnVerdict(conn, row, judged, { now })) tally.closed += 1; else tally.lost += 1;
+  } catch (err) {
+    tally.failed += 1;
+    // The code only: a query error's message can carry its bound values.
+    logger.warn(`[call-promise-ai-close] check failed for commitment ${row.id}: ${err.code || err.name}`);
+  }
 }
 
 // The Owed queue read: a small run behind the response, never two at once in
@@ -310,4 +335,4 @@ function runInBackground({ conn, callIds }) {
 }
 
 module.exports = { runCallPromiseAiClose, runInBackground, aiCheckLapsedSql, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
-  VERSION, AI_CHECK_KIND, AI_CHECK_BASIS, AGENT, MAX_MODEL_CALLS, QUEUE_MODEL_CALLS };
+  VERSION, CANDIDATE_LIMIT, AI_CHECK_KIND, AI_CHECK_BASIS, AGENT, MAX_MODEL_CALLS, QUEUE_MODEL_CALLS };
