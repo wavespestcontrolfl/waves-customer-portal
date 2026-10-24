@@ -1049,8 +1049,11 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
   const FERTILIZER = ['Fertilizer', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'owner' }];
   const HUMECTANT = ['Humectant', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 2, beside_hold_by_hours: 24, source: 'owner' }];
   const TALAK = ['Talak', { mode: 'hold', hold_hours: 24, label_minimum: { hold_until: 'dry' }, label_best_results: true, source: 'label' }];
-  const SEDGEHAMMER = ['Sedgehammer', { mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 4 }, source: 'owner' }];
+  // SedgeHammer's 4 hours is label advice ("avoid applications when rainfall is forecasted to occur within 4 hours");
+  // SpeedZone's 3 hours is a direction ("Do not irrigate or water the turfgrass within 3 hours after application").
+  const SEDGEHAMMER = ['Sedgehammer', { mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 4, advisory: true }, source: 'owner' }];
   const SPEEDZONE = ['SpeedZone', { mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 3 }, source: 'owner' }];
+  const TUE_7PM = '2026-10-27T23:00:00Z';
   const ANUEW = ['Anuew', { mode: 'hold', hold_hours: 4, source: 'label' }];
   const MEDALLION = ['Medallion', { mode: 'hold', hold_until: 'dry', source: 'label' }];
   const BAIT = ['Bait', { mode: 'hold', hold_hours: 72, yields_to_label_water_in: true, source: 'owner' }];
@@ -1125,6 +1128,14 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
     }
     // Too late even for that: no claim.
     expect(build(named(DYLOX, SEDGEHAMMER), at(TUE_830PM)).noClaim.reason).toBe('water_in_conflict');
+  });
+
+  test('late day: a minimum that is a label direction is never cut', () => {
+    // 7 PM: advice may end at 9 PM; SpeedZone's "do not irrigate within 3 hours" ends at 10 PM, too late for a full run.
+    expect(linesOf(named(DYLOX, SEDGEHAMMER), TUE_7PM)[0]).toBe('Skip your turf watering until 9 PM tonight.');
+    const direction = build(named(DYLOX, SPEEDZONE), at(TUE_7PM));
+    expect(direction.state).toBeNull();
+    expect(direction.noClaim).toMatchObject({ reason: 'water_in_conflict', holdProducts: ['SpeedZone'], waterInProducts: ['Dylox'] });
   });
 
   test('two label musts that cannot both be met late in the day are no claim, for the technician', () => {

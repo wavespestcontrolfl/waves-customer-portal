@@ -17,6 +17,10 @@
 // 'dry' } under the owner's 24-hour herbicide hold. Only a water-in whose
 // window the label writes (a same-day rule, or label_window) may shorten a
 // hold to it (lawn-watering-instruction.js rule E); nothing else reads it.
+// label_minimum.advisory (with hold_hours only): those hours are the label's
+// ADVICE (a rainfast figure, "avoid applying when rain is forecast within 4
+// hours", "may wash off"), never a "do not irrigate" direction, so late in
+// the day a same-day water-in the label requires may shorten them (rule E3).
 //
 // Clash keys (owner 2026-10-24: a clash gets a label-checked text, never an
 // office alert; lawn-watering-instruction.js rule E). Each is present only
@@ -75,7 +79,7 @@ const TARGET_RULE_KEYS = [
   'match', 'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours', 'water_in_same_day', 'rain_counts',
   ...HOLD_ONLY_KEYS, ...WATER_IN_ONLY_KEYS, 'label_note',
 ];
-const LABEL_MINIMUM_KEYS = ['hold_hours', 'hold_until'];
+const LABEL_MINIMUM_KEYS = ['hold_hours', 'hold_until', 'advisory'];
 const THEN_WATER_IN_KEYS = ['water_in_inches', 'water_in_by_hours'];
 const MAX_TARGET_RULES = 6;
 const MAX_MATCH_WORDS = 12;
@@ -232,7 +236,21 @@ function validateLabelMinimum(value, hold, errors, field = 'label_minimum') {
   if (hours != null && Number.isFinite(hold?.hold_hours) && hours > hold.hold_hours) {
     errors.push(`${field}.hold_hours cannot be longer than hold_hours`);
   }
-  return { ...(untilDry ? { hold_until: 'dry' } : {}), ...(hours != null ? { hold_hours: hours } : {}) };
+  return {
+    ...(untilDry ? { hold_until: 'dry' } : {}),
+    ...(hours != null ? { hold_hours: hours } : {}),
+    ...advisoryOf(value, hours, errors, field),
+  };
+}
+
+// label_minimum.advisory: true, and only on an hours minimum.
+function advisoryOf(value, hours, errors, field) {
+  if (value.advisory == null) return {};
+  if (value.advisory !== true || hours == null) {
+    errors.push(`${field}.advisory must be true and needs hold_hours`);
+    return {};
+  }
+  return { advisory: true };
 }
 
 // The label's second step after a hold: an amount and a window counted from

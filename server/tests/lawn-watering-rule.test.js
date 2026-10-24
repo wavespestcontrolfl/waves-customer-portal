@@ -386,6 +386,9 @@ describe('clash keys', () => {
     expect(errorsOf({ mode: 'hold', hold_hours: 24, label_best_results: true, source: 'label' })).toContain('label_best_results needs label_minimum');
     expect(errorsOf({ mode: 'hold', hold_hours: 24, label_best_results: false, label_minimum: { hold_until: 'dry' }, source: 'label' })).toContain('label_best_results must be true when present');
     expect(errorsOf({ mode: 'hold', hold_hours: 72, yields_to_label_water_in: true, label_minimum: { hold_until: 'dry' }, source: 'owner' })).toContain('yields_to_label_water_in cannot be set with label_minimum');
+    expect(errorsOf({ mode: 'hold', hold_hours: 24, label_minimum: { hold_until: 'dry', advisory: true }, source: 'owner' })).toContain('label_minimum.advisory must be true and needs hold_hours');
+    expect(errorsOf({ mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 4, advisory: 'yes' }, source: 'owner' })).toContain('label_minimum.advisory must be true and needs hold_hours');
+    expect(validateRule({ mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 4, advisory: true }, source: 'owner' }).rule.label_minimum).toEqual({ hold_hours: 4, advisory: true });
     // A target-only rule has no top-level mode, so a clash key there is misplaced.
     expect(errorsOf({ source: 'label', label_window: 'directs', by_target: [{ match: ['grub'], mode: 'water_in' }] })).toContain('label_window is for a water-in only');
   });

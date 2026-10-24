@@ -48,9 +48,11 @@
 //      E2. a 'best_results' window beside a hold it may not shorten follows
 //          that hold, as in rule C: both lines are only "for best results",
 //          so the hold goes first, then the window.
-//      E3. late day, a same-day water-in still without room: a minimum that
-//          is a number of hours (a rainfast or timing line, never a "must")
-//          ends by LATE_HOLD_END, so a full run fits before the day ends.
+//      E3. late day, a same-day water-in still without room: an hours
+//          minimum the data marks advisory (label_minimum.advisory: a rainfast
+//          figure or "avoid applying when rain is forecast", never a "do not
+//          irrigate" direction) ends by LATE_HOLD_END, so a full run fits
+//          before the day ends. Any other minimum stays.
 //      Still no deadline: no claim (water_in_conflict), for the technician.
 //   Y. (labelFirst only) a hold that only protects a bait
 //      (yields_to_label_water_in: Advion Insect Granule, whose label only
@@ -638,15 +640,15 @@ function namesWhere(list, resolved, test) {
   return list.filter((entry, i) => test(resolved[i])).map(nameOf);
 }
 
-// E3. Late day: every hold at its label minimum, and an hours minimum that
-// would end after LATE_HOLD_END on the visit's ET day ends then (a whole number
-// of hours, at least one).
+// E3. Late day: every hold at its label minimum, and an advisory hours minimum
+// that would end after LATE_HOLD_END on the visit's ET day ends then (a whole
+// number of hours, at least one). A minimum not marked advisory is never cut.
 function lateDayHold(holds, at) {
   const latest = parseETDateTime(`${etDateString(at)}T${LATE_HOLD_END}`).getTime();
   return holdWindow(holds.map((rule) => {
     const minimum = toLabelMinimum(rule);
     const hours = Number(rule.label_minimum && rule.label_minimum.hold_hours);
-    if (!(hours > 0) || at.getTime() + hours * HOUR_MS <= latest) return minimum;
+    if (!(hours > 0) || rule.label_minimum.advisory !== true || at.getTime() + hours * HOUR_MS <= latest) return minimum;
     return { ...minimum, hold_hours: Math.max(1, Math.floor((latest - at.getTime()) / HOUR_MS)) };
   }), at, SAME_DAY_DRY_HOURS);
 }
