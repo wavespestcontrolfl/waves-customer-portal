@@ -2,6 +2,8 @@ const visit = require('../services/lawn-visit-scores');
 const { NO_OBSERVATIONS } = require('../services/lawn-visit-customer-copy');
 const { UNAVAILABLE_OBSERVATIONS } = require('../services/lawn-visit-result');
 const { sig, sev, complete } = require('./helpers/lawn-visit-fixtures');
+const { visitSeasonAdjust } = require('../services/service-report/lawn-seasonality');
+const { applySeasonalAdjustment } = require('../services/lawn-assessment');
 
 describe('legacy score derivation', () => {
   test('preserves the existing units and derives stress from the worst known signal', () => {
@@ -43,6 +45,20 @@ describe('legacy score derivation', () => {
     expect(adjust).toHaveBeenCalledWith({ turf_density: 70, weed_suppression: 80 });
     expect(adjusted).toEqual({ turf_density: 77, weed_suppression: 80, color_health: null, observations: NO_OBSERVATIONS, overwatering_signal: false });
     expect(visit.adjustAvailableScores(null, adjust)).toBeNull();
+  });
+
+  test('scoreVisit stores the model density and color unboosted in a cool month when the season boost is off', () => {
+    const analysis = { ...complete(sev({ fungal_activity: 'minor', insect_damage: 'none', drought_stress: 'none', mechanical_damage: 'none', thatch_visibility: 'low' }), { turf_density: 60, weed_coverage: 20, color_health: 8 }), photoQuality: [{ photo: 1, quality: 'adequate' }] };
+    const calculateOverallScore = (scores) => Math.round((scores.turf_density + scores.weed_suppression + scores.color_health + scores.stress_damage) / 4);
+    for (const month of [11, 1]) {
+      const today = visit.scoreVisit(analysis, { seasonAdjust: visitSeasonAdjust({ month, calendarAdjust: applySeasonalAdjustment }), calculateOverallScore });
+      expect(today.adjustedScores.turf_density).toBeGreaterThan(today.displayScores.turf_density);
+      expect(today.adjustedScores.color_health).toBeGreaterThan(today.displayScores.color_health);
+      const unboosted = visit.scoreVisit(analysis, { seasonAdjust: visitSeasonAdjust({ month, calendarAdjust: applySeasonalAdjustment, noBoost: true }), calculateOverallScore });
+      expect(unboosted.adjustedScores).toEqual(unboosted.displayScores);
+      expect(unboosted.adjustedScores).toMatchObject({ turf_density: 60, color_health: 80 });
+      expect(unboosted.overallScore).toBe(calculateOverallScore(unboosted.displayScores));
+    }
   });
 
   test('overall scoring needs four known inputs while confirmation needs all six', () => {

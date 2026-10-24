@@ -132,10 +132,13 @@ async function queryOutboundHistory(phone) {
       .first('messages.id');
     if (unified) return true;
   }
+  // messaging_suppression is keyed by phone and has no id column: selecting
+  // id failed every lookup that reached here, and the fail-open caller then
+  // treated every first-contact sender as eligible.
   const suppressed = await db('messaging_suppression')
     .where({ active: true })
     .whereIn(fullDigits('phone'), variants)
-    .first('id');
+    .first('phone');
   return Boolean(suppressed);
 }
 

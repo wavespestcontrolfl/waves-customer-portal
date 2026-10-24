@@ -38,40 +38,52 @@ const looksLikeLawnRow = (row) => isObject(row)
   && /lawn/i.test(`${row.service || ''} ${row.serviceKey || ''} ${row.name || ''}`)
   && !/one.?time/i.test(`${row.service || ''} ${row.serviceKey || ''}`);
 
-function inputCarrierHasBahiaLawn(carrier) {
-  if (!isObject(carrier)) return false;
+// The grass values one input carrier records for its recurring lawn plan.
+function inputCarrierLawnGrasses(carrier) {
+  if (!isObject(carrier)) return [];
   if (isObject(carrier.services?.lawn)) {
     // The lawn line's own track, or any other grass spelling it (or the carrier) holds.
     const lawn = carrier.services.lawn;
-    return [lawn.track, lawn.grassType, lawn.grass_type, lawn.lawnTrack, lawn.turfType, carrier.lawnTrack, carrier.grassType].some(isBahia);
+    return [lawn.track, lawn.grassType, lawn.grass_type, lawn.lawnTrack, lawn.turfType, carrier.lawnTrack, carrier.grassType];
   }
   if (carrier.svcLawn === true) {
-    return [carrier.grassType, carrier.grass_type, carrier.lawnTrack, carrier.track].some(isBahia);
+    return [carrier.grassType, carrier.grass_type, carrier.lawnTrack, carrier.track];
   }
-  return false;
+  return [];
 }
 
-function resultHasBahiaLawn(result) {
-  if (!isObject(result)) return false;
+function resultLawnGrasses(result) {
+  if (!isObject(result)) return [];
   const meta = result.results?.lawnMeta || result.lawnMeta;
-  if (isObject(meta) && [meta.grassType, meta.grassName, meta.track].some(isBahia)) return true;
   const rows = [
     ...(Array.isArray(result.lineItems) ? result.lineItems : []),
     ...(Array.isArray(result.recurring?.services) ? result.recurring.services : []),
     ...(Array.isArray(result.results?.recurring?.services) ? result.results.recurring.services : []),
   ];
-  return rows.some((row) => looksLikeLawnRow(row) && [row.track, row.grassType, row.grassName, row.grass].some(isBahia));
+  return [
+    ...(isObject(meta) ? [meta.grassType, meta.grassName, meta.track] : []),
+    ...rows.filter(looksLikeLawnRow).flatMap((row) => [row.track, row.grassType, row.grassName, row.grass]),
+  ];
+}
+
+// Every grass value the stored estimate data records for its recurring lawn plan, in the order of
+// the shapes above (input carriers, then the saved request, then stored results). The lawn service
+// outline reads its grass from this list; the bahia review below asks whether any value is bahia.
+function estimateLawnGrassValues(estData) {
+  if (!isObject(estData)) return [];
+  const request = estData.engineRequest;
+  const selected = isObject(request) && Array.isArray(request.selectedServices)
+    ? request.selectedServices.map((key) => String(key).toUpperCase())
+    : [];
+  return [
+    ...[estData.engineInputs, estData.inputs, estData.engineInput, estData.result?.inputs].flatMap(inputCarrierLawnGrasses),
+    ...(selected.includes('LAWN') ? [request.options?.grassType] : []),
+    ...[estData.result, estData.engineResult, estData.result?.engineResult].flatMap(resultLawnGrasses),
+  ];
 }
 
 function estimateHasBahiaLawn(estData) {
-  if (!isObject(estData)) return false;
-  if ([estData.engineInputs, estData.inputs, estData.engineInput, estData.result?.inputs].some(inputCarrierHasBahiaLawn)) return true;
-  const request = estData.engineRequest;
-  if (isObject(request)) {
-    const selected = (Array.isArray(request.selectedServices) ? request.selectedServices : []).map((key) => String(key).toUpperCase());
-    if (selected.includes('LAWN') && isBahia(request.options?.grassType)) return true;
-  }
-  return [estData.result, estData.engineResult, estData.result?.engineResult].some(resultHasBahiaLawn);
+  return estimateLawnGrassValues(estData).some(isBahia);
 }
 
-module.exports = { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn };
+module.exports = { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn, estimateLawnGrassValues };

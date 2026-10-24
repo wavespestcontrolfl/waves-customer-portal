@@ -94,7 +94,7 @@ const PALM_TYPE_OPTIONS = [
 const NO_PALM_SYMPTOMS = 'None seen';
 const PALM_SYMPTOM_OPTIONS = [
   NO_PALM_SYMPTOMS, 'Frizzle-top (new fronds yellow / small / withered)', 'Yellow / orange spotting on older fronds',
-  'Browning / bronzing fronds', 'Spear leaf collapse',
+  'Browning / bronzing fronds', 'Spear leaf collapse', 'Unsure (something looks wrong)',
 ];
 const CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Declining', 'Recovering'];
 // Never 'No insecticide applied': the server refuses it beside an insect product.
@@ -1296,6 +1296,7 @@ function ProductEditor({ row, warnings, neonicLine, heldLine, locked, onChange, 
 function PalmsSection({ form, setField, locked }) {
   const panelId = useId();
   const totalId = useId();
+  const totalHintId = useId();
   const largeId = useId();
   const [open, setOpen] = useState(false);
   const digits = (value) => value.replace(/\D/g, '').slice(0, 4);
@@ -1331,8 +1332,10 @@ function PalmsSection({ form, setField, locked }) {
             autoComplete="off"
             value={form.palmCount}
             disabled={locked}
+            aria-describedby={totalHintId}
             onChange={(e) => setField('palmCount', digits(e.target.value))}
           />
+          <p id={totalHintId} className="tech-visit-muted">Count a clump or a multi-trunk palm as one palm.</p>
           <div className="tech-visit-section-head">
             <h3 className="tech-visit-section-title"><label htmlFor={largeId}>Large palms (canopy wider than about 15 ft)</label></h3>
           </div>

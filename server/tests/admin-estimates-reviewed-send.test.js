@@ -23,6 +23,7 @@ jest.mock('../config/feature-gates', () => ({
   // gateEnvValue's own always-false mock above.
   termiteAnnualPlanSelectionEnabled: jest.fn(() => false),
   commercialProposalSignLive: () => false,
+  satellitePalmCountTypedLive: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
 jest.mock('../services/sendgrid-mail', () => ({
@@ -753,6 +754,45 @@ describe('group publication navigation', () => {
     return { older, sibling };
   }
 
+  test('a grouped sibling priced from the satellite needs its own typed palm count: the anchor\'s count never clears it', async () => {
+    const gates = require('../config/feature-gates');
+    const { sibling } = prepareGroup();
+    sibling.estimate_data = { ...sibling.estimate_data, engineResult: { lineItems: [{ service: 'tree_shrub', palmCount: 9, palmCountFromLookup: true }] } };
+    gates.satellitePalmCountTypedLive.mockReturnValue(true);
+    try {
+      await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true, confirmedPalmCount: 9 }))
+        .rejects.toMatchObject({ code: 'PALM_COUNT_REQUIRED', message: expect.stringContaining('palm count from the satellite image') });
+    } finally {
+      gates.satellitePalmCountTypedLive.mockReturnValue(false);
+    }
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sibling.status).toBe('draft');
+  });
+
+  test('a scheduled sibling is held to the palm count its own schedule recorded (pre-push audit P1)', async () => {
+    const gates = require('../config/feature-gates');
+    const { sibling } = prepareGroup();
+    const scheduledAt = new Date('2099-01-03T15:00:00.000Z');
+    Object.assign(sibling, {
+      status: 'scheduled', scheduled_at: scheduledAt,
+      estimate_data: {
+        ...sibling.estimate_data,
+        // Scheduled after its admin typed 14; a revision then re-priced it at 9.
+        engineResult: { lineItems: [{ service: 'tree_shrub', palmCount: 9, palmCountFromLookup: true }] },
+        manualSendAttempts: [{ key: 'sibling-schedule', binding: '[]', channels: {}, scheduleReview: { scheduledAt: scheduledAt.toISOString(), confirmedPalmCount: 14 } }],
+      },
+    });
+    gates.satellitePalmCountTypedLive.mockReturnValue(true);
+    try {
+      await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
+        .rejects.toMatchObject({ code: 'PALM_COUNT_MISMATCH', message: expect.stringContaining('palm count from the satellite image') });
+    } finally {
+      gates.satellitePalmCountTypedLive.mockReturnValue(false);
+    }
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sibling.status).toBe('scheduled');
+  });
+
   function failReconciliation() {
     db.mockImplementation((table) => {
       const builder = groupDatabase(table);
@@ -1314,6 +1354,107 @@ describe('annual provider delivery receipts', () => {
       expect(sibling.status).toBe('draft');
       expect(row.status).not.toBe('sent');
     });
+  });
+});
+
+describe('satellite palm count typed before the first send (GATE_SATELLITE_PALM_COUNT_TYPED)', () => {
+  const gates = require('../config/feature-gates');
+  const satelliteLine = (palmCount) => ({ engineResult: { lineItems: [{ service: 'tree_shrub', palmCount, palmCountFromLookup: true }] } });
+  beforeEach(() => {
+    gates.satellitePalmCountTypedLive.mockReturnValue(true);
+    row.status = 'draft';
+    row.estimate_data = satelliteLine(14);
+  });
+  afterEach(() => gates.satellitePalmCountTypedLive.mockReturnValue(false));
+
+  test('the preview asks for the count without blocking; the send needs exactly the priced count', async () => {
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.satellitePalmCount).toBe(14);
+    expect(preview.body.blockReason).toBeUndefined();
+    const { body } = scheduledAttempt();
+    const missing = await invoke('/:id/send', 'post', body);
+    expect(missing.statusCode).toBe(409);
+    expect(missing.body.code).toBe('PALM_COUNT_REQUIRED');
+    const wrong = await invoke('/:id/send', 'post', { ...body, confirmedPalmCount: 6 });
+    expect(wrong.statusCode).toBe(409);
+    expect(wrong.body).toMatchObject({ code: 'PALM_COUNT_MISMATCH', error: expect.stringContaining('this quote priced 14') });
+    expect(mutations).toEqual([]);
+    const typed = await invoke('/:id/send', 'post', { ...body, confirmedPalmCount: 14 });
+    expect(typed.statusCode).toBe(200);
+    expect(typed.body.scheduled).toBe(true);
+    expect(row.status).toBe('scheduled');
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a row scheduled with no recorded count (before this check existed) sends as before', async () => {
+    row.status = 'sending';
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  // Pre-push audit P1: the count is checked on the pre-read row, so every claim
+  // must hold it to the row it actually claims or sends.
+  const casClaims = () => db.mock.results.map((r) => r.value)
+    .filter((qb) => qb?.whereRaw?.mock.calls.some(([sql]) => sql.startsWith("COALESCE(estimate_data, '{}'::jsonb) = ?::jsonb")));
+
+  test('an immediate send without a reviewed edit version still pins the snapshot the count was checked on', async () => {
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email', confirmedPalmCount: 14 });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.sent).toBe(true);
+    expect(casClaims()).toHaveLength(1);
+    const [, bindings] = casClaims()[0].whereRaw.mock.calls.find(([sql]) => sql.startsWith('COALESCE(estimate_data'));
+    expect(JSON.parse(bindings[0])).toEqual(satelliteLine(14));
+  });
+
+  test('with nothing to count, an unreviewed immediate send claims as before (no snapshot pin)', async () => {
+    gates.satellitePalmCountTypedLive.mockReturnValue(false);
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
+    expect(response.body.sent).toBe(true);
+    expect(casClaims()).toHaveLength(0);
+  });
+
+  test('a schedule checks the typed count again on the row it locks', async () => {
+    db.mockImplementation((table) => {
+      const builder = estimateDatabase(table);
+      // A revision lands between the pre-read and the schedule's row lock.
+      builder.forUpdate.mockImplementation(() => { row.estimate_data = satelliteLine(9); return builder; });
+      return builder;
+    });
+    const { body } = scheduledAttempt();
+    const response = await invoke('/:id/send', 'post', { ...body, confirmedPalmCount: 14 });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.code).toBe('PALM_COUNT_MISMATCH');
+    expect(row.status).toBe('draft');
+  });
+
+  test('a schedule records the typed count; the cron leg sends the unchanged row', async () => {
+    const { scheduledAt } = scheduledAttempt();
+    const response = await invoke('/:id/send', 'post', { sendMethod: 'email', scheduledAt, confirmedPalmCount: 14 });
+    expect(response.body.scheduled).toBe(true);
+    // A typed count always gets a receipt, so the cron leg can check it again.
+    expect(dataOf().manualSendAttempts.at(-1).scheduleReview.confirmedPalmCount).toBe(14);
+    row.status = 'sending';
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+  });
+
+  test('the cron leg refuses a scheduled row whose priced count moved after the count was typed', async () => {
+    const { body } = scheduledAttempt();
+    expect((await invoke('/:id/send', 'post', { ...body, confirmedPalmCount: 14 })).body.scheduled).toBe(true);
+    row.estimate_data = { ...dataOf(), engineResult: satelliteLine(9).engineResult };
+    row.status = 'sending';
+    await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
+      .rejects.toMatchObject({ code: 'PALM_COUNT_MISMATCH' });
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a row already sent and a row with no satellite count are never asked', async () => {
+    row.sent_at = new Date('2026-01-01T12:00:00.000Z');
+    expect((await invoke('/:id/send-preview', 'get')).body.satellitePalmCount).toBeUndefined();
+    row.sent_at = null;
+    row.estimate_data = {};
+    expect((await invoke('/:id/send-preview', 'get')).body.satellitePalmCount).toBeUndefined();
   });
 });
 

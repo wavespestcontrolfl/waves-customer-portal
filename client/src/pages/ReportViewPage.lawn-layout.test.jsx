@@ -575,6 +575,91 @@ describe('gate on: the call block, the recorded findings and the review card tel
   });
 });
 
+describe('GATE_LAWN_REPORT_STORY (lawnLayout.story): the story order', () => {
+  const story = (base) => {
+    const payload = clone(base);
+    payload.lawnLayout = { ...payload.lawnLayout, story: true };
+    return payload;
+  };
+
+  it('puts the review and technician note before Your part, explains the products before the photos, and the plan after the water card', async () => {
+    const payload = story(spotOn);
+    payload.techNote = { technicianFirstName: 'Alex', tips: [{ id: 'watering', source: 'library', copy: 'Check sprinkler coverage in the flagged area.' }] };
+    const { container } = renderReport(payload);
+    await waitForReport();
+    const markers = [
+      "Today's result", 'How did Alex do today', 'A note from Alex', 'Your part', 'Your treatment, explained', 'Lawn photos', 'Priority findings',
+      'Overall Lawn Status', 'What to expect', 'Water This Week', 'Ideal range', 'Ask Waves', 'Your plan', 'When to call us',
+    ];
+    const at = positions(container, markers);
+    at.forEach((index, i) => expect(index, markers[i]).toBeGreaterThan(-1));
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+    expect(container.querySelector('.lawn-layout')).toHaveClass('lawn-story-layout');
+    // Ask Waves prints once, in its own section, not floating above the report.
+    expect(container.querySelectorAll('.waves-ask-card')).toHaveLength(1);
+    expect(container.querySelector('[data-story-section="ask"] .waves-ask-card')).not.toBeNull();
+  });
+
+  it('the applied sentence opens the products section; the products and the Poison Control note stay visible; the summary and score are collapsed', async () => {
+    const payload = story(spotOn);
+    const { container } = renderReport(payload);
+    await waitForReport();
+    expect(count(container, 'Your treatment, explained')).toBe(1);
+    expect(count(container, 'What we applied today')).toBe(0);
+    expect(count(container, 'Products Applied')).toBe(0);
+    const products = container.querySelector('#products-applied');
+    expect(products.closest('details')).toBeNull();
+    expect(products.querySelectorAll('.treatment-story-card')).toHaveLength(payload.applications.length);
+    expect(products).toHaveTextContent('Why we used it');
+    expect(products).toHaveTextContent('Poison Control');
+    expect(products.querySelector('.poison-control-note').closest('details')).toBeNull();
+    expect(count(container, 'Poison Control Center')).toBe(count(products, 'Poison Control Center'));
+    const details = [...container.querySelectorAll('details.lawn-layout-collapse')];
+    expect(details.map((d) => d.className.includes('lawn-layout-score') || d.className.includes('lawn-story-summary'))).toEqual([true, true]);
+    details.forEach((d) => expect(d.open).toBe(false));
+    expect(screen.getByText('Full visit summary')).toBeInTheDocument();
+  });
+
+  it('a product with approved report copy prints no generic why line, so recorded free-text targets never reach the card', async () => {
+    const payload = story(spotOn);
+    const talstar = payload.applications.find((app) => /Talstar/.test(app.productName || app.product?.name || ''));
+    talstar.targets = ['gate code 1234'];
+    talstar.product = { ...talstar.product, report_copy: { how_it_works: 'Approved how-it-works line.', pets_kids: 'Approved pets line.' } };
+    const { container } = renderReport(payload);
+    await waitForReport();
+    const products = container.querySelector('#products-applied');
+    expect(products).not.toHaveTextContent('gate code 1234');
+    const card = [...products.querySelectorAll('.treatment-story-card')].find((node) => node.textContent.includes('Talstar'));
+    expect(card).toHaveTextContent('Approved how-it-works line.');
+    expect(card).toHaveTextContent('Approved pets line.');
+    expect(card).not.toHaveTextContent('Why we used it');
+    // The products without approved copy keep their why line, as the record card does.
+    expect(products).toHaveTextContent('Why we used it');
+  });
+
+  it('the status card names the lawn service plainly and adds the lawn score', async () => {
+    const payload = story(spotOn);
+    const { container } = renderReport(payload);
+    await waitForReport();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/your lawn care service/i);
+    const condition = container.querySelector('.lawn-story-condition');
+    expect(condition).toHaveTextContent('Your lawn today');
+    expect(condition).toHaveTextContent(`${Math.round(payload.reportV2.snapshot.overallScore)}/100`);
+    expect(condition.querySelector('a').getAttribute('href')).toBe('#lawn-section-score');
+    expect(container.querySelector('#lawn-section-score')).not.toBeNull();
+  });
+
+  it('without the story key the layout order, the floating Ask Waves and the status card are as before', async () => {
+    const { container } = renderReport(clone(spotOn));
+    await waitForReport();
+    expect(container.querySelector('.lawn-story-layout')).toBeNull();
+    expect(container.querySelector('[data-story-section]')).toBeNull();
+    expect(container.querySelector('.lawn-story-condition')).toBeNull();
+    expect(container.querySelector('details.lawn-layout-products')).not.toBeNull();
+    expect(count(container, 'Your treatment, explained')).toBe(0);
+  });
+});
+
 describe('the re-entry timer-view event, state by state (standard card vs the lawn layout)', () => {
   // Standard ReentryReadinessCard: renders whenever a re-entry context exists and sends the event unless the
   // context is a frozen condition. Layout Your part card: sends it when it RENDERS timed readiness content

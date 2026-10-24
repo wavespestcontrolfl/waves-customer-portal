@@ -10,7 +10,9 @@
  *     and checked homes whose county_subdivision is a bare Sarasota plat number
  *     (their plat name is now read from the plat layer). The lookup and plat
  *     read run outside any transaction; the write is
- *     resolvePropertyNeighborhood's claim, so a concurrent writer wins.
+ *     resolvePropertyNeighborhood's claim, so a concurrent writer wins. With
+ *     GATE_NEIGHBORHOOD_ADDRESS_LOOKUP, a home whose pin sits on another lot is
+ *     looked up by its own address instead (neighborhood-access.js homeParcel).
  *  2. Caller pass. A home the county could not name takes the community the
  *     customer SAID on a call about that same address (call extraction
  *     subdivision_or_community), matched to the county's directory entry of that
@@ -31,12 +33,14 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { lookupCountyParcelByPoint, lookupSarasotaPlatNames, countyParcelGisDisabled } = require('./property-lookup/county-parcel-gis');
+const {
+  lookupCountyParcelByPoint, lookupSarasotaPlatNames, lookupCountyParcelsByAddress, countyParcelGisDisabled,
+} = require('./property-lookup/county-parcel-gis');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const {
   countyHint, neighborhoodNameFromSubdivision, resolvePropertyNeighborhood, upsertNeighborhood, withPlatName, sameHouse,
-  communityKey, spokenName,
+  communityKey, spokenName, homeParcel,
 } = require('./neighborhood-access');
 
 const COUNTY_BATCH = 20; // homes the county is asked about per tick
@@ -82,7 +86,7 @@ function stampNaming(home, patch) {
 const HOME_COLUMNS = ['p.id', 'p.customer_id', 'p.address_line1', 'p.city', 'p.zip', 'p.latitude', 'p.longitude',
   'p.neighborhood_source', 'p.neighborhood_checked_at', 'p.county_subdivision'];
 
-async function countyPass({ lookup, platLookup, nowIso }) {
+async function countyPass({ lookup, platLookup, addressLookup, nowIso }) {
   const rows = await liveHomes()
     .whereRaw(`NOT (${NO_PIN_SQL})`)
     .where((w) => w.whereNull('p.neighborhood_id').orWhere('p.neighborhood_source', 'caller'))
@@ -106,6 +110,9 @@ async function countyPass({ lookup, platLookup, nowIso }) {
       // A null parcel with a recorded error is an outage, not a miss. A parcel
       // found after an earlier county's error (a county-line ZIP) is an answer.
       if (diag.errors.length && !parcel) throw new Error('county GIS error');
+      // Address gate: a pin on another lot asks the county by the home's own
+      // address; that search failing is an outage too (an hour's wait).
+      parcel = await homeParcel(home, parcel, { addressLookup });
       if (parcel) parcel = await withPlatName(parcel, platLookup);
     } catch {
       failuresInARow += 1;
@@ -236,10 +243,13 @@ async function callerPass({ nowIso }) {
   return tally;
 }
 
-async function runNamingPass({ lookup = lookupCountyParcelByPoint, platLookup = lookupSarasotaPlatNames, now = Date.now() } = {}) {
+async function runNamingPass({
+  lookup = lookupCountyParcelByPoint, platLookup = lookupSarasotaPlatNames, addressLookup = lookupCountyParcelsByAddress,
+  now = Date.now(),
+} = {}) {
   if (countyParcelGisDisabled()) return { skipped: 'gis_off' };
   const nowIso = new Date(now).toISOString();
-  const county = await countyPass({ lookup, platLookup, nowIso });
+  const county = await countyPass({ lookup, platLookup, addressLookup, nowIso });
   const caller = await callerPass({ nowIso });
   if (Object.keys(county).length || Object.keys(caller).length) {
     logger.info(`[neighborhood-naming] pass: ${JSON.stringify({ county, caller })}`);

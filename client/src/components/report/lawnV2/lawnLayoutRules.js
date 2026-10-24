@@ -52,6 +52,12 @@ export function lawnLayoutActive(data, mode) {
     && layoutDeclines(data).length === 0;
 }
 
+// GATE_LAWN_REPORT_STORY: the server adds story:true to the lawnLayout key while that gate is live. Only a page the
+// lawn layout already orders takes the story order (STORY_LAYOUT_ORDER in LawnLayout.jsx).
+export function lawnStoryActive(data, mode) {
+  return lawnLayoutActive(data, mode) && data.lawnLayout.story === true;
+}
+
 /**
  * The status card's data: "Your documents" is not part of the lawn layout, and "Next service" is left off when the
  * plan area prints that same appointment (nextVisitPlacement), so the date is printed once.
@@ -183,6 +189,7 @@ export const SLOT_CLASS = Object.freeze({
   tracedMap: 'information', markedPhotos: 'information', highlights: 'information', newSod: 'information',
   yourPart: 'instruction', recommendations: 'instruction', techNote: 'instruction',
   reservice: 'invitation', plan: 'invitation', upcoming: 'invitation', review: 'invitation', referral: 'invitation', crossSell: 'invitation',
+  ask: 'invitation',
 });
 
 /**

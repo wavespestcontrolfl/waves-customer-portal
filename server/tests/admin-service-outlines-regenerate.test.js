@@ -16,13 +16,14 @@ jest.mock('../models/db', () => {
 });
 
 jest.mock('../services/lawn-service-outline', () => ({
-  CONTENT_LIBRARY_VERSION: 'content-v1',
   PRODUCT_REGISTRY_VERSION: 'products-v1',
+  contentLibraryVersion: () => 'content-v1',
   protocolVersion: () => 'protocol-v1',
   TEMPLATE_VERSION: 'template-v1',
   buildOutline: jest.fn(),
   createPublicToken: jest.fn(() => 'abcdefghijklmnopqrstuvwxyzABCDEFGHI'),
   hashToken: jest.fn((token) => `hash:${token}`),
+  regenerationTurfType: jest.fn((packet) => packet?.turf_type || packet?.input_snapshot_json?.turfType || null),
 }));
 
 jest.mock('../services/logger', () => ({
@@ -31,7 +32,7 @@ jest.mock('../services/logger', () => ({
 
 const express = require('express');
 const db = require('../models/db');
-const { buildOutline } = require('../services/lawn-service-outline');
+const { buildOutline, regenerationTurfType } = require('../services/lawn-service-outline');
 const adminServiceOutlines = require('../routes/admin-service-outlines');
 
 function chain(overrides = {}) {
@@ -178,6 +179,25 @@ describe('admin service outline regeneration', () => {
         includeProductCards: true,
         customerNote: 'Keep this note',
       }),
+    }));
+  });
+
+  test('starts from the grass regenerationTurfType gives for the source packet, not its stored turf_type', async () => {
+    setupRegenerate();
+    regenerationTurfType.mockReturnValueOnce(null);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/service-outlines/packet-1/regenerate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(201);
+    });
+
+    expect(regenerationTurfType).toHaveBeenCalledWith(expect.objectContaining({ id: 'packet-1', turf_type: 'st_augustine' }));
+    expect(buildOutline).toHaveBeenCalledWith(expect.objectContaining({
+      input: expect.objectContaining({ turfType: null }),
     }));
   });
 

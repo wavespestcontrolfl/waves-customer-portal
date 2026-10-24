@@ -190,7 +190,7 @@ postgres('neighborhood naming pass', () => {
 
     test('an office pick is never looked up or overwritten, by the county or the caller', async () => {
       const office = await home({ checked: true, source: 'office' });
-      await callSaying(office.customerId, 'Chelsea Oaks');
+      await callSaying(office.customerId, 'Willow Hollow');
       const lookup = jest.fn();
       const r = await runPass(lookup);
       expect(lookup).not.toHaveBeenCalled();
@@ -222,7 +222,7 @@ postgres('neighborhood naming pass', () => {
     });
 
     test('the county always wins over a caller link; a county with no name leaves it standing', async () => {
-      const callerHood = await neighborhood('Chelsea Oaks', { source: 'customer' });
+      const callerHood = await neighborhood('Willow Hollow', { source: 'customer' });
       const wins = await home({ street: '100 Synthetic Way', neighborhoodId: callerHood, source: 'caller' });
       const r = await runPass(queue([parcelFor('100 Synthetic Way')]));
       expect(r.county).toEqual({ linked: 1 });
@@ -231,7 +231,7 @@ postgres('neighborhood naming pass', () => {
       const stays = await home({ street: '200 Synthetic Way', neighborhoodId: callerHood, source: 'caller' });
       const none = await runPass(queue([parcelFor('200 Synthetic Way', { subdivision: 'NOT IN SUBDIVISION 0/0' })]));
       expect(none.county).toEqual({ no_name: 1 });
-      expect(await hoodOf(stays.propertyId)).toMatchObject({ name: 'Chelsea Oaks', link: 'caller', checked: true });
+      expect(await hoodOf(stays.propertyId)).toMatchObject({ name: 'Willow Hollow', link: 'caller', checked: true });
     });
 
     test('more unnameable homes than a batch never starve a nameable one behind them, even across restarts', async () => {
@@ -277,39 +277,39 @@ postgres('neighborhood naming pass', () => {
   describe('caller pass', () => {
     test('a checked home the county could not name takes the community said on a call, new row marked customer', async () => {
       const { customerId, propertyId } = await home({ checked: true, subdivision: 'NOT IN SUBDIVISION 0/0' });
-      await callSaying(customerId, 'Chelsea Oaks subdivision');
+      await callSaying(customerId, 'Willow Hollow subdivision');
       const r = await runPass(jest.fn());
       expect(r.caller).toEqual({ linked: 1 });
-      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Chelsea Oaks', hoodSource: 'customer', link: 'caller' });
-      const hood = await trx('neighborhoods').where({ name: 'Chelsea Oaks' }).first();
-      expect(hood).toMatchObject({ county: 'Manatee', match_key: 'manatee|chelsea oaks' });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Willow Hollow', hoodSource: 'customer', link: 'caller' });
+      const hood = await trx('neighborhoods').where({ name: 'Willow Hollow' }).first();
+      expect(hood).toMatchObject({ county: 'Manatee', match_key: 'manatee|willow hollow' });
     });
 
     test('the words match the county\'s own entry of that name instead of adding a second row', async () => {
-      const existing = await neighborhood('Chelsea Oaks');
+      const existing = await neighborhood('Willow Hollow');
       const { customerId, propertyId } = await home({ checked: true });
-      await callSaying(customerId, 'chelsea oaks phase 2');
+      await callSaying(customerId, 'willow hollow phase 2');
       await runPass(jest.fn());
       expect((await hoodOf(propertyId)).p.neighborhood_id).toBe(existing);
       expect(await trx('neighborhoods').where({ county: 'Manatee' })).toHaveLength(1);
     });
 
     test('the same words in another county never join the first county\'s row', async () => {
-      const other = await neighborhood('Chelsea Oaks', { county: 'Sarasota' });
+      const other = await neighborhood('Willow Hollow', { county: 'Sarasota' });
       const { customerId, propertyId } = await home({ checked: true });
-      await callSaying(customerId, 'Chelsea Oaks');
+      await callSaying(customerId, 'Willow Hollow');
       await runPass(jest.fn());
       const p = await prop(propertyId);
       expect(p.neighborhood_id).not.toBe(other);
-      expect(await trx('neighborhoods').where({ name: 'Chelsea Oaks' })).toHaveLength(2);
+      expect(await trx('neighborhoods').where({ name: 'Willow Hollow' })).toHaveLength(2);
     });
 
     test.each([
-      ['a call about another address', (c) => callSaying(c, 'Chelsea Oaks', { street: '999 Elsewhere Ln' })],
-      ['a call that gave another ZIP', (c) => callSaying(c, 'Chelsea Oaks', { zip: '34233' })],
+      ['a call about another address', (c) => callSaying(c, 'Willow Hollow', { street: '999 Elsewhere Ln' })],
+      ['a call that gave another ZIP', (c) => callSaying(c, 'Willow Hollow', { zip: '34233' })],
       ['a town, not a community', (c) => callSaying(c, 'Lakewood Ranch')],
       ['a shrug', (c) => callSaying(c, 'not sure')],
-      ['two calls naming two communities', async (c) => { await callSaying(c, 'Chelsea Oaks'); await callSaying(c, 'Heron Pointe'); }],
+      ['two calls naming two communities', async (c) => { await callSaying(c, 'Willow Hollow'); await callSaying(c, 'Heron Pointe'); }],
     ])('%s links nothing', async (_label, makeCalls) => {
       const { customerId, propertyId } = await home({ checked: true });
       await makeCalls(customerId);
@@ -353,9 +353,9 @@ postgres('neighborhood naming pass', () => {
       ['the same ZIP+4, another city', { zip: '34202-1234', city: 'Sarasota' }, 'linked'],
     ])('a call with %s', async (_label, where, outcome) => {
       const { customerId, propertyId } = await home({ checked: true });
-      await callSaying(customerId, 'Chelsea Oaks', where);
+      await callSaying(customerId, 'Willow Hollow', where);
       expect((await runPass(jest.fn())).caller).toEqual({ [outcome]: 1 });
-      expect((await hoodOf(propertyId)).name).toBe(outcome === 'linked' ? 'Chelsea Oaks' : null);
+      expect((await hoodOf(propertyId)).name).toBe(outcome === 'linked' ? 'Willow Hollow' : null);
     });
 
     test('more homes the caller cannot help than a batch never starve a nameable one behind them', async () => {
@@ -365,13 +365,13 @@ postgres('neighborhood naming pass', () => {
       }
       const good = await home({ street: '100 Synthetic Way', checked: true, subdivision: 'NOT IN SUBDIVISION 0/0' });
       await trx('customer_properties').where({ id: good.propertyId }).update({ id: 'ffffffff-ffff-4fff-8fff-ffffffffffff' });
-      await callSaying(good.customerId, 'Chelsea Oaks');
+      await callSaying(good.customerId, 'Willow Hollow');
       const t0 = Date.now();
       const first = await runNamingPass({ lookup: jest.fn(), platLookup: async () => [], now: t0 });
       expect(first.caller).toEqual({ no_words: 50 });
       const second = await runNamingPass({ lookup: jest.fn(), platLookup: async () => [], now: t0 + 15 * 60e3 });
       expect(second.caller).toEqual({ no_words: 5, linked: 1 });
-      expect(await hoodOf('ffffffff-ffff-4fff-8fff-ffffffffffff')).toMatchObject({ name: 'Chelsea Oaks', link: 'caller' });
+      expect(await hoodOf('ffffffff-ffff-4fff-8fff-ffffffffffff')).toMatchObject({ name: 'Willow Hollow', link: 'caller' });
       // All 55 now wait a day; then they are heard again (a new call may have come in).
       expect((await runNamingPass({ lookup: jest.fn(), platLookup: async () => [], now: t0 + 3600e3 })).caller).toEqual({});
       expect((await runNamingPass({ lookup: jest.fn(), platLookup: async () => [], now: t0 + 25 * 3600e3 })).caller).toEqual({ no_words: 50 });
@@ -380,17 +380,17 @@ postgres('neighborhood naming pass', () => {
     test('an address edit between the evidence read and the link refuses the link', async () => {
       const { customerId, propertyId } = await home({ checked: true });
       const snapshot = await prop(propertyId);
-      await callSaying(customerId, 'Chelsea Oaks');
+      await callSaying(customerId, 'Willow Hollow');
       // The edit lands after the snapshot was read: the community was said about the OLD address.
       await trx('customer_properties').where({ id: propertyId }).update({ address_line1: '200 Synthetic Way', neighborhood_id: null, neighborhood_source: null });
-      expect(await linkFromCaller(snapshot, 'Manatee', 'Chelsea Oaks')).toBe('address_changed');
+      expect(await linkFromCaller(snapshot, 'Manatee', 'Willow Hollow')).toBe('address_changed');
       await trx('customer_properties').where({ id: propertyId }).update({ address_line1: snapshot.address_line1, zip: '34203' });
-      expect(await linkFromCaller(snapshot, 'Manatee', 'Chelsea Oaks')).toBe('address_changed');
+      expect(await linkFromCaller(snapshot, 'Manatee', 'Willow Hollow')).toBe('address_changed');
       expect(await hoodOf(propertyId)).toMatchObject({ name: null, link: null });
-      expect(await trx('neighborhoods').where({ name: 'Chelsea Oaks' })).toHaveLength(0);
+      expect(await trx('neighborhoods').where({ name: 'Willow Hollow' })).toHaveLength(0);
       // Unchanged: the same call links.
       await trx('customer_properties').where({ id: propertyId }).update({ zip: snapshot.zip });
-      expect(await linkFromCaller(snapshot, 'Manatee', 'Chelsea Oaks')).toBe('linked');
+      expect(await linkFromCaller(snapshot, 'Manatee', 'Willow Hollow')).toBe('linked');
     });
 
     test.each([
@@ -421,9 +421,9 @@ postgres('neighborhood naming pass', () => {
       const t0 = Date.now();
       const none = queue([parcelFor('100 Synthetic Way', { subdivision: 'NOT IN SUBDIVISION 0/0' })]);
       expect((await runNamingPass({ lookup: none, platLookup: async () => [], now: t0 })).county).toEqual({ no_name: 1 });
-      await callSaying(customerId, 'Chelsea Oaks');
+      await callSaying(customerId, 'Willow Hollow');
       expect((await runNamingPass({ lookup: jest.fn(), platLookup: async () => [], now: t0 + 15 * 60e3 })).caller).toEqual({ linked: 1 });
-      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Chelsea Oaks', link: 'caller' });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Willow Hollow', link: 'caller' });
       // A day later the county is asked again and now names it.
       const named = queue([parcelFor('100 Synthetic Way', { subdivision: 'HERON POINTE PH I PB1/1' })]);
       const later = await runNamingPass({ lookup: named, platLookup: async () => [], now: t0 + 25 * 3600e3 });
@@ -433,23 +433,23 @@ postgres('neighborhood naming pass', () => {
 
     test('a home with no pin can still be named from a call', async () => {
       const { customerId, propertyId } = await home({ pin: false });
-      await callSaying(customerId, 'Chelsea Oaks');
+      await callSaying(customerId, 'Willow Hollow');
       expect((await runPass(jest.fn())).caller).toEqual({ linked: 1 });
-      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Chelsea Oaks', link: 'caller' });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Willow Hollow', link: 'caller' });
     });
 
     test('a switched-off neighborhood is not re-linked', async () => {
-      const n = await neighborhood('Chelsea Oaks');
+      const n = await neighborhood('Willow Hollow');
       await trx('neighborhoods').where({ id: n }).update({ active: false });
       const { customerId, propertyId } = await home({ checked: true });
-      await callSaying(customerId, 'Chelsea Oaks');
+      await callSaying(customerId, 'Willow Hollow');
       expect((await runPass(jest.fn())).caller).toEqual({ switched_off: 1 });
       expect(await hoodOf(propertyId)).toMatchObject({ name: null });
     });
 
     test('a ZIP on a county line has no county to name a community in, so the words wait', async () => {
       const { customerId, propertyId } = await home({ zip: '34243', checked: true });
-      await callSaying(customerId, 'Chelsea Oaks', { zip: '34243' });
+      await callSaying(customerId, 'Willow Hollow', { zip: '34243' });
       expect((await runPass(jest.fn())).caller).toEqual({ no_county: 1 });
       expect((await hoodOf(propertyId)).name).toBeNull();
     });
@@ -458,7 +458,7 @@ postgres('neighborhood naming pass', () => {
   describe('through the sweep (the filing the owner asked for)', () => {
     test('a home named from a call files nothing: the link waits for the county or the office', async () => {
       const { customerId, propertyId } = await home({ code: '#4321', checked: true, subdivision: 'NOT IN SUBDIVISION 0/0' });
-      await callSaying(customerId, 'Chelsea Oaks');
+      await callSaying(customerId, 'Willow Hollow');
       const r = await sweepSavedGateCodes({ lookup: jest.fn(), platLookup: async () => [] });
       expect(r.naming.caller).toEqual({ linked: 1 });
       // The caller link stays (it names the community for the office to confirm); nothing is filed, listed or retried.
@@ -479,7 +479,7 @@ postgres('neighborhood naming pass', () => {
     });
 
     test('a caller-linked home saving a code adds no entry and demotes none; after the office confirms it, the code files', async () => {
-      const n = await neighborhood('Chelsea Oaks', { source: 'customer' });
+      const n = await neighborhood('Willow Hollow', { source: 'customer' });
       await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '1111', status: 'active', source: 'office' });
       const { customerId, propertyId } = await home({ code: '2222', neighborhoodId: n, source: 'caller', checked: true });
       expect((await sweepSavedGateCodes({ lookup: jest.fn(), platLookup: async () => [] })).customers).toBe(0);
@@ -493,7 +493,7 @@ postgres('neighborhood naming pass', () => {
     });
 
     test('when the county later names a caller-linked home, its saved code files as for any county home', async () => {
-      const callerHood = await neighborhood('Chelsea Oaks', { source: 'customer' });
+      const callerHood = await neighborhood('Willow Hollow', { source: 'customer' });
       const { propertyId } = await home({ code: '#8888', neighborhoodId: callerHood, source: 'caller' });
       const r = await sweepSavedGateCodes({ lookup: queue([parcelFor('100 Synthetic Way')]), platLookup: async () => [] });
       expect(r.naming.county).toEqual({ linked: 1 });
@@ -521,6 +521,94 @@ postgres('neighborhood naming pass', () => {
       spy.mockRestore();
       expect(r).toMatchObject({ failed: 1, tally: { filed: 1 } });
       expect(await accessRows(n)).toEqual([{ code: '#7777', status: 'active', source: 'profile' }]);
+    });
+  });
+
+  describe('address lookup (GATE_NEIGHBORHOOD_ADDRESS_LOOKUP)', () => {
+    const OLD_ADDRESS = process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP;
+    beforeEach(() => { process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = 'true'; });
+    afterEach(() => {
+      if (OLD_ADDRESS === undefined) delete process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP;
+      else process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = OLD_ADDRESS;
+    });
+    const lots = (...list) => jest.fn(async () => list);
+    const runWith = (lookup, addressLookup, extra = {}) => runNamingPass({ lookup, platLookup: async () => [], addressLookup, ...extra });
+
+    test('a pin on a neighbour\'s lot links the home by its own address', async () => {
+      const { propertyId } = await home({ street: '104 Synthetic Way' });
+      const addressLookup = lots(parcelFor('104 Synthetic Way'), parcelFor('1040 Synthetic Way', { subdivision: 'OTHER GLEN PB2/2' }));
+      const r = await runWith(queue([parcelFor('100 Synthetic Way')]), addressLookup);
+      expect(r.county).toEqual({ linked: 1 });
+      expect(addressLookup).toHaveBeenCalledWith('Manatee', { houseNumber: '104', streetWord: 'SYNTHETIC' });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Heron Pointe', link: 'county', checked: true });
+    });
+
+    test('no lot under the pin (an ambiguous stack) is searched by address too', async () => {
+      const { propertyId } = await home({ street: '200 Synthetic Way' });
+      const r = await runWith(queue([null]), lots(parcelFor('200 Synthetic Way Unit 3'), parcelFor('200 Synthetic Way Unit 4')));
+      expect(r.county).toEqual({ linked: 1 });
+      expect((await hoodOf(propertyId)).name).toBe('Heron Pointe');
+    });
+
+    test('lots that name two communities, another ZIP or another suffix link nothing', async () => {
+      const a = await home({ street: '300 Synthetic Way', lat: 27.41 });
+      const b = await home({ street: '400 Synthetic Way', lat: 27.42 });
+      const addressLookup = jest.fn(async (_county, { houseNumber }) => (houseNumber === '300'
+        ? [parcelFor('300 Synthetic Way'), parcelFor('300 Synthetic Way', { subdivision: 'OTHER GLEN PB2/2' })]
+        : [parcelFor('400 Synthetic Way', { situsZip: '34211' }), parcelFor('400 Synthetic Ct')]));
+      const r = await runWith(jest.fn(async () => parcelFor('100 Synthetic Way')), addressLookup);
+      expect(r.county).toEqual({ situs_mismatch: 2 });
+      for (const { propertyId } of [a, b]) expect(await hoodOf(propertyId)).toMatchObject({ name: null, checked: false });
+    });
+
+    test('an address search that fails is an outage: the home waits an hour, never "no name"', async () => {
+      const { propertyId } = await home({ street: '500 Synthetic Way' });
+      const down = jest.fn(async () => { throw new Error('county down'); });
+      const t0 = Date.now();
+      expect((await runWith(queue([parcelFor('100 Synthetic Way')]), down, { now: t0 })).county).toEqual({ gis_error: 1 });
+      const { p } = await hoodOf(propertyId);
+      expect(p.neighborhood_checked_at).toBeNull();
+      expect(p.neighborhood_naming).toMatchObject({ county_answered: false });
+      // Inside the hour it sits out; after it, it is asked again and linked.
+      expect((await runWith(queue([parcelFor('100 Synthetic Way')]), down, { now: t0 + 30 * 60e3 })).county).toEqual({});
+      const again = await runWith(queue([parcelFor('100 Synthetic Way')]), lots(parcelFor('500 Synthetic Way')), { now: t0 + 61 * 60e3 });
+      expect(again.county).toEqual({ linked: 1 });
+    });
+
+    test('a "#201" unit tail is read as a unit, so the pin\'s own building matches without a search', async () => {
+      const { propertyId } = await home({ street: '500 Sample Loop #201' });
+      const addressLookup = jest.fn();
+      expect((await runWith(queue([parcelFor('500 Sample Loop')]), addressLookup)).county).toEqual({ linked: 1 });
+      expect(addressLookup).not.toHaveBeenCalled();
+      expect((await hoodOf(propertyId)).name).toBe('Heron Pointe');
+    });
+
+    test('off: the pin alone decides, and the county is never asked by address', async () => {
+      process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = 'false';
+      await home({ street: '600 Synthetic Way', lat: 27.41 });
+      await home({ street: '500 Sample Loop #201', lat: 27.42 });
+      const lookup = jest.fn(async (lat) => (Math.abs(lat - 27.41) < 1e-6 ? parcelFor('100 Synthetic Way') : parcelFor('500 Sample Loop')));
+      const addressLookup = lots(parcelFor('600 Synthetic Way'));
+      expect((await runWith(lookup, addressLookup)).county).toEqual({ situs_mismatch: 2 });
+      expect(addressLookup).not.toHaveBeenCalled();
+    });
+
+    test('the saved-code sweep links a home by its own address and files its code', async () => {
+      // A former customer is not a live home, so the naming pass skips it and the sweep's own lookup runs.
+      const { propertyId } = await home({ street: '700 Synthetic Way', code: '#7070', stage: 'churned' });
+      const addressLookup = lots(parcelFor('700 Synthetic Way'));
+      const r = await sweepSavedGateCodes({ lookup: queue([parcelFor('100 Synthetic Way')]), platLookup: async () => [], addressLookup });
+      expect(r.tally).toEqual({ filed: 1 });
+      const { p } = await hoodOf(propertyId);
+      expect(p.neighborhood_source).toBe('county');
+      expect(await accessRows(p.neighborhood_id)).toEqual([{ code: '#7070', status: 'active', source: 'profile' }]);
+    });
+
+    test('a failed address search in the sweep files nothing and leaves the home to be looked up again', async () => {
+      const { propertyId } = await home({ street: '800 Synthetic Way', code: '#8080', stage: 'churned' });
+      const r = await sweepSavedGateCodes({ lookup: queue([parcelFor('100 Synthetic Way')]), platLookup: async () => [], addressLookup: jest.fn(async () => { throw new Error('down'); }) });
+      expect(r.tally).toEqual({ no_neighborhood: 1 });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: null, checked: false });
     });
   });
 });

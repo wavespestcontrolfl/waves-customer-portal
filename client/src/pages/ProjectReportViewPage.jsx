@@ -301,6 +301,9 @@ const FIELD_LABELS = {
   applicator_attestation: 'Applicator attestation',
   warranty_type: 'Warranty / retreatment bond',
   renewal_due: 'Renewal due by',
+  framing_inspection_date: 'Date of final framing inspection',
+  wood_base_plate_pct: 'Wood base plates, % of all base plates',
+  borate_treatment_date: 'Date of the Bora-Care application',
 };
 
 function humanizeKey(k) {
@@ -1187,6 +1190,31 @@ function finalExteriorLine(f) {
   return parts.join(' · ');
 }
 
+// "Final framing inspection 09/28/2026 · Wood base plates 85% of all base
+// plates · Bora-Care applied 10/15/2026": the Bora-Care facts the warranty
+// prints (owner 10-24 Q6). The share prints only as the server takes it, a
+// plain percent from 0 to 100 (project-types.js woodBasePlatePct).
+function borateRecordLine(f) {
+  const match = /^(\d{1,3}(?:\.\d+)?)\s*%?$/.exec(String(f.wood_base_plate_pct ?? '').trim());
+  const pct = match && Number(match[1]) <= 100 ? `${Number(match[1])}%` : '';
+  return [
+    stickerDate(f.framing_inspection_date) && `Final framing inspection ${stickerDate(f.framing_inspection_date)}`,
+    pct && `Wood base plates ${pct} of all base plates`,
+    stickerDate(f.borate_treatment_date) && `Bora-Care applied ${stickerDate(f.borate_treatment_date)}`,
+  ].filter(Boolean).join(' · ');
+}
+
+// Treatments recorded here that come after the slab-day signature, often
+// by another applicator: the signature never vouches for them.
+function laterTreatmentsNote(f) {
+  const later = [
+    finalExteriorLine(f) && 'final exterior treatment',
+    stickerDate(f.borate_treatment_date) && 'Bora-Care application',
+  ].filter(Boolean);
+  if (!later.length) return '';
+  return `This signature covers the initial treatment only. The ${later.join(' and the ')} ${later.length > 1 ? 'are' : 'is'} recorded separately above.`;
+}
+
 // The certificate's field grid. Under the sticker (detailsOnly) it keeps
 // only what the label has no blank for; the label already prints lot,
 // permit, builder, dates, address, organism, sq ft, gallons, concentration
@@ -1237,6 +1265,7 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', f.warranty_type],
     ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
+    ...(borateRecordLine(f) ? [['Bora-Care record', borateRecordLine(f)]] : []),
   ] : [
     ['Treatment address', addressValue],
     ['Lot / Block / Subdivision', lotLine],
@@ -1254,6 +1283,7 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ['Warranty / retreatment bond', warrantyLine],
     // The staff send validates this record on both layouts, so both print it.
     ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
+    ...(borateRecordLine(f) ? [['Bora-Care record', borateRecordLine(f)]] : []),
   ];
   return { fields, applications, multiApplication };
 }
@@ -1399,13 +1429,11 @@ function CertificateSignature({ f, technicianName, projectDateLabel, detailsOnly
             </span>
           </>
         ) : null}
-        {/* The final exterior visit comes later, often by another
-            applicator: this signature never vouches for it. */}
-        {finalExteriorLine(f) ? (
+        {laterTreatmentsNote(f) ? (
           <>
             <br />
             <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
-              This signature covers the initial treatment only. The final exterior treatment is recorded separately above.
+              {laterTreatmentsNote(f)}
             </span>
           </>
         ) : null}

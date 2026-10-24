@@ -11,9 +11,9 @@ const gates = require('../config/feature-gates');
 
 describe('callerCommunityName', () => {
   test.each([
-    ['Chelsea Oaks', 'Chelsea Oaks'],
-    ['chelsea oaks subdivision', 'Chelsea Oaks'],
-    ['the Chelsea Oaks community', 'Chelsea Oaks'],
+    ['Willow Hollow', 'Willow Hollow'],
+    ['willow hollow subdivision', 'Willow Hollow'],
+    ['the Willow Hollow community', 'Willow Hollow'],
     ["St. Andrew's Preserve", 'St Andrews Preserve'],
     ['Heron Pointe at Cedar Ranch Phase 2', 'Heron Pointe at Cedar Ranch'],
     ['Oakwood Glen HOA', 'Oakwood Glen'],
