@@ -4287,14 +4287,18 @@ function productWhyText(why, substitution) {
   return substitution ? `This approved seasonal equivalent was used for today's protocol window. ${why}` : why;
 }
 
-// GATE_LAWN_REPORT_STORY (presentation 'story'): one product as the lawn story explains it, purpose first,
-// then the product, where it went, why it was used, how it works, and its label and safety notes. The card's
+// GATE_LAWN_REPORT_STORY (presentation 'story', lawn only): one product as the lawn story explains it, purpose
+// first, then the product, where it went, why it was used, how it works, and its label and safety notes. The card's
 // details accordion is shared with the record presentation.
-function TreatmentStoryFace({ facts, isLawn }) {
+function TreatmentStoryFace({ facts }) {
   const { productName, purpose, why, usedIn, productSummary, precautionSummary, reentrySummary, manufacturer, reportCopy, substitution } = facts;
-  const howItWorks = reportCopy?.how_it_works || productSummary;
+  // Approved report_copy already says why the product is used (owner 2026-10-05), so the generic why line (which
+  // can carry the recorded targets) prints only where the record card prints it: no approved copy, or a substitution.
+  const showWhy = !reportCopy || substitution;
+  const howItWorks = reportCopy ? reportCopy.how_it_works : productSummary;
+  const labelLine = reportCopy?.also_labeled_for;
   const petsKids = reportCopy?.pets_kids;
-  const safety = petsKids || precautionSummary || reentrySummary;
+  const safetyLines = petsKids ? [sanitizeReentryCopy(petsKids)] : [precautionSummary, reentrySummary].filter(Boolean);
   return (
     <>
       <h3>{purpose.replace(/\s+application$/i, '')}</h3>
@@ -4302,7 +4306,7 @@ function TreatmentStoryFace({ facts, isLawn }) {
         <span className="sr-cell-label">Product</span>
         <span>{productName}</span>
       </div>
-      {isLawn && manufacturer && <div className="applied-product-maker">by {manufacturer}</div>}
+      {manufacturer && <div className="applied-product-maker">by {manufacturer}</div>}
       {/* usedIn is null when the report hides treated areas. */}
       {usedIn && (
         <div className="treatment-story-area">
@@ -4311,10 +4315,12 @@ function TreatmentStoryFace({ facts, isLawn }) {
         </div>
       )}
       <div className="treatment-story-columns">
-        <div className="treatment-story-column">
-          <div className="sr-cell-label">Why we used it</div>
-          <p>{productWhyText(why, substitution)}</p>
-        </div>
+        {showWhy && (
+          <div className="treatment-story-column">
+            <div className="sr-cell-label">Why we used it</div>
+            <p>{productWhyText(why, substitution)}</p>
+          </div>
+        )}
         {howItWorks && (
           <div className="treatment-story-column">
             <div className="sr-cell-label">How it works</div>
@@ -4322,23 +4328,18 @@ function TreatmentStoryFace({ facts, isLawn }) {
           </div>
         )}
       </div>
-      {(reportCopy?.also_labeled_for || safety) && (
+      {(labelLine || safetyLines.length > 0) && (
         <div className="treatment-story-notes">
-          {reportCopy?.also_labeled_for && (
+          {labelLine && (
             <div className="treatment-story-note">
               <div className="sr-cell-label">On the label</div>
-              <p>{reportCopy.also_labeled_for}</p>
+              <p>{labelLine}</p>
             </div>
           )}
-          {safety && (
+          {safetyLines.length > 0 && (
             <div className="treatment-story-note">
               <div className="sr-cell-label">{petsKids ? 'Pets & kids' : 'Safety & re-entry'}</div>
-              {petsKids ? <p>{sanitizeReentryCopy(petsKids)}</p> : (
-                <>
-                  {precautionSummary && <p>{precautionSummary}</p>}
-                  {reentrySummary && <p>{reentrySummary}</p>}
-                </>
-              )}
+              {safetyLines.map((line) => <p key={line}>{line}</p>)}
             </div>
           )}
         </div>
@@ -4436,7 +4437,6 @@ function AppliedProductsSection({ data, mode = 'live', presentation = 'record', 
                 {storyPresentation ? (
                   <TreatmentStoryFace
                     facts={{ productName, purpose, why, usedIn, productSummary, precautionSummary, reentrySummary, manufacturer, reportCopy, substitution }}
-                    isLawn={isLawn}
                   />
                 ) : (
                   <>

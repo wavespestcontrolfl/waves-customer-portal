@@ -620,6 +620,23 @@ describe('GATE_LAWN_REPORT_STORY (lawnLayout.story): the story order', () => {
     expect(screen.getByText('Full visit summary')).toBeInTheDocument();
   });
 
+  it('a product with approved report copy prints no generic why line, so recorded free-text targets never reach the card', async () => {
+    const payload = story(spotOn);
+    const talstar = payload.applications.find((app) => /Talstar/.test(app.productName || app.product?.name || ''));
+    talstar.targets = ['gate code 1234'];
+    talstar.product = { ...talstar.product, report_copy: { how_it_works: 'Approved how-it-works line.', pets_kids: 'Approved pets line.' } };
+    const { container } = renderReport(payload);
+    await waitForReport();
+    const products = container.querySelector('#products-applied');
+    expect(products).not.toHaveTextContent('gate code 1234');
+    const card = [...products.querySelectorAll('.treatment-story-card')].find((node) => node.textContent.includes('Talstar'));
+    expect(card).toHaveTextContent('Approved how-it-works line.');
+    expect(card).toHaveTextContent('Approved pets line.');
+    expect(card).not.toHaveTextContent('Why we used it');
+    // The products without approved copy keep their why line, as the record card does.
+    expect(products).toHaveTextContent('Why we used it');
+  });
+
   it('the status card names the lawn service plainly and adds the lawn score', async () => {
     const payload = story(spotOn);
     const { container } = renderReport(payload);
