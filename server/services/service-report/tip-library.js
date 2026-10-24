@@ -252,9 +252,9 @@ const TIPS = Object.freeze([
 
   // ── Lighting ──────────────────────────────────────────────────────────
   {
-    id: 'light_warm_bulbs', group: 'lighting', label: 'Warm porch bulbs',
-    pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'bulb', '2700k', 'spiders', 'moths'], lines: ['pest', 'mosquito'], season: 'all',
-    copy: "Insects steer by short-wavelength light, so a bright white or blue-white bulb — anything over about 3000K — pulls flying insects to your door, and the spiders and geckos that eat them follow. A warm 2700K bulb, or a yellow \"bug\" bulb, is far less visible to them.",
+    id: 'light_warm_bulbs', group: 'lighting', label: 'LED porch bulbs',
+    pests: ['Spiders', 'Crickets'], keywords: ['porch', 'light', 'bulb', 'led', 'spiders', 'moths'], lines: ['pest', 'mosquito'], season: 'all',
+    copy: "Go LED on the porch. In a 2016 field study, LED bulbs drew about four times fewer insects than incandescent bulbs and about half as many as compact fluorescents, and warm versus cool white made no difference. Fewer insects at the door means fewer spiders and geckos following them.",
   },
   {
     id: 'light_motion_sensor', group: 'lighting', label: 'Lights on a motion sensor',
@@ -264,7 +264,7 @@ const TIPS = Object.freeze([
   {
     id: 'light_aim_away', group: 'lighting', label: 'Aim landscape lights away',
     pests: ['Spiders'], keywords: ['landscape', 'uplight', 'spotlight', 'entry'], lines: ['pest'], season: 'all',
-    copy: "Uplights pointed back at the walls gather insects at the entries every night. Turning them out toward the yard, or switching them to warm bulbs, moves that crowd away from the door.",
+    copy: "Uplights pointed back at the walls gather insects at the entries every night. Turning them out toward the yard moves that crowd away from the door, and LED bulbs draw fewer insects to begin with.",
   },
 
   // ── Around the house ──────────────────────────────────────────────────
@@ -419,7 +419,9 @@ const TIPS = Object.freeze([
     id: 'lawn_water_morning', group: 'lawn', label: 'Water the lawn in the early morning',
     keywords: ['irrigation', 'sprinkler', 'water', 'fungus', 'timer', 'night', 'leaf spot'], lines: ['lawn', 'mosquito'], season: 'wet',
     findings: ['gray_leaf_spot', 'large_patch'],
-    copy: "Overnight watering leaves the blades wet until morning, which is exactly what fungus needs. Set the irrigation to finish around sunrise; the morning sun dries the turf by midday and gives fungus and mosquitos far less to work with.",
+    // The order sentence is dated: revisit when SWFWMD's Modified Phase III
+    // one-day watering order ends (through 2027-03-31 as of 2026-10-24).
+    copy: "Water in the early-morning hours. UF/IFAS says dew is already on the grass from about 2 to 8 a.m., so a run then adds the least wet time, while evening watering invites disease. Under the water-shortage order through March 31, 2027, lawn watering has to end by 4 a.m.",
   },
   {
     id: 'lawn_irrigation_portal', group: 'lawn', label: 'Add your irrigation settings to the portal',
@@ -437,7 +439,7 @@ const TIPS = Object.freeze([
     id: 'lawn_sharp_blade', group: 'lawn', label: 'Sharpen the mower blade',
     keywords: ['mower', 'blade', 'mow', 'brown tips'], lines: ['lawn'], season: 'all',
     findings: ['scalping'],
-    copy: "A dull blade tears the leaf instead of cutting it. Torn tips brown out and are the entry point for fungus, so a sharpened blade once a season shows up as a greener lawn a week later.",
+    copy: "A dull blade tears the grass instead of cutting it. UF/IFAS says the ragged cut gives the lawn a brownish cast and leaves it more open to pests and disease, so sharpen the blade monthly while the grass is growing.",
   },
 
   // Lawn seed (owner 2026-09-29, scope round 3c; copy chosen under the owner's
@@ -446,10 +448,10 @@ const TIPS = Object.freeze([
   // to the finding families in LAWN_FINDINGS. ADVICE only: no result timelines,
   // no product names, no mowing-height or watering numbers.
   {
-    id: 'lawn_bag_clippings', group: 'lawn', label: 'Bag clippings while fungus is active',
+    id: 'lawn_bag_clippings', group: 'lawn', label: 'Mow the sick spot last',
     keywords: ['clippings', 'bag', 'mulch', 'fungus', 'leaf spot', 'mower'], lines: ['lawn'], season: 'all',
     findings: ['gray_leaf_spot', 'large_patch'], months: [10],
-    copy: "Mowing carries fungus spores from sick turf to healthy turf on the deck and in the clippings. While leaf spot or another fungus is active, bag the clippings and rinse the mower deck afterward. If a crew mows for you, ask them to do the same.",
+    copy: "Mowing can carry leaf disease from sick grass to healthy grass. UF/IFAS says to mow a diseased area last and wash the mower off afterward to clear the infected clippings. If a crew mows for you, ask them to do the same.",
   },
   {
     id: 'lawn_shade_dry_between', group: 'lawn', label: 'Let shaded areas dry between waterings',
@@ -530,10 +532,10 @@ const TIPS = Object.freeze([
     copy: "Grass under a tree canopy often thins out because it is not getting enough light. Trimming up the lower branches lets more light through. Where the shade is heavy, mulch or a shade groundcover under the tree can look better than grass that struggles.",
   },
   {
-    id: 'lawn_thatch_half_inch', group: 'lawn', label: 'Thick thatch holds water and insects',
-    keywords: ['thatch', 'spongy', 'half inch', 'water', 'insects', 'fertilizer'], lines: ['lawn'], season: 'all',
+    id: 'lawn_thatch_half_inch', group: 'lawn', label: 'Thatch past an inch',
+    keywords: ['thatch', 'spongy', 'inch', 'water', 'insects', 'fertilizer'], lines: ['lawn'], season: 'all',
     findings: ['thatch'],
-    copy: "Thatch is the layer of dead and living stems above the soil. Once it is thicker than about half an inch, it holds water against the surface, shelters insects, and keeps water and fertilizer from reaching the soil. Taking no more than a third off in a mow and going easy on nitrogen both help keep it from building up.",
+    copy: "Thatch is the layer of stems between the grass and the soil. UF/IFAS says it builds fastest in grass that's overfertilized or overwatered, and once it passes about an inch it's worth removing. Keeping to one-third per mow and going easy on nitrogen keeps it down.",
   },
   {
     id: 'lawn_treated_weeds_leave', group: 'lawn', label: 'Leave treated weeds in place',
@@ -567,8 +569,8 @@ const TIPS = Object.freeze([
   },
   {
     id: 'ts_mulch_trunk', group: 'tree_shrub', label: 'Keep mulch off the trunk',
-    keywords: ['mulch', 'trunk', 'volcano', 'borers', 'bark'], lines: ['tree_shrub'], season: 'all',
-    copy: "Mulch piled against the trunk keeps the bark wet and invites borers and rot at the collar. Pull it back into a ring a few inches from the trunk — a donut, not a volcano.",
+    keywords: ['mulch', 'trunk', 'volcano', 'bark'], lines: ['tree_shrub'], season: 'all',
+    copy: "Mulch piled against the trunk keeps the bark wet, and UF/IFAS says that encourages rot. Keep it about a foot back from trees and large shrubs, 2 to 3 inches deep: a donut, not a volcano.",
   },
   {
     id: 'ts_black_film', group: 'tree_shrub', label: 'Black film on leaves comes from insects',
@@ -593,7 +595,7 @@ const TIPS = Object.freeze([
   {
     id: 'ts_yellow_new_leaves', group: 'tree_shrub', label: 'Yellow new leaves with green veins',
     keywords: ['yellow', 'chlorosis', 'iron', 'veins'], lines: ['tree_shrub'], season: 'all', watchKeys: ['chlorosis'],
-    copy: "Yellow new leaves with green veins usually mean the plant can't pull iron or manganese from the soil, which takes a few weeks to green up after treatment.",
+    copy: "Yellow new leaves with green veins usually point to iron or manganese, which UF/IFAS says show first on the newest leaves, while magnesium and potassium show on the oldest. Where the yellow starts tells me what the plant is missing.",
   },
   {
     id: 'ts_palm_dont_trim_yellow', group: 'tree_shrub', label: "Don't trim yellow palm fronds",
@@ -633,7 +635,7 @@ const TIPS = Object.freeze([
   {
     id: 'ts_fresh_mulch_weeds', group: 'tree_shrub', label: 'Weeds in fresh mulch',
     keywords: ['weeds', 'mulch', 'beds'], lines: ['tree_shrub'], season: 'all', watchKeys: ['bed_weeds'],
-    copy: "A thin layer of fresh mulch helps the pre-emergent hold weeds back between treatments.",
+    copy: "UF/IFAS says 2 to 3 inches of mulch controls weeds without smothering the roots, and more than 3 inches can hurt the plants. Topping up the thin spots in the beds helps between visits.",
   },
   {
     id: 'ts_blooms_gentler', group: 'tree_shrub', label: 'Blooming shrubs get gentler treatment',
@@ -693,7 +695,7 @@ const TIPS = Object.freeze([
     id: 'gr_bait_spots', group: 'roaches', label: "Clean around the bait spots",
     aftercare: true, keywords: ["bait", "gel", "cabinet", "wipe", "cleaner"], lines: ["pest"], season: 'all',
     services: ["german_roach", "german_roach_initial", "pest_initial_german_knockdown"],
-    copy: "The small dots of bait in the cabinet corners and hinges are doing the work. Cleaner wiped over them, or anything sprayed near them, makes roaches stay away, so for the next few weeks clean around those spots instead of over them.",
+    copy: "The small dots of bait in the cabinet corners and hinges are doing the work. UF/IFAS says a repellent product used near bait makes it ineffective, so for the next few weeks clean around those spots instead of over them, and skip the spray can.",
   },
   {
     id: 'gr_no_store_spray', group: 'roaches', label: "No store-bought roach spray",
@@ -821,7 +823,7 @@ const TIPS = Object.freeze([
     id: 'md_fewer_spiders', group: 'stinging', label: "Fewer spiders, fewer mud daubers",
     pests: ['Spiders'], keywords: ["spiders", "porch light", "bulbs", "eaves", "webs"], lines: ["pest"], season: 'all',
     services: ["mud_dauber_removal"],
-    copy: "Mud daubers stock their nests with spiders, so a house with fewer spiders draws fewer daubers. Warm porch bulbs and swept eaves cut down the insects the spiders live on.",
+    copy: "Mud daubers stock their nests with spiders, so a house with fewer spiders draws fewer daubers. LED porch bulbs and swept eaves cut down the insects the spiders live on.",
   },
 
   // ── Mosquito (service tips, owner-approved 2026-10-02) ────────────────────────────────────────────────────
@@ -1069,7 +1071,7 @@ const TIPS = Object.freeze([
     id: 'plug_light_water', group: 'lawn', label: "Light water every day at first",
     aftercare: true, keywords: ["plugs", "watering", "new plugs", "roots", "daily"], lines: ["lawn"], season: 'all',
     services: ["plugging"],
-    copy: "New plugs have short roots and dry out fast. Water them lightly once or twice a day for the first two weeks, then go back to deeper watering two days a week so the roots follow the water down.",
+    copy: "New plugs have short roots and dry out fast. UF/IFAS says to water lightly once or twice a day for a week or two after planting. The watering rules allow new lawns any day for the first 30 days and three days a week for the next 30, then your assigned day.",
   },
   {
     id: 'plug_stay_off', group: 'lawn', label: "Mower and feet off the plugs",
@@ -1223,7 +1225,7 @@ const TIPS = Object.freeze([
     id: 'mq_lanai_fan', group: 'water', label: "Run a fan where you sit",
     keywords: ["fan", "lanai", "patio", "biting", "sitting outside"], lines: ["mosquito"], season: 'all',
     services: ["mosquito_monthly", "mosquito_recurring", "mosquito_seasonal", "mosquito", "mosquito_one_time", "mosquito_onetime", "mosquito_event"],
-    copy: "Mosquitos are weak fliers. A ceiling fan or a box fan aimed across the chairs on the lanai keeps them from landing on you, and it does more than a candle.",
+    copy: "A ceiling fan or box fan aimed across the chairs on the lanai cuts down the mosquitos that find you. In a 2003 study, fan wind sharply reduced how many reached a trap, mostly by spreading out the scent they follow.",
   },
   {
     id: 'mq_downspout_pipe', group: 'water', label: "Check the ribbed downspout pipe",
