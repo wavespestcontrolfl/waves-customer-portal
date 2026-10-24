@@ -16,6 +16,7 @@ import mosquitoReportV2 from '../pages/__fixtures__/mosquito-report-v2.json';
 import pestReportV2 from '../pages/__fixtures__/pest-report-v2.json';
 import pestReportV2Expectations from '../pages/__fixtures__/pest-report-v2-expectations.json';
 import treeShrubReportV2 from '../pages/__fixtures__/tree-shrub-report-v2.json';
+import lawnLayoutReport from '../pages/__fixtures__/lawn-layout/spot-on.json';
 
 // Client-built coverage: strip the API serviceCoverage so the page's own
 // normalizeServiceCoverage builds the section from raw locations — the code
@@ -68,6 +69,7 @@ const SCENARIOS = {
   'client-built': clientBuilt,
   'server-summary': serverSummary,
   'lawn-v2': lawnReportV2,
+  'lawn-story': { ...lawnLayoutReport, reportTemplate: true, lawnLayout: { ...lawnLayoutReport.lawnLayout, story: true } },
   'mosquito-v2': mosquitoReportV2,
   'pest-v2': pestReportV2,
   // Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark) —

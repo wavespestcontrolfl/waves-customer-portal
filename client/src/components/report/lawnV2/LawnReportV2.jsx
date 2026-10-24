@@ -13,6 +13,7 @@
 import { useRef, useState, useEffect, createContext, useContext } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
+import { FS, LH } from '../../../theme-doc';
 import { usePrintRequested } from '../usePrintRequested';
 import Icon from '../../Icon';
 import POLISH_COPY from '../../../../../shared/lawn-report-polish-copy.json';
@@ -522,11 +523,11 @@ function SliderArrow({ dir, onClick, disabled }) {
       className="lawn-photo-arrow"
       style={{
         position: 'absolute', top: '42%', [dir === 'prev' ? 'left' : 'right']: 8, transform: 'translateY(-50%)',
-        width: 36, height: 36, borderRadius: 999, border: 'none', background: 'rgba(4,57,94,0.82)', color: '#fff',
+        width: 48, height: 48, borderRadius: 999, border: 'none', background: 'rgba(4,57,94,0.82)', color: '#fff',
         fontSize: 20, fontWeight: 700, lineHeight: 1, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.3 : 1,
         display: 'grid', placeItems: 'center',
       }}
-    >{dir === 'prev' ? '‹' : '›'}</button>
+    ><Icon name="chevronRight" size={20} aria-hidden="true" style={dir === 'prev' ? { transform: 'rotate(180deg)' } : undefined} /></button>
   );
 }
 
@@ -680,7 +681,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
       ) : null}
       {summary && lead ? (
         <details open={printOpen} style={{ marginTop: 12 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Technician notes</summary>
+          <summary className="lawn-detail-summary" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Technician notes</summary>
           <p className="sr-v2-body" style={{ margin: '8px 0 0', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{summary}</p>
         </details>
       ) : null}
@@ -870,7 +871,7 @@ export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
                 </div>
                 {more.length || confidenceLabel ? (
                   <details open={printOpen} style={{ marginTop: 10 }}>
-                    <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>More about this</summary>
+                    <summary className="lawn-detail-summary" aria-label={it.headline ? `More about this: ${it.headline}` : undefined} style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>More about this</summary>
                     <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
                       {more}
                       {confidenceLabel ? <div style={{ fontSize: 14, color: MUTED, fontStyle: 'italic' }}>{confidenceLabel}</div> : null}
@@ -1093,12 +1094,12 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
 function IrrigationOnFileRow({ water }) {
   const onFile = water.scheduleKind === 'runtime_only' && typeof water.scheduleText === 'string' && water.scheduleText ? water.scheduleText : null;
   return (
-    <>
+    <div className="lawn-fact">
       <span style={{ color: MUTED }}>Irrigation</span>
       {onFile
         ? <strong data-testid="lawn-water-schedule-on-file" style={{ textAlign: 'right', color: TEXT }}>{onFile}</strong>
         : <span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span>}
-    </>
+    </div>
   );
 }
 
@@ -1256,16 +1257,16 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
   return (
     <Card>
       <CardTitle>Water This Week</CardTitle>
-      <div className="lawn-fact-list report-template-stack report-template-facts" style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
-        {hasRain ? <><span style={{ color: MUTED }}>Rain</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(rain)}</strong></> : null}
-        {hasIrr && irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
+      <div className="lawn-fact-list lawn-water-facts" role="group" aria-label="Weekly water readings" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16, fontSize: 14, color: BODY, marginBottom: 16 }}>
+        {hasRain ? <div className="lawn-fact"><span style={{ color: MUTED }}>Rain</span><strong style={{ color: TEXT }}>{inchLabel(rain)}</strong></div> : null}
+        {hasIrr && irrOnFile ? <div className="lawn-fact"><span style={{ color: MUTED }}>Irrigation</span><strong style={{ color: TEXT }}>{inchLabel(irrigation)}</strong></div> : null}
         {/* "Not on file" keys off !irrOnFile alone — the no-schedule payload
             can carry irrigationInches: null, and gating on a finite amount
             hid the promised row exactly when the schedule was missing
             (codex P2 r24). */}
         {!irrOnFile ? <IrrigationOnFileRow water={water} /> : null}
-        {hasTotal ? <><span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong></> : null}
-        {hasTarget ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
+        {hasTotal ? <div className="lawn-fact"><span style={{ color: MUTED }}>Total</span><strong style={{ color: TEXT }}>{inchLabel(total)}</strong></div> : null}
+        {hasTarget ? <div className="lawn-fact"><span style={{ color: MUTED }}>Target range</span><strong style={{ color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></div> : null}
         {/* GATE_LAWN_REPORT_COPY_FIXES: one fixed sentence from the server naming where the
             target came from. Absent key (gate off, or a target with no honest source) prints nothing. */}
         {hasTarget && typeof water.targetNote === 'string' && water.targetNote.trim() ? (
@@ -1339,7 +1340,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
           so the callout stays as the one place that says it (Fable P2 #5517). */}
       {lead && (place === 'details' || afterNote) ? (
         <details open={printOpen} style={{ marginTop: 12 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Why this reading</summary>
+          <summary className="lawn-detail-summary" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Why this reading</summary>
           {place === 'details' ? <p style={{ margin: '8px 0 0', fontSize: explanationSize(water), color: BODY, lineHeight: 1.55 }}>{water.explanation}</p> : null}
           {afterNote ? (
             <div className="lawn-callout-after" style={{ marginTop: 10, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
@@ -1479,9 +1480,9 @@ export function MowingHeightGauge({ mowing = {} }) {
       <CardTitle>Mowing Height</CardTitle>
       {hasGauge ? (
         <>
-          <div className="lawn-fact-list report-template-stack report-template-facts" style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 16 }}>
-            <span style={{ color: MUTED }}>Measured</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(measured)}</strong>
-            <span style={{ color: MUTED }}>Ideal range</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(lo)}–{inchLabel(hi)}</strong>
+          <div className="lawn-fact-list lawn-mowing-facts" role="group" aria-label="Mowing height readings" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16, fontSize: 14, color: BODY, marginBottom: 16 }}>
+            <div className="lawn-fact"><span style={{ color: MUTED }}>Measured</span><strong style={{ color: TEXT }}>{inchLabel(measured)}</strong></div>
+            <div className="lawn-fact"><span style={{ color: MUTED }}>Ideal range</span><strong style={{ color: TEXT }}>{inchLabel(lo)}–{inchLabel(hi)}</strong></div>
           </div>
           <div style={{ position: 'relative', height: 34 }}>
             <div style={{ position: 'absolute', left: 0, right: 0, top: 13, height: 8, borderRadius: 6, background: '#F1EEE6' }} />
@@ -1507,7 +1508,7 @@ export function MowingHeightGauge({ mowing = {} }) {
         </figure>
       ) : null}
       {mowing.recommendation ? (
-        <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{mowing.recommendation}</p>
+        <p className="sr-v2-body" style={{ margin: '12px 0 0', fontSize: FS.bodyLg, color: BODY, lineHeight: LH.body }}>{mowing.recommendation}</p>
       ) : null}
     </Card>
   );
@@ -1865,7 +1866,7 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
         ))}
       </svg>
       {explanation && <details open={print || undefined} style={{ marginTop: 12, fontSize: 16, color: BODY, lineHeight: 1.5 }}>
-        <summary style={{ cursor: 'pointer', fontSize: 14 }}>What this means</summary>
+        <summary className="lawn-detail-summary" aria-label={`What this means: ${title}`} style={{ cursor: 'pointer', fontSize: 14 }}>What this means</summary>
         <p className="sr-v2-body" style={{ margin: '8px 0' }}>{explanation}</p>
         <p className="sr-v2-body" style={{ margin: '8px 0' }}>Latest reading: {fmt(last.value)}. Previous reading: {fmt(pts[pts.length - 2].value)}.</p>
       </details>}
@@ -1948,7 +1949,7 @@ export function LawnTrends({ trends = {}, baselineScore = null, hasNextVisit = f
       ) : null}
       {minis.length ? (
         /* Keep one metric per row at every viewport width. */
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, marginBottom: 16 }}>
+        <div className="lawn-trend-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, marginBottom: 16 }}>
           {minis.map((m) => (
             <LawnTrendChart key={m.key} title={m.title} sub={m.sub} explanation={m.explanation} points={m.points}
               domain={m.domain} unit={m.unit} zeroLine={m.zeroLine} band={m.band} accent={m.accent} />

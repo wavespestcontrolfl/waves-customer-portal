@@ -16,6 +16,7 @@ const scenarios = [
   { name: 'secure-pest', url: '/preview-secure.html?v=pest', ready: 'Quarterly Pest Control' },
   { name: 'secure-lawn', url: '/preview-secure.html?v=lawn', ready: 'Lawn Care' },
   { name: 'service-report', url: '/preview-service-report.html', ready: 'Quarterly Pest Control' },
+  { name: 'lawn-story', url: '/preview-service-report.html?scenario=lawn-story', ready: 'Your lawn today', verify: verifyLawnStoryPrint },
   { name: 'completion', url: '/preview-completion-presets.html', ready: 'Completion' },
   { name: 'track', url: '/preview-track.html', ready: 'Alex arrives in', verify: verifyTracker },
   { name: 'track-scheduled', url: '/preview-track.html?state=scheduled', ready: 'stops before yours' },
@@ -36,6 +37,25 @@ async function verifyLogin(page) {
   assert.equal(await page.getByRole('button', { name: 'Send code', exact: true }).isEnabled(), true);
   // Exercise input/focus without submitting an authentication request.
   assert.equal(await phone.evaluate((element) => document.activeElement === element), true);
+}
+
+async function verifyLawnStoryPrint(page, key) {
+  const score = page.locator('.lawn-story-score');
+  const scoreText = await score.innerText();
+  assert.match(scoreText.replace(/\s/g, ''), /^72\/100$/);
+  await page.getByRole('link', { name: 'View lawn details' }).focus();
+  await page.keyboard.press('Enter');
+  const breakdown = page.locator('#lawn-section-score details.lawn-layout-score');
+  assert.equal(await breakdown.evaluate((element) => element.open), true);
+  assert.equal(await breakdown.locator(':scope > summary').evaluate((element) => document.activeElement === element), true);
+  await page.emulateMedia({ media: 'print' });
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  assert.equal(await score.isVisible(), true, 'The overall score must survive printing the live story report');
+  assert.equal(await score.innerText(), scoreText);
+  assert.equal(await page.getByRole('link', { name: 'View lawn details' }).isVisible(), false);
+  await page.screenshot({ path: path.join(artifactDir, `${key}-print.png`), fullPage: true });
+  await page.emulateMedia({ media: 'screen' });
+  assert.equal(await breakdown.locator(':scope > summary').innerText(), 'Score details', 'Printing must not restore a duplicate score on screen');
 }
 
 async function assertShellSafeArea(page, scenario, viewport, insets) {
