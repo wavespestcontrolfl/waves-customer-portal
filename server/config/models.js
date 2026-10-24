@@ -196,6 +196,12 @@ const DEFAULTS = Object.freeze({
   // newsletterWriter policy pins effort explicitly rather than relying on
   // the model's own default.
   NEWSLETTER: 'claude-opus-5-5',
+  // Website content writers (owner 2026-10-24, "make them all claude opus
+  // 5.5"): blog-writer drafts (websiteContent policy), the Codex remediation
+  // fix on content PRs, and the content Managed Agent configs. The direct
+  // paths take effort from MODEL_ANTHROPIC_EFFORT; each Managed Agent keeps
+  // the level it was registered with.
+  CONTENT: 'claude-opus-5-5',
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
@@ -332,6 +338,10 @@ const VOICE_JUDGE = process.env.MODEL_VOICE_JUDGE || DEFAULTS.VOICE_JUDGE;
 // so this one lane can move to Opus 5.5 without affecting every other
 // FLAGSHIP/WORKHORSE call site.
 const NEWSLETTER = process.env.MODEL_NEWSLETTER || DEFAULTS.NEWSLETTER;
+// Website content writers (owner 2026-10-24). Own selector, like NEWSLETTER,
+// so the content lanes sit on Opus 5.5 without moving every other
+// FLAGSHIP/WORKHORSE call site.
+const CONTENT = process.env.MODEL_CONTENT || DEFAULTS.CONTENT;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
@@ -788,6 +798,14 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: NEWSLETTER, effort: 'max' }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
+  websiteContent: Object.freeze({
+    name: 'websiteContent',
+    // blog-writer's post drafts and idea lists (owner 2026-10-24: every
+    // website content writer on Opus 5.5). Same OpenAI backup as
+    // contentDraft, which keeps the non-website copy lanes.
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: CONTENT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
 });
 
 module.exports = {
@@ -814,6 +832,7 @@ module.exports = {
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,
   NEWSLETTER,
+  CONTENT,
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,
