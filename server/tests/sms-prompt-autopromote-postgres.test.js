@@ -21,6 +21,7 @@ const sealed = require('../services/sms-sealed-eval');
 const auto = require('../services/sms-prompt-autopromote');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const patchesMigration = require('../models/migrations/20261024220000_sms_prompt_patches');
+const tagMigration = require('../models/migrations/20261024230000_sms_prompt_patches_version_tag');
 const outcomesMigration = require('../models/migrations/20261024130000_sms_reply_outcomes');
 
 jest.setTimeout(60000);
@@ -53,14 +54,16 @@ postgres('SMS prompt auto-promote', () => {
   // A candidate row as createCandidate would make it (guards applied), for tests that start later in the cycle.
   const insertPatch = async ({ rules = [GOOD_RULE], status = 'candidate', over = {} } = {}) => {
     const built = patchLib.buildBlock(rules);
+    const base = over.base_version || baseVersion();
+    const tag = status === 'rejected' ? null : patchLib.nextFreeTag(await trx('sms_prompt_patches').where({ base_version: base }).pluck('version_tag'));
     const [row] = await trx('sms_prompt_patches').insert({
-      rules: JSON.stringify(rules), patch_text: built.text, patch_sha: built.sha, base_version: baseVersion(), status,
+      rules: JSON.stringify(rules), patch_text: built.text, patch_sha: built.sha, base_version: base, version_tag: tag, status,
       mode_at_creation: 'true', exam_leg: 'anthropic', ...over,
     }).returning('*');
     return row;
   };
   const activate = async (row, over = {}) => {
-    const activeVersion = patchLib.stampPatchVersion(baseVersion(), row.patch_no);
+    const activeVersion = patchLib.stampPatchVersion(baseVersion(), row.version_tag);
     await trx('sms_prompt_patches').where({ id: row.id }).update({
       status: 'active', activated_at: new Date(NOW.getTime() - 5 * DAY), active_version: activeVersion, prior_version: baseVersion(), ...over,
     });
@@ -109,7 +112,7 @@ postgres('SMS prompt auto-promote', () => {
         const run = await insertRun({ items, version: drafter.currentPromptVersion(), ...baseline, over: { finished_at: NOW } });
         return { runId: run.id, status: 'complete' };
       }
-      const version = patchLib.stampPatchVersion(baseVersion(), args.promptPatch.patchNo);
+      const version = patchLib.stampPatchVersion(baseVersion(), args.promptPatch.tag);
       const run = await insertRun({ items, version, patchId: args.promptPatch.id, baselineId: args.baselineRunId, ...candidate, status: candidateStatus });
       return { runId: run.id, status: candidateStatus };
     });
@@ -138,6 +141,7 @@ postgres('SMS prompt auto-promote', () => {
     trx = await database.transaction();
     mockConnection = trx;
     await patchesMigration.up(trx);
+    await tagMigration.up(trx);
     await outcomesMigration.up(trx);
   });
   afterEach(async () => {
@@ -199,6 +203,33 @@ postgres('SMS prompt auto-promote', () => {
       // Nothing live changed: not active, so the prompt is byte-identical.
       expect(patchLib.getActivePatch()).toBeNull();
       expect(drafter.buildSystemPromptWithProfile('').system).not.toContain('LEARNED REPLY RULES');
+    });
+
+    test('each patch on a base gets its own version letter, a refused rule takes none, and 26 letters are the cap per base', async () => {
+      await insertProposal();
+      await insertProposal({ failure_mode: 'over_completion' });
+      const first = await auto.createCandidate({ dbi: trx, now: NOW, distill: distillWith(GOOD_RULE) });
+      expect((await rowOf(first.created)).version_tag).toBe('A');
+      await trx('sms_prompt_patches').where({ id: first.created }).update({ status: 'rejected' });
+      // A rule the guards refuse is stored rejected WITHOUT a letter, so it does not use one up.
+      const later = new Date(NOW.getTime() + 8 * DAY);
+      const refused = await auto.createCandidate({ dbi: trx, now: later, distill: distillWith('Offer a discount of ten percent to every customer who texts twice.') });
+      expect(refused).toMatchObject({ rejected: expect.any(String) });
+      expect((await rowOf(refused.rejected)).version_tag).toBeNull();
+      // The same letter can never be handed out twice on one base (the database says so too).
+      await expect(trx.transaction(async (inner) => inner('sms_prompt_patches').insert({
+        rules: JSON.stringify([GOOD_RULE]), patch_text: 'x', patch_sha: 'y', base_version: baseVersion(), version_tag: 'A', status: 'rejected', mode_at_creation: 'true',
+      }))).rejects.toMatchObject({ code: '23505' });
+      // All 26 letters used on this base: nothing more is made until the base identity changes.
+      for (const letter of 'BCDEFGHIJKLMNOPQRSTUVWXYZ') {
+        await trx('sms_prompt_patches').insert({
+          rules: JSON.stringify([GOOD_RULE]), patch_text: 'x', patch_sha: 'y', base_version: baseVersion(), version_tag: letter, status: 'retired', mode_at_creation: 'true',
+        });
+      }
+      await insertProposal({ failure_mode: 'placeholder_leak' });
+      const distill = distillWith(SECOND_RULE);
+      expect(await auto.createCandidate({ dbi: trx, now: new Date(NOW.getTime() + 20 * DAY), distill })).toEqual({ skipped: 'tags_exhausted' });
+      expect(distill).not.toHaveBeenCalled();
     });
 
     test('one candidate at a time, and at most one new candidate per week', async () => {
@@ -321,7 +352,7 @@ postgres('SMS prompt auto-promote', () => {
       expect(out).toMatchObject({ promoted: patch.id, patchNo: patch.patch_no });
 
       const row = await rowOf(patch.id);
-      const version = `${baseVersion()}+${patchLib.patchTagFor(patch.patch_no)}`;
+      const version = `${baseVersion()}+${patch.version_tag}`;
       expect(row).toMatchObject({ status: 'active', active_version: version, prior_version: baseVersion(), would_promote: true });
       expect(await eventsOf(patch.id)).toEqual(['exam_started', 'would_promote', 'promoted']);
 
@@ -437,12 +468,45 @@ postgres('SMS prompt auto-promote', () => {
       expect((await rowOf(patch.id)).status).toBe('rejected');
     });
 
+    test('a baseline sitting that fails counts as an attempt and is resumed, never started over', async () => {
+      const items = await seedItems();
+      const patch = await insertPatch();
+      let baselineRunId = null;
+      const calls = [];
+      const runner = jest.fn(async (args) => {
+        calls.push(args);
+        if (args.runId) return { runId: args.runId, status: 'failed' };
+        const [run] = await trx('sms_sealed_eval_runs').insert({
+          prompt_version: drafter.currentPromptVersion(), provider_leg: 'anthropic', status: 'failed', items_total: items.length, model: sealed.EXAM_LEG_ROUTES.anthropic.model,
+        }).returning('id');
+        baselineRunId = run.id;
+        return { runId: run.id, status: 'failed' };
+      });
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ failed: 'exam_not_complete' });
+      expect(await rowOf(patch.id)).toMatchObject({ exam_attempts: 1, baseline_run_id: baselineRunId, status: 'candidate' });
+      expect(await eventsOf(patch.id)).toEqual(['exam_failed']);
+      // Next day: the SAME baseline run is resumed by id (no second paid run), and it counts again.
+      expect(await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough })).toEqual({ failed: 'exam_not_complete' });
+      expect(calls[1]).toEqual(expect.objectContaining({ runId: baselineRunId }));
+      expect(await trx('sms_sealed_eval_runs').count('* as n').first()).toMatchObject({ n: '1' });
+      expect(await rowOf(patch.id)).toMatchObject({ exam_attempts: 2 });
+      expect(await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 2 * DAY), runner, lock: lockThrough })).toEqual({ rejected: patch.id, reason: 'exam_unavailable' });
+      expect(runner).toHaveBeenCalledTimes(2);
+    });
+
+    test('a candidate written for an older base identity is rejected before any exam is paid for', async () => {
+      const patch = await insertPatch({ over: { base_version: 'house_voice_v12_real_answers24_n' } });
+      const runner = jest.fn();
+      expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ rejected: patch.id, reason: 'base_changed' });
+      expect(runner).not.toHaveBeenCalled();
+    });
+
     test('a finished candidate run left by a crash or the nightly sweep is decided, not run again', async () => {
       const items = await seedItems();
       const patch = await insertPatch();
       const baseline = await insertRun({ items, version: drafter.currentPromptVersion(), over: { finished_at: new Date(NOW.getTime() - DAY) } });
       await insertRun({
-        items, version: patchLib.stampPatchVersion(baseVersion(), patch.patch_no), patchId: patch.id, baselineId: baseline.id, overall: 7, actions: 7,
+        items, version: patchLib.stampPatchVersion(baseVersion(), patch.version_tag), patchId: patch.id, baselineId: baseline.id, overall: 7, actions: 7,
       });
       const runner = jest.fn();
       const out = await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() });
@@ -490,7 +554,7 @@ postgres('SMS prompt auto-promote', () => {
       const patch = await insertPatch();
       const gen = jest.spyOn(drafter, 'generateGroundedDraft').mockImplementation(async (args) => ({
         parsed: { reply: 'ok', intended_actions: [] }, passes: 1, converged: true, model: 'm', voiceProfileVersion: null,
-        promptVersion: args.promptPatch ? patchLib.stampPatchVersion(IDENTITY, args.promptPatch.patchNo) : IDENTITY,
+        promptVersion: args.promptPatch ? patchLib.stampPatchVersion(IDENTITY, args.promptPatch.tag) : IDENTITY,
       }));
       jest.spyOn(judge, 'judgeOne').mockResolvedValue({ verdict: 'equivalent', scores: scoreJson(7, 7), notes: 'n', model: 'j' });
 
@@ -502,14 +566,14 @@ postgres('SMS prompt auto-promote', () => {
       gen.mockClear();
 
       const exam = await sealed.runSealedExam({
-        providerLeg: 'anthropic', baselineRunId: plain.runId, promptPatch: { id: patch.id, patchNo: patch.patch_no, text: patch.patch_text }, dbi: trx,
+        providerLeg: 'anthropic', baselineRunId: plain.runId, promptPatch: { id: patch.id, patchNo: patch.patch_no, tag: patch.version_tag, baseVersion: patch.base_version, text: patch.patch_text }, dbi: trx,
       });
       expect(exam.status).toBe('complete');
       expect(gen).toHaveBeenCalledTimes(4);
       expect(gen.mock.calls.every(([args]) => args.promptPatch.id === patch.id && args.promptPatch.text === patch.patch_text)).toBe(true);
       const run = await trx('sms_sealed_eval_runs').where({ id: exam.runId }).first();
       expect(run).toMatchObject({
-        prompt_version: `${IDENTITY}+${patchLib.patchTagFor(patch.patch_no)}`, prompt_patch_id: patch.id, baseline_run_id: plain.runId, status: 'complete',
+        prompt_version: `${IDENTITY}+${patch.version_tag}`, prompt_patch_id: patch.id, baseline_run_id: plain.runId, status: 'complete',
       });
       expect(JSON.parse(JSON.stringify(run.significance))).toMatchObject({ pairedItems: 4 });
       // The live drafter never saw the candidate.
@@ -524,10 +588,10 @@ postgres('SMS prompt auto-promote', () => {
       const patch = await insertPatch();
       const gen = jest.spyOn(drafter, 'generateGroundedDraft').mockImplementation(async (args) => ({
         parsed: { reply: 'ok', intended_actions: [] }, passes: 1, converged: true, model: 'm', voiceProfileVersion: null,
-        promptVersion: args.promptPatch ? patchLib.stampPatchVersion(IDENTITY, args.promptPatch.patchNo) : IDENTITY,
+        promptVersion: args.promptPatch ? patchLib.stampPatchVersion(IDENTITY, args.promptPatch.tag) : IDENTITY,
       }));
       jest.spyOn(judge, 'judgeOne').mockResolvedValue({ verdict: 'equivalent', scores: scoreJson(7, 7), notes: 'n', model: 'j' });
-      const run = await sealed.createExamRun({ providerLeg: 'anthropic', promptPatch: { id: patch.id, patchNo: patch.patch_no, text: patch.patch_text }, dbi: trx });
+      const run = await sealed.createExamRun({ providerLeg: 'anthropic', promptPatch: { id: patch.id, patchNo: patch.patch_no, tag: patch.version_tag, baseVersion: patch.base_version, text: patch.patch_text }, dbi: trx });
       const out = await sealed.runSealedExam({ runId: run.id, dbi: trx });
       expect(out.status).toBe('complete');
       expect(gen).toHaveBeenCalledTimes(3);
@@ -698,6 +762,21 @@ postgres('SMS prompt auto-promote', () => {
       expect(drafter.currentPromptVersion()).toBe(active.active_version);
     });
 
+    test('a base identity change retires the active patch (no parent restored, one bell) even with no bad numbers', async () => {
+      await trx('sms_prompt_patches').where({ id: active.id }).update({ status: 'retired', retired_reason: 'superseded' });
+      const child = await activate(await insertPatch({ rules: [GOOD_RULE, SECOND_RULE], over: { parent_patch_id: active.id } }));
+      await refreshSnapshot();
+      process.env.GATE_SMS_AGENT_COMPLAINTS = 'true'; // a category gate flip moves the base identity
+      const notify = jest.fn();
+      const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify });
+      expect(out).toEqual({ rolledBack: child.id, patchNo: child.patch_no });
+      expect(await rowOf(child.id)).toMatchObject({ status: 'retired', retired_reason: 'base_changed' });
+      expect((await rowOf(active.id)).status).toBe('retired');
+      expect(await eventsOf(active.id)).not.toContain('restored_parent');
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(patchLib.getActivePatch()).toBeNull();
+    });
+
     test('no active patch, or the gate in observe mode, checks nothing', async () => {
       setMode('observe');
       expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW })).toEqual({ skipped: 'gate_off' });
@@ -720,7 +799,7 @@ postgres('SMS prompt auto-promote', () => {
       await activate(await insertPatch());
       await expect(trx.transaction(async (inner) => {
         await inner('sms_prompt_patches').insert({
-          rules: JSON.stringify([GOOD_RULE]), patch_text: 'x', patch_sha: 'y', base_version: baseVersion(), status: 'active', mode_at_creation: 'true',
+          rules: JSON.stringify([GOOD_RULE]), patch_text: 'x', patch_sha: 'y', base_version: baseVersion(), version_tag: 'Z', status: 'active', mode_at_creation: 'true',
         });
       })).rejects.toMatchObject({ code: '23505' });
     });

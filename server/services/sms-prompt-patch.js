@@ -11,7 +11,9 @@
  *  - No active patch (or the gate not 'true') means the drafter prompt and its version identity
  *    are byte-identical to today. The block is '' and the tag is ''.
  *  - Whatever changes what a live draft receives changes its prompt_version: one
- *    UPPERCASE letter (patch number mod 26) rides at the end of the tags part of the identity,
+ *    UPPERCASE letter (the patch's version_tag, handed out once per base identity: UNIQUE
+ *    (base_version, version_tag), so two patches on one base never share a version string)
+ *    rides at the end of the tags part of the identity,
  *    for example 'house_voice_v12_real_answers26_n+bcA'. Every other tag (category b c l m,
  *    voice input v e) is lowercase, so the letter cannot collide with them. ONE character is
  *    deliberate: the longest identity without a patch is 39 characters (32-character
@@ -46,10 +48,10 @@ const promptAutopromoteMode = smsPromptAutopromoteMode;
 
 /* ── Version identity ─────────────────────────────────────────────────── */
 
-function patchTagFor(patchNo) {
-  const n = Number(patchNo);
-  if (!Number.isInteger(n) || n < 1) return '';
-  return PATCH_TAG_LETTERS[(n - 1) % PATCH_TAG_LETTERS.length];
+/** The next free tag for a base identity, given the tags its patches already hold; null = all 26 used. */
+function nextFreeTag(usedTags) {
+  const used = new Set((usedTags || []).filter(Boolean));
+  return PATCH_TAG_LETTERS.split('').find((letter) => !used.has(letter)) || null;
 }
 
 /**
@@ -66,9 +68,8 @@ function splitPromptVersion(promptVersion) {
 }
 
 /** The identity with the patch tag appended; null when it would not fit the varchar(40) columns. */
-function stampPatchVersion(promptVersion, patchNo) {
-  const tag = patchTagFor(patchNo);
-  if (!tag) return null;
+function stampPatchVersion(promptVersion, tag) {
+  if (typeof tag !== 'string' || !/^[A-Z]$/.test(tag)) return null;
   const { base, tags } = splitPromptVersion(promptVersion);
   const stamped = `${base}+${tags}${tag}`;
   return stamped.length <= VERSION_COLUMN_MAX ? stamped : null;
@@ -131,7 +132,7 @@ function buildBlock(rules) {
 
 /* ── Snapshot of the active patch (read synchronously by the drafter) ──── */
 
-let snapshot = null; // { id, patchNo, text }
+let snapshot = null; // { id, patchNo, tag, baseVersion, text }
 let refreshTimer = null;
 
 function setActivePatchSnapshot(next) {
@@ -150,7 +151,7 @@ function getActivePatch() {
 async function refreshActivePatch({ dbi } = {}) {
   const handle = dbi || require('../models/db');
   try {
-    const row = await handle('sms_prompt_patches').where({ status: 'active' }).first('id', 'patch_no', 'patch_text', 'patch_sha', 'rules');
+    const row = await handle('sms_prompt_patches').where({ status: 'active' }).first('id', 'patch_no', 'version_tag', 'base_version', 'patch_text', 'patch_sha', 'rules');
     if (!row) {
       snapshot = null;
       return null;
@@ -162,7 +163,7 @@ async function refreshActivePatch({ dbi } = {}) {
       snapshot = null;
       return null;
     }
-    snapshot = { id: row.id, patchNo: row.patch_no, text: row.patch_text };
+    snapshot = { id: row.id, patchNo: row.patch_no, tag: row.version_tag, baseVersion: row.base_version, text: row.patch_text };
     return snapshot;
   } catch (err) {
     logger.warn(`[sms-prompt-patch] active patch refresh failed (code ${err?.code || 'unknown'}); keeping the last snapshot`);
@@ -191,8 +192,10 @@ function stopPatchRefresh() {
 
 /**
  * What the drafter appends and stamps for ONE draft. `options.promptPatch` undefined (or no
- * options) = the live snapshot; null = no patch; an object { patchNo, text } = an exam-only
+ * options) = the live snapshot; null = no patch; an object { patchNo, tag, text } = an exam-only
  * candidate. Returns { block, version } where version is the patched identity (null = unpatched).
+ * The LIVE patch applies only on the base identity it was examined on: after a prompt bump or a
+ * category-gate flip the old rule stops at once (the monitor then retires it).
  */
 function resolvePromptPatch({ realAnswersOn, options, baseVersion }) {
   const none = { block: '', version: null };
@@ -200,7 +203,8 @@ function resolvePromptPatch({ realAnswersOn, options, baseVersion }) {
   const override = options ? options.promptPatch : undefined;
   const patch = override === undefined ? getActivePatch() : override;
   if (!patch || !patch.text) return none;
-  const version = stampPatchVersion(baseVersion, patch.patchNo);
+  if (override === undefined && patch.baseVersion !== baseVersion) return none;
+  const version = stampPatchVersion(baseVersion, patch.tag);
   if (!version) {
     logger.error(`[sms-prompt-patch] patch ${patch.patchNo} would exceed the varchar(${VERSION_COLUMN_MAX}) prompt_version columns on ${baseVersion}; not applied`);
     return none;
@@ -216,7 +220,7 @@ module.exports = {
   MAX_BLOCK_CHARS,
   BLOCK_HEADER,
   promptAutopromoteMode,
-  patchTagFor,
+  nextFreeTag,
   splitPromptVersion,
   stampPatchVersion,
   sanitizeRuleText,

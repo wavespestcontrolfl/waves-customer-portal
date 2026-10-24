@@ -1129,9 +1129,9 @@ async function pendingTailWithinCap({ run, cohortCutoff, dbi }) {
  */
 async function loadRunPatch(run, dbi) {
   if (!run || !run.prompt_patch_id) return undefined;
-  const row = await dbi('sms_prompt_patches').where({ id: run.prompt_patch_id }).first('id', 'patch_no', 'patch_text');
+  const row = await dbi('sms_prompt_patches').where({ id: run.prompt_patch_id }).first('id', 'patch_no', 'version_tag', 'base_version', 'patch_text');
   if (!row) throw new Error(`run ${String(run.id).slice(0, 8)} is pinned to a prompt patch that no longer exists`);
-  return { id: row.id, patchNo: row.patch_no, text: row.patch_text };
+  return { id: row.id, patchNo: row.patch_no, tag: row.version_tag, baseVersion: row.base_version, text: row.patch_text };
 }
 
 // The prompt version a sitting must keep drafting under: the candidate's identity for an
@@ -1139,7 +1139,7 @@ async function loadRunPatch(run, dbi) {
 function expectedRunVersion(runPatch) {
   const drafter = require('./sms-shadow-drafter');
   if (!runPatch) return drafter.currentPromptVersion();
-  const version = stampPatchVersion(drafter.currentPromptVersionBase(), runPatch.patchNo);
+  const version = stampPatchVersion(drafter.currentPromptVersionBase(), runPatch.tag);
   if (!version) throw new Error('prompt patch tag does not fit the prompt_version columns');
   return version;
 }

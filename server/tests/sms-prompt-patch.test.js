@@ -24,7 +24,8 @@ afterEach(() => {
 });
 
 const block = () => patch.buildBlock([GOOD_RULE]);
-const snapshot = (patchNo = 3) => ({ id: 'patch-id', patchNo, text: block().text });
+// baseVersion is read when called, after a test has set its gates: a live snapshot applies only on the base it was examined on.
+const snapshot = (tag = 'C') => ({ id: 'patch-id', patchNo: 1, tag, baseVersion: drafter.currentPromptVersionBase(), text: block().text });
 
 describe('mode reader', () => {
   test.each([[undefined, 'off'], ['', 'off'], ['false', 'off'], ['yes', 'off'], ['observe', 'observe'], ['OBSERVE', 'observe'], ['true', 'true'], ['TRUE', 'true']])('%s reads as %s', (value, mode) => {
@@ -41,40 +42,43 @@ describe('version identity', () => {
   const LONGEST = `${REAL}+bcelmv`;
 
   test('one uppercase letter rides at the end of the tags part and splits back out', () => {
-    expect(patch.patchTagFor(1)).toBe('A');
-    expect(patch.patchTagFor(3)).toBe('C');
-    expect(patch.patchTagFor(26)).toBe('Z');
-    expect(patch.patchTagFor(27)).toBe('A');
-    expect(patch.patchTagFor(0)).toBe('');
-    expect(patch.patchTagFor(1.5)).toBe('');
-    expect(patch.stampPatchVersion(REAL, 3)).toBe(`${REAL}+C`);
-    expect(patch.stampPatchVersion(`${REAL}+bc`, 3)).toBe(`${REAL}+bcC`);
-    expect(patch.stampPatchVersion('house_voice_v11+v', 2)).toBe('house_voice_v11+vB');
+    expect(patch.stampPatchVersion(REAL, 'C')).toBe(`${REAL}+C`);
+    expect(patch.stampPatchVersion(`${REAL}+bc`, 'C')).toBe(`${REAL}+bcC`);
+    expect(patch.stampPatchVersion('house_voice_v11+v', 'B')).toBe('house_voice_v11+vB');
+    for (const bad of [undefined, null, '', 'c', 'AB', 3]) expect(patch.stampPatchVersion(REAL, bad)).toBeNull();
     expect(patch.splitPromptVersion(`${REAL}+bcC`)).toEqual({ base: REAL, tags: 'bc', patchTag: 'C' });
     expect(patch.splitPromptVersion(`${REAL}+bc`)).toEqual({ base: REAL, tags: 'bc', patchTag: '' });
     expect(patch.splitPromptVersion('house_voice_v11')).toEqual({ base: 'house_voice_v11', tags: '', patchTag: '' });
   });
 
+  test('tags are handed out once per base: the next free letter, none left after 26', () => {
+    expect(patch.nextFreeTag([])).toBe('A');
+    expect(patch.nextFreeTag(['A', 'B', null])).toBe('C');
+    expect(patch.nextFreeTag(['A', 'C'])).toBe('B');
+    const all = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+    expect(patch.nextFreeTag(all)).toBeNull();
+    expect(patch.nextFreeTag(all.slice(1))).toBe('A');
+  });
+
   test('the longest combination (all category tags + voice pin + edit learning) plus a patch tag is exactly 40', () => {
     expect(LONGEST).toHaveLength(39);
-    const stamped = patch.stampPatchVersion(LONGEST, 26);
+    const stamped = patch.stampPatchVersion(LONGEST, 'Z');
     expect(stamped).toBe(`${LONGEST}Z`);
     expect(stamped).toHaveLength(patch.VERSION_COLUMN_MAX);
     expect(patch.splitPromptVersion(stamped)).toEqual({ base: REAL, tags: 'bcelmv', patchTag: 'Z' });
   });
 
   test('a tagged identity that would pass 40 characters is refused, never truncated', () => {
-    expect(patch.stampPatchVersion(`${LONGEST}x`, 5)).toBeNull();
-    expect(patch.stampPatchVersion(LONGEST, 0)).toBeNull();
+    expect(patch.stampPatchVersion(`${LONGEST}x`, 'E')).toBeNull();
   });
 
   test('a patch tag never changes the fact contract the sealed exam requires', () => {
     for (const version of [REAL, `${REAL}+c`, `${REAL}+bcml`, LONGEST]) {
-      const tagged = patch.stampPatchVersion(version, 3);
+      const tagged = patch.stampPatchVersion(version, 'C');
       expect(sealed.requiredFactMarkers(tagged)).toEqual(sealed.requiredFactMarkers(version));
       expect(sealed.forbiddenFactMarkers(tagged)).toEqual(sealed.forbiddenFactMarkers(version));
     }
-    // The uppercase 'C' (patch 3) must not read as the lowercase complaints tag 'c'.
+    // An uppercase 'C' must not read as the lowercase complaints tag 'c'.
     expect(sealed.requiredFactMarkers(`${REAL}+C`)).toEqual(sealed.requiredFactMarkers(REAL));
   });
 });
@@ -137,7 +141,7 @@ describe('the drafter prompt and its identity', () => {
 
   test('an active patch under mode true appends the block before the JSON format and tags the version', () => {
     const plain = drafter.buildSystemPromptWithProfile('').system;
-    patch.setActivePatchSnapshot(snapshot(3));
+    patch.setActivePatchSnapshot(snapshot('C'));
     const patched = drafter.buildSystemPromptWithProfile('');
     expect(patched.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+C`);
     expect(patched.system).toContain(block().text);
@@ -150,7 +154,7 @@ describe('the drafter prompt and its identity', () => {
 
   test('the tag joins the category tags and the voice profile still composes after the block', () => {
     setEnv('GATE_SMS_AGENT_COMPLAINTS', 'true');
-    patch.setActivePatchSnapshot(snapshot(7));
+    patch.setActivePatchSnapshot(snapshot('G'));
     expect(drafter.currentPromptVersion()).toMatch(/\+cG$/);
     const withProfile = drafter.buildSystemPromptWithProfile('Warm and brief.');
     expect(withProfile.applied).toBe(true);
@@ -164,7 +168,7 @@ describe('the drafter prompt and its identity', () => {
     const base = drafter.currentPromptVersionBase();
     expect(base).toBe('house_voice_v12_real_answers26_n+bcelmv');
     expect(base).toHaveLength(39);
-    patch.setActivePatchSnapshot(snapshot(3));
+    patch.setActivePatchSnapshot(snapshot('C'));
     const live = drafter.currentPromptVersion();
     expect(live).toBe(`${base}C`);
     expect(live.length).toBeLessThanOrEqual(patch.VERSION_COLUMN_MAX);
@@ -176,7 +180,7 @@ describe('the drafter prompt and its identity', () => {
   test.each([['observe'], [undefined], ['false']])('mode %s: an active row is not applied (prompt and version unchanged)', (mode) => {
     const plain = drafter.buildSystemPromptWithProfile('').system;
     setEnv('GATE_SMS_PROMPT_AUTOPROMOTE', mode);
-    patch.setActivePatchSnapshot(snapshot(3));
+    patch.setActivePatchSnapshot(snapshot('C'));
     expect(patch.getActivePatch()).toBeNull();
     expect(drafter.buildSystemPromptWithProfile('').system).toBe(plain);
     expect(drafter.currentPromptVersion()).toBe(drafter.currentPromptVersionBase());
@@ -185,27 +189,37 @@ describe('the drafter prompt and its identity', () => {
   test('real answers off: the v11 prompt and version are untouched even with an active patch', () => {
     setEnv('GATE_SMS_REAL_ANSWERS', undefined);
     const plain = drafter.buildSystemPromptWithProfile('').system;
-    patch.setActivePatchSnapshot(snapshot(3));
+    patch.setActivePatchSnapshot(snapshot('C'));
     expect(drafter.buildSystemPromptWithProfile('').system).toBe(plain);
     expect(drafter.currentPromptVersion()).toBe(drafter.PROMPT_VERSION);
   });
 
+  test('a live patch stops applying when its examined base changes; an exam-only candidate is not base-gated', () => {
+    const plain = drafter.buildSystemPromptWithProfile('').system;
+    patch.setActivePatchSnapshot({ ...snapshot('C'), baseVersion: 'house_voice_v12_real_answers24_n' });
+    expect(drafter.buildSystemPromptWithProfile('').system).toBe(plain);
+    expect(drafter.buildSystemPromptWithProfile('').promptPatchVersion).toBeNull();
+    expect(drafter.currentPromptVersion()).toBe(drafter.currentPromptVersionBase());
+    const exam = drafter.buildSystemPromptWithProfile('', { promptPatch: { ...snapshot('C'), baseVersion: 'house_voice_v12_real_answers24_n' } });
+    expect(exam.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+C`);
+  });
+
   test('an exam-only candidate applies in any mode and never needs the live snapshot', () => {
     setEnv('GATE_SMS_PROMPT_AUTOPROMOTE', 'observe');
-    const exam = drafter.buildSystemPromptWithProfile('', { promptPatch: snapshot(9) });
+    const exam = drafter.buildSystemPromptWithProfile('', { promptPatch: snapshot('I') });
     expect(exam.system).toContain(block().text);
     expect(exam.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+I`);
     expect(drafter.currentPromptVersion()).toBe(drafter.currentPromptVersionBase());
     // null means "no patch at all", even over a live one.
     setEnv('GATE_SMS_PROMPT_AUTOPROMOTE', 'true');
-    patch.setActivePatchSnapshot(snapshot(3));
+    patch.setActivePatchSnapshot(snapshot('C'));
     expect(drafter.buildSystemPromptWithProfile('', { promptPatch: null }).promptPatchVersion).toBeNull();
   });
 
   test('a tag that does not fit the version columns leaves BOTH the block and the version unpatched', () => {
     const none = { block: '', version: null };
-    expect(patch.resolvePromptPatch({ realAnswersOn: true, options: { promptPatch: snapshot(5) }, baseVersion: `house_voice_v12_real_answers26_n+bcml${'x'.repeat(4)}` })).toEqual(none);
-    expect(patch.resolvePromptPatch({ realAnswersOn: false, options: { promptPatch: snapshot(5) }, baseVersion: 'house_voice_v11' })).toEqual(none);
+    expect(patch.resolvePromptPatch({ realAnswersOn: true, options: { promptPatch: snapshot('E') }, baseVersion: `house_voice_v12_real_answers26_n+bcml${'x'.repeat(4)}` })).toEqual(none);
+    expect(patch.resolvePromptPatch({ realAnswersOn: false, options: { promptPatch: snapshot('E') }, baseVersion: 'house_voice_v11' })).toEqual(none);
   });
 });
 

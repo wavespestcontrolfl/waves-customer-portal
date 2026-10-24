@@ -155,6 +155,9 @@ async function createCandidate({ dbi = db, now = new Date(), distill = distillRu
   if (baseVersion === drafter.PROMPT_VERSION) return { skipped: 'real_answers_off' };
   const blocked = await candidateGate({ dbi, now });
   if (blocked) return { skipped: blocked };
+  // One version letter per patch on this base identity, never reused (no shared cohorts).
+  const tag = patchLib.nextFreeTag(await dbi(PATCHES).where({ base_version: baseVersion }).pluck('version_tag'));
+  if (!tag) return { skipped: 'tags_exhausted' };
 
   const proposal = await pickProposal({ dbi, liveVersion: drafter.currentPromptVersion(), now });
   if (!proposal) return { skipped: 'no_eligible_proposal' };
@@ -180,6 +183,7 @@ async function createCandidate({ dbi = db, now = new Date(), distill = distillRu
         patch_text: text,
         patch_sha: patchLib.blockSha(text),
         base_version: baseVersion,
+        version_tag: verdict.ok ? tag : null,
         status: verdict.ok ? 'candidate' : 'rejected',
         mode_at_creation: mode,
         exam_leg: EXAM_LEG,
@@ -284,7 +288,7 @@ async function sitExam({ dbi, runner, lock, args }) {
   }
   if (result && result.skipped) return { skipped: result.reason || 'lock_busy' };
   const run = result && result.runId ? await dbi('sms_sealed_eval_runs').where({ id: result.runId }).first() : null;
-  return run && run.status === 'complete' ? { run } : { failed: 'exam_not_complete' };
+  return run && run.status === 'complete' ? { run } : { failed: 'exam_not_complete', runId: result && result.runId };
 }
 
 async function examWindowReason({ dbi, patch, now }) {
@@ -297,6 +301,30 @@ async function examWindowReason({ dbi, patch, now }) {
 // nightly sweep left behind is finished or read, never started twice.
 const candidateRunRow = (dbi, patchId) => dbi('sms_sealed_eval_runs').where({ prompt_patch_id: patchId }).orderBy('started_at', 'desc').first();
 
+// A failed sitting counts toward MAX_EXAM_ATTEMPTS and keeps the run it left, so the next tick
+// resumes that run instead of paying for a new one.
+async function recordFailedSitting({ dbi, patch, now, stage, runId, failed }) {
+  await dbi.transaction(async (trx) => {
+    const update = { exam_attempts: trx.raw('exam_attempts + 1'), updated_at: now };
+    if (runId) update[stage === 'baseline' ? 'baseline_run_id' : 'exam_run_id'] = runId;
+    await trx(PATCHES).where({ id: patch.id }).update(update);
+    await logEvent(trx, now, patch.id, 'exam_failed', failed || null, { stage, runId: runId || null, leg: EXAM_LEG });
+  });
+}
+
+// The baseline for a candidate: a fresh complete run of the live prompt, else sit one, resuming
+// a baseline an earlier failed sitting left behind. { baseline } | { skipped } | { failed }.
+async function obtainBaseline({ dbi, patch, runner, lock, now }) {
+  const fresh = await findFreshBaseline({ dbi, now });
+  if (fresh) return { baseline: fresh };
+  const prior = patch.baseline_run_id ? await dbi('sms_sealed_eval_runs').where({ id: patch.baseline_run_id }).first() : null;
+  const resume = prior && prior.status !== 'complete' && !prior.prompt_patch_id;
+  const sat = await sitExam({ dbi, runner, lock, args: resume ? { runId: prior.id } : { triggeredBy: 'auto:autopromote-baseline' } });
+  if (sat.run) return { baseline: sat.run };
+  if (sat.failed) await recordFailedSitting({ dbi, patch, now, stage: 'baseline', runId: sat.runId || (resume ? prior.id : null), failed: sat.failed });
+  return sat;
+}
+
 /** { run, baseline } for a decision, or { skipped } / { failed }. */
 async function runCandidateExam({ dbi, patch, runner, lock, now }) {
   let existing = await candidateRunRow(dbi, patch.id);
@@ -305,17 +333,13 @@ async function runCandidateExam({ dbi, patch, runner, lock, now }) {
     if (closed) return { skipped: closed };
     let baselineId = existing && existing.baseline_run_id;
     if (!existing) {
-      let baseline = await findFreshBaseline({ dbi, now });
-      if (!baseline) {
-        const sat = await sitExam({ dbi, runner, lock, args: { triggeredBy: 'auto:autopromote-baseline' } });
-        if (!sat.run) return sat;
-        baseline = sat.run;
-      }
-      baselineId = baseline.id;
+      const got = await obtainBaseline({ dbi, patch, runner, lock, now });
+      if (!got.baseline) return got;
+      baselineId = got.baseline.id;
     }
     const sitting = existing
       ? { runId: existing.id }
-      : { baselineRunId: baselineId, triggeredBy: 'auto:autopromote', promptPatch: { id: patch.id, patchNo: patch.patch_no, text: patch.patch_text } };
+      : { baselineRunId: baselineId, triggeredBy: 'auto:autopromote', promptPatch: { id: patch.id, patchNo: patch.patch_no, tag: patch.version_tag, baseVersion: patch.base_version, text: patch.patch_text } };
     const sat = await sitExam({ dbi, runner, lock, args: sitting });
     if (sat.skipped) return sat;
     await dbi.transaction(async (trx) => {
@@ -349,6 +373,11 @@ async function examineCandidate({ dbi = db, now = new Date(), runner, lock, noti
   const patch = await dbi(PATCHES).where({ status: 'candidate' }).first();
   if (!patch) return { skipped: 'no_candidate' };
   if (patch.decided_at) return actOnRecordedDecision({ dbi, patch, now, notify });
+  // The rule was written for one prompt identity; a prompt bump or a category-gate flip since then
+  // makes the exam (and any later promotion) describe a prompt that is no longer live.
+  if (patch.base_version !== require('./sms-shadow-drafter').currentPromptVersionBase()) {
+    return recordRejection({ dbi, patch, reason: 'base_changed', detail: null, now });
+  }
 
   if (patch.exam_attempts >= MAX_EXAM_ATTEMPTS) return recordRejection({ dbi, patch, reason: 'exam_unavailable', detail: { attempts: patch.exam_attempts }, now });
   const ran = await runCandidateExam({
@@ -409,7 +438,7 @@ async function promoteCandidate({ dbi = db, patchId, now = new Date(), notify } 
     const cand = await trx(PATCHES).where({ id: patchId }).forUpdate().first();
     if (!cand || cand.status !== 'candidate') return { skipped: 'not_candidate' };
     const active = await trx(PATCHES).where({ status: 'active' }).forUpdate().first();
-    const stamped = patchLib.stampPatchVersion(liveBase, cand.patch_no);
+    const stamped = patchLib.stampPatchVersion(liveBase, cand.version_tag);
     let refuse = null;
     if ((cand.parent_patch_id || null) !== (active ? active.id : null)) refuse = 'stale_parent';
     else if (cand.base_version !== liveBase) refuse = 'base_changed';
@@ -442,6 +471,7 @@ const ROLLBACK_PHRASES = Object.freeze({
   reply_confusion_rise: 'customers got confused more often',
   reply_optout_rise: 'more customers opted out after a reply',
   exam_regression: 'the sealed exam on the live prompt got worse',
+  base_changed: 'the SMS prompt changed underneath it',
 });
 
 async function liveJudgeStats(dbi, version, from, to) {
@@ -502,8 +532,6 @@ async function examCheck({ dbi, patch }) {
   const runs = await dbi({ r: 'sms_sealed_eval_runs' })
     .leftJoin({ b: 'sms_sealed_eval_runs' }, 'b.id', 'r.baseline_run_id')
     .where('r.prompt_version', patch.active_version)
-    // The tag is one letter (patch number mod 26): never read another patch's exam run.
-    .where((q) => q.whereNull('r.prompt_patch_id').orWhere('r.prompt_patch_id', patch.id))
     .where('r.status', 'complete')
     .whereIn('r.provider_leg', LIVE_EXAM_LEGS)
     .select('r.id', 'r.provider_leg', 'r.significance', 'r.unsafe_count', 'r.items_judged', 'b.unsafe_count as base_unsafe', 'b.items_judged as base_judged');
@@ -521,7 +549,7 @@ async function examCheck({ dbi, patch }) {
  * Retire the active patch and put its parent (when it was superseded by this one) back. One
  * transaction, two audit rows at most, one alert.
  */
-async function rollbackPatch({ dbi = db, patchId, trigger, now = new Date(), notify } = {}) {
+async function rollbackPatch({ dbi = db, patchId, trigger, now = new Date(), notify, restoreParent = true } = {}) {
   const outcome = await dbi.transaction(async (trx) => {
     const patch = await trx(PATCHES).where({ id: patchId, status: 'active' }).forUpdate().first();
     if (!patch) return { skipped: 'not_active' };
@@ -529,7 +557,7 @@ async function rollbackPatch({ dbi = db, patchId, trigger, now = new Date(), not
       status: 'retired', retired_at: now, retired_reason: trigger.reason, decision_detail: JSON.stringify({ ...(patch.decision_detail || {}), rollback: trigger.detail }), updated_at: now,
     });
     await logEvent(trx, now, patch.id, 'rolled_back', trigger.reason, trigger.detail);
-    const parent = patch.parent_patch_id ? await trx(PATCHES).where({ id: patch.parent_patch_id }).forUpdate().first() : null;
+    const parent = restoreParent && patch.parent_patch_id ? await trx(PATCHES).where({ id: patch.parent_patch_id }).forUpdate().first() : null;
     if (parent && parent.status === 'retired' && parent.retired_reason === 'superseded') {
       await trx(PATCHES).where({ id: parent.id }).update({ status: 'active', activated_at: now, retired_at: null, retired_reason: null, updated_at: now });
       await logEvent(trx, now, parent.id, 'restored_parent', trigger.reason, { restoredAfter: patch.patch_no });
@@ -548,6 +576,11 @@ async function runRollbackMonitor({ dbi = db, now = new Date(), notify } = {}) {
   if (patchLib.promptAutopromoteMode() !== 'true') return { skipped: 'gate_off' };
   const patch = await dbi(PATCHES).where({ status: 'active' }).first();
   if (!patch) return { skipped: 'no_active_patch' };
+  // The drafter already stopped applying a patch whose base prompt moved; retire the row too,
+  // and do not put a parent back (it was written for the same old prompt).
+  if (patch.base_version !== require('./sms-shadow-drafter').currentPromptVersionBase()) {
+    return rollbackPatch({ dbi, patchId: patch.id, trigger: { reason: 'base_changed', detail: { base: patch.base_version } }, now, notify, restoreParent: false });
+  }
   for (const check of [liveJudgeCheck, outcomeCheck, examCheck]) {
     const trigger = await check({ dbi, patch, now });
     if (trigger) return rollbackPatch({ dbi, patchId: patch.id, trigger, now, notify });
