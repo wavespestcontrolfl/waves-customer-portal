@@ -120,12 +120,12 @@ function visitLink(visitId, dateStr) {
   return `/admin/dispatch?tab=schedule&date=${encodeURIComponent(dateStr)}&appointment=${encodeURIComponent(visitId)}`;
 }
 
-async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, childDate, serviceType }) {
+async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, childDate, serviceLabel }) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const names = require('./admin-alert-names');
   const name = await names.lookupCustomerName(db, parent.customer_id) || 'a customer';
   const day = names.shortDateET(new Date(`${childDate}T12:00:00Z`));
-  const service = serviceType || 'service';
+  const service = serviceLabel || 'service';
   const lastPaidWords = verdict.lastPaid != null ? `the last paid visit was ${money(verdict.lastPaid)}` : 'no paid visit to compare';
   const cancelled = verdict.kind === 'cancelled_root';
   const spec = cancelled

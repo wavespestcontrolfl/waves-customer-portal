@@ -199,7 +199,7 @@ describe('office alert copy', () => {
   test('cancelled root: one alert per series, names the price and the last paid amount', async () => {
     await guards.raiseExtensionPriceAlert(
       { skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 },
-      { parent: { customer_id: 'c1' }, parentId: 'root-1', childDate: '2026-11-03', serviceType: 'Quarterly Pest Control' },
+      { parent: { customer_id: 'c1' }, parentId: 'root-1', childDate: '2026-11-03', serviceLabel: 'Quarterly Pest Control' },
     );
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toBe("Schedule — check Pat Example's plan price");
@@ -210,7 +210,7 @@ describe('office alert copy', () => {
   test('over the last paid visit: links the inserted visit, one open alert per series', async () => {
     await guards.raiseExtensionPriceAlert(
       { skip: false, kind: 'over_last_paid', price: 216.99, lastPaid: 117 },
-      { parent: { customer_id: 'c1' }, parentId: 'root-1', childId: 'child-7', childDate: '2026-11-03', serviceType: 'Quarterly Pest Control' },
+      { parent: { customer_id: 'c1' }, parentId: 'root-1', childId: 'child-7', childDate: '2026-11-03', serviceLabel: 'Quarterly Pest Control' },
     );
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toBe("Billing — check Pat Example's Nov 3 visit price");
