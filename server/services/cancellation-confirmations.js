@@ -263,7 +263,7 @@ async function confirmationChannelAvailability(customer) {
       const { toE164 } = require('../utils/phone');
       const candidates = [...new Set([customer.phone, toE164(customer.phone)].filter(Boolean))];
       const suppressed = await db('messaging_suppression')
-        .whereIn('phone', candidates).where({ active: true }).first('id');
+        .whereIn('phone', candidates).where({ active: true }).first('phone');
       if (suppressed) channels.sms = false;
     } catch (err) { logger.warn(`channel availability: suppression read failed for ${customer.id}: ${err.message}`); }
   }
