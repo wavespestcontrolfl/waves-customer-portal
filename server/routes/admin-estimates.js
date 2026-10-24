@@ -887,7 +887,7 @@ function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode }) {
     `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     '- Waves Pest Control',
   ]);
-  return { subject: 'Your Waves Pest Control Estimate is Ready', html, text };
+  return { subject: proposalMode ? 'Your pest control proposal from Waves' : 'Your Waves Pest Control Estimate is Ready', html, text };
 }
 
 function estimateEmailPriceLine(estimate) {

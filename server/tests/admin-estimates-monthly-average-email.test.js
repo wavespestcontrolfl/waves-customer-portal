@@ -234,6 +234,7 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     expect(html).toContain(NEXT);
     expect(html).toContain(NOTE);
     expect(html).toContain('View your proposal');
+    expect(subject).toBe('Your pest control proposal from Waves');
     for (const body of [subject, html, text]) expect(body).not.toMatch(/online checkout|account manager will follow up/i);
     // The estimate (non-proposal) fallback is untouched.
     const estimate = estimateSmtpContent({ firstName: 'Pat', viewUrl: 'u', proposalMode: false });
