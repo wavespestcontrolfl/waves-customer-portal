@@ -19,6 +19,15 @@ const { loadCustomerGrassContext, normalizeGrassType } = require('./lawn-grass-c
 const { recomputeEntryReviewGate } = require('./agronomic-wiki');
 const { coordinatesOf } = require('./property-coordinates');
 
+// Score scale (GATE_LAWN_SCORE_SCALE_V2, owner 2026-10-24): scores on two scales do not
+// compare, so per-customer improvements and neighbor benchmarks stay within one scale.
+// The column is read only once it exists (before its migration every row is scale 1).
+const hasScoreScale = () => db.schema.hasColumn('lawn_assessments', 'score_scale');
+const scoreScaleOf = (row) => (Number(row?.score_scale) === 2 ? 2 : 1);
+// The neighbor benchmark segment of one zip and grass on one score scale; scale 1 keeps
+// the key every earlier benchmark row was written under.
+const benchmarkKey = (zip, grass, scale) => `${zip}|${slugify(grass)}${scale === 2 ? '|s2' : ''}`;
+
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
 }
@@ -393,17 +402,20 @@ async function computeROI() {
     // Improvement correlation
     const improvements = await db('lawn_assessments')
       .where({ confirmed_by_tech: true })
-      .select('customer_id', 'overall_score', 'is_baseline', 'service_date')
+      .select('customer_id', 'overall_score', 'is_baseline', 'service_date', ...((await hasScoreScale()) ? ['score_scale'] : []))
       .orderBy('service_date', 'asc');
 
     const customerImprovements = {};
     for (const a of improvements) {
       if (!customerImprovements[a.customer_id]) customerImprovements[a.customer_id] = [];
-      customerImprovements[a.customer_id].push(a.overall_score || 0);
+      customerImprovements[a.customer_id].push(a);
     }
 
     let bigImprovers = 0, smallImprovers = 0, decliners = 0;
-    for (const scores of Object.values(customerImprovements)) {
+    for (const rows of Object.values(customerImprovements)) {
+      // First and last on the customer's latest score scale only.
+      const latestScale = scoreScaleOf(rows[rows.length - 1]);
+      const scores = rows.filter((a) => scoreScaleOf(a) === latestScale).map((a) => a.overall_score || 0);
       if (scores.length < 2) continue;
       const delta = scores[scores.length - 1] - scores[0];
       if (delta >= 20) bigImprovers++;
@@ -534,7 +546,8 @@ async function computeNeighborhoodBenchmarks() {
         this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
       })
       .where({ 'la.confirmed_by_tech': true })
-      .select('c.id', 'c.zip', 'c.city', 'tp.grass_type', 'c.lawn_type', 'la.overall_score', 'la.is_baseline', 'la.service_date')
+      .select('c.id', 'c.zip', 'c.city', 'tp.grass_type', 'c.lawn_type', 'la.overall_score', 'la.is_baseline', 'la.service_date',
+        ...((await hasScoreScale()) ? ['la.score_scale'] : []))
       .orderBy('la.service_date', 'asc');
 
     // Segment by zip + grass_type. Mirror loadCustomerGrassContext's fallback
@@ -545,7 +558,8 @@ async function computeNeighborhoodBenchmarks() {
     for (const c of customers) {
       const zip = c.zip || 'unknown';
       const grass = c.grass_type || normalizeGrassType(c.lawn_type) || 'unknown';
-      const key = `${zip}|${slugify(grass)}`;
+      // One segment per score scale: a scale-2 overall never ranks in a scale-1 pool.
+      const key = benchmarkKey(zip, grass, scoreScaleOf(c));
 
       if (!segments[key]) {
         segments[key] = {
@@ -621,10 +635,6 @@ async function getCustomerBenchmark(customerId) {
     const grassContext = await loadCustomerGrassContext(customerId);
     const zip = customer.zip || 'unknown';
     const grass = grassContext.grassType || 'unknown';
-    const key = `${zip}|${slugify(grass)}`;
-
-    const benchmark = await db('neighborhood_benchmarks').where({ segment_key: key }).first();
-    if (!benchmark || benchmark.customer_count < 3) return null;
 
     // Get customer's latest score
     const latest = await db('lawn_assessments')
@@ -633,6 +643,10 @@ async function getCustomerBenchmark(customerId) {
       .first();
 
     if (!latest?.overall_score) return null;
+
+    // The benchmark on the latest score's own scale (none until 3 neighbors have one).
+    const benchmark = await db('neighborhood_benchmarks').where({ segment_key: benchmarkKey(zip, grass, scoreScaleOf(latest)) }).first();
+    if (!benchmark || benchmark.customer_count < 3) return null;
 
     const score = latest.overall_score;
     let percentileLabel;
