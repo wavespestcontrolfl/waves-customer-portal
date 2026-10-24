@@ -109,6 +109,7 @@ const { calculateBoundedTrackingEta } = require('../services/customer-tracking-e
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const SeriesPriceGuards = require('../services/series-price-guards');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
@@ -20836,6 +20837,20 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           return spawnedVisit;
         }
       }
+      // Series price guards (GATE_SERIES_PRICE_GUARDS; off = no reads, no
+      // change): this child's price against what the series last collected
+      // (rationale on services/series-price-guards.js). A cancelled root's
+      // price that the last paid visit does not back is not minted at all.
+      const priceVerdict = SeriesPriceGuards.seriesPriceGuardsLive()
+        ? await SeriesPriceGuards.extensionPriceVerdict(conn, { parent, parentId, child: nextData })
+        : null;
+      const priceAlertContext = { parent, parentId, childDate: nextStr, serviceType: childIdentity.service_type };
+      if (priceVerdict?.skip) {
+        logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — ${nextStr} price ${priceVerdict.price} is templated from a cancelled series root and not backed by the last paid visit (${priceVerdict.lastPaid ?? 'none'})`);
+        SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, priceAlertContext);
+        onSkip?.('cancelled_root_price');
+        return spawnedVisit;
+      }
       const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
       // Annual-prepay coverage for the row we just inserted.
       //
@@ -20884,6 +20899,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // extension or register its reminder.
       if (autoExtLive && autoExtRow?.id) {
         await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
+        if (priceVerdict && !(await SeriesPriceGuards.insertedRowIsPrepaid(conn, autoExtRow.id))) {
+          SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, { ...priceAlertContext, childId: autoExtRow.id });
+        }
         spawnedVisit = {
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,
