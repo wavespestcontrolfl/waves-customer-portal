@@ -40,7 +40,7 @@ export default function PropertyLineGroups({ groups, fmtCurrency }) {
             {group.label}
           </div>
           {group.lines.map((item, idx) => (
-            <div key={item.client_id || `line-${idx}`} style={ROW}>
+            <div key={`line-${item.client_id || idx}`} style={ROW}>
               <div style={{ lineHeight: LH.snug, minWidth: 0 }}>{item.description}</div>
               <div style={{ textAlign: 'right', fontFamily: DOC_FONT }}>{item.quantity || 1}</div>
               <div style={{ textAlign: 'right', fontFamily: DOC_FONT, minWidth: 82, fontWeight: FW.semibold }}>
@@ -49,7 +49,7 @@ export default function PropertyLineGroups({ groups, fmtCurrency }) {
             </div>
           ))}
           {group.discounts.map((item, idx) => (
-            <div key={item.client_id || `discount-${idx}`} style={{ ...ROW, color: DOC.success }}>
+            <div key={`discount-${item.client_id || idx}`} style={{ ...ROW, color: DOC.success }}>
               <div style={{ lineHeight: LH.snug, minWidth: 0 }}>{item.description}</div>
               <div />
               <div style={{ textAlign: 'right', fontFamily: DOC_FONT, minWidth: 82, fontWeight: FW.semibold }}>

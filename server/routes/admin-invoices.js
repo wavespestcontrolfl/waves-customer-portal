@@ -613,7 +613,7 @@ router.get('/customers/search', async (req, res, next) => {
 // GET /customers/:customerId/properties — the saved properties a line item may
 // name on a multi-property invoice (owner 2026-10-24: no gate). Customer-facing-
 // safe columns only; the editor shows its picker only with 2+ properties.
-router.get('/customers/:customerId/properties', async (req, res, next) => {
+router.get('/customers/:customerId/properties', requireAdmin, async (req, res, next) => {
   try {
     const properties = await db('customer_properties')
       .where({ customer_id: req.params.customerId, active: true })
