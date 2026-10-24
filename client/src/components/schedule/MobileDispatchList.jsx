@@ -576,7 +576,6 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
     : null);
   const driveLabel = useMemo(() => dayDriveLabel(services || []), [services]);
   const statusById = useMemo(() => new Map((services || []).map((s) => [s.id, s.status])), [services]);
-  const today = isETToday(dateStr);
   return (
     <section>
       <header
