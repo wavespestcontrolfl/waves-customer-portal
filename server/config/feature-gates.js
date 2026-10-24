@@ -3691,6 +3691,15 @@ const gates = {
   // time via gateEnvValue so a flip needs no redeploy; dark by default.
   taxLedger: gateEnvValue('GATE_TAX_LEDGER'),
 
+  // Shared bills + home office (2026-10-24): a bill that is part business
+  // (a phone plan with business lines, home internet) books at its business
+  // share when Bank Import turns the staged row into an expense, and the
+  // simplified home-office deduction (sq ft x $5, max 300 sq ft) is kept per
+  // tax year and added to the tax package. Nested under GATE_BANK_IMPORT; read
+  // at call time via taxSharedBillsLive(); dark by default. Off = create-expense
+  // and the tax package behave exactly as before.
+  taxSharedBills: gateEnvValue('GATE_TAX_SHARED_BILLS'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic
@@ -5476,6 +5485,11 @@ function mosquitoMistingLive() {
 // returns before any query. It stores and sends nothing public. Kill: unset.
 function bidKitLive() {
   return process.env.GATE_BID_KIT === 'true';
+}
+
+// GATE_TAX_SHARED_BILLS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
+function taxSharedBillsLive() {
+  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
 }
 
 function pestInsiderProofLive() {
@@ -7522,3 +7536,5 @@ module.exports.lawnReclaimedHalfNLive = lawnReclaimedHalfNLive;
 module.exports.mosquitoMistingLive = mosquitoMistingLive;
 // GATE_BID_KIT reader, on its own line so gate PRs never conflict.
 module.exports.bidKitLive = bidKitLive;
+// GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
+module.exports.taxSharedBillsLive = taxSharedBillsLive;

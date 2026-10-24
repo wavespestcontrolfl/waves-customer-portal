@@ -42,7 +42,10 @@ function transactionsToCSV(payments) {
 }
 
 function expensesToCSV(expenses) {
-  const headers = ['Date', 'Schedule C Line', 'Category', 'Vendor', 'Description', 'Amount', 'Payment Method', 'Has Receipt'];
+  // Deductible Amount = what the books claim (a meals partial, a shared
+  // bill's business share); blank = the full amount. Notes carries the
+  // allocation note, so a later rule change never rewrites the history.
+  const headers = ['Date', 'Schedule C Line', 'Category', 'Vendor', 'Description', 'Amount', 'Payment Method', 'Has Receipt', 'Deductible Amount', 'Notes'];
   const lines = [row(headers)];
   for (const e of expenses) {
     lines.push(row([
@@ -54,6 +57,8 @@ function expensesToCSV(expenses) {
       e.amount != null ? parseFloat(e.amount).toFixed(2) : '',
       e.payment_method || '',
       e.has_receipt ? 'Yes' : 'No',
+      e.tax_deductible_amount != null ? parseFloat(e.tax_deductible_amount).toFixed(2) : '',
+      e.notes || '',
     ]));
   }
   return lines.join('\n');
@@ -318,6 +323,20 @@ function refundsToCSV(refunds) {
   return lines.join('\n');
 }
 
+function homeOfficeToCSV(homeOffice, deduction) {
+  const lines = [row(['tax_year', 'method', 'sq_ft', 'months', 'deduction'])];
+  lines.push(row([homeOffice.tax_year, homeOffice.method, homeOffice.sq_ft, homeOffice.months, Number(deduction || 0).toFixed(2)]));
+  return lines.join('\n');
+}
+
+function sharedBillsToCSV(bills) {
+  const lines = [row(['label', 'pattern', 'business_pct', 'category', 'enabled'])];
+  for (const b of bills) {
+    lines.push(row([b.label, b.pattern, Number(b.business_pct).toFixed(2), b.category_name || '', b.enabled === false ? 'no' : 'yes']));
+  }
+  return lines.join('\n');
+}
+
 module.exports = {
   transactionsToCSV,
   expensesToCSV,
@@ -328,4 +347,6 @@ module.exports = {
   refundsToCSV,
   generateReadme,
   geoGridToCSV,
+  homeOfficeToCSV,
+  sharedBillsToCSV,
 };
