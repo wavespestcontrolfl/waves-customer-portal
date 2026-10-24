@@ -22,7 +22,7 @@ function fakeConn(answers) {
   const conn = (table) => {
     const b = {};
     const calls = [];
-    for (const m of ['where', 'orWhere', 'orWhereIn', 'whereNotNull', 'select', 'orderBy']) {
+    for (const m of ['where', 'orWhere', 'orWhereIn', 'whereNull', 'whereNotNull', 'select', 'orderBy']) {
       b[m] = (...args) => {
         seen.push([table, m, ...args]);
         calls.push([m, ...args]);
@@ -55,6 +55,10 @@ describe('lastPaidSeriesVisitAmount', () => {
     const conn = lastPaidConn(117);
     await expect(guards.lastPaidSeriesVisitAmount(conn, 'root-1')).resolves.toBe(117);
     expect(conn.seen).toContainEqual(['scheduled_services', 'where', 'status', 'completed']);
+    // Base visits only: a booster (is_recurring false) or a free callback is
+    // never the baseline (a newer $0 booster must not replace the paid price).
+    expect(conn.seen).toContainEqual(['scheduled_services', 'where', 'is_recurring', true]);
+    expect(conn.seen).toContainEqual(['scheduled_services', 'orWhere', 'is_callback', false]);
     expect(conn.seen).toContainEqual(['invoices', 'where', 'status', 'paid']);
   });
   test('null with no completed visit or no paid invoice', async () => {

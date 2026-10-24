@@ -43,12 +43,17 @@ const positiveAmount = (value) => {
 };
 
 // What the series last collected: the PAID invoice (pre-tax) tied to its most
-// recent completed visit, linked by scheduled_service_id or through that
-// visit's service record. null when there is no completed visit or it has no
-// paid invoice — the comparison is then skipped.
+// recent completed BASE visit (is_recurring, not a callback — boosters share
+// recurring_parent_id with is_recurring false, as latestLiveSeriesVisit in
+// admin-schedule.js excludes them; a free re-service is no price evidence),
+// linked by scheduled_service_id or through that visit's service record.
+// null when there is no such visit or it has no paid invoice — the
+// comparison is then skipped.
 async function lastPaidSeriesVisitAmount(conn, rootId) {
   const visit = await conn('scheduled_services')
     .where((q) => q.where('id', rootId).orWhere('recurring_parent_id', rootId))
+    .where('is_recurring', true)
+    .where((q) => q.whereNull('is_callback').orWhere('is_callback', false))
     .where('status', 'completed')
     .orderBy('scheduled_date', 'desc')
     .first('id');
