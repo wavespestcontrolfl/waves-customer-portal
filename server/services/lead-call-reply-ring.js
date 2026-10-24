@@ -195,7 +195,8 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
     if (outcome.missed) await raiseMissedBell(outcome.missed);
     return { rang: outcome.rang, reason: outcome.reason, ...(outcome.callLogId ? { callLogId: outcome.callLogId } : {}) };
   } catch (err) {
-    logger.error(`[lead-call-reply-ring] check failed for customer ${customer?.id}: ${err.message}`);
+    // Code only: a knex message carries the bindings (the phone digits).
+    logger.error(`[lead-call-reply-ring] check failed for customer ${customer?.id} (${String(err?.code || err?.name || 'error')})`);
     return { rang: false, reason: 'error' };
   }
 }
