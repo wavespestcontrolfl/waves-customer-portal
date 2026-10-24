@@ -22,6 +22,7 @@ import {
   BarChart3,
   Bot,
   CalendarDays,
+  Calculator,
   DollarSign,
   Download,
   FileText,
@@ -39,6 +40,7 @@ import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import LedgerInboxTab from "./tax/LedgerInboxTab";
 import SharedBillsPanel from "./tax/SharedBillsPanel";
+import ReturnTab from "./tax/ReturnTab";
 function useTaxRead(path, setData, field) {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -240,6 +242,7 @@ const TAX_SECTIONS = [
     Icon: Landmark,
   },
   { key: "ledger", label: "Inbox", Icon: Inbox },
+  { key: "return", label: "Return", Icon: Calculator },
   {
     key: "mileage",
     label: "Mileage",
@@ -6700,7 +6703,10 @@ export default function TaxPage() {
   // /bank-import/ledger/status is the one ledger endpoint that answers while
   // dark, and a failed read keeps the leaf hidden.
   const [ledgerOn, setLedgerOn] = useState(false);
-  const tabGroups = bankImportOn
+  // GATE_TAX_RETURN_ENGINE (nested under GATE_BANK_IMPORT): the Return leaf
+  // exists only when its status says so; a failed read keeps it hidden.
+  const [returnOn, setReturnOn] = useState(false);
+  const tabGroups = (bankImportOn
     ? TAX_TAB_GROUPS.map((g) =>
         g.key === "expenses"
           ? {
@@ -6709,7 +6715,10 @@ export default function TaxPage() {
             }
           : g,
       )
-    : TAX_TAB_GROUPS;
+    : TAX_TAB_GROUPS
+  ).map((g) =>
+    g.key === "reports" && returnOn ? { ...g, tabs: [...g.tabs, "return"] } : g,
+  );
   const activeGroup =
     tabGroups.find((g) => g.tabs.includes(activeTab)) || tabGroups[0];
   const [dashboard, setDashboard] = useState(null);
@@ -6733,6 +6742,9 @@ export default function TaxPage() {
           setLedgerOn(!!l?.enabled),
         );
       })
+      .catch(() => {});
+    adminFetch("/admin/tax/return-engine/status")
+      .then((r) => setReturnOn(!!r?.enabled))
       .catch(() => {});
     loadDashboard();
   }, [loadDashboard]);
@@ -7225,6 +7237,7 @@ export default function TaxPage() {
       {activeTab === "expenses" && <ExpensesTab />}
       {activeTab === "bankimport" && <BankImportTab />}
       {activeTab === "ledger" && <LedgerInboxTab />}
+      {activeTab === "return" && <ReturnTab />}
       {activeTab === "mileage" && <MileageTab />}
       {activeTab === "revenue" && <RevenueTab />}
       {activeTab === "filings" && <FilingCalendarTab />}

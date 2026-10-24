@@ -3734,6 +3734,14 @@ const gates = {
   // and the tax package behave exactly as before.
   taxSharedBills: gateEnvValue('GATE_TAX_SHARED_BILLS'),
 
+  // Tax return engine (2026-10-24): tax-year records (filing status, other
+  // income, estimates paid, carryovers in), a federal return computed from the
+  // P&L and the books (Schedule C, Schedule SE, NOL, QBI, income tax) and a
+  // Return tab under Admin > Tax > Reports. Nested under GATE_BANK_IMPORT; read
+  // at call time via taxReturnEngineLive(); dark by default. Off = the routes
+  // 404 and the tab stays hidden; nothing else reads it.
+  taxReturnEngine: gateEnvValue('GATE_TAX_RETURN_ENGINE'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic
@@ -5581,12 +5589,9 @@ function taxSharedBillsLive() {
   return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
 }
 
-// GATE_NEW_CLIENT_CONFIRM_EMAIL read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader for
-// the new-client confirmation promotion: services/appointment-reminders.js resolveConfirmationChannel. Off: a booking confirmation
-// keeps today's channel (text first, email only when the text fails). On: a confirmation that would go by text alone goes by text
-// AND email when the customer has no completed visit and a member_since unset or within 90 days (see the gate doc line at the top of this file). Kill: unset.
-function newClientConfirmEmailLive() {
-  return process.env.GATE_NEW_CLIENT_CONFIRM_EMAIL === 'true';
+// GATE_TAX_RETURN_ENGINE read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
+function taxReturnEngineLive() {
+  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_RETURN_ENGINE');
 }
 
 // GATE_PUBLIC_LLM_SHARED_CAP read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -7541,6 +7546,16 @@ function alertRingOnceLive() {
 // GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
 module.exports.alertRingOnceLive = alertRingOnceLive;
 
+// GATE_NEW_CLIENT_CONFIRM_EMAIL read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader for
+// the new-client confirmation promotion: services/appointment-reminders.js resolveConfirmationChannel. Off: a booking confirmation
+// keeps today's channel (text first, email only when the text fails). On: a confirmation that would go by text alone goes by text
+// AND email when the customer has no completed visit and a member_since unset or within 90 days (see the gate doc line at the top of this file). Kill: unset.
+function newClientConfirmEmailLive() {
+  return process.env.GATE_NEW_CLIENT_CONFIRM_EMAIL === 'true';
+}
+// GATE_NEW_CLIENT_CONFIRM_EMAIL reader, on its own line so gate PRs never conflict.
+module.exports.newClientConfirmEmailLive = newClientConfirmEmailLive;
+
 // GATE_REPORT_CLEANUP_1020 read at CALL time, strict `=== 'true'` (customer report copy), dark in every environment.
 // The one reader for the 2026-10-20 service report cleanup: one clear water-in line, no spray method on a granular
 // product, a clean follow-up sentence, a trouble-spot note, and the stock lines the report no longer repeats.
@@ -7658,8 +7673,8 @@ module.exports.bidKitLive = bidKitLive;
 module.exports.commercialProposalSignLive = commercialProposalSignLive;
 // GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
 module.exports.taxSharedBillsLive = taxSharedBillsLive;
-// GATE_NEW_CLIENT_CONFIRM_EMAIL reader, on its own line so gate PRs never conflict.
-module.exports.newClientConfirmEmailLive = newClientConfirmEmailLive;
+// GATE_TAX_RETURN_ENGINE reader, on its own line so gate PRs never conflict.
+module.exports.taxReturnEngineLive = taxReturnEngineLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.
 module.exports.publicLlmSharedCapLive = publicLlmSharedCapLive;
 // GATE_SMS_FOLLOWUP_WITNESS_FIX reader, on its own line so gate PRs never conflict.

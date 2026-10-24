@@ -19,8 +19,8 @@ import { etParts } from "../../../lib/timezone";
 // Shared bills + home office (GATE_TAX_SHARED_BILLS). A shared bill is a
 // payee that is part business (a phone plan with business lines, home
 // internet): Bank Import books it at the business share. The home office is
-// the simplified method, one row per tax year. Renders nothing while the gate
-// is off. Same shared V2 primitives and fetch idiom as LedgerInboxTab.
+// one row per tax year, simplified or actual method. Renders nothing while the
+// gate is off. Same shared V2 primitives and fetch idiom as LedgerInboxTab.
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RATE = 5;
@@ -60,10 +60,57 @@ function money(n) {
 
 // The same arithmetic the server uses (the server's number is the one stored
 // and exported; this one only previews what the owner is typing).
-function previewDeduction(sqFt, months) {
-  const sq = Math.min(Math.max(Number(sqFt) || 0, 0), MAX_SQ_FT);
-  const m = Math.min(Math.max(Number(months) || 0, 0), 12);
+function previewDeduction(form) {
+  if (form.method === "actual") {
+    const office = Number(form.sq_ft) || 0;
+    const home = Number(form.home_sq_ft) || 0;
+    if (office <= 0 || home <= 0) return 0;
+    const cents = ["rent", "utilities", "insurance", "other"].reduce(
+      (sum, k) => sum + Math.round((Number(form[k]) || 0) * 100),
+      0,
+    );
+    return Math.round((cents * Math.min(office, home)) / home) / 100;
+  }
+  const sq = Math.min(Math.max(Number(form.sq_ft) || 0, 0), MAX_SQ_FT);
+  const m = Math.min(Math.max(Number(form.months) || 0, 0), 12);
   return Math.round((RATE * 100 * sq * m) / 12) / 100;
+}
+
+const EMPTY_HOME = {
+  method: "simplified", sq_ft: "", months: "12", home_sq_ft: "", rent: "", utilities: "", insurance: "", other: "", notes: "",
+};
+const amountText = (v) => (v == null ? "" : String(Number(v)));
+
+function homeForm(row) {
+  if (!row) return EMPTY_HOME;
+  return {
+    method: row.method || "simplified",
+    sq_ft: String(row.sq_ft),
+    months: String(row.months),
+    home_sq_ft: row.home_sq_ft == null ? "" : String(row.home_sq_ft),
+    rent: amountText(row.rent),
+    utilities: amountText(row.utilities),
+    insurance: amountText(row.insurance),
+    other: amountText(row.other),
+    notes: row.notes || "",
+  };
+}
+
+// what goes up is what was typed, never silently changed: the server decides
+function homeBody(form) {
+  if (form.method === "actual") {
+    return {
+      method: "actual",
+      sq_ft: form.sq_ft.trim(),
+      home_sq_ft: form.home_sq_ft.trim(),
+      rent: form.rent.trim(),
+      utilities: form.utilities.trim(),
+      insurance: form.insurance.trim(),
+      other: form.other.trim(),
+      notes: form.notes,
+    };
+  }
+  return { method: "simplified", sq_ft: form.sq_ft.trim(), months: form.months.trim(), notes: form.notes };
 }
 
 function BillsTable({ bills, categories, busy, onChange, onDelete }) {
@@ -204,10 +251,13 @@ function BillsBox({ categories }) {
   );
 }
 
-function HomeOfficeBox() {
+// actualMethod: the server says the actual method may be written (the return
+// engine is on too). While it is off the method picker is hidden and a saved
+// actual-method year is shown read-only: the tax package still uses it.
+function HomeOfficeBox({ actualMethod }) {
   const thisYear = etParts().year;
   const [year, setYear] = useState(thisYear);
-  const [form, setForm] = useState({ sq_ft: "", months: "12", notes: "" });
+  const [form, setForm] = useState(EMPTY_HOME);
   const [saved, setSaved] = useState(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -216,6 +266,7 @@ function HomeOfficeBox() {
   // only the newest year's response may fill the form: a slower answer for a
   // year the operator already left must not land under the new year's Save
   const loadSeq = useRef(0);
+  const locked = !actualMethod && saved?.method === "actual";
 
   const load = useCallback(() => {
     const seq = ++loadSeq.current;
@@ -226,9 +277,7 @@ function HomeOfficeBox() {
       .then((d) => {
         if (seq !== loadSeq.current) return;
         setSaved(d.row);
-        setForm(d.row
-          ? { sq_ft: String(d.row.sq_ft), months: String(d.row.months), notes: d.row.notes || "" }
-          : { sq_ft: "", months: "12", notes: "" });
+        setForm(homeForm(d.row));
         setLoading(false);
       })
       .catch((e) => { if (seq === loadSeq.current) setError(e.message); });
@@ -242,7 +291,7 @@ function HomeOfficeBox() {
     setError("");
     setNotice("");
     try {
-      const d = await put(`${T}/home-office/${year}`, { sq_ft: form.sq_ft.trim(), months: form.months.trim(), notes: form.notes });
+      const d = await put(`${T}/home-office/${year}`, homeBody(form));
       setSaved(d.row);
       setNotice(`Saved. ${year} home office deduction: ${money(d.deduction)}.`);
     } catch (err) {
@@ -260,7 +309,7 @@ function HomeOfficeBox() {
     try {
       await del(`${T}/home-office/${year}`);
       setSaved(null);
-      setForm({ sq_ft: "", months: "12", notes: "" });
+      setForm(EMPTY_HOME);
       setNotice(`Removed the ${year} home office.`);
     } catch (err) {
       setError(err.message);
@@ -278,37 +327,80 @@ function HomeOfficeBox() {
       <CardBody className="flex flex-col gap-3 min-w-0">
         <strong>Home office</strong>
         <div className="text-sm text-ink-secondary">
-          Simplified method: ${RATE} × square feet × months ÷ 12, up to {MAX_SQ_FT} square feet ($1,500 a year at most).
-          The tax package lists it in home-office.csv.
+          {locked
+            ? "Actual method (return engine off): shown as saved and still used by the tax package. Turn the return engine on to change it, or remove it to start again with the simplified method."
+            : form.method === "actual"
+            ? "Actual method (Form 8829): the year's rent, utilities, insurance and other home costs × office square feet ÷ home square feet. No square foot limit."
+            : `Simplified method: $${RATE} × square feet × months ÷ 12, up to ${MAX_SQ_FT} square feet ($1,500 a year at most).`}
+          {" "}The tax package lists it in home-office.csv.
+        </div>
+        <div className="text-sm text-ink-secondary">
+          The simplified method is only valid on a timely original return (Rev. Proc. 2013-13, section 4.03). A late return needs the actual method.
         </div>
         <form onSubmit={save} className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <Select aria-label="Home office year" className="flex-1 min-w-[120px]" value={String(year)} disabled={busy} onChange={(e) => setYear(Number(e.target.value))}>
               {years.map((y) => <option key={y} value={y}>{y}</option>)}
             </Select>
+            {actualMethod && (
+              <Select aria-label="Home office method" className="flex-1 min-w-[140px]" value={form.method} onChange={set("method")}>
+                <option value="simplified">Simplified</option>
+                <option value="actual">Actual</option>
+              </Select>
+            )}
             <Input
               aria-label="Square feet"
-              placeholder={`Square feet (up to ${MAX_SQ_FT})`}
+              placeholder={form.method === "actual" ? "Office square feet" : `Square feet (up to ${MAX_SQ_FT})`}
               inputMode="numeric"
               className="flex-1 min-w-[140px]"
+              disabled={locked}
               value={form.sq_ft}
               onChange={set("sq_ft")}
             />
-            <Input
-              aria-label="Months used"
-              placeholder="Months (1 to 12)"
-              inputMode="numeric"
-              className="flex-1 min-w-[120px]"
-              value={form.months}
-              onChange={set("months")}
-            />
+            {form.method === "actual" ? (
+              <Input
+                aria-label="Home square feet"
+                placeholder="Whole home square feet"
+                inputMode="numeric"
+                className="flex-1 min-w-[140px]"
+                disabled={locked}
+                value={form.home_sq_ft}
+                onChange={set("home_sq_ft")}
+              />
+            ) : (
+              <Input
+                aria-label="Months used"
+                placeholder="Months (1 to 12)"
+                inputMode="numeric"
+                className="flex-1 min-w-[120px]"
+                disabled={locked}
+                value={form.months}
+                onChange={set("months")}
+              />
+            )}
           </div>
-          <Input aria-label="Home office notes" placeholder="Notes (optional)" value={form.notes} onChange={set("notes")} />
+          {form.method === "actual" && (
+            <div className="flex flex-wrap items-center gap-2">
+              {[["rent", "Rent for the year"], ["utilities", "Utilities for the year"], ["insurance", "Insurance for the year"], ["other", "Other home costs for the year"]].map(([k, label]) => (
+                <Input
+                  key={k}
+                  aria-label={label}
+                  placeholder={label}
+                  inputMode="decimal"
+                  className="flex-1 min-w-[160px]"
+                  disabled={locked}
+                  value={form[k]}
+                  onChange={set(k)}
+                />
+              ))}
+            </div>
+          )}
+          <Input aria-label="Home office notes" placeholder="Notes (optional)" disabled={locked} value={form.notes} onChange={set("notes")} />
           <div className="text-sm" data-testid="home-office-deduction">
-            Deduction for {year}: <strong>{money(previewDeduction(form.sq_ft, form.months))}</strong>
+            Deduction for {year}: <strong>{money(previewDeduction(form))}</strong>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button type="submit" variant="primary" disabled={busy || loading}>Save home office</Button>
+            {!locked && <Button type="submit" variant="primary" disabled={busy || loading}>Save home office</Button>}
             {saved && <Button variant="secondary" disabled={busy || loading} onClick={remove}>Remove {year}</Button>}
             {loading && error && <Button variant="secondary" onClick={load}>Try again</Button>}
           </div>
@@ -322,13 +414,14 @@ function HomeOfficeBox() {
 
 export default function SharedBillsPanel() {
   const [enabled, setEnabled] = useState(false);
+  const [actualMethod, setActualMethod] = useState(false);
   const [categories, setCategories] = useState([]);
 
   useEffect(() => {
     let live = true;
     adminFetch(`${T}/shared-bills/status`)
-      .then((d) => { if (live) setEnabled(!!d?.enabled); })
-      .catch(() => { if (live) setEnabled(false); });
+      .then((d) => { if (live) { setEnabled(!!d?.enabled); setActualMethod(!!d?.actual_method); } })
+      .catch(() => { if (live) { setEnabled(false); setActualMethod(false); } });
     return () => { live = false; };
   }, []);
 
@@ -343,7 +436,7 @@ export default function SharedBillsPanel() {
   return (
     <div className="flex flex-col gap-4 min-w-0">
       <BillsBox categories={categories} />
-      <HomeOfficeBox />
+      <HomeOfficeBox actualMethod={actualMethod} />
     </div>
   );
 }
