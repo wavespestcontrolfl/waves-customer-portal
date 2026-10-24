@@ -258,11 +258,23 @@ function invoiceLineParts(item) {
   return { description: String(item.description || '').slice(0, 200), qty, rate, amount: Number(item.amount ?? qty * rate) };
 }
 
+// LETTER page with a 40pt margin: the last printable y. The table advances an
+// absolute y, so a row that would cross this line starts a new page instead
+// (PDFKit's own text pagination would not reset that y).
+const PAGE_TOP = 40;
+const PAGE_BOTTOM = 792 - 40;
+function ensureRoom(doc, y, needed) {
+  if (y + needed <= PAGE_BOTTOM) return y;
+  doc.addPage();
+  return PAGE_TOP;
+}
+
 // One service row, exactly as the flat table has always printed it. Returns the next y.
 function drawLineItemRow(doc, item, x, y, width) {
   const { description, qty, rate, amount } = invoiceLineParts(item);
   const descHeight = doc.heightOfString(description, { width: width - 210 });
   const rowHeight = Math.max(descHeight + 6, 18);
+  y = ensureRoom(doc, y, rowHeight);
   doc.text(description, x, y, { width: width - 210 });
   doc.text(String(qty), x + width - 190, y, { width: 40, align: 'right' });
   doc.text(currency(rate), x + width - 140, y, { width: 60, align: 'right' });
@@ -276,6 +288,8 @@ function drawLineItemRow(doc, item, x, y, width) {
 function groupedLineItemsTable(doc, groups, x, y, width) {
   for (const group of groups) {
     const headingHeight = Math.max(doc.heightOfString(group.label, { width: width - 12 }) + 8, 18);
+    // Keep a heading with at least its first row.
+    y = ensureRoom(doc, y, headingHeight + 4 + 18);
     doc.save().rect(x, y, width, headingHeight).fill(SOFT).restore();
     doc.fontSize(PDF_TYPE.body).font('Helvetica-Bold').fillColor(INK)
       .text(group.label, x + 6, y + 4, { width: width - 12 });
@@ -285,12 +299,14 @@ function groupedLineItemsTable(doc, groups, x, y, width) {
     for (const item of group.discounts) {
       const { description, amount } = invoiceLineParts(item);
       const rowHeight = Math.max(doc.heightOfString(description, { width: width - 210 }) + 6, 18);
+      y = ensureRoom(doc, y, rowHeight);
       doc.fillColor(GREEN).text(description, x, y, { width: width - 210 });
       doc.text(`- ${currency(Math.abs(amount))}`, x + width - 70, y, { width: 70, align: 'right' });
       doc.fillColor(INK);
       y += rowHeight;
     }
     const streetLine = propertyStreetLine(group.address);
+    y = ensureRoom(doc, y, 22);
     doc.font('Helvetica-Bold').fillColor(MUTED)
       .text(`${streetLine || 'Property'} subtotal`, x, y, { width: width - 80, align: 'right' });
     doc.fillColor(INK).text(currency(group.subtotal), x + width - 70, y, { width: 70, align: 'right' });
@@ -318,6 +334,9 @@ function lineItemsTable(doc, lineItems, x, y, width) {
   doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(INK);
   if (propertyGroups) {
     y = groupedLineItemsTable(doc, propertyGroups, x, y, width);
+    // The totals block that follows advances the same absolute y: reserve its
+    // height so a long grouped table never leaves TOTAL below the page.
+    y = ensureRoom(doc, y, 170);
   } else {
     for (const item of visibleLineItems) y = drawLineItemRow(doc, item, x, y, width);
   }

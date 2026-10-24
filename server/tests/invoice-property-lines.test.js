@@ -17,14 +17,17 @@ const CUSTOMER = '11111111-1111-4111-8111-111111111111';
 const PALM = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const BAY = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const OTHER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const REMOVED = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 
 const PROPERTIES = {
-  [PALM]: { id: PALM, customer_id: CUSTOMER, address_line1: '1842 Palm Harbor Dr', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' },
-  [BAY]: { id: BAY, customer_id: CUSTOMER, address_line1: '410 Bayshore Rd', address_line2: 'Unit B', city: 'Parrish', state: 'FL', zip: '34219' },
-  [OTHER]: { id: OTHER, customer_id: 'someone-else', address_line1: '9 Elsewhere Ln', city: 'Venice', state: 'FL', zip: '34285' },
+  [PALM]: { id: PALM, customer_id: CUSTOMER, active: true, address_line1: '1842 Palm Harbor Dr', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' },
+  [BAY]: { id: BAY, customer_id: CUSTOMER, active: true, address_line1: '410 Bayshore Rd', address_line2: 'Unit B', city: 'Parrish', state: 'FL', zip: '34219' },
+  [OTHER]: { id: OTHER, customer_id: 'someone-else', active: true, address_line1: '9 Elsewhere Ln', city: 'Venice', state: 'FL', zip: '34285' },
+  // Removed from the customer (customer-properties deactivates, never deletes).
+  [REMOVED]: { id: REMOVED, customer_id: CUSTOMER, active: false, address_line1: '77 Former Pl', city: 'Bradenton', state: 'FL', zip: '34209' },
 };
 
-// Minimal knex-shaped fake over customer_properties: honours customer_id + whereIn(id).
+// Minimal knex-shaped fake over customer_properties: honours where({customer_id, active}) + whereIn(id).
 function fakeConn() {
   return (table) => {
     expect(table).toBe('customer_properties');
@@ -32,7 +35,7 @@ function fakeConn() {
     q.where = (criteria) => { q.criteria = criteria; return q; };
     q.whereIn = (_col, ids) => { q.ids = ids; return q; };
     q.select = async () => Object.values(PROPERTIES)
-      .filter((row) => row.customer_id === q.criteria.customer_id && q.ids.includes(row.id));
+      .filter((row) => Object.entries(q.criteria).every(([k, v]) => row[k] === v) && q.ids.includes(row.id));
     return q;
   };
 }
@@ -71,6 +74,13 @@ describe('attachInvoiceLineProperties (write path)', () => {
       .rejects.toMatchObject({ statusCode: 400, code: 'invalid_line_property' });
     await expect(attachInvoiceLineProperties(fakeConn(), CUSTOMER, [service('a', 'not-a-uuid')]))
       .rejects.toMatchObject({ statusCode: 400, code: 'invalid_line_property' });
+    // A property removed from the customer (deactivated) cannot be chosen for a new line either...
+    await expect(attachInvoiceLineProperties(fakeConn(), CUSTOMER, [service('a', REMOVED)]))
+      .rejects.toMatchObject({ statusCode: 400, code: 'invalid_line_property' });
+    // ...but an unchanged line that was frozen at it before the removal keeps its history on edit.
+    const frozenRemoved = { address_line1: '77 Former Pl', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+    const kept = await attachInvoiceLineProperties(fakeConn(), CUSTOMER, [service('a', REMOVED)], { existingLineItems: [{ ...service('a', REMOVED), property_address: frozenRemoved }] });
+    expect(kept[0].property_address).toEqual(frozenRemoved);
   });
 
   test('an edit keeps the frozen snapshot of an unchanged property without reading it; only a changed property is looked up', async () => {
@@ -201,6 +211,36 @@ describe('groupInvoiceLinesByProperty (documents)', () => {
         expect(text).toContain('410 Bayshore Rd Unit B subtotal');
       }
     } finally { written.mockRestore(); }
+  });
+
+  test('a long grouped PDF paginates: every row and the totals stay inside the printable page', async () => {
+    const PDFDocument = require('pdfkit');
+    const written = jest.spyOn(PDFDocument.prototype, 'text');
+    const addPage = jest.spyOn(PDFDocument.prototype, 'addPage');
+    try {
+      const lines = [];
+      for (let i = 0; i < 10; i++) {
+        const id = i % 2 ? BAY : PALM;
+        lines.push({ ...service(`s${i}`, id, 149), description: `Service ${i + 1} with a long description that wraps onto a second line in the PDF table column`, property_address: addr(id) });
+        lines.push({ ...discount(`s${i}-d`, `s${i}`), property_id: id, property_address: addr(id) });
+      }
+      const invoice = {
+        invoice_number: 'QA-LONG', status: 'sent', subtotal: 1490, discount_amount: 149, discount_label: 'Multi-Home Discount', total: 1341,
+        created_at: new Date(), due_date: new Date(), line_items: lines, notes: 'Thank you.',
+        customer: { first_name: 'Synthetic', last_name: 'Fixture', address_line1: '1842 Palm Harbor Dr', city: 'Bradenton', state: 'FL', zip: '34209' },
+      };
+      const pdf = require('../services/pdf/invoice-pdf');
+      const buffer = await pdf.buildInvoicePDFBuffer(invoice);
+      expect(buffer.subarray(0, 4).toString()).toBe('%PDF');
+      expect(addPage).toHaveBeenCalled();
+      // Table and totals content only (the page header/footer chrome is drawn in the margins on purpose).
+      const content = written.mock.calls.filter((args) => typeof args[2] === 'number'
+        && /^(Service \d+|Multi-Home Discount|.* subtotal$|1842 Palm|410 Bayshore|SUBTOTAL|Subtotal|TOTAL|Discount)/.test(String(args[0])));
+      expect(content.length).toBeGreaterThan(20); // 10 lines + 10 discounts + headings, subtotals, totals
+      const outside = content.filter((args) => args[2] < 40 || args[2] > 752).map((args) => `${String(args[0]).slice(0, 30)}@${args[2]}`);
+      expect(outside).toEqual([]);
+      expect(content.some((args) => String(args[0]) === 'TOTAL')).toBe(true);
+    } finally { written.mockRestore(); addPage.mockRestore(); }
   });
 
   test('the billing email Property row names both properties, outranking the visit link', async () => {

@@ -75,8 +75,11 @@ async function attachInvoiceLineProperties(conn, customerId, items = [], { exist
   const snapshots = new Map();
   if (wanted.length) {
     if (!customerId) throw linePropertyError('A line item names a property but the invoice has no customer.');
+    // Active only: a removed (deactivated) property can no longer be chosen
+    // for a new or changed line, matching the editor's properties endpoint.
+    // Unchanged lines keep their frozen address above without this lookup.
     const rows = await conn('customer_properties')
-      .where({ customer_id: customerId })
+      .where({ customer_id: customerId, active: true })
       .whereIn('id', wanted)
       .select('id', ...PROPERTY_ADDRESS_FIELDS);
     for (const row of rows) snapshots.set(String(row.id), propertyAddressSnapshot(row));
