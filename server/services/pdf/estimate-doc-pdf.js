@@ -42,7 +42,14 @@ function hashToken(token) {
 // engagement) for a VERIFIED pin — a bare public ?mode=pdf renders the
 // document but still counts as the customer view it is; (2) it optionally
 // carries the valid-through display override for the send path.
-function signEstimateDocPin(token, { validThrough = null } = {}) {
+//
+// `staffPreview` (admin proposal.pdf for a draft/scheduled row ONLY): an
+// explicit claim that lets /:token/data serve the not-yet-published estimate
+// to this render pass. It is minted by exactly one caller — the staff-authed
+// admin download route — and is bound to the token hash and the 15 min TTL
+// like every pin, so a bare public request (no pin, or a pin without the
+// claim) still gets the generic 404 for a draft.
+function signEstimateDocPin(token, { validThrough = null, staffPreview = false } = {}) {
   const secret = docPinSecret();
   if (!secret) return null;
   let vexp;
@@ -52,14 +59,20 @@ function signEstimateDocPin(token, { validThrough = null } = {}) {
     vexp = new Date(millis).toISOString();
   }
   return jwt.sign(
-    { kind: 'estimate_doc_render', tokenHash: hashToken(token), ...(vexp ? { vexp } : {}) },
+    {
+      kind: 'estimate_doc_render',
+      tokenHash: hashToken(token),
+      ...(vexp ? { vexp } : {}),
+      ...(staffPreview === true ? { staffPreview: true } : {}),
+    },
     secret,
     { expiresIn: DOC_PIN_TTL_SECONDS },
   );
 }
 
 // Verifies a pin against the estimate token it claims to describe.
-// Returns { validThrough: string|null } for a verified render pin, or null —
+// Returns { validThrough: string|null, staffPreview: boolean } for a verified
+// render pin, or null —
 // callers treat null as "unauthenticated render" (side effects fire), never
 // as an error.
 function verifyEstimateDocPin(pin, token) {
@@ -70,15 +83,15 @@ function verifyEstimateDocPin(pin, token) {
     if (payload?.kind !== 'estimate_doc_render') return null;
     if (payload.tokenHash !== hashToken(token)) return null;
     if (payload.vexp != null && Number.isNaN(Date.parse(payload.vexp))) return null;
-    return { validThrough: payload.vexp || null };
+    return { validThrough: payload.vexp || null, staffPreview: payload.staffPreview === true };
   } catch {
     return null;
   }
 }
 
-function estimateDocumentUrl(token, { validThrough = null } = {}) {
+function estimateDocumentUrl(token, { validThrough = null, staffPreview = false } = {}) {
   const base = serviceReportPublicBase(null).replace(/\/+$/, '');
-  const pin = signEstimateDocPin(token, { validThrough });
+  const pin = signEstimateDocPin(token, { validThrough, staffPreview });
   if (!pin) {
     // FAIL CLOSED (same trade as the service-report assessment pin): an
     // unpinned server render would fire the estimate's view side effects —
@@ -131,9 +144,9 @@ async function withDocumentPdfCapacity(render) {
 // download route (a document without a map beats no document) but not for a
 // permanent emailed copy, so there the render throws a tagged error instead and
 // the send goes out without the file (codex #6343 r12).
-async function renderEstimateDocumentPdf(estimate, { validThrough = null, failOnImageErrors = false } = {}) {
+async function renderEstimateDocumentPdf(estimate, { validThrough = null, failOnImageErrors = false, staffPreview = false } = {}) {
   if (!estimate?.token) throw new Error('estimate token required for document render');
-  return withDocumentPdfCapacity(() => renderEstimateDocumentPdfInner(estimate, { validThrough, failOnImageErrors }));
+  return withDocumentPdfCapacity(() => renderEstimateDocumentPdfInner(estimate, { validThrough, failOnImageErrors, staffPreview }));
 }
 
 // The page's own count of images that failed to load, read after the render;
@@ -151,8 +164,8 @@ async function pageImageFailures(page) {
   }
 }
 
-async function renderEstimateDocumentPdfInner(estimate, { validThrough = null, failOnImageErrors = false } = {}) {
-  const url = estimateDocumentUrl(estimate.token, { validThrough });
+async function renderEstimateDocumentPdfInner(estimate, { validThrough = null, failOnImageErrors = false, staffPreview = false } = {}) {
+  const url = estimateDocumentUrl(estimate.token, { validThrough, staffPreview });
   const browser = await launchBrowser();
   let page = null;
   try {

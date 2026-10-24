@@ -4390,6 +4390,7 @@ router.get('/:id/proposal', async (req, res, next) => {
       // `proposal`/`totals`.
       estimate: {
         id: estimate.id,
+        estimateSlug: estimate.estimate_slug || null,
         editVersion: estimateEditVersion(estimate),
         status: estimate.status,
         customerName: estimate.customer_name,
@@ -5065,6 +5066,14 @@ router.post('/:id/proposal/bid-form.pdf', (req, res, next) => {
   }
 });
 
+// Download name for the staff proposal PDF: the number the estimate page
+// prints (estimate_slug), else a short id. No customer name in the file name.
+function proposalPdfFilename(estimate) {
+  const slug = String(estimate?.estimate_slug || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+  const fallback = String(estimate?.id || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+  return `Waves-Proposal-${slug || fallback || 'copy'}.pdf`;
+}
+
 // GET /api/admin/estimates/:id/proposal.pdf — branded commercial proposal
 // PDF (inline), using the same generator as its email attachment.
 router.get('/:id/proposal.pdf', async (req, res, next) => {
@@ -5105,12 +5114,17 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     // failure falls through to pdfkit — the admin download must never 500 on a
     // browser hiccup.
     const sentOfferView = hasSentBundle && (!publicViewable || laneMoved);
-    if (!sentOfferView && publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
+    // An unsent draft/scheduled row is not publicViewable, but the operator's
+    // copy must still be the document the email will attach (not the legacy
+    // pdfkit one), so it renders through the staff-preview pin: the render
+    // pass may read the unpublished row, the public route never can.
+    const staffDraftRender = unsent && !publicViewable && !estimate.archived_at;
+    if (!sentOfferView && (publicViewable || staffDraftRender) && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
-        const buffer = await renderEstimateDocumentPdf(estimate);
+        const buffer = await renderEstimateDocumentPdf(estimate, staffDraftRender ? { staffPreview: true } : {});
         res.set('Content-Type', 'application/pdf');
-        res.set('Content-Disposition', 'inline; filename="proposal.pdf"');
+        res.set('Content-Disposition', `attachment; filename="${proposalPdfFilename(estimate)}"`);
         return res.send(buffer);
       } catch (e) {
         const { sanitizeRenderError } = require('../services/pdf/estimate-doc-pdf');

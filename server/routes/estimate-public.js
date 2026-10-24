@@ -31424,6 +31424,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       && !estimate.archived_at
       && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
       && !estimateOffCustomerSurface(estimate);
+    // Staff-preview pin (the admin proposal.pdf of a DRAFT/scheduled row): the
+    // one other way an unpublished row is served, and only to the server's own
+    // render pass. Needs the verified pin AND its explicit staffPreview claim,
+    // which only the staff-authed admin route mints; a bare request, or a pin
+    // without the claim, stays on the generic 404. Archived and off-surface
+    // rows stay 404, and the call-side verdict below still overrides it.
+    // adminDraftPreview stays false on purpose: the document must render
+    // exactly as the emailed copy will (no "draft preview" banner). The side
+    // effects are suppressed by verifiedPdfRenderPass (any verified pin).
+    const docPinStaffDraftBypass = docRenderPin?.staffPreview === true
+      && !estimate.archived_at
+      && UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      && !estimateOffCustomerSurface(estimate);
     // Call-side verdict check runs alongside the estimate-side gate (codex
     // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
     // a pinned document render of a blocked estimate is the same
@@ -31444,7 +31457,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       && !estimate.archived_at
       && !estimateOffCustomerSurface(estimate)
       && groupLinkStillViewable(estimate);
-    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass && !groupLinkViewBypass) {
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass && !docPinStaffDraftBypass && !groupLinkViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
       // SPA's not-found screen may offer the "Request an extension" button.

@@ -62,6 +62,8 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
   const [error, setError] = useState(null);
   const [savedOnce, setSavedOnce] = useState(false);
   const loadedProposalRef = React.useRef({});
+  // The printed estimate number (EST-YYYY-NNNN), from the proposal load; names the downloaded file.
+  const estimateSlugRef = React.useRef(null);
 
   const [title, setTitle] = useState('Commercial Service Proposal');
   const [preparedFor, setPreparedFor] = useState('');
@@ -81,6 +83,7 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
         if (!alive) return;
         const p = data.proposal || {};
         loadedProposalRef.current = p;
+        estimateSlugRef.current = data.estimate?.estimateSlug || null;
         setTitle(p.title || 'Commercial Service Proposal');
         setPreparedFor(p.preparedFor || estimate.customerName || '');
         setPropertyAddress(p.propertyAddress || estimate.address || '');
@@ -194,20 +197,13 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
 
   const downloadPdf = async () => {
     setError(null);
-    // Open the tab synchronously, tied to the click — Safari/iOS and popup
-    // blockers block a window.open issued after the async save/fetch below.
-    const win = window.open('', '_blank');
-    if (win) {
-      win.opener = null;
-      try { win.document.write('Generating proposal PDF…'); } catch { /* about:blank write can throw in some browsers */ }
-    }
     setDownloading(true);
     try {
       // The PDF is rendered server-side from persisted estimate_data, so save
       // the current modal edits first — otherwise the download is the last
       // saved / synthesized proposal, not what's on screen.
       const saved = await save();
-      if (!saved) { if (win) win.close(); return; }
+      if (!saved) return;
       // The shared adminFetch always parses the body as JSON, which corrupts
       // PDF bytes — so hit the endpoint with a raw fetch (same auth header)
       // and read the response as a blob.
@@ -217,12 +213,20 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
       );
       if (!r.ok) throw new Error(`Could not generate PDF (${r.status})`);
       const blob = await r.blob();
+      // Save a real file (no blank blob tab, no dead link after a minute): a
+      // temporary anchor with a download name, named by the estimate number,
+      // else a short id.
+      const slug = String(estimateSlugRef.current || estimate.estimateSlug || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+      const shortId = String(estimate.id || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
       const url = URL.createObjectURL(blob);
-      if (win) win.location = url;
-      else window.open(url, '_blank', 'noopener,noreferrer');
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Waves-Proposal-${slug || shortId || 'copy'}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
     } catch (e) {
-      if (win) win.close();
       setError(e.message);
     } finally {
       setDownloading(false);
