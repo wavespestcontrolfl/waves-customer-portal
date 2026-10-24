@@ -11,7 +11,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [] };
+const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [], open: [] };
 
 // Minimal chainable stand-in for the knex builder: resolves rows per table.
 jest.mock('../models/db', () => {
@@ -21,7 +21,7 @@ jest.mock('../models/db', () => {
       if (table === 'call_log') return mockState.calls;
       if (table === 'scheduled_services') return mockState.booked;
       if (table === 'triage_items') return mockState.triage;
-      if (table === 'notifications') return mockState.rung;
+      if (table === 'notifications') return ctx.probe ? mockState.open : mockState.rung;
       if (table === 'customers') return mockState.customers;
       return [];
     };
@@ -29,7 +29,8 @@ jest.mock('../models/db', () => {
       where: () => b,
       whereRaw: (_sql, args) => { if (args) ctx.rawArgs.push(...args); return b; },
       whereNotNull: () => b,
-      whereNull: () => b,
+      // The close pass reads the OPEN bells (done_at IS NULL); no open bells by default.
+      whereNull: () => { ctx.probe = true; return b; },
       whereIn: () => b,
       whereNotIn: () => b,
       groupByRaw: () => b,
@@ -81,6 +82,7 @@ beforeEach(() => {
   mockState.customers = [];
   mockState.alertedKeys = new Set();
   mockState.rung = [];
+  mockState.open = [];
   NotificationService.notifyAdmin.mockReset();
   require('../config/feature-gates').alertRingOnceLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-new', deduped: false });
@@ -258,6 +260,59 @@ describe('booked on another account with the same name', () => {
       await runCallBookingMissWatchdog({ now: NOW });
       expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).not.toMatch(/One account carries this name/);
     }
+  });
+});
+
+// Owner 2026-10-24: the office booked the visit on the wrong week. The bell
+// must say the dates differ, not "nothing is on the calendar"; a visit already
+// done on another day needs no bell at all.
+describe('a later visit on another day', () => {
+  const afterCall = '2026-09-28T22:15:00Z';
+  const otherDay = (over = {}) => ({
+    id: 'visit-7', customer_id: 'cust-9', status: 'confirmed', sched_date: '2026-10-11', window_start: '16:00:00',
+    created_at: afterCall, source_call_log_id: null, notes: null, ...over,
+  });
+
+  test('a live visit on another day rings the date check, not "nothing is on the calendar"', async () => {
+    mockState.booked = [otherDay()];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — check Robin Example's visit date");
+    expect(why).toBe('Booked Sun Oct 11 at 4:00 PM; the call agreed Sun Oct 4 at 11:00 AM.');
+    expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-10-11');
+    expect(opts.detail).toMatch(/agreed Wasp Nest Removal for Sun Oct 4 at 11:00 AM on a inbound call at .* ET\. The visit on the calendar is Sun Oct 11 at 4:00 PM\. Move it to the agreed day, or confirm the new day with the customer, then tap Done\./);
+    expect(opts.dedupeKey).toBe(`call-booking-miss:${CALL_ID}`);
+    expect(opts.metadata).toMatchObject({ doneWhen: 'visit_booked', subject: { type: 'call', id: CALL_ID }, mismatch: { visit_id: 'visit-7', date: '2026-10-11', time: '16:00' } });
+  });
+
+  test('the same-day visit outside the window tolerance also rings the date check', async () => {
+    mockState.booked = [otherDay({ sched_date: '2026-10-04', window_start: '15:00:00' })];
+    await runCallBookingMissWatchdog({ now: NOW });
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe("Schedule — check Robin Example's visit date");
+  });
+
+  test('a visit done on another day by the call\'s own customer does not ring', async () => {
+    mockState.booked = [otherDay({ status: 'completed' })];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 0, alerted: 0 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a visit done on another day by a namesake account still rings the usual bell', async () => {
+    mockState.customers = [
+      { id: 'cust-9', first_name: 'Robin', last_name: 'Example', pipeline_stage: 'active_customer' },
+      { id: 'cust-first', first_name: 'Robin', last_name: 'Example', pipeline_stage: 'active_customer' },
+    ];
+    mockState.booked = [otherDay({ customer_id: 'cust-first', status: 'completed' })];
+    await runCallBookingMissWatchdog({ now: NOW });
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe("Schedule — book Robin Example's Wasp Nest Removal");
+  });
+
+  test('a visit created before the call is not a later visit: the usual bell rings', async () => {
+    mockState.booked = [otherDay({ created_at: '2026-09-27T15:00:00Z' })];
+    await runCallBookingMissWatchdog({ now: NOW });
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe("Schedule — book Robin Example's Wasp Nest Removal");
   });
 });
 

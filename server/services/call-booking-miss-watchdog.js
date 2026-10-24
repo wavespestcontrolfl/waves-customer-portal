@@ -56,11 +56,22 @@
  * GATE_CALL_BOOKING_MISS_WATCHDOG. Read-only against call_log,
  * scheduled_services and triage_items; writes nothing but admin
  * notifications.
+ *
+ * The bell closes itself (owner 2026-10-24, "Alerts must clear once the thing
+ * happened"). Every tick a close pass runs first and sorts each call's open
+ * bells with classifyOpenBookingMiss: the visit got booked, or was done on
+ * another day, or the agreed day passed 14 days ago -> done, with a resolution
+ * line; older duplicates of one call -> done as replaced. A visit booked on a
+ * DIFFERENT day than the call agreed (the office booked the wrong week) turns
+ * the open bell into a date check ("Booked Wed Oct 28 ...; the call agreed Wed
+ * Nov 4 ..."), unread again, and the first ring says the same instead of
+ * "nothing is on the calendar". Same gate, same lock; a close failure logs a
+ * warning and never stops the ring path.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
+const { raiseAdminAlert, composeAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 
@@ -97,6 +108,17 @@ const INACTIVE_STATUSES = new Set(['cancelled', 'rescheduled']);
 // visit that is on the calendar or was done. An allow-list, so a skipped or
 // any later non-live outcome never counts.
 const NAMESAKE_LIVE_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_site', 'completed']);
+// A visit that is still on the calendar (not done, not closed out).
+const LIVE_VISIT_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_site']);
+// A later visit counts as the office answering the call (done or booked on
+// another day) only inside this many days of the agreed day. A customer's
+// routine visit months away is not the visit the call agreed.
+const OTHER_DAY_MATCH_DAYS = 21;
+// The agreed day passed this many days ago with no visit: the bell leaves the
+// list (docs/admin-notifications.md section 4, retention).
+const PAST_AFTER_DAYS = 14;
+const BELL_DEDUPE_PREFIX = 'call-booking-miss';
+const REPLACED = 'Replaced by a newer alert for this call';
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
@@ -214,9 +236,28 @@ function namesakeRowClearsSlot(row, call, slot) {
   if (row.sched_date !== slot.dateET || !NAMESAKE_LIVE_STATUSES.has(row.status)) return false;
   const startMinutes = windowStartMinutes(row.window_start);
   if (startMinutes === null || Math.abs(startMinutes - slot.minutes) > WINDOW_MATCH_TOLERANCE_MINUTES) return false;
+  return rowCreatedAfterCall(row, call);
+}
+
+// Strictly after the call: the created-at fence a namesake visit needs, and
+// the "later visits" evidence the date check and the done-on-another-day
+// close read.
+function rowCreatedAfterCall(row, call) {
   const rowAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
   const callAt = call.created_at ? new Date(call.created_at).getTime() : NaN;
   return Number.isFinite(rowAt) && Number.isFinite(callAt) && rowAt > callAt;
+}
+
+// The visit that answers the call's slot, if any: the call's own booking
+// (provenance, under any customer), a same-day window match on the call's
+// customer, or a namesake's visit after the call. computeBookingMisses and the
+// close pass both read this one rule.
+function clearingRow(call, slot, bookedRows, sameName) {
+  return bookedRows.find((row) => (
+    rowCarriesCall(row, call)
+    || (!!call.customer_id && row.customer_id === call.customer_id && rowClearsSlot(row, call, slot))
+    || (!!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot))
+  ));
 }
 
 // Pure diff, exported for tests: which calls confirmed a slot that has no
@@ -239,16 +280,91 @@ function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes =
     if (!createdAt || createdAt > graceCutoff) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
-    const sameName = namesakes.get(call.id);
-    const cleared = bookedRows.some((row) => (
-      rowCarriesCall(row, call)
-      || (!!call.customer_id && row.customer_id === call.customer_id && rowClearsSlot(row, call, slot))
-      || (!!sameName && sameName.has(row.customer_id) && namesakeRowClearsSlot(row, call, slot))
-    ));
-    if (cleared) continue;
+    if (clearingRow(call, slot, bookedRows, namesakes.get(call.id))) continue;
     misses.push({ call, slot, serviceDateET: slot.dateET });
   }
   return misses;
+}
+
+const pad2 = (n) => String(n).padStart(2, '0');
+const clockOf = (minutes) => `${pad2(Math.floor(minutes / 60))}:${pad2(minutes % 60)}`;
+const dayNumber = (dateET) => Date.parse(`${dateET}T00:00:00Z`) / 86400000;
+const daysApart = (a, b) => Math.abs(dayNumber(a) - dayNumber(b));
+
+// A spoken day and time, never ISO ("Wed Oct 28", "4:00 PM"); time is null when
+// the minutes are unknown.
+function spokenSlot(dateET, minutes) {
+  const at = parseETDateTime(`${dateET}T${clockOf(minutes ?? 12 * 60)}`);
+  const day = at.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).replace(',', '');
+  return { day, time: minutes == null ? null : formatETTime(at) };
+}
+
+const nearestTo = (rows, dateET) => rows.reduce((best, row) => {
+  if (!best) return row;
+  const d = daysApart(row.sched_date, dateET);
+  const bestD = daysApart(best.sched_date, dateET);
+  if (d !== bestD) return d < bestD ? row : best;
+  return new Date(row.created_at) > new Date(best.created_at) ? row : best;
+}, null);
+
+const newestFirst = (a, b) => (new Date(b.created_at) - new Date(a.created_at)) || String(b.id).localeCompare(String(a.id));
+
+// Pure (no database): what to do with a call's OPEN booking-miss bells. `call`
+// is a call_log row, `slot` the agreed slot ({ dateET, minutes }), `bookedRows`
+// the evidence rows (see loadBookingRows: provenance, the customer and its
+// namesakes), `openRows` the call's open bells ({ id, created_at, mismatch_visit_id,
+// mismatch_date, mismatch_time }), `namesakes` as computeBookingMisses takes it.
+// Returns { verdict, row, mismatch, closes: [{ ids, resolution }], keep, rewrite }:
+//   booked           the visit is on the agreed slot -> close every bell
+//   done_other_day   the call's own customer had a later visit completed on
+//                    another day -> close every bell (a namesake may be another
+//                    person, so a namesake's completed visit never closes)
+//   booked_other_day a later visit is on the calendar on another day or outside
+//                    the window -> keep the newest bell, close older ones,
+//                    rewrite the kept one when the booked visit changed
+//   past             nothing booked and the agreed day was PAST_AFTER_DAYS ago
+//                    or more -> close every bell
+//   still_missed     keep the newest bell, close older duplicates
+// With no `openRows` it is the ring path's verdict. `row` is the visit behind
+// the verdict; `mismatch` is { visit_id, date, time } for booked_other_day.
+function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = new Date(), namesakes = new Map() } = {}) {
+  const ordered = [...openRows].sort(newestFirst);
+  const newest = ordered[0] || null;
+  const closeAll = (resolution) => (ordered.length ? [{ ids: ordered.map((r) => r.id), resolution }] : []);
+  const result = (verdict, row, extra = {}) => ({ verdict, row, mismatch: null, closes: [], keep: null, rewrite: null, ...extra });
+  const keepNewest = () => (ordered.length > 1 ? [{ ids: ordered.slice(1).map((r) => r.id), resolution: REPLACED }] : []);
+
+  const sameName = namesakes.get(call.id);
+  const cleared = clearingRow(call, slot, bookedRows, sameName);
+  if (cleared) {
+    const booked = cleared.sched_date ? spokenSlot(cleared.sched_date, windowStartMinutes(cleared.window_start)) : null;
+    const label = booked ? ` for ${booked.day}${booked.time ? ` at ${booked.time}` : ''}` : '';
+    return result('booked', cleared, { closes: closeAll(`Visit booked${label}`) });
+  }
+
+  const later = bookedRows.filter((r) => r.sched_date && rowCreatedAfterCall(r, call) && daysApart(r.sched_date, slot.dateET) <= OTHER_DAY_MATCH_DAYS);
+  const own = later.filter((r) => (!!call.customer_id && r.customer_id === call.customer_id) || rowCarriesCall(r, call));
+  const done = nearestTo(own.filter((r) => r.status === 'completed'), slot.dateET);
+  if (done) return result('done_other_day', done, { closes: closeAll(`Visit done ${spokenSlot(done.sched_date, null).day}`) });
+
+  const live = nearestTo(
+    later.filter((r) => LIVE_VISIT_STATUSES.has(r.status) && (own.includes(r) || (!!sameName && sameName.has(r.customer_id)))),
+    slot.dateET,
+  );
+  if (live) {
+    const startMinutes = windowStartMinutes(live.window_start);
+    const mismatch = { visit_id: live.id ?? null, date: live.sched_date, time: startMinutes == null ? null : clockOf(startMinutes) };
+    const same = newest
+      && String(newest.mismatch_visit_id ?? '') === String(mismatch.visit_id ?? '')
+      && (newest.mismatch_date ?? '') === mismatch.date
+      && (newest.mismatch_time ?? '') === (mismatch.time ?? '');
+    return result('booked_other_day', live, { mismatch, closes: keepNewest(), keep: newest && newest.id, rewrite: newest && !same ? { id: newest.id, mismatch } : null });
+  }
+
+  if (dayNumber(etDateString(now)) - dayNumber(slot.dateET) >= PAST_AFTER_DAYS) {
+    return result('past', null, { closes: closeAll('Agreed day passed with no visit booked') });
+  }
+  return result('still_missed', null, { closes: keepNewest(), keep: newest && newest.id });
 }
 
 const squashName = (v) => String(v || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -373,6 +489,175 @@ async function alreadyAlerted(dedupeKey) {
   return !!existing;
 }
 
+// The evidence rows for a set of calls ({ call, slot } entries): one bulk
+// lookup, three OR'd fetch branches matching what computeBookingMisses reads
+// — date-agnostic, customer-agnostic provenance (source_call_log_id / Call SID
+// marker): an in-place reschedule moves the call-linked row to another date,
+// and the office may book the call under another household member, and either
+// row must still be fetched or the watchdog pages a booked visit as missed —
+// PLUS the calls' own customers on the confirmed dates (window-proximity
+// fallback) and their namesake accounts on those dates (namesakeRowClearsSlot)
+// — and a fourth for classifyOpenBookingMiss: every visit of the call's own
+// customer and its namesakes created after the earliest call, any date, any
+// status (the "later visits").
+async function loadBookingRows(entries, namesakes) {
+  const customerIds = evidenceCustomerIds(entries, namesakes);
+  const dates = [...new Set(entries.map((m) => m.slot.dateET))];
+  const callIds = entries.map((m) => m.call.id);
+  const sidPatterns = entries
+    .map((m) => m.call.twilio_call_sid)
+    .filter(Boolean)
+    .map((sid) => `%Call SID: ${sid}%`);
+  const earliestCallAt = new Date(Math.min(...entries.map((m) => new Date(m.call.created_at).getTime())));
+  return db('scheduled_services')
+    .where(function bookedEvidence() {
+      this.whereIn('source_call_log_id', callIds);
+      const markerPatterns = [...sidPatterns, ...callIds.map((id) => `%Call ID: ${id}%`)];
+      this.orWhereRaw('(notes LIKE ANY(?) OR internal_notes LIKE ANY(?))', [markerPatterns, markerPatterns]);
+      if (customerIds.length) {
+        this.orWhere(function ownCustomerOnDate() {
+          this.whereIn('customer_id', customerIds)
+            .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ANY(?)", [dates]);
+        });
+        if (!Number.isNaN(earliestCallAt.getTime())) {
+          this.orWhere(function laterVisits() {
+            this.whereIn('customer_id', customerIds).where('created_at', '>', earliestCallAt);
+          });
+        }
+      }
+    })
+    .select(
+      'id', 'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes', 'internal_notes',
+      db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
+    );
+}
+
+// The date-check text, for the first ring and for the rewrite of a standing
+// bell: the office booked a visit, but not on the day the call agreed. `name`
+// is null when only the old bell's slot is known. Headline and why follow
+// docs/admin-notifications.md (composeAdminAlert checks them).
+function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
+  const agreed = spokenSlot(slot.dateET, slot.minutes);
+  const booked = spokenSlot(mismatch.date, mismatch.time == null ? null : Number(mismatch.time.slice(0, 2)) * 60 + Number(mismatch.time.slice(3, 5)));
+  const callAtET = new Date(call.created_at).toLocaleString('en-US', {
+    timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+  const contactPhone = String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone;
+  const bookedAt = `${booked.day}${booked.time ? ` at ${booked.time}` : ''}`;
+  const agreedAt = `${agreed.day} at ${agreed.time}`;
+  return {
+    action: `check ${name ? `${cutAtWord(name, MAX_HEADLINE_CHARS - 'Schedule — check '.length - "'s visit date".length)}'s` : 'the'} visit date`,
+    why: `Booked ${bookedAt}; the call agreed ${agreedAt}.`,
+    detail: `${name || 'The caller'} (${contactPhone || 'no number'}) agreed ${service || 'a visit'} for ${agreedAt} ` +
+      `on a ${call.direction || 'unknown-direction'} call at ${callAtET} ET. The visit on the calendar is ${bookedAt}. ` +
+      'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
+    link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(mismatch.date)}`,
+  };
+}
+
+// The close pass (owner 2026-10-24): every open booking-miss bell is checked
+// against the schedule on every tick, not only the ones a new ring would reach.
+// Open bells are grouped by call; each call's verdict (classifyOpenBookingMiss)
+// closes them as done with a resolution, or turns the kept one into a date
+// check. System-closer pattern (openToCloser + doneColumns), the same shape
+// promise-chaser-bell uses. Returns { closed, rewritten } (rows).
+async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
+  const NotificationService = require('./notification-service');
+  const openRows = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${BELL_DEDUPE_PREFIX}%`])
+    .select(
+      'id', 'title', 'created_at',
+      db.raw("metadata->>'call_log_id' AS call_log_id"),
+      db.raw("metadata->>'confirmed_date_et' AS confirmed_date_et"),
+      db.raw("metadata->>'confirmed_time_et' AS confirmed_time_et"),
+      db.raw("metadata->'mismatch'->>'visit_id' AS mismatch_visit_id"),
+      db.raw("metadata->'mismatch'->>'date' AS mismatch_date"),
+      db.raw("metadata->'mismatch'->>'time' AS mismatch_time"),
+    );
+  const byCall = new Map();
+  for (const row of openRows) {
+    if (!row.call_log_id) continue;
+    if (!byCall.has(row.call_log_id)) byCall.set(row.call_log_id, []);
+    byCall.get(row.call_log_id).push(row);
+  }
+  if (!byCall.size) return { closed: 0, rewritten: 0 };
+
+  const calls = await db('call_log')
+    .whereIn('id', [...byCall.keys()])
+    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched');
+  // The slot comes from the call's extraction; when it was reprocessed and no
+  // longer confirms one, the bell's own stamp stands in (older bells carry it).
+  const entries = [];
+  for (const call of calls) {
+    const rows = byCall.get(call.id);
+    let slot = extractConfirmedSlot(call.ai_extraction_enriched);
+    if (!slot) {
+      const stamped = rows.find((r) => r.confirmed_date_et && /^\d{2}:\d{2}/.test(r.confirmed_time_et || ''));
+      if (!stamped) continue;
+      const nameInTitle = /^Schedule — (?:book|check) (.+?)'s /.exec(stamped.title || '');
+      slot = {
+        dateET: stamped.confirmed_date_et,
+        minutes: Number(stamped.confirmed_time_et.slice(0, 2)) * 60 + Number(stamped.confirmed_time_et.slice(3, 5)),
+        name: nameInTitle ? nameInTitle[1] : null,
+        service: null,
+      };
+    }
+    entries.push({ call, slot, rows });
+  }
+  if (!entries.length) return { closed: 0, rewritten: 0 };
+
+  const { namesakes } = await loadNamesakeAccounts(entries);
+  const bookedRows = await loadBookingRows(entries, namesakes);
+  let closed = 0;
+  let rewritten = 0;
+  for (const { call, slot, rows } of entries) {
+    const plan = classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes });
+    for (const { ids, resolution } of plan.closes) {
+      closed += await NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }).whereIn('id', ids), BELL_DEDUPE_PREFIX)
+        .update(NotificationService._private.doneColumns({ by: BELL_DEDUPE_PREFIX, resolution, keepExisting: true, conn: db }))
+        .catch((err) => { logger.warn(`[call-booking-miss] failed to close bell(s) for call ${call.id}: ${err.message}`); return 0; });
+    }
+    if (plan.rewrite) {
+      const wrote = await rewriteAsDateCheck(plan.rewrite, { call, slot, NotificationService })
+        .catch((err) => { logger.warn(`[call-booking-miss] failed to rewrite the bell for call ${call.id}: ${err.message}`); return 0; });
+      rewritten += wrote;
+    }
+  }
+  if (closed || rewritten) logger.info(`[call-booking-miss] close pass: closed=${closed} rewritten=${rewritten}`);
+  return { closed, rewritten };
+}
+
+// Turn the kept bell into the date check: new words, unread again (somebody
+// has to look at it), no push. Only when the booked visit changed (the caller
+// compared). A name unknown (reprocessed call, old title unparseable) leaves
+// the title alone.
+async function rewriteAsDateCheck({ id, mismatch }, { call, slot, NotificationService }) {
+  const parts = dateCheckAlert({ name: slot.name === 'Unknown caller' ? null : slot.name, slot, call, mismatch, service: slot.service });
+  const composed = composeAdminAlert({
+    area: 'Schedule', action: parts.action, why: parts.why, severity: 'needs-you', link: parts.link,
+    subject: { type: 'call', id: call.id }, doneWhen: 'visit_booked', who: 'person',
+  });
+  const text = NotificationService.normalizeAdminText({ category: 'alert', title: composed.headline, body: composed.why, detail: parts.detail });
+  const updated = await db('notifications')
+    .where({ id, recipient_type: 'admin' })
+    .whereNull('done_at')
+    .update({
+      ...(slot.name && slot.name !== 'Unknown caller' ? { title: text.title } : {}),
+      body: text.body,
+      detail: text.detail,
+      link: composed.link,
+      // Unread again; the row is open (done_at IS NULL above), so the done fields stay clear.
+      read_at: null,
+      done_at: null,
+      done_by: null,
+      resolution: null,
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ mismatch })]),
+    });
+  return updated ? 1 : 0;
+}
+
 async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('callBookingMissWatchdog')) {
@@ -385,6 +670,8 @@ async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
 }
 
 async function runInner({ now = new Date() } = {}) {
+  const closed = await closeResolvedBookingMissBells({ now })
+    .catch((err) => { logger.warn(`[call-booking-miss] close pass failed: ${err.message}`); return { closed: 0, rewritten: 0 }; });
   const windowStart = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
   // Exclude ACTIVE processing only ('processing' / NULL): a delayed or
   // force-reprocessed call persists its valid V2 extraction BEFORE the
@@ -429,42 +716,22 @@ async function runInner({ now = new Date() } = {}) {
   // One pass to find the confirmed slots, then one bulk booking lookup.
   const provisional = computeBookingMisses(calls, [], { now });
   if (!provisional.length) {
-    return { skipped: false, scanned: calls.length, misses: 0, alerted: 0 };
+    return { skipped: false, scanned: calls.length, misses: 0, alerted: 0, ...closed };
   }
   const { namesakes, accounts } = await loadNamesakeAccounts(provisional);
-  const customerIds = evidenceCustomerIds(provisional, namesakes);
-  const dates = [...new Set(provisional.map((m) => m.serviceDateET))];
-  const callIds = provisional.map((m) => m.call.id);
-  const sidPatterns = provisional
-    .map((m) => m.call.twilio_call_sid)
-    .filter(Boolean)
-    .map((sid) => `%Call SID: ${sid}%`);
-  // Three OR'd fetch branches, matching the evidence computeBookingMisses
-  // reads: date-agnostic, customer-agnostic provenance (source_call_log_id /
-  // Call SID marker) — an in-place reschedule moves the call-linked row to
-  // another date, and the office may book the call under another household
-  // member, and either row must still be fetched or the watchdog pages a
-  // booked visit as missed — PLUS the calls' own customers on the confirmed
-  // dates (window-proximity fallback) and their namesake accounts on those
-  // dates (namesakeRowClearsSlot).
-  const bookedRows = await db('scheduled_services')
-    .where(function bookedEvidence() {
-      this.whereIn('source_call_log_id', callIds);
-      const markerPatterns = [...sidPatterns, ...callIds.map((id) => `%Call ID: ${id}%`)];
-      this.orWhereRaw('(notes LIKE ANY(?) OR internal_notes LIKE ANY(?))', [markerPatterns, markerPatterns]);
-      if (customerIds.length) {
-        this.orWhere(function ownCustomerOnDate() {
-          this.whereIn('customer_id', customerIds)
-            .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ANY(?)", [dates]);
-        });
-      }
-    })
-    .select(
-      'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes', 'internal_notes',
-      db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
-    );
-  const misses = computeBookingMisses(calls, bookedRows, { now, namesakes });
-  nameLikelyAccounts(misses, namesakes, accounts);
+  const bookedRows = await loadBookingRows(provisional, namesakes);
+  const missed = computeBookingMisses(calls, bookedRows, { now, namesakes });
+  nameLikelyAccounts(missed, namesakes, accounts);
+  // A later visit changes what the bell says. Done on another day: the call
+  // was handled, so it never rings. On the calendar on another day: it rings
+  // as a date check, not as "nothing is on the calendar".
+  const misses = [];
+  for (const m of missed) {
+    const { verdict, mismatch } = classifyOpenBookingMiss(m.call, m.slot, bookedRows, [], { now, namesakes });
+    if (verdict === 'done_other_day') continue;
+    if (verdict === 'booked_other_day') m.mismatch = mismatch;
+    misses.push(m);
+  }
 
   // Office dismissal and last-ring lookups, only for calls a repeat could
   // reach this tick (slot inside the repeat window).
@@ -510,7 +777,7 @@ async function runInner({ now = new Date() } = {}) {
     const outcome = await ringMiss(m, { dedupeKey: `call-booking-miss-repeat:${m.call.id}`, repeat: true });
     if (outcome === 'rung') repeated += 1;
   }
-  return { skipped: false, scanned: calls.length, misses: misses.length, alerted, repeated };
+  return { skipped: false, scanned: calls.length, misses: misses.length, alerted, repeated, ...closed };
 }
 
 function likelyAccountSentence(account) {
@@ -525,8 +792,7 @@ function likelyAccountSentence(account) {
 // reporting "alert fired" (owner ruling 2026-09-30: this alarm always
 // rings). Returns 'rung', 'deduped' or 'silenced'.
 async function ringMiss(m, { dedupeKey, repeat }) {
-  const pad = (n) => String(n).padStart(2, '0');
-  const slotClock = `${pad(Math.floor(m.slot.minutes / 60))}:${pad(m.slot.minutes % 60)}`;
+  const slotClock = clockOf(m.slot.minutes);
   const slotET = `${m.slot.dateET} ${slotClock} ET`;
   const callAtET = new Date(m.call.created_at).toLocaleString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
@@ -536,22 +802,25 @@ async function ringMiss(m, { dedupeKey, repeat }) {
   // number, direction, call time) stays in `detail`. A spoken day and time, never ISO.
   const slotAt = parseETDateTime(`${m.slot.dateET}T${slotClock}`);
   const spokenDay = slotAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).replace(',', '');
+  // The office booked a visit, but not on the agreed day: say the dates differ.
+  const dateCheck = m.mismatch ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service }) : null;
   const created = await raiseAdminAlert(
     'alert',
     {
       area: 'Schedule',
-      action: `book ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - 'Schedule — book '.length)}`,
-      why: `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenDay} at ${formatETTime(slotAt)} on a call; nothing is on the calendar.`,
+      action: dateCheck ? dateCheck.action : `book ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - 'Schedule — book '.length)}`,
+      why: dateCheck ? dateCheck.why : `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenDay} at ${formatETTime(slotAt)} on a call; nothing is on the calendar.`,
       severity: 'needs-you',
-      // Booking happens on the schedule, so the tap opens the confirmed day there;
-      // the call itself is named in `detail` and in the subject.
-      link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(m.slot.dateET)}`,
+      // Booking happens on the schedule, so the tap opens the confirmed day there (the
+      // booked day for a date check, where the fix is made); the call itself is named
+      // in `detail` and in the subject.
+      link: dateCheck ? dateCheck.link : `/admin/dispatch?tab=schedule&date=${encodeURIComponent(m.slot.dateET)}`,
       subject: { type: 'call', id: m.call.id },
       doneWhen: 'visit_booked',
       who: 'person',
     },
     {
-      detail: `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${slotET} ` +
+      detail: dateCheck ? dateCheck.detail : `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${slotET} ` +
         `on a ${m.call.direction || 'unknown-direction'} call at ${callAtET} ET, but the schedule has no matching appointment ` +
         `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
         likelyAccountSentence(m.likelyAccount) +
@@ -568,6 +837,7 @@ async function ringMiss(m, { dedupeKey, repeat }) {
         customer_id: m.call.customer_id || null,
         confirmed_date_et: m.slot.dateET,
         confirmed_time_et: slotClock,
+        ...(m.mismatch ? { mismatch: m.mismatch } : {}),
         ...(repeat ? { repeat: true } : {}),
       },
     },
@@ -630,6 +900,9 @@ function officeClosedCall(triageRows) {
 module.exports = {
   runCallBookingMissWatchdog,
   computeBookingMisses,
+  classifyOpenBookingMiss,
+  closeResolvedBookingMissBells,
+  dateCheckAlert,
   extractConfirmedSlot,
   confirmedWallClockET,
   rowClearsSlot,
@@ -646,4 +919,7 @@ module.exports = {
   officeClosedCall,
   INACTIVE_STATUSES,
   NAMESAKE_LIVE_STATUSES,
+  LIVE_VISIT_STATUSES,
+  OTHER_DAY_MATCH_DAYS,
+  PAST_AFTER_DAYS,
 };
