@@ -1931,6 +1931,16 @@ describe('general_title (tip seeder topics, tips with facts, owner 2026-10-24)',
     expect(checkGeneralTitle({ title: 'Clogged Gutters and Mosquitoes: What Southwest Florida Homeowners Should Know' }, seeded)).toEqual({ ok: true });
   });
 
+  test('the headline in the body counts, as the writer emits it: Markdown "#", setext "===" or HTML <h1>; an H2 naming a town does not (local Codex P2 / pre-push P1 on 7c071663c3)', () => {
+    const general = 'Clogged Gutters and Mosquitoes';
+    for (const body of [
+      '# Clogged Gutters and Mosquitoes in Sarasota\n\nGutters hold water.',
+      'Clogged Gutters and Mosquitoes in Sarasota\n=====\n\nGutters hold water.',
+      '<h1 class="title">Clogged Gutters and <em>Mosquitoes</em> in Venice, FL</h1>\n\nGutters hold water.',
+    ]) expect([body.slice(0, 20), checkGeneralTitle({ title: general, body }, seeded)]).toEqual([body.slice(0, 20), { ok: false, reason: 'title_names_a_town' }]);
+    expect(checkGeneralTitle({ title: general, body: `# ${general}\n\n## What rain does to gutters in Bradenton\n\nGutters hold water.` }, seeded)).toEqual({ ok: true });
+  });
+
   test('evaluate(): a town-titled draft for a seeded topic is a hard failure', () => {
     const { evaluate } = require('../services/content/content-quality-gate');
     const out = evaluate({ title: 'Clogged Gutters and Mosquitoes in Bradenton, FL', body: 'Gutters hold water.' }, { page_type: 'supporting-blog', ...seeded });
