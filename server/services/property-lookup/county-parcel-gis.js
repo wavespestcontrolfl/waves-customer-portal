@@ -829,6 +829,41 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
   return null;
 }
 
+// Sarasota's parcel layer names a plat by its NUMBER ("3491"); the plat's name
+// lives on the county's PlatBoundary layer, keyed by the same number in
+// max_sub_id. One number can span every phase of a community (Gran Paradiso:
+// 18 phase rows under 3072), so the answer is a list of plat names. The id
+// lookup is used rather than a point-in-polygon query because the parcel the
+// caller already matched carries the exact number, while a stored pin can
+// fall on a neighbouring plat. Resolves to the sorted, de-duplicated names
+// ([] = the layer has no plat under that number) and THROWS when the layer
+// cannot answer, so a caller never reads an outage as "no name". Names are
+// cached for the life of the process (a plat number never changes name).
+const SARASOTA_PLAT_URL = 'https://ags3.scgov.net/server/rest/services/Hosted/PlatBoundary/FeatureServer/0/query';
+const platNameCache = new Map();
+async function lookupSarasotaPlatNames(platNumber, options = {}) {
+  const id = String(platNumber || '').trim();
+  if (!/^\d{1,6}$/.test(id)) return [];
+  if (isDisabled()) throw new Error('county parcel GIS disabled');
+  if (platNameCache.has(id)) return platNameCache.get(id);
+  const params = new URLSearchParams({
+    f: 'json', where: `max_sub_id='${id}'`, outFields: 'sub_name', returnGeometry: 'false',
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMsFor(options));
+  try {
+    const resp = await fetch(`${SARASOTA_PLAT_URL}?${params.toString()}`, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`Sarasota plat GIS ${resp.status}`);
+    const data = await resp.json();
+    if (data?.error) throw new Error(`Sarasota plat GIS error: ${data.error.message || data.error.code}`);
+    const names = [...new Set((data?.features || []).map((f) => cleanStr(f?.attributes?.sub_name)).filter(Boolean))].sort();
+    if (names.length) platNameCache.set(id, names);
+    return names;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Situs-address field(s) per county for street-level roll queries (the
 // house-number audit in ai-property-lookup). Same layers as the
 // point-in-polygon path above, so availability and casing stay in lockstep.
@@ -1202,6 +1237,9 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision, lotSqft 
 
 module.exports = {
   lookupCountyParcelByPoint,
+  lookupSarasotaPlatNames,
+  // The kill switch, so the neighborhood pass can tell "GIS off" from a miss.
+  countyParcelGisDisabled: isDisabled,
   unitParcelFromAggregate,
   unitParcelFromAggregateRow,
   normalizeUnitId,

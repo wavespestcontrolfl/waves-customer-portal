@@ -451,6 +451,10 @@ postgres('admin neighborhood gate-code routes', () => {
     // Same name in another county is a different neighborhood.
     const manatee = await call('PUT', `/properties/${other.propertyId}/neighborhood`, { create: { name: 'Yarrow Estates', county: 'Manatee' } });
     expect(manatee.body.neighborhood.id).not.toBe(made.body.neighborhood.id);
+    // Another spelling of the same community ("The", punctuation) links the existing row too.
+    const spelled = await call('PUT', `/properties/${other.propertyId}/neighborhood`, { create: { name: 'The Yarrow Estates.', county: 'Sarasota' } });
+    expect(spelled.status).toBe(200);
+    expect(spelled.body.neighborhood.id).toBe(made.body.neighborhood.id);
   });
 
   test('create: a switched-off neighborhood of that name is refused, not revived', async () => {

@@ -7421,7 +7421,7 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets,
 // nothing at all when the directory is off (404) or the viewer is not an
 // admin (403).
 const NEIGHBORHOOD_COUNTIES = ["Manatee", "Sarasota", "Charlotte"];
-const NEIGHBORHOOD_SOURCE_LABEL = { office: "Set by office", county: "County records" };
+const NEIGHBORHOOD_SOURCE_LABEL = { office: "Set by office", county: "County records", caller: "From the customer, confirm" };
 const NEIGHBORHOOD_SEARCH_DEBOUNCE_MS = 250;
 
 function NeighborhoodPicker({ property, onSaved, onCancel }) {
@@ -7548,7 +7548,24 @@ function NeighborhoodPicker({ property, onSaved, onCancel }) {
 
 function PropertyNeighborhood({ property, showAddress, onUpdated }) {
   const [changing, setChanging] = useState(false);
+  const [confirmError, setConfirmError] = useState("");
   const hood = property.neighborhood;
+  // A link made from the customer's own words is kept out of the shared gate
+  // codes until the office confirms it: the same office pick as Change, with
+  // the neighborhood already shown.
+  const fromCustomer = Boolean(hood) && property.neighborhoodSource === "caller";
+  const confirm = async () => {
+    setConfirmError("");
+    try {
+      const updated = await adminFetch(`/admin/neighborhood-access/properties/${property.id}/neighborhood`, {
+        method: "PUT",
+        body: JSON.stringify({ neighborhoodId: hood.id }),
+      });
+      onUpdated(updated);
+    } catch (err) {
+      setConfirmError(apiErrorMessage(err, "Could not confirm the neighborhood"));
+    }
+  };
   // Label, street, unit and city, so two properties in one building never
   // read the same (their Change buttons name the same text).
   const street = [property.addressLine1, property.addressLine2].filter(Boolean).join(" ");
@@ -7569,17 +7586,33 @@ function PropertyNeighborhood({ property, showAddress, onUpdated }) {
           )}
         </div>
         {!changing && (
-          <button
-            type="button"
-            onClick={() => setChanging(true)}
-            aria-label={`Change neighborhood${showAddress ? ` for ${heading}` : ""}`}
-            className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
-          >
-            Change
-          </button>
+          <span className="flex items-center gap-3">
+            {fromCustomer && (
+              <button
+                type="button"
+                onClick={confirm}
+                aria-label={`Confirm neighborhood${showAddress ? ` for ${heading}` : ""}`}
+                className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+              >
+                Confirm
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setChanging(true)}
+              aria-label={`Change neighborhood${showAddress ? ` for ${heading}` : ""}`}
+              className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+            >
+              Change
+            </button>
+          </span>
         )}
       </div>
-      {hood && property.entries.length === 0 && (
+      {confirmError && <ActionFeedback error>{confirmError}</ActionFeedback>}
+      {fromCustomer && (
+        <div className="py-1 text-ui-label text-ink-tertiary italic">Confirm the neighborhood to use its gate entries.</div>
+      )}
+      {hood && !fromCustomer && property.entries.length === 0 && (
         <div className="py-1 text-ui-label text-ink-tertiary italic">No gate entry on file.</div>
       )}
       {hood && property.entries.map((e) => (
