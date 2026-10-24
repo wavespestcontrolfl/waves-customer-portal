@@ -62,10 +62,15 @@ const normalized = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').tri
 async function loadThreadMessages(conn, message, now) {
   const after = new Date(message.created_at);
   // The same conversation only: the number the source text came from (or went
-  // to), like the record loader. Another phone on the account is not evidence.
+  // to), like the record loader. Another phone on the account is not evidence —
+  // except for a source that has no thread number (message.any_customer_phone: a
+  // call promise, like the record loader), where any of the customer's own
+  // texts counts; both sources stay scoped to the customer.
   const peer = tenDigits(message.direction === 'inbound' ? message.from_phone : message.to_phone);
-  if (peer.length < 10) return { records: [] };
+  const anyPhone = message.any_customer_phone === true;
+  if (peer.length < 10 && !anyPhone) return { records: [] };
   const phoneOf = (column) => `RIGHT(regexp_replace(${column}, '[^0-9]', '', 'g'), 10) = ?`;
+  const onPeer = (q, column) => (anyPhone ? q : q.whereRaw(phoneOf(column), [peer]));
   // Recruiting threads (applicant texts) are owner-only and never evidence.
   const base = () => excludeRecruitingSmsLog(conn('sms_log').where({ customer_id: message.customer_id })
     .where('created_at', '>', after)
@@ -73,9 +78,9 @@ async function loadThreadMessages(conn, message, now) {
     .whereNot('id', message.id)
     .orderBy('created_at', 'desc').limit(THREAD_LIMIT)
     .select('id', 'direction', 'message_body', 'created_at'));
-  const inbound = base().where({ direction: 'inbound' }).whereRaw(phoneOf('from_phone'), [peer])
+  const inbound = onPeer(base().where({ direction: 'inbound' }), 'from_phone')
     .where((q) => q.whereNull('message_type').orWhereNotIn('message_type', NOT_CONVERSATION));
-  const outbound = excludeUnresolvedSendReservations(base().where({ direction: 'outbound' }).whereRaw(phoneOf('to_phone'), [peer]))
+  const outbound = excludeUnresolvedSendReservations(onPeer(base().where({ direction: 'outbound' }), 'to_phone'))
     .whereIn('status', ['sent', 'delivered']).whereRaw(operatorReplySql('sms_log'))
     // A scheduled text is stamped at handoff; one QUEUED before the source
     // text never answers it, like writtenAfterAsk in the record check.

@@ -152,6 +152,17 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       expect((await row(w.commitment.id)).status).toBe('fulfilled');
     });
 
+    test('the customer\'s confirmation counts from any phone on the account, not only the one that called', async () => {
+      const w = await world({ kind: 'send_report' });
+      const reply = await addSms(w, { direction: 'inbound', from_phone: '+15555559999', to_phone: OUR_NUMBER, message_type: null, status: 'received', metadata: null,
+        message_body: 'My wife got the report, thanks!', created_at: later(60) });
+      say(w, (payload) => (payload.text.includes(THREAD_PROMPT)
+        ? { ok: true, json: { verdict: 'completed', record_ref: `sms:${reply}`, quote: 'got the report' } }
+        : { ok: true, json: { verdict: 'open', record_ref: null, quote: null } }));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      expect((await row(w.commitment.id)).fulfillment).toMatchObject({ witness: 'customer', record_id: reply });
+    });
+
     test('a promise no record answers is closed by the customer\'s own later text saying it is done (the thread check)', async () => {
       const w = await world({ kind: 'send_report' });
       const reply = await addCustomerText(w, 'Got the report, thanks!');
@@ -314,6 +325,18 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       await db('call_log').where({ id: relinked.w.call.id }).update({ customer_id: other.customerId });
       await cc.refreshFulfillment(db, relinked.w.call.id);
       expect((await row(relinked.w.commitment.id)).status).toBe('open');
+
+      // A visit that kept a scheduling promise and was then cancelled or skipped no longer keeps it; a rescheduled one still does.
+      const booked = await world({ kind: 'schedule_visit' });
+      const visit = await addVisit(booked);
+      say(booked, fulfilledBy(`visit:${visit}`, 'status confirmed'));
+      expect(await run(booked)).toMatchObject({ closed: 1 });
+      await db('scheduled_services').where({ id: visit }).update({ status: 'rescheduled' });
+      await cc.refreshFulfillment(db, booked.call.id);
+      expect((await row(booked.commitment.id)).status).toBe('fulfilled');
+      await db('scheduled_services').where({ id: visit }).update({ status: 'cancelled' });
+      await cc.refreshFulfillment(db, booked.call.id);
+      expect((await row(booked.commitment.id)).status).toBe('open');
 
       const rewritten = await closedByText();
       await db('call_commitments').where({ id: rewritten.w.commitment.id }).update({ description: `${rewritten.w.commitment.description} (changed)` });

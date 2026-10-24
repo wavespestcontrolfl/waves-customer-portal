@@ -78,7 +78,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // plain column there, the record's existence alone is read).
 const LEDGER_RECORD_TYPE = { sms: 'sms_log', call: 'call_log', visit: 'scheduled_service', estimate: 'estimate',
   email_reply: 'email', email_delivery: 'email_message' };
-const RECORD_TABLES = { sms_log: ['sms_log', 'customer_id'], call_log: ['call_log', 'customer_id'], scheduled_service: ['scheduled_services', 'customer_id'],
+// A visit that was cancelled, skipped or never happened after it kept a promise no longer keeps it (a
+// rescheduled one still does: moving the visit is the booking act).
+const DEAD_VISIT_STATUSES = ['cancelled', 'canceled', 'skipped', 'no_show'];
+const RECORD_TABLES = { sms_log: ['sms_log', 'customer_id'], call_log: ['call_log', 'customer_id'],
+  scheduled_service: ['scheduled_services', 'customer_id', (q) => q.whereNotIn('status', DEAD_VISIT_STATUSES)],
   estimate: ['estimates', null], email: ['emails', null], email_message: ['email_messages', null] };
 
 const callEnd = (call) => require('./call-booking-link-text').callEndFor(call);
@@ -224,13 +228,16 @@ async function closeOnVerdict(conn, row, judged, { now }) {
 // Whether an ai-check close still stands, with no model call (called by
 // refreshFulfillment's re-judge): the promise is still the one judged, the call
 // still has the customer it was judged for, and the one record it rests on
-// still exists (for that customer where the table says so).
+// still exists (for that customer where the table says so) and, for a visit,
+// was not cancelled or skipped since.
 async function aiCloseStands(conn, commitment, call, prior) {
   if (prior?.basis !== AI_CHECK_BASIS || commitment.party !== 'waves' || commitment.human_state) return false;
   if (prior.promise_md5 !== promiseMd5(commitment) || !call?.customer_id || prior.judged_customer_id !== call.customer_id) return false;
-  const [table, customerColumn] = RECORD_TABLES[prior.record_type] || [];
+  const [table, customerColumn, stillCounts] = RECORD_TABLES[prior.record_type] || [];
   if (!table || !UUID_RE.test(String(prior.record_id))) return false;
-  return !!await conn(table).where({ id: prior.record_id }).modify((q) => { if (customerColumn) q.where(customerColumn, call.customer_id); }).first('id');
+  return !!await conn(table).where({ id: prior.record_id })
+    .modify((q) => { if (customerColumn) q.where(customerColumn, call.customer_id); })
+    .modify((q) => { if (stillCounts) stillCounts(q); }).first('id');
 }
 
 // ── The run ─────────────────────────────────────────────────────────────────
