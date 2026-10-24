@@ -524,10 +524,16 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
         .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
         .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")));
   if (forUpdate) query = query.forUpdate();
-  const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
+  const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data', 'sent_at', 'scheduled_at');
   for (const sibling of siblings) {
     if (sendAt && ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
       assertBidSendDate(sibling, sendAt);
+    }
+    // …and a sibling this send would publish while it still prices a
+    // satellite palm count no admin count matches (pre-push audit P1): the
+    // group claim would refuse it at delivery, so a schedule hears it now.
+    if (['draft', 'scheduled', 'send_failed'].includes(sibling.status)) {
+      try { assertSatellitePalmCountTyped(sibling, palmCountGateFor(sibling)); } catch (err) { return { sibling, statusCode: 409, code: err.code }; }
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,
@@ -571,6 +577,9 @@ function blockingSiblingMessage(blockingSibling, beforeWhat) {
   }
   if (blockingSibling.code === 'LEGACY_AUTOFILL_PRICE') {
     return `Grouped estimate ${id} has a price saved before a pricing fix — open it in the estimate tool, generate it again and save before ${beforeWhat}.`;
+  }
+  if (['PALM_COUNT_REQUIRED', 'PALM_COUNT_MISMATCH'].includes(blockingSibling.code)) {
+    return `Grouped estimate ${id} still prices a palm count from the satellite image that no admin count matches — rebuild it with the real palm count before ${beforeWhat}.`;
   }
   if (blockingSibling.code === 'ADDRESS_UNVERIFIED') {
     return `Grouped estimate ${id} has a house number county records could not confirm — correct or confirm its address before ${beforeWhat}.`;

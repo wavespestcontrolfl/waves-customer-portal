@@ -761,7 +761,7 @@ describe('group publication navigation', () => {
     gates.satellitePalmCountTypedLive.mockReturnValue(true);
     try {
       await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true, confirmedPalmCount: 9 }))
-        .rejects.toMatchObject({ code: 'PALM_COUNT_REQUIRED', message: expect.stringContaining('Grouped property') });
+        .rejects.toMatchObject({ code: 'PALM_COUNT_REQUIRED', message: expect.stringContaining('palm count from the satellite image') });
     } finally {
       gates.satellitePalmCountTypedLive.mockReturnValue(false);
     }
@@ -785,7 +785,7 @@ describe('group publication navigation', () => {
     gates.satellitePalmCountTypedLive.mockReturnValue(true);
     try {
       await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
-        .rejects.toMatchObject({ code: 'PALM_COUNT_MISMATCH', message: expect.stringContaining('Grouped property') });
+        .rejects.toMatchObject({ code: 'PALM_COUNT_MISMATCH', message: expect.stringContaining('palm count from the satellite image') });
     } finally {
       gates.satellitePalmCountTypedLive.mockReturnValue(false);
     }
