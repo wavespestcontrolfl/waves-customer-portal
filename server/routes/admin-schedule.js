@@ -11,6 +11,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
+const mistingRefill = require('../services/misting-refill');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
@@ -2793,9 +2794,15 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
   return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, conn = db }) {
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, refillContext = null, conn = db }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
+  }
+  // A misting refill is an add-on of a misting plan visit, never the visit itself (misting PR 2c, GATE_MOSQUITO_MISTING).
+  if (mistingRefill.refillLive() && mistingRefill.isRefillKey(serviceRecord?.service_key)) {
+    throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({
+      customerId: customer?.id, parentServiceKey: serviceRecord.service_key, isRecurring: !!refillContext?.isRecurring,
+    }, conn));
   }
 
   // One-time mosquito default follows the lot-based ladder (owner decision
@@ -2830,11 +2837,27 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   }];
 
   const addonLines = [];
+  const mistingRefills = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
     let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     const addonService = addon.serviceId
       ? await conn('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
       : null;
+    // A misting refill is priced by ONE resolver (services/misting-refill.js): the solution the accepted misting estimate was sold
+    // with, at the live table price. The posted price (the catalog Standard placeholder) is ignored; an unpriceable refill refuses.
+    let refill = null;
+    if (mistingRefill.refillLive() && mistingRefill.isRefillKey(addonService?.service_key)) {
+      refill = await mistingRefill.resolveRefillAttachment({
+        customerId: customer?.id,
+        propertyId: refillContext?.propertyId || null,
+        sourceEstimateId: refillContext?.sourceEstimateId || null,
+        parentServiceKey: serviceRecord?.service_key || null,
+        isRecurring: !!refillContext?.isRecurring,
+      }, conn);
+      if (!refill.ok) throw mistingRefill.refusalError(refill);
+      base = refill.unitPrice;
+      mistingRefills.push({ solution: refill.solution, solutionLabel: refill.solutionLabel, unitPrice: refill.unitPrice, estimateId: refill.estimateId });
+    }
     // Blank-priced one-time mosquito add-on lines get the same lot-ladder
     // default as the primary (catalog base_price as the no-lot-data
     // fallback) — a grouped booking must never silently bill mosquito at $0.
@@ -2858,14 +2881,15 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     });
     addonLines.push({
       serviceId: addon.serviceId || null,
-      serviceName: addon.name || addon.serviceName,
+      // The refill line is named with its solution (the visit invoice prints this name) and is an explicit one-time line.
+      serviceName: refill ? refill.lineName : (addon.name || addon.serviceName),
       serviceKey: addonService?.service_key || null,
       serviceCategory: addonService?.category || null,
       base,
       price: net,
       estimatedDuration: addon.estimatedDuration ?? addon.duration ?? addon.default_duration_minutes ?? null,
       discount: lineDiscount,
-      recurringPattern: addon.recurringPattern || addon.cadence || null,
+      recurringPattern: refill ? 'one_time' : (addon.recurringPattern || addon.cadence || null),
       recurringIntervalDays: addon.recurringIntervalDays ?? addon.intervalDays ?? null,
       recurringNth: addon.recurringNth ?? addon.nth ?? null,
       recurringWeekday: addon.recurringWeekday ?? addon.weekday ?? null,
@@ -3027,6 +3051,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     primaryDiscount: finalPrimaryDiscount,
     primaryAppointmentCreditDollars: finalPrimaryAppointmentCredit,
     addonLines: finalAddonLines,
+    ...(mistingRefills.length ? { mistingRefills } : {}),
     appointmentDiscount: appointmentDiscount ? {
       discountId: appointmentDiscount.id,
       discountName: appointmentDiscount.name,
@@ -7783,7 +7808,7 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
       const {
         key, customerId, scheduledDate, serviceType, serviceId, estimatedPrice, primaryLinePrice,
         primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount,
-        isRecurring, recurringCount, collectPrepay,
+        isRecurring, recurringCount, collectPrepay, propertyId, sourceEstimateId,
       } = group || {};
       if (!customerId || !serviceType) {
         results.push({ key: key ?? null, error: 'customerId and serviceType are required' });
@@ -7809,9 +7834,11 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
         pricing = await buildAppointmentPricing({
           serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount,
           serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking,
+          refillContext: { propertyId: propertyId || null, sourceEstimateId: sourceEstimateId || null, isRecurring: !!isRecurring },
         });
       } catch (e) {
-        results.push({ key: key ?? null, error: e.message || 'pricing failed' });
+        // A refused misting refill carries its stable code so the modal can show the staff-readable reason as it is.
+        results.push({ key: key ?? null, error: e.message || 'pricing failed', ...(e.code && String(e.code).startsWith('MISTING_REFILL_') ? { code: e.code } : {}) });
         continue;
       }
       // Stack-group verdict: advisory here (a dry run reports, never
@@ -7853,6 +7880,8 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
         price: pricing.finalPrice,
         primaryDiscount: pricing.primaryDiscount || null,
         addonLines: (pricing.addonLines || []).map((l) => ({ price: l.price, discount: l.discount || null })),
+        // The refill's solution and per-application price, so staff see the amount before they book (misting PR 2c).
+        ...(pricing.mistingRefills ? { mistingRefills: pricing.mistingRefills } : {}),
         appointmentDiscount: pricing.appointmentDiscount || null,
         stackGroupConflict: stackGroupConflictVerdict,
         prepay,
@@ -8750,6 +8779,7 @@ async function scheduleCreateHandler(req, res, next) {
       discountAmount,
       customer,
       recurringMembershipBooking,
+      refillContext: { propertyId: bookingProperty?.property_id || null, sourceEstimateId: linkedEstimateId, isRecurring: !!isRecurring },
     });
 
     // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
@@ -12235,6 +12265,24 @@ async function computeSingleServiceEstimatedPricePlan({
   return { clearAddonDiscountsOnPriceEdit, financialCasSnapshot, appointmentDiscountChanged };
 }
 
+// The visit a refill is being added to: who and where it is for, the estimate it came from, and the catalog key it will carry after
+// this save (a service change in the same save counts). Read once per save.
+async function loadRefillVisit(database, id, cols, updates) {
+  const wanted = ['customer_id', 'property_id', 'source_estimate_id', 'service_id', 'service_key_snapshot'].filter((column) => cols[column]);
+  const row = (await database('scheduled_services').where({ id }).first(...wanted)) || {};
+  let parentServiceKey = updates && updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : row.service_key_snapshot;
+  if (!parentServiceKey && row.service_id) {
+    const svc = await database('services').where({ id: row.service_id }).first('service_key').catch(() => null);
+    parentServiceKey = svc && svc.service_key;
+  }
+  return {
+    customer_id: row.customer_id || null,
+    property_id: row.property_id || null,
+    source_estimate_id: row.source_estimate_id || null,
+    parentServiceKey: parentServiceKey || null,
+  };
+}
+
 async function normalizeUpdateDetailsAddons({
   db, id, addons, updates, isRecurring, serviceType, scheduledDate,
 }) {
@@ -12361,6 +12409,7 @@ async function normalizeUpdateDetailsAddons({
         return membershipContextPromise;
       };
       const normalizedAddons = [];
+      let refillVisit = null;
       for (const a of addons) {
         // GitHub Codex round 12 P1 (#4657, :9970): the save transaction
         // REPLACES every add-on row (delete + reinsert), so a row id is
@@ -12380,14 +12429,41 @@ async function normalizeUpdateDetailsAddons({
             { code: 'VISIT_CHANGED_RETRY' },
           );
         }
-        const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
+        let serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
         if (!serviceName) continue;
         const catalogService = a.serviceId
           ? addonServiceById.get(a.serviceId)
           : (addonServiceByKey.get(String(a.serviceKey || '').trim().toLowerCase())
             || addonServiceByName.get(serviceName)
             || null);
-        const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
+        let gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
+        // A misting refill goes through the ONE refill resolver (services/misting-refill.js, same as a new booking): the posted price
+        // is ignored, the solution comes from the accepted misting estimate and the price from the live table. A refill the visit
+        // already carries keeps its stored price and name only when the resolver cannot price it now (it never bricks an unrelated
+        // edit); a NEW unpriceable refill is refused. GATE_MOSQUITO_MISTING off: untouched.
+        let refillLine = null;
+        if (mistingRefill.refillLive() && mistingRefill.isRefillKey(catalogService?.service_key)) {
+          if (!refillVisit) refillVisit = await loadRefillVisit(db, id, cols, updates);
+          const prior = a.id ? existingAddonDiscountById.get(a.id) : null;
+          const attach = await mistingRefill.resolveRefillAttachment({
+            customerId: refillVisit.customer_id,
+            propertyId: refillVisit.property_id,
+            sourceEstimateId: refillVisit.source_estimate_id,
+            parentServiceKey: refillVisit.parentServiceKey,
+            isRecurring: false,
+          }, db);
+          if (attach.ok) {
+            refillLine = attach;
+            gross = attach.unitPrice;
+            serviceName = attach.lineName;
+          } else if (prior && mistingRefill.isRefillKey(prior.service_key_snapshot) && mistingRefill.KEEP_STORED_ON.has(attach.code)) {
+            gross = toMoney(prior.base_price ?? prior.estimated_price);
+            serviceName = String(prior.service_name || serviceName).trim();
+            refillLine = { keptStored: true };
+          } else {
+            throw mistingRefill.refusalError(attach);
+          }
+        }
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
         let net = gross;
@@ -12498,7 +12574,8 @@ async function normalizeUpdateDetailsAddons({
           base: gross,
           price: net,
           estimatedDuration: (a.estimatedDuration != null && a.estimatedDuration !== '' && !isNaN(parseInt(a.estimatedDuration, 10))) ? parseInt(a.estimatedDuration, 10) : null,
-          recurringPattern: a.recurringPattern || null,
+          // A misting refill is an explicit one-time line: a NULL pattern would ride the visit's cadence.
+          recurringPattern: refillLine ? 'one_time' : (a.recurringPattern || null),
           recurringIntervalDays: a.recurringIntervalDays ?? null,
           recurringNth: a.recurringNth ?? null,
           recurringWeekday: a.recurringWeekday ?? null,
@@ -28589,6 +28666,8 @@ router._test = {
   addonRecursAfterAnchor,
   filterAddonLinesForDate,
   ONE_TIME_ADDON_SERVICE_KEYS,
+  normalizeUpdateDetailsAddons,
+  isOneTimeOnlyAddonKey,
   negativePricePosted,
   discountChangeWithoutPricePosted,
   addonServiceIdentityForFreshness,

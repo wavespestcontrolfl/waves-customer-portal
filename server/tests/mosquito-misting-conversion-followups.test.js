@@ -610,13 +610,13 @@ describe('audit 8: the install resolves for an inputs-only estimate and fails cl
     expect(client).toContain("'MOSQUITO_MISTING_INSTALL_UNRESOLVED'");
   });
 
-  test('refill booking and billing are not part of this PR (misting PR 2c): no resolver module, no price helper, no add-on link', () => {
-    expect(fs.existsSync(path.join(__dirname, '..', 'services/misting-refill-pricing.js'))).toBe(false);
-    expect(require('../services/pricing-engine/mosquito-misting-config').mistingRefillPriceFor).toBeUndefined();
+  test('the frozen catalog migration still creates no add-on link and keeps the refill row dormant; the link is misting PR 2c\'s own migration', () => {
+    // 20261023100000 shipped in PR 2a and is frozen: it never links the refill. The link lives in 20261024100000 (PR 2c).
     const migration = require('../models/migrations/20261023100000_mosquito_misting_catalog_rows');
     expect(read('models/migrations/20261023100000_mosquito_misting_catalog_rows.js')).not.toMatch(/linkRefillAddon|service_addons'\)\.insert/);
     const refill = migration.SERVICES.find((row) => row.service_key === 'mosquito_misting_refill');
     expect(refill).toMatchObject({ customer_visible: false, booking_enabled: false, public_quote_selectable: false });
+    expect(read('models/migrations/20261024100000_mosquito_misting_refill_addon_link.js')).toMatch(/service_addons/);
   });
 });
 

@@ -149,6 +149,17 @@ function syncMosquitoMistingPricingConfig(row, target = MOSQUITO_MISTING) {
   return applied;
 }
 
+// The per-refill-application price of ONE named solution (misting PR 2c). Reads the LIVE table, so it is DB-authoritative through the
+// pricing_config sync exactly like a quote. An unknown, missing or non-positive solution price is null: the refill is then UNPRICED
+// and refused, never read as the Standard price (the catalog row's base_price is only the Standard placeholder).
+function mistingRefillPriceFor(solution, target = MOSQUITO_MISTING) {
+  const key = String(solution == null ? '' : solution).trim().toLowerCase();
+  const refills = target.refills || {};
+  if (!Object.prototype.hasOwnProperty.call(refills, key)) return null;
+  const price = Number(refills[key].price);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
 // The row's data at the in-code defaults: what the migration seeds and the route's table-creating fallback inserts.
 function defaultMosquitoMistingPricingData() {
   return JSON.parse(JSON.stringify(DEFAULTS));
@@ -161,4 +172,5 @@ module.exports = {
   applyMosquitoMistingPricingConfig,
   syncMosquitoMistingPricingConfig,
   rebaseMosquitoMisting,
+  mistingRefillPriceFor,
 };

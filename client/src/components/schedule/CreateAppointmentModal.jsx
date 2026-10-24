@@ -3400,8 +3400,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // / partialCommitLocked / committedLineIdsRef are all declared at the
   // very top of the component now (round 5 P1 follow-up) — see their own
   // fuller comments there.
+  // A misting refill (GATE_MOSQUITO_MISTING) is priced by the server from the accepted misting estimate, so its group is previewed
+  // and its create POST is bound to the previewed price (expected_price) like a discounted group. The catalog price on the line is
+  // only the Standard placeholder.
+  const isMistingRefillLine = (svc) => lineServiceKey(svc) === 'mosquito_misting_refill';
   const groupRegimeDependent = (group, carriesDiscount) => (
-    carriesDiscount || group.lines.some((s) => s.lineDiscount)
+    carriesDiscount || group.lines.some((s) => s.lineDiscount) || group.lines.some(isMistingRefillLine)
   );
   // GitHub round 4 item 2 (Codex, blocked push 2 on PR #4656):
   // server-authoritative preview verification. Built with the SAME fields
@@ -3487,6 +3491,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           isRecurring: groupIsRecurring,
           recurringCount: groupIsRecurring ? (plannedRecurringCount(recurringCount) ?? undefined) : undefined,
           collectPrepay: groupIsRecurring ? !!collectPrepay : undefined,
+          // The refill's solution comes from the accepted misting estimate for THIS house, so the preview names the same
+          // property and estimate the create POST will (appointmentGroupRequestBody).
+          ...(group.lines.some(isMistingRefillLine) ? {
+            propertyId: propertyPickerActive && selectedPropertyId ? selectedPropertyId : undefined,
+            sourceEstimateId: linkedEstimate?.id || undefined,
+          } : {}),
         };
       })
       .filter(Boolean);
@@ -3494,7 +3504,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // `services`, so listing it (not just services) is what actually
     // catches a cadence-only edit with no discount change at all — same
     // reasoning as existingSelectionConflict's own dependency list above.
-  }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay, committedGroupKeysVersion]);
+  }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay, committedGroupKeysVersion, propertyPickerActive, selectedPropertyId, linkedEstimate]);
 
   // --- WaveGuard tier auto-preselect (owner ruling 2026-09-26: "auto-fill,
   // staff can remove it") — three real Silver customers were booked at full
@@ -3770,6 +3780,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // independently-stale Discounts figure could.
   const displayedTotal = appointmentSubmitGroups.reduce((sum, g) => sum + groupStackedPerVisitTotal(g), 0);
   const displayedDiscounts = Math.max(0, Math.round((subtotal - displayedTotal) * 100) / 100);
+  // The misting refills the server priced for this booking (solution and per-application price), shown only from a FRESH preview.
+  const mistingRefillNotes = serverPreview.status === 'ready' && serverPreview.forKey === previewRequestKey
+    ? appointmentSubmitGroups.flatMap((g) => (serverPreview.byKey?.get(groupKey(g))?.mistingRefills || []))
+    : [];
 
   // Recurring preview — for each cadence group, produce up to 4 future
   // dates Virginia will land on. Honors skip-weekends shift so what's
@@ -4909,7 +4923,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               // about to post — surfaced with its own retry, same as every
               // other reason here.
               : (previewGroupError
-                ? `Couldn't confirm today's price${serverPreview.byKey.get(previewGroupError.key)?.error ? ` (${serverPreview.byKey.get(previewGroupError.key).error})` : ''} — retry before saving.`
+                // A refused misting refill names its own reason (no accepted misting estimate, wrong visit, series): retrying
+                // changes nothing, so the server's text stands alone.
+                ? (String(serverPreview.byKey.get(previewGroupError.key)?.code || '').startsWith('MISTING_REFILL_')
+                  ? serverPreview.byKey.get(previewGroupError.key).error
+                  : `Couldn't confirm today's price${serverPreview.byKey.get(previewGroupError.key)?.error ? ` (${serverPreview.byKey.get(previewGroupError.key).error})` : ''} — retry before saving.`)
                 // Codex P2 (round 5, blocked push 10 on PR #4656): a
                 // PERMANENT preview failure (see the fetch effect's own
                 // comment) — never silently disabled forever, surfaced with
@@ -5325,6 +5343,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             {services.length > 0 && subtotal > 0 && (
               <div style={{ fontSize: 13, fontWeight: 500, color: '#18181B', textAlign: 'right' }}>
                 <div>Total: ${displayedTotal.toFixed(2)}</div>
+                {mistingRefillNotes.map((refill, i) => (
+                  <div key={`refill-${i}`} style={{ fontSize: 11, fontWeight: 500, color: D.muted }}>
+                    Refill, {refill.solutionLabel}: ${Number(refill.unitPrice).toFixed(2)} per application
+                  </div>
+                ))}
                 {displayedDiscounts > 0 && (
                   <div style={{ fontSize: 11, fontWeight: 500, color: D.muted }}>
                     Discounts: -${displayedDiscounts.toFixed(2)}
