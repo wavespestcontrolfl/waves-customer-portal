@@ -59,8 +59,10 @@ const dayKey = (v) => {
 
 // ── weed card ───────────────────────────────────────────────────────────────
 // The value is how clear the lawn is of weeds (Strong = few weeds), so "Weed Pressure: Strong"
-// read as strong weeds. Same scale and status words; the name the weed trend chart already uses.
-const WEED_CARD_LABEL = 'Weed Cleanliness';
+// read as strong weeds. Owner 2026-10-24: one name for this score everywhere, "Weed control"
+// (the tech screen's name). lawn-visual-diagnosis now builds the card with that name, so this
+// stays as the gate-on pin.
+const WEED_CARD_LABEL = 'Weed control';
 
 function fixWeedLabel(v2) {
   const card = (v2.diagnosis || []).find((c) => c && c.key === 'weed_pressure');

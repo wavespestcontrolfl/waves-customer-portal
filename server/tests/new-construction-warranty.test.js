@@ -60,8 +60,8 @@ describe('supersedeOpenNewConstructionWarranty', () => {
 const mockReadiness = jest.fn(() => ({ missing: [] }));
 jest.mock('../routes/admin-projects', () => ({ _private: { evaluateProjectSendReadiness: (...args) => mockReadiness(...args) } }));
 
-describe('templateIssueValues (server-built warranty)', () => {
-  const { templateIssueValues } = require('../services/new-construction-warranty');
+describe('templateIssueWithWarnings (server-built warranty)', () => {
+  const { templateIssueWithWarnings } = require('../services/new-construction-warranty');
   const KEY = 'service_agreement.termite_new_construction_warranty';
   const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Owner', address_line1: '1 Builder Office Rd', city: 'Sarasota', state: 'FL', zip: '34236' };
   const findings = {
@@ -78,7 +78,7 @@ describe('templateIssueValues (server-built warranty)', () => {
   // sets lockedCustomer to model an edit that committed in between.
   const issue = (body, cust, row, lockedRow = cust) => {
     lockedCustomer = lockedRow;
-    return templateIssueValues(KEY, body, cust, conn(row));
+    return templateIssueWithWarnings(KEY, body, cust, conn(row)).then(({ values }) => values);
   };
   const conn = (row) => (table) => ({
     where() { return this; },
@@ -134,7 +134,9 @@ describe('templateIssueValues (server-built warranty)', () => {
 
   test('other templates keep their own values', async () => {
     const values = { a: 1 };
-    await expect(templateIssueValues('service_agreement.termite_bond_retreatment', { values }, customer, conn(null))).resolves.toBe(values);
+    const result = await templateIssueWithWarnings('service_agreement.termite_bond_retreatment', { values }, customer, conn(null));
+    expect(result).toEqual({ values, warnings: [] });
+    expect(result.values).toBe(values);
   });
 
   test('builds the job fields from the saved certificate and takes only office fields', async () => {

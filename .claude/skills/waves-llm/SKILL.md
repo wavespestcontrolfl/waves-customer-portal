@@ -124,6 +124,9 @@ Currently live:
 - **GPT-5.5** (`MODEL_OPENAI_BEST`): lead-triage classification
   (`lead-triage.js`), knowledge-base Q&A (`knowledge-bridge.js`), estimate
   assistant (`estimate-assistant.js`).
+- **Lawn visit read + paired recheck** (`MODEL_GEMINI_LAWN_ASSESSMENT`, default
+  `gemini-3.8-flash`, owner 2026-10-24): their own Gemini selector, so the lawn
+  read does not follow `MODEL_GEMINI_VISION`.
 - **Gemini 3.8 Flash** (`MODEL_GEMINI_VISION`; per-service override
   `GEMINI_VISION_MODEL`): every Gemini image-analysis leg — the photo lanes
   (`lawn-assessment.js`, `pest-identification.js`, `tree-shrub-assessment.js`,
