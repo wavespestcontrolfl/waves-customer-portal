@@ -158,7 +158,7 @@ describe('LawnTrends first-visit baseline (owner 2026-08-04)', () => {
     ];
     const { unmount } = render(<LawnTrends trends={{ overall: points, weed: points }} baselineScore={70} />);
     expect(screen.queryByText('Color & Vigor')).not.toBeInTheDocument();
-    expect(screen.getByText('Weed Cleanliness')).toBeInTheDocument();
+    expect(screen.getByText('Weed control')).toBeInTheDocument();
     expect(screen.getByText('Lawn Health Trend')).toBeInTheDocument();
     unmount();
     render(<LawnTrends trends={{ overall: points, color: points }} baselineScore={70} />);

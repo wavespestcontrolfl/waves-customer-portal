@@ -62,6 +62,23 @@ describe('thread close bookkeeping', () => {
     expect(withThread).toBe(plain);
   });
 
+  test('turning GATE_SMS_FOLLOWUP_WITNESS_FIX on changes the record-check hash; off keeps today\'s hash', () => {
+    const evidence = { records: [], failures: [] };
+    const saved = process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX;
+    try {
+      delete process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX;
+      const off = fulfillmentFingerprint(commitment, evidence).evidenceHash;
+      process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+      const on = fulfillmentFingerprint(commitment, evidence).evidenceHash;
+      expect(on).not.toBe(off);
+      process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'false';
+      expect(fulfillmentFingerprint(commitment, evidence).evidenceHash).toBe(off);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX;
+      else process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = saved;
+    }
+  });
+
   test('a close from the thread is never a "kept late" ring', () => {
     const late = { verdict: 'fulfilled', matched_at: '2026-10-21T13:00:00Z' };
     expect(keptLate(commitment, late)).toBe(true);

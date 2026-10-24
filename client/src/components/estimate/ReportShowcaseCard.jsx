@@ -125,7 +125,7 @@ function ReportMock() {
 function LawnReportMock() {
   const scoreRows = [
     ['Density / Coverage', '82'],
-    ['Weed pressure', '88'],
+    ['Weed control', '88'],
     ['Color health', '79'],
   ];
   return (

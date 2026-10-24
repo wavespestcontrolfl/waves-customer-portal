@@ -236,7 +236,7 @@ describe('the fact sheet and prompt carry required lines', () => {
       watching: ['Dry spots near the fence.'],
       overall_out_of_100: 82,
       density_out_of_100: 80,
-      weed_cleanliness_out_of_100: 90,
+      weed_control_out_of_100: 90,
       color_out_of_100: 78,
     });
     expect(JSON.stringify(facts)).not.toMatch(/%/);

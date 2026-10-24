@@ -7,6 +7,8 @@ const { hashContractToken, publicContractUrl } = require('./contracts');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
+const { warranty13692CheckLive } = require('../config/feature-gates');
+const { CONSUMER_NOTICE_GRACE_END, findConsumerNotice } = require('./consumer-notices');
 
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
@@ -204,12 +206,46 @@ function money(value, label) {
   return `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function officeFields(body, initial) {
+// The Builder Master Agreement caps a lot warranty's renewal fee (owner
+// 10-24 Q5); its text prints the same amount.
+const BUILDER_RENEWAL_FEE_CAP = 149;
+
+// Rule 5E-14.105(1): the signed FDACS-13692 comes before the contract.
+// GATE_WARRANTY_13692_CHECK (owner 2026-10-24): a signed notice on file (an
+// e-signed Document Request or an uploaded paper scan) supplies the printed
+// date; with none, the typed date still works through the grace end, then the
+// issue refuses.
+const NOTICE_WARNING = `No signed FDACS-13692 consumer notice is on file for this customer. Until ${us(parseIso(CONSUMER_NOTICE_GRACE_END))} you can type the date it was signed. After that, the warranty cannot be issued until the notice is signed (send it from Document Requests) or the paper form is uploaded.`;
+const NOTICE_REQUIRED = 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form) on or before the contract basis date, then issue the warranty.';
+
+// { signedOn } when a usable notice is on file, else { warnings } while the
+// grace lasts (through the grace end, an Eastern date); refuses after it.
+// Gate off = nothing here (the typed date).
+async function consumerNoticeOnFile(body, customer, initial, conn) {
+  if (!warranty13692CheckLive()) return { signedOn: null, warnings: [] };
+  const basis = parseUs(body?.values?.basis?.date);
+  if (!basis) throw bad('Enter the contract basis date as MM/DD/YYYY.');
+  // The notice comes before the contract and before the treatment.
+  const found = await findConsumerNotice(conn, customer.id, { onOrBefore: key(basis) < key(initial) ? basis : initial });
+  if (found) return { signedOn: found.signedOn, warnings: [] };
+  if (key(parseIso(etDateString())) > key(parseIso(CONSUMER_NOTICE_GRACE_END))) throw bad(NOTICE_REQUIRED, 409);
+  return { signedOn: null, warnings: [NOTICE_WARNING] };
+}
+
+function officeFields(body, initial, noticeSignedOn = null) {
   const warranty = body?.values?.warranty || {};
   const out = Object.fromEntries(OFFICE_FIELDS.map((field) => [field, oneLine(warranty[field])]));
   out.treatment_price = money(out.treatment_price, 'treatment price');
   out.renewal_fee = money(out.renewal_fee, 'annual renewal fee');
+  if (body?.values?.basis?.kind === 'master' && Number(out.renewal_fee.replace(/[$,]/g, '')) > BUILDER_RENEWAL_FEE_CAP) {
+    throw bad('The Builder Master Agreement caps the annual renewal fee at $149.00.');
+  }
   if (out.plan_price !== PLAN_PRICE_INCLUDED) out.plan_price = money(out.plan_price, 'plan price');
+  // A notice on file prints its own signed date: the typed one is ignored.
+  if (noticeSignedOn) {
+    out.consumer_notice_date = noticeSignedOn;
+    return out;
+  }
   const notice = parseUs(out.consumer_notice_date);
   if (!notice || key(notice) > key(initial)) throw bad('The FDACS-13692 date must be a real date on or before the treatment date.');
   // Rule 5E-14.105(1): the signed consumer notice comes before the contract.
@@ -274,7 +310,11 @@ function assertStructuredCertificate(findings) {
   if (failing.length) throw bad(`Fix these certificate fields first (a short value, not a sentence): ${failing.join(', ')}.`, 409);
 }
 
-function certificateValues(project, findings) {
+// A builder lot under the master agreement runs from its final treatment
+// date, an owner contract from the initial one (Rule 5E-14.105(3)(a) allows
+// either; owner 10-24 Q3). The term, its end and the 30-day issue window
+// count from that date.
+function certificateValues(project, findings, { basisKind } = {}) {
   assertStructuredCertificate(findings);
   // project_date is the certificate's treatment date; a legacy
   // findings.treatment_date must agree with it, never override it.
@@ -284,12 +324,17 @@ function certificateValues(project, findings) {
   if (key(initial) > key(today)) throw bad('The treatment date on the certificate is in the future.', 409);
   const legacyDate = certificateDate(findings, 'treatment_date', 'The treatment date');
   if (legacyDate && key(legacyDate) !== key(initial)) throw bad('The certificate has two different treatment dates. Fix the certificate first.', 409);
-  const termEnd = us(addYears(initial, PLAN_YEARS[oneLine(findings.warranty_type)]));
   const lot = [oneLine(findings.lot_block), oneLine(findings.subdivision)].filter(Boolean).join(', ');
   const finalDate = certificateDate(findings, 'final_exterior_date', 'The final exterior date');
   if (finalDate && (key(finalDate) < key(initial) || key(finalDate) > key(today))) {
     throw bad('The final exterior date on the certificate must be between the treatment date and today.', 409);
   }
+  const fromFinal = basisKind === 'master';
+  if (fromFinal && !finalDate) {
+    throw bad('A builder lot warranty runs from the final exterior treatment. Record its date on the certificate and send the certificate again first.', 409);
+  }
+  const start = fromFinal ? finalDate : initial;
+  const termEnd = us(addYears(start, PLAN_YEARS[oneLine(findings.warranty_type)]));
   const recordedRenewal = certificateDate(findings, 'renewal_due', 'Renewal due by');
   // Renewal is due when the guaranteed term ends; a recorded date that
   // differs would end coverage early, so it stops the issue.
@@ -319,6 +364,8 @@ function certificateValues(project, findings) {
         // The whole project id: a shortened one can repeat across jobs.
         number: `NCW-${String(project.id).toUpperCase()}`,
         plan: oneLine(findings.warranty_type),
+        start_basis: fromFinal ? 'final' : 'initial',
+        start_date: us(start),
         term_end: termEnd,
         renewal_due: termEnd,
       },
@@ -452,8 +499,9 @@ function sentCertificate(project, customer) {
 // transaction with `trx`, which locks the certificate row, so the snapshot is
 // the certificate as it stands at insert time. Any other template passes its
 // values through.
-async function templateIssueValues(templateKey, body, customer, conn = db) {
-  if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return body?.values || {};
+async function templateIssueWithWarnings(templateKey, body, customer, conn = db) {
+  if (BUILDER_DOCUMENT_KEYS.includes(templateKey)) return { values: builderDocumentValues(templateKey, body), warnings: [] };
+  if (templateKey !== NEW_CONSTRUCTION_WARRANTY_KEY) return { values: body?.values || {}, warnings: [] };
   const projectId = issueRequestProjectId(body);
   // Customer row before the certificate row: the order the issue route and
   // a customer merge both take, so the two cannot deadlock.
@@ -471,22 +519,77 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
   assertCustomerPrintable(locked);
   const { asSent, findings } = sentCertificate(project, customer);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
-  const { initial, values } = certificateValues(asSent, findings);
+  const { initial, values } = certificateValues(asSent, findings, { basisKind: body?.values?.basis?.kind });
   Object.assign(values.treatment, soilLiquid(values.treatment));
   const issuer = body?.values?.issuer || {};
-  return screenValues({
+  const notice = await consumerNoticeOnFile(body, customer, initial, conn);
+  const printed = screenValues({
     ...values,
     // Named here, or the context falls back to the customer's plan tier.
     service: { name: 'New Construction Termite Warranty' },
     warranty: {
       ...values.warranty,
-      ...officeFields(body, initial),
+      ...officeFields(body, initial, notice.signedOn),
       contract_basis: contractBasis(body?.values?.basis, values.project.builder, initial),
       // The day Waves signs it (the signature line); delivery keeps its own time.
       issue_date: us(parseIso(etDateString())),
     },
     issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title), license: WAVES_FDACS_LICENSE_NUMBER },
   });
+  return { values: printed, warnings: notice.warnings };
+}
+
+// ── Builder Master Agreement and Lot Order (owner 10-24) ────────────────────
+// The office types these values; they print on a contract the builder signs,
+// so each one is a single screened line, every date is real, every price is
+// a dollar amount, and the day Waves signs is the server's ET date.
+const BUILDER_MASTER_AGREEMENT_KEY = 'service_agreement.termite_builder_master_agreement';
+const BUILDER_LOT_ORDER_KEY = 'service_agreement.termite_builder_lot_order';
+const BUILDER_DOCUMENT_KEYS = [BUILDER_MASTER_AGREEMENT_KEY, BUILDER_LOT_ORDER_KEY];
+const BUILDER_TEXT_FIELDS = {
+  [BUILDER_MASTER_AGREEMENT_KEY]: { agreement: ['price_schedule'] },
+  [BUILDER_LOT_ORDER_KEY]: { lot: ['lot_block', 'subdivision', 'address', 'permit', 'structures', 'treatment', 'price_basis'] },
+};
+
+function builderDate(value, label, { notAfter } = {}) {
+  const date = parseUs(value);
+  if (!date) throw bad(`Enter the ${label} as MM/DD/YYYY.`);
+  if (notAfter && key(date) > key(notAfter)) throw bad(`The ${label} cannot be in the future.`);
+  return us(date);
+}
+
+function builderDocumentValues(templateKey, body) {
+  if (body?.allowUnresolved === true) throw bad('This builder document cannot be issued with blank fields.');
+  const today = parseIso(etDateString());
+  const input = body?.values || {};
+  const values = {};
+  for (const [group, fields] of Object.entries(BUILDER_TEXT_FIELDS[templateKey])) {
+    values[group] = {};
+    for (const field of fields) {
+      const raw = input[group]?.[field];
+      if (!isShortText(raw) || !oneLine(raw)) throw bad(`Enter ${group}.${field} as one short line.`);
+      values[group][field] = oneLine(raw);
+    }
+  }
+  if (templateKey === BUILDER_MASTER_AGREEMENT_KEY) {
+    // Rule 5E-14.105(1): the consumer notice is signed before the agreement,
+    // and the agreement is signed today at the earliest.
+    values.agreement.consumer_notice_date = builderDate(input.agreement?.consumer_notice_date, 'FDACS-13692 date', { notAfter: today });
+  } else {
+    const lot = input.lot || {};
+    values.lot.agreement_date = builderDate(lot.agreement_date, 'master agreement date', { notAfter: today });
+    values.lot.scheduled_date = builderDate(lot.scheduled_date, 'expected slab pour date');
+    values.lot.price_total = money(oneLine(lot.price_total), 'total price for this lot');
+    values.lot.disturbed_soil_price = money(oneLine(lot.disturbed_soil_price), 're-treatment price');
+    values.lot.renewal_fee = money(oneLine(lot.renewal_fee), 'annual renewal fee');
+    if (Number(values.lot.renewal_fee.replace(/[$,]/g, '')) > BUILDER_RENEWAL_FEE_CAP) {
+      throw bad('The Builder Master Agreement caps the annual renewal fee at $149.00.');
+    }
+  }
+  const issuer = input.issuer || {};
+  values.issuer = { name: oneLine(issuer.name), title: oneLine(issuer.title), date: us(today) };
+  if (!values.issuer.name || !values.issuer.title) throw bad('Enter the name and title of the person signing for Waves.');
+  return screenValues(values);
 }
 
 // Staff read the full warranty text before it is created: the preview
@@ -520,10 +623,13 @@ function issueDeliveryState(templateKey, token, expiresAt, now = new Date()) {
 
 module.exports = {
   NEW_CONSTRUCTION_WARRANTY_KEY,
+  BUILDER_MASTER_AGREEMENT_KEY,
+  BUILDER_LOT_ORDER_KEY,
+  CONSUMER_NOTICE_GRACE_END,
   issueDeliveryState,
   assertConfirmedRender,
   renderHash,
   supersedeOpenNewConstructionWarranty,
   snapshotWarrantyNumber,
-  templateIssueValues,
+  templateIssueWithWarnings,
 };
