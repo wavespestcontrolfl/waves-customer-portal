@@ -302,6 +302,43 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(await service.ingestEmail(await storeEmail({ classification: 'spam' }))).toEqual({ skipped: 'spam' });
       expect(raiseAdminAlert).not.toHaveBeenCalled();
     });
+
+    test('a signed Blue Book invite in Gmail Spam is filed and rings; forged or blocked ones are not', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      const bluebook = (over = {}) => storeEmail({
+        from_address: 'FixtureBuild.oneteam.build@bbbid.thebluebook.com', from_name: 'Fixture Build via The Blue Book',
+        subject: 'Invitation to Bid', label_ids: JSON.stringify(['UNREAD', 'SPAM']),
+        body_text: [
+          'Bid is due by 2:00 PM (Eastern) on October 20, 2026',
+          'You\u2019ve been invited to bid on a - Gas Station Project in Sampleton, FL.',
+          'We are looking for', 'Pest Control--Exterminating.',
+          "Fixture Build Co. is sharing this project opportunity with you through The Blue Book Network's ONETEAM.",
+        ].join('\n'),
+        ...over,
+      });
+      // Not signed by the Blue Book domain: Gmail's SPAM label holds.
+      await bluebook({ authentication_results: 'mx.google.com; dkim=fail header.i=@bbbid.thebluebook.com; spf=softfail smtp.mailfrom=x@elsewhere.example', received_at: new Date(NOW.getTime() - 25 * 60000) });
+      // A sender-typed MAIL FROM that fakes a DKIM pass fools only the loose reader (GATE_EMAIL_AUTH_STRICT is off
+      // here): it never passes Gmail Spam.
+      await bluebook({
+        authentication_results: 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=bbbid.thebluebook.com y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=bbbid.thebluebook.com y"@evil.example',
+        received_at: new Date(NOW.getTime() - 22 * 60000),
+      });
+      // Our own spam classification (a blocked sender) holds even when signed.
+      await bluebook({ classification: 'spam', received_at: new Date(NOW.getTime() - 20 * 60000) });
+      // Any other sender in Gmail Spam still holds.
+      await storeEmail({ label_ids: JSON.stringify(['SPAM']), subject: 'Invitation to bid', received_at: new Date(NOW.getTime() - 18 * 60000) });
+      const signed = await bluebook({ received_at: new Date(NOW.getTime() - 15 * 60000) });
+      expect(await service.runBidDeskTick({ now: NOW })).toMatchObject({ filed: 1, created: 1 });
+      const link = await mockPg('bid_opportunity_emails').where({ email_id: signed.id }).first();
+      expect(await bidRow(link.bid_id)).toMatchObject({
+        source: 'bluebook', gc_or_agency: 'Fixture Build Co.', project_title: 'Gas Station Project in Sampleton, FL',
+        package_name: 'Pest Control--Exterminating', location: 'Sampleton, FL', due_confirmed: false,
+        due_source_line: 'Bid is due by 2:00 PM (Eastern) on October 20, 2026',
+      });
+      expect((await bidRow(link.bid_id)).due_at.toISOString()).toBe('2026-10-20T18:00:00.000Z');
+      expect(rung('new')).toHaveLength(1);
+    });
   });
 
   describe('reminders', () => {
@@ -522,6 +559,23 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const live = await mockPg('bid_opportunities').where({ first_email_id: recent.id }).first();
       expect(live).toMatchObject({ historical: false });
       expect(rung('new')).toHaveLength(1);
+    });
+
+    test('the backfill dry run and real run agree on Blue Book mail in Gmail Spam: only the signed one counts', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      const at = new Date(NOW.getTime() - 3 * DAY);
+      const bluebook = (over) => storeEmail({
+        from_address: 'FixtureBuild.oneteam.build@bbbid.thebluebook.com', subject: 'Invitation to Bid',
+        label_ids: JSON.stringify(['SPAM']), created_at: at, received_at: at,
+        body_text: ['Bid is due by 2:00 PM (Eastern) on October 20, 2026', 'You\u2019ve been invited to bid on a - Gas Station Project in Sampleton, FL.'].join('\n'),
+        ...over,
+      });
+      await bluebook({ authentication_results: 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=bbbid.thebluebook.com y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=bbbid.thebluebook.com y"@evil.example' });
+      await bluebook({ authentication_results: null, subject: 'Invitation to Bid: unsigned' });
+      const signed = await bluebook({});
+      expect(await service.runBackfill({ days: 180, dryRun: true, now: NOW })).toMatchObject({ matched: 1, created: 0 });
+      expect(await service.runBackfill({ days: 180, dryRun: false, now: NOW })).toMatchObject({ matched: 1, created: 1 });
+      expect(await mockPg('bid_opportunities').where({ first_email_id: signed.id }).first()).toMatchObject({ source: 'bluebook', historical: true });
     });
 
     test('the backfill leaves rows after the cursor id to the live intake, even at the same created_at', async () => {

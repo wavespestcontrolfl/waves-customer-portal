@@ -581,11 +581,17 @@ async function stampCustomerPreferredLanguage(customerId, language) {
  *     requested_service|matched_service, preferred_date_time, pain_points,
  *     call_summary, lead_quality ('hot'|'warm'|'cold'),
  *     contact_preference, preferred_contact_method, do_not_contact_request }
- * @param {object} opts { phone, toPhone, callSid, language, callDurationSeconds }
+ * @param {object} opts { phone, toPhone, callSid, language, callDurationSeconds,
+ *   channel: 'sms' for the text-thread reader (sms-lead-extraction.js), messageSid }
  * @returns {Promise<{ leadId: string|null, customerId: string|null, created: boolean }>}
  */
 async function createLeadFromExtraction(extracted = {}, opts = {}) {
   const phone = opts.phone || extracted.phone || null;
+  // The text-thread reader (GATE_SMS_LEAD_EXTRACTION) writes through this same
+  // function so a texted lead gets the call path's reuse and merge rules; only
+  // the labels below differ. Anything else is the voice path, as before.
+  const viaSms = opts.channel === 'sms';
+  const captureSource = viaSms ? 'sms_agent' : 'voice_agent';
   const language = opts.language ? String(opts.language).toLowerCase().slice(0, 8) : null;
   // composeServiceInterest returns the matched service plus any requested
   // families it doesn't cover (multi-service calls), or null when nothing
@@ -595,6 +601,9 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   let customerId = null;
   let leadId = null;
   let created = false;
+  // Text reader only: the number turned out to belong to someone between the
+  // reader's check and this write ('customer' or 'lead'). Nothing is written.
+  let notOwned = null;
 
   // ⭐ IDENTITY CAN BE HANDED IN, AND WHEN IT IS, IT WINS. The voice relay knows
   // WHO is on the call from the ANI cross-check against the signature-verified
@@ -632,9 +641,20 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       identityPhone = ownAni && ownAni === lookupNumber ? phone : opts.aniPhone;
     }
   }
-  let customer = opts.identityCustomerId
+  // The text reader only writes for a number nobody owns (sms-lead-extraction.js
+  // knownState). Re-checked here, on every identity phone column and before the
+  // voice path's single-match and name rules, because a customer may have
+  // taken the number while the model was reading.
+  if (viaSms && phone) {
+    const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
+    if (await knownCallerPhoneExists(db, phone)) return { leadId: null, customerId: null, created: false, notOwned: 'customer' };
+  }
+  // The text reader's strict check above already proved no customer holds the
+  // number; the voice lookup's last-10-digit match could still pick an
+  // international customer with the same trailing digits.
+  let customer = viaSms ? null : (opts.identityCustomerId
     ? await db('customers').where({ id: opts.identityCustomerId }).whereNull('deleted_at').first()
-    : (identityPhone ? await findCustomerByPhone(identityPhone) : null);
+    : (identityPhone ? await findCustomerByPhone(identityPhone) : null));
   // Name-aware guard: on a shared line the phone-only match can resolve the
   // wrong household member. If the agent captured a name that conflicts with the
   // matched customer's, don't link (treat as a new, unlinked caller) rather than
@@ -695,9 +715,33 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // beats a lost capture.
   let existingLead = null;
   const resolveExistingLead = async (q) => {
-    existingLead = phone
-      ? await q('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
-      : null;
+    // The text reader fills only a lead it made (marked on its insert below).
+    // Any other lead on the number, in any phone format, is someone else's (a
+    // form, a call, staff, maybe made while the model was reading): merging
+    // would stamp it as the reader's, and the name rule below would mint a
+    // duplicate beside it. Write nothing.
+    if (viaSms) {
+      // US/Canada digits with or without the leading 1 (the reader only
+      // handles +1 numbers); never a bare last-10 match across countries.
+      const digits = phoneDigits(phone);
+      const key = /^1?\d{10}$/.test(digits) ? digits.slice(-10) : '';
+      const onNumber = key
+        ? await q('leads').whereNull('deleted_at')
+          .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)", [key, `1${key}`])
+          .orderBy('created_at', 'desc')
+        : [];
+      if (onNumber.some((row) => parseJsonObject(row.extracted_data).source !== captureSource)) {
+        notOwned = 'lead';
+        existingLead = null;
+        return;
+      }
+      // The reader's own lead, matched on digits: staff may have reformatted its phone.
+      existingLead = onNumber[0] || null;
+    } else {
+      existingLead = phone
+        ? await q('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
+        : null;
+    }
   // ⭐ AN UNVERIFIED SESSION REUSES NOTHING. Nulling identity resolution above
   // is not enough: leads resolve BY PHONE, so an unverified relay caller
   // claiming a victim's number would still land on — and overwrite the rolling
@@ -752,7 +796,6 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     logger.info(`[voice-agent-lead] Existing lead name conflicts on ${maskPhone(phone)}; creating a separate lead`);
     existingLead = null;
   }
-
     if (existingLead) {
       leadId = existingLead.id;
     } else {
@@ -764,12 +807,17 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         first_name: nameCase(extracted.first_name),
         last_name: nameCase(extracted.last_name) || '',
         email: extracted.email || null,
-        lead_type: 'inbound_call',
+        lead_type: viaSms ? 'inbound_sms' : 'inbound_call',
         first_contact_at: new Date(),
-        first_contact_channel: 'call',
+        first_contact_channel: viaSms ? 'sms' : 'call',
         status: 'new',
       };
       if (opts.callSid) insert.twilio_call_sid = opts.callSid;
+      if (viaSms && opts.messageSid) insert.twilio_message_sid = opts.messageSid;
+      // The reader's ownership mark rides the INSERT itself, so a process exit
+      // before the merge below still leaves a lead the next read recognises
+      // as its own and fills (sms-lead-extraction.js knownState).
+      if (viaSms) insert.extracted_data = JSON.stringify({ source: captureSource });
       if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
       const [newLead] = await q('leads').insert(insert).returning('*');
       leadId = newLead.id;
@@ -829,7 +877,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     const merged = mergeLeadExtractedData(priorExtracted, {
       pain_points: extracted.pain_points,
       preferred_date_time: extracted.preferred_date_time,
-      source: 'voice_agent',
+      source: captureSource,
       language: language || priorExtracted.language || null,
       ...(extracted.quote_requested === true ? { quote_requested: true } : {}),
       ...(extracted.quote_promised === true ? { quote_promised: true } : {}),
@@ -918,13 +966,15 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     activityRow = {
       lead_id: leadId,
       activity_type: 'ai_triage',
-      description: `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
-      performed_by: 'AI Voice Agent',
+      description: viaSms
+        ? `AI text reader captured: ${service || 'general inquiry'}`
+        : `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
+      performed_by: viaSms ? 'AI Text Reader' : 'AI Voice Agent',
       metadata: JSON.stringify({
         call_summary: extracted.call_summary,
         pain_points: extracted.pain_points,
         language,
-        source: 'voice_agent',
+        source: captureSource,
         ...(contactPreference || {}),
       }),
     };
@@ -999,7 +1049,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       .catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
   }
 
-  return { leadId, customerId, created };
+  return { leadId, customerId, created, ...(notOwned ? { notOwned } : {}) };
 }
 
 /**
