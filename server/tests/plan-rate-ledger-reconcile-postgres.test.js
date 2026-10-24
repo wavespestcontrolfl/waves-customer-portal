@@ -6,7 +6,8 @@
  *   - the shortfall upsert: a new 'unattributed' line, or the gap ADDED to an existing one whose
  *     source and stamps stay as they were (ON CONFLICT ... DO UPDATE of monthly_rate only);
  *   - customers.monthly_rate is never written; an overshoot writes no line;
- *   - the alert through the real notifyAdmin on the repair's transaction, once per gap;
+ *   - the alert through the real episode helpers on the repair's transaction, once per gap; an
+ *     overshoot alert closes once its lines are corrected and rings again when the same gap returns;
  *   - a customer whose rung-6 (customer-comms) lock is held waits, and judges the gap again once
  *     it gets the lock.
  * The full run (gate, alert budget, failure isolation) is in the unit suite: run against a
@@ -115,7 +116,7 @@ maybeDescribe('plan-rate ledger reconcile (live Postgres)', () => {
     });
     expect(alerts[0].detail).toContain('Earlier rate (not split by service) $10.00');
     expect(alerts[0].metadata).toMatchObject({
-      dedupeKey: `plan-rate-invariant:${id}:7500:5000`, customerId: id, gap: 'shortfall', parkedCents: 2500, area: 'Billing', severity: 'needs-you', who: 'person',
+      dedupeKey: `plan-rate-invariant:shortfall:${id}:7500:5000`, customerId: id, gap: 'shortfall', parkedCents: 2500, area: 'Billing', severity: 'needs-you', who: 'person',
     });
 
     // The lines add up to the bill again: a second pass finds nothing to do and raises nothing.
@@ -155,7 +156,32 @@ maybeDescribe('plan-rate ledger reconcile (live Postgres)', () => {
     expect(await billOf(id)).toBe('50.00');
     const alerts = await alertsFor(id);
     expect(alerts).toHaveLength(1);
-    expect(alerts[0].metadata).toMatchObject({ dedupeKey: `plan-rate-invariant:${id}:5000:9000`, gap: 'overshoot', parkedCents: 0 });
+    expect(alerts[0].metadata).toMatchObject({ dedupeKey: `plan-rate-invariant:overshoot:${id}:5000:9000`, gap: 'overshoot', parkedCents: 0 });
+  });
+
+  test('an overshoot alert closes once the lines are corrected, and rings again when the same gap returns', async () => {
+    const id = await seed({ bill: '50.00', lines: [['pest_control', '45.00'], ['lawn_care', '45.00']] });
+    const key = `plan-rate-invariant:overshoot:${id}:5000:9000`;
+    const first = await reconcile.reconcileCustomer(db, id);
+    expect(first.alert).toMatchObject({ deduped: false, rang: true });
+
+    await db('customer_plan_rates').where({ customer_id: id, family_key: 'lawn_care' }).update({ monthly_rate: '5.00' });
+    await reconcile.closeSettledOvershootAlerts(db);
+    const [closed] = await alertsFor(id);
+    expect(closed.metadata).toMatchObject({ dedupeKey: key, autoCleared: true, autoClearedReason: 'the plan lines add up to the bill' });
+    const closedRow = await db('notifications').where({ id: closed.id }).first('done_at', 'done_by', 'resolution', 'read_at');
+    expect(closedRow).toMatchObject({ done_by: 'episodes', resolution: 'Cleared: the plan lines add up to the bill' });
+    expect(closedRow.done_at).not.toBeNull();
+
+    await db('customer_plan_rates').where({ customer_id: id, family_key: 'lawn_care' }).update({ monthly_rate: '45.00' });
+    const again = await reconcile.reconcileCustomer(db, id);
+    expect(again.alert.rang).toBe(true);
+    const rows = await alertsFor(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toMatchObject({ dedupeKey: key, autoCleared: false, recurrenceGeneration: 1 });
+    const reopened = await db('notifications').where({ id: rows[0].id }).first('done_at', 'read_at');
+    expect(reopened).toEqual({ done_at: null, read_at: null });
+    expect(await billOf(id)).toBe('50.00');
   });
 
   test('a customer whose rung-6 lock is held waits, then judges the gap again under the lock', async () => {

@@ -27,9 +27,17 @@
  *   is never changed; the lines are only its attribution.
  * - Overshoot (lines above the bill): nothing is deleted or shrunk. Which line
  *   is stale is the owner's call.
- * Either way the owner gets one Billing alert per distinct gap, deduped forever on
- * the customer and both cent figures: an unfixed overshoot does not ring every
+ * Either way the owner gets one Billing alert per distinct gap, deduped on the
+ * customer and both cent figures: an unfixed overshoot does not ring every
  * night, and a new gap on the same customer rings again.
+ *
+ * Alert lifecycle (docs/admin-notifications.md section 4, admin-alert-episodes.js,
+ * live unless ALERT_EPISODES is killed): an overshoot alert closes itself once its
+ * gap no longer stands (the lines were corrected, the bill changed, or the account
+ * stopped being live), and the same gap coming back rings again; a person's own
+ * dismissal of a gap that still stands stays dismissed. A shortfall alert asks a
+ * person to check a repair this job already made, so only that person closes it.
+ * ALERT_EPISODES killed: the plain deduped alert, nothing closes or reopens.
  *
  * Never changes customers.monthly_rate, never charges, never messages a customer.
  *
@@ -49,11 +57,14 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { planRateLedgerReconcileLive } = require('../config/feature-gates');
+const { planRateLedgerReconcileLive, alertEpisodesLive } = require('../config/feature-gates');
 const { UNATTRIBUTED } = require('./plan-rate-ledger');
 const { whereLiveCustomer } = require('./customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { raiseAdminAlert } = require('./admin-alert-compose');
+const { raiseAdminAlert, composeAdminAlert } = require('./admin-alert-compose');
+// Through the module object, as the schedule-integrity watchdog does, so a unit
+// test can stand the episode helpers in for their SQL.
+const alertEpisodes = require('./admin-alert-episodes');
 const names = require('./admin-alert-names');
 // The owner-facing name of a ledger line ("Earlier rate (not split by service)"
 // for 'unattributed'), the same words the Intelligence Bar's rate-change card uses.
@@ -61,7 +72,10 @@ const { lineLabel, money } = require('./intelligence-bar/rate-change');
 
 const REPAIR_SOURCE = 'invariant_repair';
 const MAX_NEW_ALERTS_PER_RUN = 5;
-const DEDUPE_PREFIX = 'plan-rate-invariant';
+// One key per distinct gap: <prefix><customer>:<bill cents>:<line sum cents>.
+const SHORTFALL_PREFIX = 'plan-rate-invariant:shortfall:';
+const OVERSHOOT_PREFIX = 'plan-rate-invariant:overshoot:';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const cents = (value) => Math.round(Number(value || 0) * 100);
 const dollars = (amountCents) => money(amountCents / 100);
@@ -107,6 +121,28 @@ async function parkShortfall(trx, customerId, shortfallCents) {
     .merge({ monthly_rate: trx.raw('customer_plan_rates.monthly_rate + excluded.monthly_rate') });
 }
 
+// The alert's eight parts for one gap, named for `name`.
+function gapSpec(customer, name, { shortfall, bill, sum, billWords }) {
+  return {
+    area: 'Billing',
+    severity: 'needs-you',
+    who: 'person',
+    link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+    subject: { type: 'customer', id: String(customer.id) },
+    ...(shortfall
+      ? {
+        action: names.fitAction('Billing', name, [(n) => `check ${n}'s monthly bill by service`, (n) => `check ${n}'s monthly bill`]),
+        why: `Billed ${bill} a month but the service lines added up to ${sum}; the gap is now an unsplit line.`,
+        doneWhen: 'plan_lines_checked',
+      }
+      : {
+        action: names.fitAction('Billing', name, [(n) => `fix ${n}'s monthly bill by service`, (n) => `fix ${n}'s monthly bill`]),
+        why: `The service lines add up to ${sum} but ${billWords}; nothing was deleted.`,
+        doneWhen: 'plan_lines_match_bill',
+      }),
+  };
+}
+
 // One alert per distinct gap, raised on the repair's own transaction.
 async function raiseGapAlert(trx, { customer, lines, billedCents, lineSumCents }) {
   const shortfall = billedCents > lineSumCents;
@@ -116,20 +152,22 @@ async function raiseGapAlert(trx, { customer, lines, billedCents, lineSumCents }
   const sum = dollars(lineSumCents);
   const gap = dollars(gapCents);
   const lineList = lines.map((row) => `${lineLabel(row.family_key)} ${dollars(cents(row.monthly_rate))}`).join(', ');
-  const dedupeKey = `${DEDUPE_PREFIX}:${customer.id}:${billedCents}:${lineSumCents}`;
+  const dedupeKey = `${shortfall ? SHORTFALL_PREFIX : OVERSHOOT_PREFIX}${customer.id}:${billedCents}:${lineSumCents}`;
   // A NULL rate is compared as $0 but is not "a $0.00 bill": say there is none.
   const billWords = customer.monthly_rate == null ? 'there is no monthly rate on the account' : `the bill is ${bill} a month`;
-  const spec = shortfall
-    ? {
-      action: names.fitAction('Billing', name, [(n) => `check ${n}'s monthly bill by service`, (n) => `check ${n}'s monthly bill`]),
-      why: `Billed ${bill} a month but the service lines added up to ${sum}; the gap is now an unsplit line.`,
-      doneWhen: 'plan_lines_checked',
-    }
-    : {
-      action: names.fitAction('Billing', name, [(n) => `fix ${n}'s monthly bill by service`, (n) => `fix ${n}'s monthly bill`]),
-      why: `The service lines add up to ${sum} but ${billWords}; nothing was deleted.`,
-      doneWhen: 'plan_lines_match_bill',
-    };
+  const figures = { shortfall, bill, sum, billWords };
+  // A name the alert rules refuse (an emoji, brackets, an exclamation mark)
+  // must not cost the gap its alert, nor fail, every night, the repair the
+  // alert rides on: the headline says "a customer" and the detail keeps the name.
+  let spec = gapSpec(customer, name, figures);
+  let composed;
+  try {
+    composed = composeAdminAlert(spec);
+  } catch (err) {
+    if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+    spec = gapSpec(customer, 'a customer', figures);
+    composed = composeAdminAlert(spec);
+  }
   const detail = shortfall
     ? `${name} is billed ${bill} a month, but the service lines behind that bill added up to ${sum} (${lineList}). `
       + 'The rate was changed somewhere that did not update the lines, such as a script or a direct database edit. '
@@ -141,14 +179,7 @@ async function raiseGapAlert(trx, { customer, lines, billedCents, lineSumCents }
       + 'Nothing was deleted or changed, nothing was charged, and the customer was not contacted. '
       + `Until it is fixed, the next estimate accept or plan hold for this customer rebuilds the bill from the lines, which add up to ${sum}. `
       + 'Correct the lines or the rate.';
-  return raiseAdminAlert('billing', {
-    area: 'Billing',
-    severity: 'needs-you',
-    who: 'person',
-    link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
-    subject: { type: 'customer', id: String(customer.id) },
-    ...spec,
-  }, {
+  const opts = {
     trx,
     bell: true,
     dedupeKey,
@@ -161,7 +192,53 @@ async function raiseGapAlert(trx, { customer, lines, billedCents, lineSumCents }
       lineSumCents,
       parkedCents: shortfall ? gapCents : 0,
     },
+  };
+  // ALERT_EPISODES killed: the plain deduped alert; nothing closes or reopens.
+  if (!alertEpisodesLive()) return raiseAdminAlert('billing', spec, opts);
+  // Episodes: a standing alert is a silent dedupe; one this job closed when its
+  // gap cleared rings again if the same gap comes back.
+  return alertEpisodes.raiseAdminAlertWithReopen('billing', composed.headline, composed.why, {
+    ...opts, link: composed.link, metadata: { ...opts.metadata, ...composed.metadata },
   });
+}
+
+// The close half of the episode: every open overshoot alert whose gap no
+// longer stands is closed, with what changed as its resolution. Judged on the
+// customer as it is now (not on this run's candidates, which a spent alert
+// budget leaves unprocessed), and writes nothing but admin notifications: an
+// alert closed a moment before its gap returns is re-raised, and rings again,
+// on the next run. Shortfall alerts are never closed here (see the header).
+async function closeSettledOvershootAlerts(database, now = new Date()) {
+  const open = (await alertEpisodes.openAdminAlertKeys(database, OVERSHOOT_PREFIX))
+    .map((key) => {
+      const [customerId, billedCents, lineSumCents] = key.slice(OVERSHOOT_PREFIX.length).split(':');
+      return { key, customerId, billedCents: Number(billedCents), lineSumCents: Number(lineSumCents) };
+    })
+    .filter((alert) => UUID.test(alert.customerId));
+  if (!open.length) return 0;
+  const rows = await database('customers')
+    .whereIn('id', [...new Set(open.map((alert) => alert.customerId))])
+    .modify(whereLiveCustomer)
+    .select('id', 'monthly_rate', database.raw('(SELECT ROUND(SUM(r.monthly_rate) * 100) FROM customer_plan_rates r WHERE r.customer_id = customers.id) AS line_sum_cents'));
+  const current = new Map(rows.map((row) => [String(row.id).toLowerCase(), {
+    billedCents: cents(row.monthly_rate),
+    lineSumCents: row.line_sum_cents == null ? null : Number(row.line_sum_cents),
+  }]));
+  const byReason = new Map();
+  for (const alert of open) {
+    const state = current.get(alert.customerId.toLowerCase());
+    let reason = null;
+    if (!state) reason = 'the account is no longer a live customer';
+    else if (state.lineSumCents == null) reason = 'the plan lines were cleared';
+    else if (state.lineSumCents === state.billedCents) reason = 'the plan lines add up to the bill';
+    else if (state.billedCents !== alert.billedCents || state.lineSumCents !== alert.lineSumCents) reason = 'the gap changed';
+    if (reason) byReason.set(reason, [...(byReason.get(reason) || []), alert.key]);
+  }
+  let closed = 0;
+  for (const [reason, keys] of byReason) {
+    closed += Number(await alertEpisodes.closeAdminAlertKeys(database, keys, reason, { now, resolution: `Cleared: ${reason}` })) || 0;
+  }
+  return closed;
 }
 
 // One customer, under rung 6 and the customers row lock. Returns
@@ -207,9 +284,12 @@ async function runPlanRateLedgerReconcile({ database = db } = {}) {
     // (converged), or the customer had left the live stages (notLive).
     converged: 0,
     notLive: 0,
+    // Real rings (a new alert, or a closed one rung again), which spend the
+    // budget; a silent dedupe onto a standing alert does not.
     alerted: 0,
     alreadyAlerted: 0,
     deferred: 0,
+    closed: 0,
     failed: 0,
   };
   for (const { id } of candidates) {
@@ -223,13 +303,20 @@ async function runPlanRateLedgerReconcile({ database = db } = {}) {
       else if (outcome === 'overshoot') result.overshoots += 1;
       else if (outcome === 'not_live') result.notLive += 1;
       else result.converged += 1;
-      if (alert && alert.deduped === true) result.alreadyAlerted += 1;
-      else if (alert && alert.id != null) result.alerted += 1;
+      if (alert) {
+        // The reopen helper reports `rang`; the plain raise rang when it wrote a row.
+        const rang = typeof alert.rang === 'boolean'
+          ? alert.rang
+          : (!alert.suppressed && alert.deduped !== true && alert.id != null);
+        if (rang) result.alerted += 1;
+        else if (alert.deduped === true) result.alreadyAlerted += 1;
+      }
     } catch (err) {
       result.failed += 1;
       logger.error(`[plan-rate-reconcile] customer ${id} not reconciled: ${err.message}`);
     }
   }
+  if (alertEpisodesLive()) result.closed = await closeSettledOvershootAlerts(database);
   if (result.failed) {
     // Every other customer was still reconciled; the run reads as failed in job_health.
     logger.error(`[plan-rate-reconcile] run: ${JSON.stringify(result)}`);
@@ -242,5 +329,5 @@ module.exports = {
   runPlanRateLedgerReconcile,
   MAX_NEW_ALERTS_PER_RUN,
   REPAIR_SOURCE,
-  _private: { divergentCustomersQuery, reconcileCustomer },
+  _private: { divergentCustomersQuery, reconcileCustomer, closeSettledOvershootAlerts },
 };

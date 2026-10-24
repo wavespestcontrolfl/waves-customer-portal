@@ -4,23 +4,28 @@
  * Pins what the run may and may not do with a customer whose customer_plan_rates
  * lines no longer add up to the billed customers.monthly_rate:
  *   - gate off: nothing is read, written or raised (the database handle throws on any use);
+ *   - only live customers (whereLiveCustomer: active, customer stage, not deleted) are scanned or touched;
  *   - a shortfall is parked in the 'unattributed' line (fresh insert, or ADDED to an existing
  *     line whose source and stamps stay as they were);
  *   - an overshoot only alerts: no line is deleted, shrunk or written;
  *   - one alert per distinct gap: a second run on the same gap raises no second alert;
  *   - every customer is judged again under rung 6 (customer-comms) taken BEFORE the customers row
- *     lock, and a gap that closed (or a customer that left the live stages) before the lock is left alone;
+ *     lock, and a gap that closed (or a customer that stopped being live) before the lock is left alone;
  *   - customers.monthly_rate is never written (the fake refuses any write to customers);
  *   - an alert that cannot be written rolls its repair back, other customers still run, the run fails;
- *   - at most MAX_NEW_ALERTS_PER_RUN new alerts a run, the rest untouched until the next run.
- * The real SQL (the candidate HAVING, the ON CONFLICT merge, the lock wait) runs against Postgres
- * in plan-rate-ledger-reconcile-postgres.test.js. All fixture identities are synthetic.
+ *   - at most MAX_NEW_ALERTS_PER_RUN new alerts a run, the rest untouched until the next run;
+ *   - alert episodes: an overshoot alert closes itself once its gap no longer stands and rings
+ *     again if the same gap comes back; a shortfall alert is never closed by the job;
+ *     ALERT_EPISODES killed = the plain deduped alert, no close pass.
+ * The real SQL (the scan, the ON CONFLICT merge, the lock wait, the episode helpers) runs against
+ * Postgres in plan-rate-ledger-reconcile-postgres.test.js. All fixture identities are synthetic.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const mockGate = { on: true };
+const mockGate = { on: true, episodes: true };
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   planRateLedgerReconcileLive: jest.fn(() => mockGate.on),
+  alertEpisodesLive: jest.fn(() => mockGate.episodes),
 }));
 // The module-level handle must never be used: every test injects its own.
 jest.mock('../models/db', () => {
@@ -30,25 +35,52 @@ jest.mock('../models/db', () => {
 });
 // Everything the fake database does, and every alert, in one ordered log.
 const mockLog = [];
-// notifyAdmin as its contract runs on a CALLER's transaction: dedupe on the key against
+// Both raise paths as their contracts run on a CALLER's transaction: dedupe on the key against
 // committed rows and this transaction's own, insert into the transaction (committed with it,
-// discarded on rollback), errors propagate.
-const mockAlerts = { rows: [], nextId: 1, failFor: null };
+// discarded on rollback), errors propagate. The reopen path (raiseAdminAlertWithReopen) also rings
+// a row the job closed (autoCleared) again, and reports `rang`.
+const mockAlerts = { rows: [], calls: [], nextId: 1, failFor: null };
+function mockRaise(path, category, title, body, opts = {}) {
+  mockLog.push({ op: 'alert', path, key: opts.dedupeKey });
+  if (!opts.trx || !opts.trx.__pendingAlerts) throw new Error('fake: the alert must ride the repair transaction');
+  if (mockAlerts.failFor && String(opts.dedupeKey).includes(mockAlerts.failFor)) throw new Error('admin notification insert failed');
+  mockAlerts.calls.push({ path, category, title, body, opts });
+  const latest = [...mockAlerts.rows, ...opts.trx.__pendingAlerts].filter((row) => row.dedupeKey === opts.dedupeKey).pop();
+  if (latest && latest.autoCleared && path === 'reopen') {
+    latest.autoCleared = false;
+    latest.recurrenceGeneration = (latest.recurrenceGeneration || 0) + 1;
+    return { ...latest, deduped: true, refreshed: true, rung: true, rang: true };
+  }
+  if (latest) return { ...latest, deduped: true, ...(path === 'reopen' ? { rang: false } : {}) };
+  const { trx: _trx, ...rest } = opts;
+  const row = { id: mockAlerts.nextId++, category, title, body, ...rest, autoCleared: false };
+  opts.trx.__pendingAlerts.push(row);
+  return { ...row, deduped: false, ...(path === 'reopen' ? { rang: true } : {}) };
+}
 jest.mock('../services/notification-service', () => ({
-  notifyAdmin: jest.fn(async (category, title, body, opts = {}) => {
-    mockLog.push({ op: 'alert', key: opts.dedupeKey });
-    if (!opts.trx || !opts.trx.__pendingAlerts) throw new Error('fake: the alert must ride the repair transaction');
-    if (mockAlerts.failFor && String(opts.dedupeKey).includes(mockAlerts.failFor)) throw new Error('admin notification insert failed');
-    const existing = [...mockAlerts.rows, ...opts.trx.__pendingAlerts].find((row) => row.dedupeKey === opts.dedupeKey);
-    if (existing) return { ...existing, deduped: true };
-    const { trx: _trx, ...rest } = opts;
-    const row = { id: mockAlerts.nextId++, category, title, body, ...rest };
-    opts.trx.__pendingAlerts.push(row);
-    return { ...row, deduped: false };
+  notifyAdmin: jest.fn(async (category, title, body, opts) => mockRaise('plain', category, title, body, opts)),
+}));
+jest.mock('../services/admin-alert-episodes', () => ({
+  raiseAdminAlertWithReopen: jest.fn(async (category, title, body, opts) => mockRaise('reopen', category, title, body, opts)),
+  openAdminAlertKeys: jest.fn(async (_conn, prefix) => [...new Set(mockAlerts.rows
+    .filter((row) => String(row.dedupeKey).startsWith(prefix) && !row.autoCleared)
+    .map((row) => row.dedupeKey))]),
+  closeAdminAlertKeys: jest.fn(async (_conn, keys, reason, { resolution } = {}) => {
+    mockLog.push({ op: 'close', keys: [...keys], reason });
+    let closed = 0;
+    for (const row of mockAlerts.rows) {
+      if (keys.includes(row.dedupeKey) && !row.autoCleared) {
+        row.autoCleared = true;
+        row.resolution = resolution;
+        closed += 1;
+      }
+    }
+    return closed;
   }),
 }));
 
 const NotificationService = require('../services/notification-service');
+const alertEpisodes = require('../services/admin-alert-episodes');
 const { planRateLedgerReconcileLive } = require('../config/feature-gates');
 const { runPlanRateLedgerReconcile, MAX_NEW_ALERTS_PER_RUN, REPAIR_SOURCE } = require('../services/plan-rate-ledger-reconcile');
 
@@ -58,6 +90,8 @@ const cents = (v) => Math.round(Number(v || 0) * 100);
 const asMoney = (c) => (c / 100).toFixed(2);
 const clone = (rows) => rows.map((row) => ({ ...row }));
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const shortfallKey = (n, bill, sum) => `plan-rate-invariant:shortfall:${uuid(n)}:${bill}:${sum}`;
+const overshootKey = (n, bill, sum) => `plan-rate-invariant:overshoot:${uuid(n)}:${bill}:${sum}`;
 
 function customer(n, monthlyRate, extra = {}) {
   return {
@@ -70,19 +104,21 @@ function line(n, familyKey, monthlyRate, extra = {}) {
   };
 }
 
-// A stateful fake knex covering exactly what the reconcile touches: the candidate scan, and
-// per-customer transactions with the advisory lock, the locked customers read, the ledger read and
-// the ledger upsert. The customers builder records and APPLIES every where/whereNull/whereIn it is
-// given (so the real whereLiveCustomer filters the fake rows), and evaluates the scan's gap predicate
-// itself. Writes to customers, deletes and updates anywhere, and any other table throw.
-// `snapshot` stands in for a scan taken BEFORE a concurrent writer committed.
+// A stateful fake knex covering exactly what the reconcile touches: the candidate scan, per-customer
+// transactions (the advisory lock, the locked customers read, the ledger read and upsert), and the
+// close pass's read of customers with open overshoot alerts. The customers builder records and
+// APPLIES every where/whereNull/whereIn it is given (so the real whereLiveCustomer filters the fake
+// rows) and evaluates the raw sum predicates itself. Writes to customers, deletes and updates
+// anywhere, and any other table throw. `snapshot` stands in for a scan taken BEFORE a concurrent
+// writer committed.
 function makeDb({ customers = [], lines = [], snapshot = null } = {}) {
   const state = { customers: clone(customers), lines: clone(lines) };
   const initialCustomers = clone(customers);
-  const hasGap = (c) => {
+  const lineSum = (c) => {
     const own = state.lines.filter((l) => l.customer_id === c.id);
-    return own.length > 0 && own.reduce((sum, l) => sum + cents(l.monthly_rate), 0) !== cents(c.monthly_rate);
+    return own.length ? own.reduce((sum, l) => sum + cents(l.monthly_rate), 0) : null;
   };
+  const hasGap = (c) => lineSum(c) !== null && lineSum(c) !== cents(c.monthly_rate);
   const refuse = (what) => () => { mockLog.push({ op: 'refused', what }); throw new Error(`fake: ${what}`); };
 
   const builder = (view, table) => {
@@ -91,6 +127,7 @@ function makeDb({ customers = [], lines = [], snapshot = null } = {}) {
       const preds = [];
       let locked = false;
       let gapPredicate = false;
+      let columns = [];
       const b = {
         modify: (fn) => { fn(b); return b; },
         where: (criteria, value) => {
@@ -111,7 +148,7 @@ function makeDb({ customers = [], lines = [], snapshot = null } = {}) {
           return b;
         },
         orderBy: () => b,
-        select: () => b,
+        select: (...cols) => { columns = cols; return b; },
         forUpdate: () => { locked = true; return b; },
         first: async () => {
           mockLog.push({ op: 'customer-read', locked, scope });
@@ -119,12 +156,21 @@ function makeDb({ customers = [], lines = [], snapshot = null } = {}) {
           return row ? { ...row } : undefined;
         },
         then: (resolve, reject) => {
-          mockLog.push({ op: 'scan', scope });
-          if (!gapPredicate) return Promise.reject(new Error('fake: scan without the gap predicate')).then(resolve, reject);
-          const rows = snapshot
-            ? snapshot.map((id) => ({ id }))
-            : view.customers.filter((c) => preds.every((p) => p(c)) && hasGap(c)).map((c) => c.id).sort().map((id) => ({ id }));
-          return Promise.resolve(rows).then(resolve, reject);
+          if (gapPredicate) {
+            mockLog.push({ op: 'scan', scope });
+            const rows = snapshot
+              ? snapshot.map((id) => ({ id }))
+              : view.customers.filter((c) => preds.every((p) => p(c)) && hasGap(c)).map((c) => c.id).sort().map((id) => ({ id }));
+            return Promise.resolve(rows).then(resolve, reject);
+          }
+          if (columns.some((col) => col && /AS line_sum_cents$/.test(String(col.__raw || '')))) {
+            mockLog.push({ op: 'close-read', scope });
+            const rows = view.customers.filter((c) => preds.every((p) => p(c))).map((c) => ({
+              id: c.id, monthly_rate: c.monthly_rate, line_sum_cents: lineSum(c) == null ? null : String(lineSum(c)),
+            }));
+            return Promise.resolve(rows).then(resolve, reject);
+          }
+          return Promise.reject(new Error('fake: unexpected customers query')).then(resolve, reject);
         },
         update: refuse('customers write'),
         insert: refuse('customers write'),
@@ -200,7 +246,8 @@ function makeDb({ customers = [], lines = [], snapshot = null } = {}) {
       throw err;
     }
   };
-  database.raw = refuse('raw outside a transaction');
+  // Outside a transaction raw is only ever a select expression (the close pass's line sum).
+  database.raw = (sql) => ({ __raw: sql });
   database.__state = state;
   database.__initialCustomers = initialCustomers;
   return database;
@@ -208,7 +255,11 @@ function makeDb({ customers = [], lines = [], snapshot = null } = {}) {
 
 const linesOf = (db, n) => db.__state.lines.filter((l) => l.customer_id === uuid(n))
   .sort((a, z) => a.family_key.localeCompare(z.family_key));
+const setLines = (db, n, rows) => {
+  db.__state.lines = [...db.__state.lines.filter((l) => l.customer_id !== uuid(n)), ...rows];
+};
 const ops = (name) => mockLog.filter((entry) => entry.op === name);
+const alertRow = (key) => mockAlerts.rows.filter((row) => row.dedupeKey === key);
 // The bill is the business fact: whatever happened, the customers rows are exactly as they were.
 const expectBillsUntouched = (db) => {
   expect(db.__state.customers).toEqual(db.__initialCustomers);
@@ -219,9 +270,11 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockLog.length = 0;
   mockAlerts.rows = [];
+  mockAlerts.calls = [];
   mockAlerts.nextId = 1;
   mockAlerts.failFor = null;
   mockGate.on = true;
+  mockGate.episodes = true;
 });
 
 test('gate off: nothing is read, written or raised', async () => {
@@ -235,6 +288,9 @@ test('gate off: nothing is read, written or raised', async () => {
   expect(database.transaction).not.toHaveBeenCalled();
   expect(database.raw).not.toHaveBeenCalled();
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(alertEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  expect(alertEpisodes.openAdminAlertKeys).not.toHaveBeenCalled();
+  expect(alertEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
 });
 
 test('the scan only meets live customers: active, a customer stage, not deleted (whereLiveCustomer)', async () => {
@@ -269,7 +325,7 @@ test('shortfall: the gap is parked as a new unattributed line, the bill is untou
   });
   const result = await runPlanRateLedgerReconcile({ database: db });
   expect(result).toEqual({
-    skipped: false, checked: 1, parked: 1, overshoots: 0, converged: 0, notLive: 0, alerted: 1, alreadyAlerted: 0, deferred: 0, failed: 0,
+    skipped: false, checked: 1, parked: 1, overshoots: 0, converged: 0, notLive: 0, alerted: 1, alreadyAlerted: 0, deferred: 0, closed: 0, failed: 0,
   });
   expect(linesOf(db, 1)).toEqual([
     expect.objectContaining({ family_key: 'pest_control', monthly_rate: '45.00', source: 'backfill', updated_at: STAMP }),
@@ -278,8 +334,9 @@ test('shortfall: the gap is parked as a new unattributed line, the bill is untou
   expect(linesOf(db, 1).reduce((sum, l) => sum + cents(l.monthly_rate), 0)).toBe(8660);
   expectBillsUntouched(db);
 
-  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-  const [category, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+  expect(mockAlerts.calls).toHaveLength(1);
+  const [{ path, category, title, body, opts }] = mockAlerts.calls;
+  expect(path).toBe('reopen');
   expect(category).toBe('billing');
   expect(title).toBe("Billing — check Pat Example1's monthly bill by service");
   expect(body).toBe('Billed $86.60 a month but the service lines added up to $45.00; the gap is now an unsplit line.');
@@ -288,10 +345,10 @@ test('shortfall: the gap is parked as a new unattributed line, the bill is untou
   expect(opts.detail).toContain('The bill was not changed, nothing was charged, and the customer was not contacted.');
   expect(opts).toMatchObject({
     bell: true,
-    dedupeKey: `plan-rate-invariant:${uuid(1)}:8660:4500`,
+    dedupeKey: shortfallKey(1, 8660, 4500),
     link: `/admin/customers?customerId=${uuid(1)}`,
     metadata: {
-      dedupeKey: `plan-rate-invariant:${uuid(1)}:8660:4500`,
+      dedupeKey: shortfallKey(1, 8660, 4500),
       customerId: uuid(1),
       gap: 'shortfall',
       billedCents: 8660,
@@ -334,28 +391,38 @@ test('overshoot: alert only, no line is written, deleted or shrunk', async () =>
   const lines = [line(1, 'lawn_care', '45.00'), line(1, 'pest_control', '45.00', { source: 'estimate_accept' })];
   const db = makeDb({ customers: [customer(1, '50.00')], lines });
   const result = await runPlanRateLedgerReconcile({ database: db });
-  expect(result).toMatchObject({ checked: 1, parked: 0, overshoots: 1, alerted: 1 });
+  expect(result).toMatchObject({ checked: 1, parked: 0, overshoots: 1, alerted: 1, closed: 0 });
   expect(ops('upsert')).toEqual([]);
   expect(linesOf(db, 1)).toEqual(lines);
   expectBillsUntouched(db);
-  const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+  const [{ title, body, opts }] = mockAlerts.calls;
   expect(title).toBe("Billing — fix Pat Example1's monthly bill by service");
   expect(body).toBe('The service lines add up to $90.00 but the bill is $50.00 a month; nothing was deleted.');
   expect(opts.detail).toContain('Lawn care $45.00, Pest control $45.00');
+  expect(opts.dedupeKey).toBe(overshootKey(1, 5000, 9000));
   expect(opts.metadata).toMatchObject({ gap: 'overshoot', billedCents: 5000, lineSumCents: 9000, parkedCents: 0, doneWhen: 'plan_lines_match_bill' });
 });
 
 test('a NULL bill with lines is an overshoot against zero, alerted and left alone', async () => {
   const db = makeDb({ customers: [customer(1, null)], lines: [line(1, 'pest_control', '45.00')] });
   const result = await runPlanRateLedgerReconcile({ database: db });
-  expect(result).toMatchObject({ overshoots: 1, parked: 0, alerted: 1 });
+  expect(result).toMatchObject({ overshoots: 1, parked: 0, alerted: 1, closed: 0 });
   expect(ops('upsert')).toEqual([]);
-  const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
-  expect(opts.dedupeKey).toBe(`plan-rate-invariant:${uuid(1)}:0:4500`);
+  const [{ body, opts }] = mockAlerts.calls;
+  expect(opts.dedupeKey).toBe(overshootKey(1, 0, 4500));
   // Compared as $0, but never described as a $0.00 bill.
   expect(body).toBe('The service lines add up to $45.00 but there is no monthly rate on the account; nothing was deleted.');
   expect(opts.detail).toContain('but there is no monthly rate on the account.');
   expectBillsUntouched(db);
+});
+
+test('a customer name the alert rules refuse still rings, as "a customer", and the repair stands', async () => {
+  const db = makeDb({ customers: [customer(1, '86.60', { first_name: 'Pat!', last_name: '[Example]' })], lines: [line(1, 'pest_control', '45.00')] });
+  const result = await runPlanRateLedgerReconcile({ database: db });
+  expect(result).toMatchObject({ parked: 1, alerted: 1, failed: 0 });
+  const [{ title, opts }] = mockAlerts.calls;
+  expect(title).toBe("Billing — check a customer's monthly bill by service");
+  expect(opts.detail).toContain('Pat! [Example] is billed $86.60 a month');
 });
 
 test('dedupe: a second run on the same gap raises no second alert', async () => {
@@ -363,14 +430,14 @@ test('dedupe: a second run on the same gap raises no second alert', async () => 
   const first = await runPlanRateLedgerReconcile({ database: db });
   const second = await runPlanRateLedgerReconcile({ database: db });
   expect(first).toMatchObject({ overshoots: 1, alerted: 1, alreadyAlerted: 0 });
-  expect(second).toMatchObject({ overshoots: 1, alerted: 0, alreadyAlerted: 1 });
-  const keys = NotificationService.notifyAdmin.mock.calls.map(([, , , opts]) => opts.dedupeKey);
-  expect(keys).toEqual([`plan-rate-invariant:${uuid(1)}:5000:9000`, `plan-rate-invariant:${uuid(1)}:5000:9000`]);
+  expect(second).toMatchObject({ overshoots: 1, alerted: 0, alreadyAlerted: 1, closed: 0 });
+  expect(mockAlerts.calls.map((call) => call.opts.dedupeKey)).toEqual([overshootKey(1, 5000, 9000), overshootKey(1, 5000, 9000)]);
   expect(mockAlerts.rows).toHaveLength(1);
+  expect(mockAlerts.rows[0].autoCleared).toBe(false);
 });
 
 test('dedupe: a shortfall whose gap was already alerted is still parked, without a new alert', async () => {
-  mockAlerts.rows.push({ id: 41, dedupeKey: `plan-rate-invariant:${uuid(1)}:8660:4500` });
+  mockAlerts.rows.push({ id: 41, dedupeKey: shortfallKey(1, 8660, 4500), autoCleared: false });
   const db = makeDb({ customers: [customer(1, '86.60')], lines: [line(1, 'pest_control', '45.00')] });
   const result = await runPlanRateLedgerReconcile({ database: db });
   expect(result).toMatchObject({ parked: 1, alerted: 0, alreadyAlerted: 1 });
@@ -401,7 +468,7 @@ test('re-check under the lock: a gap a concurrent writer closed before the lock 
   expect(result).toMatchObject({ checked: 1, converged: 1, parked: 0, overshoots: 0, alerted: 0 });
   expect(ops('lock')).toHaveLength(1);
   expect(ops('upsert')).toEqual([]);
-  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(mockAlerts.calls).toEqual([]);
   expectBillsUntouched(db);
 });
 
@@ -421,7 +488,7 @@ test('re-check under the lock: lines cleared, or the customer churned, deleted o
   // Not-live customers are refused before their lines are even read.
   expect(ops('lines-read').map((entry) => entry.id)).toEqual([uuid(1)]);
   expect(ops('upsert')).toEqual([]);
-  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(mockAlerts.calls).toEqual([]);
   expectBillsUntouched(db);
 });
 
@@ -462,13 +529,95 @@ test('alert budget: once the new alerts are spent the remaining customers wait, 
 test('an already-alerted gap costs no budget', async () => {
   const ids = Array.from({ length: MAX_NEW_ALERTS_PER_RUN + 1 }, (_, i) => i + 1);
   // Customer 1 is a standing, already-alerted overshoot the run meets first every night.
-  mockAlerts.rows.push({ id: 7, dedupeKey: `plan-rate-invariant:${uuid(1)}:5000:9000` });
+  mockAlerts.rows.push({ id: 7, dedupeKey: overshootKey(1, 5000, 9000), autoCleared: false });
   const db = makeDb({
     customers: [customer(1, '50.00'), ...ids.slice(1).map((n) => customer(n, '60.00'))],
     lines: [line(1, 'pest_control', '90.00'), ...ids.slice(1).map((n) => line(n, 'pest_control', '50.00'))],
   });
   const result = await runPlanRateLedgerReconcile({ database: db });
-  expect(result).toMatchObject({ overshoots: 1, alreadyAlerted: 1, parked: MAX_NEW_ALERTS_PER_RUN, alerted: MAX_NEW_ALERTS_PER_RUN, deferred: 0 });
+  expect(result).toMatchObject({ overshoots: 1, alreadyAlerted: 1, parked: MAX_NEW_ALERTS_PER_RUN, alerted: MAX_NEW_ALERTS_PER_RUN, deferred: 0, closed: 0 });
+});
+
+describe('alert episodes (ALERT_EPISODES live, the default)', () => {
+  test('an overshoot alert closes itself once the lines add up to the bill, and rings again if the same gap comes back', async () => {
+    const db = makeDb({ customers: [customer(1, '50.00')], lines: [line(1, 'pest_control', '90.00')] });
+    expect(await runPlanRateLedgerReconcile({ database: db })).toMatchObject({ overshoots: 1, alerted: 1, closed: 0 });
+
+    setLines(db, 1, [line(1, 'pest_control', '50.00')]);
+    expect(await runPlanRateLedgerReconcile({ database: db })).toMatchObject({ checked: 0, alerted: 0, closed: 1 });
+    expect(alertRow(overshootKey(1, 5000, 9000))).toEqual([
+      expect.objectContaining({ autoCleared: true, resolution: 'Cleared: the plan lines add up to the bill' }),
+    ]);
+    expect(mockAlerts.calls).toHaveLength(1);
+
+    setLines(db, 1, [line(1, 'pest_control', '90.00')]);
+    expect(await runPlanRateLedgerReconcile({ database: db })).toMatchObject({ overshoots: 1, alerted: 1, alreadyAlerted: 0, closed: 0 });
+    expect(alertRow(overshootKey(1, 5000, 9000))).toEqual([expect.objectContaining({ autoCleared: false, recurrenceGeneration: 1 })]);
+    expectBillsUntouched(db);
+  });
+
+  test('a gap that changed closes the old alert and rings its own', async () => {
+    const db = makeDb({ customers: [customer(1, '50.00')], lines: [line(1, 'pest_control', '90.00')] });
+    await runPlanRateLedgerReconcile({ database: db });
+    setLines(db, 1, [line(1, 'pest_control', '80.00')]);
+    const result = await runPlanRateLedgerReconcile({ database: db });
+    expect(result).toMatchObject({ overshoots: 1, alerted: 1, closed: 1 });
+    expect(alertRow(overshootKey(1, 5000, 9000))).toEqual([expect.objectContaining({ autoCleared: true, resolution: 'Cleared: the gap changed' })]);
+    expect(alertRow(overshootKey(1, 5000, 8000))).toEqual([expect.objectContaining({ autoCleared: false })]);
+  });
+
+  test('an overshoot alert closes when the account stops being live or its lines are cleared', async () => {
+    const db = makeDb({
+      customers: [customer(1, '50.00'), customer(2, '50.00')],
+      lines: [line(1, 'pest_control', '90.00'), line(2, 'pest_control', '90.00')],
+    });
+    await runPlanRateLedgerReconcile({ database: db });
+    db.__state.customers[0].active = false;
+    db.__initialCustomers[0].active = false;
+    setLines(db, 2, []);
+    expect(await runPlanRateLedgerReconcile({ database: db })).toMatchObject({ checked: 0, closed: 2 });
+    expect(alertRow(overshootKey(1, 5000, 9000))[0].resolution).toBe('Cleared: the account is no longer a live customer');
+    expect(alertRow(overshootKey(2, 5000, 9000))[0].resolution).toBe('Cleared: the plan lines were cleared');
+    // The close pass reads customers through the same live rule.
+    expect(ops('close-read')[0].scope).toEqual(expect.arrayContaining([['where', 'active', true], ['whereNull', 'deleted_at'], ['whereIn', 'pipeline_stage', LIVE]]));
+  });
+
+  test('a standing overshoot the alert budget deferred keeps its alert open', async () => {
+    // Customers 1-5 are new shortfalls that spend the budget; customer 6's overshoot is already
+    // alerted, still stands, and is deferred this run: the close pass must not read deferral as a fix.
+    const ids = Array.from({ length: MAX_NEW_ALERTS_PER_RUN }, (_, i) => i + 1);
+    const standing = MAX_NEW_ALERTS_PER_RUN + 1;
+    mockAlerts.rows.push({ id: 90, dedupeKey: overshootKey(standing, 5000, 9000), autoCleared: false });
+    const db = makeDb({
+      customers: [...ids.map((n) => customer(n, '60.00')), customer(standing, '50.00')],
+      lines: [...ids.map((n) => line(n, 'pest_control', '50.00')), line(standing, 'pest_control', '90.00')],
+    });
+    const result = await runPlanRateLedgerReconcile({ database: db });
+    expect(result).toMatchObject({ alerted: MAX_NEW_ALERTS_PER_RUN, deferred: 1, closed: 0 });
+    expect(alertRow(overshootKey(standing, 5000, 9000))[0].autoCleared).toBe(false);
+  });
+
+  test('a shortfall alert is never closed by the job: a person checks the repair', async () => {
+    const db = makeDb({ customers: [customer(1, '86.60')], lines: [line(1, 'pest_control', '45.00')] });
+    await runPlanRateLedgerReconcile({ database: db });
+    expect(await runPlanRateLedgerReconcile({ database: db })).toMatchObject({ checked: 0, closed: 0 });
+    expect(alertEpisodes.openAdminAlertKeys.mock.calls.map(([, prefix]) => prefix)).toEqual(['plan-rate-invariant:overshoot:', 'plan-rate-invariant:overshoot:']);
+    expect(alertRow(shortfallKey(1, 8660, 4500))[0].autoCleared).toBe(false);
+  });
+});
+
+test('ALERT_EPISODES killed: the plain deduped alert, no close pass, a fixed-then-returned gap stays deduped', async () => {
+  mockGate.episodes = false;
+  const db = makeDb({ customers: [customer(1, '50.00')], lines: [line(1, 'pest_control', '90.00')] });
+  expect(await runPlanRateLedgerReconcile({ database: db })).toMatchObject({ overshoots: 1, alerted: 1 });
+  expect(mockAlerts.calls.map((call) => call.path)).toEqual(['plain']);
+  setLines(db, 1, [line(1, 'pest_control', '50.00')]);
+  expect(await runPlanRateLedgerReconcile({ database: db })).toMatchObject({ checked: 0, closed: 0 });
+  setLines(db, 1, [line(1, 'pest_control', '90.00')]);
+  expect(await runPlanRateLedgerReconcile({ database: db })).toMatchObject({ overshoots: 1, alerted: 0, alreadyAlerted: 1 });
+  expect(alertEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  expect(alertEpisodes.openAdminAlertKeys).not.toHaveBeenCalled();
+  expect(alertEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
 });
 
 describe('planRateLedgerReconcileLive (the real reader)', () => {
