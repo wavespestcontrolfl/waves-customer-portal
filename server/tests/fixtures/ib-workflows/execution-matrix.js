@@ -128,9 +128,10 @@ function ownerGateOnCell(ownerDirect, tool) {
 //   - add_customer_property: always a card on the owner login (#6297: every
 //     valid add carries address text, and address text always keeps its card;
 //     the tool is off OWNER_DIRECT_TOOL_NAMES)
-//   - update_customer: direct only for name, phone, lead source and note
-//     fields, notes only over empty notes; email, pipeline stage and (#6297)
-//     every address field keep the card (the scope named name, phone and address)
+//   - update_customer: direct only for name, lead source and note fields,
+//     notes only over empty notes; phone (the portal sign-in key, owner
+//     2026-10-24), email, pipeline stage and (#6297) every address field keep
+//     the card (the scope named name, phone and address)
 //   - update_lead_contact: direct only by lead_id alone, never by name
 //   - reschedule_appointment: direct only when the pinned visit is ungrouped
 //   - adjust_stock, update_restock_request: always a card on the owner login (owner 2026-10-05),

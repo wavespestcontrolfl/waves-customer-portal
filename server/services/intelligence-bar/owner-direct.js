@@ -562,7 +562,7 @@ async function seedDirectCounts(task, dbh = null) {
 // GATE_IB_TARGET_RULES_V2 (Codex #6369 r19, r21, r26): every grounded customer tool (the customer
 // edits, reschedule_appointment, assign_technician) is counted SEQUENTIALLY, as it commits
 // (dynamicCapReached), never from a whole-message plan made before the calls run. A plan would
-// refuse all six of six grounded phone edits, and both of two proposed beside four committed;
+// refuse all six of six grounded name edits, and both of two proposed beside four committed;
 // counting as they commit lets five run and refuses only the sixth (four committed + two
 // proposed: one runs, one is refused). Carded calls never use the allowance.
 const countsAsTheyCommit = toolName => ibTargetRulesV2Live() && isGroundedCapTool(toolName);

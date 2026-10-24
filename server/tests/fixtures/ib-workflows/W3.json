@@ -693,17 +693,16 @@
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "partial",
-        "changes": [
-          "customers[cust-murphy-a].phone = +19415550172"
-        ],
+        "outcome": "awaiting_operator",
+        "changes": [],
         "unchanged": [
+          "customers[cust-murphy-a].phone",
           "customers[cust-murphy-a].email",
           "customers[cust-murphy-b]"
         ],
         "sends": 0,
         "card": true,
-        "say": "Split execution: the phone change commits directly with a receipt, and the email change stops at a confirmation card that names the opt-in email. The bar reports both halves; the email is unchanged until confirmed."
+        "say": "Both changes stop at a confirmation card: the new number (the phone is the portal sign-in key) and the email, whose card names the opt-in email. Nothing changes until confirmed, and the bar does not report either change as done."
       },
       "call": [
         {
