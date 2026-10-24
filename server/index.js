@@ -551,16 +551,30 @@ const paidEstimatorDailyLimiter = rateLimit({
 // before any model call — shared isPlausibleMessageBody check) all resolve
 // without an LLM call, so none of them may burn the paid budget for a
 // shared/NAT'd IP and 429 later real turns.
-const askWavesDailyLimiter = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000, // 24 hours
-  max: 120,
-  message: { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' },
-  keyGenerator: rateLimitKey,
-  skip: (req) => process.env.NODE_ENV !== 'production'
+const PUBLIC_LLM_DAILY_LIMIT_MESSAGE = { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' };
+const askWavesDailySkip = (req) => process.env.NODE_ENV !== 'production'
     || req.method !== 'POST'
     || !/^\/message\/?$/.test(req.path)
     || !require('./config/feature-gates').isEnabled('askWaves')
-    || !require('./routes/public-ai-intake').isPlausibleMessageBody(req.body),
+    || !require('./routes/public-ai-intake').isPlausibleMessageBody(req.body);
+const askWavesDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 120,
+  message: PUBLIC_LLM_DAILY_LIMIT_MESSAGE,
+  keyGenerator: rateLimitKey,
+  skip: askWavesDailySkip,
+});
+// Shared daily ceiling across all IPs and processes (GATE_PUBLIC_LLM_SHARED_CAP,
+// security audit run 2 #13): the per-IP limiters above keep in-memory counts
+// that reset on every deploy and never add up across IPs. Same skip predicate,
+// mounted after the per-IP limiter; gate off = next() with no DB call.
+const { sharedDailyCap } = require('./middleware/public-llm-shared-cap');
+const askWavesSharedCap = sharedDailyCap({
+  bucket: 'ask-waves',
+  envVar: 'PUBLIC_LLM_DAILY_CAP_ASK_WAVES',
+  defaultMax: 1500,
+  message: PUBLIC_LLM_DAILY_LIMIT_MESSAGE,
+  skip: askWavesDailySkip,
 });
 // Photo-assessment lead magnets (lawn-assessment + pest-identifier): each
 // accepted /analyze is a paid dual-model vision call, so both funnels share one
@@ -569,12 +583,7 @@ const askWavesDailyLimiter = rateLimit({
 // feature gate on; claim submits, tokenized report reads, and dark-launch
 // probes while the gate is off resolve without a model call and never burn the
 // paid budget for a shared/NAT'd IP.
-const photoAssessmentDailyLimiter = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000, // 24 hours
-  max: 40,
-  message: { error: 'Daily limit reached — call (941) 297-5749 and a real person will help right away.' },
-  keyGenerator: rateLimitKey,
-  skip: (req) => process.env.NODE_ENV !== 'production'
+const photoAssessmentDailySkip = (req) => process.env.NODE_ENV !== 'production'
     || req.method !== 'POST'
     || !/^\/analyze\/?$/.test(req.path)
     || !require('./config/feature-gates').isEnabled(
@@ -583,7 +592,22 @@ const photoAssessmentDailyLimiter = rateLimit({
     // Only requests that could reach a paid vision call burn the budget —
     // malformed/empty floods and honeypot trips are rejected without a model
     // call and must not 429 real prospects behind a shared IP.
-    || !require('./routes/public-lawn-assessment').isPlausibleAnalyzeBody(req.body),
+    || !require('./routes/public-lawn-assessment').isPlausibleAnalyzeBody(req.body);
+const photoAssessmentDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 40,
+  message: PUBLIC_LLM_DAILY_LIMIT_MESSAGE,
+  keyGenerator: rateLimitKey,
+  skip: photoAssessmentDailySkip,
+});
+// One shared bucket for both photo funnels (same shared-ceiling rationale as
+// askWavesSharedCap above).
+const photoAssessmentSharedCap = sharedDailyCap({
+  bucket: 'photo-assessment',
+  envVar: 'PUBLIC_LLM_DAILY_CAP_PHOTO',
+  defaultMax: 300,
+  message: PUBLIC_LLM_DAILY_LIMIT_MESSAGE,
+  skip: photoAssessmentDailySkip,
 });
 
 // Body parsing
@@ -845,14 +869,14 @@ app.use('/api/public/secure-card', require('./routes/secure-card-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/price-change', require('./routes/price-change-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
-app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
-app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));
+app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, photoAssessmentSharedCap, require('./routes/public-lawn-assessment'));
+app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, photoAssessmentSharedCap, require('./routes/public-pest-identifier'));
 app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
 app.use('/api/public/pest-forecast', require('./routes/public-pest-forecast'));
 app.use('/api/public/yard-calendar', require('./routes/public-yard-calendar'));
-app.use('/api/public/ai-intake', askWavesDailyLimiter, require('./routes/public-ai-intake'));
+app.use('/api/public/ai-intake', askWavesDailyLimiter, askWavesSharedCap, require('./routes/public-ai-intake'));
 app.use('/api/admin/credentials', require('./routes/admin-credentials'));
 app.use('/api/admin/seo-diagnosis', require('./routes/admin-seo-diagnosis'));
 // Twilio webhook signature validation. Runs before BOTH Twilio routers
