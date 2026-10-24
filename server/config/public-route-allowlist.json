@@ -147,7 +147,7 @@
       "reason": "Public shortlink redirect — code entropy floor + per-route limiter (see public-route-gates.test.js); the limiter's custom over-limit handler serves the same 404 page and is keyed by its body digest",
       "routes": [
         "GET /l/:code",
-        "USE /l (express-rate-limit({ handler#945948f2 }))"
+        "USE /l (express-rate-limit({ handler#c5ed62a2 }))"
       ]
     },
     {
@@ -156,7 +156,7 @@
       "reason": "Prep-guide outside-link click logger + 302 — destinations are pre-registered outbound_links rows resolved by code only (no URL in the request, so not an open redirect); per-route limiter; see docs/public-route-contracts.md",
       "routes": [
         "GET /go/:code",
-        "USE /go (express-rate-limit({ handler#f2668dc4 }))",
+        "USE /go (express-rate-limit({ handler#93541155 }))",
         "USE /go (inline function#29df873e)"
       ]
     },
