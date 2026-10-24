@@ -500,6 +500,37 @@ describe('re-service offer validation with openings', () => {
   });
 });
 
+describe('a missed visit AND a covered pest report in one text (Codex r2 P1 on #6615)', () => {
+  const OPENINGS = '- Tuesday, June 16: 9:00 AM - 11:00 AM, 1:00 PM - 3:00 PM';
+  const offered = [{ date: 'Tuesday, June 16', window: '9:00 AM - 11:00 AM' }];
+  const reply = 'Sorry we missed you, a person will reply within the hour about rebooking. For the ants, I can get your free re-service Tuesday, June 16 at 9:00 AM - 11:00 AM, and a teammate will text the link to book it.';
+  const actions = [{ type: 'escalate', note: 'followup_promised' }, { type: 'escalate', note: 'send_reservice_link' }];
+  const build = () => {
+    on();
+    const d = freshDrafter();
+    const facts = d.buildFactsBlock({ ...baseContext, visitLoops: { missedVisit: MISSED }, serviceHistory: [{ type: 'Quarterly Pest', date: '2026-05-20' }] },
+      { now: NOW, reserviceLanes: ['pest'], reserviceOpeningsBlock: OPENINGS });
+    return { d, facts };
+  };
+
+  test('the re-service openings beside the missed-visit hand-off converge: SLA + escalation, declared re-service times', () => {
+    const { d, facts } = build();
+    expect(d.validateOpenLoopAnswer({ reply, factsBlock: facts, intendedActions: actions, offeredTimes: offered })).toEqual({ ok: true, violations: [] });
+    const days = d.parseOpenTimesDaysFromFactsBlock(facts, 'FREE RE-SERVICE OPENINGS (');
+    expect(d.validateOfferedTimes({ offeredTimes: offered, openTimesDays: days, reply, factsBlock: facts }).ok).toBe(true);
+    expect(d.validateReserviceOffer({ reply, factsBlock: facts, intendedActions: actions, inboundMessage: 'The ants are back, and nobody came Monday', offeredTimes: offered, context: { ...baseContext, serviceHistory: [{ type: 'Quarterly Pest', date: '2026-05-20' }] } }).ok).toBe(true);
+  });
+
+  test('the missed-visit hand-off is still required beside the openings, and a made-up time is still refused', () => {
+    const { d, facts } = build();
+    const noHandoff = d.validateOpenLoopAnswer({ reply: 'Sorry about the ants. A teammate will text the link.', factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], offeredTimes: offered });
+    expect(noHandoff.ok).toBe(false);
+    const rebook = d.validateOpenLoopAnswer({ reply, factsBlock: facts, intendedActions: actions, offeredTimes: [{ date: 'Friday, June 19', window: '9:00 AM - 11:00 AM' }] });
+    expect(rebook.ok).toBe(false);
+    expect(rebook.violations.join(' ')).toMatch(/offer no times/);
+  });
+});
+
 describe('change A: the latest visit notes and findings', () => {
   const long = `${'Treated the perimeter and eaves. '.repeat(60)}END`;
   const ctx = (findings) => ({

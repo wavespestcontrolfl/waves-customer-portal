@@ -5105,8 +5105,13 @@ function factsListMissedVisit(factsBlock) {
 // B1: a MISSED VISIT reply that offers real OPEN TIMES slots to rebook needs neither the follow-up wording nor the escalation.
 // The slots themselves are validated against OPEN TIMES by validateOfferedTimes; this only recognizes that times were offered
 // where the facts list some (and no WINDOW PASSED line, which stays a hand-off).
+function offeredBeyondReserviceOpenings(offeredTimes, factsBlock) {
+  const openings = new Set(parseOpenTimesDaysFromFactsBlock(factsBlock, RESERVICE_OPENINGS_HEADER_PREFIX)
+    .flatMap((d) => d.windows.map((w) => `${d.date}|${w}`)));
+  return (Array.isArray(offeredTimes) ? offeredTimes : []).filter((e) => !(smsPromptB1Live() && openings.has(`${e?.date}|${e?.window}`)));
+}
 function missedRebookOffered({ factsBlock, offeredTimes }) {
-  return smsPromptB1Live() && Array.isArray(offeredTimes) && offeredTimes.length > 0
+  return smsPromptB1Live() && offeredBeyondReserviceOpenings(offeredTimes, factsBlock).length > 0
     && factsListMissedVisit(factsBlock)
     && !visitLoopItemLinesIn(factsBlock).some((line) => /^- WINDOW PASSED\b/.test(line))
     && parseOpenTimesDaysFromFactsBlock(factsBlock).length > 0;
@@ -5135,7 +5140,8 @@ function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null, off
   if (!quotesFactTiming) violations.push('WINDOW PASSED / MISSED VISIT is listed: say when they will hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
   if (!escalated) violations.push('WINDOW PASSED / MISSED VISIT is listed: add {"type":"escalate","note":"followup_promised"} to intended_actions');
   // the office rebooks a miss: no customer-selectable times beside it (a frozen block may still carry OPEN TIMES)
-  if (Array.isArray(offeredTimes) && offeredTimes.length && factsListMissedVisit(factsBlock)) {
+  // (B1: a covered pest report beside the miss may still offer the free re-service page's own openings - those are not rebooking times)
+  if (offeredBeyondReserviceOpenings(offeredTimes, factsBlock).length && factsListMissedVisit(factsBlock)) {
     violations.push('MISSED VISIT is listed: the office rebooks it — offer no times (leave offered_times empty)');
   }
   return { ok: violations.length === 0, violations };
