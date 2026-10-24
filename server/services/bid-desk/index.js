@@ -16,7 +16,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { bidDeskLive, bidChecklistLive } = require('../../config/feature-gates');
-const { detectBidEmail, parseBidEmail, classifyKind } = require('./detector');
+const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
 const { attachPatch, reminderDue, datesDue, OPEN_STATUSES } = require('./rules');
 const alerts = require('./alerts');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
@@ -25,8 +25,15 @@ const { domainFromAddress } = require('../email/spam-blocker');
 // The email with `provider_verified` set: aligned SPF or DKIM for its own From domain in the stored
 // Authentication-Results (the same check the receipts sweep and spam rescue use). The detector trusts a provider
 // template only when this is true.
+// `gmail_spam_verified` is the strict reading (resinfo clauses from Google's own authserv-id only, whatever
+// GATE_EMAIL_AUTH_STRICT says): it alone may carry an email past Gmail's SPAM label.
 function withProviderCheck(email) {
-  return { ...email, provider_verified: hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address)) };
+  const domain = domainFromAddress(email.from_address);
+  return {
+    ...email,
+    provider_verified: hasAlignedAuth(email.authentication_results, domain),
+    gmail_spam_verified: hasAlignedAuth(email.authentication_results, domain, { strict: true }),
+  };
 }
 
 const LOG = '[bid-desk]';
@@ -51,14 +58,20 @@ function unsettled(email, now) {
 }
 const EMAIL_COLUMNS = ['id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'body_html', 'received_at', 'classification', 'label_ids', 'authentication_results'];
 
-// Mail the sync stored as spam (a blocked sender, Gmail's SPAM label) never becomes a bid or a bell.
-const NOT_SPAM_SQL = "COALESCE(classification, '') <> 'spam' AND NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'SPAM')";
-const NOT_SPAM_SQL_E = NOT_SPAM_SQL.replace(/classification/g, 'e.classification').replace(/label_ids/g, 'e.label_ids');
+// Mail the sync stored as spam (a blocked sender, Gmail's SPAM label) never becomes a bid or a bell. One exception:
+// Gmail files every Blue Book Network invite as spam, so Blue Book mail is read past Gmail's SPAM label (never past
+// our own spam classification), and isSpam lets it through only when its signature aligns with the Blue Book domain.
+const NOT_SPAM_SQL = "COALESCE(classification, '') <> 'spam' AND (NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'SPAM')"
+  // No "?" in this SQL: knex reads it as a binding ("{0,1}" stands in).
+  + " OR from_address ~* '[@.]thebluebook\\.com>{0,1}\\s*$')";
+const NOT_SPAM_SQL_E = NOT_SPAM_SQL.replace(/classification/g, 'e.classification').replace(/label_ids/g, 'e.label_ids')
+  .replace(/from_address/g, 'e.from_address');
+// `email` carries provider_verified and gmail_spam_verified (withProviderCheck).
 function isSpam(email) {
   if (String(email.classification || '') === 'spam') return true;
   let labels = email.label_ids;
   if (typeof labels === 'string') { try { labels = JSON.parse(labels); } catch { labels = []; } }
-  return Array.isArray(labels) && labels.includes('SPAM');
+  return Array.isArray(labels) && labels.includes('SPAM') && !passesGmailSpam(email);
 }
 
 const BID_COLUMNS = [
@@ -212,7 +225,9 @@ async function deliverOwedAlert(linkId) {
     const link = await trx('bid_opportunity_emails').where({ id: linkId }).forUpdate().first();
     if (!link || !link.alert_kind || link.alerted_at) return false;
     const bid = await trx('bid_opportunities').where({ id: link.bid_id }).forUpdate().first();
-    const email = await trx('emails').where({ id: link.email_id }).first(['id', 'subject', 'from_name', 'from_address', 'classification', 'label_ids']);
+    const row = await trx('emails').where({ id: link.email_id })
+      .first(['id', 'subject', 'from_name', 'from_address', 'classification', 'label_ids', 'authentication_results']);
+    const email = row ? withProviderCheck(row) : null;
     // Moot: the bid is gone, history or closed, or the bell's own job is already done (a new-bid bell after the
     // decision; an addendum bell after the date was confirmed).
     const moot = !bid || bid.historical || !OPEN_STATUSES.includes(bid.status) || !email || isSpam(email)
@@ -491,8 +506,12 @@ async function sendDateReminders({ now = new Date() } = {}) {
  * Files the last `days` days of mail as historical rows, oldest first. `dryRun` counts and writes nothing.
  * Never notifies. Safe to re-run: filed emails are skipped.
  */
-async function backfillOne(email, { dryRun, previewThreads, result }) {
-  const detected = await detectWithThread(withProviderCheck(email));
+async function backfillOne(rawEmail, { dryRun, previewThreads, result }) {
+  const email = withProviderCheck(rawEmail);
+  // The query lets Blue Book mail past Gmail's SPAM label; the same check as ingestEmail decides, so the dry run
+  // never counts an email the real run would skip.
+  if (isSpam(email)) return;
+  const detected = await detectWithThread(email);
   const thread = email.gmail_thread_id;
   const previewJoin = dryRun && !detected.bid && THREAD_JOIN_REASONS.has(detected.reason) && thread && previewThreads.has(thread);
   if (!detected.bid && !previewJoin) return;
