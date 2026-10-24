@@ -237,6 +237,29 @@ describe('schedule-send atomic claim', () => {
     });
   });
 
+  test('409s at REQUEST time when a grouped sibling still prices an untyped satellite palm count (GATE_SATELLITE_PALM_COUNT_TYPED)', async () => {
+    const satellite = { id: 'sib-1', status: 'draft', price_locked_at: null, pricing_authority: 'SERVER', sent_at: null, scheduled_at: null,
+      estimate_data: { engineResult: { lineItems: [{ service: 'tree_shrub', palmCount: 14, palmCountFromLookup: true }] } } };
+    const builder = makeBuilder(estimateRow({ estimate_group_id: 'grp-1' }), { updateResult: 1, selectResult: [satellite] });
+    db.mockImplementation(() => builder);
+    process.env.GATE_SATELLITE_PALM_COUNT_TYPED = 'true';
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/estimates/est-1/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sendMethod: 'both', scheduledAt: FUTURE }),
+        });
+        const body = await res.json();
+        expect([res.status, body]).toEqual([409, expect.objectContaining({ code: 'PALM_COUNT_REQUIRED', siblingEstimateId: 'sib-1' })]);
+        expect(body.error).toMatch(/palm count from the satellite image/);
+        expect(builder.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+      });
+    } finally {
+      delete process.env.GATE_SATELLITE_PALM_COUNT_TYPED;
+    }
+  });
+
   test('409s when the claim misses (row mid-send, accepted, or price-locked)', async () => {
     const builder = makeBuilder(estimateRow({ status: 'sent' }), { updateResult: 0 });
     db.mockImplementation(() => builder);

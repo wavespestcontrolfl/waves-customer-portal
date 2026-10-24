@@ -1,5 +1,6 @@
 const { acceptedScheduleFindings } = require('../services/recurring-schedule-audit');
 const { buildRecurringFollowUpRows } = require('../services/recurring-appointment-seeder');
+const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 const TODAY = '2040-01-01';
 function estimate(overrides = {}) {
@@ -87,6 +88,51 @@ test('a year of applications cannot be compressed into weekly dates', () => {
 test('monthly metadata cannot disguise a year stretched across six-week dates', () => {
   const rows = series('every_6_weeks', 12).map((row) => ({ ...row, recurring_pattern: 'monthly' }));
   expect(check(estimate(), rows)[0].issues).toContain('application_spacing_needs_review');
+});
+
+// Seeded the converter's way: a Saturday or Sunday first visit puts every
+// follow-up on that nth weekend day, shifted to the Monday after (or the
+// Friday before). Near a month end the shift crosses into another month.
+function weekendSeries(firstDate, pattern, count, weekendShift = 'forward') {
+  const root = parent({ scheduled_date: firstDate, recurring_pattern: pattern, skip_weekends: true, weekend_shift: weekendShift });
+  const children = buildRecurringFollowUpRows(root, { pattern, plannedCount: count, skipWeekends: true, weekendShift });
+  return [root, ...children.map((row, index) => ({ ...row, id: `child-${index}` }))];
+}
+const quarterlyPest = () => estimate({ estimate_data: { customerSelection: { frequency: 'quarterly' },
+  result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }] } } } });
+
+test.each([
+  ['monthly', 'Sun 2040-01-29', 'forward', '2040-10-01', estimate],
+  ['quarterly', 'Sat 2040-03-31', 'forward', '2040-07-02', quarterlyPest],
+  ['quarterly', 'Sun 2040-01-01', 'back', '2040-03-30', quarterlyPest],
+])('a %s plan first visited %s is not flagged when a %s weekend shift crosses a month end', (pattern, first, weekendShift, crossed, makeEstimate) => {
+  const rows = weekendSeries(first.slice(4), pattern, pattern === 'monthly' ? 12 : 4, weekendShift);
+  expect(rows.map((row) => row.scheduled_date)).toContain(crossed);
+  expect(check(makeEstimate(), rows)).toEqual([]);
+});
+
+test('no weekend first visit of a year is flagged for its seeded follow-ups', () => {
+  const start = parseETDateTime('2040-01-01T12:00');
+  for (let day = 0; day < 366; day++) {
+    const first = etDateString(addETDays(start, day));
+    if (![0, 6].includes(etParts(parseETDateTime(`${first}T12:00`)).dayOfWeek)) continue;
+    for (const weekendShift of ['forward', 'back']) {
+      expect([first, weekendShift, check(estimate(), weekendSeries(first, 'monthly', 12, weekendShift))]).toEqual([first, weekendShift, []]);
+      expect([first, weekendShift, check(quarterlyPest(), weekendSeries(first, 'quarterly', 4, weekendShift))]).toEqual([first, weekendShift, []]);
+    }
+  }
+});
+
+test('a weekend first visit cannot disguise quarterly dates as monthly', () => {
+  const rows = weekendSeries('2040-03-31', 'quarterly', 12).map((row) => ({ ...row, recurring_pattern: 'monthly' }));
+  expect(check(estimate(), rows)[0].issues).toContain('application_spacing_needs_review');
+});
+
+test('a weekday first visit with an office-set weekend anchor is walked from its own date', () => {
+  const root = parent({ scheduled_date: '2040-10-01', recurring_pattern: 'quarterly', recurring_nth: 1, recurring_weekday: 0, skip_weekends: true });
+  const children = buildRecurringFollowUpRows(root, { pattern: 'quarterly', plannedCount: 4 });
+  expect(children.map((row) => row.scheduled_date)).toEqual(['2041-01-07', '2041-04-08', '2041-07-08']);
+  expect(check(quarterlyPest(), [root, ...children.map((row, index) => ({ ...row, id: `child-${index}` }))])).toEqual([]);
 });
 
 test.each([

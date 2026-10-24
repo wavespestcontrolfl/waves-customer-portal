@@ -29,6 +29,7 @@ describe('saved estimate send confirmation',()=>{
   expect(confirm).toBeDisabled();
   const body=JSON.parse(fetcher.mock.calls.find(([,o])=>o?.method==='POST')[1].body);
   expect(body).toMatchObject({sendMethod:'sms',expectedEditVersion:preview.editVersion,messageVersion:preview.messageVersion});
+  expect(body).not.toHaveProperty('confirmedPalmCount');
   finish({ok:true,status:200,json:async()=>({sent:true,channels:{sms:{ok:true,real:true}}})});
   expect(await screen.findByText(/provider accepted; delivery not confirmed/)).toBeInTheDocument();
   expect(screen.queryByRole('button',{name:'Confirm send'})).not.toBeInTheDocument();
@@ -61,6 +62,24 @@ describe('saved estimate send confirmation',()=>{
   fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
   expect(await screen.findByText(/Text message to .*SMS suppressed/)).toBeInTheDocument();
   expect(screen.queryByText(/provider accepted/)).not.toBeInTheDocument();
+ });
+ it('a satellite palm count asks for the typed count: none or another number is refused before any send, the priced one rides the attempt',async()=>{
+  const fetcher=vi.fn((url,opts)=>opts?.method==='POST'?json({sent:true,channels:{sms:{ok:true,real:true}}}):json({...preview,satellitePalmCount:14}));vi.stubGlobal('fetch',fetcher);
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole('radio',{name:'Text message',exact:true}));
+  const count=screen.getByLabelText(/Palms you counted on the aerial photo/);
+  expect(count).toHaveAccessibleDescription(/Count a clump or a multi-trunk palm as one palm/);
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Type the number of palms you counted on the aerial photo.');
+  fireEvent.change(count,{target:{value:'6'}});
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('You counted 6 palms, but this quote priced 14. Rebuild the quote with 6 palms in the estimate builder, then send it.');
+  expect(fetcher.mock.calls.filter(([,o])=>o?.method==='POST')).toHaveLength(0);
+  fireEvent.change(count,{target:{value:'14'}});
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  await waitFor(()=>expect(fetcher.mock.calls.filter(([,o])=>o?.method==='POST')).toHaveLength(1));
+  expect(JSON.parse(fetcher.mock.calls.find(([,o])=>o?.method==='POST')[1].body)).toMatchObject({confirmedPalmCount:14});
  });
  it('an impossible saved US phone shows the reason and leaves only the email channel selectable',async()=>{
   const reason='+11035550123 is not a valid US phone number. Fix the phone on the contact or the estimate, then send again. Nothing was sent.';
