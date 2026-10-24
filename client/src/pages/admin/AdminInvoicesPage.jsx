@@ -6271,18 +6271,16 @@ function CreateInvoice({
       alive = false;
     };
   }, [customerIdForProperties, editMode]);
-  // A service line sent without a property when the customer has 2+ saved
-  // properties names the primary, so a multi-property invoice never has a
-  // line that would keep the documents flat. On an EDIT this applies only
-  // when the invoice already carries a property on some line: a legacy
-  // invoice's untagged lines are never relabeled to the primary by an
-  // unrelated edit (the service may not have been performed there).
+  // On CREATE, a service line sent without a property when the customer has
+  // 2+ saved properties names the primary, so a new multi-property invoice
+  // never has a line that would keep the documents flat. On an EDIT nothing is
+  // defaulted: a stored line's property is whatever the operator set, and a
+  // legacy invoice's untagged lines are never relabeled to the primary (the
+  // service may not have been performed there) — the renderer keeps such an
+  // invoice flat.
   const withDefaultLineProperties = (items) => {
     const eligible =
-      customerProperties.length >= 2 &&
-      primaryPropertyId &&
-      (!editMode ||
-        items.some((item) => item._kind !== "discount" && item.property_id));
+      !editMode && customerProperties.length >= 2 && primaryPropertyId;
     if (!eligible) return items;
     return items.map((item) =>
       item._kind !== "discount" && !item.property_id
@@ -6740,10 +6738,13 @@ function CreateInvoice({
     setDocumentDiscountSearchOpen(false);
     setDiscountQueries((prev) => ({ ...prev, __document__: "" }));
   };
+  // A new line defaults to the primary property only on CREATE; on an edit a
+  // line names a property only when the operator picks one (see
+  // withDefaultLineProperties).
   const addLineItem = () =>
     setLineItems([
       ...lineItems,
-      customerProperties.length >= 2 && primaryPropertyId
+      !editMode && customerProperties.length >= 2 && primaryPropertyId
         ? { ...newLineItem(), property_id: primaryPropertyId }
         : newLineItem(),
     ]);
@@ -8120,10 +8121,16 @@ function CreateInvoice({
                     >
                       <Select
                         aria-label="Property for this service"
-                        value={item.property_id || primaryPropertyId || ""}
+                        value={
+                          item.property_id ||
+                          (editMode ? "" : primaryPropertyId || "")
+                        }
                         onChange={(e) => setLinePropertyId(i, e.target.value)}
                         disabled={builderBusy}
                       >
+                        {editMode && !item.property_id && (
+                          <option value="">Not set</option>
+                        )}
                         {customerProperties.map((p) => (
                           <option key={p.id} value={p.id}>
                             {[
