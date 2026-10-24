@@ -246,6 +246,16 @@ describe("what the calculate request carries", () => {
     expect(body.options.mosquitoMisting).toEqual({ tier: "smart", nozzles: "24", risers: "3", solution: "natural", refillsPerYear: "6" });
   });
 
+  it("generates a misting-only quote with no home or lot size: the price comes from the layout, not the footprint", async () => {
+    renderNew();
+    fireEvent.click(await toggle());
+    typeInto("Nozzles", "30");
+    const body = await generate();
+    expect(window.alert).not.toHaveBeenCalledWith("Enter home sq ft or lot size.");
+    expect(body.selectedServices).toEqual(["MOSQUITO_MISTING"]);
+    expect(body.options.mosquitoMisting).toEqual({ nozzles: "30", refillsPerYear: "4" });
+  });
+
   it("counts a misting-only estimate as a selected recurring service", async () => {
     renderNew();
     expect(screen.getByText("Select at least one service to see pricing")).toBeInTheDocument();
