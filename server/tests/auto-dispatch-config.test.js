@@ -155,4 +155,29 @@ describe('day-move drive floor and conflict moves (owner 2026-10-09)', () => {
       }
     }
   });
+
+  // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH (owner 2026-10-24): three values, and
+  // off without the shared model, whose slot_taken filter drops an hour the
+  // writer's probe would refuse (2026-09-26: 72 failed writes, all SLOT_TAKEN).
+  test('the arrival search is off unless the gate says shadow or true, and needs the shared model', () => {
+    const prev = { gate: process.env.GATE_AUTO_DISPATCH_ARRIVAL_SEARCH, model: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
+    try {
+      process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+      delete process.env.GATE_AUTO_DISPATCH_ARRIVAL_SEARCH;
+      expect(getAutoDispatchConfig().arrivalSearch).toBe('off');
+      for (const [value, mode] of [['shadow', 'shadow'], [' True ', 'true'], ['SHADOW', 'shadow'], ['on', 'off'], ['1', 'off'], ['live', 'off']]) {
+        process.env.GATE_AUTO_DISPATCH_ARRIVAL_SEARCH = value;
+        expect([value, getAutoDispatchConfig().arrivalSearch]).toEqual([value, mode]);
+      }
+      process.env.GATE_AUTO_DISPATCH_ARRIVAL_SEARCH = 'true';
+      delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+      expect(getAutoDispatchConfig().arrivalSearch).toBe('off');
+      // A manual run's override wins, like every other knob.
+      expect(getAutoDispatchConfig({ arrivalSearch: 'shadow' }).arrivalSearch).toBe('shadow');
+    } finally {
+      for (const [key, value] of [['GATE_AUTO_DISPATCH_ARRIVAL_SEARCH', prev.gate], ['GATE_AUTO_DISPATCH_SHARED_MODEL', prev.model]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
 });

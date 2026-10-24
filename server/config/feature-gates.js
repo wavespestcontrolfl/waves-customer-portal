@@ -3965,6 +3965,18 @@ const gates = {
   // call time (config.proofreaderEnabled). Kill switch: unset.
   autoDispatchProofreader: gateEnvValue('GATE_AUTO_DISPATCH_PROOFREADER'),
 
+  // Auto-dispatch arrival search (owner 2026-10-24 "build"): the 04:10 run
+  // searches for a better hour with find-time's arrival-window engine (each
+  // stop reached inside its 2-hour promise) instead of fixed one-hour blocks
+  // with drive time on both sides, which read a day of 4-5 stops as full.
+  // Only the night tool asks for it; every booking surface keeps today's
+  // search and GATE_SCHEDULING_CAPACITY stays as it is. 'shadow' records,
+  // per visit, what the arrival search would do and moves nothing; 'true'
+  // moves on it. Needs GATE_AUTO_DISPATCH_SHARED_MODEL. Any other value is
+  // off; auto-dispatch/config.js reads autoDispatchArrivalSearchMode() at
+  // call time (config.arrivalSearch). Kill switch: unset.
+  autoDispatchArrivalSearch: ['shadow', 'true'].includes(String(process.env.GATE_AUTO_DISPATCH_ARRIVAL_SEARCH || '').trim().toLowerCase()),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -6022,6 +6034,15 @@ function autoDispatchSharedModelLive() {
   return gateEnvValue('GATE_AUTO_DISPATCH_SHARED_MODEL');
 }
 
+// GATE_AUTO_DISPATCH_ARRIVAL_SEARCH read at CALL time: 'shadow', 'true' or
+// 'off' (any other value; unset is the kill, no redeploy). The one canonical
+// reader; the `autoDispatchArrivalSearch` gates-map entry above is for
+// logGateStatus only. auto-dispatch/config.js also requires the shared model.
+function autoDispatchArrivalSearchMode() {
+  const value = String(process.env.GATE_AUTO_DISPATCH_ARRIVAL_SEARCH || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
 // same convention as leadInspectionLinkLive(). The `estimateConsultationOffer`
 // gates-map entry above is for logGateStatus only; this is the one canonical
@@ -7372,6 +7393,7 @@ module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+module.exports.autoDispatchArrivalSearchMode = autoDispatchArrivalSearchMode;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.payAfterFirstVisitLive = payAfterFirstVisitLive;

@@ -109,6 +109,27 @@ describe('foldVisitUnit', () => {
   });
 });
 
+// The nightly auto-dispatch arrival search (find-time.js, owner 2026-10-24)
+// asks for planningMinutes: false; every other caller leaves it unset.
+describe('loadArrivalRouteContext({ planningMinutes })', () => {
+  const conn = () => fakeConn({ target: stop('a', { visit_id: null }), siblings: [] });
+  const day = () => [stop('x', { visit_id: null, scheduled_date: '2035-03-08', lat: 27.4, lng: -82.4 }),
+    stop('y', { visit_id: null, scheduled_date: '2035-03-08', window_start: '13:00:00', window_end: '14:00:00', lat: 27.3, lng: -82.3 })];
+
+  test('false: every stop on the day is marked to keep its own length', async () => {
+    mockDayRows = day();
+    const context = await load(conn(), { preserveCapacity: true, planningMinutes: false });
+    expect(context.rows.map((row) => [row.id, row.planning_exempt])).toEqual([['x', true], ['y', true]]);
+  });
+
+  test('unset: the rows are the day\'s rows, unmarked, as before', async () => {
+    mockDayRows = day();
+    const context = await load(conn(), { preserveCapacity: true });
+    expect(context.rows.map((row) => row.id)).toEqual(['x', 'y']);
+    context.rows.forEach((row) => expect(row).not.toHaveProperty('planning_exempt'));
+  });
+});
+
 describe('loadArrivalRouteContext({ unit })', () => {
   test('gate on + unit: the visit is one ungrouped target and its members are off the day', async () => {
     process.env.GATE_COMBO_ROUTE_CHECK = 'true';

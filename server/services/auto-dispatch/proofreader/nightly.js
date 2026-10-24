@@ -15,8 +15,10 @@
  * rule and the per-run cap, so a move that would not happen anyway is never
  * paid for. A run asks at most config.proofreaderMaxCalls times and starts
  * no call after config.proofreaderDeadlineSeconds; past either a move waits
- * for the next run. A check that broke (the provider, a malformed answer, a
- * read) moves nothing and the run ends completed_with_errors.
+ * for the next run (a night no check answered because the deadline came first
+ * raises the check-down notice, check-down-notice.js). A check that broke (the
+ * provider, a malformed answer, a read) moves nothing and the run ends
+ * completed_with_errors.
  *
  * THE NOTICE. One per visit and placement (dedupe key below), rung once: a
  * later run that is still unsure about the same visit rings nothing (it
@@ -103,7 +105,7 @@ const causeOf = (answer) => (answer.why === 'model_failed' ? (answer.reason || '
 // and one call can take two minutes (r7).
 function newRunState({ startedAt = Date.now(), deadlineSeconds = null } = {}) {
   return {
-    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, grouped: 0, personHeld: 0, broke: 0, answered: 0, brokeCause: null, noticesFailed: 0, notices: new Map(), settled: new Set(),
+    calls: 0, allowed: 0, held: 0, unsure: 0, notAsked: 0, timedOut: 0, grouped: 0, personHeld: 0, broke: 0, answered: 0, brokeCause: null, noticesFailed: 0, notices: new Map(), settled: new Set(),
     deadlineAt: Number.isFinite(deadlineSeconds) ? startedAt + deadlineSeconds * 1000 : Infinity,
   };
 }
@@ -313,12 +315,16 @@ async function checkMove({ service, best, run }, deps = {}) {
   const outOf = (state.calls >= run.config.proofreaderMaxCalls && 'call_limit') || (Date.now() >= state.deadlineAt && 'deadline');
   if (outOf) {
     state.notAsked += 1;
+    // Past the deadline is a stopped check, not a spent allowance: the
+    // check-down notice counts these (check-down-notice.js).
+    state.timedOut += outOf === 'deadline' ? 1 : 0;
     return stopped('not_asked', { verdict: 'unknown', why: outOf });
   }
   const asked = await ask({ service, best }, { conn, proofreader: deps.proofreader || require('./index'), state });
   const { answer } = asked;
   if (answer.why === 'deadline') {
     state.notAsked += 1;
+    state.timedOut += 1;
     return stopped('not_asked', answer);
   }
   const heldNow = answer.verdict === 'allow' ? await heldSinceAsked(conn, service) : false;

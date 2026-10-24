@@ -212,4 +212,17 @@ describe('preserveCapacity (a version-2 hold accepted after a gate rollback)', (
     const fit = evaluateArrivalPlacement({ ...context(day), preserveCapacity: true }, options(12 * 60, 60));
     expect(fit.feasible).toBe(true);
   });
+
+  // The nightly auto-dispatch arrival search (GATE_AUTO_DISPATCH_ARRIVAL_SEARCH,
+  // owner 2026-10-24) runs under the same per-call switch but plans the day
+  // like the 04:20 route pass: loadArrivalRouteContext({ planningMinutes:
+  // false }) marks each stop planning_exempt, so the same day keeps 60 apiece.
+  test('a stop marked planning_exempt keeps its own length under the per-call switch', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const day = [9, 9, 10, 10, 11, 11].map((h, i) => stop(`s${i}`, h * 60, 60,
+      { route_order: i + 1, service_type: 'Quarterly Pest Control Service', planning_exempt: true }));
+    expect(workDuration({ ...day[0], preserveCapacity: true })).toBe(60);
+    const fit = evaluateArrivalPlacement({ ...context(day), preserveCapacity: true }, options(12 * 60, 60));
+    expect(fit.feasible).toBe(false);
+  });
 });

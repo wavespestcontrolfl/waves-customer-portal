@@ -8,10 +8,11 @@
  * turned red, and one general digest went unread.
  *
  * At each run's end (index.js), from the run's check tally:
- *   - down: the check was asked and NO answer could be used (every ask broke:
- *     a provider error, an unreadable answer, a failed read) → ONE notice that
- *     names the cause. It rings once per outage: while it stands, a later
- *     broken run only rewrites it, and a person's done stays done.
+ *   - down: NO answer could be used — every ask broke (a provider error, an
+ *     unreadable answer, a failed read), or the run reached its check deadline
+ *     before asking (a slow slot search, e.g. GATE_AUTO_DISPATCH_ARRIVAL_SEARCH)
+ *     → ONE notice that names the cause. It rings once per outage: while it
+ *     stands, a later broken run only rewrites it, and a person's done stays done.
  *   - up: at least one usable answer → the notice closes itself; a later
  *     outage rings again.
  *   - nothing asked, or a dry run (the check runs in apply mode only): no
@@ -41,6 +42,7 @@ function causeText(code) {
   if (c === 'no_key') return 'no API key is set for the model';
   if (c === 'bad_answer' || c === 'empty_json') return 'the model answered in a shape the check cannot read';
   if (c === 'check_failed') return 'a database read failed during the check';
+  if (c === 'deadline') return 'the run reached its time limit for move checks before it could ask';
   if (/_timeout$/.test(c)) return 'the model did not answer in time';
   const status = Number((c.match(/_(\d{3})$/) || [])[1]);
   if (status === 400) return 'the provider refused the call (on Oct 15 this was the monthly spend limit)';
@@ -58,6 +60,7 @@ function shortCause(code) {
   if (c === 'no_key') return 'no API key is set';
   if (c === 'bad_answer' || c === 'empty_json') return 'its answers could not be read';
   if (c === 'check_failed') return 'a database read failed';
+  if (c === 'deadline') return 'the run ran out of time';
   if (/_timeout$/.test(c)) return 'the model timed out';
   const status = Number((c.match(/_(\d{3})$/) || [])[1]);
   if (status === 400) return 'the provider refused the call';
@@ -75,13 +78,17 @@ async function closeNotice(episodes, db, nowDate, reason, resolution) {
 
 async function raiseNotice(state, { episodes }) {
   const { composeAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
-  const cause = String(state.brokeCause || 'error');
   const broke = Number(state.broke) || 0;
+  const timedOut = Number(state.timedOut) || 0;
+  // A broken ask names the outage; with none, the deadline stopped every check.
+  const cause = broke > 0 ? String(state.brokeCause || 'error') : 'deadline';
+  const stayed = broke + timedOut;
+  const what = broke > 0 ? 'every move check failed' : 'no move check could run';
   // Throws on a rule violation (caught by noteRun): a malformed notice never goes out.
   const composed = composeAdminAlert({
     area: 'System',
     action: 'restore the auto-dispatch move check',
-    why: cutAtWord(`${plural(broke, 'planned move')} stayed put: every move check failed (${shortCause(cause)}).`, MAX_WHY_CHARS),
+    why: cutAtWord(`${plural(stayed, 'planned move')} stayed put: ${what} (${shortCause(cause)}).`, MAX_WHY_CHARS),
     severity: 'needs-you',
     link: LINK,
     subject: { type: 'check', id: 'auto-dispatch-move-check' },
@@ -98,9 +105,12 @@ async function raiseNotice(state, { episodes }) {
     ringOnRefresh: () => false,
     // Rings unless the owner turned the System category off (admin bell policy).
     bellDefault: true,
-    detail: `The 4:10 AM auto-dispatch run asks an AI model before each move. Tonight every check failed (${cause}): ${causeText(cause)}. `
-      + `The tool never moves a visit it could not check, so ${plural(broke, 'planned move')} stayed put, double-booking fixes included. `
-      + 'Check the AI provider account (spend limit, API key) and the key in Railway → Variables. '
+    detail: `The 4:10 AM auto-dispatch run asks an AI model before each move. Tonight ${broke > 0 ? 'every check failed' : 'no check could run'} (${cause}): ${causeText(cause)}. `
+      + `The tool never moves a visit it could not check, so ${plural(stayed, 'planned move')} stayed put, double-booking fixes included. `
+      + (broke > 0
+        ? 'Check the AI provider account (spend limit, API key) and the key in Railway → Variables. '
+        : 'No check starts after AUTO_DISPATCH_PROOFREADER_DEADLINE_SECONDS into the run (the 4:20 AM route pass needs the run done). '
+          + 'If this repeats, raise that limit in Railway → Variables, or unset GATE_AUTO_DISPATCH_ARRIVAL_SEARCH (it makes the slot search slower). ')
       + 'The run asks again every night; this notice closes itself the first night a check answers.',
     metadata: { ...composed.metadata, cause, broke },
   });
@@ -130,7 +140,7 @@ async function noteRun(state, { enabled = true, nowDate = new Date(), deps = {} 
       const closed = await closeNotice(episodes, db, nowDate, 'check_answers', 'The move check answered again');
       return { action: closed ? 'closed' : 'up' };
     }
-    if (!(Number(state.broke) > 0)) return { action: 'none' };
+    if (!(Number(state.broke) > 0) && !(Number(state.timedOut) > 0)) return { action: 'none' };
     await raiseNotice(state, { episodes });
     return { action: 'down' };
   } catch (err) {
