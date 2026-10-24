@@ -3581,6 +3581,19 @@ const gates = {
   // keep using this same parser.
   zelleNoticeReconcile: isProd ? gateEnvValue('GATE_ZELLE_NOTICE_RECONCILE') : process.env.GATE_ZELLE_NOTICE_RECONCILE !== 'false',
 
+  // Zelle payments from the Plaid bank feed — the same decision table and
+  // money path as zelleNoticeReconcile, fed by bank_transactions instead of
+  // email: after each hourly Plaid sync, a new "Zelle money received from
+  // <payer>" credit on a bank account settles the ONE open self-pay invoice
+  // that matches it to the cent with a corroborating payer name, receipt
+  // email + SMS included (owner ruling 2026-09-02); everything else parks on
+  // the Invoices page. Money + a customer comm, so it ships dark in prod; the
+  // owner flips it. OFF = the feed is never scanned (stale-claim recovery
+  // still runs). Read at CALL time (gateEnvValue) by
+  // services/zelle-notice-reconciler.js, so unsetting
+  // GATE_ZELLE_BANK_RECONCILE is a live kill switch.
+  zelleBankReconcile: isProd ? gateEnvValue('GATE_ZELLE_BANK_RECONCILE') : process.env.GATE_ZELLE_BANK_RECONCILE !== 'false',
+
   // Treatment Zone Mapper — tech traces the treated perimeter over a satellite
   // photo of the property; the traced path + snapshot replace the generic
   // schematic on the customer's service report. Gates BOTH the tech capture
