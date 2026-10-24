@@ -18446,7 +18446,7 @@ const CallRecordingProcessor = {
             if (bounceVerdict?.outcome === 'opted_out') {
               optOutStillActive = !!(await db('messaging_suppression')
                 .where({ phone: smsAni || phone, active: true })
-                .first('id')
+                .first('phone')
                 .catch(() => null));
             }
             const bounceOutcome = bounceVerdict

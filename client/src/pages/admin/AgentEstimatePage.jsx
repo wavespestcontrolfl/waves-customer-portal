@@ -605,6 +605,26 @@ export function LearningPanel({ leadId, user, memories, onReload }) {
   );
 }
 
+// Yellow-lane drafts 409 their FIRST send until the operator acknowledges the
+// engine's review reasons, and a satellite palm count 409s until the operator
+// types the count from the aerial photo (GATE_SATELLITE_PALM_COUNT_TYPED) — the
+// same confirm-and-retry contract as the estimates pipeline page. Returns the
+// answers with the new one added; throws on a cancel or any other error.
+export function answerSendGate(error, answers) {
+  if (error?.code === "ENGINE_REVIEW_REQUIRED" && !answers.acknowledgeEngineReview) {
+    if (!window.confirm(`${error.message}\n\nReviewed — send now?`)) {
+      throw new Error("Send cancelled — review the flagged reasons first.");
+    }
+    return { ...answers, acknowledgeEngineReview: true };
+  }
+  if (error?.code === "PALM_COUNT_REQUIRED" && answers.confirmedPalmCount == null) {
+    const typed = String(window.prompt(`${error.message}\n\nPalms you counted (a clump or a multi-trunk palm is one palm):`, "") ?? "").trim();
+    if (!/^\d{1,4}$/.test(typed)) throw new Error("Send cancelled — type the palm count from the aerial photo first.");
+    return { ...answers, confirmedPalmCount: Number(typed) };
+  }
+  throw error;
+}
+
 export default function AgentEstimatePage() {
   const { enabled, ready } = useFeatureFlagReady("agent_estimate", false);
   const outlet = useOutletContext() || {};
@@ -798,26 +818,27 @@ export default function AgentEstimatePage() {
     setSending(true);
     setSendMessage("");
     try {
-      const postSend = (acknowledgeEngineReview = false) => adminFetch(`/admin/estimates/${draft.id}/send`, {
+      const postSend = ({ acknowledgeEngineReview = false, confirmedPalmCount = null } = {}) => adminFetch(`/admin/estimates/${draft.id}/send`, {
         method: "POST",
         body: JSON.stringify({
           sendMethod,
           idempotencyKey: globalThis.crypto?.randomUUID?.() || `agent-estimate-send-${Date.now()}`,
           ...(acknowledgeEngineReview ? { acknowledgeEngineReview: true } : {}),
+          ...(confirmedPalmCount != null ? { confirmedPalmCount } : {}),
         }),
       });
+      // Each send gate is answered once, so at most three tries
+      // (answerSendGate throws on anything it does not ask).
+      let answers = {};
       let data;
-      try {
-        data = await postSend();
-      } catch (error) {
-        // Yellow-lane drafts 409 their FIRST send until the operator
-        // acknowledges the engine's review reasons — same confirm-and-retry
-        // contract as the estimates pipeline page.
-        if (error?.code !== "ENGINE_REVIEW_REQUIRED") throw error;
-        if (!window.confirm(`${error.message}\n\nReviewed — send now?`)) {
-          throw new Error("Send cancelled — review the flagged reasons first.");
+      let sent = false;
+      for (let tries = 0; !sent && tries < 3; tries += 1) {
+        try {
+          data = await postSend(answers);
+          sent = true;
+        } catch (error) {
+          answers = answerSendGate(error, answers);
         }
-        data = await postSend(true);
       }
       if (activeLeadRef.current !== sendLeadId) return;
       const label = sendMethod === "sms" ? "SMS" : sendMethod === "email" ? "email" : "SMS and email";
