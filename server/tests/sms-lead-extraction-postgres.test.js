@@ -290,6 +290,14 @@ postgres('text-thread lead reader', () => {
     // GATE_TECH_LINES off: the webhook stores the tech line's texts with source 'location'.
     await text('Gate code for the next stop?', { minutesAgo: 10, from: '+19415550133', to: numbers.fieldTech[0].number, metadata: { source: 'location' } });
     expect((await sweep()).candidates).toBe(0);
+
+    // The same person also texting an office line: only the office thread is read.
+    await text('Sending the photo of the ants', { minutesAgo: 10, from: '+19415550133' });
+    modelSays(answer({ requested_service: 'ant control' }));
+    await sweep();
+    const prompt = dispatchWithFallback.mock.calls[0][1].text;
+    expect(prompt).toContain('Sending the photo of the ants');
+    expect(prompt).not.toContain('Gate code for the next stop');
   });
 
   test('a text whose stored time has microseconds is still in its own thread', async () => {

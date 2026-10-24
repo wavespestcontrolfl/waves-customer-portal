@@ -196,6 +196,9 @@ async function loadThread(phone10, throughSmsLogId) {
       .orWhereRaw(nanpSql('to_phone'), nanpKeys(phone10)))
     .whereRaw(`created_at >= (SELECT created_at FROM sms_log WHERE id = ?) - interval '${THREAD_LOOKBACK_HOURS} hours'`, [throughSmsLogId])
     .whereRaw('created_at <= (SELECT created_at FROM sms_log WHERE id = ?)', [throughSmsLogId])
+    // Texts on a tech or internal line are staff talk, not this request.
+    .whereRaw("COALESCE(metadata->>'source', '') <> ALL(?::text[])", [SKIP_SOURCES])
+    .whereRaw("regexp_replace(COALESCE(CASE WHEN direction = 'inbound' THEN to_phone ELSE from_phone END, ''), '[^0-9]', '', 'g') <> ALL(?::text[])", [internalLineDigits()])
     .whereRaw("COALESCE(message_body, '') <> ''")
     // An in-flight send reservation is not a text Waves sent: never show it to the model.
     .modify(excludeUnresolvedSendReservations)
