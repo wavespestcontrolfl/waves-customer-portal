@@ -12,7 +12,8 @@
  * What is NOT modeled: the QBI wage/property limit above the QBI threshold (the
  * engine warns instead), the section 179 phase-out (the engine warns when the
  * year's pool passes the dollar limit), the $400 minimum QBI deduction that
- * starts in 2026 (section 199A(i)), and credits of any kind.
+ * starts in 2026 (section 199A(i); the engine warns when it could apply), and
+ * credits of any kind.
  */
 
 // the same every year in this range
@@ -81,6 +82,10 @@ const YEARS = {
     ss_wage_base: 184500,
     qbi_threshold: { single: 201750, mfj: 403500, hoh: 201750 },
     sec179_limit: 2560000,
+    // IRC 199A(i), added by P.L. 119-21 section 70105: from 2026, at least $1,000
+    // of QBI from active businesses gives a QBI deduction of at least $400
+    // (both indexed after 2026). Not applied: the engine only warns.
+    qbi_minimum: { qbi: 1000, deduction: 400 },
   },
 };
 

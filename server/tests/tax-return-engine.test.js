@@ -322,6 +322,22 @@ describe('section 179 and wages', () => {
   });
 });
 
+describe('the 2026 minimum QBI deduction', () => {
+  // profit 1,500 + other income 30,000 (the auditor's case): SE base 1,385.25 x 15.3% = 211.94,
+  // half 105.97; QBI 1,394.03; 20% = 278.81, under the 400 minimum
+  test('a warning when it could apply; no number changes', () => {
+    const r = computeReturn(inputs({ year: 2026, gross_receipts: 1500, other_income: 30000 }));
+    expect(r.qbi_deduction).toBe(278.81);
+    expect(r.warnings.find((w) => w.code === 'qbi_minimum').message).toBe('The $400.00 minimum QBI deduction (IRC 199A(i)) may apply to an active business with at least $1,000.00 of QBI. This engine does not add it: check Form 8995 with a tax preparer.');
+  });
+  test('no warning before 2026, under $1,000 of QBI, at a deduction of $400 or more, or with no taxable income left', () => {
+    expect(codes(computeReturn(inputs({ year: 2025, gross_receipts: 1500, other_income: 30000 })))).not.toContain('qbi_minimum');
+    expect(codes(computeReturn(inputs({ year: 2026, gross_receipts: 1000, other_income: 30000 })))).not.toContain('qbi_minimum'); // QBI 929.35
+    expect(codes(computeReturn(inputs({ year: 2026, gross_receipts: 2500, other_income: 30000 })))).not.toContain('qbi_minimum'); // 20% of 2,323.38 = 464.68
+    expect(codes(computeReturn(inputs({ year: 2026, gross_receipts: 1500 })))).not.toContain('qbi_minimum'); // under the standard deduction
+  });
+});
+
 describe('NOL and QBI', () => {
   test('the NOL takes at most 80% of taxable income, the rest carries out', () => {
     // profit 60,000: SE 55,410 x 15.3% = 8,477.73; half 4,238.87 (half cent up)

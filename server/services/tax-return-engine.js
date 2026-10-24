@@ -317,6 +317,9 @@ function computeReturn(inputs = {}) {
     warnings.push(warn('qbi_threshold', `Taxable income is over the ${fmt(K.qbi_threshold[filing])} QBI threshold. The wage and property limit is not modeled: ask a tax preparer.`));
   }
   const taxable = round2(Math.max(taxableAfterNol - qbiDeduction, 0));
+  if (K.qbi_minimum && qbiNet >= K.qbi_minimum.qbi && qbiDeduction < K.qbi_minimum.deduction && taxable > 0) {
+    warnings.push(warn('qbi_minimum', `The ${fmt(K.qbi_minimum.deduction)} minimum QBI deduction (IRC 199A(i)) may apply to an active business with at least ${fmt(K.qbi_minimum.qbi)} of QBI. This engine does not add it: check Form 8995 with a tax preparer.`));
+  }
   const nolGenerated = profit < 0 ? round2(Math.max(-profit - otherIncome, 0)) : 0;
   const nolOut = round2(carryIn.nol - nolUsed + nolGenerated);
   const qbiLossOut = round2(Math.max(-qbiNet, 0));
