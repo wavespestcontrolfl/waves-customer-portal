@@ -290,6 +290,27 @@ describe("what the result shows", () => {
     expect(screen.getByText("This scope requires a quote review before a firm price can be sent.")).toBeInTheDocument();
   });
 
+  it("never shows an oversize system as free beside another service: the bundle row reads Quote Required", async () => {
+    calculateResult = {
+      ...MISTING_OVERSIZE,
+      recurring: {
+        ...MISTING_OVERSIZE.recurring, serviceCount: 1, grandTotal: 50, monthlyTotal: 50, annualBeforeDiscount: 600,
+        services: [{ service: "pest_control", name: "Pest Control", mo: 50, annual: 600 }, ...MISTING_OVERSIZE.recurring.services],
+      },
+    };
+    renderNew();
+    fireEvent.click(await toggle());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Pest Control", exact: true }));
+    await lookUp();
+    typeInto("Nozzles", "90");
+    await generate();
+    await screen.findByText("1 recurring service —", { exact: false });
+    expect(screen.queryByTestId("misting-plan")).not.toBeInTheDocument();
+    expect(screen.getByText("Quote Required")).toBeInTheDocument();
+    expect(screen.queryByText("$0.00/mo")).not.toBeInTheDocument();
+    expect(screen.getByText("more nozzles than our standard system", { exact: false })).toBeInTheDocument();
+  });
+
   it("lists the plan once, in the bundle card, when another service is on the estimate", async () => {
     calculateResult = {
       ...MISTING_PRICED,

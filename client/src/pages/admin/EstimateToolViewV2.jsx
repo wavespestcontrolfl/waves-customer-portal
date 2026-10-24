@@ -9152,9 +9152,11 @@ export default function EstimateToolViewV2({
                                   <div className="text-ink-secondary">
                                     {" "}
                                     <div>{s.displayName || s.name}</div>
-                                    {s.detail && (
+                                    {/* A manual-quote row also names its reason in words, as the one-time
+                                        list does; priced rows keep their plain detail line. */}
+                                    {(s.quoteRequired ? serviceDetailText(s) : s.detail) && (
                                       <div className="text-14 text-ink-tertiary leading-snug mt-0.5">
-                                        {s.detail}
+                                        {s.quoteRequired ? serviceDetailText(s) : s.detail}
                                       </div>
                                     )}
                                     {mistingReasonNotes(s).map((note) => (
@@ -9162,7 +9164,9 @@ export default function EstimateToolViewV2({
                                     ))}
                                   </div>{" "}
                                   <div className="text-zinc-900 text-right u-nums">
-                                    {fmt(s.mo)}/mo
+                                    {/* A manual-quote row (an oversize misting layout) carries mo 0 as a
+                                        placeholder; never show an unpriced system as free (pre-push P1). */}
+                                    {s.quoteRequired ? "Quote Required" : `${fmt(s.mo)}/mo`}
                                   </div>{" "}
                                 </React.Fragment>
                               ))}
