@@ -789,6 +789,11 @@ async function runInner({ now = new Date() } = {}) {
   // reach this tick (slot inside the repeat window).
   const repeatCandidates = misses.filter((m) => repeatWindowOpen(m.slot, now));
   const closedCalls = new Set();
+  // A call whose open bell is a standing date check has a booked visit (on the wrong
+  // day): a repeat must never re-ring it as "nothing is on the calendar". The close
+  // pass, which ran first, owns that bell (it follows the visit, or turns it back
+  // into "book it" once the visit is gone).
+  const standingDateChecks = new Set();
   const lastRung = new Map();
   if (repeatCandidates.length) {
     const ids = repeatCandidates.map((m) => m.call.id);
@@ -803,6 +808,14 @@ async function runInner({ now = new Date() } = {}) {
       .groupByRaw("metadata->>'call_log_id'")
       .select(db.raw("metadata->>'call_log_id' AS call_log_id"), db.raw('MAX(created_at) AS last_at'));
     for (const r of rungRows) lastRung.set(r.call_log_id, new Date(r.last_at));
+    const checkRows = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereNull('done_at')
+      .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${BELL_DEDUPE_PREFIX}%`])
+      .whereRaw("metadata->>'call_log_id' = ANY(?)", [ids])
+      .whereRaw("metadata->'mismatch'->>'date' IS NOT NULL")
+      .select(db.raw("metadata->>'call_log_id' AS call_log_id"), db.raw("metadata->'mismatch'->>'date' AS mismatch_date"));
+    for (const r of checkRows) if (r.mismatch_date) standingDateChecks.add(r.call_log_id);
   }
 
   let alerted = 0;
@@ -823,7 +836,7 @@ async function runInner({ now = new Date() } = {}) {
     // than the repeat interval.
     // GATE_ALERT_RING_ONCE (owner 2026-10-14): the first ring stands alone.
     if (require('../config/feature-gates').alertRingOnceLive?.()) continue;
-    if (!repeatCandidates.includes(m) || closedCalls.has(m.call.id)) continue;
+    if (!repeatCandidates.includes(m) || closedCalls.has(m.call.id) || standingDateChecks.has(m.call.id)) continue;
     const last = lastRung.get(m.call.id);
     if (last && now.getTime() - last.getTime() < REPEAT_INTERVAL_MINUTES * 60 * 1000) continue;
     const outcome = await ringMiss(m, { dedupeKey: `call-booking-miss-repeat:${m.call.id}`, repeat: true });

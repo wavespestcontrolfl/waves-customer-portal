@@ -378,6 +378,26 @@ describe('repeat paging', () => {
     expect(opts.dedupeWindowMs).toBe(REPEAT_INTERVAL_MINUTES * 60000);
   });
 
+  test('no repeat for a call whose open bell is a standing date check, even when its visit moved beyond the match window (pre-push P1)', async () => {
+    mockState.rung = [{ call_log_id: CALL_ID, last_at: new Date(NOW.getTime() - (REPEAT_INTERVAL_MINUTES + 10) * 60000).toISOString() }];
+    mockState.booked = [{
+      id: 'visit-far', customer_id: 'cust-9', status: 'confirmed', service_type: 'Wasp Nest Removal', sched_date: '2026-11-20',
+      window_start: '11:00:00', created_at: '2026-09-28T22:15:00Z', source_call_log_id: null, notes: null,
+    }];
+    mockState.open = [{
+      id: 'd1', title: "Schedule — check Robin Example's visit date", created_at: '2026-10-01T15:00:00Z', call_log_id: CALL_ID,
+      confirmed_date_et: '2026-10-04', confirmed_time_et: '11:00', confirmed_service: 'Wasp Nest Removal',
+      mismatch_visit_id: 'visit-far', mismatch_date: '2026-11-20', mismatch_time: '11:00',
+    }];
+    try {
+      const result = await runCallBookingMissWatchdog({ now: NOW });
+      expect(result).toMatchObject({ alerted: 0, repeated: 0, raised: 0 });
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    } finally {
+      mockState.open = [];
+    }
+  });
+
   test('GATE_ALERT_RING_ONCE on: no repeat ring even when one is due', async () => {
     require('../config/feature-gates').alertRingOnceLive.mockReturnValue(true);
     mockState.rung = [{ call_log_id: CALL_ID, last_at: new Date(NOW.getTime() - (REPEAT_INTERVAL_MINUTES + 10) * 60000).toISOString() }];
