@@ -894,8 +894,13 @@ async function fileUnlinkedItems(trx, message, items, receipt) {
   await trx('customer_access_codes').where({ source_type: sourceTypeOf(message), source_id: message.id, status: 'found' })
     .whereNull('customer_id').whereNot('sender_phone', sender)
     .update({ sender_phone: sender, updated_at: trx.fn.now() });
-  const filed = new Set((await trx('customer_access_codes').where({ source_type: sourceTypeOf(message), source_id: message.id })
-    .select('kind', 'value_hash', 'instructions')).map(rowKey));
+  const filedRows = trx('customer_access_codes').where({ source_type: sourceTypeOf(message), source_id: message.id });
+  // A call's rows of a former owner (retired when the phone moved) are history,
+  // not this filing: only unlinked rows and the office's own links count.
+  if (message.source_kind === 'call') {
+    filedRows.where((w) => { w.whereNull('customer_id'); if (!message.call_customer_id) w.orWhereNotNull('linked_at'); });
+  }
+  const filed = new Set((await filedRows.select('kind', 'value_hash', 'instructions')).map(rowKey));
   const toInsert = items.filter((item) => !filed.has(rowKey(item)));
   let inserted = 0;
   if (toInsert.length) {

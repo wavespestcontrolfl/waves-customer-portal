@@ -2639,6 +2639,34 @@ postgres('access codes section', () => {
         expect((await callRows({ source_id: callId, status: 'found' }))).toEqual([expect.objectContaining({ customer_id: null, sender_phone: FAR })]);
       });
 
+      test('an accepted phone-matched code whose phone becomes nobody\'s is filed again, unlinked, from the same transcript', async () => {
+        const a = await owner();
+        const callId = await phoneCall(BOBBY);
+        await sweepCalls(stub([callItem()]));
+        const [first] = await callRows({ source_id: callId });
+        expect((await access.accept(trx, first.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        await trx('customers').where({ id: a.id }).update({ phone: '+19415550100' });
+        const out = await sweepCalls(stub([callItem()]));
+        expect(out).toMatchObject({ movedRetired: 1, calls: { read: 1, found: 1 } });
+        expect((await trx('customer_access_codes').where({ id: first.id }).first()).status).toBe('retired');
+        expect(await callRows({ source_id: callId, status: 'found' })).toEqual([expect.objectContaining({ customer_id: null, sender_phone: FAR, code: '#3394' })]);
+        expect((await access.listFound(trx)).items.filter((r) => r.sourceId === callId)).toHaveLength(1);
+        expect((await callReceipts(callId)).filter((r) => r.status === 'ok').length).toBeGreaterThan(0);
+      });
+
+      test('a phone that moves from one customer to another files the code for the new one, not suppressed by the old one\'s retired row', async () => {
+        const a = await owner();
+        const callId = await phoneCall(BOBBY);
+        await sweepCalls(stub([callItem()]));
+        const [first] = await callRows({ source_id: callId });
+        expect((await access.accept(trx, first.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        await trx('customers').where({ id: a.id }).update({ phone: '+19415550100' });
+        const b = await owner(FAR);
+        expect(await sweepCalls(stub([callItem()]))).toMatchObject({ movedRetired: 1, calls: { found: 1 } });
+        expect((await trx('customer_access_codes').where({ id: first.id }).first()).status).toBe('retired');
+        expect(await callRows({ source_id: callId, status: 'found' })).toEqual([expect.objectContaining({ customer_id: b.id, code: '#3394' })]);
+      });
+
       test('a phone that now belongs to nobody retires an active code that came by the phone, but not one the office linked', async () => {
         const phoneOwner = await owner();
         const linkedTo = await owner('+19415550155');
