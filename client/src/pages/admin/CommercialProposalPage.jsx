@@ -212,6 +212,13 @@ function CommercialProposalEditor() {
   // The SAVED fixed date — the one the server enforces on send and Mark won.
   const [savedValidThrough, setSavedValidThrough] = useState('');
   const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
+  // "Bid tools" switch: shows the Required bid form and Project cost sheet
+  // sections. Visibility only; the sections stay mounted and their data stays
+  // in state, so hiding never drops or resets anything. Defaults ON when the
+  // proposal already carries bid work; once the operator flips it, their
+  // choice wins over later reloads.
+  const [bidToolsOpen, setBidToolsOpen] = useState(false);
+  const bidToolsChosenRef = React.useRef(false);
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
   const showUnitColumn = bidToolsEnabled || buildings.some((building) => building.lineItems.some((line) => line.unit));
   // Structured agreement sections (slice 1A-i) — all optional; leaving a
@@ -286,6 +293,13 @@ function CommercialProposalEditor() {
     setProjectCosting(data.projectCosting || { revenueYears: 1, rows: [] });
     setSavedValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
+    if (!bidToolsChosenRef.current) {
+      setBidToolsOpen(
+        (data.projectCosting?.rows?.length || 0) > 0
+        || !!p.validThrough
+        || (p.buildings || []).some((b) => (b.lineItems || []).some((li) => li.unit)),
+      );
+    }
     setBuildings(
       Array.isArray(p.buildings) && p.buildings.length
         ? p.buildings.map((b) => ({
@@ -1480,9 +1494,27 @@ function CommercialProposalEditor() {
             </Button>
           )}
 
-          {bidToolsEnabled && !programsMode && <ProposalBidForm buildings={buildings} onDownload={downloadBidForm} disabled={saving || estimate?.status === 'sending'} />}
-          {(bidToolsEnabled || projectCosting.rows.length > 0) && <ProposalProjectCosting value={projectCosting} totals={totals} revenueIssue={revenueIssue} disabled={!!locked || !bidToolsEnabled}
-            onChange={(value) => { setProjectCosting(value); markEdit(); }} />}
+          {bidToolsEnabled && (
+            <div className="flex items-center gap-2 text-14">
+              <Switch
+                checked={bidToolsOpen}
+                id="bid-tools-switch" label="Bid tools"
+                onChange={(v) => { bidToolsChosenRef.current = true; setBidToolsOpen(v); }}
+              />
+              <span className="text-zinc-600">Required bid form and private project cost sheet, for solicitation bids.</span>
+            </div>
+          )}
+          {bidToolsEnabled && !programsMode && (
+            <div hidden={!bidToolsOpen}>
+              <ProposalBidForm buildings={buildings} onDownload={downloadBidForm} disabled={saving || estimate?.status === 'sending'} />
+            </div>
+          )}
+          {(bidToolsEnabled || projectCosting.rows.length > 0) && (
+            <div hidden={bidToolsEnabled && !bidToolsOpen}>
+              <ProposalProjectCosting value={projectCosting} totals={totals} revenueIssue={revenueIssue} disabled={!!locked || !bidToolsEnabled}
+                onChange={(value) => { setProjectCosting(value); markEdit(); }} />
+            </div>
+          )}
 
           <Card>
             <CardHeader>

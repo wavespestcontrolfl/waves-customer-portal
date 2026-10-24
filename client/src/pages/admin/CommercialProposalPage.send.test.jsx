@@ -39,9 +39,11 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); });
 const mount = () => render(<MemoryRouter initialEntries={['/estimates/synthetic-proposal/proposal']}><Routes><Route path="/estimates/:estimateId/proposal" element={<CommercialProposalPage />} /></Routes></MemoryRouter>);
+const openBidTools = () => fireEvent.click(screen.getByRole('switch', { name: 'Bid tools' }));
 const bidFormExport = async () => {
   mount();
   await screen.findByDisplayValue('Synthetic proposal');
+  openBidTools();
   fireEvent.change(screen.getByLabelText('Original PDF'), { target: { files: [new File(['%PDF-'], 'original.pdf', { type: 'application/pdf' })] } });
   fireEvent.change(screen.getByLabelText('Form row for Quarterly service'), { target: { value: 'application' } });
   vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:synthetic', revokeObjectURL: () => {} });
@@ -92,6 +94,7 @@ it('hides bid controls while disabled and omits fields that an older editor cann
 it('preserves decimal quantities, units, unit rates, validity and private cost inputs through save/reload', async () => {
   mount();
   await screen.findByDisplayValue('Synthetic proposal');
+  openBidTools();
   fireEvent.change(screen.getByLabelText('Quantity', { exact: true }), { target: { value: '25.8' } });
   fireEvent.change(screen.getByLabelText('Quantity unit'), { target: { value: 'acre' } });
   fireEvent.change(screen.getByLabelText('Unit price', { exact: true }), { target: { value: '0.0755' } });
@@ -198,6 +201,7 @@ it('duplicates a unit-bearing building as a unit-less copy while the gate is off
 it('withholds the costing margin while any program row is incomplete, exactly as the save refuses it (GH codex P2 r10 on #4270)', async () => {
   mount();
   await screen.findByDisplayValue('Synthetic proposal');
+  openBidTools();
   fireEvent.click(screen.getByRole('button', { name: 'Add project cost' }));
   fireEvent.change(screen.getByLabelText('Cost description'), { target: { value: 'Private crew hours' } });
   fireEvent.change(screen.getByLabelText('Cost quantity', { exact: true }), { target: { value: '1' } });
@@ -244,6 +248,7 @@ it('updates costing eligibility when tax pushes the combined first invoice over 
 it('includes the reviewed Cove submission date in the export request', async () => {
   mount();
   await screen.findByDisplayValue('Synthetic proposal');
+  openBidTools();
   fireEvent.change(screen.getByLabelText('Form layout'), { target: { value: 'cove_termite' } });
   fireEvent.change(screen.getByLabelText('Submission date'), { target: { value: '2026-09-22' } });
   fireEvent.change(screen.getByLabelText('Original PDF'), { target: { files: [new File(['%PDF-'], 'original.pdf', { type: 'application/pdf' })] } });
@@ -287,4 +292,82 @@ it('keeps the misting program identity through an ordinary save', async () => {
   await screen.findByRole('button', { name: 'Saved' });
   const programs = JSON.parse(calls.find((call) => call.method === 'PUT').body).proposal.programs;
   expect(programs[0]).toMatchObject({ service: 'mosquito', identity: 'mosquito_misting' });
+});
+
+const BID_FORM_TITLE = 'Required bid form';
+const COST_SHEET_TITLE = 'Project cost sheet · private';
+const costRows = [{ category: 'labor', phase: 'Phase A', description: 'Private crew hours', quantity: 40, unit: 'hour', unitCost: 35, occurrences: 1 }];
+const sectionVisible = (title) => {
+  const heading = screen.queryByText(title);
+  return !!heading && heading.closest('[hidden]') === null;
+};
+
+it('hides the bid form and cost sheet on a plain proposal until the Bid tools switch is on', async () => {
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  const toggle = screen.getByRole('switch', { name: 'Bid tools' });
+  expect(toggle).toHaveAttribute('aria-checked', 'false');
+  expect(sectionVisible(BID_FORM_TITLE)).toBe(false);
+  expect(sectionVisible(COST_SHEET_TITLE)).toBe(false);
+  expect(screen.queryByRole('button', { name: 'Download filled bid form' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Add project cost' })).toBeNull();
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute('aria-checked', 'true');
+  expect(sectionVisible(BID_FORM_TITLE)).toBe(true);
+  expect(sectionVisible(COST_SHEET_TITLE)).toBe(true);
+  expect(screen.getByRole('button', { name: 'Add project cost' })).toBeInTheDocument();
+  fireEvent.click(toggle);
+  expect(sectionVisible(BID_FORM_TITLE)).toBe(false);
+  expect(sectionVisible(COST_SHEET_TITLE)).toBe(false);
+});
+
+it('defaults Bid tools on when the proposal already has project cost rows', async () => {
+  saved.projectCosting = { revenueYears: 1, rows: costRows };
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  expect(screen.getByRole('switch', { name: 'Bid tools' })).toHaveAttribute('aria-checked', 'true');
+  expect(sectionVisible(BID_FORM_TITLE)).toBe(true);
+  expect(sectionVisible(COST_SHEET_TITLE)).toBe(true);
+});
+
+it('defaults Bid tools on when the proposal has a fixed valid-through date or a unit-bearing line', async () => {
+  saved.proposal.validThrough = '2099-12-21';
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  expect(screen.getByRole('switch', { name: 'Bid tools' })).toHaveAttribute('aria-checked', 'true');
+  cleanup();
+  delete saved.proposal.validThrough;
+  Object.assign(saved.proposal.buildings[0].lineItems[0], { id: 'saved-line', unit: 'acre' });
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  expect(screen.getByRole('switch', { name: 'Bid tools' })).toHaveAttribute('aria-checked', 'true');
+});
+
+it('still saves the cost rows and valid-through date while Bid tools is switched off', async () => {
+  saved.projectCosting = { revenueYears: 1, rows: costRows };
+  saved.proposal.validThrough = '2099-12-21';
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.click(screen.getByRole('switch', { name: 'Bid tools' }));
+  expect(sectionVisible(COST_SHEET_TITLE)).toBe(false);
+  fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Edit while hidden' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await screen.findByRole('button', { name: 'Saved' });
+  const payload = JSON.parse(calls.find((call) => call.method === 'PUT').body);
+  expect(payload.projectCosting.rows[0]).toMatchObject({ description: 'Private crew hours', quantity: 40, unitCost: 35 });
+  expect(payload.proposal.validThrough).toBe('2099-12-21');
+  // Switching back on shows the same data, untouched.
+  fireEvent.click(screen.getByRole('switch', { name: 'Bid tools' }));
+  expect(screen.getByLabelText('Cost description')).toHaveValue('Private crew hours');
+});
+
+it('keeps the chosen bid-form state when the switch is toggled off and on', async () => {
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  openBidTools();
+  fireEvent.change(screen.getByLabelText('Form row for Quarterly service'), { target: { value: 'application' } });
+  openBidTools(); openBidTools();
+  expect(screen.getByLabelText('Form row for Quarterly service')).toHaveValue('application');
+});
+
+it('shows no Bid tools switch and no bid sections when the gate is off', async () => {
+  saved.bidToolsEnabled = false;
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  expect(screen.queryByRole('switch', { name: 'Bid tools' })).toBeNull();
+  expect(screen.queryByText(BID_FORM_TITLE)).toBeNull();
+  expect(screen.queryByText(COST_SHEET_TITLE)).toBeNull();
 });
