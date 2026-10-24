@@ -303,7 +303,8 @@ describe('tipsForVisit', () => {
     const { line, groups } = tipsForVisit({ serviceLine, date: '2026-08-15' });
     const all = groups.flatMap((group) => group.tips);
     expect(line).toBe(serviceLine);
-    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine) && !tip.services).map((tip) => tip.id).sort());
+    // (a tip written for tips with facts is listed only behind its gate)
+    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine) && !tip.services && !tip.sourcedOnly).map((tip) => tip.id).sort());
     expect(groups.every((group) => group.tips.length > 0)).toBe(true);
   });
 
@@ -407,7 +408,7 @@ describe('tipsForVisit', () => {
 
   test('every service tip names catalog-shaped service keys', () => {
     const withServices = TIPS.filter((tip) => tip.services);
-    expect(withServices).toHaveLength(88);
+    expect(withServices).toHaveLength(91);
     for (const tip of withServices) {
       expect(tip.services.length).toBeGreaterThan(0);
       expect(new Set(tip.services).size).toBe(tip.services.length);
@@ -605,8 +606,10 @@ describe('open search and pest tags (owner 2026-10-09)', () => {
       const visit = tipsForVisit({ serviceLine, serviceKey, date: '2026-10-09' });
       const listed = visit.groups.flatMap((group) => group.tips).map((tip) => tip.id);
       const more = visit.more.map((tip) => tip.id);
-      expect([...listed, ...more].sort()).toEqual(TIPS.map((tip) => tip.id).sort());
-      expect(new Set([...listed, ...more]).size).toBe(TIPS.length);
+      // (a tip written for tips with facts exists only behind its gate)
+      const offered = TIPS.filter((tip) => !tip.sourcedOnly);
+      expect([...listed, ...more].sort()).toEqual(offered.map((tip) => tip.id).sort());
+      expect(new Set([...listed, ...more]).size).toBe(offered.length);
     }
   });
 
@@ -851,7 +854,8 @@ describe('tips matched to the yard (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', (
   test('every yard filter and month list names real values', () => {
     const GRASSES = new Set(['st_augustine', 'bermuda', 'zoysia', 'bahia']);
     for (const tip of TIPS.filter((t) => t.yard)) {
-      expect(Object.keys(tip.yard).every((key) => ['grass', 'irrigation', 'county', 'city'].includes(key))).toBe(true);
+      expect(Object.keys(tip.yard).every((key) => ['grass', 'irrigation', 'county', 'city', 'water'].includes(key))).toBe(true);
+      if (tip.yard.water) expect(['county', 'reclaimed', 'well']).toContain(tip.yard.water);
       for (const grass of tip.yard.grass || []) expect(GRASSES.has(grass)).toBe(true);
       for (const county of tip.yard.county || []) expect(['Manatee', 'Sarasota', 'Charlotte']).toContain(county);
       for (const city of tip.yard.city || []) expect(city).toBe(city.toLowerCase());
@@ -926,6 +930,54 @@ describe('a topic for the post a tip lacks (tech-tip-blog-seeder, owner 2026-10-
       const tip = TIPS.find((t) => t.id === id);
       expect([id, Boolean(tip?.blog?.topic), Boolean(tip?.blog?.path)]).toEqual([id, true, false]);
     }
+  });
+});
+
+describe('tips written for tips with facts exist only behind the gate (sourcedOnly, owner 2026-10-24, part 4)', () => {
+  const { yardMatches } = require('../services/service-report/tip-library');
+  const ids = (opts) => {
+    const library = tipsForVisit(opts);
+    return new Set([...library.groups.flatMap((group) => group.tips), ...library.more].map((tip) => tip.id));
+  };
+  const NEW = TIPS.filter((tip) => tip.sourcedOnly);
+
+  test('each has its own sources and one text, its copy', () => {
+    expect(NEW.length).toBeGreaterThan(0);
+    for (const tip of NEW) {
+      expect([tip.id, Array.isArray(tip.sources) && tip.sources.length > 0]).toEqual([tip.id, true]);
+      expect([tip.id, tip.sourcedCopy]).toEqual([tip.id, undefined]);
+    }
+  });
+
+  test('gate off: never listed, never searched, never frozen', () => {
+    const off = ids({ serviceLine: 'lawn', date: '2026-07-15' });
+    const offPest = ids({ serviceLine: 'pest', date: '2026-07-15' });
+    for (const tip of NEW) {
+      expect([tip.id, off.has(tip.id) || offPest.has(tip.id)]).toEqual([tip.id, false]);
+    }
+    expect(resolveTipIds(['lawn_mow_dry', 'lawn_water_morning'])).toEqual([expect.objectContaining({ id: 'lawn_water_morning' })]);
+  });
+
+  test('gate on: listed where the yard and month fit, and frozen with their citations', () => {
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).has('lawn_mow_dry')).toBe(true);
+    const [frozen] = resolveTipIds(['lawn_mow_dry'], { sourced: true, date: '2026-07-15' });
+    expect(frozen.id).toBe('lawn_mow_dry');
+    expect(frozen.citations.map((citation) => citation.label)).toEqual(['UF/IFAS']);
+  });
+
+  test('a reclaimed-water tip needs the source saved for this home', () => {
+    expect(yardMatches({ water: 'reclaimed' }, { waterSource: 'reclaimed' })).toBe(true);
+    expect(yardMatches({ water: 'reclaimed' }, { waterSource: 'county' })).toBe(false);
+    expect(yardMatches({ water: 'reclaimed' }, { waterSource: null })).toBe(false);
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).has('lawn_reclaimed_water')).toBe(false);
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true, yard: { waterSource: 'reclaimed' } }).has('lawn_reclaimed_water')).toBe(true);
+  });
+
+  test('the Sarasota County fertilizer season is never shown in North Port, whose season starts April 1', () => {
+    const july = { serviceLine: 'lawn', date: '2026-07-15', sourced: true };
+    expect(ids({ ...july, yard: { county: 'Sarasota', city: 'venice' } }).has('lawn_fertilizer_season')).toBe(true);
+    expect(ids({ ...july, yard: { county: 'Sarasota', city: 'north port' } }).has('lawn_fertilizer_season')).toBe(false);
+    expect(ids({ ...july, yard: { county: 'Charlotte', city: 'port charlotte' } }).has('lawn_fertilizer_season')).toBe(false);
   });
 });
 
