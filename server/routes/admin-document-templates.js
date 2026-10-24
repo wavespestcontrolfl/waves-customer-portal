@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  NEW_CONSTRUCTION_WARRANTY_KEY, assertConfirmedRender, issueDeliveryState, renderHash, supersedeOpenNewConstructionWarranty, templateIssueValues,
+  NEW_CONSTRUCTION_WARRANTY_KEY, assertConfirmedRender, issueDeliveryState, renderHash, supersedeOpenNewConstructionWarranty, templateIssueValues, templateIssueWithWarnings,
 } = require('../services/new-construction-warranty');
 
 const router = express.Router();
@@ -392,7 +392,7 @@ router.post('/:key/issue-preview', async (req, res, next) => {
     }
     const customer = await db('customers').where({ id: req.body?.customerId }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    const values = await templateIssueValues(loaded.template.template_key, req.body, customer);
+    const { values, warnings } = await templateIssueWithWarnings(loaded.template.template_key, req.body, customer);
     const rendered = renderDocumentTemplate({
       template: loaded.template,
       version: loaded.activeVersion,
@@ -401,7 +401,7 @@ router.post('/:key/issue-preview', async (req, res, next) => {
     if (rendered.unresolvedVariables.length) {
       return res.status(400).json({ error: 'Document has unresolved merge fields.', unresolvedVariables: rendered.unresolvedVariables });
     }
-    res.json({ body: rendered.body, renderHash: renderHash(rendered.body) });
+    res.json({ body: rendered.body, renderHash: renderHash(rendered.body), warnings });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
