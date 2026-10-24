@@ -15,10 +15,12 @@ jest.mock('../services/admin-alert-episodes', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n2', deduped: false })),
 }));
+jest.mock('../services/invoice-followups', () => ({ latePaymentCheckerRetiredLive: jest.fn(() => true) }));
 
 const gates = require('../config/feature-gates');
 const episodes = require('../services/admin-alert-episodes');
 const NotificationService = require('../services/notification-service');
+const InvoiceFollowUps = require('../services/invoice-followups');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const Quiet = require('../services/quiet-overdue-invoices');
 
@@ -61,7 +63,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   gates.quietOverdueListLive.mockReturnValue(true);
   gates.alertEpisodesLive.mockReturnValue(true);
+  InvoiceFollowUps.latePaymentCheckerRetiredLive.mockReturnValue(true);
+  process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
 });
+afterAll(() => { delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF; });
 
 describe('which states are quiet', () => {
   test.each([
@@ -110,13 +115,13 @@ describe('the list', () => {
     const composed = composeList(items);
     const alert = composeAdminAlert(composed.spec);
     expect(alert.headline).toBe('Billing — follow up on 2 quiet overdue invoices');
-    expect(alert.why).toBe('$1,072 is owed and no reminder is going out on any of them; the oldest is 146 days late.');
+    expect(alert.why).toBe('$1,072 is owed with no overdue reminder scheduled on any of them; the oldest is 146 days late.');
     expect(alert.link).toBe('/admin/invoices');
     expect(alert.metadata).toMatchObject({ area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'count_zero', subject: { type: 'check', id: Quiet.DEDUPE_KEY } });
     expect(composed.itemKeys).toEqual(['a', 'b']);
     expect(composed.total).toBe(1071.5);
     expect(composed.detail.split('\n')).toEqual([
-      '2 open invoices, $1,071.50 owed. No reminder goes out on any of them, and nothing was sent by this check.',
+      '2 open invoices, $1,071.50 owed. No overdue reminder is scheduled on any of them, and nothing was sent by this check.',
       'Oldest first:',
       'WPC-TEST-0002 · Pat Synthetic · $996.00 · 146 days late · every reminder sent, nothing next',
       'WPC-TEST-0001 · Pat Synthetic · $75.50 · 30 days late · reminders paused, no end date',
@@ -127,8 +132,15 @@ describe('the list', () => {
     const composed = composeList(listItems([row({ id: 'inv-9', total: '250.00', days_late: 16, hold_days: 10, seq_status: 'autopay_hold' })], NOW));
     const alert = composeAdminAlert(composed.spec);
     expect(alert.headline).toBe('Billing — follow up on 1 quiet overdue invoice');
-    expect(alert.why).toBe('Pat Synthetic owes $250 and no reminder is going out; it is 16 days late.');
+    expect(alert.why).toBe('Pat Synthetic owes $250 with no overdue reminder scheduled; it is 16 days late.');
     expect(alert.link).toBe('/admin/invoices?invoice=inv-9');
+  });
+
+  test('one invoice whose name the rule cannot carry: the why drops the name', () => {
+    for (const over of [{ first_name: 'Mary J.', last_name: 'Synthetic' }, { first_name: 'Bartholomew-Maximilian Alexander', last_name: 'Synthetic-Featherstonehaugh' }]) {
+      const composed = composeList(listItems([row({ ...over, total: '250.00', days_late: 16 })], NOW));
+      expect(composeAdminAlert(composed.spec).why).toBe('$250 is owed on one invoice with no overdue reminder scheduled; it is 16 days late.');
+    }
   });
 
   test('a long list stays rule-clean and the detail names how many more there are', () => {
@@ -158,6 +170,18 @@ describe('runQuietOverdueList', () => {
     await expect(Quiet.runQuietOverdueList({ now: NOW, database })).resolves.toEqual({ skipped: 'disabled' });
     expect(database).not.toHaveBeenCalled();
     expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  });
+
+  test('a legacy sender still running: no read, no bell, no close (it may still contact these invoices)', async () => {
+    const database = jest.fn();
+    InvoiceFollowUps.latePaymentCheckerRetiredLive.mockReturnValue(false);
+    await expect(Quiet.runQuietOverdueList({ now: NOW, database })).resolves.toEqual({ skipped: 'legacy_sender_live' });
+    InvoiceFollowUps.latePaymentCheckerRetiredLive.mockReturnValue(true);
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'false';
+    await expect(Quiet.runQuietOverdueList({ now: NOW, database })).resolves.toEqual({ skipped: 'legacy_sender_live' });
+    expect(database).not.toHaveBeenCalled();
+    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
   test('a list raises one standing billing row that asks to ring and rings again only for a new invoice', async () => {

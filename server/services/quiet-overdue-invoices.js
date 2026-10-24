@@ -30,6 +30,12 @@
 // Not quiet: an active sequence with a next touch, or a pause whose end date
 // is still ahead (staff chose that wait).
 //
+// Only while both legacy senders are retired (late-payment-checker.js, and
+// balance-reminder.js's account late check): either one can still contact an
+// invoice with no sequence, a finished one or a stopped one, so "no overdue
+// reminder is scheduled" would not hold. Otherwise the run is skipped and the
+// standing row is left as it is.
+//
 // GATE_QUIET_OVERDUE_LIST (strict 'true', read at call time). Off = the
 // weekday cron returns before any read.
 
@@ -37,6 +43,7 @@ const db = require('../models/db');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { quietOverdueListLive, alertEpisodesLive } = require('../config/feature-gates');
 const { OPEN_STATUSES: OPEN_CUSTOMER_SCHEDULE_STATUSES } = require('./customer-dunning/constants');
+const { MAX_WHY_CHARS, breaksAlertRules, composeAdminAlert, raiseAdminAlert } = require('./admin-alert-compose');
 
 const DEDUPE_KEY = 'quiet-overdue-invoices';
 const CATEGORY = 'billing';
@@ -182,20 +189,28 @@ function listItems(rows, now = new Date()) {
 
 // The bell for a non-empty list (pure): the composeAdminAlert spec plus the
 // detail text and the ring stamps.
+// One invoice names its customer; a name the rule cannot carry (too long, an
+// initial that reads as a sentence end) falls back to the plain wording.
+function whyFor(items, total) {
+  const oldest = items[0];
+  if (items.length > 1) return `${moneyWhole(total)} is owed with no overdue reminder scheduled on any of them; the oldest is ${oldest.daysLate} days late.`;
+  const named = `${oldest.customerName} owes ${moneyWhole(total)} with no overdue reminder scheduled; it is ${oldest.daysLate} days late.`;
+  if (named.length <= MAX_WHY_CHARS && !breaksAlertRules(named)) return named;
+  return `${moneyWhole(total)} is owed on one invoice with no overdue reminder scheduled; it is ${oldest.daysLate} days late.`;
+}
+
 function composeList(items) {
   const count = items.length;
   const total = items.reduce((sum, item) => sum + item.amountDue, 0);
   const oldest = items[0];
   const plural = count === 1 ? '' : 's';
-  const why = count === 1
-    ? `${oldest.customerName} owes ${moneyWhole(total)} and no reminder is going out; it is ${oldest.daysLate} days late.`
-    : `${moneyWhole(total)} is owed and no reminder is going out on any of them; the oldest is ${oldest.daysLate} days late.`;
+  const why = whyFor(items, total);
   const lines = items.slice(0, DETAIL_MAX_LINES).map((item) => (
     `${item.invoiceNumber} · ${item.customerName} · ${moneyCents(item.amountDue)} · ${item.daysLate} days late · ${reasonWords(item)}`
   ));
   if (count > DETAIL_MAX_LINES) lines.push(`…and ${count - DETAIL_MAX_LINES} more.`);
   const detail = [
-    `${count} open invoice${plural}, ${moneyCents(total)} owed. No reminder goes out on ${count === 1 ? 'it' : 'any of them'}, and nothing was sent by this check.`,
+    `${count} open invoice${plural}, ${moneyCents(total)} owed. No overdue reminder is scheduled on ${count === 1 ? 'it' : 'any of them'}, and nothing was sent by this check.`,
     'Oldest first:',
     ...lines,
   ].join('\n');
@@ -223,10 +238,9 @@ function ringOnNewInvoice(itemKeys) {
   };
 }
 
-async function raiseList(composed) {
-  const { raiseAdminAlert, composeAdminAlert } = require('./admin-alert-compose');
+async function raiseList(composed, dedupeKey) {
   const opts = {
-    dedupeKey: DEDUPE_KEY,
+    dedupeKey,
     // GATE_ADMIN_BELL_POLICY admits a billing row only when the site asks: ring
     // unless the owner silenced the category (notification-bell-policy.js).
     bellDefault: true,
@@ -244,28 +258,37 @@ async function raiseList(composed) {
   });
 }
 
-async function closeList(database) {
+async function closeList(database, dedupeKey) {
   if (!alertEpisodesLive()) return 0;
-  return require('./admin-alert-episodes').closeAdminAlertKeys(database, [DEDUPE_KEY], 'count_zero', {
+  return require('./admin-alert-episodes').closeAdminAlertKeys(database, [dedupeKey], 'count_zero', {
     resolution: 'Every overdue invoice has reminders going out or is settled',
   });
 }
 
+// Both legacy senders retired: the late-payment checker (its own reader) and
+// the balance reminder's account late check (GATE_BALANCE_REMINDER_LEGACY_OFF).
+function legacySendersRetired() {
+  return require('./invoice-followups').latePaymentCheckerRetiredLive()
+    && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true';
+}
+
 /**
- * Weekday cron entry point. Returns { skipped } when the gate is off, otherwise
- * { count, outcome }: raised | refreshed | unchanged | suppressed | closed |
- * clear. A read failure throws (runExclusive records it in job_health) and
- * never closes the row. `loadRows` is the row source (tests stub it).
+ * Weekday cron entry point. Returns { skipped } when the gate is off or a
+ * legacy sender still runs, otherwise { count, outcome }: raised | refreshed |
+ * unchanged | suppressed | closed | clear. A read failure throws
+ * (runExclusive records it in job_health) and never closes the row.
+ * `loadRows` is the row source and `dedupeKey` the row's key (tests set both).
  */
-async function runQuietOverdueList({ now = new Date(), database = db, gateEnabled, loadRows = candidatesQuery } = {}) {
+async function runQuietOverdueList({ now = new Date(), database = db, gateEnabled, loadRows = candidatesQuery, dedupeKey = DEDUPE_KEY } = {}) {
   if (!(gateEnabled ?? quietOverdueListLive())) return { skipped: 'disabled' };
+  if (!legacySendersRetired()) return { skipped: 'legacy_sender_live' };
   const items = listItems(await loadRows(now, database), now);
   if (!items.length) {
-    const closed = Number(await closeList(database)) || 0;
+    const closed = Number(await closeList(database, dedupeKey)) || 0;
     return { count: 0, outcome: closed ? 'closed' : 'clear' };
   }
   const composed = composeList(items);
-  const result = await raiseList(composed);
+  const result = await raiseList(composed, dedupeKey);
   if (!result) throw new Error('quiet overdue invoice bell was not written');
   let outcome = 'unchanged';
   // The owner silenced billing bells: the bell policy wrote nothing.

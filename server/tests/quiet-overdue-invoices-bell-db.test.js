@@ -6,11 +6,15 @@
  * rings; the next weekday's refresh with the same invoices is quiet (read and
  * done stay as a person left them); a new invoice rings again and moves the
  * row to the top; an empty list closes it done; a comeback rings. The rows
- * come from a stubbed loader, so other suites' invoices never join the list.
- * Every row this suite writes is deleted afterwards.
+ * come from a stubbed loader, so other suites' invoices never join the list,
+ * and the row carries this run's own key, so cleanup touches only rows this
+ * suite wrote. It refuses any database but a private QA one or CI's.
  */
 process.env.GATE_ADMIN_BELL_POLICY = 'true'; // read once, when feature-gates loads
 const { randomUUID } = require('crypto');
+
+// The legacy senders are retired in production; the run requires it.
+jest.mock('../services/invoice-followups', () => ({ latePaymentCheckerRetiredLive: () => true }));
 
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
@@ -21,21 +25,26 @@ maybeDescribe('quiet overdue invoices bell (live Postgres)', () => {
   let db;
   let Quiet;
   let NotificationService;
+  const KEY = `quiet-overdue-invoices-test-${randomUUID()}`;
   const MONDAY = new Date('2026-10-26T15:47:00Z');
   const TUESDAY = new Date('2026-10-27T15:47:00Z');
 
-  beforeAll(async () => {
+  beforeAll(() => {
+    const target = new URL(process.env.DATABASE_URL);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
+    const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
+    if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
     db = require('../models/db');
     Quiet = require('../services/quiet-overdue-invoices');
     NotificationService = require('../services/notification-service');
-    await clean();
   });
-  afterAll(async () => { await clean(); });
+  afterAll(async () => {
+    delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
+    if (db) await rows().del();
+  });
 
-  function clean() {
-    return db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", ['quiet-overdue-invoices']).del();
-  }
-  const rows = () => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", ['quiet-overdue-invoices']);
+  const rows = () => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [KEY]);
   const standing = async () => {
     const all = await rows();
     expect(all).toHaveLength(1);
@@ -46,7 +55,7 @@ maybeDescribe('quiet overdue invoices bell (live Postgres)', () => {
     first_name: 'Pat', last_name: 'Synthetic', seq_status: 'completed', next_touch_at: null, paused_until: null,
     stopped_by_admin_id: null, stopped_reason: null, autopay_failures_observed: 0, days_late: daysLate, hold_days: daysLate, ...over,
   });
-  const run = (list, now) => Quiet.runQuietOverdueList({ now, gateEnabled: true, loadRows: async () => list });
+  const run = (list, now) => Quiet.runQuietOverdueList({ now, gateEnabled: true, loadRows: async () => list, dedupeKey: KEY });
 
   test('raise, quiet refresh, a person\'s done, a new invoice rings, closed at zero, a comeback rings', async () => {
     const a = randomUUID();
