@@ -87,15 +87,17 @@ describe('estimate PDF Before you book page', () => {
     expect(extractPdfText(await render(fixture('byb-c3', [], [{ name: 'Rodent Trapping' }])))).not.toContain(PHRASE.contract);
   });
 
-  test('a commercial or unknown-category estimate never prints the no-contract line; unknown prints the neutral agreement line', async () => {
+  test('a commercial or unknown-category estimate never prints the no-contract line; without an authored proposal it prints the neutral agreement line', async () => {
     const NEUTRAL = 'follow the agreement you sign';
-    // Single building, recurring pest, but category COMMERCIAL: the case a building count would miss.
-    // It reads the commercial page (owner 2026-10-24), which has no residential plan claims.
+    // Single building, recurring pest, but category COMMERCIAL and no authored proposal: the case a building count would
+    // miss. It keeps the current page (owner 2026-10-24: only an authored proposal reads the commercial page).
     const commercial = { ...fixture('byb-com1', [pest]), category: 'COMMERCIAL' };
     const commercialText = extractPdfText(await render(commercial));
     expect(commercialText).not.toContain(PHRASE.contract);
     expect(commercialText).not.toContain('first visit includes an inside spray');
-    expect(commercialText).toContain('Before you start service');
+    expect(commercialText).toContain(NEUTRAL);
+    expect(commercialText).toContain('Before you book');
+    expect(commercialText).not.toContain('Before you start service');
     // No category at all: unknown fails closed.
     const unknown = { ...fixture('byb-com2', [pest]), category: undefined };
     const unknownText = extractPdfText(await render(unknown));
@@ -337,14 +339,20 @@ describe('Before you book: commercial page', () => {
     ]);
   });
 
-  test('the COMMERCIAL category alone is commercial; an unknown category without an authored proposal is the current page', () => {
-    const commercial = { ...fixture('byb-cat', [pest]), category: 'COMMERCIAL' };
-    expect(pageOf(commercial).title).toBe('Before you start service');
-    for (const category of [undefined, null, '', 'LAWN']) {
-      const unknown = { ...fixture('byb-unk', [pest]), category };
-      const page = pageOf(unknown);
+  test('only an enabled authored proposal reads the commercial page; auto-priced commercial and unknown categories keep the current page byte-identical', () => {
+    const current = sha(buildBeforeYouBook({ planTerms: false }, { phone: '(941) 297-5749' }));
+    for (const category of ['COMMERCIAL', undefined, null, '', 'LAWN']) {
+      const estimate = { ...fixture('byb-unk', [pest]), category };
+      const page = pageOf(estimate);
       expect(page.title).toBe('Before you book');
-      expect(sha(page)).toBe(sha(buildBeforeYouBook({ planTerms: false }, { phone: '(941) 297-5749' })));
+      expect(sha(page)).toBe(current);
+    }
+    // The commercial category with a proposal that is not enabled (the synthesized, auto-priced shape) is the same page.
+    const autoPriced = { ...authored(['Commercial pest control']), estimate_data: { proposal: { enabled: false, buildings: [{ name: 'Site', lineItems: [{ description: 'Commercial pest control', unitPrice: 100, frequency: 'monthly' }] }] } } };
+    expect(sha(pageOf(autoPriced))).toBe(current);
+    // An enabled authored proposal reads the commercial page whatever the row's category label says.
+    for (const category of ['COMMERCIAL', 'RESIDENTIAL', undefined]) {
+      expect(pageOf({ ...authored(['Commercial pest control']), category }).title).toBe('Before you start service');
     }
   });
 
@@ -356,9 +364,24 @@ describe('Before you book: commercial page', () => {
     expect(keys(['Commercial pest control', 'Termite bait monitoring'])).toEqual(['scheduling', 'pest', 'termite']);
     expect(keys(['Commercial pest control', 'Rodent bait stations'])).toEqual(['scheduling', 'pest', 'rodent']);
     // A service program carries its family directly.
-    expect(keys([], { programs: [{ service: 'termite', label: 'Program', frequencyPerYear: 4, pricePerApplication: 100 }], buildings: [] })).toEqual(['scheduling', 'pest', 'termite']);
-    // Nothing printed that names a family: the optional sections are omitted, not guessed.
+    expect(keys([], { programs: [{ service: 'termite', label: 'Program', frequencyPerYear: 4, pricePerApplication: 100 }], buildings: [] })).toEqual(['scheduling', 'termite']);
+    // Nothing printed that names a family: no lawn, termite or rodent section, and the pest default prints.
     expect(keys([])).toEqual(['scheduling', 'pest']);
+    expect(keys(['Monthly service'])).toEqual(['scheduling', 'pest']);
+  });
+
+  test('the pest section prints when pest work is named or no family is detected; lawn-only, termite-only and rodent-only proposals do not get it', () => {
+    const keys = (descriptions) => pageOf(authored(descriptions)).sections.map((s) => s.key);
+    expect(keys(['Lawn fertilization and weed control'])).toEqual(['scheduling', 'lawn']);
+    expect(keys(['Termite bait monitoring'])).toEqual(['scheduling', 'termite']);
+    expect(keys(['Rodent bait stations'])).toEqual(['scheduling', 'rodent']);
+    expect(keys(['General pest control', 'Lawn care'])).toEqual(['scheduling', 'pest', 'lawn']);
+    expect(keys(['Quarterly roach and ant service'])).toEqual(['scheduling', 'pest']);
+    expect(keys(['Mosquito reduction'])).toEqual(['scheduling']);
+    // A pest program row by family key, and a lawn-only program row.
+    const program = (service) => ({ programs: [{ service, label: 'Program', frequencyPerYear: 4, pricePerApplication: 100 }], buildings: [] });
+    expect(pageOf(authored([], program('pest'))).sections.map((s) => s.key)).toEqual(['scheduling', 'pest']);
+    expect(pageOf(authored([], program('lawn'))).sections.map((s) => s.key)).toEqual(['scheduling', 'lawn']);
   });
 
   test('a commercial page never prints the two-hour window, card saving, or the lanai and pool cage line', () => {

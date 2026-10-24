@@ -11,7 +11,7 @@
 // missed). Only the no-contract line depends on THIS estimate, and it reads the
 // canonical verdict (known residential + proposalCarriesPlanTerms). The 90-day
 // prepay refund line always prints.
-// A known commercial proposal reads the commercial page (COMMERCIAL_SECTIONS below); everything else reads this one.
+// An authored (enabled) commercial proposal reads the commercial page (COMMERCIAL_SECTIONS below); everything else reads this one.
 // Copy is the owner's answer book: no prices, no product brand names, no fixed
 // dry or re-entry times.
 //
@@ -83,9 +83,9 @@ const SECTIONS = [
   },
 ];
 
-// The commercial page (owner 2026-10-24): a KNOWN commercial proposal reads this page instead of the residential
+// The commercial page (owner 2026-10-24): an authored commercial proposal reads this page instead of the residential
 // one. Scheduling and pest are commercial copy; lawn, termite and rodent reuse the residential sections above, but print
-// only when the proposal includes that service (`signals.families`). It has no closing line and never prints the
+// only when the proposal includes that service (`signals.families`); pest prints when named or when no family is detected. It has no closing line and never prints the
 // two-hour window, card saving, or the lanai and pool cage lines.
 const COMMERCIAL_TITLE = 'Before you start service';
 const COMMERCIAL_SECTIONS = [
@@ -102,12 +102,13 @@ const COMMERCIAL_SECTIONS = [
   {
     key: 'pest',
     heading: 'If your service includes pest control',
+    // Pest is the commercial default: named pest work, or no family detected at all.
     lines: [
       { rank: 1, text: 'For inside service, someone needs to let us in, or set up access with us ahead of time.' },
       { rank: 1, text: 'Some activity for up to two weeks after a treatment is normal, as pests are flushed out. If it has not slowed after two weeks, tell us.' },
       { rank: 2, text: 'Please keep people off treated areas until they are dry.' },
       { rank: 2, text: 'Before the first visit, tell us about sensitive areas: food handling, equipment, or staff with sensitivities.' },
-    ],
+    ].map((line) => ({ ...line, when: (s) => s.families?.has('pest') === true || (s.families?.size || 0) === 0 })),
   },
   ...['lawn', 'termite', 'rodent'].map((key) => {
     const section = SECTIONS.find((candidate) => candidate.key === key);
@@ -146,17 +147,22 @@ function isKnownResidential(estimate, proposal) {
   }
 }
 
-// Commercial is KNOWN from an authored (enabled) proposal or the COMMERCIAL category. A missing or other
-// category with no authored proposal is unknown and fails closed to the residential page.
-function isKnownCommercial(estimate, proposal) {
-  if (proposal?.enabled === true) return true;
-  return String(estimate?.category || '').toUpperCase() === 'COMMERCIAL';
+// The commercial page is KNOWN only for an authored (enabled) proposal: it states the 12-month agreement, which an
+// auto-priced COMMERCIAL-category estimate may not carry (owner 2026-10-24). Everything else, including a
+// COMMERCIAL category with no authored proposal, fails closed to the current page.
+function isKnownCommercial(proposal) {
+  return proposal?.enabled === true;
 }
 
 // The service families a commercial proposal includes, read from the rows its document prints: building lines,
 // service programs and corrective work. Whole-word matches only ("rate" is not rodent work, "tenant" is not
-// pest work). A row that names no family adds none, so an undeterminable proposal omits the optional sections.
+// pest work). A row that names no family adds none, so an undeterminable proposal omits the lawn, termite and
+// rodent sections; the pest section is the commercial default and prints when pest work is named or no family
+// is detected at all (mosquito and tree & shrub count as detected, so those proposals do not get it).
 const FAMILY_PATTERNS = [
+  ['pest', /\b(pests?|roach\w*|cockroach\w*|ants?|spiders?|silverfish|earwigs?|fleas?|wasps?|bed\s?bugs?|bedbugs?)\b/],
+  ['mosquito', /\b(mosquito\w*)\b/],
+  ['tree_shrub', /\b(trees?|shrubs?|ornamentals?)\b/],
   ['lawn', /\b(lawn|turf|fertili[sz]\w*|weed control|top\s?dress\w*|dethatch\w*|overseed\w*)\b/],
   ['termite', /\b(termites?|wdo|bora\s?care|termidor|trelona|trench\w*)\b/],
   ['rodent', /\b(rodents?|rats?|mouse|mice)\b/],
@@ -174,7 +180,7 @@ function proposalServiceFamilies(proposal) {
     const text = [row?.service, row?.serviceKey, row?.label, row?.name, row?.description]
       .filter((part) => typeof part === 'string').join(' ').toLowerCase().replace(/[_-]+/g, ' ');
     for (const [family, pattern] of FAMILY_PATTERNS) if (pattern.test(text)) families.add(family);
-    if (row?.service === 'lawn' || row?.service === 'termite' || row?.service === 'rodent') families.add(row.service);
+    if (FAMILY_PATTERNS.some(([family]) => family === row?.service)) families.add(row.service);
   }
   return families;
 }
@@ -204,7 +210,7 @@ function planTermsApply(estimate, proposal) {
 // estimate offers a prepaid year", so it needs no prepay verdict (Codex #6504 r1/r4 kept finding prepay
 // shapes a local verdict missed).
 function estimateSignals(estimate, proposal) {
-  if (isKnownCommercial(estimate, proposal)) {
+  if (isKnownCommercial(proposal)) {
     return { planTerms: false, commercial: true, families: proposalServiceFamilies(proposal) };
   }
   return { planTerms: planTermsApply(estimate, proposal) };
