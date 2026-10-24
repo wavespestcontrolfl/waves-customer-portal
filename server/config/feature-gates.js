@@ -1852,6 +1852,14 @@ const gates = {
   // service classifier (always, by design: it names no service).
   leadCallTextPreference: process.env.GATE_LEAD_CALL_TEXT_PREFERENCE === 'true',
 
+  // Lead Repeat Form — a row that is still a lead (not yet a customer) and
+  // sends the website quote form again keeps its open SMS intake state, so
+  // its next CALL / TEXT or service reply is handled as for a new lead, and
+  // rings one Leads alert (owner 2026-10-24, "A: both parts"). Sends nothing
+  // to the lead. Off unless exactly 'true'; off, a repeat form writes its
+  // note and clears the intake state, as before.
+  leadRepeatForm: process.env.GATE_LEAD_REPEAT_FORM === 'true',
+
   // Text-thread lead reader (owner 2026-10-23): every 5 minutes a model reads
   // the text thread of a number with no customer and no lead, once the number
   // has been quiet for 5 minutes, and makes a lead (name, address, email,
