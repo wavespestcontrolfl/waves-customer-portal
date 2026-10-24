@@ -426,18 +426,66 @@ describe('track-transitions lifecycle side effects', () => {
       expect(transitionJobStatus).not.toHaveBeenCalled();
     });
 
-    test('a late arrival that loses the flip to another signal keeps the board write conditional and texts nothing', async () => {
+    // What another signal leaves when it wins the flip with the guard open (a geofence drive-past).
+    const onPropertyOpenGuard = (svc) => ({
+      ...svc, track_state: 'on_property', status: 'on_site', arrived_at: new Date(), actual_start_time: new Date(), check_in_time: new Date(),
+    });
+
+    test('losing the flip to a signal that left the guard open: the late arrival stamps it, so a later signal cannot text', async () => {
       const svc = lateSvc('job-l5');
+      const winner = onPropertyOpenGuard(svc);
+      const stamp = query(1);
       db
-        .mockReturnValueOnce(query(svc))
-        .mockReturnValueOnce(query(0))
-        .mockReturnValueOnce(query({ ...svc, track_state: 'on_property', status: 'on_site', arrived_at: new Date() }));
+        .mockReturnValueOnce(query(svc)) // load
+        .mockReturnValueOnce(query(0)) // the flip is lost
+        .mockReturnValueOnce(query(winner)) // fresh reload: on property, guard open
+        .mockReturnValueOnce(stamp); // the late arrival's guard stamp
 
       const result = await trackTransitions.markOnProperty('job-l5', lateOpts());
 
       expect(result).toMatchObject({ ok: true, state: 'on_property' });
       expect(setTechJobStatus).toHaveBeenCalledWith(expect.objectContaining({ ifCurrentJobId: 'job-l5' }));
+      // fenced to the visit on property, its day, the validated en-route attempt and the arrival it saw; open guard only
+      expect(stamp.where).toHaveBeenCalledWith({ id: 'job-l5', track_state: 'on_property', scheduled_date: '2026-10-01' });
+      expect(stamp.whereNull).toHaveBeenCalledWith('arrival_sms_sent_at');
+      expect(stamp.whereRaw).toHaveBeenCalledWith(expect.stringContaining('en_route_at'), [enRouteAt]);
+      expect(stamp.whereRaw).toHaveBeenCalledWith(expect.stringContaining('arrived_at'), [winner.arrived_at]);
+      expect(stamp.update).toHaveBeenCalledWith({ arrival_sms_sent_at: expect.any(Date) });
       expect(sendTechArrived).not.toHaveBeenCalled();
+
+      // The next real signal (a manual start) reads the row as the stamp left it and sends nothing.
+      db.mockReturnValueOnce(query({ ...winner, arrival_sms_sent_at: stamp.update.mock.calls[0][0].arrival_sms_sent_at }));
+      const next = await trackTransitions.markOnProperty('job-l5', { actingTechId: 'tech-late' });
+      expect(next).toMatchObject({ ok: true, state: 'on_property', arrivalSms: 'already_handled' });
+      expect(sendTechArrived).not.toHaveBeenCalled();
+    });
+
+    test('finding the visit already on property with the guard open (another signal won before the load): it stamps it too', async () => {
+      const stamp = query(1);
+      db
+        .mockReturnValueOnce(query(onPropertyOpenGuard(lateSvc('job-l6')))) // load: already on property
+        .mockReturnValueOnce(stamp);
+
+      const result = await trackTransitions.markOnProperty('job-l6', lateOpts());
+
+      expect(result).toMatchObject({ ok: true, state: 'on_property' });
+      expect(stamp.update).toHaveBeenCalledWith({ arrival_sms_sent_at: expect.any(Date) });
+      expect(setTechJobStatus).toHaveBeenCalledWith(expect.objectContaining({ ifCurrentJobId: 'job-l6' }));
+      expect(sendTechArrived).not.toHaveBeenCalled();
+    });
+
+    test('a guard another signal already claimed is left as it is', async () => {
+      const svc = lateSvc('job-l7');
+      db
+        .mockReturnValueOnce(query(svc))
+        .mockReturnValueOnce(query(0))
+        .mockReturnValueOnce(query({ ...onPropertyOpenGuard(svc), arrival_sms_sent_at: new Date() }));
+
+      const result = await trackTransitions.markOnProperty('job-l7', lateOpts());
+
+      expect(result).toMatchObject({ ok: true, state: 'on_property' });
+      // load, lost flip, reload: no stamp write
+      expect(db).toHaveBeenCalledTimes(3);
     });
 
     test('without lateArrival an arrival is unchanged: stamped now, guard left to the sender, plain board write', async () => {

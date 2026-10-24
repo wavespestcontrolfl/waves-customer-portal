@@ -1044,6 +1044,26 @@ function lateArrivalGuard(opts, now) {
   return opts.lateArrival ? { arrival_sms_sent_at: now } : {};
 }
 
+// The same promise when another signal put the visit on property first (a
+// geofence drive-past leaves the guard open): stamp the guard, fenced like
+// the covered stamp at the tail (on property, same schedule day and arrival)
+// plus the en-route attempt the late arrival validated, and only while it is
+// open (a send already claimed keeps its claim).
+async function stampLateArrivalHandled(serviceId, row, claimArrivedAt, opts) {
+  if (!opts.lateArrival || row.arrival_sms_sent_at) return;
+  try {
+    const fence = db('scheduled_services')
+      .where({ id: serviceId, track_state: 'on_property', scheduled_date: row.scheduled_date ?? null })
+      .whereNull('arrival_sms_sent_at')
+      .whereRaw(`date_trunc('milliseconds', en_route_at) = date_trunc('milliseconds', ?::timestamptz)`, [new Date(opts.lateArrival.enRouteAt)]);
+    if (claimArrivedAt == null) fence.whereNull('arrived_at');
+    else fence.whereRaw(`date_trunc('milliseconds', arrived_at) = date_trunc('milliseconds', ?::timestamptz)`, [new Date(claimArrivedAt)]);
+    await fence.update({ arrival_sms_sent_at: new Date() });
+  } catch (err) {
+    logger.error(`[track-transitions] late arrival guard stamp failed for ${serviceId}: ${err.message}`);
+  }
+}
+
 // The tech board row of the arriving technician: on_site on this visit. A late
 // arrival must not repoint a technician who has moved on, so its write is ONE
 // conditional update that lands only while this visit is still their job.
@@ -1066,9 +1086,10 @@ async function syncTechOnSite(row, opts, label) {
  * Safe to call manually; just flips state when called from en_route.
  *
  * opts.lateArrival (GPS sample delivered late, see above): the arrival is
- * stamped with the sample's time, the arrival guard is stamped handled in the
- * flip, and the tech board flips only while this visit is still the
- * technician's current job. A row that is not the validated attempt is
+ * stamped with the sample's time, the arrival guard is stamped handled (in
+ * the flip, or by a fenced stamp when another signal put the visit on
+ * property first), and the tech board flips only while this visit is still
+ * the technician's current job. A row that is not the validated attempt is
  * refused (lateArrivalRefusal) before any write.
  */
 async function markOnProperty(serviceId, opts = {}) {
@@ -1210,6 +1231,7 @@ async function markOnProperty(serviceId, opts = {}) {
     emitCustomerTrackRefresh(svc, 'on_property', svc.arrived_at || lifecycleUpdates.arrived_at || new Date());
     arrivalRow = svc;
     claimArrivedAt = svc.arrived_at || lifecycleUpdates.arrived_at || null;
+    await stampLateArrivalHandled(serviceId, svc, claimArrivedAt, opts);
     result = { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   } else {
     const now = new Date();
@@ -1261,6 +1283,7 @@ async function markOnProperty(serviceId, opts = {}) {
       await syncTechOnSite(fresh, opts, 'race sync');
       arrivalRow = fresh;
       claimArrivedAt = fresh.arrived_at || null;
+      await stampLateArrivalHandled(serviceId, fresh, claimArrivedAt, opts);
       result = { ok: true, state: 'on_property', arrivedAt: fresh.arrived_at || null };
     } else {
       try {
