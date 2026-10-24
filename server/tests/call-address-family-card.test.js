@@ -328,6 +328,20 @@ const SKIP = !process.env.DATABASE_URL;
       expect((await cardsFor(callLogId))[0].status).toBe('open');
     });
 
+    test('Attach is atomic: a relink that fails after the slot write rolls the slot back, and the card stays open', async () => {
+      const { mom, callLogId, card } = await filed();
+      const relink = require('../services/call-customer-relink');
+      const spy = jest.spyOn(relink, 'relinkCallCustomerTx').mockRejectedValueOnce(new Error('relink failed'));
+      const out = await post(`${card.id}/attach-contact`, { customer_id: mom, expected_updated_at: card.updated_at });
+      spy.mockRestore();
+      expect(out.status).toBe(500);
+      const row = await trx('customers').where({ id: mom }).first();
+      expect(row.service_contact_name).toBeNull();
+      expect(row.service_contact_phone).toBeNull();
+      expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+      expect((await cardsFor(callLogId))[0].status).toBe('open');
+    });
+
     test('Attach refuses a stale card, an account the card does not list, a non-admin, and a gate that is off', async () => {
       const { mom, card } = await filed();
       const other = await customer({ address_line1: '9 Somewhere Ct' });

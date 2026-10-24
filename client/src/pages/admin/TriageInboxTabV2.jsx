@@ -1109,7 +1109,15 @@ export default function TriageInboxTabV2({ isAdmin }) {
       method: "POST",
       body: JSON.stringify({ ...body, expected_updated_at: item.updated_at }),
     })
-      .then(() => { setActioning(null); load(mode, status); })
+      .then((res) => {
+        setActioning(null);
+        load(mode, status);
+        // New customer closes the card first, then reprocesses the call: say so when the reprocess did not run, or
+        // nobody knows the customer was not created.
+        if (res?.reprocess && res.reprocess.started === false) {
+          setError("The card is closed, but the call was not reprocessed, so no customer was created. Reprocess the call from its recording to create the customer.");
+        }
+      })
       .catch((err) => {
         setActioning(null);
         if (err?.status === 409 || err?.status === 400) {

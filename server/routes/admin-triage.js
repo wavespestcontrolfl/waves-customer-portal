@@ -1938,9 +1938,8 @@ async function loadFamilyCardForAction(req, res) {
 // pipeline's one slot writer (persistCallSecondaryContact, operatorAttach): never overwrites a slot (all three full = 409,
 // nothing changes), keeps the account's consent stamp and holds the new number out of every text until that person's own
 // YES (recipient-optin), and never sends or starts an opt-in. Admin only.
-// ORDER: the slot write commits first (it is idempotent: a retry finds the number on record and goes on to the relink), then
-// ONE transaction relinks the call and resolves the card. LOCK ORDER as save-contact-note: customers row, then the call
-// advisory lock, then the call_log row.
+// ONE transaction: the slot write, the relink and the version-checked card transition commit together or not at all.
+// LOCK ORDER as save-contact-note: customers row, then the call advisory lock, then the call_log row.
 router.post('/:id/attach-contact', async (req, res) => {
   try {
     const card = await loadFamilyCardForAction(req, res);
@@ -1959,24 +1958,13 @@ router.post('/:id/attach-contact', async (req, res) => {
     if (call.customer_id && String(call.customer_id) !== customerId) {
       return res.status(409).json({ error: 'This call is already linked to another customer — unlink it first' });
     }
-    const live = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
-    if (!live) return res.status(409).json({ error: 'That customer is no longer live — reload the card' });
-
-    const status = await require('../services/call-recording-processor').persistCallSecondaryContact(customerId, {
-      first_name: payload.caller_first_name, last_name: payload.caller_last_name || null, phone: payload.contact_phone, role,
-    }, { operatorAttach: true, keepConsentStamp: true });
     const REFUSALS = {
       skipped_slots_full: 'All three contact slots on this account are full. Free one on the customer, then try again. Nothing was changed.',
       skipped_phone_belongs_to_other_customer: 'That number belongs to another customer. Nothing was changed.',
       skipped_slot_race: 'The account changed while saving. Reload the card and try again.',
       skipped_no_customer: 'That customer was not found.',
     };
-    if (REFUSALS[status]) return res.status(409).json({ error: REFUSALS[status], code: status });
-    if (status !== 'written' && !String(status).startsWith('skipped_phone_on_record')) {
-      return res.status(400).json({ error: 'The caller could not be filed as a contact', code: status });
-    }
-
-    let moved;
+    let slot;
     let result;
     await db.transaction(async (trx) => {
       const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
@@ -1990,9 +1978,19 @@ router.post('/:id/attach-contact', async (req, res) => {
             throw Object.assign(new Error('The call changed while saving — reload the card and try again'), { conflict: true });
           }
         },
+        // Under the locks and after the version check: ONE transaction holds the slot write, the relink and the
+        // card transition, so a loser of a race (another admin, a refresh, New customer) files nothing, and a
+        // refusal below rolls the whole attach back.
         afterTransition: async (t) => {
+          slot = await require('../services/call-recording-processor').persistCallSecondaryContact(customerId, {
+            first_name: payload.caller_first_name, last_name: payload.caller_last_name || null, phone: payload.contact_phone, role,
+          }, { operatorAttach: true, keepConsentStamp: true, conn: t });
+          if (REFUSALS[slot]) throw Object.assign(new Error(REFUSALS[slot]), { refusal: slot });
+          if (slot !== 'written' && !String(slot).startsWith('skipped_phone_on_record')) {
+            throw Object.assign(new Error('The caller could not be filed as a contact'), { refusal: slot, badRequest: true });
+          }
           const override = { customer_id: customerId, previous_customer_id: call.customer_id || null, by: req.technicianId || null, at: new Date().toISOString() };
-          moved = await require('../services/call-customer-relink').relinkCallCustomerTx(t, call, customerId, override);
+          const moved = await require('../services/call-customer-relink').relinkCallCustomerTx(t, call, customerId, override);
           if (!moved || moved.notFound) throw Object.assign(new Error('The call could not be linked — reload the card and try again'), { conflict: true });
         },
       });
@@ -2000,11 +1998,12 @@ router.post('/:id/attach-contact', async (req, res) => {
     if (result.outcome === 'ok') {
       const after = await require('../services/call-customer-relink').afterCallRelink(call, customerId);
       // Ids only: the contact's name and number stay out of logs.
-      logger.info(`[admin-triage] attach-contact card=${item.id} customer=${customerId} call=${call.id} slot=${status}`);
-      return res.json({ ok: true, id: item.id, status: 'resolved', slot: status === 'written' ? 'filed' : 'already_on_account', warnings: after.warnings });
+      logger.info(`[admin-triage] attach-contact card=${item.id} customer=${customerId} call=${call.id} slot=${slot}`);
+      return res.json({ ok: true, id: item.id, status: 'resolved', slot: slot === 'written' ? 'filed' : 'already_on_account', warnings: after.warnings });
     }
     return sendTransitionResult(res, result, item.id, 'resolved');
   } catch (err) {
+    if (err.refusal) return res.status(err.badRequest ? 400 : 409).json({ error: err.message, code: err.refusal });
     if (err.conflict) return res.status(409).json({ error: err.message });
     logger.error(`[admin-triage] attach-contact failed: ${err.code || err.name || 'error'}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to attach the contact' });

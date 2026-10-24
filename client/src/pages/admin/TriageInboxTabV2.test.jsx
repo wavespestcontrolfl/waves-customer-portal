@@ -688,6 +688,33 @@ describe('FamilyEvidence — stated address on an account (Attach as contact / N
   });
 });
 
+describe('family card actions on the page', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const familyCard = { ...ordinary, id: 'fam', first_name: 'Family', last_name: 'Card', reason_code: 'family_account_candidates',
+    feedback_verdict: null, can_attach_contact: true, can_new_customer: true,
+    payload: { match_basis: 'stated_address_on_account', caller_name: 'Dana Bronner', caller_role: 'family_member',
+      holder_candidates: [{ id: A, name: 'Angelina Testerson', city: 'Parrish', address_matches: true }], customer_ids: [A] } };
+  const listWith = (actionResult) => adminFetch.mockImplementation(async (url) => (
+    url.startsWith('/admin/triage?') ? { items: [familyCard], counts: { open: 1, resolved: 0, dismissed: 0 } } : actionResult));
+
+  it('Attach posts the chosen account, the role and the card version', async () => {
+    listWith({ ok: true });
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Family Card');
+    fireEvent.click(screen.getByRole('button', { name: 'Attach as contact' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fam/attach-contact', {
+      method: 'POST', body: JSON.stringify({ customer_id: A, role: 'family_member', expected_updated_at: familyCard.updated_at }),
+    }));
+  });
+  it('says so when New customer closed the card but the call was not reprocessed', async () => {
+    listWith({ ok: true, reprocess: { started: false, reason: 'already_processing' } });
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Family Card');
+    fireEvent.click(screen.getByRole('button', { name: 'New customer' }));
+    expect(await screen.findByText(/call was not reprocessed, so no customer was created/)).toBeInTheDocument();
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{

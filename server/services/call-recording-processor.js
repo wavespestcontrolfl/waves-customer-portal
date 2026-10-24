@@ -3983,7 +3983,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp, operatorAttach = false } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp, operatorAttach = false, conn = db } = {}) {
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
@@ -4001,7 +4001,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   if (onSiteOnly && contact.email) contact = { ...contact, email: null };
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
-  const customer = await db('customers').where({ id: customerId }).first();
+  const customer = await conn('customers').where({ id: customerId }).first();
   if (!customer) return 'skipped_no_customer';
 
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -4024,7 +4024,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       || (contact.email && lowerEmail(customer[s.email]) && lowerEmail(customer[s.email]) === lowerEmail(contact.email))
     ));
     if (!matched || String(customer[matched.roleCol] || '').trim()) return false;
-    const wrote = await db('customers')
+    const wrote = await conn('customers')
       .where({ id: customerId })
       .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
       // Re-assert the slot still holds the SAME person as the snapshot the
@@ -4048,6 +4048,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
         after: { ...customer, [matched.roleCol]: roleToRecord.slice(0, 30) },
         source: 'call',
         occurredAt: roleWriteAt,
+        ...(conn !== db ? { conn } : {}),
       });
     }
     return !!wrote;
@@ -4062,7 +4063,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // service_contact_authorized trust. The call site escalates this to its own
   // review flag so the office adjudicates the collision.
   if (contact.phone) {
-    const otherCustomer = await db('customers')
+    const otherCustomer = await conn('customers')
       .whereNull('deleted_at')
       .whereNot('id', customerId)
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10(contact.phone)])
@@ -4120,7 +4121,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   if (contact.phone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
   if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
   if (Object.keys(prefsToSet).length) {
-    await db('notification_prefs')
+    await conn('notification_prefs')
       .insert({ customer_id: customerId, ...prefsToSet })
       .onConflict('customer_id')
       .merge(prefsToSet);
@@ -4129,7 +4130,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // emptiness in the UPDATE's WHERE — a concurrent admin edit or reprocessed
   // call filling it between read and write must make this a 0-row no-op, never
   // an overwrite.
-  let write = db('customers').where({ id: customerId });
+  let write = conn('customers').where({ id: customerId });
   for (const col of [emptySlot.name, emptySlot.phone, emptySlot.email]) {
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
@@ -4167,7 +4168,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // contacts often have no opt-in row): if a later edit clears the stamp,
     // the held person's YES can still restore it.
     ...((contact.phone && holdPhone) ? {
-      service_preferences: db.raw(
+      service_preferences: conn.raw(
         "jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb)",
         [last10(contact.phone), JSON.stringify(customer.service_contacts_consent_at
           ? SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean)
@@ -4181,7 +4182,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       // The phones the cleared stamp DID cover (pre-double-opt-in slots have
       // no recipient_optin row): kept so the new recipient's YES can restore
       // the account stamp instead of being blocked by them forever.
-      service_preferences: db.raw(
+      service_preferences: conn.raw(
         "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{consent_covered_phone_keys}', ?::jsonb)",
         [JSON.stringify(SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean))],
       ),
@@ -4203,6 +4204,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     after: { ...customer, ...slotWrite },
     source: 'call',
     occurredAt: slotWriteAt,
+    ...(conn !== db ? { conn } : {}),
   });
   return 'written';
 }
