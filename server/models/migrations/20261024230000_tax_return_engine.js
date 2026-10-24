@@ -5,7 +5,9 @@
  *
  * tax_years: one row per tax year. The owner's inputs for the federal return
  * (filing status, income outside the business, estimates paid) and the
- * carryovers that come IN from the prior year. A year marked filed freezes the
+ * carryovers that come IN from the prior year. A carry-in is NULL until the
+ * owner enters a figure: NULL means "take the prior year's filed carry-out, or
+ * 0 when there is none"; any number, 0 included, is the owner's own and wins. A year marked filed freezes the
  * computed return (lines and carryovers OUT) in filed_snapshot; a draft year
  * has neither a filing date nor a snapshot (CHECK below).
  *
@@ -35,10 +37,10 @@ exports.up = async function up(knex) {
       t.date('filed_on');
       t.decimal('other_income', 12, 2).notNullable().defaultTo(0);
       t.decimal('estimates_paid', 12, 2).notNullable().defaultTo(0);
-      t.decimal('nol_in', 12, 2).notNullable().defaultTo(0);
-      t.decimal('qbi_loss_in', 12, 2).notNullable().defaultTo(0);
-      t.decimal('sec179_carry_in', 12, 2).notNullable().defaultTo(0);
-      t.decimal('home_office_carry_in', 12, 2).notNullable().defaultTo(0);
+      t.decimal('nol_in', 12, 2); // NULL = take the prior year's filed carry-out
+      t.decimal('qbi_loss_in', 12, 2); // NULL = take the prior year's filed carry-out
+      t.decimal('sec179_carry_in', 12, 2); // NULL = take the prior year's filed carry-out
+      t.decimal('home_office_carry_in', 12, 2); // NULL = take the prior year's filed carry-out
       t.jsonb('filed_snapshot');
       t.text('notes');
       t.timestamps(true, true);
@@ -49,8 +51,10 @@ exports.up = async function up(knex) {
       (status = 'filed' AND filed_on IS NOT NULL AND filed_snapshot IS NOT NULL)
       OR (status = 'draft' AND filed_on IS NULL AND filed_snapshot IS NULL))`);
     await knex.raw(`ALTER TABLE tax_years ADD CONSTRAINT tax_years_amounts_check CHECK (
-      other_income >= 0 AND estimates_paid >= 0 AND nol_in >= 0 AND qbi_loss_in >= 0
-      AND sec179_carry_in >= 0 AND home_office_carry_in >= 0)`);
+      other_income >= 0 AND estimates_paid >= 0
+      AND (nol_in IS NULL OR nol_in >= 0) AND (qbi_loss_in IS NULL OR qbi_loss_in >= 0)
+      AND (sec179_carry_in IS NULL OR sec179_carry_in >= 0)
+      AND (home_office_carry_in IS NULL OR home_office_carry_in >= 0))`);
   }
 
   if (await knex.schema.hasTable('tax_home_office')) {

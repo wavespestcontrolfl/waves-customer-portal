@@ -7,8 +7,9 @@
  *  1. A PUT takes only the editable fields, each a strict number (no "50junk",
  *     no blank, no negative) or a known filing status; an unknown field is a 400.
  *  2. A filed year cannot be edited: 409, before and at the write.
- *  3. A carry-in left at 0 takes the prior year's FILED snapshot; a number the
- *     owner typed wins; a prior year that is only a draft gives nothing.
+ *  3. A NULL carry-in takes the prior year's FILED snapshot (or 0); any number
+ *     the owner entered, 0 included, wins; a PUT of null clears it back to the
+ *     default; a prior year that is only a draft gives nothing.
  *  4. filed_on is a real day from the start of the year to today.
  *  5. Marking filed is draft to filed only (409 otherwise); unmarking a year
  *     that was never filed is a 409, a year with no record a 404.
@@ -44,15 +45,28 @@ beforeEach(() => {
 });
 
 describe('upsertYear validation', () => {
-  beforeEach(() => { state.upsertReturns = [{ tax_year: year, filing_status: 'single', status: 'draft', other_income: '10.50', estimates_paid: '0', nol_in: '0', qbi_loss_in: '0', sec179_carry_in: '0', home_office_carry_in: '0', filed_on: null }]; });
+  beforeEach(() => { state.upsertReturns = [{ tax_year: year, filing_status: 'single', status: 'draft', other_income: '10.50', estimates_paid: '0', nol_in: null, qbi_loss_in: '0.00', sec179_carry_in: null, home_office_carry_in: null, filed_on: null }]; });
   test('saves strict numbers rounded to cents and a known filing status', async () => {
     const row = await ty.upsertYear(String(year), { filing_status: 'mfj', other_income: '10.505', estimates_paid: 200, notes: '  hi  ' });
     expect(state.upserted[0]).toMatchObject({ filing_status: 'mfj', other_income: 10.51, estimates_paid: 200, notes: 'hi' });
     expect(row.other_income).toBe(10.5);
+    expect(row).toMatchObject({ nol_in: null, qbi_loss_in: 0, sec179_carry_in: null }); // NULL stays NULL, a stored 0 stays 0
   });
   test.each([['50junk'], [''], [null], [-1], [true], [[]], ['1e12'], [NaN]])('refuses an amount of %p', async (v) => {
     await expect(ty.upsertYear(year, { other_income: v })).rejects.toEqual(httpErr(400));
-    await expect(ty.upsertYear(year, { nol_in: v })).rejects.toEqual(httpErr(400));
+    await expect(ty.upsertYear(year, { estimates_paid: v })).rejects.toEqual(httpErr(400));
+  });
+  test.each([['50junk'], [''], [-1], [true], [[]], ['1e12'], [NaN]])('refuses a carry-in of %p (only a number or null)', async (v) => {
+    for (const k of ['nol_in', 'qbi_loss_in', 'sec179_carry_in', 'home_office_carry_in']) {
+      await expect(ty.upsertYear(year, { [k]: v })).rejects.toEqual(httpErr(400));
+    }
+    expect(state.upserted).toEqual([]);
+  });
+  test('a carry-in of 0 is saved as 0 and null clears it back to the default', async () => {
+    await ty.upsertYear(year, { nol_in: 0, sec179_carry_in: '0' });
+    expect(state.upserted[0]).toEqual(expect.objectContaining({ nol_in: 0, sec179_carry_in: 0 }));
+    await ty.upsertYear(year, { nol_in: null, qbi_loss_in: null, home_office_carry_in: 12.5 });
+    expect(state.upserted[1]).toEqual(expect.objectContaining({ nol_in: null, qbi_loss_in: null, home_office_carry_in: 12.5 }));
   });
   test('refuses an unknown filing status, an unknown field and an empty body', async () => {
     await expect(ty.upsertYear(year, { filing_status: 'mfs' })).rejects.toEqual(httpErr(400));
@@ -78,23 +92,28 @@ describe('upsertYear validation', () => {
 
 describe('resolveCarryIn', () => {
   const filedPrior = (carry) => ({ exists: true, row: { tax_year: 2024, status: 'filed', filed_snapshot: { result: { carry_out: carry } } } });
-  const row = { nol_in: 0, qbi_loss_in: 0, sec179_carry_in: 0, home_office_carry_in: 0 };
-  test('a zero takes the prior year filed carry-out, with where it came from', () => {
-    const c = ty.resolveCarryIn(row, filedPrior({ nol: 26000, qbi_loss: 0, sec179: 700, home_office: 12.5 }));
-    expect(c.nol).toEqual({ value: 26000, source: 'prior_year', from_year: 2024 });
-    expect(c.qbi_loss).toEqual({ value: 0, source: 'prior_year', from_year: 2024 });
+  const nulls = { nol_in: null, qbi_loss_in: null, sec179_carry_in: null, home_office_carry_in: null };
+  test('NULL takes the prior year filed carry-out, with where it came from', () => {
+    const c = ty.resolveCarryIn(nulls, filedPrior({ nol: 26000, qbi_loss: 0, sec179: 700, home_office: 12.5 }));
+    expect(c.nol).toMatchObject({ value: 26000, source: 'prior_year', from_year: 2024, default_value: 26000 });
+    expect(c.qbi_loss).toMatchObject({ value: 0, source: 'prior_year', from_year: 2024 });
     expect(c.sec179.value).toBe(700);
     expect(c.home_office.value).toBe(12.5);
   });
-  test('a number typed on the year wins', () => {
-    const c = ty.resolveCarryIn({ ...row, nol_in: 5 }, filedPrior({ nol: 26000 }));
-    expect(c.nol).toEqual({ value: 5, source: 'entered', from_year: null });
+  test('a number entered on the year wins, and the default stays visible', () => {
+    const c = ty.resolveCarryIn({ ...nulls, nol_in: 5 }, filedPrior({ nol: 26000 }));
+    expect(c.nol).toMatchObject({ value: 5, source: 'entered', from_year: null, default_value: 26000, default_source: 'prior_year', default_from_year: 2024 });
     expect(c.sec179.source).toBe('prior_year');
+  });
+  test('an explicit 0 overrides a non-zero prior snapshot', () => {
+    const c = ty.resolveCarryIn({ ...nulls, nol_in: 0 }, filedPrior({ nol: 26000 }));
+    expect(c.nol).toMatchObject({ value: 0, source: 'entered', default_value: 26000 });
   });
   test('a prior year that is only a draft, or missing, gives none', () => {
     const draft = { exists: true, row: { tax_year: 2024, status: 'draft', filed_snapshot: null } };
-    expect(ty.resolveCarryIn(row, draft).nol).toEqual({ value: 0, source: 'none', from_year: null });
-    expect(ty.resolveCarryIn(row, null).nol.source).toBe('none');
+    expect(ty.resolveCarryIn(nulls, draft).nol).toMatchObject({ value: 0, source: 'none', from_year: null });
+    expect(ty.resolveCarryIn(nulls, null).nol.source).toBe('none');
+    expect(ty.resolveCarryIn({ ...nulls, nol_in: 0 }, null).nol).toMatchObject({ value: 0, source: 'entered', default_source: 'none' });
   });
 });
 
@@ -102,7 +121,7 @@ describe('getYearRow', () => {
   test('a year with no record reads as the defaults', async () => {
     const r = await ty.getYearRow(year);
     expect(r.exists).toBe(false);
-    expect(r.row).toMatchObject({ tax_year: year, filing_status: 'single', status: 'draft', nol_in: 0, filed_snapshot: null });
+    expect(r.row).toMatchObject({ tax_year: year, filing_status: 'single', status: 'draft', nol_in: null, qbi_loss_in: null, filed_snapshot: null });
   });
 });
 

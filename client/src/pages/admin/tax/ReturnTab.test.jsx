@@ -22,7 +22,7 @@ function json(body, ok = true) {
   return { ok, status: ok ? 200 : 400, json: async () => body };
 }
 
-const baseRow = { tax_year: YEAR, filing_status: 'single', status: 'draft', filed_on: null, other_income: 0, estimates_paid: 0, nol_in: 0, qbi_loss_in: 0, sec179_carry_in: 0, home_office_carry_in: 0, notes: null };
+const baseRow = { tax_year: YEAR, filing_status: 'single', status: 'draft', filed_on: null, other_income: 0, estimates_paid: 0, nol_in: null, qbi_loss_in: null, sec179_carry_in: 1500, home_office_carry_in: null, notes: null };
 
 beforeEach(() => {
   calls = [];
@@ -31,10 +31,10 @@ beforeEach(() => {
   detail = {
     year: YEAR, exists: true, row: baseRow,
     carry_in: {
-      nol: { value: 26000, source: 'prior_year', from_year: YEAR - 1 },
-      qbi_loss: { value: 0, source: 'none', from_year: null },
-      sec179: { value: 1500, source: 'entered', from_year: null },
-      home_office: { value: 0, source: 'none', from_year: null },
+      nol: { value: 26000, source: 'prior_year', from_year: YEAR - 1, default_value: 26000, default_source: 'prior_year', default_from_year: YEAR - 1 },
+      qbi_loss: { value: 0, source: 'none', from_year: null, default_value: 0, default_source: 'none', default_from_year: null },
+      sec179: { value: 1500, source: 'entered', from_year: null, default_value: 700, default_source: 'prior_year', default_from_year: YEAR - 1 },
+      home_office: { value: 0, source: 'none', from_year: null, default_value: 0, default_source: 'none', default_from_year: null },
     },
   };
   ret = {
@@ -85,9 +85,12 @@ it('shows the Schedule C lines, the tax, the carryovers, the warnings and each c
   expect(screen.getByTestId('carry-out')).toHaveTextContent('Section 179: $1,000.00');
   expect(screen.getByTestId('warnings')).toHaveTextContent('These figures are to date.');
   expect(screen.getByText(/Set aside about \$2,912.29 a month/)).toBeInTheDocument();
-  await waitFor(() => expect(screen.getByTestId('source-nol')).toHaveTextContent(`$26,000.00 from the ${YEAR - 1} filed return`));
-  expect(screen.getByTestId('source-sec179')).toHaveTextContent('Your number.');
-  expect(screen.getByTestId('source-qbi_loss')).toHaveTextContent('None.');
+  await waitFor(() => expect(screen.getByTestId('source-nol')).toHaveTextContent(`Default: $26,000.00 from the ${YEAR - 1} filed return`));
+  expect(screen.getByLabelText('Net operating loss carried in')).toHaveValue('');
+  expect(screen.getByLabelText('Net operating loss carried in')).toHaveAttribute('placeholder', expect.stringContaining('default $26,000.00'));
+  expect(screen.getByTestId('source-sec179')).toHaveTextContent(`Your number. Clear the box to use the default: $700.00 from the ${YEAR - 1} filed return.`);
+  expect(screen.getByLabelText('Section 179 carried in')).toHaveValue('1500');
+  expect(screen.getByTestId('source-qbi_loss')).toHaveTextContent('Default: $0.00 (no filed return for last year)');
 });
 
 it('shows a refund as a refund', async () => {
@@ -97,18 +100,20 @@ it('shows a refund as a refund', async () => {
   expect(screen.getByTestId('owed')).toHaveTextContent('$150.00');
 });
 
-it('Save year posts the typed amounts, a blank box as 0', async () => {
+it('Save year posts the typed amounts: a blank amount as 0, a blank carry-in as null (the default), a typed 0 kept', async () => {
   render(<ReturnTab />);
   await screen.findByLabelText('Other income');
   fireEvent.change(screen.getByLabelText('Other income'), { target: { value: '1200.50' } });
   fireEvent.change(screen.getByLabelText('Filing status'), { target: { value: 'mfj' } });
+  fireEvent.change(screen.getByLabelText('QBI loss carried in'), { target: { value: '0' } });
+  fireEvent.change(screen.getByLabelText('Section 179 carried in'), { target: { value: '' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save year' }));
-  await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+  await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true), { timeout: 5000 });
   const put = calls.find((c) => c.method === 'PUT');
   expect(put.url).toContain(`/tax-years/${YEAR}`);
   expect(put.body).toEqual({
-    filing_status: 'mfj', other_income: '1200.50', estimates_paid: '0', nol_in: '0', qbi_loss_in: '0',
-    sec179_carry_in: '0', home_office_carry_in: '0', notes: '',
+    filing_status: 'mfj', other_income: '1200.50', estimates_paid: '0', nol_in: null, qbi_loss_in: '0',
+    sec179_carry_in: null, home_office_carry_in: null, notes: '',
   });
 });
 

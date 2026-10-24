@@ -87,7 +87,7 @@ const httpError = (status, message) => Object.assign(new Error(message), { statu
 
 const DETAIL = (extra = {}) => ({
   year: 2025, exists: true,
-  row: { tax_year: 2025, filing_status: 'single', status: 'draft', filed_on: null, other_income: 0, estimates_paid: 0, nol_in: 0, qbi_loss_in: 0, sec179_carry_in: 0, home_office_carry_in: 0, notes: null },
+  row: { tax_year: 2025, filing_status: 'single', status: 'draft', filed_on: null, other_income: 0, estimates_paid: 0, nol_in: null, qbi_loss_in: 0, sec179_carry_in: null, home_office_carry_in: null, notes: null },
   carry_in: { nol: { value: 0, source: 'none', from_year: null } },
   ...extra,
 });
@@ -146,15 +146,15 @@ describe('gate on', () => {
   test('save hands the body to the service and answers the year detail', async () => {
     ty.upsertYear.mockResolvedValue({});
     ty.getYearDetail.mockResolvedValue(DETAIL());
-    const res = await send('PUT', `${P}/tax-years/2025`, { other_income: '1200', filing_status: 'mfj' });
+    const res = await send('PUT', `${P}/tax-years/2025`, { other_income: '1200', filing_status: 'mfj', nol_in: null, qbi_loss_in: 0 });
     expect(res.status).toBe(200);
-    expect(ty.upsertYear).toHaveBeenCalledWith('2025', { other_income: '1200', filing_status: 'mfj' });
+    expect(ty.upsertYear).toHaveBeenCalledWith('2025', { other_income: '1200', filing_status: 'mfj', nol_in: null, qbi_loss_in: 0 });
     expect((await res.json()).row.tax_year).toBe(2025);
   });
 
   test('save refuses a bad number, an unknown field and a bad status with a 400 before any write', async () => {
     ty.upsertYear.mockImplementation(realTaxYears.upsertYear);
-    for (const body of [{ other_income: '50junk' }, { nol_in: -1 }, { status: 'filed' }, { filing_status: 'mfs' }, {}]) {
+    for (const body of [{ other_income: '50junk' }, { nol_in: -1 }, { qbi_loss_in: '' }, { other_income: null }, { status: 'filed' }, { filing_status: 'mfs' }, {}]) {
       const res = await send('PUT', `${P}/tax-years/2025`, body);
       expect([JSON.stringify(body), res.status]).toEqual([JSON.stringify(body), 400]);
     }

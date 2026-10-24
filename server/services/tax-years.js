@@ -5,9 +5,10 @@
  * carryovers that come IN from the prior year, and, once the year is marked
  * filed, a frozen snapshot of the computed return.
  *
- * A carry-in left at 0 on a year takes the prior year's FILED snapshot
- * carry-out (resolveCarryIn). A number the owner typed always wins. A year
- * that is filed cannot be edited until it is unmarked.
+ * A carry-in that is NULL on a year takes the prior year's FILED snapshot
+ * carry-out, or 0 when there is none (resolveCarryIn). Any number the owner
+ * entered, 0 included, wins; a PUT of null clears it back to the default. A
+ * year that is filed cannot be edited until it is unmarked.
  */
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
@@ -18,18 +19,20 @@ const { strictNumber, parseYear, httpError } = require('./tax-shared-bills');
 const NOTES_MAX = 500;
 const AMOUNT_MAX = 1000000000;
 const CARRY_FIELDS = { nol: 'nol_in', qbi_loss: 'qbi_loss_in', sec179: 'sec179_carry_in', home_office: 'home_office_carry_in' };
-const MONEY_FIELDS = ['other_income', 'estimates_paid', ...Object.values(CARRY_FIELDS)];
-const EDITABLE = ['filing_status', 'notes', ...MONEY_FIELDS];
+const CARRY_COLUMNS = Object.values(CARRY_FIELDS); // nullable: NULL = the default
+const MONEY_FIELDS = ['other_income', 'estimates_paid'];
+const EDITABLE = ['filing_status', 'notes', ...MONEY_FIELDS, ...CARRY_COLUMNS];
 
 const DEFAULTS = {
   filing_status: 'single', status: 'draft', filed_on: null, other_income: 0, estimates_paid: 0,
-  nol_in: 0, qbi_loss_in: 0, sec179_carry_in: 0, home_office_carry_in: 0, filed_snapshot: null, notes: null,
+  nol_in: null, qbi_loss_in: null, sec179_carry_in: null, home_office_carry_in: null, filed_snapshot: null, notes: null,
 };
 
 function present(row) {
   if (!row) return row;
   const out = { ...row, filed_on: row.filed_on ? dateCellStr(row.filed_on) : null };
   for (const k of MONEY_FIELDS) out[k] = Number(row[k]) || 0;
+  for (const k of CARRY_COLUMNS) out[k] = row[k] == null ? null : Number(row[k]);
   return out;
 }
 
@@ -64,16 +67,19 @@ async function getYearRow(year) {
 }
 
 // Each carry-in with its value and where it came from: 'entered' (a number on
-// this year), 'prior_year' (the prior year's filed snapshot) or 'none'.
+// this year, 0 included), 'prior_year' (the prior year's filed snapshot) or
+// 'none'. `default_value` is what an empty box would use, so the screen can
+// show it even while the owner's own number is in force.
 function resolveCarryIn(row, prior) {
   const out = {};
   const priorFiled = prior && prior.row.status === 'filed' && prior.row.filed_snapshot && prior.row.filed_snapshot.result;
   for (const [key, col] of Object.entries(CARRY_FIELDS)) {
-    const own = Number(row[col]) || 0;
-    if (own > 0) out[key] = { value: own, source: 'entered', from_year: null };
-    else if (priorFiled) {
-      out[key] = { value: Number(prior.row.filed_snapshot.result.carry_out?.[key]) || 0, source: 'prior_year', from_year: prior.row.tax_year };
-    } else out[key] = { value: 0, source: 'none', from_year: null };
+    const fromPrior = priorFiled ? Number(prior.row.filed_snapshot.result.carry_out?.[key]) || 0 : 0;
+    const fallback = priorFiled
+      ? { value: fromPrior, source: 'prior_year', from_year: prior.row.tax_year }
+      : { value: 0, source: 'none', from_year: null };
+    const base = { default_value: fallback.value, default_source: fallback.source, default_from_year: fallback.from_year };
+    out[key] = row[col] == null ? { ...fallback, ...base } : { value: Number(row[col]), source: 'entered', from_year: null, ...base };
   }
   return out;
 }
@@ -95,6 +101,8 @@ async function upsertYear(year, input = {}) {
     patch.filing_status = input.filing_status;
   }
   for (const k of MONEY_FIELDS) if (k in input) patch[k] = parseMoney(input[k], k);
+  // null clears a carry-in back to the default; a number (0 too) is the owner's own
+  for (const k of CARRY_COLUMNS) if (k in input) patch[k] = input[k] === null ? null : parseMoney(input[k], k);
   if ('notes' in input) {
     if (input.notes != null && input.notes !== '' && (typeof input.notes !== 'string' || input.notes.length > NOTES_MAX)) {
       throw httpError(400, `notes must be text of ${NOTES_MAX} characters or less`);

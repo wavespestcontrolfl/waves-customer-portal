@@ -67,38 +67,46 @@ const CARRY = [
 
 function formFrom(row) {
   const amount = (v) => (Number(v) ? String(Number(v)) : "");
+  // a carry-in of NULL is the default (an empty box); a stored 0 stays "0"
+  const carry = (v) => (v == null ? "" : String(Number(v)));
   return {
     filing_status: row.filing_status || "single",
     other_income: amount(row.other_income),
     estimates_paid: amount(row.estimates_paid),
-    nol_in: amount(row.nol_in),
-    qbi_loss_in: amount(row.qbi_loss_in),
-    sec179_carry_in: amount(row.sec179_carry_in),
-    home_office_carry_in: amount(row.home_office_carry_in),
+    nol_in: carry(row.nol_in),
+    qbi_loss_in: carry(row.qbi_loss_in),
+    sec179_carry_in: carry(row.sec179_carry_in),
+    home_office_carry_in: carry(row.home_office_carry_in),
     notes: row.notes || "",
   };
 }
 
-// a blank box is 0: the server then takes the prior year's filed carryover
+// An empty carry-in box goes up as null (use the default); a typed 0 is kept.
 function bodyFrom(form) {
   const num = (v) => (v.trim() === "" ? "0" : v.trim());
+  const carry = (v) => (v.trim() === "" ? null : v.trim());
   return {
     filing_status: form.filing_status,
     other_income: num(form.other_income),
     estimates_paid: num(form.estimates_paid),
-    nol_in: num(form.nol_in),
-    qbi_loss_in: num(form.qbi_loss_in),
-    sec179_carry_in: num(form.sec179_carry_in),
-    home_office_carry_in: num(form.home_office_carry_in),
+    nol_in: carry(form.nol_in),
+    qbi_loss_in: carry(form.qbi_loss_in),
+    sec179_carry_in: carry(form.sec179_carry_in),
+    home_office_carry_in: carry(form.home_office_carry_in),
     notes: form.notes,
   };
 }
 
+function defaultText(c) {
+  return c.default_source === "prior_year"
+    ? `${money(c.default_value)} from the ${c.default_from_year} filed return`
+    : "$0.00 (no filed return for last year)";
+}
+
 function sourceText(c) {
   if (!c) return "";
-  if (c.source === "entered") return "Your number.";
-  if (c.source === "prior_year") return `${money(c.value)} from the ${c.from_year} filed return. Type a number to use your own.`;
-  return "None. It comes from last year's return once that year is marked filed.";
+  if (c.source === "entered") return `Your number. Clear the box to use the default: ${defaultText(c)}.`;
+  return `Default: ${defaultText(c)}. Type a number, even 0, to use your own.`;
 }
 
 function Row({ label, value, strong, testId }) {
@@ -190,7 +198,7 @@ function YearForm({ detail, disabled, busy, onSave }) {
       <strong>Carried in from {detail.year - 1}</strong>
       {CARRY.map(([key, col, label]) => (
         <div key={key} className="flex flex-col gap-1">
-          <Input aria-label={label} placeholder={label} inputMode="decimal" disabled={disabled} value={form[col]} onChange={set(col)} />
+          <Input aria-label={label} placeholder={`${label} (default ${money(detail.carry_in[key]?.default_value)})`} inputMode="decimal" disabled={disabled} value={form[col]} onChange={set(col)} />
           <div className="text-sm text-ink-secondary" data-testid={`source-${key}`}>{sourceText(detail.carry_in[key])}</div>
         </div>
       ))}
