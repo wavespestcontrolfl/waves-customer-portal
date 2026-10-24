@@ -1488,6 +1488,7 @@ export default function PublicBookingPage() {
                   <a
                     href={refusal.quoteUrl || ESTIMATE_QUOTE_URL}
                     data-glass-accent=""
+                    data-glass-size="primary"
                     style={{
                       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                       minHeight: 44, padding: '0 18px', background: COLORS.glassNavy,
@@ -1615,6 +1616,7 @@ export default function PublicBookingPage() {
                   target="_top"
                   rel="noopener"
                   data-glass-accent=""
+                  data-glass-size="primary"
                   style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     minHeight: 48, padding: '0 20px', background: COLORS.glassNavy,

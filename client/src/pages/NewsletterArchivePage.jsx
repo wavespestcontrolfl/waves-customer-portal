@@ -220,7 +220,7 @@ export default function NewsletterArchivePage() {
           {post.previewText && (
             <p style={{
               fontFamily: FONTS.body,
-              fontSize: 15,
+              fontSize: 16,
               color: BODY,
               lineHeight: 1.55,
               margin: 0,

@@ -164,6 +164,7 @@ function RateReviewNotice({ data }) {
         href="/"
         className="pcn-no-print"
         data-glass-accent=""
+        data-glass-size="primary"
         style={{
           display: 'block', textAlign: 'center', textDecoration: 'none',
           background: '#F0A500', color: NAVY, fontWeight: FW.bold, fontSize: FS.bodyLg,

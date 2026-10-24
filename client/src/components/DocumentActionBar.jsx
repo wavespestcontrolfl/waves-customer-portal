@@ -134,6 +134,7 @@ export default function DocumentActionBar({
         {pdfUrl ? (
           <a
             data-glass-accent=""
+            data-glass-size="primary"
             href={pdfUrl}
             download
             onClick={(e) => {
@@ -150,21 +151,21 @@ export default function DocumentActionBar({
             style={buttonStyle()}
           ><Download size={16} /> Download PDF</a>
         ) : (printFallbackDownload && !isNativeApp() ? (
-          <button data-glass-accent="" type="button" onClick={() => window.print()} style={buttonStyle()}>
+          <button data-glass-accent="" data-glass-size="primary" type="button" onClick={() => window.print()} style={buttonStyle()}>
             <Download size={16} /> Download PDF
           </button>
         ) : null)}
-        <button data-glass-accent="" type="button" onClick={share} style={buttonStyle()}>
+        <button data-glass-accent="" data-glass-size="primary" type="button" onClick={share} style={buttonStyle()}>
           <Share2 size={16} /> {copied ? 'Link copied' : 'Share'}
         </button>
         {/* window.print() is a no-op in the Capacitor webview — hide the
             button there; the Download PDF share sheet carries Print on iOS. */}
         {isNativeApp() ? null : (
-          <button data-glass-accent="" type="button" onClick={() => window.print()} style={buttonStyle()}>
+          <button data-glass-accent="" data-glass-size="primary" type="button" onClick={() => window.print()} style={buttonStyle()}>
             <Printer size={16} /> Print
           </button>
         )}
-        <a data-glass-accent="" href="/login" style={buttonStyle()}>
+        <a data-glass-accent="" data-glass-size="primary" href="/login" style={buttonStyle()}>
           <Lock size={16} /> Portal Login
         </a>
       </div>
