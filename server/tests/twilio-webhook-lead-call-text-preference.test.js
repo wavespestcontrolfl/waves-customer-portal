@@ -94,6 +94,9 @@ jest.mock('../services/lead-intake', () => ({
   recordCallTextReply: (...args) => mockRecord(...args),
 }));
 
+const mockRing = jest.fn(async () => ({ rang: true }));
+jest.mock('../services/lead-call-reply-ring', () => ({ ringForCallReply: (...args) => mockRing(...args) }));
+
 const { EventEmitter } = require('node:events');
 const numbers = require('../config/twilio-numbers');
 const TwilioService = require('../services/twilio');
@@ -163,4 +166,31 @@ test('a failure inside the preference step is swallowed and the bell still rings
   await receive('call');
   expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
   expect(ringSmsReplyBell.mock.calls[0][0].leadPreference).toBeUndefined();
+});
+
+// GATE_LEAD_CALL_REPLY_RING plumbing: the webhook hands every unconsumed text
+// to the ring service after the ack; the service owns every rule.
+test('an unconsumed reply goes to the ring service only after the ack', async () => {
+  mockIntake.mockResolvedValue({ handled: false });
+  mockRecord.mockResolvedValue('call');
+  const res = await receive('call');
+  expect(mockRing).not.toHaveBeenCalled();
+  res.emit('finish');
+  expect(mockRing).toHaveBeenCalledTimes(1);
+  expect(mockRing.mock.calls[0][0]).toMatchObject({ customer: { id: CUSTOMER.id }, body: 'call', fromPhone: sender });
+});
+
+test('a lead with no intake status still reaches the ring service', async () => {
+  mockState.customer = { ...CUSTOMER, lead_intake_status: null };
+  const res = await receive('call');
+  expect(mockIntake).not.toHaveBeenCalled();
+  res.emit('finish');
+  expect(mockRing).toHaveBeenCalledTimes(1);
+});
+
+test('a reply the intake machine consumed never reaches the ring service', async () => {
+  mockIntake.mockResolvedValue({ handled: true, next: 'estimate_drafted' });
+  const res = await receive('100 Sample St');
+  res.emit('finish');
+  expect(mockRing).not.toHaveBeenCalled();
 });
