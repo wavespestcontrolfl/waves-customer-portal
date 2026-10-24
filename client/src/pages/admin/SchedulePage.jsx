@@ -4002,6 +4002,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     stackingEnabled, stackingKnown,
     // The whole-stop choice changes which date the money is planned on.
     comboTogether,
+    // A re-picked Service address changes the house a misting refill is priced for (the save sends it too).
+    selectedPropertyId,
   });
   useEffect(() => {
     const requestId = ++previewRequestRef.current;
@@ -4021,6 +4023,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             // whole stop moves together; the preview must do the same.
             comboMove: comboTogether ? "together" : undefined,
             isRecurring,
+            ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
             ...(sendAddons ? { addons: addonsPayload } : {}),
             primaryLinePrice: parseFinitePrice(form.price) ?? undefined,
             estimatedPrice: parseFinitePrice(form.price) ?? undefined,

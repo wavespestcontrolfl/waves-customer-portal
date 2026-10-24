@@ -11,6 +11,8 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
+const mistingRefill = require('../services/misting-refill');
+const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG_KEY: MISTING_REFILL_KEY } = require('../utils/mosquito-misting-system');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
@@ -2090,6 +2092,120 @@ async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons, addre
   });
 }
 
+// An Update Details save that CHANGES the visit's service (misting PR 2c): the refill is an add-on of a Mosquito Misting Service Plan visit
+// and never the visit itself, so the service the save leaves the visit with is judged here even when no add-on line is posted. The
+// resolver judges the posted lines; this covers the primary-service change (to the refill) and a host change that leaves a refill row the
+// request did not repost. A save that keeps the service is never judged here, so an older visit stays editable.
+async function assertRefillPlacementOnEdit(database, id, { updates, addonsPosted }) {
+  if (!mistingRefill.refillLive() || !updates || updates.service_key_snapshot === undefined) return;
+  const row = (await database('scheduled_services').where({ id }).first('service_key_snapshot')) || {};
+  const next = updates.service_key_snapshot || null;
+  if ((row.service_key_snapshot || null) === next) return;
+  if (mistingRefill.isRefillKey(next)) {
+    throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({ parentServiceKey: next }, database));
+  }
+  if (addonsPosted || next === MISTING_SERVICE_KEY) return;
+  const kept = await database('scheduled_service_addons').where({ scheduled_service_id: id, service_key_snapshot: MISTING_REFILL_KEY }).first('id');
+  if (kept) throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({ parentServiceKey: next }, database));
+}
+
+// Under the save's row lock, after the shared address mover (applyAppointmentAddress) has already refused any refill the plan would
+// carry to another house (assertNoMistingRefillMoves in services/appointment-address.js, the ONE move judge for Update Details, the
+// Intelligence Bar and the geocode review), three things are re-read against the LOCKED row (Codex #6559 r1 P2: no second copy of the
+// move decision here):
+//  - the placement rule for a service-only save (a refill another editor attached after the pre-lock check must not ride a service
+//    change onto a non-plan visit);
+//  - each priced refill line's house: another editor's move landing after the price was set is a retryable conflict, not a stale price;
+//  - the host service, when the save leaves it alone: the resolver judged it from a read taken before the lock.
+async function assertRefillPropertyCurrent(trx, visitId, { replaceAddons, updates }) {
+  const lines = Array.isArray(replaceAddons) ? replaceAddons.filter(Boolean) : null;
+  await assertRefillPlacementOnEdit(trx, visitId, { updates, addonsPosted: Array.isArray(lines) });
+  const priced = (lines || []).filter((line) => line.refillPricedForProperty !== undefined);
+  if (!priced.length) return;
+  const row = await trx('scheduled_services').where({ id: visitId }).first('property_id', 'service_key_snapshot', 'service_id');
+  const house = String((row && row.property_id) || '');
+  if (priced.some((line) => String(line.refillPricedForProperty || '') !== house)) {
+    throw Object.assign(
+      httpError(409, 'This visit moved to a different address while you were editing, so the misting refill price is out of date. Reload and save again.'),
+      { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+  if (updates && updates.service_key_snapshot !== undefined) return;
+  if ((await lockedHostKey(trx, row)) !== MISTING_SERVICE_KEY) {
+    throw Object.assign(
+      httpError(409, 'This visit\'s service changed while you were editing, and a misting refill only goes on a Mosquito Misting Service Plan visit. Reload and save again.'),
+      { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+}
+
+// The locked row's service key: its snapshot, else the catalog row behind service_id, else null (judged as not the plan).
+async function lockedHostKey(trx, row) {
+  if (!row) return null;
+  if (row.service_key_snapshot) return row.service_key_snapshot;
+  if (!row.service_id) return null;
+  const svc = await trx('services').where({ id: row.service_id }).first('service_key').catch(() => null);
+  return (svc && svc.service_key) || null;
+}
+
+// Read at call time, like the completion that bills the add-on does. A partial test mock of the gates module reads as off.
+const addonBillingLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.gateEnvValue === 'function' && !!gates.gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING');
+};
+
+// Adding or repricing a misting refill on a visit raises its estimated_price, which the repricing guard reads as a price change on money
+// that is already committed. For a visit covered by an ANNUAL PREPAY that is wrong: the covered base stays as it was and the refill is
+// owed on top, billed once on that visit by annual-prepay-addon-billing. So the guard may skip the annual-prepay coverage reasons for
+// a save whose whole price change is the refill's: the primary line price is not posted as different, and the estimated_price moves by
+// exactly the refill lines' net change. Anything else (another add-on, an appointment discount that shifts the total, a primary price
+// edit) is a different change and keeps the full guard. A live invoice, a card hold or a hand prepayment still block: the guard only
+// loses the annual-prepay term link and the annual-prepay stamp for this one judgement.
+async function refillOnlyPriceChange(trx, visitId, { row, updates, replaceAddons }) {
+  if (!mistingRefill.refillLive() || !row || !updates || !Array.isArray(replaceAddons) || updates.estimated_price === undefined) return false;
+  // The exemption exists only where the refill is billed on top of the coverage; with that billing dark it would go uncollected.
+  if (!addonBillingLive()) return false;
+  // Only coverage the term has already stamped on this occurrence. An unstamped visit may be covered by a prepay still awaiting payment,
+  // whose price-hold would see the raised total as drift and drop the visit from coverage: it keeps the full guard.
+  if (!row.annual_prepay_term_id) return false;
+  const cents = (value) => Math.round((Number(value) || 0) * 100);
+  const postedNet = replaceAddons.filter((line) => line && mistingRefill.isRefillKey(line.serviceKey)).reduce((sum, line) => sum + cents(line.price), 0);
+  const stored = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).select('service_key_snapshot', 'estimated_price');
+  const storedRows = Array.isArray(stored) ? stored : [];
+  const storedNet = storedRows.filter((line) => line.service_key_snapshot === MISTING_REFILL_KEY).reduce((sum, line) => sum + cents(line.estimated_price), 0);
+  // An estimate-converted visit can carry no primary_line_price: its effective primary is the total less its stored add-ons.
+  if (updates.primary_line_price !== undefined) {
+    const storedPrimary = row.primary_line_price != null && row.primary_line_price !== ''
+      ? cents(row.primary_line_price)
+      : cents(row.estimated_price) - storedRows.reduce((sum, line) => sum + cents(line.estimated_price), 0);
+    if (Math.abs(cents(updates.primary_line_price) - storedPrimary) > 1) return false;
+  }
+  const refillDelta = postedNet - storedNet;
+  return refillDelta !== 0 && Math.abs((cents(updates.estimated_price) - cents(row.estimated_price)) - refillDelta) <= 1;
+}
+
+// The row as the repricing guard judges it when the change is only a refill on an annual-prepay-covered visit (see above).
+const withoutAnnualPrepayCoverage = (row) => ({
+  ...row,
+  annual_prepay_term_id: null,
+  ...(row.prepaid_method === ANNUAL_PREPAY_METHOD ? { prepaid_amount: null } : {}),
+});
+
+// A service change that reaches later occurrences ('following'/series scope) must not leave a refill on a visit that stops being a misting
+// plan visit. `nextKey` is the catalog key the propagation writes (undefined when it is not known: judged as a change away from the plan).
+async function assertNoStrandedRefill(conn, targets, nextKey) {
+  if (!mistingRefill.refillLive() || nextKey === MISTING_SERVICE_KEY) return;
+  const ids = (targets || []).map((row) => row && row.id).filter(Boolean);
+  if (!ids.length) return;
+  const hit = await conn('scheduled_service_addons').whereIn('scheduled_service_id', ids).where({ service_key_snapshot: MISTING_REFILL_KEY }).first('id');
+  if (hit) {
+    throw Object.assign(
+      httpError(409, 'A later visit in this plan carries a misting refill, which only goes on a Mosquito Misting Service Plan visit. Remove that refill first, or apply the change to this appointment only.'),
+      { code: 'MISTING_REFILL_WRONG_PARENT' },
+    );
+  }
+}
+
 function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
@@ -2815,9 +2931,15 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
   return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, conn = db }) {
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, refillContext = null, conn = db }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
+  }
+  // A misting refill is an add-on of a misting plan visit, never the visit itself (misting PR 2c, GATE_MOSQUITO_MISTING).
+  if (mistingRefill.refillLive() && mistingRefill.isRefillKey(serviceRecord?.service_key)) {
+    throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({
+      customerId: customer?.id, parentServiceKey: serviceRecord.service_key, isRecurring: !!refillContext?.isRecurring,
+    }, conn));
   }
 
   // One-time mosquito default follows the lot-based ladder (owner decision
@@ -2852,11 +2974,27 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   }];
 
   const addonLines = [];
+  const mistingRefills = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
     let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     const addonService = addon.serviceId
       ? await conn('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
       : null;
+    // A misting refill is priced by ONE resolver (services/misting-refill.js): the solution the accepted misting estimate was sold
+    // with, at the live table price. The posted price (the catalog Standard placeholder) is ignored; an unpriceable refill refuses.
+    let refill = null;
+    if (mistingRefill.refillLive() && mistingRefill.isRefillKey(addonService?.service_key)) {
+      refill = await mistingRefill.resolveRefillAttachment({
+        customerId: customer?.id,
+        propertyId: refillContext?.propertyId || null,
+        sourceEstimateId: refillContext?.sourceEstimateId || null,
+        parentServiceKey: serviceRecord?.service_key || null,
+        isRecurring: !!refillContext?.isRecurring,
+      }, conn);
+      if (!refill.ok) throw mistingRefill.refusalError(refill);
+      base = refill.unitPrice;
+      mistingRefills.push({ solution: refill.solution, solutionLabel: refill.solutionLabel, unitPrice: refill.unitPrice, estimateId: refill.estimateId });
+    }
     // Blank-priced one-time mosquito add-on lines get the same lot-ladder
     // default as the primary (catalog base_price as the no-lot-data
     // fallback) — a grouped booking must never silently bill mosquito at $0.
@@ -2880,14 +3018,15 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     });
     addonLines.push({
       serviceId: addon.serviceId || null,
-      serviceName: addon.name || addon.serviceName,
+      // The refill line is named with its solution (the visit invoice prints this name) and is an explicit one-time line.
+      serviceName: refill ? refill.lineName : (addon.name || addon.serviceName),
       serviceKey: addonService?.service_key || null,
       serviceCategory: addonService?.category || null,
       base,
       price: net,
       estimatedDuration: addon.estimatedDuration ?? addon.duration ?? addon.default_duration_minutes ?? null,
       discount: lineDiscount,
-      recurringPattern: addon.recurringPattern || addon.cadence || null,
+      recurringPattern: refill ? 'one_time' : (addon.recurringPattern || addon.cadence || null),
       recurringIntervalDays: addon.recurringIntervalDays ?? addon.intervalDays ?? null,
       recurringNth: addon.recurringNth ?? addon.nth ?? null,
       recurringWeekday: addon.recurringWeekday ?? addon.weekday ?? null,
@@ -3049,6 +3188,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     primaryDiscount: finalPrimaryDiscount,
     primaryAppointmentCreditDollars: finalPrimaryAppointmentCredit,
     addonLines: finalAddonLines,
+    ...(mistingRefills.length ? { mistingRefills } : {}),
     appointmentDiscount: appointmentDiscount ? {
       discountId: appointmentDiscount.id,
       discountName: appointmentDiscount.name,
@@ -4969,6 +5109,7 @@ async function lockAndGuardFollowingSiblings(conn, {
       { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
     );
   }
+  if (serviceChanged) await assertNoStrandedRefill(conn, targets, proposedFields ? proposedFields.service_key_snapshot : undefined);
   if (priceChanged || serviceChanged) {
     const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
     for (const id of targets.map((row) => String(row.id)).sort()) {
@@ -7805,7 +7946,7 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
       const {
         key, customerId, scheduledDate, serviceType, serviceId, estimatedPrice, primaryLinePrice,
         primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount,
-        isRecurring, recurringCount, collectPrepay,
+        isRecurring, recurringCount, collectPrepay, propertyId, sourceEstimateId,
       } = group || {};
       if (!customerId || !serviceType) {
         results.push({ key: key ?? null, error: 'customerId and serviceType are required' });
@@ -7831,9 +7972,11 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
         pricing = await buildAppointmentPricing({
           serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount,
           serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking,
+          refillContext: { propertyId: propertyId || null, sourceEstimateId: sourceEstimateId || null, isRecurring: !!isRecurring },
         });
       } catch (e) {
-        results.push({ key: key ?? null, error: e.message || 'pricing failed' });
+        // A refused misting refill carries its stable code so the modal can show the staff-readable reason as it is.
+        results.push({ key: key ?? null, error: e.message || 'pricing failed', ...(e.code && String(e.code).startsWith('MISTING_REFILL_') ? { code: e.code } : {}) });
         continue;
       }
       // Stack-group verdict: advisory here (a dry run reports, never
@@ -7875,6 +8018,8 @@ router.post('/preview', requireAdmin, async (req, res, next) => {
         price: pricing.finalPrice,
         primaryDiscount: pricing.primaryDiscount || null,
         addonLines: (pricing.addonLines || []).map((l) => ({ price: l.price, discount: l.discount || null })),
+        // The refill's solution and per-application price, so staff see the amount before they book (misting PR 2c).
+        ...(pricing.mistingRefills ? { mistingRefills: pricing.mistingRefills } : {}),
         appointmentDiscount: pricing.appointmentDiscount || null,
         stackGroupConflict: stackGroupConflictVerdict,
         prepay,
@@ -8772,6 +8917,7 @@ async function scheduleCreateHandler(req, res, next) {
       discountAmount,
       customer,
       recurringMembershipBooking,
+      refillContext: { propertyId: bookingProperty?.property_id || null, sourceEstimateId: linkedEstimateId, isRecurring: !!isRecurring },
     });
 
     // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same
@@ -12257,8 +12403,36 @@ async function computeSingleServiceEstimatedPricePlan({
   return { clearAddonDiscountsOnPriceEdit, financialCasSnapshot, appointmentDiscountChanged };
 }
 
+// The visit a refill is being added to: who and where it is for, the estimate it came from, and the catalog key it will carry after
+// this save (a service change in the same save counts). Read once per save.
+async function loadRefillVisit(database, id, cols, updates, destinationPropertyId = undefined) {
+  const wanted = ['customer_id', 'property_id', 'source_estimate_id', 'service_id', 'service_key_snapshot'].filter((column) => cols[column]);
+  const row = (await database('scheduled_services').where({ id }).first(...wanted)) || {};
+  // The service the save leaves the visit with. An explicit identity in this save (even null: an unknown pick) is the answer; the stored
+  // service is only consulted when the save did not change it.
+  let parentServiceKey;
+  if (updates && updates.service_key_snapshot !== undefined) {
+    parentServiceKey = updates.service_key_snapshot;
+  } else {
+    parentServiceKey = row.service_key_snapshot;
+    const serviceId = updates && updates.service_id !== undefined ? updates.service_id : row.service_id;
+    if (!parentServiceKey && serviceId) {
+      const svc = await database('services').where({ id: serviceId }).first('service_key').catch(() => null);
+      parentServiceKey = svc && svc.service_key;
+    }
+  }
+  return {
+    customer_id: row.customer_id || null,
+    // Where the visit is. A posted destination that differs is a MOVE, and a move never carries a refill (see the caller).
+    property_id: row.property_id || null,
+    moving: destinationPropertyId !== undefined && String(destinationPropertyId || '') !== String(row.property_id || ''),
+    source_estimate_id: row.source_estimate_id || null,
+    parentServiceKey: parentServiceKey || null,
+  };
+}
+
 async function normalizeUpdateDetailsAddons({
-  db, id, addons, updates, isRecurring, serviceType, scheduledDate,
+  db, id, addons, updates, isRecurring, serviceType, scheduledDate, propertyId,
 }) {
   // Codex pre-push audit P2 (structural round 3 on #4657, :9310): the
   // service-identity resolution + per-addon normalization phase of
@@ -12383,6 +12557,7 @@ async function normalizeUpdateDetailsAddons({
         return membershipContextPromise;
       };
       const normalizedAddons = [];
+      let refillVisit = null;
       for (const a of addons) {
         // GitHub Codex round 12 P1 (#4657, :9970): the save transaction
         // REPLACES every add-on row (delete + reinsert), so a row id is
@@ -12402,14 +12577,47 @@ async function normalizeUpdateDetailsAddons({
             { code: 'VISIT_CHANGED_RETRY' },
           );
         }
-        const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
+        let serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
         if (!serviceName) continue;
         const catalogService = a.serviceId
           ? addonServiceById.get(a.serviceId)
           : (addonServiceByKey.get(String(a.serviceKey || '').trim().toLowerCase())
             || addonServiceByName.get(serviceName)
             || null);
-        const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
+        let gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
+        // A misting refill goes through the ONE refill resolver (services/misting-refill.js, same as a new booking): the posted price
+        // is ignored, the solution comes from the accepted misting estimate and the price from the live table. A refill the visit
+        // already carries keeps its stored price and name only when the resolver cannot price it now (it never bricks an unrelated
+        // edit); a NEW unpriceable refill is refused. GATE_MOSQUITO_MISTING off: untouched.
+        let refillLine = null;
+        if (mistingRefill.refillLive() && mistingRefill.isRefillKey(catalogService?.service_key)) {
+          if (!refillVisit) refillVisit = await loadRefillVisit(db, id, cols, updates, propertyId);
+          if (refillVisit.moving) {
+            throw Object.assign(
+              httpError(409, 'A misting refill is priced for the house it was set up for. Remove the refill (Edit visit, Add-ons), change the address, then add the refill again.'),
+              { code: 'MISTING_REFILL_ADDRESS_MOVE' },
+            );
+          }
+          const prior = a.id ? existingAddonDiscountById.get(a.id) : null;
+          const attach = await mistingRefill.resolveRefillAttachment({
+            customerId: refillVisit.customer_id,
+            propertyId: refillVisit.property_id,
+            sourceEstimateId: refillVisit.source_estimate_id,
+            parentServiceKey: refillVisit.parentServiceKey,
+            isRecurring: false,
+          }, db);
+          if (attach.ok) {
+            refillLine = attach;
+            gross = attach.unitPrice;
+            serviceName = attach.lineName;
+          } else if (prior && mistingRefill.isRefillKey(prior.service_key_snapshot) && mistingRefill.KEEP_STORED_ON.has(attach.code)) {
+            gross = toMoney(prior.base_price ?? prior.estimated_price);
+            serviceName = String(prior.service_name || serviceName).trim();
+            refillLine = { keptStored: true };
+          } else {
+            throw mistingRefill.refusalError(attach);
+          }
+        }
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
         let net = gross;
@@ -12520,7 +12728,8 @@ async function normalizeUpdateDetailsAddons({
           base: gross,
           price: net,
           estimatedDuration: (a.estimatedDuration != null && a.estimatedDuration !== '' && !isNaN(parseInt(a.estimatedDuration, 10))) ? parseInt(a.estimatedDuration, 10) : null,
-          recurringPattern: a.recurringPattern || null,
+          // A misting refill is an explicit one-time line: a NULL pattern would ride the visit's cadence.
+          recurringPattern: refillLine ? 'one_time' : (a.recurringPattern || null),
           recurringIntervalDays: a.recurringIntervalDays ?? null,
           recurringNth: a.recurringNth ?? null,
           recurringWeekday: a.recurringWeekday ?? null,
@@ -12528,6 +12737,8 @@ async function normalizeUpdateDetailsAddons({
           weekendShift: a.weekendShift,
           discount: lineDiscount,
           legacyGrossUnknown,
+          // The house this refill was priced for, re-checked under the save's row lock (assertRefillPropertyCurrent).
+          ...(refillLine ? { refillPricedForProperty: refillVisit.property_id } : {}),
         });
       }
 
@@ -12668,7 +12879,7 @@ async function computeUpdateDetailsFinancialPlan({
   db, id, updates, discountType, discountAmount, discountId, isRecurring, serviceType, scheduledDate,
   primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
   appointmentDiscountPreset, appointmentDiscountChanged: appointmentDiscountChangedAtRouteRead, appointmentDiscountCols,
-  presetEligibilityCheck,
+  presetEligibilityCheck, propertyId,
 }) {
   // GitHub Codex round 27 P1 (#4657, :10969): the route's early answer is
   // only the DEFAULT — each branch below that reads the row re-derives
@@ -12727,11 +12938,12 @@ async function computeUpdateDetailsFinancialPlan({
   } = await resolveReServiceConversion({
     db, id, updates, serviceId, serviceType, postedServiceKey, primaryLinePrice, estimatedPrice, addons,
   });
+    await assertRefillPlacementOnEdit(db, id, { updates, addonsPosted: Array.isArray(addons) });
     if (Array.isArray(addons)) {
       const {
         cols, normalizedAddons, existingAddonDiscountRows, isNewAddonDiscount,
       } = await normalizeUpdateDetailsAddons({
-        db, id, addons, updates, isRecurring, serviceType, scheduledDate,
+        db, id, addons, updates, isRecurring, serviceType, scheduledDate, propertyId,
       });
       replaceAddons = normalizedAddons;
       expectedAddonRowIds = existingAddonDiscountRows.map((r) => r.id);
@@ -14071,7 +14283,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         db, id: req.params.id, updates, discountType, discountAmount, discountId, isRecurring, serviceType, scheduledDate,
         primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
         appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
-        presetEligibilityCheck,
+        presetEligibilityCheck, propertyId,
       });
       // GitHub Codex round 27 P1 (#4657, :10969): the planner's own answer,
       // judged against the row read its CAS snapshot was built from.
@@ -14782,6 +14994,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       if (priceEditPosted) {
         const priceGuardCols = await trx('scheduled_services').columnInfo();
         const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
+        for (const col of ['estimated_price', 'primary_line_price']) {
+          if (priceGuardCols[col] && !priceGuardSelect.includes(col)) priceGuardSelect.push(col);
+        }
         if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
         if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
         if (priceGuardCols.source_estimate_id) priceGuardSelect.push('source_estimate_id');
@@ -14811,7 +15026,14 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             priceGuardRow._coverageContext = await cadenceCoverageContext(trx, priceGuardCols);
             priceGuardRow._plannedInserts = await plannedInsertCandidates(trx, priceGuardRow);
           }
-          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
+          // A save whose whole price change is a misting refill on an annual-prepay-covered visit is judged without that coverage.
+          // Its live invoice, card hold and hand prepayment still block; only the annual coverage (the stamped
+          // columns and the secure-prepay term rediscovery) is set aside, since the refill is owed on top of it.
+          const refillOnly = priceGuardRow
+            && await refillOnlyPriceChange(trx, req.params.id, { row: priceGuardRow, updates, replaceAddons });
+          const covered = refillOnly
+            ? await findBillingCoveredVisits(trx, [withoutAnnualPrepayCoverage(priceGuardRow)], { liveInvoice: true, securePrepay: false })
+            : await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
             : await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id);
           if (covered.size > 0 || estimateReason) {
@@ -15517,6 +15739,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             .first('customer_id', 'scheduled_date')
           : null;
         await assertAreaAddOnEdit(trx, req.params.id, { updates, replaceAddons, addressPlan });
+        await assertRefillPropertyCurrent(trx, req.params.id, { replaceAddons, updates });
         await areaAddOnRows.clearOwnAreaAddOnScopeOnServiceChange(trx, req.params.id, updates);
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
@@ -17454,6 +17677,8 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
       appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
       presetEligibilityCheck,
+      // A refill is priced for the house the visit will be at after this save (an address move in the same save counts).
+      propertyId: typeof req.body.propertyId === 'string' ? req.body.propertyId : undefined,
     });
 
     // Client rearchitecture (structural round 3 on #4657): the primary
@@ -28572,6 +28797,13 @@ router._test = {
   addonRecursAfterAnchor,
   filterAddonLinesForDate,
   ONE_TIME_ADDON_SERVICE_KEYS,
+  normalizeUpdateDetailsAddons,
+  assertRefillPropertyCurrent,
+  assertRefillPlacementOnEdit,
+  assertNoStrandedRefill,
+  refillOnlyPriceChange,
+  withoutAnnualPrepayCoverage,
+  isOneTimeOnlyAddonKey,
   negativePricePosted,
   discountChangeWithoutPricePosted,
   addonServiceIdentityForFreshness,

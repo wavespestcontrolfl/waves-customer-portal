@@ -1,0 +1,246 @@
+/**
+ * Misting refill pricing and attachment rules (misting PR 2c, GATE_MOSQUITO_MISTING).
+ *
+ * A refill (catalog key mosquito_misting_refill) is ONE refill application, billed once on the one visit it is added to. Its price is
+ * the per-application price of the solution the customer's ACCEPTED misting estimate was sold with (Standard / Natural / Premium).
+ * The catalog row's base_price is only the Standard placeholder, so nothing here ever reads it.
+ *
+ * ONE resolver (resolveRefillAttachment) decides every attach, in this order, and every staff path calls it:
+ *   1. series      a refill never goes on a repeating series (its price would be multiplied across the prepaid term);
+ *   2. parent      only a Mosquito Misting Service Plan visit takes a refill;
+ *   3. estimate    the accepted misting estimate for this customer AND property: the visit's own source estimate when it is one,
+ *                  else the property's newest accepted misting estimate. Draft, sent, declined, expired or another property's
+ *                  estimates never decide the price;
+ *   4. solution    read from that estimate's stored rows (the stamped refill solution), else its engine inputs;
+ *   5. price       the LIVE pricing_config table (mosquito_misting_pricing, through the db-bridge sync) at the time of the attach.
+ * Any step that cannot be established is a refusal (ok false), never a default: an unpriced refill is refused with a staff-readable
+ * reason and nothing is billed at the Standard placeholder.
+ *
+ * The result carries the invoice line name with the solution label ("Mosquito Misting System Refill - Natural (botanical)"), which is
+ * what the visit invoice builder prints (it uses scheduled_service_addons.service_name).
+ */
+const db = require('../models/db');
+const logger = require('./logger');
+const {
+  MISTING_REFILL_CATALOG_KEY, MISTING_SERVICE_CATALOG_KEY, isMistingSelection, mistingProposalIdentity,
+} = require('../utils/mosquito-misting-system');
+const { MOSQUITO_MISTING } = require('./pricing-engine/constants');
+const { mistingRefillPriceFor, mistingRefillPriceIsFromRow } = require('./pricing-engine/mosquito-misting-config');
+const { storedMistingRows, proposalIsAuthoritative } = require('./estimate-result-container');
+const { estimateDataCarriesMosquitoMisting } = require('./pricing-engine/v1-legacy-mapper');
+
+const REFILL_BASE_NAME = 'Mosquito Misting System Refill';
+// Accepted estimates are read newest first in pages and filtered as they come, so a customer's newer unrelated estimates can never hide
+// the older misting one. A customer with more than SCAN_CAP accepted estimates stops being read there (never reached in practice).
+const SCAN_PAGE = 20;
+const SCAN_CAP = 1000;
+
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+// GATE_MOSQUITO_MISTING, read at call time. A test that mocks the gate module with a partial set reads as off.
+const refillLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.mosquitoMistingLive === 'function' && gates.mosquitoMistingLive() === true;
+};
+const isRefillKey = (serviceKey) => serviceKey === MISTING_REFILL_CATALOG_KEY;
+
+const REFUSALS = {
+  MISTING_REFILL_ON_SERIES: [400, 'A misting refill is billed on one visit. Book the series first, then add the refill to that one visit (Edit visit, Add-ons).'],
+  MISTING_REFILL_ADDON_ONLY: [400, 'A misting refill is an add-on. Add it to a Mosquito Misting Service Plan visit; it cannot be the visit itself.'],
+  MISTING_REFILL_WRONG_PARENT: [400, 'A misting refill can only be added to a Mosquito Misting Service Plan visit.'],
+  MISTING_REFILL_UNPRICED: [409, 'This misting refill cannot be priced: no accepted misting estimate was found for this customer and property. Accept the misting estimate first, then add the refill.'],
+  MISTING_REFILL_SOLUTION_UNREADABLE: [409, 'This misting refill cannot be priced: the accepted misting estimate does not say which refill solution was sold. Re-send the estimate or ask the office to fix it.'],
+  MISTING_REFILL_PRICE_UNAVAILABLE: [409, 'This misting refill cannot be priced: the live misting price table (Pricing Logic, Mosquito) is missing or has no price for the refill solution that was sold.'],
+  MISTING_REFILL_LOOKUP_FAILED: [503, 'The accepted misting estimate could not be read, so the refill was not priced. Try again in a moment.'],
+  MISTING_REFILL_PRICING_STALE: [503, 'The live misting prices could not be refreshed, so the refill was not priced. Try again in a moment.'],
+};
+
+function refusal(code, extra = {}) {
+  const [status, message] = REFUSALS[code];
+  return { ok: false, code, status, message, ...extra };
+}
+
+function parseData(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw !== 'string') return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function asSolution(value) {
+  const key = String(value == null ? '' : value).trim().toLowerCase();
+  return hasOwn(MOSQUITO_MISTING.refills, key) ? key : null;
+}
+
+// The same "authored itemized proposal" test the stored-estimate guards use (v1-legacy-mapper): such a proposal, not the retained engine
+// rows, says what was sold.
+const proposalIsItemized = (proposal) => ['buildings', 'programs', 'correctiveWork']
+  .some((key) => Array.isArray(proposal && proposal[key]) && proposal[key].length > 0);
+
+const solutionOfLine = (line) => asSolution(line && line.pricingKnobs && line.pricingKnobs.refillSolution)
+  || asSolution(line && line.solution) || asSolution(line && line.refill && line.refill.solution);
+
+// The solution an AUTHORED proposal states on its own misting lines, or null. In proposal mode this is the only evidence that counts.
+function solutionFromProposal(proposal) {
+  const lines = [
+    ...(proposal.buildings || []).flatMap((building) => (building && building.lineItems) || []),
+    ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+  ];
+  for (const line of lines) {
+    if (!mistingProposalIdentity(line)) continue;
+    const found = solutionOfLine(line);
+    if (found) return found;
+  }
+  return null;
+}
+
+// What one stored estimate says about a misting plan: { carries, solution }. Whether it carries a plan at all is the stored-estimate
+// guards' own rule (estimateDataCarriesMosquitoMisting), which honors an authored proposal: one that removed the misting plan carries
+// none, whatever engine rows the estimate retains. `solution` is null when it carries a plan but does not say which refill solution was
+// sold: an authored proposal must state it on its own misting line; otherwise the stamped rows, then the engine inputs.
+function readEstimateMisting(row) {
+  const data = parseData(row && row.estimate_data);
+  if (!data) return { carries: false, solution: null };
+  let carries = false;
+  try { carries = estimateDataCarriesMosquitoMisting(data, { pricingAuthority: row.pricing_authority }); } catch { carries = false; }
+  if (!carries) return { carries: false, solution: null };
+  if (proposalIsAuthoritative(data) && proposalIsItemized(data.proposal)) return { carries: true, solution: solutionFromProposal(data.proposal) };
+  let rows = [];
+  try { rows = storedMistingRows(data, { pricingAuthority: row.pricing_authority }); } catch { rows = []; }
+  for (const line of rows) {
+    const found = solutionOfLine(line);
+    if (found) return { carries: true, solution: found };
+  }
+  // Inputs only: a selection that names no solution was priced by the engine at its default solution; one that names an unknown
+  // solution is ambiguous, so it reads as unreadable.
+  const shapes = [data.engineInputs, data.engineInput, data.inputs, data.engineRequest && data.engineRequest.options, data.result && data.result.engineInputs];
+  const chosen = shapes
+    .map((shape) => shape && shape.services && [shape.services.mosquitoMisting, shape.services.mosquito_misting].find(isMistingSelection))
+    .find(Boolean);
+  if (chosen && typeof chosen === 'object' && chosen.solution != null && String(chosen.solution).trim() !== '') {
+    return { carries: true, solution: asSolution(chosen.solution) };
+  }
+  return { carries: true, solution: chosen ? MOSQUITO_MISTING.defaultSolution : null };
+}
+
+// The customer's one active property, read-only (null when there are none or several). The booking paths anchor a booking with no
+// chosen property to this one, so a refill with no explicit property is for this house. Never creates a property.
+async function readSoleActivePropertyId(customerId, database) {
+  if (!customerId) return null;
+  const rows = await database('customer_properties').where({ customer_id: customerId, active: true }).limit(2).select('id');
+  return Array.isArray(rows) && rows.length === 1 ? rows[0].id : null;
+}
+
+// The live pricing table, fresh. The bridge keeps the sync interval (needsSync); a refresh that is due and fails (missing table,
+// connection failure) means the in-memory prices may be stale or the code defaults, so the refill is NOT priced from them.
+async function pricingIsFresh() {
+  try {
+    const engine = require('./pricing-engine');
+    if (typeof engine.needsSync === 'function' && engine.needsSync()) return (await engine.syncConstantsFromDB()) === true;
+    return true;
+  } catch (err) {
+    logger.warn(`[misting-refill] live pricing refresh failed: ${err.message}`);
+    return false;
+  }
+}
+
+// An estimate is for this property when it names it. An estimate that names no property (written before the linkage) belongs to the
+// customer's sole property only.
+const sameProperty = (row, propertyId, soleId) => (row.property_id
+  ? String(row.property_id) === String(propertyId || '')
+  : !!propertyId && String(propertyId) === String(soleId || ''));
+
+const ESTIMATE_COLUMNS = ['id', 'customer_id', 'property_id', 'status', 'accepted_at', 'estimate_data', 'pricing_authority'];
+
+// The house a refill is for: the one named, else the one the booking's linked estimate belongs to (the booking is stamped with it),
+// else the customer's sole active property. `own` is the linked estimate row, trusted only when it is this customer's.
+const effectiveHouse = ({ propertyId, own, customerId, soleId }) => propertyId
+  || (own && String(own.customer_id || '') === String(customerId || '') && own.property_id)
+  || soleId || null;
+
+// The accepted misting estimate that decides the refill solution, or null. Throws only on a failed read.
+async function findAcceptedMistingEstimate({ customerId, propertyId, soleId, own }, database) {
+  if (own && own.status === 'accepted' && String(own.customer_id || '') === String(customerId || '')
+    && sameProperty(own, propertyId, soleId)) {
+    const read = readEstimateMisting(own);
+    if (read.carries) return { id: own.id, ...read };
+  }
+  for (let offset = 0; offset < SCAN_CAP; offset += SCAN_PAGE) {
+    const page = await database('estimates')
+      .where({ customer_id: customerId, status: 'accepted' })
+      .orderBy('accepted_at', 'desc')
+      .orderBy('id', 'desc')
+      .limit(SCAN_PAGE)
+      .offset(offset)
+      .select(...ESTIMATE_COLUMNS);
+    const rows = Array.isArray(page) ? page : [];
+    for (const row of rows) {
+      if (!sameProperty(row, propertyId, soleId)) continue;
+      const read = readEstimateMisting(row);
+      if (read.carries) return { id: row.id, ...read };
+    }
+    if (rows.length < SCAN_PAGE) return null;
+  }
+  logger.warn(`[misting-refill] stopped reading accepted estimates for customer ${customerId} at ${SCAN_CAP}`);
+  return null;
+}
+
+/**
+ * Decide one refill attach. `parentServiceKey` is the catalog key of the visit the refill goes on; `isRecurring` is true for a
+ * series booking. Returns { ok: true, solution, solutionLabel, unitPrice, estimateId, lineName } or { ok: false, code, status, message }.
+ */
+async function resolveRefillAttachment({
+  customerId, propertyId = null, sourceEstimateId = null, parentServiceKey = null, isRecurring = false,
+}, database = db) {
+  if (isRecurring) return refusal('MISTING_REFILL_ON_SERIES');
+  if (isRefillKey(parentServiceKey)) return refusal('MISTING_REFILL_ADDON_ONLY');
+  if (parentServiceKey !== MISTING_SERVICE_CATALOG_KEY) return refusal('MISTING_REFILL_WRONG_PARENT');
+  if (!customerId) return refusal('MISTING_REFILL_UNPRICED');
+  let found;
+  try {
+    const soleId = await readSoleActivePropertyId(customerId, database);
+    const own = sourceEstimateId ? await database('estimates').where({ id: sourceEstimateId }).first(...ESTIMATE_COLUMNS) : null;
+    found = await findAcceptedMistingEstimate({
+      customerId, propertyId: effectiveHouse({ propertyId, own, customerId, soleId }), soleId, own,
+    }, database);
+  } catch (err) {
+    logger.warn(`[misting-refill] accepted estimate lookup failed for customer ${customerId}: ${err.message}`);
+    return refusal('MISTING_REFILL_LOOKUP_FAILED');
+  }
+  if (!found) return refusal('MISTING_REFILL_UNPRICED');
+  if (!found.solution) return refusal('MISTING_REFILL_SOLUTION_UNREADABLE', { estimateId: found.id });
+  if (!(await pricingIsFresh())) return refusal('MISTING_REFILL_PRICING_STALE', { estimateId: found.id });
+  // The sync reports success even when the misting row is missing, refused or partial and the in-code defaults stand: a billed price
+  // must be the row's own price for this solution.
+  if (!mistingRefillPriceIsFromRow(found.solution)) return refusal('MISTING_REFILL_PRICE_UNAVAILABLE', { solution: found.solution, estimateId: found.id });
+  const unitPrice = mistingRefillPriceFor(found.solution);
+  if (unitPrice == null) return refusal('MISTING_REFILL_PRICE_UNAVAILABLE', { solution: found.solution, estimateId: found.id });
+  const solutionLabel = MOSQUITO_MISTING.refills[found.solution].label;
+  return {
+    ok: true,
+    solution: found.solution,
+    solutionLabel,
+    unitPrice,
+    estimateId: found.id,
+    lineName: `${REFILL_BASE_NAME} - ${solutionLabel}`,
+  };
+}
+
+// Refusals that leave a refill the visit ALREADY carries in place (it keeps its stored price and name): the resolver could not price
+// it now, which must not block an unrelated edit of the visit. A NEW refill is always refused for these.
+const KEEP_STORED_ON = new Set(['MISTING_REFILL_UNPRICED', 'MISTING_REFILL_SOLUTION_UNREADABLE', 'MISTING_REFILL_PRICE_UNAVAILABLE']);
+
+// The error a route throws for a refusal: operational, carrying the status, the staff text and the stable code.
+function refusalError(result) {
+  return Object.assign(new Error(result.message), {
+    status: result.status, statusCode: result.status, code: result.code, isOperational: true,
+  });
+}
+
+module.exports = {
+  REFILL_BASE_NAME,
+  refillLive,
+  isRefillKey,
+  readEstimateMisting,
+  resolveRefillAttachment,
+  refusalError,
+  KEEP_STORED_ON,
+};

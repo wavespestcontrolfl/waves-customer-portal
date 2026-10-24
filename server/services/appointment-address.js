@@ -104,6 +104,35 @@ async function assertAreaAddOnLimitsAtDestination(trx, lockedRows, propertyId, e
   }
 }
 
+// A misting refill is priced for the house its accepted estimate names, so a visit that carries one cannot be moved to another
+// property (misting PR 2c; behind GATE_MOSQUITO_MISTING). Judged here, the one mechanism every address mover shares (Update Details,
+// the Intelligence Bar, the geocode review), on the locked rows the plan moves to a property they are not already at. The visit the
+// SAME save edits is judged by what the save leaves on it (`edited.rowKeys`, its add-ons are replaced later in that save); every
+// other moved visit by the rows it stores. Remove the refill, move the address, add the refill again.
+async function assertNoMistingRefillMoves(trx, lockedRows, propertyId, edited = null) {
+  const gates = require('../config/feature-gates');
+  if (typeof gates.mosquitoMistingLive !== 'function' || !gates.mosquitoMistingLive()) return;
+  const { MISTING_REFILL_CATALOG_KEY: REFILL_KEY } = require('../utils/mosquito-misting-system');
+  const moving = lockedRows.filter((row) => String(row.property_id || '') !== String(propertyId || ''));
+  if (!moving.length) return;
+  const isEdited = (row) => edited && String(edited.id) === String(row.id);
+  const stillStored = moving.filter((row) => !(isEdited(row) && Array.isArray(edited.rowKeys))).map((row) => row.id);
+  const postedRefill = moving.some((row) => isEdited(row) && Array.isArray(edited.rowKeys) && edited.rowKeys.includes(REFILL_KEY));
+  const storedRefill = stillStored.length > 0
+    && !!(await trx('scheduled_service_addons').whereIn('scheduled_service_id', stillStored).where({ service_key_snapshot: REFILL_KEY }).first('id'));
+  if (postedRefill || storedRefill) {
+    throw Object.assign(new Error('A misting refill is priced for the house it was set up for. Remove the refill (Edit visit, Add-ons), change the address, then add the refill again.'), {
+      statusCode: 409, isOperational: true, code: 'MISTING_REFILL_ADDRESS_MOVE',
+    });
+  }
+}
+
+// Which locked rows the move re-addresses: the anchor, its package children, and every member not in a historical status.
+function rowsTheMoveUpdates(locked, { anchorId, packageChildIds }) {
+  return locked.filter((row) => row.id === anchorId || (packageChildIds || []).includes(row.id)
+    || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
+}
+
 async function applyAppointmentAddress(trx, plan, actorId) {
   const fresh = await planAppointmentAddress(trx, plan.anchor.id, plan.propertyId, plan.scope);
   const fingerprint = (p) => JSON.stringify(p.rows.map((row) => [row.id, row.customer_id, row.recurring_parent_id,
@@ -118,9 +147,11 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
+  const addressRows = rowsTheMoveUpdates(locked, { anchorId: plan.anchor.id, packageChildIds: fresh.packageChildIds });
   await assertAreaAddOnLimitsAtDestination(trx, locked, plan.propertyId, plan.editedVisit || null);
-  const addressRows = locked.filter((row) => row.id === plan.anchor.id || (fresh.packageChildIds || []).includes(row.id)
-    || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
+  // Only the rows this move actually re-addresses are judged (Codex #6559 r1 P2): a completed series parent the plan carries for its
+  // fingerprint stays where it is, so a refill on it never blocks moving the future occurrences.
+  await assertNoMistingRefillMoves(trx, addressRows, plan.propertyId, plan.editedVisit || null);
   for (const visit of fresh.visits) {
     const verdict = await frozenVisitVerdict(trx, visit.id);
     // A retained historical member must never be left at a different property
@@ -198,5 +229,5 @@ async function refreshAppointmentAddressBriefs(conn, ids) {
   }
 }
 
-module.exports = { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs };
-module.exports._test = { assertAreaAddOnLimitsAtDestination };
+module.exports = { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs, assertNoMistingRefillMoves };
+module.exports._test = { assertAreaAddOnLimitsAtDestination, rowsTheMoveUpdates };

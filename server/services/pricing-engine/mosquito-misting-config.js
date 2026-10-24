@@ -124,7 +124,25 @@ function rebaseMosquitoMisting(target = MOSQUITO_MISTING) {
  * The sync's one call: rebase onto the defaults, then apply the row when it is valid. Returns { applied, error? }.
  * `row` undefined (no row) applies nothing and is not an error.
  */
+// Which refill solutions the LAST apply took a price for from the row. The sync keeps the in-code defaults for anything the row did not
+// supply (no row, a refused row, or a partial one that leaves a solution out), which is right for a quote on a fresh environment; a billed
+// refill price must be the row's own, so the resolver asks about the one solution it prices.
+let appliedRefillPrices = new Set();
+function mistingRefillPriceIsFromRow(solution) {
+  return appliedRefillPrices.has(String(solution == null ? '' : solution).trim().toLowerCase());
+}
+
+// db-bridge snapshots this beside the constants before a sync and restores both when the sync fails (Codex #6559 r1 P2): a failed
+// refresh restores the in-code prices, so the provenance of the failed apply must not survive with them.
+function snapshotMistingRefillProvenance() {
+  return new Set(appliedRefillPrices);
+}
+function restoreMistingRefillProvenance(snapshot) {
+  if (snapshot instanceof Set) appliedRefillPrices = new Set(snapshot);
+}
+
 function applyMosquitoMistingPricingConfig(row, target = MOSQUITO_MISTING) {
+  appliedRefillPrices = new Set();
   rebaseMosquitoMisting(target);
   if (row === undefined || row === null) return { applied: false };
   const verdict = normalizeMosquitoMistingPricingConfig(row, { strict: false });
@@ -139,6 +157,7 @@ function applyMosquitoMistingPricingConfig(row, target = MOSQUITO_MISTING) {
       for (const field of fields) if (member[field] !== undefined) target[group][key][field] = member[field];
     }
   }
+  for (const [key, member] of Object.entries(value.refills || {})) if (member && member.price !== undefined) appliedRefillPrices.add(key);
   return { applied: true };
 }
 
@@ -147,6 +166,17 @@ function syncMosquitoMistingPricingConfig(row, target = MOSQUITO_MISTING) {
   const applied = applyMosquitoMistingPricingConfig(row, target);
   if (applied.error) console.warn(`[db-bridge] mosquito_misting_pricing rejected (${applied.error}); the in-code misting prices stand`);
   return applied;
+}
+
+// The per-refill-application price of ONE named solution (misting PR 2c). Reads the LIVE table, so it is DB-authoritative through the
+// pricing_config sync exactly like a quote. An unknown, missing or non-positive solution price is null: the refill is then UNPRICED
+// and refused, never read as the Standard price (the catalog row's base_price is only the Standard placeholder).
+function mistingRefillPriceFor(solution, target = MOSQUITO_MISTING) {
+  const key = String(solution == null ? '' : solution).trim().toLowerCase();
+  const refills = target.refills || {};
+  if (!Object.prototype.hasOwnProperty.call(refills, key)) return null;
+  const price = Number(refills[key].price);
+  return Number.isFinite(price) && price > 0 ? price : null;
 }
 
 // The row's data at the in-code defaults: what the migration seeds and the route's table-creating fallback inserts.
@@ -161,4 +191,8 @@ module.exports = {
   applyMosquitoMistingPricingConfig,
   syncMosquitoMistingPricingConfig,
   rebaseMosquitoMisting,
+  mistingRefillPriceFor,
+  mistingRefillPriceIsFromRow,
+  snapshotMistingRefillProvenance,
+  restoreMistingRefillProvenance,
 };
