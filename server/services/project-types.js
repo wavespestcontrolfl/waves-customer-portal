@@ -944,7 +944,7 @@ const PROJECT_TYPES = {
       { key: 'palm_types_seen', label: 'Palm types seen', type: 'multi_select', section: 'Property measurements', detail: true, internal: true, options: TREE_SHRUB_PALM_TYPE_OPTIONS },
       { key: 'palm_symptoms', label: 'Palm symptoms seen', type: 'multi_select', section: 'Property measurements', detail: true, internal: true, options: [
         'None seen', 'Frizzle-top (new fronds yellow / small / withered)', 'Yellow / orange spotting on older fronds',
-        'Browning / bronzing fronds', 'Spear leaf collapse',
+        'Browning / bronzing fronds', 'Spear leaf collapse', 'Unsure (something looks wrong)',
       ] },
       { key: 'tree_count_total', label: 'Trees on property (non-palm)', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'shrub_density', label: 'Shrub density', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Light', 'Moderate', 'Heavy'] },
