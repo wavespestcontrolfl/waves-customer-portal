@@ -6273,14 +6273,23 @@ function CreateInvoice({
   }, [customerIdForProperties, editMode]);
   // A service line sent without a property when the customer has 2+ saved
   // properties names the primary, so a multi-property invoice never has a
-  // line that would keep the documents flat.
-  const withDefaultLineProperty = (item) =>
-    customerProperties.length >= 2 &&
-    primaryPropertyId &&
-    item._kind !== "discount" &&
-    !item.property_id
-      ? { ...item, property_id: primaryPropertyId }
-      : item;
+  // line that would keep the documents flat. On an EDIT this applies only
+  // when the invoice already carries a property on some line: a legacy
+  // invoice's untagged lines are never relabeled to the primary by an
+  // unrelated edit (the service may not have been performed there).
+  const withDefaultLineProperties = (items) => {
+    const eligible =
+      customerProperties.length >= 2 &&
+      primaryPropertyId &&
+      (!editMode ||
+        items.some((item) => item._kind !== "discount" && item.property_id));
+    if (!eligible) return items;
+    return items.map((item) =>
+      item._kind !== "discount" && !item.property_id
+        ? { ...item, property_id: primaryPropertyId }
+        : item,
+    );
+  };
 
   // Service library search for active line item
   useEffect(() => {
@@ -7071,10 +7080,10 @@ function CreateInvoice({
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
         serviceDate,
-        lineItems: repricedLineItems
+        lineItems: withDefaultLineProperties(repricedLineItems)
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
-            ...withDefaultLineProperty(i),
+            ...i,
             amount: lineAmount(i),
           })),
         notes: notes || null,
@@ -7302,10 +7311,10 @@ function CreateInvoice({
           stackingEnabled,
           persistedClientIds: persistedClientIdsRef.current,
         });
-        body.line_items = repricedLineItems
+        body.line_items = withDefaultLineProperties(repricedLineItems)
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
-            ...withDefaultLineProperty(i),
+            ...i,
             amount: lineAmount(i),
           }));
       }
