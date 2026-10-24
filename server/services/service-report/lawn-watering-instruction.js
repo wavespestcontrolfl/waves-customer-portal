@@ -437,26 +437,34 @@ function waterInDeadline(at, waterIns, byHours, holdEnd, { timedEnd = null, foll
 // The water-in half of the instruction: amount, deadline and minutes. Fills the
 // water-in fields of `out` and returns the detail the lines are written from,
 // or null when no honest deadline exists (C. see waterInDeadline).
-// Each water-in gets its own deadline and the visit's is the earliest: a label
-// window counts from the application (E; only E2's `followLabel` lets a "for
-// best results" one follow the hold), our own window follows the hold (rule C).
-// One water-in with no honest deadline leaves the visit none.
 function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd, timedEnd, followLabel = false, besideHold = false, labelFirst = false }) {
   const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
   const detail = { inches, ...minutesFor(runtime, inches, plainWhenNoSetup) };
-  const deadlines = waterIns.map((r) => {
-    const strength = labelFirst ? windowStrength(r) : null;
-    const follow = !strength || (followLabel && strength === 'best_results');
-    return waterInDeadline(at, [r], windowHoursOf(r, besideHold), holdEnd, { timedEnd, follow, lateDay: labelFirst });
-  });
-  if (deadlines.some((deadline) => !deadline)) return null;
-  const by = new Date(Math.min(...deadlines.map((deadline) => deadline.getTime())));
+  const by = labelFirst
+    ? earliestDeadline(at, waterIns, { holdEnd, timedEnd, followLabel, besideHold })
+    : waterInDeadline(at, waterIns, Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24))), holdEnd, { timedEnd });
+  if (!by) return null;
   out.minutes = detail.minutes;
   out.waterInInches = inches;
   out.waterInBy = by.toISOString();
   out.waterInByLabel = formatWhen(by, at);
   if (detail.amountOnly) out.amountOnly = true;
   return detail;
+}
+
+// Label first: each water-in gets its own deadline and the visit's is the
+// earliest. A label window counts from the application (E; only E2's
+// `followLabel` lets a "for best results" one follow the hold); our own window
+// follows the hold (rule C). One water-in with no honest deadline leaves the
+// visit none. (Gate off: one deadline from the shortest window, as before.)
+function earliestDeadline(at, waterIns, { holdEnd, timedEnd, followLabel, besideHold }) {
+  const deadlines = waterIns.map((r) => {
+    const strength = windowStrength(r);
+    const follow = !strength || (followLabel && strength === 'best_results');
+    return waterInDeadline(at, [r], windowHoursOf(r, besideHold), holdEnd, { timedEnd, follow, lateDay: true });
+  });
+  if (deadlines.some((deadline) => !deadline)) return null;
+  return new Date(Math.min(...deadlines.map((deadline) => deadline.getTime())));
 }
 
 // The water-in sentences. Minutes: "by <when>" then "Run <clause>" (one line after

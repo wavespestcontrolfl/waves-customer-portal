@@ -1080,6 +1080,11 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
       'After that, water in today’s treatment with about ¼ inch by Fri 9 AM.',
       'Run it even if it is not your usual day.',
     ]);
+    // Gate off: one deadline from the shortest window, as before (24 h after the 30-hour hold ends).
+    const own36 = ['Own36', { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 36, source: 'owner' }];
+    const thirty = ['Thirty', { mode: 'hold', hold_hours: 30, source: 'label' }];
+    expect(linesOf(named(FERTILIZER, own36, thirty), TUE_9AM, { labelFirst: false })[1]).toBe('After that, water in today’s treatment with about ¼ inch by Thu 3 PM.');
+    expect(linesOf(named(FERTILIZER, own36, thirty), TUE_9AM)[1]).toBe('After that, water in today’s treatment with about ¼ inch by Wed 9 PM.');
   });
 
   test('a label window a hold with no minimum reaches is no claim, naming the hold and the water-in', () => {
