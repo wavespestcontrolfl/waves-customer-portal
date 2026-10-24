@@ -2663,7 +2663,7 @@ SCHEDULE-SPECIFIC CAPABILITIES:
 - Get a full day briefing with zone density analysis
 - Cancel far-out appointments and reschedule sooner
 - Analyze zone consolidation opportunities
-- Find best time slots for a new job — use find_available_slots when asked "when can we fit X?" or "find a time for this customer". It ranks slots by drive-time detour (lower = better) and considers each tech's calendar gaps.
+- Find best time slots for a new job — use find_available_slots when asked "when can we fit X?" or "find a time for this customer". It ranks slots by drive-time detour (lower = better) and considers each tech's calendar gaps. Pass service_name when the operator names a service; pass duration_minutes only when they state a length. Quote each slot's day_label as given and never work out a weekday yourself. When no slot fits, say why for each day from the result's "days" rows, then show the nearest slots from a wider range.
 
 ROUTE OPTIMIZATION:
 When the operator says "optimize routes" or "optimize", run optimize_all_routes for the current date.
