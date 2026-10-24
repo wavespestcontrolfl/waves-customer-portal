@@ -2397,6 +2397,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // The found-codes bell (owner ruling 2026-10-24): one standing admin row for
+  // the codes waiting on Customers → Gate codes, 90 seconds after each sweep
+  // tick so a code the sweep just filed is listed. It rings when a code joins,
+  // refreshes quietly when one leaves and closes itself when none wait. Dark
+  // behind GATE_ACCESS_CODES_FOUND_BELL, read at each tick. No cron lease: the
+  // sync holds the row's own advisory lock in one transaction (one pooled
+  // connection). Logs the outcome and count only, never a code.
+  cron.schedule('30 4,9,14,19,24,29,34,39,44,49,54,59 * * * *', async () => {
+    try {
+      if (!require('../config/feature-gates').accessCodesFoundBellLive()) return;
+      const result = await require('./access-code-found-bell').syncFoundCodesBell();
+      if (!['unchanged', 'clear'].includes(result?.outcome)) logger.info(`[access-codes] found bell: ${result?.outcome} (${result?.count ?? 0})`);
+    } catch (err) {
+      logger.error(`[access-codes] found bell failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 */5 * * * *', async () => {
     if (require('./reschedule-link-promises').mode() === 'off') return;
