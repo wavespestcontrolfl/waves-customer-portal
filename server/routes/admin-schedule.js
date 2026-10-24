@@ -14983,10 +14983,13 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             priceGuardRow._plannedInserts = await plannedInsertCandidates(trx, priceGuardRow);
           }
           // A save whose whole price change is a misting refill on an annual-prepay-covered visit is judged without that coverage.
-          if (priceGuardRow && await refillOnlyPriceChange(trx, req.params.id, { row: priceGuardRow, updates, replaceAddons })) {
-            Object.assign(priceGuardRow, withoutAnnualPrepayCoverage(priceGuardRow));
-          }
-          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
+          // Its live invoice, card hold and hand prepayment still block; only the annual coverage (the stamped
+          // columns and the secure-prepay term rediscovery) is set aside, since the refill is owed on top of it.
+          const refillOnly = priceGuardRow
+            && await refillOnlyPriceChange(trx, req.params.id, { row: priceGuardRow, updates, replaceAddons });
+          const covered = refillOnly
+            ? await findBillingCoveredVisits(trx, [withoutAnnualPrepayCoverage(priceGuardRow)], { liveInvoice: true, securePrepay: false })
+            : await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
             : await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id);
           if (covered.size > 0 || estimateReason) {

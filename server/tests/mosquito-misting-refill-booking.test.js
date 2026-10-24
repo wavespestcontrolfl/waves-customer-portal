@@ -503,7 +503,7 @@ describe('annual prepay path: a refill on a covered occurrence is the add-on owe
     const exempt = src.indexOf('await refillOnlyPriceChange(trx, req.params.id, { row: priceGuardRow, updates, replaceAddons })');
     const judged = src.indexOf('findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true })');
     expect(exempt).toBeGreaterThan(-1);
-    expect(src).toContain('Object.assign(priceGuardRow, withoutAnnualPrepayCoverage(priceGuardRow));');
+    expect(src).toContain('[withoutAnnualPrepayCoverage(priceGuardRow)], { liveInvoice: true, securePrepay: false }');
     expect(exempt).toBeLessThan(judged);
   });
 });
