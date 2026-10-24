@@ -252,15 +252,22 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 async function loadLatestVisitFindings(record) {
   if (!record?.id || !require('../config/feature-gates').smsPromptB1Live() || !customerSafeVisitNotes(record)) return null;
   try {
-    const rows = await db('service_findings').where({ service_record_id: record.id }).orderBy('created_at').limit(5)
+    // the provenance rule runs in SQL, before the cap, so title-only rows cannot use up the five
+    const rows = await db('service_findings').where({ service_record_id: record.id })
+      .whereRaw("(btrim(COALESCE(detail, '')) <> '' OR btrim(COALESCE(recommendation, '')) <> '')")
+      .orderBy('created_at').limit(5)
       .select('title', 'detail', 'recommendation', 'severity', 'category');
+    // PROVENANCE, not category (the customer report's own rule, ServiceReportDocument.jsx; voice-agent/relay-visit.js applies the same one):
+    // findings synthesized from RAW technician notes are inserted title-only, so a bare title is never shown. Only a row carrying
+    // structured detail or recommendation came from the findings pipeline (owner ruling 2026-07-16: internal notes never reach a prompt).
+    // The SQL above already enforces it; the check here keeps the rule if a redaction empties a field.
     const findings = rows.map((r) => ({
       title: redactAccessCodes(r.title) || null,
       detail: redactAccessCodes(r.detail) || null,
       recommendation: redactAccessCodes(r.recommendation) || null,
       severity: r.severity || null,
       category: r.category || null,
-    })).filter((f) => f.title);
+    })).filter((f) => f.title && (String(f.detail || '').trim() || String(f.recommendation || '').trim()));
     return findings.length ? findings : null;
   } catch (err) {
     logger.warn(`[context-aggregator] latest visit findings read failed: ${err.code || err.name || 'error'}`);
