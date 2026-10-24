@@ -5860,6 +5860,16 @@ function pestReportVoiceLive() {
   return process.env.GATE_PEST_REPORT_VOICE === 'true';
 }
 
+// GATE_PEST_QUIET_VISIT read at CALL time — strict `=== 'true'`, dark in
+// every environment. On (with GATE_REPORT_WRITER_RULES and
+// GATE_PEST_REPORT_VOICE), the one-voice pest writer gets pest_report_voice_v2:
+// a quiet visit opens on what we saw and where we worked, never on what the
+// customer did not say, and the route stops sending its empty "None" input
+// lines and the sheet's customer-home setting. Off, v1 is byte-identical.
+function pestQuietVisitLive() {
+  return process.env.GATE_PEST_QUIET_VISIT === 'true';
+}
+
 // GATE_COMPLETION_TEXT_PLAIN read at CALL time — off unless exactly 'true'.
 // On, the completion recap text (server/services/completion-recap.js) makes
 // no AI call for a completed visit with nothing visit-specific recorded and
@@ -7424,6 +7434,7 @@ module.exports.seriesMoveSkipClosedDaysLive = seriesMoveSkipClosedDaysLive;
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
 module.exports.pestReportVoiceLive = pestReportVoiceLive;
+module.exports.pestQuietVisitLive = pestQuietVisitLive;
 module.exports.completionTextPlainLive = completionTextPlainLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;

@@ -212,6 +212,16 @@ function writerRulesInScope(serviceType, context = {}) {
   return resolveDedicatedWriter(serviceType, context) === 'pest';
 }
 
+// Whether selectReportCopyPrompt serves the one-voice pest prompt
+// (GATE_PEST_REPORT_VOICE) for this context. The generate route trims its
+// pest inputs for GATE_PEST_QUIET_VISIT only then, so both read this.
+function pestVoiceServes(serviceType, context = {}) {
+  return context.writerRules === true && context.pestVoice === true
+    && writerRulesInScope(serviceType, context)
+    && !selectRemainingServicePrompt(context, 'main')
+    && resolveDedicatedWriter(serviceType, context) === 'pest';
+}
+
 function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   // Keep shared safety/provenance, without the old style rules and examples
   // that demanded variation or supplied unsupported recovery timelines.
@@ -237,8 +247,9 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   const reservice = context.isCallback === true || context.serviceKey === 'pest_re_service';
   // GATE_PEST_REPORT_VOICE (pest-report-voice.js): under the writer rules the
   // recurring pest writer gets one prompt in one voice in place of the
-  // stacked blocks below. Inputs and output screens stay the same.
-  if (writerRules && writer === 'pest' && context.pestVoice === true) return pestReportVoicePrompt({ reservice });
+  // stacked blocks below. Output screens stay the same. GATE_PEST_QUIET_VISIT
+  // picks its v2, and the route then trims its empty inputs (pestVoiceServes).
+  if (pestVoiceServes(serviceType, context)) return pestReportVoicePrompt({ reservice, quietVisit: context.pestQuietVisit === true });
   // Under the writer rules a pest re-service gets the remaining-service
   // callback modifier, which the pest writer never received.
   const callback = writerRules && writer === 'pest' && reservice
@@ -251,4 +262,5 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
 
 module.exports = {
   LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, LAWN_RESULT_TIMING_RULE, selectReportCopyPrompt, writerRulesInScope,
+  pestVoiceServes,
 };
