@@ -37,12 +37,12 @@ postgres('reply outcome signals', () => {
   const sweep = (extra = {}) => outcomes.sweepReplyOutcomes({ now: NOW, limit: 5000, lookbackDays: 10, ...extra });
   const rowFor = (replyId) => trx('sms_reply_outcomes').where({ reply_sms_log_id: replyId }).first();
 
-  const text = async (body, { at, direction = 'inbound', type, status, metadata = null, from = phone, customerId = null } = {}) => {
+  const text = async (body, { at, direction = 'inbound', type, status, metadata = null, from = phone, customerId = null, line = OUR_NUMBER } = {}) => {
     const id = randomUUID();
     await trx('sms_log').insert({
       id, customer_id: customerId, direction,
-      from_phone: direction === 'inbound' ? from : OUR_NUMBER,
-      to_phone: direction === 'inbound' ? OUR_NUMBER : from,
+      from_phone: direction === 'inbound' ? from : line,
+      to_phone: direction === 'inbound' ? line : from,
       message_body: body, created_at: at,
       status: status || (direction === 'inbound' ? 'received' : 'sent'),
       message_type: type || (direction === 'inbound' ? 'inbound' : 'manual'),
@@ -164,6 +164,28 @@ postgres('reply outcome signals', () => {
     expect(await rowFor(replyId)).toMatchObject({ silent: false, positive_close: false, confused: false, first_inbound_seconds: 60 * 18 * 60 });
     expect(await rowFor(replyId)).toHaveProperty('first_inbound_at');
     expect((await rowFor(replyId)).first_inbound_at).not.toBeNull();
+  });
+
+  test('tech and internal lines are staff talk: not replies, not a follow-up, not a call back', async () => {
+    const techLine = numbers.fieldTech[0].number;
+    // A staff exchange on the tech line (stored as an office line when GATE_TECH_LINES is off, or tagged tech_line).
+    await text('Gate code for the next stop?', { at: after(-10), line: techLine, metadata: { source: 'location' } });
+    const staffReply = await text('Code is 1234', { at: REPLY_AT, direction: 'outbound', line: techLine });
+    const taggedAsk = await text('Running late?', { at: after(-10), metadata: { source: 'tech_line' } });
+    const taggedReply = await text('On my way', { at: REPLY_AT, direction: 'outbound', metadata: { source: 'tech_line' } });
+    await sweep();
+    for (const id of [staffReply, taggedReply]) expect(await rowFor(id)).toBeUndefined();
+    expect(taggedAsk).toBeTruthy();
+
+    // A customer reply on an office line ignores a "huh?" the same person texted to the tech line.
+    phone = `+1${ten.slice(0, 6)}${Number(ten.slice(6)) + 500}`;
+    const replyId = await askAndReply();
+    await text('huh?', { at: after(5), line: techLine, metadata: { source: 'location' } });
+    await text('Thanks!', { at: after(7), line: techLine, metadata: { source: 'tech_line' } });
+    await call({ minutes: 20 });
+    await trx('call_log').where({ from_phone: phone }).update({ to_phone: techLine });
+    await sweep();
+    expect(await rowFor(replyId)).toMatchObject({ confused: false, positive_close: false, called_back: false, silent: true });
   });
 
   test('call back: an inbound call within an hour counts; later, outbound and foreign-number calls do not', async () => {

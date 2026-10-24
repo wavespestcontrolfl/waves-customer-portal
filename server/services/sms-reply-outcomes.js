@@ -40,6 +40,7 @@ const logger = require('./logger');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { detectSmsOptCommand } = require('./messaging/opt-out-detector');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { internalLineDigits, SKIP_SOURCES } = require('./sms-lead-extraction');
 const { isCourtesyOnly, isSmsReaction, isAffirmativeSmsReaction } = require('./sms-intent');
 
 const CONFUSION_WINDOW_MINUTES = 30;
@@ -127,6 +128,16 @@ function whereSamePhone(query, column, phone) {
     );
 }
 
+// Staff talk on a tech or internal line is not a customer exchange. The lines are matched by
+// source AND by number, because with GATE_TECH_LINES off a tech line's texts are stored as an
+// ordinary location (sms-lead-extraction.js). `lineColumn` is OUR number on the row: from_phone
+// on an outbound, to_phone on an inbound.
+function whereCustomerLine(query, lineColumn, metadataColumn = 'metadata') {
+  return query
+    .whereRaw(`COALESCE(${metadataColumn}->>'source', '') <> ALL(?::text[])`, [SKIP_SOURCES])
+    .whereRaw(`${DIGITS_SQL(lineColumn)} <> ALL(?::text[])`, [internalLineDigits()]);
+}
+
 // The draft behind each reply. An auto-send stamps agent_decision_id on the sms_log row. An
 // approved or revised draft passes draft_id only in the send wrapper's metadata, which the
 // provider does not copy onto sms_log, so it is read from the send audit row that holds the
@@ -180,7 +191,7 @@ async function readReplyCandidates({ dbh, now, limit, lookbackDays }) {
   const newest = new Date(now.getTime() - SETTLE_HOURS * 3600 * 1000);
   const oldest = new Date(now.getTime() - lookbackDays * 86400 * 1000);
   const toDigits = DIGITS_SQL('s.to_phone');
-  return excludeUnresolvedSendReservations(dbh('sms_log as s'), 's')
+  return whereCustomerLine(excludeUnresolvedSendReservations(dbh('sms_log as s'), 's'), 's.from_phone', 's.metadata')
     .where('s.direction', 'outbound')
     .whereIn('s.message_type', REPLY_TYPES)
     .whereIn('s.status', SENT_STATUSES)
@@ -205,7 +216,7 @@ async function readAnsweredText({ dbh, reply, phone }) {
     .whereIn('message_type', TEXT_TYPES)
     .where('created_at', '>=', since)
     .where('created_at', '<', reply.created_at);
-  return whereSamePhone(query, 'from_phone', phone)
+  return whereSamePhone(whereCustomerLine(query, 'to_phone'), 'from_phone', phone)
     .orderBy('created_at', 'desc')
     .first('id', 'message_body');
 }
@@ -222,7 +233,7 @@ async function readInboundPage({ dbh, reply, phone, windowMs, afterId = null, li
     .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
     .whereRaw("COALESCE(message_type, 'inbound') NOT IN ('help_request', 'opt_in')");
   if (afterId) query.whereRaw('(created_at, id) > ((SELECT created_at FROM sms_log WHERE id = ?), ?)', [afterId, afterId]);
-  return whereSamePhone(query, 'from_phone', phone)
+  return whereSamePhone(whereCustomerLine(query, 'to_phone'), 'from_phone', phone)
     .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .limit(limit)
     .select('id', 'message_type', 'message_body', 'created_at');
@@ -254,7 +265,8 @@ async function readCallBack({ dbh, reply, phone }) {
     .where({ direction: 'inbound' })
     .where('created_at', '>', start)
     .where('created_at', '<=', end);
-  return Boolean(await whereSamePhone(query, 'from_phone', phone).first('id'));
+  return Boolean(await whereSamePhone(query, 'from_phone', phone)
+    .whereRaw(`${DIGITS_SQL('to_phone')} <> ALL(?::text[])`, [internalLineDigits()]).first('id'));
 }
 
 // A tapback ("Liked “…”"): the webhook stores one on a conversational question as an ordinary
