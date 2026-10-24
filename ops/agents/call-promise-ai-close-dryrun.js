@@ -71,7 +71,7 @@ llm.dispatchWithFallback = async (policy, payload, options) => {
 };
 
 const sharedDb = require(server('models/db'));
-const { listCandidates, judgeCandidate, MAX_MODEL_CALLS } = require(server('services/call-promise-ai-close'));
+const { listCandidates, judgeCandidate, MAX_MODEL_CALLS, CANDIDATE_LIMIT } = require(server('services/call-promise-ai-close'));
 
 async function assertReadOnly(db) {
   let rejected = false;
@@ -117,7 +117,14 @@ async function main() {
      WHERE cc.party = 'waves' AND cc.status = 'open'
        AND NOT (cc.human_state IS NULL AND cc.source = 'ai' AND cc.last_seen_generation IS NOT NULL
          AND cc.last_seen_generation < (SELECT MAX(l.last_seen_generation) FROM call_commitments l WHERE l.call_log_id = cc.call_log_id))`)).rows;
-  const rows = await listCandidates(sharedDb);
+  // Every page, as the live job walks them (200 a page, oldest first).
+  const rows = [];
+  for (let cursor = null; ;) {
+    const page = await listCandidates(sharedDb, { cursor });
+    rows.push(...page);
+    if (page.length < CANDIDATE_LIMIT) break;
+    cursor = { at: page[page.length - 1].cursor_at, id: page[page.length - 1].id };
+  }
   const budget = { left: limit };
   const results = new Array(rows.length);
   // Four at a time: a model call is seconds; the budget is spent synchronously
