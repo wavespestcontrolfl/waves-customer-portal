@@ -1736,7 +1736,7 @@ const TIPS = Object.freeze([
     keywords: ['ants', 'spray', 'trail', 'colony', 'budding', 'raid'], lines: ['pest'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-nr-spray-splits-colony', label: 'PubMed', url: 'https://pubmed.ncbi.nlm.nih.gov/40834271/' }],
-    copy: "Ant sprays can backfire. A study found pyrethroid-based sprays raised the chance of an ant colony budding, splitting off new nests. If you see a trail between visits, wipe it up and tell me instead of spraying it.",
+    copy: "A study found that pyrethroid-based ant sprays, at a low application rate, raised the chance of a colony budding, splitting off new nests. If you see a trail between visits, tell me.",
   },
   {
     id: 'tl_fdacs_diy', group: 'termite', label: 'What Florida recommends for termites',
@@ -1750,7 +1750,7 @@ const TIPS = Object.freeze([
     keywords: ['mosquitoes', 'neighbors', 'containers', 'nearby', 'breeding'], lines: ['mosquito'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-mq-few-blocks', label: 'CDC', url: 'https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html' }],
-    copy: "The mosquitoes biting you probably hatched close by. The CDC says these mosquitoes only fly a few blocks in their lifetime, so tipping out water on your own property, and asking the neighbors to do the same, is where the difference gets made.",
+    copy: "The mosquitoes biting you probably hatched close by. The CDC says these mosquitoes only fly a few blocks in their lifetime. Tipping out standing water on your own property is the place to start.",
   },
   {
     id: 'mq_daytime_biters', group: 'water', label: 'Bitten in the daytime?',
@@ -1785,7 +1785,7 @@ const TIPS = Object.freeze([
     keywords: ['formosan', 'swarm', 'mud tube', 'colony', 'queen'], lines: ['termite'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-tb-formosan-colony', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN278' }, { fact: 'fact-tip-tb-formosan-colony', label: 'Florida Dept. of Agriculture', url: 'https://www.fdacs.gov/Consumer-Resources/Health-and-Safety/Protect-Your-Home-from-Pests/Termites/Formosan-Termite-Program' }],
-    copy: "Formosan subterranean termites live in underground colonies of several million, UF/IFAS says, and Florida's Department of Agriculture notes a mature queen can lay up to 3,000 eggs a day. A swarm or a new mud tube is worth a call the same day.",
+    copy: "Formosan subterranean termites live in underground colonies of several million, UF/IFAS says, and Florida's Department of Agriculture notes a mature queen can lay up to 3,000 eggs a day. Tell me about any swarm or new mud tube.",
   },
   {
     id: 'gr_egg_case', group: 'roaches', label: 'One roach, 30 to 40 eggs',
