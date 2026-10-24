@@ -346,15 +346,23 @@ async function liveBlogPostsByPath(knex, paths) {
   return found;
 }
 
-// A post titled for one town ("Get Rid Of Fleas In Lakewood Ranch, FL",
-// "Ghost Ants in Sarasota"): never filled in from a tip, since the customer
-// may live in another (owner 2026-10-24, decision 2). The service-area towns,
-// whole-county and straddling, read as "in <town>" or "<town>, FL", so
-// "Palmetto Bugs" or an osprey stays a generic title.
-const TOWNS = [...Object.keys(CITY_COUNTY), 'lakewood ranch', 'longboat key', 'englewood', 'sarasota']
-  .map((town) => town.replace(/\s+/g, '\\s+')).join('|');
-const TOWN_TITLE_RE = new RegExp(`\\b(?:in|near)\\s+(?:${TOWNS})\\b|\\b(?:${TOWNS}),?\\s+(?:fl|florida)\\b`, 'i');
-const isTownTitled = (title) => TOWN_TITLE_RE.test(String(title || ''));
+// A post titled for one place ("Get Rid Of Fleas In Lakewood Ranch, FL",
+// "Sarasota Mosquito Prevention Guide", "Manatee County fertilizer rules"):
+// never filled in from a tip, and never the general post the tip seeder asks
+// for, since the customer may live elsewhere (owner 2026-10-24, decision 2).
+// A service-area town anywhere in the title counts, whole-county or
+// straddling, and so does a county by name. A town that is also an ordinary
+// word ("palmetto bugs", an osprey, laurel wilt, the Myakka River) counts
+// only as a place: "in <town>", "near <town>" or "<town>, FL".
+const TOWN_NAMES = [...Object.keys(CITY_COUNTY), 'lakewood ranch', 'longboat key', 'englewood', 'sarasota'];
+const WORD_TOWNS = new Set(['palmetto', 'osprey', 'laurel', 'myakka']);
+const alternation = (names) => names.map((town) => town.replace(/\s+/g, '\\s+')).join('|');
+const PLAIN_TOWN_RE = new RegExp(`\\b(?:${alternation(TOWN_NAMES.filter((town) => !WORD_TOWNS.has(town)))})\\b`, 'i');
+const PLACED_TOWN_RE = new RegExp(`\\b(?:in|near)\\s+(?:${alternation(TOWN_NAMES)})\\b|\\b(?:${alternation(TOWN_NAMES)}),?\\s+(?:fl|florida)\\b|\\b(?:manatee|sarasota|charlotte)\\s+county\\b`, 'i');
+const isTownTitled = (title) => {
+  const text = String(title || '');
+  return PLAIN_TOWN_RE.test(text) || PLACED_TOWN_RE.test(text);
+};
 
 /**
  * The live hub post each tip names (tip-library `blog.path`), by tip id, for

@@ -1024,9 +1024,16 @@ describe('the post a tip fills in (tips with facts, GATE_TECH_TIP_SOURCES, owner
     expect(knex.calls).toEqual([]);
   });
 
-  test('isTownTitled reads "in <town>" or "<town>, FL" for the service-area towns, and leaves generic titles alone', () => {
-    for (const title of ['Get Rid Of Fleas In Lakewood Ranch, FL', 'Ghost Ants in Sarasota: Identification and Next Steps', 'Termites in Venice, FL', 'North Port, Florida lawn guide']) expect([title, isTownTitled(title)]).toEqual([title, true]);
-    for (const title of ['Palmetto Bugs vs. Cockroaches', 'Osprey Nests and Your Roof', 'How to Get Rid of Mice in Southwest Florida', 'Sarasota County fertilizer rules', '', null]) expect([title, isTownTitled(title)]).toEqual([title, false]);
+  test('isTownTitled: a service-area town anywhere, a county by name, and a town that is also a word only as a place (pre-push P1 on 2c9b6e0664)', () => {
+    for (const title of [
+      'Get Rid Of Fleas In Lakewood Ranch, FL', 'Ghost Ants in Sarasota: Identification and Next Steps', 'Termites in Venice, FL', 'North Port, Florida lawn guide',
+      'Sarasota Mosquito Prevention Guide', 'Why Bradenton Gutters Breed Mosquitoes', 'Port Charlotte Termite Season', 'Sarasota County fertilizer rules',
+      'Manatee County Watering Days', 'Pest Control in Palmetto, FL', 'Termites near Osprey', 'Myakka City Fire Ants',
+    ]) expect([title, isTownTitled(title)]).toEqual([title, true]);
+    for (const title of [
+      'Palmetto Bugs vs. Cockroaches', 'Osprey Nests and Your Roof', 'Laurel Wilt in Avocado Trees', 'Myakka River Mosquitoes After Rain',
+      'How to Get Rid of Mice in Southwest Florida', 'Get Rid of Mosquitoes: Mosquito Control for Southwest Florida Homes', 'Manatees and Lawn Fertilizer', '', null,
+    ]) expect([title, isTownTitled(title)]).toEqual([title, false]);
   });
 });
 
