@@ -734,6 +734,77 @@ async function gateActionVisitIds(conn, visits) {
   return new Set([...visitNeighborhood].filter(([, n]) => active.has(n)).map(([visitId]) => visitId));
 }
 
+// ---- gate location (owner 2026-10-24) ---------------------------------------
+// Where a gate is on the map, as the office pastes it on the Gate codes page:
+// "27.4, -82.5" (also with a space or a slash), or a Google Maps link that
+// carries the point: the !3dlat!4dlng pair of a place link, ?q= / ?query= /
+// ?ll= / destination=lat,lng, and last the …/@lat,lng,17z… viewport centre,
+// which a place link also carries but which is only where the map was
+// looking, not the pin (Codex P2) — so it is the fallback, never preferred.
+// Returns { lat, lng } rounded to six places, or null when no point is found
+// (a shortened maps.app.goo.gl link has none: the office pastes the expanded
+// link or the numbers). A link is read only from a Google host: a pasted
+// non-Maps URL that happens to carry q=lat,lng must not pin a gate. Never a
+// place name: nothing here geocodes.
+const COORD = '(-?\\d{1,3}(?:\\.\\d+)?)';
+const BARE_PAIR = new RegExp(`^${COORD}\\s*[,/\\s]\\s*${COORD}$`);
+const LINK_PATTERNS = [
+  new RegExp(`!3d${COORD}!4d${COORD}`),
+  new RegExp(`[?&](?:q|query|ll|destination|center)=${COORD}(?:,|%2C)${COORD}`, 'i'),
+  new RegExp(`/@${COORD},${COORD}`),
+];
+function googleMapsHost(text) {
+  if (!/^https?:\/\//i.test(text)) return false;
+  try {
+    const host = new URL(text).hostname.toLowerCase();
+    return host === 'google.com' || host.endsWith('.google.com');
+  } catch {
+    return false;
+  }
+}
+function parseGateLocation(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const patterns = googleMapsHost(text) ? LINK_PATTERNS : [BARE_PAIR];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const lat = Number(m[1]);
+    const lng = Number(m[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+    // (0, 0) is the sea off West Africa, never a gate: a link with an empty point.
+    if (lat === 0 && lng === 0) return null;
+    return { lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6 };
+  }
+  return null;
+}
+
+// The point each visit's Directions link routes through before the house,
+// keyed by visit id: the neighborhood's one pinned live entry (the admin
+// route and neighborhood_access_pin_uniq allow one per neighborhood). The
+// pin is the office's, so it is read apart from the code/instruction
+// visibility rule below (Codex P2): an unconfirmed instructions entry the
+// office pinned still routes, while its text stays hidden until confirmed.
+// A switched-off neighborhood routes nothing. No key = the plain address.
+async function neighborhoodGateWaypointsForVisits(conn, visits) {
+  const out = new Map();
+  const visitNeighborhood = await visitNeighborhoodIds(conn, visits);
+  if (!visitNeighborhood.size) return out;
+  const pins = await conn('neighborhood_access')
+    .whereIn('neighborhood_id', [...new Set(visitNeighborhood.values())])
+    .whereIn('neighborhood_id', conn('neighborhoods').where({ active: true }).select('id'))
+    .whereNot('status', 'retired')
+    .whereNotNull('gate_lat').whereNotNull('gate_lng')
+    .select('neighborhood_id', 'gate_lat', 'gate_lng');
+  const byNeighborhood = new Map(pins.map((p) => [p.neighborhood_id, { lat: Number(p.gate_lat), lng: Number(p.gate_lng) }]));
+  for (const [visitId, n] of visitNeighborhood) {
+    const pin = byNeighborhood.get(n);
+    if (pin) out.set(visitId, pin);
+  }
+  return out;
+}
+
 // ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
 // The neighborhood's gate entries for each visit, keyed by visit id, so the
 // office's day feed can show "Gate: …" for a customer with no gate code of
@@ -788,4 +859,6 @@ module.exports = {
   neighborhoodGateEntriesForVisits,
   visitNeighborhoodIds,
   gateActionVisitIds,
+  parseGateLocation,
+  neighborhoodGateWaypointsForVisits,
 };

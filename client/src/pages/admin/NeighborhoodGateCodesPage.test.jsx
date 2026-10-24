@@ -123,7 +123,30 @@ it("Add entry posts a keypad code and shows a server error inline", async () => 
   expect(await screen.findByText("That code is already on file for this neighborhood")).toBeInTheDocument();
   const post = rawAdminFetch.mock.calls.find(([, o]) => o?.method === "POST");
   expect(post[0]).toBe("/admin/neighborhood-access/n1/entries");
-  expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "2468" });
+  expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "2468", gate_location: null });
+});
+
+it("a gate's map point shows on its row, prefills Edit, and travels on Add as gate_location", async () => {
+  // Owner 2026-10-24: the office pins the main gate once; every visit's
+  // Directions link in the neighborhood then routes through it.
+  const pinned = { total: 1, neighborhoods: [{ id: "n1", name: "Synthetic Oaks", county: "Manatee", propertyCount: 3, hasConflict: false,
+    entries: [entry({ gateLocation: { lat: 27.4321, lng: -82.4567 } })] }] };
+  rawAdminFetch.mockImplementation((path, options) => (options?.method ? response({ id: "e1" }) : response(pinned)));
+  renderPage();
+  await screen.findByText("Synthetic Oaks");
+  expect(screen.getByText(/Directions route through this gate/)).toBeInTheDocument();
+  const pin = screen.getByRole("link", { name: "27.4321, -82.4567" });
+  expect(pin.getAttribute("href")).toBe("https://www.google.com/maps/search/?api=1&query=27.4321%2C-82.4567");
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  expect(screen.getByLabelText("Gate location")).toHaveValue("27.4321, -82.4567");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add entry" }));
+  fireEvent.change(screen.getByLabelText("Code"), { target: { value: "2468" } });
+  fireEvent.change(screen.getByLabelText("Gate location"), { target: { value: " https://www.google.com/maps/@27.5,-82.6,17z " } });
+  fireEvent.click(screen.getByRole("button", { name: "Save entry" }));
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([, o]) => o?.method === "POST")).toBe(true));
+  const post = rawAdminFetch.mock.calls.find(([, o]) => o?.method === "POST");
+  expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "2468", gate_location: "https://www.google.com/maps/@27.5,-82.6,17z" });
 });
 
 it("shows the not-turned-on state when the API answers 404 enabled:false", async () => {

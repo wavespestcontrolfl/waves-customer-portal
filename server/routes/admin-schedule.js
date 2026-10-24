@@ -6448,6 +6448,10 @@ router.get('/', async (req, res, next) => {
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
+    // The neighborhood's pinned gate per visit (owner 2026-10-24): the
+    // Directions link routes through it before the house. Only visits with
+    // a pin have a key, so every other row is byte-identical to before.
+    let gateWaypointByVisit = new Map();
     // Visits whose stop is in an active neighborhood, when a visit's assigned
     // technician may add a gate code or mark one wrong
     // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
@@ -6457,6 +6461,7 @@ router.get('/', async (req, res, next) => {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
         const neighborhoodAccess = require('../services/neighborhood-access');
         neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+        gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
         if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
       }
     } catch (err) {
@@ -6933,6 +6938,7 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,
@@ -7063,21 +7069,28 @@ router.get('/', async (req, res, next) => {
     // helper's deadline regardless of zone count, and any NWS failure or
     // deadline leaves rainChance null / zoneRain values null (Codex
     // 2026-07-20: decorative weather must never hold the payload).
+    // The per-zone HOURLY outlook rides the same wave and stamps each row's
+    // rainAtStop (chance at its window-start hour in its zone) for the day
+    // list card — bounded the same way, null when the forecast is late.
     let rainChance = null;
     let zoneRain;
+    const { attachStopRain, zoneHourlyOutlooks } = require('../services/scheduling/stop-rain');
+    attachStopRain(enriched, date, {});
     try {
       const zonesPresent = [...new Set(enriched.map((s) => s.zone))].filter((z) => ZONE_COORDS[z]);
-      const [outlook, ...perZone] = await Promise.all([
+      const [outlook, perZone, hourlyByZone] = await Promise.all([
         rainOutlookPromise,
-        ...zonesPresent.map(async (z) => {
+        Promise.all(zonesPresent.map(async (z) => {
           const zoneOutlook = await getDailyRainOutlookBounded(ZONE_COORDS[z].lat, ZONE_COORDS[z].lng).catch(() => null);
           const chance = zoneOutlook?.[date]?.rainChance;
           return [z, Number.isFinite(chance) ? chance : null];
-        }),
+        })),
+        zoneHourlyOutlooks(zonesPresent, ZONE_COORDS).catch(() => ({})),
       ]);
       const officeChance = outlook?.[date]?.rainChance;
       rainChance = Number.isFinite(officeChance) ? officeChance : null;
       if (perZone.length > 0) zoneRain = Object.fromEntries(perZone);
+      attachStopRain(enriched, date, hourlyByZone);
     } catch { /* rain outlook is optional */ }
 
     res.json({

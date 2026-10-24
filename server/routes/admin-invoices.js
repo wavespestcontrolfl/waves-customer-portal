@@ -19,7 +19,7 @@ const { generateInvoiceSummary, generateThankYouMessage } = require('../services
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+const { technicianServicesCustomer, isTechnicianRequest } = require('../services/technician-visit-scope');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: the invoice workspace is owner-only, with ONE
@@ -610,6 +610,19 @@ router.get('/customers/search', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /customers/:customerId/properties — the saved properties a line item may
+// name on a multi-property invoice (owner 2026-10-24: no gate). Customer-facing-
+// safe columns only; the editor shows its picker only with 2+ properties.
+router.get('/customers/:customerId/properties', requireAdmin, async (req, res, next) => {
+  try {
+    const properties = await db('customer_properties')
+      .where({ customer_id: req.params.customerId, active: true })
+      .select('id', 'label', 'is_primary', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+      .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
+    res.json({ properties });
+  } catch (err) { next(err); }
+});
+
 // GET /service-records/:customerId — get recent services for a customer (to link invoice)
 router.get('/service-records/:customerId', async (req, res, next) => {
   try {
@@ -916,6 +929,13 @@ router.get('/:id', async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Not found' });
     if (!(await technicianServicesCustomer(req, invoice.customer_id))) {
       return res.status(404).json({ error: 'Not found' });
+    }
+    // A technician is authorised per customer by an assignment at ONE
+    // property: a multi-property invoice's frozen line addresses would name
+    // the customer's other homes, so they are dropped (money fields kept),
+    // like accountProperties on the technician Customer 360 payload.
+    if (isTechnicianRequest(req)) {
+      invoice.line_items = require('../services/invoice-property-lines').techSafeInvoiceLineItems(invoice.line_items);
     }
     // Coverage-service suggestion for the annual-prepay modal (real recurring
     // service, not the invoice title). Modal-only; safe to attach for all GETs.

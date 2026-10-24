@@ -274,7 +274,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.completionChoicesEnabled).toBe(false);
     expect(res.body.line).toBe('mosquito');
     expect(res.body.season).toBe('wet');
-    expect(res.body.groups.flatMap((g) => g.tips).map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes('mosquito') && !tip.services).map((tip) => tip.id).sort());
+    expect(res.body.groups.flatMap((g) => g.tips).map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes('mosquito') && !tip.services && !tip.sourcedOnly).map((tip) => tip.id).sort());
     expect(res.body.groups[0].primary).toBe(true);
     // newest send wins per id
     expect(res.body.lastSent).toEqual({ water_bromeliads: '2026-08-03', light_warm_bulbs: '2026-07-01' });

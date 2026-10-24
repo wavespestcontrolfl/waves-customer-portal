@@ -58,15 +58,23 @@
  * 2026-10-24): `yard: { grass: [...], irrigation: 'system', county: [...],
  * city: [...] }` and `showMonths: [1-12]`. The picker leaves a tip out when
  * the yard does not match (yardMatches) or the visit falls outside its
- * months. Grass, county and city need a known fact (fail closed); an
- * irrigation tip hides only where the yard is known to have no system. With
- * the gate off, nothing is filtered.
+ * months. Grass, county, city and water source (`water: 'reclaimed'`) need
+ * a known fact (fail closed); an irrigation tip hides only where the yard is
+ * known to have no system. With the gate off, nothing is filtered.
+ *
+ * A tip written for this feature (`sourcedOnly`, owner 2026-10-24, part 4)
+ * exists only behind the gate: with it off, the picker never lists it and
+ * the freeze drops it, so its words reach no report until the gate flips.
+ * Its `copy` is the sourced text.
  *
  * A tip may name its Waves post, `blog: { path: '/{category}/{slug}/' }`
  * (owner 2026-10-24, decisions 2 and 6): behind the same gate the office
  * form fills an empty blog slot with it when the tip is picked, if the post
  * is live on the hub and not titled for one town (report-blog-post
- * tipBlogPosts). Only a post that covers the tip's subject is named.
+ * tipBlogPosts). Only a post that covers the tip's subject is named. A tip
+ * whose subject no such post covers may carry `blog: { topic }` instead: the
+ * phrase a new post would be written from, queued by an operator's hand-pick
+ * (tech-tip-blog-seeder, decision 3).
  *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
@@ -263,6 +271,7 @@ const TIPS = Object.freeze([
   {
     id: 'moisture_ac_drip', group: 'moisture', label: 'A/C condensate line',
     pests: ['Ants', 'Roaches'], keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest'], season: 'all',
+    blog: { topic: 'ac drain line and ants' },
     sources: [{ fact: 'fact-tip-moisture-ac-drip', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
     sourcedCopy: "Where the A/C condensate line drips, the soil against the slab never dries, and ants and roaches follow that moisture to the foundation. UF/IFAS gives the same advice for termites: point condensate lines away from the house. A short extension into the bed lets that strip dry out.",
     copy: "Your A/C condensate line runs all summer, and where it drips the soil against the slab never dries. Ants and roaches follow that moisture gradient straight to the foundation. If the line ends at the wall, a short extension that carries it a couple of feet into the bed makes that strip dry again.",
@@ -275,6 +284,7 @@ const TIPS = Object.freeze([
   {
     id: 'moisture_bath_fan', group: 'moisture', label: 'Bath fan until the mirror clears',
     pests: ['Roaches'], keywords: ['bathroom', 'humidity', 'fan', 'roach'], lines: ['pest'], season: 'all',
+    blog: { topic: 'bathroom humidity and pests' },
     copy: "Humidity trapped in a closed bathroom keeps the baseboards and cabinet kicks damp. German roaches need that humidity more than they need food, so run the fan after every shower until the mirror clears — that drops the room below what they can live on.",
   },
   {
@@ -314,6 +324,7 @@ const TIPS = Object.freeze([
   {
     id: 'ext_shrub_clearance', group: 'exterior', label: "A hand's width off the wall",
     namesWork: true, keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
+    blog: { topic: 'shrubs touching the house and pests' },
     sources: [{ fact: 'fact-tip-limbs-highway-roof-rats', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1397' }],
     sourcedCopy: "Branches touching the house are a bridge over the treated band along the foundation. UF/IFAS calls limbs that touch the house a highway for rodents, and ants and roaches use it too, so the treatment never touches them. Trim to a hand's width of daylight between plant and wall.",
     copy: "Branches touching the house are a bridge over the treated band along the foundation — ants and roaches walk the branch, not the ground, and the treatment never touches them. Trim to a hand's width of daylight between plant and wall and the bridge is closed.",
@@ -321,6 +332,7 @@ const TIPS = Object.freeze([
   {
     id: 'ext_mulch_gap', group: 'exterior', label: 'Pull mulch back from the slab',
     keywords: ['mulch', 'foundation', 'slab', 'termite', 'bed'], lines: ['pest', 'termite'], season: 'all',
+    blog: { topic: 'mulch against the foundation and termites' },
     sources: [{ fact: 'fact-tip-ext-mulch-gap', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN651' }],
     sourcedCopy: "Mulch piled against the block holds moisture and hides the base of the wall. UF/IFAS advises keeping about a 6-inch inspection space there and a mulch layer under 2 inches thick within a foot of the foundation, so termites lose a covered route up the wall.",
     copy: "Mulch piled against the block holds moisture and hides the base of the wall where I need to see. Pull it back a few inches and keep it below the top of the slab — that strip dries out, and termites lose a covered route up the wall.",
@@ -338,6 +350,7 @@ const TIPS = Object.freeze([
   {
     id: 'ext_palm_roof', group: 'exterior', label: 'Palm fronds off the roof',
     pests: ['Ants', 'Roaches'], keywords: ['palm', 'fronds', 'roof', 'rats', 'branches'], lines: ['rodent', 'pest', 'tree_shrub'], season: 'all',
+    blog: { topic: 'palm fronds touching the roof and rats' },
     sources: [{ fact: 'fact-tip-limbs-highway-roof-rats', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1397' }],
     sourcedCopy: "Fronds and branches touching the roofline are a highway, UF/IFAS says, and a roof rat can jump about three feet straight up and more than four feet across. Several feet of clearance is exclusion without a single trap, and ants and roaches lose the same route into the soffit.",
     copy: "Fronds and branches touching the roofline are a highway. Roof rats climb better than they burrow, and ants and roaches use the same route into the soffit. A few feet of clearance is exclusion without a single trap.",
@@ -376,6 +389,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_gutters', group: 'water', label: 'Keep gutters draining',
     keywords: ['gutters', 'downspout', 'roof', 'storm'], lines: ['mosquito', 'pest'], season: 'wet',
+    blog: { topic: 'clogged gutters and mosquitoes' },
     sources: [{ fact: 'fact-tip-water-gutters', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1045' }],
     sourcedCopy: "A clogged gutter holds water for days after a storm, a nursery right above the entry, and cleaning out eaves and gutters is the first item on UF/IFAS's mosquito control list for homeowners. Downspouts should carry water a few feet from the foundation, not dump it at the slab.",
     copy: "A clogged gutter holds water for days after a storm — a nursery right above the entry. Downspouts should carry water a few feet from the foundation, not dump it at the slab.",
@@ -383,6 +397,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_lanai_drains', group: 'water', label: 'Flush lanai and patio drains',
     keywords: ['drain', 'lanai', 'patio', 'catch basin'], lines: ['mosquito'], season: 'wet',
+    blog: { topic: 'mosquitoes breeding in patio drains' },
     sources: [{ fact: 'fact-tip-water-lanai-drains', label: 'CDC', url: 'https://www.cdc.gov/mosquitoes/about/life-cycle-of-culex-mosquitoes.html' }],
     sourcedCopy: "Floor drains and catch basins on the lanai hold a few inches of still water between rains. The CDC says a Culex mosquito lays a raft of 100 to 300 eggs on still water like that, and an egg becomes an adult in 7 to 10 days. A bucket of water down each one weekly flushes the larvae before then.",
     copy: "Floor drains and catch basins on the lanai hold a few inches of still water between rains. A bucket of water down each one weekly flushes the larvae before they mature.",
@@ -390,6 +405,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_floor_mats', group: 'water', label: 'Flip floor mats after rain',
     pests: ['Roaches', 'Earwigs'], keywords: ['mat', 'door mat', 'rug', 'rubber', 'lanai', 'water'], lines: ['mosquito', 'pest'], season: 'wet',
+    blog: { topic: 'standing water under outdoor mats' },
     copy: "Rubber-backed door mats and lanai floor mats hold a surprising amount of water underneath — enough for mosquitos to breed in, and a cool damp shelter for roaches and earwigs right at the threshold. After a rain, flip them or hang them on the rail until they're dry.",
   },
 
@@ -397,6 +413,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_pet_bowls', group: 'kitchen', label: 'Pet bowls up overnight',
     pests: ['Ants'], keywords: ['pet', 'dog', 'cat', 'bowl', 'food', 'ants'], lines: ['pest'], season: 'all',
+    blog: { topic: 'pet food bowls and ants' },
     sources: [{ fact: 'fact-tip-interior-pet-bowls', label: 'EPA', url: 'https://www.epa.gov/safepestcontrol/dos-and-donts-pest-control' }],
     sourcedCopy: "A bowl left down is an open food and water source all night, and it's the most common thing I trace an ant trail back to. The EPA's pest-control advice says not to leave pet food and water out overnight. Up at bedtime, down at breakfast.",
     copy: "A bowl left down is an open food and water source all night, and it's the most common thing I trace an ant trail back to. Up at bedtime, down at breakfast.",
@@ -404,6 +421,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_trash_night', group: 'kitchen', label: 'Kitchen trash out at night',
     pests: ['Ants', 'Roaches'], keywords: ['trash', 'garbage', 'can', 'roach'], lines: ['pest'], season: 'all',
+    blog: { topic: 'kitchen trash and cockroaches' },
     copy: "Roaches and ants forage overnight. An empty can gives them nothing on the shift they're actually working — the difference shows in a week.",
   },
   {
@@ -417,6 +435,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_range_grease', group: 'kitchen', label: 'Degrease behind the range',
     pests: ['Roaches'], keywords: ['stove', 'range', 'grease', 'oven', 'german roach'], lines: ['pest'], season: 'all',
+    blog: { topic: 'grease behind the stove and cockroaches' },
     sources: [{ fact: 'fact-tip-german-cockroach-sanitation', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1190' }],
     sourcedCopy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own, which is why UF/IFAS puts sanitation beside treatment in its German cockroach program. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
     copy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
@@ -424,6 +443,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_cardboard', group: 'kitchen', label: 'Cardboard boxes to plastic bins',
     pests: ['Roaches', 'Silverfish'], keywords: ['cardboard', 'boxes', 'garage', 'closet', 'storage'], lines: ['pest'], season: 'all',
+    blog: { topic: 'cardboard boxes and cockroaches' },
     copy: "Corrugated cardboard is roach harborage — they feed on the glue and lay egg cases in the flutes. Boxes in the garage and closets do better as plastic bins with lids, and a move-in is when it matters most.",
   },
 
@@ -450,6 +470,7 @@ const TIPS = Object.freeze([
   {
     id: 'seal_soffit_vents', group: 'sealing', label: 'Check soffit and gable vents',
     keywords: ['soffit', 'gable', 'attic', 'vent', 'screen', 'rats'], lines: ['rodent'], season: 'all',
+    blog: { topic: 'roof rats getting in through attic vents' },
     copy: "Roof rats come in through soffit gaps and torn gable-vent screens far more often than through the ground floor. Quarter-inch hardware cloth over the vent keeps the airflow and closes the route.",
   },
 
@@ -457,11 +478,13 @@ const TIPS = Object.freeze([
   {
     id: 'rodent_bird_feeders', group: 'rodent', label: 'Move bird feeders off the house',
     keywords: ['bird', 'feeder', 'seed', 'rats'], lines: ['rodent'], season: 'all',
+    blog: { topic: 'bird feeders and rats' },
     copy: "Spilled seed under a feeder is the most reliable rat and mouse food source in a yard. Move the feeder well away from the house, add a catch tray, and sweep under it — or take it down for a few weeks while we work.",
   },
   {
     id: 'rodent_fallen_fruit', group: 'rodent', label: 'Pick up fallen fruit',
     keywords: ['fruit', 'citrus', 'mango', 'avocado', 'rats'], lines: ['rodent'], season: 'all',
+    blog: { topic: 'fallen fruit and roof rats' },
     copy: "Fallen citrus, mango, and avocado are a roof rat's favorite food, and a tree in season will hold a population by itself. Picking up drops every couple of days takes that food away.",
   },
   {
@@ -474,6 +497,7 @@ const TIPS = Object.freeze([
   {
     id: 'termite_wood_soil', group: 'termite', label: 'Break wood-to-soil contact',
     keywords: ['fence', 'post', 'deck', 'trellis', 'soil', 'termite'], lines: ['termite'], season: 'all',
+    blog: { topic: 'wood touching soil and termites' },
     sources: [{ fact: 'fact-tip-termite-wood-soil', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
     sourcedCopy: "Fence posts, deck supports and trellises sitting in soil are a subterranean termite's easiest route into wood, and removing wood-to-ground contact is the first step UF/IFAS lists for keeping them out. A concrete or metal footing breaks that contact.",
     copy: "Fence posts, deck supports, and trellises in direct contact with soil are a subterranean termite's easiest route into wood. Where you can, a concrete or metal footing breaks that contact and puts the wood back where I can inspect it.",
@@ -481,6 +505,7 @@ const TIPS = Object.freeze([
   {
     id: 'termite_slab_edge', group: 'termite', label: 'Keep the slab edge visible',
     keywords: ['slab', 'grade', 'soil', 'stucco', 'mud tube'], lines: ['termite'], season: 'all',
+    blog: { topic: 'termite mud tubes on the slab edge' },
     sources: [{ fact: 'fact-tip-termite-slab-edge', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
     sourcedCopy: "Soil or mulch above the slab covers the inspection gap and lets termites tube into the wall unseen. UF/IFAS calls for at least 6 inches between the soil or mulch line and the bottom of the siding. A visible slab edge is your early warning: a mud tube there is easy to spot.",
     copy: "Soil or mulch above the top of the slab covers the inspection gap and lets termites tube straight into the wall unseen. Keeping a few inches of slab edge visible all the way around is your early warning — a mud tube there is easy to spot.",
@@ -880,6 +905,7 @@ const TIPS = Object.freeze([
     id: 'flea_shady_spots', group: 'fleas', label: "Open up where pets rest outside",
     pests: ['Fleas'], keywords: ["yard", "shade", "deck", "fence", "dog run"], lines: ["pest"], season: 'all',
     services: ["flea_tick"],
+    blog: { topic: 'fleas in shady spots where pets rest' },
     sources: [{ fact: 'fact-tip-flea-shady-spots', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN137' }],
     sourcedCopy: "Outside, fleas develop in shady, sheltered spots where pets lie down. UF/IFAS puts the larvae where they're protected from rain, irrigation and sun, at humidity of at least 75% and 70 to 90 degrees. Keeping those spots raked and open to the sun takes that away.",
     copy: "Outside, fleas develop in the shady, sheltered spots where pets lie down: under decks, along fences, beneath shrubs. Keeping those spots raked and open to the sun makes them a poor place for fleas to grow.",
@@ -1457,6 +1483,355 @@ const TIPS = Object.freeze([
     sourcedCopy: "String trimmer nicks at the base of a young tree or shrub add up. UF/IFAS says a ring of mulch, kept about 12 inches back from the trunk, cuts down damage from mowers and string trimmers.",
     copy: "String trimmer line cuts the bark at the base of a young tree or shrub, and a ring of cuts starves the plant from the bottom up. A bare ring of soil or a plastic guard around the base keeps the trimmer away from it.",
   },
+  {
+    id: 'lawn_leave_clippings', group: 'lawn', label: 'Leave the clippings',
+    keywords: ['clippings', 'mow', 'mower', 'thatch', 'mulching'], lines: ['lawn'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-leave-clippings', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/lawns/maintenance-and-care/mowing-your-florida-lawn/' }],
+    copy: "Leave the clippings on the lawn. UF/IFAS says they break down quickly and add nutrients, and that research shows they don't cause thatch, whatever many people believe.",
+  },
+  {
+    id: 'lawn_skip_after_rain', group: 'lawn', label: 'Skip a watering after a good rain',
+    keywords: ['rain', 'skip', 'watering day', 'sprinkler', 'irrigation'], lines: ['lawn'], season: 'wet',
+    yard: { irrigation: 'system' },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-skip-after-rain', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH025' }],
+    copy: "Got a good rain the day before your watering day? UF/IFAS says that with at least half an inch of rain, you don't need to water that day.",
+  },
+  {
+    id: 'lawn_soil_moisture_sensor', group: 'lawn', label: 'A soil moisture sensor pays off',
+    keywords: ['sensor', 'timer', 'irrigation', 'sprinkler', 'controller'], lines: ['lawn'], season: 'all',
+    yard: { irrigation: 'system' },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-soil-moisture-sensor', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/wq142' }],
+    copy: "If your sprinklers run on a plain timer, a soil moisture sensor is worth asking your irrigation company about. UF/IFAS research found 44 to 50 percent irrigation savings with one, without the landscape looking any worse.",
+  },
+  {
+    id: 'lawn_why_summer_ban', group: 'lawn', label: 'Why the summer fertilizer ban exists',
+    keywords: ['fertilizer', 'summer', 'nitrogen', 'phosphorus', 'red tide', 'ordinance'], lines: ['lawn', 'tree_shrub'], season: 'wet',
+    showMonths: [5, 6, 7, 8, 9],
+    yard: { county: ['Charlotte'] },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-why-summer-ban', label: 'SWFWMD', url: 'https://www.swfwmd.state.fl.us/residents/water-101/fertilizer-restrictions-county' }, { fact: 'fact-tip-lawn-why-summer-ban', label: 'Charlotte County', url: 'https://charlottecountyfl.gov/one-charlotte-one-water/improving-water-quality/fertilizers-pesticides-irrigation.stml' }],
+    copy: "Heavy rain can wash fertilizer off lawns into the streets and on to local waters, SWFWMD says, and Charlotte County ties the extra nutrients to algae blooms and red tide in Charlotte Harbor.",
+  },
+  {
+    id: 'lawn_weeds_fill_voids', group: 'lawn', label: 'Weeds fill a gap',
+    keywords: ['weeds', 'thin', 'bare', 'thick lawn'], lines: ['lawn'], season: 'all',
+    findings: ['broadleaf_weeds', 'crabgrass', 'dollarweed', 'sedges'],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-weeds-fill-voids', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP141' }],
+    copy: "UF/IFAS puts it simply: weeds don't create a void, they fill one. Weeds follow a weakened lawn rather than cause it, so a stronger lawn is more competitive against them.",
+  },
+  {
+    id: 'lawn_mushrooms_after_rain', group: 'lawn', label: 'Mushrooms after rain',
+    keywords: ['mushrooms', 'toadstools', 'fungus', 'rain'], lines: ['lawn'], season: 'wet',
+    showMonths: [6, 7, 8, 9, 10],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-mushrooms-after-rain', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH046' }],
+    copy: "Mushrooms popping up after rain rarely hurt the grass, UF/IFAS says, but it still advises removing them, and chopping them up with the mower is usually enough.",
+  },
+  {
+    id: 'lawn_slime_mold', group: 'lawn', label: 'Slime mold looks worse than it is',
+    keywords: ['slime mold', 'crust', 'gray', 'powder'], lines: ['lawn'], season: 'wet',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-slime-mold', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/topics/slime_molds' }],
+    copy: "That crust on the grass after wet weather can be slime mold. UF/IFAS says it's rarely harmful, and it disappears on its own once the weather changes.",
+  },
+  {
+    id: 'lawn_reclaimed_water', group: 'lawn', label: 'Reclaimed water carries nutrients',
+    keywords: ['reclaimed', 'reuse', 'water', 'fertilizer', 'nitrogen'], lines: ['lawn'], season: 'all',
+    yard: { water: 'reclaimed' },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-reclaimed-water', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/SS587' }],
+    copy: "Reclaimed water carries nitrogen, phosphorus and potassium, UF/IFAS says, so a lawn watered with it can get by on less nitrogen fertilizer.",
+  },
+  {
+    id: 'lawn_iron_yellowing', group: 'lawn', label: 'Yellow St. Augustine on alkaline soil',
+    keywords: ['yellow', 'iron', 'manganese', 'chlorosis', 'ph'], lines: ['lawn'], season: 'all',
+    yard: { grass: ['st_augustine'] },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-iron-yellowing', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH010' }],
+    copy: "Yellow grass on alkaline soil or high-pH water can be short on iron or manganese, UF/IFAS says, and a micronutrient application greens it up. The color boost is temporary.",
+  },
+  {
+    id: 'lawn_frost_wait', group: 'lawn', label: 'After a frost, wait for spring',
+    keywords: ['frost', 'freeze', 'cold', 'winter', 'brown'], lines: ['lawn'], season: 'dry',
+    showMonths: [12, 1, 2],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-frost-wait', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/lawns/maintenance-and-care/how-to-help-your-lawn-survive-the-chill/' }],
+    copy: "After a frost, stay off the grass while it's white, and don't fertilize to green it back up. UF/IFAS says to wait for the lawn's natural green-up in spring, and that lawns need less water in winter.",
+  },
+  {
+    id: 'lawn_mow_dry', group: 'lawn', label: 'Mow when the grass is dry',
+    keywords: ['mow', 'wet', 'dew', 'disease', 'mower'], lines: ['lawn'], season: 'all',
+    findings: ['gray_leaf_spot', 'large_patch'],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-mow-dry', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH040' }],
+    copy: "Mow when the grass is dry. UF/IFAS says wet grass shouldn't be mowed because it can spread disease, and wet turf clogs a rotary mower. If one area has a leaf disease, mow it last and rinse the mower off after.",
+  },
+  {
+    id: 'lawn_water_signs', group: 'lawn', label: 'Was the watering day enough?',
+    keywords: ['drought', 'dry', 'folding', 'footprints', 'thirsty', 'water'], lines: ['lawn'], season: 'all',
+    findings: ['drought'],
+    yard: { irrigation: 'system' },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-water-signs', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/LH025' }],
+    copy: "How to tell the lawn is thirsty: blades folding in half lengthwise, a blue-gray tint, or footprints that stay visible. UF/IFAS says those are the signs it's time to water.",
+  },
+  {
+    id: 'lawn_seasonal_timer', group: 'lawn', label: 'Turn the timer down for the rainy season',
+    keywords: ['timer', 'sprinkler', 'rainy season', 'overwatering', 'run time'], lines: ['lawn'], season: 'wet',
+    findings: ['dollarweed', 'sedges'],
+    showMonths: [5, 6, 7, 8, 9, 10],
+    yard: { irrigation: 'system' },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-seasonal-timer', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/LH025' }],
+    copy: "A sprinkler timer left on one setting all year usually overwaters, and overwatering brings disease, thatch, shorter roots, dollarweed and sedge. Turn the run time down when the summer rains start and back up when they stop.",
+  },
+  {
+    id: 'lawn_fertilizer_season', group: 'lawn', label: 'Why summer feedings skip nitrogen',
+    keywords: ['fertilizer', 'nitrogen', 'summer', 'ordinance', 'potassium'], lines: ['lawn', 'tree_shrub'], season: 'wet',
+    showMonths: [5, 6, 7, 8, 9],
+    yard: { county: ['Sarasota'], city: ['sarasota', 'venice', 'north venice', 'nokomis', 'osprey', 'laurel', 'siesta key', 'lake sarasota', 'englewood', 'longboat key'] },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-fertilizer-season', label: 'UF/IFAS', url: 'https://sfyl.ifas.ufl.edu/media/sfylifasufledu/sarasota/documents/pdf/hortres/keydocs/2025_HortRes_brochureSacoFertilizerCodes_FINAL_ADA.pdf' }],
+    copy: "Summer feedings skip nitrogen on purpose. Sarasota County's ordinance bars fertilizer with nitrogen or phosphorus on residential lawns and landscapes from June 1 through September 30.",
+  },
+  {
+    id: 'lawn_chinch_can_test', group: 'lawn', label: 'See chinch bugs for yourself',
+    keywords: ['chinch', 'coffee can', 'yellow', 'test'], lines: ['lawn'], season: 'all',
+    findings: ['chinch_bugs'],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-chinch-can-test', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN383' }],
+    copy: "You can check for chinch bugs yourself: push a bottomless coffee can a few inches into the soil beside the yellow grass, keep it full of water for a few minutes, and any chinch bugs float to the top.",
+  },
+  {
+    id: 'lawn_take_all_weeks', group: 'lawn', label: 'Root rot starts weeks before you see it',
+    keywords: ['take-all', 'root rot', 'yellow patches', 'fungus'], lines: ['lawn'], season: 'all',
+    findings: ['take_all'],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-lawn-take-all-weeks', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/LH079' }],
+    copy: "Take-all root rot works underground first. By the time yellow patches show, UF/IFAS says the fungus has already been on the roots for weeks.",
+  },
+  {
+    id: 'ts_palm_hurricane_cut', group: 'tree_shrub', label: 'Skip the hurricane cut',
+    keywords: ['palm', 'hurricane cut', 'trim', 'fronds', 'storm'], lines: ['tree_shrub'], season: 'all',
+    showMonths: [5, 6, 7],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-palm-hurricane-cut', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP443' }],
+    copy: "Skip the “hurricane cut” on palms. UF/IFAS found that after the 2004 and 2005 hurricanes, palms trimmed that way were more likely to have their crowns snapped off than palms with fuller crowns. Pruning the dead fronds before the season may reduce the chance they come loose in a storm.",
+  },
+  {
+    id: 'ts_right_plant_right_place', group: 'tree_shrub', label: 'The right plant for the spot',
+    keywords: ['plant', 'spot', 'florida-friendly', 'declining', 'replace'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-right-plant-right-place', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/care/florida-friendly/the-nine-principles/' }],
+    copy: "The easiest plants to keep healthy are the ones suited to the spot. UF/IFAS's Florida-Friendly advice is to pick plants that match the site's soil, light and water, which then need little irrigation, fertilizer or pest control once they're established.",
+  },
+  {
+    id: 'storm_salt_flush', group: 'tree_shrub', label: 'After saltwater flooding',
+    keywords: ['salt', 'flood', 'storm surge', 'saltwater', 'hurricane'], lines: ['lawn', 'tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-storm-salt-flush', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP068' }],
+    copy: "After saltwater flooding, UF/IFAS says to flush the soil thoroughly with fresh water to move the salt down through it, and not to rush to prune or pull plants that look burned.",
+  },
+  {
+    id: 'storm_structural_pruning', group: 'tree_shrub', label: 'Pruned trees ride out storms better',
+    keywords: ['pruning', 'hurricane', 'storm', 'topping', 'wind'], lines: ['tree_shrub'], season: 'all',
+    showMonths: [3, 4, 5, 6],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-storm-structural-pruning', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/FR173' }],
+    copy: "Structural pruning pays off in a storm. UF/IFAS reports that 73 percent of pruned trees survived compared with 47 percent of unpruned ones, and that topping makes trees more likely to fail in wind.",
+  },
+  {
+    id: 'ts_crape_myrtle_topping', group: 'tree_shrub', label: "Don't top the crape myrtle",
+    keywords: ['crape myrtle', 'prune', 'topping', 'crepe'], lines: ['tree_shrub'], season: 'dry',
+    showMonths: [1, 2],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-crape-myrtle-topping', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP399' }],
+    copy: "Skip topping the crape myrtle. UF/IFAS doesn't recommend it; if pruning is needed, it suggests tipping or pollarding instead, and notes that topping or pollarding can delay flowering by up to a month.",
+  },
+  {
+    id: 'ts_stakes_and_flare', group: 'tree_shrub', label: 'Stakes off in a year, flare above the soil',
+    keywords: ['stakes', 'new tree', 'flare', 'planting', 'too deep'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-stakes-and-flare', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/care/planting/planting-and-establishing-trees/' }],
+    copy: "If a new tree is staked, take the stakes off within a year, UF/IFAS says. Keep the flare at the base of the trunk above the soil too; a tree planted too deep, or with its flare buried, suffers for it.",
+  },
+  {
+    id: 'ts_oleander_caterpillar', group: 'tree_shrub', label: 'Orange caterpillars on the oleander',
+    keywords: ['oleander', 'caterpillar', 'orange', 'leaves eaten'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-oleander-caterpillar', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN135' }],
+    copy: "Bright orange caterpillars with tufts of black hair on the oleanders are oleander caterpillars, a common sight in Florida. UF/IFAS says they can strip a lot of leaves, but even total defoliation won't kill the plant.",
+  },
+  {
+    id: 'ts_azalea_lace_bug', group: 'tree_shrub', label: 'Silvery azalea leaves',
+    keywords: ['azalea', 'lace bug', 'silvery', 'stippled'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-azalea-lace-bug', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN677' }],
+    copy: "Azalea leaves turning stippled and silvery? UF/IFAS says that's often lace bugs, and the giveaway is shiny black spots, their eggs and droppings, on the leaves. Point them out to me.",
+  },
+  {
+    id: 'ts_hibiscus_mealybug', group: 'tree_shrub', label: 'Curled hibiscus growth',
+    keywords: ['hibiscus', 'mealybug', 'curled', 'sooty mold'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-hibiscus-mealybug', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN156' }],
+    copy: "Curled, twisted new growth on a hibiscus can be mealybug. UF/IFAS says its saliva curls and contorts the leaves, and its honeydew grows black sooty mold. Point it out to me.",
+  },
+  {
+    id: 'ts_chilli_thrips', group: 'tree_shrub', label: 'Bronzed rose and plumbago leaves',
+    keywords: ['thrips', 'rose', 'plumbago', 'indian hawthorn', 'bronzed'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-chilli-thrips', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/care/pests-and-diseases/pests/chilli-thrips/' }],
+    copy: "Bronzed, silvery or curled new leaves on roses, plumbago or Indian hawthorn can be chilli thrips. UF/IFAS calls them a significant pest of Florida landscapes, and the adults are only about 0.04 inches long.",
+  },
+  {
+    id: 'ts_palm_flower_stalks', group: 'tree_shrub', label: 'Palm flower stalks can come off',
+    keywords: ['palm', 'flower stalk', 'fruit', 'seed pods', 'trim'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-palm-flower-stalks', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP443' }],
+    copy: "Taking off palm flower and fruit stalks doesn't hurt the palm, UF/IFAS says, and can even raise leaf production. If you want to help pollinators, wait until the blooms drop before cutting them.",
+  },
+  {
+    id: 'ts_palm_manganese', group: 'tree_shrub', label: 'Frizzled new palm fronds',
+    keywords: ['palm', 'frizzle', 'manganese', 'yellow fronds', 'new growth'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-palm-manganese', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP267' }],
+    copy: "Yellow, streaked new fronds on a palm can mean manganese deficiency, which UF/IFAS ties to low manganese in the soil or high soil pH. After treatment, it says a response may take 3 to 6 months to show.",
+  },
+  {
+    id: 'ts_citrus_greening', group: 'tree_shrub', label: 'Citrus greening has no cure',
+    keywords: ['citrus', 'greening', 'psyllid', 'mottle', 'orange tree'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-citrus-greening', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/HS141' }],
+    copy: "If you have citrus, watch the leaves. UF/IFAS says there's no cure for citrus greening, which psyllids spread from tree to tree, and one sign is a blotchy mottle on the leaves. Tell me if you see it.",
+  },
+  {
+    id: 'ts_ficus_whitefly', group: 'tree_shrub', label: 'Ficus hedges and whitefly',
+    keywords: ['ficus', 'whitefly', 'hedge', 'leaf drop'], lines: ['tree_shrub'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-ficus-whitefly', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/IN1169' }],
+    copy: "Ficus hedges are the whitefly's favorite here. UF/IFAS calls Ficus benjamina the preferred host of the ficus whitefly in Florida, and says left untreated it can strip a hedge of its leaves. Leaf drop on a ficus is worth a call.",
+  },
+  {
+    id: 'ts_drip_beds', group: 'tree_shrub', label: 'Drip keeps the leaves dry',
+    keywords: ['drip', 'bubbler', 'leaf spot', 'irrigation', 'beds'], lines: ['tree_shrub'], season: 'all',
+    yard: { irrigation: 'system' },
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-ts-drip-beds', label: 'UF/IFAS', url: 'https://gardeningsolutions.ifas.ufl.edu/care/irrigation/microirrigation/' }],
+    copy: "Drip or bubbler lines in the beds water the roots and keep the leaves dry, which UF/IFAS says cuts down leaf disease. It also puts microirrigation's efficiency above 90 percent.",
+  },
+  {
+    id: 'seasonal_lovebugs', group: 'exterior', label: 'Lovebug season',
+    keywords: ['lovebugs', 'love bugs', 'car', 'paint', 'swarm'], lines: ['pest', 'lawn', 'mosquito', 'tree_shrub'], season: 'all',
+    showMonths: [4, 5, 8, 9],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-seasonal-lovebugs', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN694' }],
+    copy: "Lovebug season runs about four weeks each April–May and August–September. UF/IFAS says they don't bite, sting or carry disease, and in its tests they didn't damage car paint even after 21 days, though rinsing them off within a day is still easiest.",
+  },
+  {
+    id: 'nr_spray_splits_colony', group: 'kitchen', label: 'Store ant sprays can split a colony',
+    keywords: ['ants', 'spray', 'trail', 'colony', 'budding', 'raid'], lines: ['pest'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-nr-spray-splits-colony', label: 'PubMed', url: 'https://pubmed.ncbi.nlm.nih.gov/40834271/' }],
+    copy: "A study found that pyrethroid-based ant sprays, at a low application rate, raised the chance of a colony budding, splitting off new nests. If you see a trail between visits, tell me.",
+  },
+  {
+    id: 'tl_fdacs_diy', group: 'termite', label: 'What Florida recommends for termites',
+    keywords: ['termite', 'diy', 'bait', 'soil treatment', 'do it yourself'], lines: ['termite'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-tl-fdacs-diy', label: 'Florida Dept. of Agriculture', url: 'https://www.fdacs.gov/Consumer-Resources/Health-and-Safety/Protect-Your-Home-from-Pests/Termites/Subterranean-Termites' }],
+    copy: "For subterranean termites, Florida's Department of Agriculture recommends a non-repellent soil treatment or an in-ground bait system, and strongly recommends against treating for them yourself. Let me know before anyone digs along the foundation.",
+  },
+  {
+    id: 'mq_few_blocks', group: 'water', label: 'Your mosquitoes hatched nearby',
+    keywords: ['mosquitoes', 'neighbors', 'containers', 'nearby', 'breeding'], lines: ['mosquito'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-mq-few-blocks', label: 'CDC', url: 'https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html' }],
+    copy: "The mosquitoes biting you probably hatched close by. The CDC says these mosquitoes only fly a few blocks in their lifetime. Tipping out standing water on your own property is the place to start.",
+  },
+  {
+    id: 'mq_daytime_biters', group: 'water', label: 'Bitten in the daytime?',
+    keywords: ['daytime', 'bite', 'aedes', 'yellow fever mosquito', 'day'], lines: ['mosquito'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-mq-daytime-biters', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN792' }],
+    copy: "Getting bitten in the daytime? UF/IFAS says many mosquitoes bite at night, dawn or dusk, but the yellow fever mosquito readily bites during the day, indoors as well as out. It's a container breeder, the kind the standing-water tips go after.",
+  },
+  {
+    id: 'mq_skip_zapper', group: 'lighting', label: 'Skip the bug zapper',
+    keywords: ['zapper', 'bug light', 'bug zapper', 'electric'], lines: ['mosquito', 'pest'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-mq-skip-zapper', label: 'UF/IFAS', url: 'https://blogs.ifas.ufl.edu/news/1997/07/23/electric-bug-zappers-useless-for-controlling-mosquitoes/' }],
+    copy: "Skip the bug zapper. In a UF/IFAS test, one zapper killed some 10,000 insects in a night and only eight were mosquitoes, and UF/IFAS lists zappers among the things that don't reduce mosquitoes.",
+  },
+  {
+    id: 'mq_citronella', group: 'exterior', label: "Citronella candles help less than you'd think",
+    keywords: ['citronella', 'candles', 'repellent', 'torch'], lines: ['mosquito'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-mq-citronella', label: 'PubMed 1996', url: 'https://pubmed.ncbi.nlm.nih.gov/8827606/' }, { fact: 'fact-tip-mq-citronella', label: 'PubMed 2017', url: 'https://pubmed.ncbi.nlm.nih.gov/28423421/' }],
+    copy: "Citronella candles help less than people think. One study measured only a 42.3 percent drop in bites from the candles, and a later study found a citronella candle had no effect.",
+  },
+  {
+    id: 'tb_drywood_pellets', group: 'termite', label: 'Little piles of “sand”',
+    keywords: ['drywood', 'pellets', 'frass', 'sand', 'droppings'], lines: ['termite', 'pest'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-tb-drywood-pellets', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
+    copy: "Small piles of what looks like sand under a window sill or a piece of furniture can be drywood termites. UF/IFAS describes their droppings as 6-sided pellets pushed out through holes about the size of a pen tip. Save some in a bag for me.",
+  },
+  {
+    id: 'tb_formosan_colony', group: 'termite', label: 'Termite colonies run into the millions',
+    keywords: ['formosan', 'swarm', 'mud tube', 'colony', 'queen'], lines: ['termite'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-tb-formosan-colony', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN278' }, { fact: 'fact-tip-tb-formosan-colony', label: 'Florida Dept. of Agriculture', url: 'https://www.fdacs.gov/Consumer-Resources/Health-and-Safety/Protect-Your-Home-from-Pests/Termites/Formosan-Termite-Program' }],
+    copy: "Formosan subterranean termites live in underground colonies of several million, UF/IFAS says, and Florida's Department of Agriculture notes a mature queen can lay up to 3,000 eggs a day. Tell me about any swarm or new mud tube.",
+  },
+  {
+    id: 'gr_egg_case', group: 'roaches', label: 'One roach, 30 to 40 eggs',
+    keywords: ['german roach', 'egg case', 'groceries', 'cardboard'], lines: ['pest'], season: 'all',
+    services: ['german_roach', 'german_roach_initial', 'pest_initial_german_knockdown'],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-gr-egg-case', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN128' }],
+    copy: "A German roach carries her egg case until just before it hatches, and UF/IFAS says a typical case holds 30 to 40 eggs.",
+  },
+  {
+    id: 'bb_not_dirt', group: 'bed_bugs', label: "Bed bugs aren't about dirt",
+    keywords: ['bed bugs', 'clean', 'dirty', 'disease'], lines: ['pest'], season: 'all',
+    services: ['bed_bug_treatment'],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-bb-not-dirt', label: 'CDC', url: 'https://www.cdc.gov/bed-bugs/about/index.html' }, { fact: 'fact-tip-bb-not-dirt', label: 'EPA', url: 'https://www.epa.gov/bedbugs/bed-bug-myths' }],
+    copy: "Bed bugs say nothing about how clean a home is. The CDC says cleanliness doesn't decide whether they show up and that they aren't known to spread disease, and the EPA says they're drawn to warmth, blood and carbon dioxide, not dirt.",
+  },
+  {
+    id: 'spider_brown_widow', group: 'exterior', label: "The brown widow's egg sac",
+    keywords: ['spider', 'brown widow', 'egg sac', 'widow'], lines: ['pest'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-spider-brown-widow', label: 'UF/IFAS', url: 'https://sfyl.ifas.ufl.edu/sarasota/natural-resources/chemicals-in-the-environment/integrated-pest-management/brown-widow-spider/' }],
+    copy: "Brown widow spiders have spread throughout Florida, UF/IFAS says. Their egg sac is the giveaway: a small ball covered in pointed bumps. If you see one, point it out to me instead of reaching for it.",
+  },
+  {
+    id: 'tick_brown_dog_indoors', group: 'fleas', label: 'The tick that lives indoors',
+    keywords: ['tick', 'dog', 'indoors', 'brown dog tick', 'walls'], lines: ['pest'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-tick-brown-dog-indoors', label: 'UF/IFAS', url: 'https://edis.ifas.ufl.edu/publication/IN378' }],
+    copy: "Unlike most ticks, the brown dog tick can live its whole life indoors. UF/IFAS says the first sign is often ticks crawling up walls or curtains, and each stage can go three to five months without feeding. Tell me if you see one.",
+  },
+  {
+    id: 'bb_skip_home_remedies', group: 'bed_bugs', label: 'Skip the freezer and the thermostat',
+    keywords: ['bed bugs', 'freezer', 'heat', 'thermostat', 'space heater'], lines: ['pest'], season: 'all',
+    services: ['bed_bug_treatment'],
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-bb-skip-home-remedies', label: 'EPA', url: 'https://www.epa.gov/bedbugs/do-it-yourself-bed-bug-control' }],
+    copy: "Two home remedies to skip. The EPA says many home freezers aren't cold enough to kill bed bugs, and that turning up the thermostat or running a space heater to kill them doesn't work.",
+  },
+  {
+    id: 'palmetto_bugs_weather', group: 'roaches', label: 'Why palmetto bugs come in',
+    keywords: ['palmetto bug', 'american cockroach', 'storm', 'cold snap', 'big roach'], lines: ['pest'], season: 'all',
+    sourcedOnly: true,
+    sources: [{ fact: 'fact-tip-palmetto-bugs-weather', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN298' }],
+    copy: "The big palmetto bugs live outdoors. UF/IFAS says American cockroaches wander inside looking for food and water or to get away from extreme weather, so you may see more around extreme weather.",
+  },
 ]);
 
 // Deep-frozen: the registry is the screened source of customer copy, and
@@ -1520,7 +1895,9 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   // Behind GATE_TECH_TIP_SOURCES a tip that does not fit this yard, or this
   // visit's month, is left out of every list, search included.
   const month = monthForDate(date);
-  const fits = (tip) => !sourced || (yardMatches(tip.yard, yard) && (!tip.showMonths || tip.showMonths.includes(month)));
+  const fits = (tip) => (sourced
+    ? yardMatches(tip.yard, yard) && (!tip.showMonths || tip.showMonths.includes(month))
+    : !tip.sourcedOnly);
   const TIPS_HERE = TIPS.filter(fits);
   // Within a group the best fit leads: this visit's confirmed findings, then
   // the month, then the season; ties keep registry order (the sort is stable).
@@ -1555,16 +1932,17 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
 }
 
 // Whether a tip's `yard` filter fits this yard (tips with facts, owner
-// 2026-10-24). No filter fits every yard. Grass, county and city need a known
-// fact that matches; a grass counts only when it can be trusted (staff or the
-// estimate set it). An irrigation tip fits unless the yard is known to have
-// no system.
+// 2026-10-24). No filter fits every yard. Grass, county, city and water
+// source need a known fact that matches; a grass counts only when it can be
+// trusted (staff or the estimate set it). An irrigation tip fits unless the
+// yard is known to have no system.
 function yardMatches(filter, yard) {
   if (!filter) return true;
   const known = yard || {};
   if (filter.grass && !(known.grassTrusted && filter.grass.includes(known.grass))) return false;
   if (filter.county && !filter.county.includes(known.county)) return false;
   if (filter.city && !filter.city.includes(known.city)) return false;
+  if (filter.water && known.waterSource !== filter.water) return false;
   if (filter.irrigation === 'system' && known.irrigationSystem === false) return false;
   return true;
 }
@@ -1621,7 +1999,8 @@ function resolveTipIds(ids, { sourced = false, date = new Date() } = {}) {
   for (const raw of Array.isArray(ids) ? ids : []) {
     const id = String(raw || '').trim();
     const tip = TIPS_BY_ID.get(id);
-    if (!tip || seen.has(id)) continue;
+    // A tip written for tips with facts never freezes with the gate off.
+    if (!tip || seen.has(id) || (tip.sourcedOnly && !sourced)) continue;
     seen.add(id);
     // The link is a snapshot, never the registry's own object — a caller
     // that edits its payload must not edit the registry for every later call.

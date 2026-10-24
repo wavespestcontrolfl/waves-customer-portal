@@ -2640,9 +2640,14 @@ function rowPrepaidElsewhere(term, row) {
 // no single sold price. Under GATE_PREPAY_MINT_PRICE_HOLD they carry a
 // per-visit baseline instead: recordMintVisitPrices writes each covered
 // visit's own price when the term is created, and a visit is held when its
-// price no longer equals the one recorded for it. A visit the record does not
-// name (created or pulled into coverage later) has no baseline and is stamped
-// exactly as before. Gate off, those terms are left exactly as before.
+// price no longer equals the one recorded for it. A covered visit with no
+// price of its own (a WaveGuard membership visit) is priced by the plan: the
+// record names it with the term's per-visit coverage price
+// (seededVisitPriceForTerm), and it is held only when it later carries a price
+// other than that one; while it stays unpriced it is covered as before. A
+// visit the record does not name (created or pulled into coverage later) has
+// no baseline and is stamped exactly as before. Gate off, those terms are left
+// exactly as before.
 const SECURE_PLAN_MINT_SOURCE = 'secure_plan_choice';
 const MINT_VISIT_PRICES_ACTION = 'annual_prepay_mint_visit_prices';
 const PRICE_DRIFT_HELD_REASON = 'price_drift_held';
@@ -2697,19 +2702,31 @@ async function recordMintVisitPrices(termOrId, conn = db) {
       if (!term?.id || !term.customer_id || isTermiteAnnualPlanTerm(term) || term.renewed_from_term_id) return null;
       const rows = await coverageRowsForTerm(term, sp);
       const prices = {};
+      const unpricedIds = [];
       for (const row of rows) {
+        if (!row.id) continue;
         const cents = priceCents(row.estimated_price);
-        if (row.id && cents != null) prices[String(row.id)] = cents;
+        if (cents != null) prices[String(row.id)] = cents;
+        else unpricedIds.push(String(row.id));
       }
-      if (!Object.keys(prices).length) return null;
+      // A visit with no price of its own is priced by the plan: the term's
+      // per-visit coverage price, the one it seeds new visits with. Unknown
+      // (no prepay invoice), such a visit is left unnamed, as before.
+      const unpriced = {};
+      if (unpricedIds.length) {
+        const planCents = priceCents(await seededVisitPriceForTerm(term, sp, normalizeCoverageVisitCount(term.coverage_visit_count)));
+        if (planCents != null && planCents > 0) for (const id of unpricedIds) unpriced[id] = planCents;
+      }
+      const named = Object.keys(prices).length + Object.keys(unpriced).length;
+      if (!named) return null;
       await sp('activity_log').insert({
         customer_id: term.customer_id,
         action: MINT_VISIT_PRICES_ACTION,
-        description: `Annual prepay created: recorded the price of ${Object.keys(prices).length} covered visit(s)`,
-        metadata: JSON.stringify({ term_id: String(term.id), prices }),
+        description: `Annual prepay created: recorded the price of ${named} covered visit(s)`,
+        metadata: JSON.stringify({ term_id: String(term.id), prices, ...(Object.keys(unpriced).length ? { unpriced } : {}) }),
         created_at: new Date(),
       });
-      return prices;
+      return { prices, unpriced };
     });
   } catch (err) {
     if (mode === 'true') throw err;
@@ -2718,8 +2735,10 @@ async function recordMintVisitPrices(termOrId, conn = db) {
   }
 }
 
-// Map of visit id -> price in cents recorded at mint (newest record wins), or
-// null. A failed read PROPAGATES, same as securePlanSoldPerVisitCents.
+// Map of visit id -> { cents, unpriced } recorded at mint (newest record
+// wins), or null. `unpriced`: the visit had no price of its own and `cents` is
+// the plan's per-visit price. A failed read PROPAGATES, same as
+// securePlanSoldPerVisitCents.
 async function mintVisitPriceCents(term, conn) {
   if (prepayMintPriceHoldMode() === 'off' || !term?.id || !term.customer_id) return null;
   const row = await conn('activity_log')
@@ -2734,8 +2753,12 @@ async function mintVisitPriceCents(term, conn) {
   }
   if (!meta?.prices || typeof meta.prices !== 'object') return null;
   const byVisit = new Map();
+  const plan = meta.unpriced && typeof meta.unpriced === 'object' ? meta.unpriced : {};
+  for (const [id, cents] of Object.entries(plan)) {
+    if (Number.isInteger(cents) && cents > 0) byVisit.set(String(id), { cents, unpriced: true });
+  }
   for (const [id, cents] of Object.entries(meta.prices)) {
-    if (Number.isInteger(cents) && cents >= 0) byVisit.set(String(id), cents);
+    if (Number.isInteger(cents) && cents >= 0) byVisit.set(String(id), { cents, unpriced: false });
   }
   return byVisit.size ? byVisit : null;
 }
@@ -2748,7 +2771,7 @@ async function soldPriceCentsForVisit(term, row, conn) {
   if (secure != null) return secure;
   if (prepayMintPriceHoldMode() !== 'true' || row?.id == null) return null;
   const byVisit = await mintVisitPriceCents(term, conn);
-  return byVisit?.get(String(row.id)) ?? null;
+  return byVisit?.get(String(row.id))?.cents ?? null;
 }
 
 // A held visit's current price for the log and the office alert.
@@ -2758,10 +2781,21 @@ function heldPriceNow(row) {
 }
 
 // The rows the mint record names whose price is no longer the recorded one.
+// A visit recorded with no price of its own changes only when it carries a
+// price other than the plan's: still unpriced, the plan covers it as before.
 function mintPriceDriftedRows(eligible, byVisit) {
+  const drifted = (row) => {
+    const base = byVisit.get(String(row.id));
+    if (!base) return false;
+    const now = priceCents(row.estimated_price);
+    return base.unpriced ? now != null && now !== base.cents : now !== base.cents;
+  };
   return eligible
-    .filter((row) => byVisit.has(String(row.id)) && priceCents(row.estimated_price) !== byVisit.get(String(row.id)))
-    .map((row) => ({ row, soldCents: byVisit.get(String(row.id)), mintPrice: true }));
+    .filter(drifted)
+    .map((row) => {
+      const base = byVisit.get(String(row.id));
+      return { row, soldCents: base.cents, mintPrice: true, planPrice: base.unpriced };
+    });
 }
 
 // Shadow only observes: it logs the visits `true` would hold and changes
@@ -2776,8 +2810,11 @@ async function logShadowMintPriceHolds(term, eligible, conn, { checkSecure = fal
       return mintVisitPriceCents(term, sp);
     });
     if (!byVisit) return;
-    for (const { row, soldCents } of mintPriceDriftedRows(eligible, byVisit)) {
-      logger.warn(`[annual-prepay] shadow: term ${term.id} would hold visit ${row.id} (${dateOnly(row.scheduled_date) || 'undated'}) out of coverage: ${heldPriceNow(row)} now, $${(soldCents / 100).toFixed(2)} when the term was created`);
+    for (const { row, soldCents, planPrice } of mintPriceDriftedRows(eligible, byVisit)) {
+      const then = planPrice
+        ? `no price when the term was created (plan price $${(soldCents / 100).toFixed(2)} a visit)`
+        : `$${(soldCents / 100).toFixed(2)} when the term was created`;
+      logger.warn(`[annual-prepay] shadow: term ${term.id} would hold visit ${row.id} (${dateOnly(row.scheduled_date) || 'undated'}) out of coverage: ${heldPriceNow(row)} now, ${then}`);
     }
   } catch (err) {
     logger.warn(`[annual-prepay] shadow: mint visit prices unreadable for term ${term.id}: ${err.message}`);
@@ -2881,16 +2918,20 @@ function whereObservedPrice(query, row) {
 }
 
 async function fileHeldPriceDriftAlerts(term, held, notifyScope) {
-  for (const { row, soldCents, mintPrice } of held) {
+  for (const { row, soldCents, mintPrice, planPrice } of held) {
     const date = dateOnly(row.scheduled_date) || 'undated';
+    const sold = `$${(soldCents / 100).toFixed(2)}`;
     // A /secure pick has one sold price; any other term has the visit's own
-    // price from the day the prepay was created.
-    const soldAt = mintPrice ? 'created with this visit priced at' : 'sold at';
-    const perVisit = mintPrice ? '' : ' per visit';
+    // price from the day the prepay was created, or, for a visit that had no
+    // price of its own, the plan's per-visit price.
+    let soldText = `sold at ${sold} per visit`;
+    if (planPrice) soldText = `created with this visit unpriced (the plan's price is ${sold} a visit)`;
+    else if (mintPrice) soldText = `created with this visit priced at ${sold}`;
     const repriced = priceCents(row.estimated_price) == null ? 'left with no price' : `repriced to ${heldPriceNow(row)}`;
-    logger.warn(`[annual-prepay] term ${term.id}: visit ${row.id} (${date}) held out of coverage — ${repriced} after the term was ${soldAt} $${(soldCents / 100).toFixed(2)}${perVisit}`);
+    const repair = planPrice ? `edit the visit to exactly ${sold}` : `edit the visit back to exactly ${sold}`;
+    logger.warn(`[annual-prepay] term ${term.id}: visit ${row.id} (${date}) held out of coverage — ${repriced} after the term was ${soldText}`);
     await fileCoverageExceptionAfterCommit(notifyScope, term, `${PRICE_DRIFT_HELD_REASON}:${row.id}`,
-      `The ${date} ${row.service_type || 'service'} visit was ${repriced} after this annual prepay was ${soldAt} $${(soldCents / 100).toFixed(2)}${perVisit}, so it was NOT marked as covered and will bill normally (its sold slot stays unused). To cover it, edit the visit back to exactly $${(soldCents / 100).toFixed(2)} (the schedule editor allows that) and it is covered on the next refresh; changing it to any other price stays blocked while this prepay is held. Or adjust the term.`,
+      `The ${date} ${row.service_type || 'service'} visit was ${repriced} after this annual prepay was ${soldText}, so it was NOT marked as covered and will bill normally (its sold slot stays unused). To cover it, ${repair} (the schedule editor allows that) and it is covered on the next refresh; changing it to any other price stays blocked while this prepay is held. Or adjust the term.`,
       { title: 'Annual prepay: repriced visit left uncovered', dedupeDays: null });
   }
 }

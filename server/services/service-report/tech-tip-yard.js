@@ -8,10 +8,12 @@
  * tip-library's yardMatches hides only the tips that need it: a grass tip
  * needs a trusted grass, a county or city tip needs a known county or city,
  * and an irrigation tip hides only where the yard is known to have no system.
+ * A water-source tip needs the source the customer saved for this home.
  */
 
 const { loadCustomerGrassContext, irrigationTypeHasSystem } = require('../lawn-grass-context');
 const { resolveAddressCounty } = require('../../config/address-county');
+const { waterSourceConfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 
 // Grass a tip may name: one of the four grasses with a lawn track, set by
 // staff or the estimate (or before the source column existed). A photo read
@@ -30,7 +32,17 @@ async function loadTechTipYard(knex, { customerId = null, zip = null, city = nul
     irrigationSystem: irrigationTypeHasSystem(grass?.irrigationSystem),
     county: resolveAddressCounty({ zip, city }) || null,
     city: cityKey,
+    waterSource: await savedWaterSource(knex, customerId).catch(() => null),
   };
+}
+
+// The sprinklers' water source ('county', 'reclaimed' or 'well'), only as
+// re-saved for the current home after a move (the irrigation email's rule).
+async function savedWaterSource(knex, customerId) {
+  if (!customerId) return null;
+  const prefs = await knex('property_preferences').where({ customer_id: customerId })
+    .first('irrigation_water_source', 'irrigation_home_changed_at', 'irrigation_confirmed_fields');
+  return prefs && waterSourceConfirmedAfterMove(prefs) ? (prefs.irrigation_water_source || null) : null;
 }
 
 module.exports = { loadTechTipYard };

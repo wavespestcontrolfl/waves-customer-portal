@@ -955,7 +955,7 @@
     },
     {
       "endpoint": "/admin/invoices/:id",
-      "reviewed": "Handler + InvoiceService.getById + loadInvoiceAnnualPrepay + loadAnnualPrepayTermForInvoice + suggestCoverageServiceType: invoices.* for one invoice with the customer (name, contact, address, default card brand and last four), active payment plan, annual prepay term and a coverage suggestion. Selects only; the row omits the pay token, the send claim token, the Stripe ids and the receipt URL. write:transaction is the read-only nested transaction helper. Free text: notes and line item descriptions are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row.",
+      "reviewed": "Handler + InvoiceService.getById + loadInvoiceAnnualPrepay + loadAnnualPrepayTermForInvoice + suggestCoverageServiceType: invoices.* for one invoice with the customer (name, contact, address, default card brand and last four), active payment plan, annual prepay term and a coverage suggestion. Selects only; the row omits the pay token, the send claim token, the Stripe ids and the receipt URL. write:transaction is the read-only nested transaction helper. Free text: notes and line item descriptions are withheld by the key-name default. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-read 2026-10-24 (PR #6656, multi-property invoices): the handler now drops property_id and property_address from line_items for a TECHNICIAN request (isTechnicianRequest; the bar runs as admin, so its read is unchanged), and line items may carry property_id / property_address, which this row's keep list does not include.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1072,7 +1072,7 @@
         "services/invoice.js#database.transaction",
         "services/invoice.js#read"
       ],
-      "hash": "48c0f45b1f5aa28e094fa9942f8c9121"
+      "hash": "c2d6395263506053649c50f9f6217f80"
     },
     {
       "endpoint": "/admin/invoices/:id/attachments",

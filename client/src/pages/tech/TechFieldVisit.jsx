@@ -1,5 +1,6 @@
 import { ArrowLeft, MapPin, Navigation } from 'lucide-react';
 import { stopStatusLabel, TERMINAL_STATUSES } from './routeStops';
+import { directionsHref } from '../../lib/directionsHref';
 
 function RouteError({ error, busy, onRetry }) {
   return <div className="tf-alert tf-error" role="alert">{error}{busy && <p role="status">Current action is still in progress.</p>}<div><button type="button" className="tf-button" onClick={onRetry}>Retry route</button></div></div>;
@@ -27,7 +28,7 @@ export default function TechFieldVisit({ stop, loading, error, onBack, onRetry, 
     <div className="tf-section-title"><p className="tf-muted">{stopStatusLabel(stop)}</p><h1>{service.customerName || service.customer_name || 'Current visit'}</h1><p className="tf-muted">{service.address}</p></div>
     <div className="tf-tags">{stop.services.map((row) => <span key={row.id} className="tf-tag">{row.serviceTypeDisplay || row.serviceType || row.service_type || 'Service'} · {(row.status || 'pending').replace(/_/g, ' ')}</span>)}</div>
     <div className="tf-actions">
-      {service.address && <a className="tf-button" href={`https://maps.google.com/?q=${encodeURIComponent(service.address)}`} target="_blank" rel="noopener noreferrer"><Navigation aria-hidden="true" />Directions</a>}
+      {service.address && <a className="tf-button" href={directionsHref(service.address, service.gateWaypoint)} target="_blank" rel="noopener noreferrer"><Navigation aria-hidden="true" />Directions</a>}
       {!outOfSync && ['pending', 'confirmed', 'rescheduled'].includes(status) && <button type="button" className="tf-button" disabled={pending} onClick={() => onEnRoute(service.id)}>En route</button>}
       {!outOfSync && status === 'en_route' && <button type="button" className="tf-button" disabled={pending} onClick={() => onSite(service.id)}><MapPin aria-hidden="true" />On site</button>}
       {outOfSync && <button type="button" className="tf-button" disabled={pending} onClick={() => onSync(stop)}>Sync stop</button>}

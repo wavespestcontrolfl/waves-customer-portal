@@ -74,7 +74,7 @@ export default function InstallPrompt() {
           gradient + blur, gold accent CTA, navy text; same recipe as the
           glass-components.css chips/CTAs, inlined because the login page
           isn't mounted under [data-glass-theme]. */}
-      <div style={{
+      <div data-glass-motion="card" style={{
         maxWidth: 480,
         margin: '0 auto',
         background: 'linear-gradient(135deg, rgba(255,255,255,0.62), rgba(255,255,255,0.34)), rgba(255,255,255,0.3)',

@@ -6006,6 +6006,14 @@ function CreateInvoice({
   const [selectedService, setSelectedService] = useState(null);
   const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
+  // Multi-property invoices: the customer's saved properties a service line
+  // may name. The picker renders only with 2+ properties; one property needs
+  // no choice.
+  const [customerProperties, setCustomerProperties] = useState([]);
+  const primaryPropertyId =
+    customerProperties.find((p) => p.is_primary)?.id ||
+    customerProperties[0]?.id ||
+    null;
   const [notes, setNotes] = useState("");
   const [emailMessage, setEmailMessage] = useState("");
   const [aiMessageLoading, setAiMessageLoading] = useState(false);
@@ -6221,6 +6229,70 @@ function CreateInvoice({
       alive = false;
     };
   }, [selectedCustomer, serviceRecordsAttempt, editMode]);
+
+  // Load the customer's saved properties (create and edit) for the per-line
+  // property picker. Service lines with no property default to the primary
+  // once the list is known, so every line names a property when 2+ exist.
+  const customerIdForProperties =
+    selectedCustomer?.id || editInvoice?.customer_id || null;
+  useEffect(() => {
+    let alive = true;
+    setCustomerProperties([]);
+    // A property belongs to ONE customer: on create, changing (or clearing)
+    // the customer drops every line's property so a stale id from the previous
+    // customer can never reach the server's ownership check.
+    const stripLineProperties = (items) =>
+      items.map(({ property_id: _pid, property_address: _addr, ...rest }) => rest);
+    if (!editMode) setLineItems((current) => stripLineProperties(current));
+    if (!customerIdForProperties) return;
+    adminFetch(
+      "/admin/invoices/customers/" + customerIdForProperties + "/properties",
+    )
+      .then((data) => {
+        if (!alive) return;
+        const properties = Array.isArray(data?.properties)
+          ? data.properties
+          : [];
+        setCustomerProperties(properties);
+        // Edit mode never rewrites the loaded lines (the save's dirty check
+        // compares them to the stored baseline) and defaults nothing.
+        if (properties.length < 2 || editMode) return;
+        const primaryId =
+          properties.find((p) => p.is_primary)?.id || properties[0]?.id;
+        if (!primaryId) return;
+        setLineItems((current) =>
+          current.map((item) =>
+            item._kind !== "discount" && !item.property_id
+              ? { ...item, property_id: primaryId }
+              : item,
+          ),
+        );
+      })
+      .catch(() => {
+        // Properties are optional: a failed read leaves the editor flat.
+        if (alive) setCustomerProperties([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [customerIdForProperties, editMode]);
+  // On CREATE, a service line sent without a property when the customer has
+  // 2+ saved properties names the primary, so a new multi-property invoice
+  // never has a line that would keep the documents flat. On an EDIT nothing is
+  // defaulted: a stored line's property is whatever the operator set, and a
+  // legacy invoice's untagged lines are never relabeled to the primary (the
+  // service may not have been performed there) — the renderer keeps such an
+  // invoice flat.
+  const withDefaultLineProperties = (items) => {
+    const eligible =
+      !editMode && customerProperties.length >= 2 && primaryPropertyId;
+    if (!eligible) return items;
+    return items.map((item) =>
+      item._kind !== "discount" && !item.property_id
+        ? { ...item, property_id: primaryPropertyId }
+        : item,
+    );
+  };
 
   // Service library search for active line item
   useEffect(() => {
@@ -6671,7 +6743,23 @@ function CreateInvoice({
     setDocumentDiscountSearchOpen(false);
     setDiscountQueries((prev) => ({ ...prev, __document__: "" }));
   };
-  const addLineItem = () => setLineItems([...lineItems, newLineItem()]);
+  // A new line defaults to the primary property only on CREATE; on an edit a
+  // line names a property only when the operator picks one (see
+  // withDefaultLineProperties).
+  const addLineItem = () =>
+    setLineItems([
+      ...lineItems,
+      !editMode && customerProperties.length >= 2 && primaryPropertyId
+        ? { ...newLineItem(), property_id: primaryPropertyId }
+        : newLineItem(),
+    ]);
+  // Multi-property invoices: which saved property a service line is for. The
+  // server re-checks ownership and freezes the address on save.
+  const setLinePropertyId = (i, propertyId) => {
+    const updated = [...lineItems];
+    updated[i] = { ...updated[i], property_id: propertyId || null };
+    setLineItems(updated);
+  };
   // Codex pre-push audit P0 (round 6 on PR #4655, post-push): removing a
   // discount (or, below, editing a line's price) can leave a SURVIVING
   // fresh sibling's own unit_price stale — repriceAllFreshDiscounts
@@ -6998,7 +7086,7 @@ function CreateInvoice({
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
         serviceDate,
-        lineItems: repricedLineItems
+        lineItems: withDefaultLineProperties(repricedLineItems)
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
             ...i,
@@ -7229,7 +7317,7 @@ function CreateInvoice({
           stackingEnabled,
           persistedClientIds: persistedClientIdsRef.current,
         });
-        body.line_items = repricedLineItems
+        body.line_items = withDefaultLineProperties(repricedLineItems)
           .filter((i) => i.description && Number(i.unit_price) !== 0)
           .map((i) => ({
             ...i,
@@ -8028,6 +8116,43 @@ function CreateInvoice({
                         ))
                       )}
                     </div>
+                  )}
+                {customerProperties.length >= 2 &&
+                  item._kind !== "discount" && (
+                    <Field
+                      className="min-w-0 mt-2"
+                      label="Property"
+                      id={`line-property-${item.client_id || i}`}
+                    >
+                      <Select
+                        aria-label="Property for this service"
+                        value={
+                          item.property_id ||
+                          (editMode ? "" : primaryPropertyId || "")
+                        }
+                        onChange={(e) => setLinePropertyId(i, e.target.value)}
+                        disabled={builderBusy}
+                      >
+                        {editMode && !item.property_id && (
+                          <option value="">Not set</option>
+                        )}
+                        {customerProperties.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {[
+                              [p.address_line1, p.address_line2]
+                                .filter(Boolean)
+                                .join(" "),
+                              p.city,
+                            ]
+                              .filter(Boolean)
+                              .join(", ") ||
+                              p.label ||
+                              "Saved property"}
+                            {p.is_primary ? " (primary)" : ""}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
                   )}
               </div>{" "}
               <div>
