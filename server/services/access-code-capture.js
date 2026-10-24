@@ -1173,7 +1173,11 @@ async function callOwnerId(conn, row) {
 }
 // A filed row answers to its call's (or email's) owner now; an explicit office
 // link (the source has no customer of its own) is the office's decision and stays.
-const sourceRowOwned = (source, ownerId, row) => (ownerId || null) === (row.customer_id || null) || (!!row.linked_at && !source.customer_id);
+// An office link is kept while the source names no customer of its own: a call
+// with no customer_id; an email with no owner (an address on two customers
+// included), as OWNED_SOURCE_SQL reads it.
+const sourceRowOwned = (source, ownerId, row) => (ownerId || null) === (row.customer_id || null)
+  || (!!row.linked_at && !(row.source_type === 'email' ? ownerId : source.customer_id));
 
 // A call's receipt covers everything that decides whether and how it is read, as
 // a text's does: its owner (above), direction, both numbers, a spam verdict, the
@@ -1875,7 +1879,8 @@ async function sourceStillSupports(trx, row) {
 // A call's rows belong to its owner now (callOwnerSql: its own customer, else
 // the one customer of the far-end phone), an email's to its owner (emailOwnerSql:
 // its own customer, else the one customer of the sender address), unless the
-// office linked the row to a customer itself while the source has none. (The
+// office linked the row to a customer itself while the source has none (for an
+// email: no owner, which includes an address shared by two customers). (The
 // call is read by its id, which is what the sandbox-call reader guard looks for.)
 const OWNED_SOURCE_SQL = `(a.source_id IS NULL OR (
   (a.source_type <> 'sms' OR NOT EXISTS (
@@ -1889,7 +1894,7 @@ const OWNED_SOURCE_SQL = `(a.source_id IS NULL OR (
   AND (a.source_type <> 'email' OR NOT EXISTS (
     SELECT 1 FROM emails src WHERE src.id = a.source_id
       AND ${emailOwnerSql('src')} IS DISTINCT FROM a.customer_id
-      AND NOT (a.linked_at IS NOT NULL AND src.customer_id IS NULL)))))`;
+      AND NOT (a.linked_at IS NOT NULL AND ${emailOwnerSql('src')} IS NULL)))))`;
 
 async function listForCustomer(conn, customerId) {
   const rows = await conn('customer_access_codes as a')

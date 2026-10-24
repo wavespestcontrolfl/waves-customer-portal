@@ -3228,6 +3228,12 @@ postgres('access codes section', () => {
         const rows = await emailRows({ source_id: id });
         expect(rows).toHaveLength(1);
         expect(rows[0]).toMatchObject({ customer_id: null, sender_email: SENDER, status: 'found' });
+        // The office links it to one of the two: the link holds and the code is accepted.
+        expect(await access.link(trx, rows[0].id, { customerId: a.id, adminUserId: ADMIN_ID })).toMatchObject({ ok: true });
+        expect((await access.listForCustomer(trx, a.id)).found.map((r) => r.id)).toEqual([rows[0].id]);
+        expect(await access.accept(trx, rows[0].id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true });
+        await sweepEmails(stub([emailItem()]));
+        expect((await emailRows({ source_id: id })).map((r) => [r.customer_id, r.status])).toEqual([[a.id, 'active']]);
       });
 
       test.each([
