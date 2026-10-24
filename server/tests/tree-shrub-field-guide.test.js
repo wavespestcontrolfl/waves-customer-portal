@@ -408,3 +408,48 @@ describe('13-0-13 and Sequestar guide entries (labels read 2026-10-22)', () => {
     }
   });
 });
+
+describe('palm-type table (owner 2026-10-23; every fact from UF/IFAS)', () => {
+  const reference = require('../config/tree-shrub-field-guide.json');
+  const { palmTypes } = reference;
+  const byKey = Object.fromEntries(palmTypes.rows.map(row => [row.key, row]));
+
+  test('one row per common SW Florida palm, plus other / not sure; every cell is filled', () => {
+    expect(palmTypes.rows.map(row => row.key)).toEqual([
+      'sabal', 'queen', 'royal', 'foxtail', 'christmas', 'pygmy', 'canary', 'date',
+      'bismarck', 'washingtonia', 'coconut', 'areca', 'pindo', 'chinese-fan', 'other',
+    ]);
+    for (const row of palmTypes.rows) {
+      expect(['yes', 'not listed', 'unknown']).toContain(row.lethalBronzing);
+      expect(['yes', 'no', 'partly', 'unknown']).toContain(row.selfCleaning);
+      expect(row.nutrients.length).toBeGreaterThan(0);
+      expect(row.note.length).toBeGreaterThan(0);
+    }
+    expect(byKey.other).toMatchObject({ lethalBronzing: 'unknown', nutrients: 'unknown', selfCleaning: 'unknown' });
+  });
+
+  test('lethal bronzing column matches the UF PP163 host table', () => {
+    const hosts = ['sabal', 'queen', 'christmas', 'pygmy', 'canary', 'date', 'bismarck', 'coconut', 'pindo', 'chinese-fan'];
+    for (const key of hosts) expect({ key, lb: byKey[key].lethalBronzing }).toEqual({ key, lb: 'yes' });
+    // Not on UF's 21-species list today.
+    for (const key of ['royal', 'foxtail', 'washingtonia', 'areca']) expect({ key, lb: byKey[key].lethalBronzing }).toEqual({ key, lb: 'not listed' });
+  });
+
+  test('says palm type changes neither the plan price nor the fertilizer, and cites UF sources', () => {
+    expect(palmTypes.planNote).toMatch(/does not change the plan price or the fertilizer/);
+    expect(palmTypes.planNote).toMatch(/all palm species/);
+    expect(palmTypes.sources.length).toBeGreaterThanOrEqual(3);
+    for (const src of palmTypes.sources) expect(src.url).toMatch(/^https:\/\/edis\.ifas\.ufl\.edu\/publication\/[A-Z]+\d+$/);
+    expect(JSON.stringify(palmTypes)).not.toMatch(/\$\s?\d/);
+  });
+
+  test('the visit payload carries the table only where it carries the palm chart', () => {
+    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
+    let withPalm = 0;
+    for (const row of program.visits) {
+      const guide = treeShrubFieldGuide(row);
+      if (row.fieldGuide.palm) { withPalm += 1; expect(guide.palmTypes).toBe(palmTypes); } else expect(guide.palmTypes).toBeNull();
+    }
+    expect(withPalm).toBeGreaterThan(0);
+  });
+});

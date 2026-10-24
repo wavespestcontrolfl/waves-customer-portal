@@ -89,3 +89,18 @@ test('the Zylam tank amount is named foliar-only, so it is never read as the dre
   render(<TreeShrubFieldGuide guide={{ ...december.fieldGuide, month: 'Dec', ...reference, products: held }} mode="tech" />);
   expect(within(screen.getByRole('button', { name: /Zylam/ })).getByText('Mix withheld · see product checks')).toBeTruthy();
 });
+
+test('palm-type table lists every palm, says type does not change price or fertilizer, and cites UF', () => {
+  render(<TreeShrubFieldGuide guide={guide} mode="tech" />);
+  const section = screen.getByTestId('palm-types');
+  expect(within(section).getAllByRole('row')).toHaveLength(reference.palmTypes.rows.length + 1);
+  expect(within(section).getByRole('rowheader', { name: /Queen palm/ })).toBeTruthy();
+  expect(within(section).getByRole('rowheader', { name: /Other \/ not sure/ })).toBeTruthy();
+  expect(within(section).getByText(/does not change the plan price or the fertilizer/)).toBeTruthy();
+  expect(within(section).getByRole('link', { name: /PP163/ }).getAttribute('href')).toBe('https://edis.ifas.ufl.edu/publication/PP163');
+});
+
+test('no palm-type table when the visit carries none', () => {
+  render(<TreeShrubFieldGuide guide={{ ...guide, palmTypes: null }} />);
+  expect(screen.queryByTestId('palm-types')).toBeNull();
+});
