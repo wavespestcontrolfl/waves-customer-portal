@@ -880,3 +880,14 @@ describe('GATE_PEST_QUIET_VISIT', () => {
     expect(text).toContain('Customer interaction: Customer home — spoke with them');
   });
 });
+
+// GATE_PEST_LABEL_FACTS reads which pests the technician named; the route
+// hands the context its own redacted note and observations to read them from.
+test('the grounding context gets the redacted note and observations as visitTexts', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  await handler(mkReq({ serviceNotes: 'German cockroach under the sink. Gate code 1234.', observations: ['Ants on the slider'] }), mkRes());
+  const { visitTexts } = mockBuildContext.mock.calls[0][0];
+  expect(visitTexts[0]).toContain('German cockroach under the sink.');
+  expect(visitTexts).toContain('Ants on the slider');
+  expect(visitTexts.join(' ')).not.toContain('1234');
+});

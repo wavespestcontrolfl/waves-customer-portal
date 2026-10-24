@@ -17,6 +17,7 @@ const { findReportProductCopyEntry } = require('../../config/report-product-copy
 const { validateCustomerCopy } = require('./premium-experience');
 const { groundedTimeframePhrases } = require('./report-writer-rules');
 const { writerPromiseLines } = require('./visit-promises');
+const { labelFactPests, displayTerm, joinTerms } = require('./label-pest-facts');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -102,15 +103,23 @@ function writerExpectations({ line = null, findingsType = null, applications = [
 // count stays on the product card: a figure the writer may say needs a screen
 // that knows the count and whether the customer asked. One line per job, never a product name. Reviewed config
 // only: config/report-product-copy.js.
-function productFactLines(applications) {
+// GATE_PEST_LABEL_FACTS (label-pest-facts.js): `namedPests` is what the
+// technician named today; a product whose reviewed label list names one of
+// them adds "its label lists ...". Null (the gate off) leaves every line as
+// it was.
+function productFactLines(applications, { namedPests = null } = {}) {
   const seen = new Set();
   return (Array.isArray(applications) ? applications : []).flatMap((application) => {
     const entry = findReportProductCopyEntry({ epaReg: application?.epaReg, name: application?.name });
-    if (!entry?.mainPests?.length) return [];
+    const labelPests = namedPests ? labelFactPests(entry?.labelPests, namedPests, entry?.labelPestsExcept).map(displayTerm) : [];
+    if (!entry?.mainPests?.length && !labelPests.length) return [];
     const tagged = (Array.isArray(application.targets) ? application.targets : []).map(cleanText).filter(Boolean);
     const facts = [
-      `mainly used for ${entry.mainPests.join(' and ')}`,
-      tagged.length ? `tagged today for ${tagged.join(', ')}` : 'not tagged today (its reason is not recorded here)',
+      entry.mainPests?.length ? `mainly used for ${entry.mainPests.join(' and ')}` : null,
+      entry.mainPests?.length || tagged.length
+        ? (tagged.length ? `tagged today for ${tagged.join(', ')}` : 'not tagged today (its reason is not recorded here)')
+        : null,
+      labelPests.length ? `its label lists ${joinTerms(labelPests)}` : null,
     ].filter(Boolean);
     const label = [application.role, application.methodLabel, application.applicationArea]
       .map(cleanText).filter(Boolean).join(', ');
@@ -121,10 +130,16 @@ function productFactLines(applications) {
   });
 }
 
-function productFactsSection(applications) {
-  const lines = productFactLines(applications);
+// Owner 2026-10-24 page: "the writer can use it: 'the treatment in the kitchen
+// is one labeled for German cockroaches'". A permissive "you may" was left
+// unused in the replay (0 of 4), so it is an instruction.
+const LABEL_LISTS_NOTE = ' "Its label lists" names a pest from today\'s note that this treatment\'s EPA label names. Say it once in WHAT WE DID AND WHY, as a treatment "labeled for" that pest ("the treatment in the kitchen is one labeled for German cockroaches"), and nothing else about the label: never that it kills the pest, keeps it away or works on any pest not listed there.';
+
+function productFactsSection(applications, { namedPests = null } = {}) {
+  const lines = productFactLines(applications, { namedPests });
   if (!lines.length) return null;
-  return 'PRODUCT FACTS (reviewed label facts for the treatments recorded today, by job, never by name. "Mainly used for" says what we use the treatment for: it is not a finding and not proof that pest was seen today. "Tagged today for" is what the technician recorded this one treatment for.):'
+  const labelNote = lines.some((line) => line.includes('its label lists ')) ? LABEL_LISTS_NOTE : '';
+  return `PRODUCT FACTS (reviewed label facts for the treatments recorded today, by job, never by name. "Mainly used for" says what we use the treatment for: it is not a finding and not proof that pest was seen today. "Tagged today for" is what the technician recorded this one treatment for.${labelNote}):`
     + `\n${lines.join('\n')}`;
 }
 
@@ -155,7 +170,7 @@ function reachOutDate(serviceYmd, days) {
 }
 
 function buildWriterRecords({
-  serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [], promises = [],
+  serviceYmd, line = null, findingsType = null, serviceKind = null, applications = [], promises = [], namedPests = null,
 } = {}) {
   const sections = [];
   const expectations = writerExpectations({ line, findingsType, applications });
@@ -166,7 +181,7 @@ function buildWriterRecords({
   if (howItWorks.length) {
     sections.push(`HOW IT WORKS (approved product wording for the work recorded today; use it only to say why the work fits what was found, never for where or how anything was applied):\n${howItWorks.join('\n')}`);
   }
-  const productFacts = line === 'pest' ? productFactsSection(applications) : null;
+  const productFacts = line === 'pest' ? productFactsSection(applications, { namedPests }) : null;
   if (productFacts) sections.push(productFacts);
   if (SERVICE_KIND_LABELS[serviceKind]) sections.push(`SERVICE TYPE: ${SERVICE_KIND_LABELS[serviceKind]}.`);
   const reach = (serviceKind === 'one_time' || serviceKind === 're_service')

@@ -27037,6 +27037,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         writerRules: writerRulesOn,
         findingsType: reportPromptContext.findingsType || null,
         serviceKind: reportPromptContext.serviceKind || null,
+        visitTexts: [promptNotes, ...promptObs],
         visitPromises,
       });
       contextText = ctx.contextText || '';
