@@ -164,7 +164,7 @@ function sameLocality(call, home) {
 // The one community the customer's calls name for THIS address, or null when
 // no call names one or two calls name different ones.
 async function communityFromCalls(home) {
-  const calls = await db('call_log')
+  const calls = await whereNotSandboxCall(db('call_log'), 'source')
     .where({ customer_id: home.customer_id })
     .whereRaw("btrim(coalesce(ai_extraction_enriched #>> '{property,service_address,subdivision_or_community}', '')) <> ''")
     .orderBy('created_at', 'desc')
