@@ -19,7 +19,7 @@ import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib
 import InlineTechPicker from './InlineTechPicker';
 import QuickActionMenu from './QuickActionMenu';
 import DispatchReadinessStrip from './DispatchReadinessStrip';
-import { openHoursForDay, hourToHHMM, formatOpenHour, useHourClock } from './openHours';
+import { openHoursForDay, hourToHHMM, formatOpenHour, useHourClock, NOT_OCCUPYING } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -149,20 +149,6 @@ function isLawnService(service) {
   return /lawn|turf/.test(String(service?.serviceType || '').toLowerCase());
 }
 
-// Human section header for each day segment.
-// Today / Tomorrow / else weekday + month-day.
-function headerLabel(dateStr) {
-  if (isETToday(dateStr)) return 'Today';
-  const tomorrow = etDateString(addETDays(new Date(), 1));
-  if (dateStr === tomorrow) return 'Tomorrow';
-  const d = new Date(dateStr + 'T12:00:00Z');
-  return d.toLocaleDateString('en-US', {
-    timeZone: TIMEZONE,
-    weekday: 'long',
-    month: 'short',
-    day: 'numeric',
-  });
-}
 
 // The drive into a stop, drawn as a thin line above its card (owner
 // 2026-10-05): "~59 min drive from <previous stop>". The server stamps each
@@ -200,6 +186,21 @@ function DriveLine({ service, statusById }) {
       </span>
     </div>
   );
+}
+
+// Week-list section header for each day: Today / Tomorrow / else weekday +
+// month-day. The day list has the date strip above it and shows none.
+function headerLabel(dateStr) {
+  if (isETToday(dateStr)) return 'Today';
+  const tomorrow = etDateString(addETDays(new Date(), 1));
+  if (dateStr === tomorrow) return 'Tomorrow';
+  const d = new Date(dateStr + 'T12:00:00Z');
+  return d.toLocaleDateString('en-US', {
+    timeZone: TIMEZONE,
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 // "AT" for Alex Tech: two techs sharing a first initial still read apart.
@@ -535,7 +536,7 @@ function withOpenHours(sorted, openHours) {
   return rows;
 }
 
-function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
+function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const now = useHourClock();
   // Techs marked out for the day can't take a booking; with the whole roster
@@ -575,31 +576,31 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
     ? (freeTechs.get(hour) || []).map((id) => working.find((t) => t.id === id)).filter(Boolean)
     : null);
   const driveLabel = useMemo(() => dayDriveLabel(services || []), [services]);
+  // The desktop summary bar's split (completed / still to run); a cancelled,
+  // skipped or no-show visit is neither.
+  const doneCount = sorted.filter((s) => s.status === 'completed').length;
+  const leftCount = sorted.filter((s) => !NOT_OCCUPYING.has(s.status)).length;
   const statusById = useMemo(() => new Map((services || []).map((s) => [s.id, s.status])), [services]);
   return (
     <section>
       <header
-        className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 flex items-center justify-between"
-        style={{ padding: '8px 14px', height: 36 }}
+        className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 flex items-center justify-between u-nums font-bold text-zinc-900"
+        style={{ padding: '8px 14px', height: 36, fontSize: 13, gap: 8 }}
       >
-        <span className="flex items-center u-nums font-bold text-zinc-900" style={{ gap: 8, fontSize: 13 }}>
-          <span className="uppercase tracking-label">
-            {headerLabel(dateStr)}
-          </span>
-          {/* Exception-based rain figure: shown only at ≥40%, alert-red at ≥50
-              (same thresholds as the week grids / dispatch weather bar); below
-              that it reads in the header's own color. */}
-          {rainChance != null && rainChance >= 40 && (
-            <span
-              className={rainChance >= 50 ? 'text-alert-fg' : undefined}
-              title={`${rainChance}% chance of rain`}
-            >
+        {/* A week section names its day and carries that day's rain chance
+            (the week feed stamps no per-stop figure); the day list's date
+            strip and weather bar already say both. Rain shows from 40%,
+            alert-red from 50%, like every other rain chip. */}
+        <span className="flex items-center min-w-0" style={{ gap: 8 }}>
+          {weekDay && <span className="uppercase tracking-label">{headerLabel(dateStr)}</span>}
+          {weekDay && rainChance != null && rainChance >= 40 && (
+            <span className={rainChance >= 50 ? 'text-alert-fg' : undefined} title={`${rainChance}% chance of rain`}>
               {rainChance}% rain
             </span>
           )}
         </span>
-        <span className="u-nums font-bold text-zinc-900" style={{ fontSize: 13 }}>
-          {sorted.length} {sorted.length === 1 ? 'appt' : 'appts'}
+        <span className="whitespace-nowrap">
+          {doneCount} done · {leftCount} left
           {openHours.length > 0 && ` · ${openHours.length} open ${openHours.length === 1 ? 'hr' : 'hrs'}`}
           {driveLabel && ` · ${driveLabel} driving`}
         </span>
@@ -646,7 +647,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
+export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -702,7 +703,6 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
         <DaySegment
           dateStr={date}
           services={services || []}
-          rainChance={rainChance}
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}
@@ -739,8 +739,9 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
         <DaySegment
           key={d.date}
           dateStr={d.date}
+          weekDay
+          rainChance={typeof d.rainChance === 'number' ? d.rainChance : null}
           services={d.services || []}
-          rainChance={d.rainChance}
           onEdit={onEdit}
           onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}

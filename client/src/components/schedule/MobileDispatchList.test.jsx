@@ -313,7 +313,7 @@ describe('MobileDispatchList week open hours', () => {
       json: async () => ({
         startDate: '2026-07-13',
         days: [
-          { date: '2026-07-14', services: [], outTechIds: ['tech-1'] },
+          { date: '2026-07-14', services: [], outTechIds: ['tech-1'], rainChance: 55 },
           { date: '2026-07-15', services: [], outTechIds: [] },
         ],
       }),
@@ -327,6 +327,9 @@ describe('MobileDispatchList week open hours', () => {
       />,
     );
     await waitFor(() => expect(screen.getAllByRole('button', { name: /^Book open hour/ })).toHaveLength(12));
+    // Week sections keep their day label and that day's rain chip.
+    expect(screen.getByText('Tomorrow')).toBeInTheDocument();
+    expect(screen.getByText('55% rain')).toHaveClass('text-alert-fg');
     vi.useRealTimers();
   });
 });
@@ -382,6 +385,24 @@ describe('MobileDispatchList drive legs', () => {
     expect(screen.queryByText(/to next|from last stop|First stop|Last stop/)).toBeNull();
     expect(screen.queryByText(/~0 min/)).toBeNull();
     expect(screen.getByText(/~1h 15m driving/)).toBeInTheDocument();
+  });
+
+  it('counts the day as done / left, without a date label', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[
+          { ...SERVICE, customerName: 'Sample One', status: 'completed' },
+          { ...SERVICE, id: 'svc-2', customerName: 'Sample Two', windowStart: '10:00', windowEnd: '11:00' },
+          { ...SERVICE, id: 'svc-3', customerName: 'Sample Three', windowStart: '13:00', windowEnd: '14:00' },
+          { ...SERVICE, id: 'svc-4', customerName: 'Sample Four', status: 'cancelled', windowStart: '15:00', windowEnd: '16:00' },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText(/1 done · 2 left/)).toBeInTheDocument();
+    expect(screen.queryByText(/Today|Tomorrow|July/)).toBeNull();
   });
 
   it('hides the day total when a leg could not be measured', () => {

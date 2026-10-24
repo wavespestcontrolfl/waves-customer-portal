@@ -2061,7 +2061,6 @@ export default function DispatchPageV2({
                 setShowNewAppt(true);
               } : undefined}
               services={services}
-              rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}
               owesCompletion={completionResumeMarked}
               onRefresh={() => fetchSchedule(date)}
