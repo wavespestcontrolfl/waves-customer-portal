@@ -2097,18 +2097,23 @@ async function assertRefillPlacementOnEdit(database, id, { updates, addonsPosted
 async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceAddons }) {
   const lines = Array.isArray(replaceAddons) ? replaceAddons.filter(Boolean) : null;
   if (addressPlan) {
-    const moved = [String(visitId), ...(addressPlan.rows || []).map((row) => String(row.id))];
+    // Only a visit whose property actually changes is "moved": the sheet posts the current property too, and a series plan lists
+    // occurrences already at the destination.
+    const ids = [...new Set([String(visitId), ...(addressPlan.rows || []).map((row) => String(row.id))])];
+    const heldAt = await trx('scheduled_services').whereIn('id', ids).select('id', 'property_id');
+    const moved = (Array.isArray(heldAt) ? heldAt : []).filter((row) => String(row.property_id || '') !== String(addressPlan.propertyId || '')).map((row) => String(row.id));
+    const editedMoves = moved.includes(String(visitId));
     const stored = lines ? moved.filter((id) => id !== String(visitId)) : moved;
-    const postedRefill = !!lines && lines.some((line) => mistingRefill.isRefillKey(line.serviceKey));
+    const postedRefill = editedMoves && !!lines && lines.some((line) => mistingRefill.isRefillKey(line.serviceKey));
     const storedRefill = stored.length > 0
-      && !!(await trx('scheduled_service_addons').whereIn('scheduled_service_id', [...new Set(stored)]).where({ service_key_snapshot: MISTING_REFILL_KEY }).first('id'));
+      && !!(await trx('scheduled_service_addons').whereIn('scheduled_service_id', stored).where({ service_key_snapshot: MISTING_REFILL_KEY }).first('id'));
     if ((postedRefill || storedRefill) && mistingRefill.refillLive()) {
       throw Object.assign(
         httpError(409, 'A misting refill is priced for the house it was set up for. Remove the refill (Edit visit, Add-ons), change the address, then add the refill again.'),
         { code: 'MISTING_REFILL_ADDRESS_MOVE' },
       );
     }
-    return;
+    if (editedMoves) return;
   }
   const priced = (lines || []).filter((line) => line.refillPricedForProperty !== undefined);
   if (!priced.length) return;
