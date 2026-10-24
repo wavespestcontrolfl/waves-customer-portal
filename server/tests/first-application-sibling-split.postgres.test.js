@@ -2021,7 +2021,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(result).toEqual({ estimateId: ids.estimateId, action: 'alerted', divergingSiblingIds: [ids.pestId] });
       const bell = await readBell(trx, REFUND_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId]));
       expect(bell.read_at).toBeNull();
-      expect(bell.body).toContain(`visit ${ids.pestId} was cancelled — refund or credit its share of the already-paid invoice`);
+      expect(bell.body).toContain(`visit ${String(ids.pestId).slice(0, 8)} was cancelled — refund or credit its share of the already-paid invoice`);
     }));
 
     test('paid + anchor cancelled + a genuinely separate live invoice on the anchor → still alerts (the combined charge never moved)', () => rollbackTest(async (trx) => {
@@ -2081,7 +2081,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(result).toEqual({ estimateId: ids.estimateId, action: 'alerted', divergingSiblingIds: [ids.pestId] });
       const bell = await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId]));
       expect(bell.read_at).toBeNull();
-      expect(bell.body).toContain(`visit ${ids.pestId} was cancelled — remove its charge from the combined invoice`);
+      expect(bell.body).toContain(`visit ${String(ids.pestId).slice(0, 8)} was cancelled — remove its charge from the combined invoice`);
       expect(bell.body).toContain('still charges for it — remove that charge.');
     }));
 
