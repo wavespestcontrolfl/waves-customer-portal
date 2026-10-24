@@ -51,7 +51,7 @@ const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive } = require(
 const { etDateString } = require('../utils/datetime-et');
 const commitments = require('./call-commitments');
 const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
-const { verifyThreadCompletion, loadThreadMessages, latestCustomerTextAt, THREAD_LIMIT, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
+const { verifyThreadCompletion, loadThreadMessages, latestHumanTextAt, THREAD_LIMIT, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
 
 const { associationFrom, evidenceBoundary, storedProof, refreshableVerdictSql, staleAiRowSql, speakerTurns, normalizeForMatch } = commitments;
@@ -144,10 +144,12 @@ async function subjectOf(conn, row, from, cache) {
   return { current, message };
 }
 
-// The newest text the CUSTOMER sent (any of their phones) after the promise's floor, or null. The record loader
-// reads outbound texts only, so a record that says "done" cannot see a newer "no one came": a close on a record
-// must not stand over a customer text that came after the record, and the later conversation decides instead.
-const latestCustomerInbound = (conn, message) => latestCustomerTextAt(conn, message);
+// The newest HUMAN message after the promise's floor, or null: a text the customer sent (any phone) or one a person
+// from Waves sent; never an automated reminder, tracker link or receipt. The record loader sees outbound texts
+// only, so a record that says "done" cannot see a newer "no one came" or "the send failed, I will resend": a
+// close, on a record or on the thread, must not stand over a human message that came after what it read, and
+// the later conversation decides instead.
+const latestHumanMessage = (conn, message) => latestHumanTextAt(conn, message);
 const laterThan = (a, b) => !!a && (!b || a.getTime() > new Date(b).getTime());
 
 // A call record proves the promise only in Waves' own words (the transcript's
@@ -191,9 +193,9 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
   const result = { outcome: 'judged', verdict, current, message, evidence, model,
     cache: { fulfillment_check: checked, thread_check: cache?.thread_check ?? null } };
   if (verdict.verdict === 'fulfilled') {
-    // A customer text after the cited record: the record alone does not close. Remember the held verdict (no
+    // A human message after the cited record: the record alone does not close. Remember the held verdict (no
     // quote, same evidence hash) so it is not re-judged, and let the later conversation decide below.
-    result.readThrough = await latestCustomerInbound(conn, message);
+    result.readThrough = await latestHumanMessage(conn, message);
     if (!laterThan(result.readThrough, verdict.matched_at)) return result;
     result.cache.fulfillment_check = { verdict: 'uncertain', reason: 'contradicted_by_later_text', evidence_hash: checked.evidence_hash, retry_after: null };
     result.verdict = { verdict: 'uncertain', reason: 'contradicted_by_later_text' };
@@ -204,7 +206,7 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
   result.model = model;
   if (thread) {
     result.cache.thread_check = thread;
-    if (thread.verdict === 'fulfilled') return { ...result, verdict: thread, readThrough: result.readThrough ?? await latestCustomerInbound(conn, message) };
+    if (thread.verdict === 'fulfilled') return { ...result, verdict: thread, readThrough: result.readThrough ?? await latestHumanMessage(conn, message) };
   }
   return result;
 }
@@ -247,22 +249,22 @@ async function witnessState(conn, row, { ref, thread = false, now = new Date() }
   const from = associationFrom(joined, after);
   if (from.getTime() >= now.getTime()) return { missing: true };
   const { current, message } = await subjectOf(conn, joined, from, null);
-  // Read first: a close whose witness a truncated source hides is still reopened by a newer customer text.
-  const lastInbound = await latestCustomerInbound(conn, message);
+  // Read first: a close whose witness a truncated source hides is still reopened by a newer human message.
+  const lastHuman = await latestHumanMessage(conn, message);
   if (thread) {
     const { records } = await loadThreadMessages(conn, message, null);
     const found = records.find((r) => r.ref === ref);
-    if (found) return { fingerprint: md5(stringifySmsEvidence({ ref, who: found.who, at: found.created_at, text: found.text })), customerId: call.customer_id, lastInbound };
+    if (found) return { fingerprint: md5(stringifySmsEvidence({ ref, who: found.who, at: found.created_at, text: found.text })), customerId: call.customer_id, lastHuman };
     // The thread loader keeps the newest THREAD_LIMIT texts: a full page may have pushed an older one out.
-    return records.length >= THREAD_LIMIT ? { unknown: true, lastInbound } : { missing: true };
+    return records.length >= THREAD_LIMIT ? { unknown: true, lastHuman } : { missing: true };
   }
   const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
   const hard = evidence.failures.filter((f) => !f.endsWith('_truncated'));
   if (hard.length) throw Object.assign(new Error('evidence source failed'), { code: 'evidence_source_failed' });
   const found = evidence.records.find((r) => r.ref === ref);
-  if (!found) return evidence.failures.includes(`${ref.split(':')[0]}_truncated`) ? { unknown: true, lastInbound } : { missing: true };
+  if (!found) return evidence.failures.includes(`${ref.split(':')[0]}_truncated`) ? { unknown: true, lastHuman } : { missing: true };
   if (!admissibleWitness(found, current, evidence.records)) return { missing: true };
-  return { fingerprint: witnessFingerprint(found), customerId: call.customer_id, lastInbound };
+  return { fingerprint: witnessFingerprint(found), customerId: call.customer_id, lastHuman };
 }
 
 const refOf = (checkerType, id) => `${checkerType}:${id}`;
@@ -303,8 +305,8 @@ async function closeOnVerdict(conn, row, judged, { now }) {
     // The same function the stand check uses, so the stamp and the later comparison can never disagree.
     const state = await witnessState(trx, row, { ref: refOf(verdict.record_type, verdict.record_id), thread, now });
     if (!state.fingerprint) return false;
-    // A customer text that arrived since the verdict was judged changes the answer: the next run judges again.
-    if ((state.lastInbound?.getTime() ?? null) !== (judged.readThrough?.getTime() ?? null)) return false;
+    // A human message that arrived since the verdict was judged changes the answer: the next run judges again.
+    if ((state.lastHuman?.getTime() ?? null) !== (judged.readThrough?.getTime() ?? null)) return false;
     const proof = proofOf(row, verdict, state.fingerprint, judged.readThrough);
     const written = await snapshot(trx('call_commitments'))
       .whereExists(function callStillHasThatCustomer() {
@@ -326,9 +328,9 @@ async function aiCloseStands(conn, commitment, call, prior) {
   const checkerType = prior.check === THREAD_BASIS ? 'sms' : CHECKER_TYPE[prior.record_type];
   if (!checkerType || !UUID_RE.test(String(prior.record_id))) return false;
   const state = await witnessState(conn, commitment, { ref: refOf(checkerType, prior.record_id), thread: prior.check === THREAD_BASIS });
-  // A customer text after the cited record (and after everything the close read) reopens it: the later
+  // A human message after the cited record (and after everything the close read) reopens it: the later
   // conversation is judged again, which closes it once more if the customer confirms.
-  const contradicted = laterThan(state.lastInbound, new Date(Math.max(new Date(prior.matched_at).getTime() || 0, new Date(prior.read_through).getTime() || 0)));
+  const contradicted = laterThan(state.lastHuman, new Date(Math.max(new Date(prior.matched_at).getTime() || 0, new Date(prior.read_through).getTime() || 0)));
   const stands = (state.unknown === true || (!!state.fingerprint && state.fingerprint === prior.witness_fp)) && !contradicted;
   // Bookkeeping only (never bumps updated_at): when this close was last read again, for the recheck selector.
   if (stands) {

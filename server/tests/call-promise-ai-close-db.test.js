@@ -556,18 +556,13 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
   });
 
   describe('a close whose witness a full thread page hides', () => {
-    test('stays closed until a newer customer text arrives, then reopens', async () => {
+    test('30 later staff texts that push the confirming text out of the page reopen it (they are human messages)', async () => {
       const w = await world({ kind: 'send_report' });
       const reply = await addCustomerText(w, 'Got the report, thanks!');
       say(w, (payload) => (payload.text.includes(THREAD_PROMPT)
         ? { ok: true, json: { verdict: 'completed', record_ref: `sms:${reply}`, quote: 'Got the report' } } : { ok: true, json: { verdict: 'open', record_ref: null, quote: null } }));
       expect(await run(w)).toMatchObject({ closed: 1 });
-      // 30 later staff texts push the confirming text out of the newest-30 page.
-      // (Also proves a customer text 30 staff texts back is still seen: see the second case below.)
       for (let i = 0; i < 30; i += 1) await addSms(w, { message_body: `Follow-up note ${i}`, created_at: new Date(Date.now() - 2 * 60 * 60 * 1000 + i * 1000) });
-      await cc.refreshFulfillment(db, w.call.id);
-      expect((await row(w.commitment.id)).status).toBe('fulfilled');
-      await addSms(w, { direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, message_type: null, status: 'received', metadata: null, message_body: 'Never mind, still nothing', created_at: new Date(Date.now() - 60 * 1000) });
       await cc.refreshFulfillment(db, w.call.id);
       expect((await row(w.commitment.id)).status).toBe('open');
     });
@@ -583,6 +578,37 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
         ? { ok: true, json: { verdict: 'not_completed', record_ref: null, quote: null } } : fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment')));
       expect(await run(w)).toMatchObject({ closed: 0 });
       expect((await row(w.commitment.id)).status).toBe('open');
+    });
+  });
+
+  describe('a later human message of either side', () => {
+    test('staff "sent" then staff "send failed, will resend": the close reopens with no model call, then is judged on the whole conversation', async () => {
+      const w = await world({ kind: 'send_report' });
+      const first = await addSms(w, { message_body: 'We sent the report out this morning.', created_at: later(10) });
+      say(w, (payload) => (payload.text.includes(THREAD_PROMPT)
+        ? { ok: true, json: { verdict: 'completed', record_ref: `sms:${first}`, quote: 'We sent the report' } } : { ok: true, json: { verdict: 'open', record_ref: null, quote: null } }));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      const before = dispatchWithFallback.mock.calls.length;
+      await addSms(w, { message_body: 'The report send failed, I still need to resend it.', created_at: new Date(Date.now() - 60 * 1000) });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+      expect(dispatchWithFallback.mock.calls.length).toBe(before);
+      // The next run judges the whole conversation: the newest staff text says it is not done.
+      say(w, { ok: true, json: { verdict: 'not_completed', record_ref: null, quote: null } });
+      expect(await run(w)).toMatchObject({ closed: 0 });
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('an automated reminder after the close does not reopen it', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      await addSms(w, { metadata: null, message_type: 'appointment_reminder', message_body: 'Reminder: your visit is tomorrow. Track: portal.example.invalid/l/abc', created_at: new Date(Date.now() - 60 * 1000) });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
     });
   });
 
