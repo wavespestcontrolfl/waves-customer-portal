@@ -62,6 +62,12 @@
  * irrigation tip hides only where the yard is known to have no system. With
  * the gate off, nothing is filtered.
  *
+ * A tip may name its Waves post, `blog: { path: '/{category}/{slug}/' }`
+ * (owner 2026-10-24, decisions 2 and 6): behind the same gate the office
+ * form fills an empty blog slot with it when the tip is picked, if the post
+ * is live on the hub and not titled for one town (report-blog-post
+ * tipBlogPosts). Only a post that covers the tip's subject is named.
+ *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
  */
@@ -279,6 +285,7 @@ const TIPS = Object.freeze([
   {
     id: 'moisture_ac_auto', group: 'moisture', label: 'A/C fan on Auto, not On',
     pests: ['Roaches', 'Silverfish'], keywords: ['thermostat', 'humidity', 'silverfish', 'booklice'], lines: ['pest'], season: 'wet',
+    blog: { path: '/pest-control/silverfish-earwig-booklice-identification/' },
     sources: [{ fact: 'fact-tip-indoor-humidity-epa', label: 'EPA', url: 'https://www.epa.gov/mold/brief-guide-mold-moisture-and-your-home' }],
     sourcedCopy: "Roaches, silverfish, and booklice all track indoor humidity. With the thermostat fan set to On, the coil re-evaporates the water it just pulled out, and on Auto the house stays drier. The EPA's guidance is to keep indoor humidity below 60 percent, ideally 30 to 50.",
     copy: "Roaches, silverfish, and booklice all track indoor humidity. With the thermostat fan set to On, the coil re-evaporates the water it just pulled out; on Auto the house settles around 50% humidity, and that takes away the conditions they establish in.",
@@ -345,6 +352,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_weekly_dump', group: 'water', label: 'Tip out standing water weekly',
     keywords: ['water', 'buckets', 'saucers', 'toys', 'tarp', 'mosquito'], lines: ['mosquito'], season: 'wet',
+    blog: { path: '/mosquito/standing-water-checklist-swfl-patio/' },
     sources: [{ fact: 'fact-tip-water-weekly-dump', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN594' }],
     sourcedCopy: "Mosquitos need very little water and not much time. UF/IFAS puts the Asian tiger mosquito at five to ten days from larva to pupa and two more to adult, and its eggs can survive drying out for up to a year. A weekend walk-around to tip out and scrub saucers, buckets, toys, and tarps breaks the cycle.",
     copy: "Mosquitos need about a bottle cap of water and roughly a week to go from egg to adult. One walk-around every weekend to tip out saucers, buckets, toys, and tarps breaks the cycle on your own property before they ever fly.",
@@ -352,6 +360,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_bromeliads', group: 'water', label: 'Flush bromeliads weekly',
     keywords: ['bromeliad', 'plants', 'cups', 'water', 'larvae'], lines: ['mosquito'], season: 'all',
+    blog: { path: '/mosquito/get-rid-of-mosquitoes/' },
     sources: [{ fact: 'fact-tip-water-bromeliads', label: 'UF/IFAS', url: 'https://blogs.ifas.ufl.edu/sarasotaco/2024/06/21/mosquito-faqs/' }],
     sourcedCopy: "Bromeliad cups hold water, and UF/IFAS Extension in Sarasota County notes it takes only a bottle cap's worth to breed mosquitos. They're the most productive breeding site I find in SWFL yards, so flush the cups with the hose once a week before the larvae can mature.",
     copy: "If you have bromeliads, the cup of each plant holds water, and they're the most productive mosquito breeding site I find in SWFL yards. Flush the cups with the hose once a week so the larvae wash out before they can mature.",
@@ -359,6 +368,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_bird_bath', group: 'water', label: 'Change bird bath water every 3 days',
     keywords: ['bird bath', 'fountain', 'water'], lines: ['mosquito'], season: 'all',
+    blog: { path: '/mosquito/get-rid-of-mosquitoes/' },
     sources: [{ fact: 'fact-tip-water-bird-bath', label: 'Florida Dept. of Health', url: 'https://www.floridahealth.gov/2024/10/08/fdoh-urges-floridians-to-drain-and-cover-to-prevent-mosquito-bites/' }],
     sourcedCopy: "The Florida Department of Health's rule for birdbaths and pet bowls is to empty and clean them at least twice a week, so the water never sits long enough to carry larvae through to adults. Fountains and bubblers do the same job on their own, since larvae don't develop in moving water.",
     copy: "Water changed every few days never reaches the pupal stage. Fountains and bubblers do the same job on their own — larvae can't develop in moving water.",
@@ -399,6 +409,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_sealed_pantry', group: 'kitchen', label: 'Seal flour, rice, cereal, pet food',
     keywords: ['pantry', 'flour', 'rice', 'cereal', 'moths', 'weevils'], lines: ['pest'], season: 'all',
+    blog: { path: '/pest-control/get-rid-of-pantry-moths/' },
     sources: [{ fact: 'fact-tip-interior-sealed-pantry', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN153' }],
     sourcedCopy: "Pantry pests usually arrive inside a bag from the store, and UF/IFAS says dog food and bird seed are the spots people usually overlook. Sealed containers keep one bad bag from spreading to the whole shelf, and they let you spot which one it was.",
     copy: "Pantry pests usually arrive inside the bag from the store. Sealed containers keep one bad bag from spreading to the whole shelf, and they let you spot which one it was.",
@@ -420,6 +431,7 @@ const TIPS = Object.freeze([
   {
     id: 'seal_door_sweeps', group: 'sealing', label: 'Replace worn door sweeps',
     keywords: ['door', 'sweep', 'gap', 'daylight', 'garage', 'mice'], lines: ['pest', 'rodent'], season: 'all',
+    blog: { path: '/pest-control/get-rid-of-mice/' },
     sources: [{ fact: 'fact-tip-seal-door-sweeps', label: 'CDC', url: 'https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html' }],
     sourcedCopy: "If you can see daylight under a door, that's the gap. The CDC puts a mouse through a hole about a quarter inch wide, the width of a pencil. The bottom corners of the garage door are the entry I find most often, and a new sweep closes it.",
     copy: "If you can see daylight under a door, that's the gap. A mouse fits through about a quarter inch, a rat through a half. The bottom corners of the garage door are the entry I find most often, and a new sweep closes it.",
@@ -427,6 +439,7 @@ const TIPS = Object.freeze([
   {
     id: 'seal_penetrations', group: 'sealing', label: 'Seal around pipes and vents',
     keywords: ['pipe', 'vent', 'dryer', 'conduit', 'wall', 'gap'], lines: ['pest', 'rodent'], season: 'all',
+    blog: { path: '/pest-control/get-rid-of-mice/' },
     copy: "Every pipe, vent, and conduit through the wall leaves a gap around it. Copper mesh packed into the gap with sealant over it shuts the direct route from the wall void into the house — it's the repair that outlasts any treatment.",
   },
   {
@@ -485,6 +498,7 @@ const TIPS = Object.freeze([
     findings: ['gray_leaf_spot', 'large_patch'],
     // The order sentence is dated: revisit when SWFWMD's Modified Phase III
     // one-day watering order ends (through 2027-03-31 as of 2026-10-24).
+    blog: { path: '/lawn-care/overwatering-lawn-vs-underwatering/' },
     sources: [{ fact: 'fact-tip-lawn-water-morning', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH040' }, { fact: 'fact-swfwmd-modified-phase-iii-water-shortage', label: 'SWFWMD' }],
     copy: "Water in the early-morning hours. UF/IFAS says dew is already on the grass from about 2 to 8 a.m., so a run then adds the least wet time, while evening watering invites disease. Under the water-shortage order through March 31, 2027, lawn watering has to end by 4 a.m.",
   },
@@ -1338,6 +1352,7 @@ const TIPS = Object.freeze([
   {
     id: 'silverfish_paper', group: 'moisture', label: "Keep paper out of damp rooms",
     pests: ['Silverfish'], keywords: ["books", "paper", "photos", "damp", "closet"], lines: ["pest"], season: 'all',
+    blog: { path: '/pest-control/silverfish-earwig-booklice-identification/' },
     copy: "Silverfish feed on paper, glue, and starch, and they need damp air to live. Books, photo boxes, and stored papers do better on a shelf in an air-conditioned room than in the garage or under a sink.",
   },
   {
@@ -1377,6 +1392,7 @@ const TIPS = Object.freeze([
     id: 'mq_lanai_fan', group: 'water', label: "Run a fan where you sit",
     keywords: ["fan", "lanai", "patio", "biting", "sitting outside"], lines: ["mosquito"], season: 'all',
     services: ["mosquito_monthly", "mosquito_recurring", "mosquito_seasonal", "mosquito", "mosquito_one_time", "mosquito_onetime", "mosquito_event"],
+    blog: { path: '/mosquito/get-rid-of-mosquitoes/' },
     sources: [{ fact: 'fact-tip-mq-lanai-fan', label: 'J. Medical Entomology, 2003', url: 'https://pubmed.ncbi.nlm.nih.gov/14596273/' }],
     copy: "A ceiling fan or box fan aimed across the chairs on the lanai cuts down the mosquitos that find you. In a 2003 study, fan wind sharply reduced how many reached a trap, mostly by spreading out the scent they follow.",
   },
@@ -1458,9 +1474,20 @@ deepFreeze(TIPS);
 deepFreeze(TIP_GROUPS);
 
 const TIPS_BY_ID = new Map(TIPS.map((tip) => [tip.id, tip]));
-// A sourced tip as the picker shows it with GATE_TECH_TIP_SOURCES on: the
-// same entry carrying its sourced words, frozen like the registry.
-const SOURCED_VIEWS = new Map(TIPS.filter((tip) => tip.sourcedCopy).map((tip) => [tip.id, deepFreeze({ ...tip, copy: tip.sourcedCopy })]));
+// A tip as the picker shows it with GATE_TECH_TIP_SOURCES on: its sourced
+// words and the citations the completion would freeze on `day` (the office
+// form prints their labels on the tip's chip), frozen like the registry. A
+// tip with neither is the registry's own entry.
+function sourcedView(tip, day) {
+  const citations = citationsFor(tip, day);
+  if (!tip.sourcedCopy && !citations.length) return tip;
+  return deepFreeze({ ...tip, copy: tip.sourcedCopy || tip.copy, ...(citations.length ? { citations } : {}) });
+}
+
+// A schedule day stays that calendar day; a Date is read in ET.
+function etDay(date) {
+  return typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date.trim()) ? date.trim() : etDateString(date);
+}
 
 // An exact registry line passes through; anything else — a service key
 // ('wdo_inspection'), a display name ('Palm Injection'), a companion
@@ -1512,10 +1539,12 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   const keys = new Set([serviceKey, ...serviceKeys].filter(Boolean));
   const forService = keys.size ? TIPS_HERE.filter((tip) => tip.services?.some((key) => keys.has(key))).sort(bySeason) : [];
   const listed = new Set([...forService, ...groups.flatMap((group) => group.tips)]);
-  // Behind GATE_TECH_TIP_SOURCES the picker shows the words the completion
-  // will freeze (a sourced tip's sourcedCopy), so the technician approves
-  // exactly what the customer reads; off, the registry's own entries.
-  const shown = (tip) => (sourced && SOURCED_VIEWS.get(tip.id)) || tip;
+  // Behind GATE_TECH_TIP_SOURCES the picker shows what the completion will
+  // freeze (a sourced tip's sourcedCopy and its citations), so the
+  // technician approves exactly what the customer reads; off, the
+  // registry's own entries.
+  const day = etDay(date);
+  const shown = (tip) => (sourced ? sourcedView(tip, day) : tip);
   const allGroups = forService.length ? [{ ...FOR_SERVICE_GROUP, primary: true, tips: forService }, ...groups] : groups;
   return {
     line,
@@ -1586,8 +1615,7 @@ function citationsFor(tip, day) {
  * sourced words and its citations; without it the result is unchanged.
  */
 function resolveTipIds(ids, { sourced = false, date = new Date() } = {}) {
-  // A schedule day stays that calendar day; a Date is read in ET.
-  const day = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date.trim()) ? date.trim() : etDateString(date);
+  const day = etDay(date);
   const seen = new Set();
   const resolved = [];
   for (const raw of Array.isArray(ids) ? ids : []) {

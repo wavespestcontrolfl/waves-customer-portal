@@ -186,7 +186,7 @@ import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { completionInvoiceFields } from "../../lib/completion-invoice-fields";
 import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-next-visit-note";
-import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups } from "../../lib/tech-tips";
+import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups, techTipYardLine, techTipSourceLabels } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
@@ -13231,6 +13231,9 @@ export function CompletionPanel({
   // is a firm "no": /complete checks it either way.
   const [blogPostOffer, setBlogPostOffer] = useState("no");
   const [blogPost, setBlogPost] = useState(null);
+  // The tip a pick filled the blog post from (tips with facts), for the
+  // "Filled from the tip" line while that post stays picked.
+  const [blogPostFrom, setBlogPostFrom] = useState(null);
   // Free-typed [Found]/[Next] note lines parked when an AI draft replaces
   // the notes (parkTaggedNoteLines). Their own state, NOT the textarea
   // state: they ground the AI draft, the recap and the photo context, but
@@ -14629,13 +14632,22 @@ export function CompletionPanel({
 
   // The blog search is offered wherever the server answers available (an
   // empty query reads nothing but the visit): only where /complete keeps the
-  // pick, every service but WDO, termite pre-treat, lawn and tree, shrub &
-  // palm (blogPostAllowedFor). The lawn and tree, shrub & palm forms never
-  // ask: another lane owns those completions.
+  // pick, every service but WDO, termite pre-treat and tree, shrub & palm
+  // (blogPostAllowedFor). The tree, shrub & palm forms never ask: another
+  // lane owns those completions. Lawn asks only with tips with facts on
+  // (GATE_TECH_TIP_SOURCES, as the tips payload says; owner 2026-10-24,
+  // decision 6).
+  const tipSourcesOn = techTips?.tipSources === true;
+  const blogPostLineExcluded = ["tree_shrub", "palm"].includes(serviceLineForCloseout)
+    || (serviceLineForCloseout === "lawn" && !tipSourcesOn);
+  useEffect(() => {
+    setBlogPost(null);
+    setBlogPostFrom(null);
+  }, [service.id, serviceLineForCloseout]);
+  // Apart from the reset, so the tips payload landing never clears a pick.
   useEffect(() => {
     let cancelled = false;
-    setBlogPost(null);
-    if (!service.id || ["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout)) {
+    if (!service.id || blogPostLineExcluded) {
       setBlogPostOffer("no");
       return () => { cancelled = true; };
     }
@@ -14644,7 +14656,7 @@ export function CompletionPanel({
       .then((data) => { if (!cancelled) setBlogPostOffer(data?.available === true ? "yes" : "no"); })
       .catch(() => { if (!cancelled) setBlogPostOffer("unknown"); });
     return () => { cancelled = true; };
-  }, [service.id, serviceLineForCloseout]);
+  }, [service.id, serviceLineForCloseout, blogPostLineExcluded]);
   const blogPostKept = !!blogPost && blogPostOffer !== "no";
   // A kept pick shows while the answer is pending or failed, so it can be
   // removed (a post /complete finds gone answers BLOG_POST_UNAVAILABLE).
@@ -14659,6 +14671,28 @@ export function CompletionPanel({
     (phrase) => adminFetch(`/admin/dispatch/${service.id}/blog-suggestions`, { method: "POST", body: JSON.stringify({ phrase }) }),
     [service.id],
   );
+  // Tips with facts: picking a tip that names a live Waves post fills an
+  // empty blog slot with it (owner 2026-10-24). Only a pick fills: a
+  // restored draft keeps its own post, a post already picked stays, and
+  // removing the tip never clears the post.
+  const pickTechTips = useCallback((ids) => {
+    const added = ids.find((id) => !selectedTipIds.includes(id));
+    setSelectedTipIds(ids);
+    const post = added && tipSourcesOn ? techTips?.blogPosts?.[added] : null;
+    if (!post || blogPost || blogPostOffer !== "yes") return;
+    const tip = [...(techTips.groups || []).flatMap((group) => group.tips || []), ...(techTips.more || [])]
+      .find((candidate) => candidate.id === added);
+    setBlogPost(post);
+    setBlogPostFrom({ id: post.id, label: tip?.label || "" });
+  }, [selectedTipIds, tipSourcesOn, techTips, blogPost, blogPostOffer]);
+  // A post the technician picks or removes is their own.
+  const changeBlogPost = useCallback((post) => {
+    setBlogPost(post);
+    setBlogPostFrom(null);
+  }, []);
+  const blogPostNote = blogPostFrom?.label && blogPost?.id === blogPostFrom.id
+    ? `Filled from the tip “${blogPostFrom.label}”`
+    : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -15731,6 +15765,7 @@ export function CompletionPanel({
       && ["id", "title", "url"].every((key) => typeof draftBlogPost[key] === "string" && draftBlogPost[key])
       ? { id: draftBlogPost.id, title: draftBlogPost.title, url: draftBlogPost.url }
       : null);
+    setBlogPostFrom(null);
     setParkedFound(typeof savedDraft.parkedFound === "string" ? savedDraft.parkedFound : "");
     setParkedNext(typeof savedDraft.parkedNext === "string" ? savedDraft.parkedNext : "");
     // Drafts saved before the detached-selection model lack the field → false,
@@ -20390,7 +20425,7 @@ export function CompletionPanel({
                   loading={techTipsLoading}
                   error={techTipsError}
                   selectedIds={selectedTipIds}
-                  onChange={setSelectedTipIds}
+                  onChange={pickTechTips}
                   customTip={customTip}
                   onCustomTipChange={setCustomTip}
                   disabled={generating}
@@ -20416,7 +20451,9 @@ export function CompletionPanel({
                   search={searchBlogPosts}
                   suggest={suggestBlogPost}
                   value={blogPost}
-                  onChange={setBlogPost}
+                  onChange={changeBlogPost}
+                  note={blogPostNote}
+                  canChange={tipSourcesOn}
                   disabled={generating || submitting}
                   tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, font, inputStyle: mInput }}
                 />
@@ -22900,7 +22937,7 @@ export function CompletionPanel({
                   loading={techTipsLoading}
                   error={techTipsError}
                   selectedIds={selectedTipIds}
-                  onChange={setSelectedTipIds}
+                  onChange={pickTechTips}
                   customTip={customTip}
                   onCustomTipChange={setCustomTip}
                   disabled={generating}
@@ -22926,7 +22963,9 @@ export function CompletionPanel({
                   search={searchBlogPosts}
                   suggest={suggestBlogPost}
                   value={blogPost}
-                  onChange={setBlogPost}
+                  onChange={changeBlogPost}
+                  note={blogPostNote}
+                  canChange={tipSourcesOn}
                   disabled={generating || submitting}
                   tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, inputStyle }}
                 />
@@ -24966,6 +25005,8 @@ function TechTipPicker({
   const ranked = q ? rankTechTips(searchTips, q) : null;
   const lastSent = library?.lastSent || {};
   const conditions = library?.conditions || {};
+  // Tips with facts: what the list was matched to (null with the gate off).
+  const yardLine = techTipYardLine(library?.yard);
   const inactive = disabled || loading || !!error;
 
   function add(id) {
@@ -25067,6 +25108,9 @@ function TechTipPicker({
         if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false);
       }}
     >
+      {yardLine && (
+        <div style={{ fontFamily: theme.font, fontSize: 14, color: theme.mutedText, marginBottom: 8 }}>{yardLine}</div>
+      )}
       <input
         type="text"
         role="combobox"
@@ -25139,6 +25183,7 @@ function TechTipPicker({
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
           {selectedIds.map((id) => {
             const tip = tipById.get(id);
+            const sources = techTipSourceLabels(tip);
             return (
               <span
                 key={id}
@@ -25156,7 +25201,10 @@ function TechTipPicker({
                 }}
               >
                 <span style={{ color: theme.mutedText }}>Tip:</span>
-                {tip ? tip.label : id}
+                {/* one run with its sources, so a long chip wraps as a line */}
+                {sources ? (
+                  <span>{tip.label}<span style={{ color: theme.mutedText }}> · {sources}</span></span>
+                ) : (tip ? tip.label : id)}
                 <button
                   type="button"
                   aria-label={`Remove tip: ${tip ? tip.label : id}`}

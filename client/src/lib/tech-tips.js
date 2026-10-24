@@ -82,3 +82,23 @@ export function rotatedTipGroups(library) {
 export function pickableTipIds(library) {
   return new Set([...(library?.groups || []).flatMap((group) => group.tips || []), ...(library?.more || [])].map((tip) => tip.id));
 }
+
+// What the picker matched its tips to (tips with facts, GATE_TECH_TIP_SOURCES,
+// owner 2026-10-24): the yard facts the server knows, as one line, or null
+// when it knows none.
+export function techTipYardLine(yard) {
+  if (!yard || typeof yard !== "object") return null;
+  const parts = [
+    typeof yard.grass === "string" && yard.grass ? yard.grass : null,
+    yard.irrigationSystem === true ? "irrigation system" : yard.irrigationSystem === false ? "no irrigation system" : null,
+    typeof yard.county === "string" && yard.county ? `${yard.county} County` : null,
+  ].filter(Boolean);
+  return parts.length ? `Matched to this yard: ${parts.join(" · ")}` : null;
+}
+
+// A tip's sources as its chip prints them ("UF/IFAS, SWFWMD"), each label
+// once; empty without citations (the gate off).
+export function techTipSourceLabels(tip) {
+  return [...new Set((tip?.citations || []).map((citation) => citation?.label).filter(Boolean))].join(", ");
+}
+
