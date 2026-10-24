@@ -416,14 +416,17 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
         notes: row.observations,
       });
 
-      const initial = assessments[0];
+      // Score scale (GATE_LAWN_SCORE_SCALE_V2): the first visit and the
+      // improvement compare within the latest visit's scale only.
+      const comparable = require('../lawn-assessment-history').sameScoreScale(assessments);
+      const initial = comparable[0];
       const latest = assessments[assessments.length - 1];
 
       return {
         has_assessments: true,
         latest: score(latest),
         initial: score(initial),
-        improvement: assessments.length > 1
+        improvement: comparable.length > 1
           ? score(latest).overall - score(initial).overall
           : 0,
         total_assessments: assessments.length,

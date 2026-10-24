@@ -105,6 +105,37 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     expect(photoRows.map((row) => row.is_best_photo)).toEqual([true, false, false]);
   });
 
+  test('score scale 2 stamps the row and keeps the four ratings as read, with no season multiplier; scale 1 leaves the stamp NULL', async () => {
+    const visitAssessment = require('../services/lawn-visit-assessment');
+    const real = visitAssessment.analyzeVisit;
+    const rating = (value) => ({ determinable: true, value });
+    const legacy = await request({ customerId: await customer(), photos });
+    expect((await mockKnex('lawn_assessments').where({ id: legacy.body.assessment.id }).first()).score_scale).toBeNull();
+    // GATE_LAWN_SCORE_SCALE_V2 needs GATE_LAWN_PROPERTY_HISTORY, which this suite keeps off: the read is forced to scale 2.
+    const spy = jest.spyOn(visitAssessment, 'analyzeVisit').mockImplementation((args) => real({ ...args, scale2: true }));
+    dispatch.mockResolvedValue({
+      ok: true, provider: 'gemini', model: 'fixture-model', usage: {}, failures: [],
+      json: complete({ scores: { turf_density: rating(82), weed_control: rating(78), color_health: rating(85), condition: rating(90) } }),
+    });
+    try {
+      const scale2Customer = await customer();
+      const [visit] = await mockKnex('scheduled_services').insert({ customer_id: scale2Customer, scheduled_date: '2026-10-20', service_type: 'lawn' }).returning('*');
+      const { body } = await request({ customerId: scale2Customer, photos, serviceId: visit.id });
+      const stored = await mockKnex('lawn_assessments').where({ id: body.assessment.id }).first();
+      expect(stored).toMatchObject({ score_scale: 2, turf_density: 82, weed_suppression: 78, color_health: 85, stress_damage: 90, confirmed_by_tech: false });
+      // The screen's Last visit row on this read's scale comes back with the read (none here).
+      expect(body).toHaveProperty('lastVisit', null);
+      expect((await runs.loadRun(body.assessment.id, mockKnex)).prompt_version).toBe('lawn-visit-v1-scale2');
+      // Both providers miss: the technician scores this visit by hand, on scale 2 too.
+      dispatch.mockResolvedValue({ ok: false, reason: 'gemini_timeout', failures: [] });
+      const missed = await request({ customerId: await customer(), photos });
+      expect(missed.body.aiAvailable).toBe(false);
+      expect((await mockKnex('lawn_assessments').where({ id: missed.body.assessment.id }).first()).score_scale).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('provider exhaustion stores a pending unavailable assessment with no healthy defaults', async () => {
     dispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'gemini', reason: 'timeout' }] });
     const { body } = await request({ customerId: await customer(), photos });

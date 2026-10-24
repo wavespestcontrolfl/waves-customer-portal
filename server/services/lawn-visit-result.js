@@ -1,6 +1,6 @@
 /** Normalize lawn visit evidence and keep unrated photos out of customer delivery. */
 const Ajv = require('ajv');
-const { RESPONSE_SCHEMA, LIGHTING_RESPONSE_SCHEMA, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS } = require('./lawn-visit-input');
+const { RESPONSE_SCHEMA, LIGHTING_RESPONSE_SCHEMA, SCALE2_VARIANTS, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS } = require('./lawn-visit-input');
 const { normalizeFindings, safeConditionLabel, namesAssertedCause } = require('./lawn-diagnostic-report');
 const { normalizeGrassType } = require('./lawn-grass-context');
 const shotList = require('./lawn-photo-shots');
@@ -113,12 +113,20 @@ const hasResponseShape = new Ajv().compile(containerShape(RESPONSE_SCHEMA));
 // shape above would reject, so it has its own compiled shape (compiled lazily-free
 // at load: the schema is a constant).
 const hasLightingResponseShape = new Ajv().compile(containerShape(LIGHTING_RESPONSE_SCHEMA));
+// Score scale 2 (GATE_LAWN_SCORE_SCALE_V2): the scores object carries four 0-100
+// ratings, so each light mode has its own closed shape.
+const hasScale2ResponseShape = new Ajv().compile(containerShape(SCALE2_VARIANTS.base.schema));
+const hasScale2LightingResponseShape = new Ajv().compile(containerShape(SCALE2_VARIANTS.lighting.schema));
+const shapeCheck = ({ lighting, scale2 }) => {
+  if (scale2) return lighting ? hasScale2LightingResponseShape : hasScale2ResponseShape;
+  return lighting ? hasLightingResponseShape : hasResponseShape;
+};
 
 // `lighting: true` validates against the lighting variant's shape (GATE_LAWN_LIGHTING).
-function validateAssessmentJson(result, photoCount, { lighting = false } = {}) {
+function validateAssessmentJson(result, photoCount, { lighting = false, scale2 = false } = {}) {
   const json = result && result.json;
   if (!json || typeof json !== 'object' || Array.isArray(json)) return 'malformed_assessment';
-  if (!(lighting ? hasLightingResponseShape : hasResponseShape)(json)) return 'malformed_assessment';
+  if (!shapeCheck({ lighting, scale2 })(json)) return 'malformed_assessment';
   if (!Array.isArray(json.findings)) return 'malformed_assessment';
   if (!json.severities || typeof json.severities !== 'object') return 'malformed_assessment';
   if (!json.scores || typeof json.scores !== 'object') return 'malformed_assessment';
@@ -144,7 +152,7 @@ function ratesEveryPhoto(list, photoCount) {
 
 // `shotListOn` (a shot-list capture, decided by the caller) adds the two
 // server-side evidence rules above to each finding; off, nothing is added.
-function normalizeAssessment(json, photoCount, photoZones = [], { shotList: shotListOn = false, lighting = false } = {}) {
+function normalizeAssessment(json, photoCount, photoZones = [], { shotList: shotListOn = false, lighting = false, scale2 = false } = {}) {
   const rawFindings = Array.isArray(json.findings) ? json.findings : [];
   const photoQuality = normalizePhotoQuality(json.photo_quality, photoCount, { lighting });
   const usable = new Set(photoQuality.filter((row) => CUSTOMER_VISIBLE_QUALITY.has(row.quality)).map((row) => row.photo));
@@ -193,17 +201,27 @@ function normalizeAssessment(json, photoCount, photoZones = [], { shotList: shot
   for (const key of STRESS_SIGNALS) severities[key] = normalizeSignal(json.severities[key], SEVERITY_LEVELS);
   severities.thatch_visibility = normalizeSignal(json.severities.thatch_visibility, THATCH_LEVELS);
   severities.overwatering_signal = normalizeSignal(json.severities.overwatering_signal, SIGNAL_LEVELS);
-  const scores = {
-    turf_density: scoreOrNull(json.scores.turf_density, 0, 100),
-    weed_coverage: scoreOrNull(json.scores.weed_coverage, 0, 100),
-    color_health: scoreOrNull(json.scores.color_health, 1, 10),
-  };
+  // Score scale 2 keeps the model's four 0-100 ratings as read; scale 1 keeps
+  // its own units (weed share of the lawn, color 1-10).
+  const scores = scale2
+    ? {
+      turf_density: scoreOrNull(json.scores.turf_density, 0, 100),
+      weed_control: scoreOrNull(json.scores.weed_control, 0, 100),
+      color_health: scoreOrNull(json.scores.color_health, 0, 100),
+      condition: scoreOrNull(json.scores.condition, 0, 100),
+    }
+    : {
+      turf_density: scoreOrNull(json.scores.turf_density, 0, 100),
+      weed_coverage: scoreOrNull(json.scores.weed_coverage, 0, 100),
+      color_health: scoreOrNull(json.scores.color_health, 1, 10),
+    };
   const grass = normalizeGrassType(json.grass_type);
   return {
     status: 'complete',
     findings,
     severities,
     scores,
+    ...(scale2 ? { scoreScale: 2 } : {}),
     photoQuality,
     grassType: grass && grass !== 'unknown' ? grass : null,
     observations: clip(json.observations, 1200),
@@ -243,6 +261,8 @@ function compositeFor(analysis) {
     turf_density: analysis.scores?.turf_density ?? null,
     weed_coverage: analysis.scores?.weed_coverage ?? null,
     color_health: analysis.scores?.color_health ?? null,
+    // Score scale 2: the ratings as read, and the scale they are on.
+    ...(analysis.scoreScale === 2 ? { score_scale: 2, weed_control: analysis.scores?.weed_control ?? null, condition: analysis.scores?.condition ?? null } : {}),
     fungal_activity: level('fungal_activity'),
     insect_damage: level('insect_damage'),
     drought_stress: level('drought_stress'),

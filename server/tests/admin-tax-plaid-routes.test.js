@@ -36,6 +36,7 @@ jest.mock('../services/plaid-sync', () => ({
   connectItem: jest.fn(async () => 'item-uuid'),
   setupItem: jest.fn(async () => {}),
   markReconnected: jest.fn(async () => true),
+  refreshAccounts: jest.fn(async () => ({ added: 0, setup: false, unshared: [] })),
   syncItem: jest.fn(async () => ({ inserted: 2 })),
   disconnectItem: jest.fn(async () => {}),
 }));
@@ -77,7 +78,9 @@ test('dark unless BOTH gates are on; bank-import status reports the nested gate'
   expect((await post('/connect', { publicToken: 'public-sandbox-x' })).status).toBe(404);
   expect((await post(`/items/${ITEM}/setup`, { accounts: [] })).status).toBe(404);
   expect((await post(`/items/${ITEM}/sync`)).status).toBe(404);
+  expect((await post(`/items/${ITEM}/accounts-changed`)).status).toBe(404);
   expect(plaidSync.syncItem).not.toHaveBeenCalled();
+  expect(plaidSync.refreshAccounts).not.toHaveBeenCalled();
   // switched off after import: resolving a staged bank change and revoking
   // a connection stay reachable (else those rows stay blocked from claims)
   expect((await post(`/rows/${ITEM}/bank-change`, {})).status).toBe(400); // reached validation
@@ -97,12 +100,32 @@ test('dark unless BOTH gates are on; bank-import status reports the nested gate'
   expect(await (await fetch(`${baseUrl}/admin/tax/bank-import/status`)).json()).toMatchObject({ plaidEnabled: true });
 });
 
-test('link-token: new connection vs update mode, bad item id refused', async () => {
+test('link-token: new connection vs update mode vs Add accounts; bad input refused', async () => {
   expect(await (await post('/link-token')).json()).toEqual({ linkToken: 'link-sandbox-1' });
-  expect(plaidSync.createLinkToken).toHaveBeenLastCalledWith({ clientUserId: 'tech-1', itemId: null });
+  expect(plaidSync.createLinkToken).toHaveBeenLastCalledWith({ clientUserId: 'tech-1', itemId: null, addAccounts: false });
   await post('/link-token', { itemId: ITEM });
-  expect(plaidSync.createLinkToken).toHaveBeenLastCalledWith({ clientUserId: 'tech-1', itemId: ITEM });
+  expect(plaidSync.createLinkToken).toHaveBeenLastCalledWith({ clientUserId: 'tech-1', itemId: ITEM, addAccounts: false });
+  await post('/link-token', { itemId: ITEM, addAccounts: true });
+  expect(plaidSync.createLinkToken).toHaveBeenLastCalledWith({ clientUserId: 'tech-1', itemId: ITEM, addAccounts: true });
+  expect(plaidSync.createLinkToken).toHaveBeenCalledTimes(3);
   expect((await post('/link-token', { itemId: "1' or 1=1" })).status).toBe(400);
+  expect((await post('/link-token', { addAccounts: true })).status).toBe(400);
+  expect((await post('/link-token', { itemId: ITEM, addAccounts: 'yes' })).status).toBe(400);
+  expect(plaidSync.createLinkToken).toHaveBeenCalledTimes(3);
+});
+
+test('accounts-changed: a new account waits for confirmation (no sync); otherwise the feed syncs', async () => {
+  plaidSync.refreshAccounts.mockResolvedValueOnce({ added: 1, setup: true, unshared: [] });
+  expect(await (await post(`/items/${ITEM}/accounts-changed`)).json())
+    .toEqual({ success: true, added: 1, setup: true, unshared: [], sync: null });
+  expect(plaidSync.syncItem).not.toHaveBeenCalled();
+
+  const unshared = [{ id: 'acct-1', name: 'Business Checking', mask: '0001' }];
+  plaidSync.refreshAccounts.mockResolvedValueOnce({ added: 0, setup: false, unshared });
+  expect(await (await post(`/items/${ITEM}/accounts-changed`)).json())
+    .toEqual({ success: true, added: 0, setup: false, unshared, sync: { inserted: 2 } });
+  expect(plaidSync.refreshAccounts).toHaveBeenLastCalledWith(ITEM);
+  expect(plaidSync.syncItem).toHaveBeenCalledWith(ITEM);
 });
 
 test('connect requires a public token', async () => {
@@ -113,7 +136,7 @@ test('connect requires a public token', async () => {
 });
 
 test('item routes 404 a non-uuid id before touching the service', async () => {
-  for (const action of ['setup', 'sync', 'reconnected', 'disconnect']) {
+  for (const action of ['setup', 'sync', 'reconnected', 'accounts-changed', 'disconnect']) {
     expect((await post(`/items/not-a-uuid/${action}`)).status).toBe(404);
   }
   expect(plaidSync.syncItem).not.toHaveBeenCalled();

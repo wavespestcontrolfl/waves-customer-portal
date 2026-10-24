@@ -341,7 +341,7 @@ async function refereeVisit({ policy, payload, geminiJson, visit, deadline = nul
     delete solPayload.thinkingLevel;
     const solResult = await boundedDispatch(solRoute, { ...solPayload, promptVersion: `${version}:second-opinion` }, capUnder(SECOND_OPINION_MAX_MS, deadline));
     const solInfo = { called: true, reasons, ...legInfo(solResult, solRoute) };
-    const solValid = solResult.ok && validateAssessmentJson(solResult, visit.photoCount, { lighting: visit.lighting === true }) === null;
+    const solValid = solResult.ok && validateAssessmentJson(solResult, visit.photoCount, { lighting: visit.lighting === true, scale2: visit.scale2 === true }) === null;
     if (solResult.ok && !solValid) {
       solInfo.ok = false; solInfo.reason = 'malformed_assessment';
       // The adapter filed this leg as a success; flip its ledger row (Codex #5362 r1).

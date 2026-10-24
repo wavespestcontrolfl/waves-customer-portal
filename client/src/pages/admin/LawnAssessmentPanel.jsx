@@ -37,6 +37,9 @@ function adminFetch(path, options = {}) {
 const scoreColor = (v) =>
   v >= 75 ? "#15803D" : v >= 50 ? "#A16207" : "#991B1B";
 
+// GATE_LAWN_SCORE_SCALE_V2: an analysis read under score scale 2 (its row says so).
+const readsScale2 = (result) => Number(result?.assessment?.score_scale) === 2;
+
 function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -258,11 +261,19 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       const adjustedScores = {
         ...(techScores || result.adjustedScores || result.displayScores || {}),
       };
-      // Stress is never edited here (this panel only ever fills Fungus/Thatch
-      // when the AI left them blank) — drop it so the server always derives
-      // it itself from whatever Fungus/Thatch end up known, rather than
-      // echoing back a value the client happens to be holding.
-      delete adjustedScores.stress_damage;
+      // Stress is never edited here on scale 1 (this panel only ever fills
+      // Fungus/Thatch when the AI left them blank) — drop it so the server
+      // always derives it itself from whatever Fungus/Thatch end up known,
+      // rather than echoing back a value the client happens to be holding.
+      // Score scale 2 (GATE_LAWN_SCORE_SCALE_V2): Condition is a rating the
+      // server never derives, so a Condition the AI left blank is filled here
+      // like any other blank score; an AI-rated one is still dropped.
+      const aiCondition = lawnScores.lawnScoreValue(
+        (result.adjustedScores || result.displayScores)?.stress_damage,
+      );
+      if (!(readsScale2(result) && aiCondition == null)) {
+        delete adjustedScores.stress_damage;
+      }
       const protocol_field_checks = Object.fromEntries(
         Object.entries(protocolChecks).filter(
           ([, value]) => value !== "" && value !== null,
@@ -728,6 +739,10 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                 { key: "color_health", label: "Color Health" },
                 { key: "fungus_control", label: "Fungus Control" },
                 { key: "thatch_level", label: "Thatch Level" },
+                // Score scale 2: Condition is its own rating, never derived.
+                ...(readsScale2(result)
+                  ? [{ key: "stress_damage", label: "Condition" }]
+                  : []),
               ].map((m) => {
                 const aiVal = lawnScores.lawnScoreValue(
                   (result.adjustedScores || result.displayScores)?.[m.key],

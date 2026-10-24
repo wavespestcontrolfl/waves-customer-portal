@@ -36,7 +36,10 @@ const mockIdentifyPest = jest.fn();
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => !!mockGateState[gate] }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (gate) => !!mockGateState[gate],
+  reportSharedTemplateLive: () => !!mockGateState.reportSharedTemplate,
+}));
 jest.mock('../utils/turnstile', () => ({
   verifyTurnstileToken: jest.fn(async () => ({ ok: true, enforced: false })),
 }));
@@ -386,5 +389,36 @@ describe('GET /:token', () => {
       const res = await fetch(`${base}/api/public/pest-identifier/not-a-token`);
       expect(res.status).toBe(404);
     });
+  });
+
+  test('GATE_REPORT_SHARED_TEMPLATE: off = no reportTemplate key; on = reportTemplate: true beside an unchanged report', async () => {
+    const sentRow = () => analyzedRow({
+      status: 'sent',
+      report_token: 'e'.repeat(32),
+      report_expires_at: new Date(Date.now() + 86400000).toISOString(),
+      contact_snapshot: JSON.stringify({ first_name: 'Dana' }),
+      address_snapshot: JSON.stringify({ city: 'Venice' }),
+    });
+    const fetchBody = async () => {
+      let body;
+      await withServer(async (base) => {
+        const res = await fetch(`${base}/api/public/pest-identifier/${'e'.repeat(32)}`);
+        expect(res.status).toBe(200);
+        body = await res.json();
+      });
+      return body;
+    };
+    mockIdentificationRow = sentRow();
+    const off = await fetchBody();
+    expect('reportTemplate' in off).toBe(false);
+    mockGateState.reportSharedTemplate = true;
+    try {
+      mockIdentificationRow = sentRow();
+      const on = await fetchBody();
+      expect(on.reportTemplate).toBe(true);
+      expect(on.report).toEqual(off.report);
+    } finally {
+      delete mockGateState.reportSharedTemplate;
+    }
   });
 });

@@ -23,7 +23,7 @@ export default function GuaranteeStrip({ licenseNumber }) {
       background: W.offWhite, borderTop: `1px solid ${W.borderLight}`,
       borderRadius: 12,
     }}>
-      <div style={{
+      <div className="guarantee-strip-grid" style={{
         display: 'grid',
         // Always three across — including phones (owner directive).
         gridTemplateColumns: 'repeat(3, 1fr)',

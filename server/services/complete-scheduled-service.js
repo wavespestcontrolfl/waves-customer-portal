@@ -2271,6 +2271,13 @@ function techTipsGateOn() {
   return typeof gateEnvValue === 'function' && gateEnvValue('GATE_TECH_TIPS') === true;
 }
 
+// GATE_TECH_TIP_SOURCES at call time (tips with facts, owner 2026-10-24): on,
+// a sourced tip freezes its sourced words and its citations; off, the freeze
+// is what it was. A partial feature-gates mock reads as off.
+function techTipSourcesOn() {
+  return require('../config/feature-gates').techTipSourcesLive?.() === true;
+}
+
 // POST /api/admin/dispatch/:serviceId/complete
 // Pre-submit report reconciliation block (409) — pure for testability
 // (_test), like the other completion block-payload helpers. Returns
@@ -4393,7 +4400,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Gated at the freeze too: with the kill switch unset a stale or crafted
     // client cannot keep the feature alive through the completion body.
     const techTipsFreeze = techTipsGateOn()
-      ? freezeTechTips(completionInput.body?.techTips)
+      ? freezeTechTips(completionInput.body?.techTips, { sourced: techTipSourcesOn() })
       : { tips: [], dropped: [] };
     // T&S tech findings (GATE_TS_TECH_FINDINGS_COPY): freeze the technician's
     // keep / confirm / hide / edit decisions on the service record whether or
