@@ -756,12 +756,11 @@ async function raiseDivergenceAlert(conn, {
   const { detail, leadSentence, actionSentence } = buildDivergenceAlertCopy({ diverging, anchorDate, alertKind });
   const invoiceRef = alertInvoiceReference(invoice, estimateId);
   // The headline names the customer (owner 2026-10-21: promise and billing headlines must name who).
-  const who = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
-  const name = [who?.first_name, who?.last_name].filter(Boolean).join(' ').trim();
-  const baseTitle = ALERT_TITLES[alertKind] || ALERT_TITLES.diverged;
+  const [who = {}] = await conn('customers').whereIn('id', [customerId].filter(Boolean)).select('first_name', 'last_name');
+  const name = [who.first_name, who.last_name].filter(Boolean).join(' ').trim();
   await require('./notification-service').notifyAdmin(
     'billing',
-    name ? `${baseTitle}: ${name}` : baseTitle,
+    [ALERT_TITLES[alertKind] || ALERT_TITLES.diverged, name].filter(Boolean).join(': '),
     `${leadSentence}: ${detail}. ${actionSentence} ${invoiceRef}`,
     {
       // Query form only — the admin app has no /admin/estimates/:id page
