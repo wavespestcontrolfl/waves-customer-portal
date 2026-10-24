@@ -3234,6 +3234,10 @@ postgres('access codes section', () => {
         expect(await access.accept(trx, rows[0].id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true });
         await sweepEmails(stub([emailItem()]));
         expect((await emailRows({ source_id: id })).map((r) => [r.customer_id, r.status])).toEqual([[a.id, 'active']]);
+        // A later re-read (the subject changed) keeps the office's link and files nothing new.
+        await trx('emails').where({ id }).update({ subject: 'Gate code again' });
+        await sweepEmails(stub([emailItem()]));
+        expect((await emailRows({ source_id: id })).map((r) => [r.customer_id, r.status])).toEqual([[a.id, 'active']]);
       });
 
       test.each([

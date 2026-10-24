@@ -1354,10 +1354,12 @@ const EMAIL_HASH_SQL = `encode(sha256(convert_to(concat_ws(chr(1), coalesce((${e
 // The email as the message-like row the shared writers read: the customer's NEW
 // words only (quoted history and signature stripped), the sender address kept
 // for an unlinked row. `customerId` is the customer the row will belong to (the
-// owner, if live, else null); the owner as emailOwnerId reads it is in owner_id.
+// owner, if live, else null); the owner as emailOwnerId reads it is in owner_id,
+// and is also the source's own customer for the office-link rules (a shared
+// address has none, whatever the sync's customer_id says).
 function emailAsMessage(row, customerId, ownerId = row.customer_id) {
   return {
-    source_kind: 'email', id: row.id, customer_id: customerId || null, owner_id: ownerId || null, source_customer_id: row.customer_id || null,
+    source_kind: 'email', id: row.id, customer_id: customerId || null, owner_id: ownerId || null, source_customer_id: ownerId || null,
     direction: 'inbound', sender_email: emailAddressOf(row), from_phone: null, to_phone: null,
     message_body: emailWords(row), created_at: row.received_at,
   };
