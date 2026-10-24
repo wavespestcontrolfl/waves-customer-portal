@@ -1816,7 +1816,7 @@ function lawnMetricRows(assessment = {}) {
   const scores = assessment.scores || {};
   return [
     ['Density / Coverage', scores.turfDensity],
-    ['Weed Cleanliness', scores.weedSuppression],
+    ['Weed control', scores.weedSuppression],
     ['Color / Nutrients', scores.colorHealth],
     ['Stress / Damage', scores.stressDamage],
   ];
@@ -1949,9 +1949,9 @@ function lawnAssessmentBody(assessment = {}) {
   // in LawnWaterBalance; we no longer surface a tech's manual wet/dry observation.
   const rawGrass = String(profile?.grassType || '').toLowerCase().trim();
   if (rawGrass && rawGrass !== 'unknown' && rawGrass !== 'mixed') {
-    return `Assessment captured for ${formatEnumLabel(profile.grassType).toLowerCase()} turf. Scores reflect visible turf density, weed pressure, color, fungus signal, and thatch conditions.`;
+    return `Assessment captured for ${formatEnumLabel(profile.grassType).toLowerCase()} turf. Scores reflect visible turf density, weed control, color, fungus signal, and thatch conditions.`;
   }
-  return 'Assessment scores reflect visible turf density, weed suppression, color health, fungus control, and thatch conditions documented during this lawn visit.';
+  return 'Assessment scores reflect visible turf density, weed control, color health, fungus control, and thatch conditions documented during this lawn visit.';
 }
 
 function weatherIconInfo(conditions = {}, weatherCall) {

@@ -627,7 +627,7 @@ function lawnAssessmentFacts(data = {}, keep = () => true) {
     grass_type: grassTypeOf(lawn.turfProfile),
     overall_out_of_100: out100(scores.overallScore),
     density_out_of_100: out100(scores.turfDensity),
-    weed_cleanliness_out_of_100: out100(scores.weedSuppression),
+    weed_control_out_of_100: out100(scores.weedSuppression),
     color_out_of_100: out100(scores.colorHealth),
     stress_damage_out_of_100: out100(scores.stressDamage),
   };
@@ -826,7 +826,7 @@ function lawnMowingFacts(mowing, text) {
 // numbers: a string would lose a score of 100 to the 3-digit scrub (Codex P2
 // #5964 r6).
 const LAWN_TRENDS = [
-  ['overall_out_of_100', 'overall'], ['density_out_of_100', 'coverage'], ['weed_cleanliness_out_of_100', 'weed'],
+  ['overall_out_of_100', 'overall'], ['density_out_of_100', 'coverage'], ['weed_control_out_of_100', 'weed'],
   ['color_out_of_100', 'color'], ['stress_damage_out_of_100', 'stress'], ['water_gap_inches', 'waterGap'],
   ['mowing_height_inches', 'mowing'],
 ];
@@ -1942,7 +1942,7 @@ const HEALTH_DIMENSIONS = [
   [/\b(?:density|dense|coverage|thick\w*|thin\w*|sparse|bare|patchy|fill\w*)\b/, 'density_out_of_100', null],
   [/\b(?:foliage|leaves|leaf|canopy)\b/, null, 'foliage_out_of_100'],
   [/\b(?:colou?r|green\w*|yellow\w*|brown\w*|pale)\b/, 'color_out_of_100', 'color_out_of_100'],
-  [/\bweeds?\b/, 'weed_cleanliness_out_of_100', null],
+  [/\bweeds?\b/, 'weed_control_out_of_100', null],
   [/\b(?:pests?|insects?)\b/, null, 'pest_out_of_100'],
   [/\b(?:water\s+stress|drought)\b/, null, 'water_stress_out_of_100'],
   [/\b(?:stress\w*|damage\w*)\b/, 'stress_damage_out_of_100', null],
@@ -2128,7 +2128,7 @@ function deniesRecordedApplication(text, facts) {
 // to 80" on an 80 -> 50 trend fails (Codex P1 #5964 r46).
 const TREND_UP = /\b(?:improv\w*|increas\w*|ros(?:e|en)|rising|climb\w*|grew|grow(?:ing|n|s)?|went\s+up|gone\s+up|up\b|higher|better|gain\w*)\b/i;
 const TREND_DOWN = /\b(?:declin\w*|decreas\w*|dropp?\w*|fell|fall(?:en|ing|s)?|went\s+down|gone\s+down|down\b|lower|worse|slipp?\w*|los[st]\w*)\b/i;
-const TREND_KEYS = [[/\bwater\s+(?:gap|balance)\b/i, 'water_gap_inches'], [/\bfoliage\b/i, 'foliage_out_of_100'], [/\b(?:water\s+stress|drought)\b/i, 'water_stress_out_of_100'], [/\b(?:mow\w*|height)\b/i, 'mowing_height_inches'], [/\b(?:density|thick\w*)\b/i, 'density_out_of_100'], [/\bcolou?r\b/i, 'color_out_of_100'], [/\bweeds?\b/i, 'weed_cleanliness_out_of_100']];
+const TREND_KEYS = [[/\bwater\s+(?:gap|balance)\b/i, 'water_gap_inches'], [/\bfoliage\b/i, 'foliage_out_of_100'], [/\b(?:water\s+stress|drought)\b/i, 'water_stress_out_of_100'], [/\b(?:mow\w*|height)\b/i, 'mowing_height_inches'], [/\b(?:density|thick\w*)\b/i, 'density_out_of_100'], [/\bcolou?r\b/i, 'color_out_of_100'], [/\bweeds?\b/i, 'weed_control_out_of_100']];
 // The trend a clause speaks about: a named series, else the overall one.
 function trendEndsFor(clause, trends) {
   const key = (TREND_KEYS.find(([re]) => re.test(clause)) || [])[1]

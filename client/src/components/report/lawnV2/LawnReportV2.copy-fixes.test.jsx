@@ -29,8 +29,8 @@ describe('the water target source line', () => {
 
 describe('the weed score card', () => {
   it('prints the label the server sends, with the same status word', () => {
-    render(<VisualDiagnosisCards categories={[{ key: 'weed_pressure', label: 'Weed Cleanliness', score: 90, status: 'strong', explanation: 'Very little weed activity visible today.' }]} />);
-    expect(screen.getByText('Weed Cleanliness')).toBeInTheDocument();
+    render(<VisualDiagnosisCards categories={[{ key: 'weed_pressure', label: 'Weed control', score: 90, status: 'strong', explanation: 'Very little weed activity visible today.' }]} />);
+    expect(screen.getByText('Weed control')).toBeInTheDocument();
     expect(screen.queryByText('Weed Pressure')).toBeNull();
     expect(screen.getByText('Strong')).toBeInTheDocument();
   });

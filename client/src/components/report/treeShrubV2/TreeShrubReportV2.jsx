@@ -643,7 +643,7 @@ export function TreeShrubTrends({ trends = {} }) {
     color && { key: 'color', title: 'Leaf Color & Vigor', sub: 'higher is better', points: color },
     // the series is the INVERTED pest_activity cleanliness score (higher =
     // cleaner) — titled "Pest Pressure" it read as rising pests being good;
-    // named honestly like lawn's "Weed Cleanliness" (audit 2026-07-16)
+    // named honestly like lawn's "Weed control" (audit 2026-07-16)
     pest && { key: 'pest', title: 'Pest Cleanliness', sub: 'higher is better', points: pest },
     water && { key: 'water', title: 'Water / Heat Stress', sub: 'higher is better', points: water },
   ].filter(Boolean).filter((m) => (m.points || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2);

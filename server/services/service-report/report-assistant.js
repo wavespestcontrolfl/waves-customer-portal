@@ -583,7 +583,7 @@ function answerTrend({ data = {} } = {}) {
     // ones we actually have, so the assistant never says "null% overall".
     const breakdown = [
       scores.turfDensity != null ? `density/coverage ${scores.turfDensity}%` : null,
-      scores.weedSuppression != null ? `weed cleanliness ${scores.weedSuppression}%` : null,
+      scores.weedSuppression != null ? `weed control ${scores.weedSuppression}%` : null,
       scores.colorHealth != null ? `color/nutrients ${scores.colorHealth}%` : null,
       scores.stressDamage != null ? `stress/damage ${scores.stressDamage}%` : null,
     ].filter(Boolean);
