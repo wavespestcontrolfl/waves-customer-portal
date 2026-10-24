@@ -29,6 +29,7 @@ const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { propertyDisplayLabel } = require('../utils/property-display');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { MOVE_NOTICE_CATEGORY } = require('../constants/email-replay-exclusions');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -713,9 +714,11 @@ async function sendAppointmentNoShowEmail({
 // The email version of a reschedule or cancellation text that reached nobody
 // (GATE_MOVE_NOTICE_EMAIL; the caller is appointment-reminders.js
 // deliverMoveNoticeEmail). Same words as the texts. `stillCurrent` is the
-// caller's freshness check, re-run at the dispatch boundary; the reschedule
-// email also quotes a slot, so the shared move-hold guard checks that slot.
-async function sendAppointmentRescheduledEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, arrivalWindow, idempotencyKey, stillCurrent } = {}) {
+// caller's freshness check, re-run at the dispatch boundary. Both carry
+// MOVE_NOTICE_CATEGORY, so no stored-copy rail re-sends them. The reschedule
+// email records the slot it promises (the no-show detector's evidence),
+// except for a windowless visit (`windowUnknown`), whose notice promises none.
+async function sendAppointmentRescheduledEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, arrivalWindow, windowUnknown, idempotencyKey, stillCurrent } = {}) {
   const apptTime = toDate(appointmentTime);
   if (!apptTime) return { ok: false, reason: 'no_appointment_time' };
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
@@ -732,11 +735,11 @@ async function sendAppointmentRescheduledEmail({ customerId, scheduledServiceId,
       arrival_window: clean(arrivalWindow),
     },
     idempotencyKey,
-    categories: ['appointment_rescheduled'],
+    categories: ['appointment_rescheduled', MOVE_NOTICE_CATEGORY],
     triggerEventId: `appointment.rescheduled:${scheduledServiceId}`,
     metadata: { scheduled_service_id: scheduledServiceId },
     moveHoldServiceId: scheduledServiceId,
-    renderedSlotMs: apptTime.getTime(),
+    renderedSlotMs: windowUnknown ? null : apptTime.getTime(),
     stillCurrent,
   });
 }
@@ -757,7 +760,7 @@ async function sendAppointmentCancelledEmail({ customerId, scheduledServiceId, a
       appointment_date: formatETDate(apptTime),
     },
     idempotencyKey,
-    categories: ['appointment_cancelled'],
+    categories: ['appointment_cancelled', MOVE_NOTICE_CATEGORY],
     triggerEventId: `appointment.cancelled:${scheduledServiceId}`,
     metadata: { scheduled_service_id: scheduledServiceId },
     stillCurrent,

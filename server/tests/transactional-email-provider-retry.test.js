@@ -140,6 +140,37 @@ describe('transactional email provider retry classification', () => {
     });
   });
 
+  describe('reschedule and cancellation notices stay off the rail (their stored copy may no longer be true)', () => {
+    const marked = { template_key: 'appointment.cancelled', categories: ['appointment', 'appointment_cancelled', 'appointment_move_notice'] };
+
+    test('not eligible, so a provider block schedules no retry', () => {
+      expect(retry.isTransactionalRetryEligible(message(marked))).toBe(false);
+      const withPhase = retry.retryStateForProviderBlock(message({ ...marked, provider_handoff_phase: 'pending', send_attempt_token: 'a' }));
+      expect(withPhase).not.toHaveProperty('provider_retry_next_at');
+      expect(withPhase).toMatchObject({ provider_handoff_phase: 'rejected' });
+    });
+
+    test('a marked row that is somehow scheduled settles as not sent, with its own reason, without reaching the provider', async () => {
+      const chain = {};
+      chain.where = jest.fn(() => chain);
+      chain.update = jest.fn(() => chain);
+      chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+      db.mockReturnValue(chain);
+
+      const result = await retry.retryOne(message({ ...marked, send_attempt_token: 'attempt-2' }));
+
+      expect(result).toMatchObject({ sent: false, stopped: true });
+      expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'failed', provider_retry_next_at: null, error_message: 'Not re-sent from stored copy (the visit may have changed since).',
+      }));
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
+    test('the category the rail reads is the one both senders stamp', () => {
+      expect(require('../constants/email-replay-exclusions').MOVE_NOTICE_CATEGORY).toBe('appointment_move_notice');
+    });
+  });
+
   test('other billing emails keep the retry rail', () => {
     expect(retry.isSenderRenderedEmail(message({ template_key: 'billing.notice' }))).toBe(false);
     expect(retry.isTransactionalRetryEligible(message({ template_key: 'billing.notice' }))).toBe(true);

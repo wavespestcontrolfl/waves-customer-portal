@@ -123,13 +123,13 @@ describe('deliverMoveNoticeEmail', () => {
     expect(appointmentSendHeld).not.toHaveBeenCalled();
   });
 
-  test('a reschedule text that reached nobody: the reschedule email, keyed by the notice stamp', async () => {
+  test('a reschedule text that reached nobody: the reschedule email, keyed by its slot and the notice stamp', async () => {
     expect(await deliverMoveNoticeEmail(args())).toBe(true);
     expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledTimes(1);
     const sent = AppointmentEmail.sendAppointmentRescheduledEmail.mock.calls[0][0];
     expect(sent).toMatchObject({
       customerId: 'cust-1', scheduledServiceId: 'svc-1', appointmentTime: SLOT, serviceLabel: 'Quarterly Pest Control',
-      arrivalWindow: 'between 4:00 PM and 6:00 PM', idempotencyKey: `appointment.rescheduled:svc-1:${NOTICE_AT.getTime()}`,
+      arrivalWindow: 'between 4:00 PM and 6:00 PM', idempotencyKey: `appointment.rescheduled:svc-1:${SLOT.getTime()}:${NOTICE_AT.getTime()}`,
     });
     // The freshness check rides to the email's dispatch boundary.
     expect(typeof sent.stillCurrent).toBe('function');
@@ -259,8 +259,11 @@ describe('deliverMoveNoticeEmail', () => {
 });
 
 describe('helpers', () => {
-  test('moveNoticeEmailKey: a reschedule by its stamp, a cancellation by its restoration count', () => {
-    expect(moveNoticeEmailKey('rescheduled', 'svc-9', { noticeAt: '2099-10-24T12:00:00.000Z' })).toBe(`appointment.rescheduled:svc-9:${Date.parse('2099-10-24T12:00:00.000Z')}`);
+  test('moveNoticeEmailKey: a reschedule by its slot (the detector reads segment 3) and stamp, a cancellation by its restoration count', () => {
+    const stamp = Date.parse('2099-10-24T12:00:00.000Z');
+    expect(moveNoticeEmailKey('rescheduled', 'svc-9', { apptTime: SLOT, noticeAt: '2099-10-24T12:00:00.000Z' })).toBe(`appointment.rescheduled:svc-9:${SLOT.getTime()}:${stamp}`);
+    // A windowless visit promised no slot: never a made-up 8:00 AM in the key.
+    expect(moveNoticeEmailKey('rescheduled', 'svc-9', { apptTime: SLOT, windowUnknown: true, noticeAt: '2099-10-24T12:00:00.000Z' })).toBe(`appointment.rescheduled:svc-9:na:${stamp}`);
     expect(moveNoticeEmailKey('cancelled', 'svc-9', { cancellation: OWN(0) })).toBe('appointment.cancelled:svc-9:r0');
     expect(moveNoticeEmailKey('cancelled', 'svc-9', { cancellation: OWN(1) })).toBe('appointment.cancelled:svc-9:r1');
   });
@@ -316,9 +319,20 @@ describe('handleUndeliveredSms: a carrier bounced a reschedule or cancellation t
     expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledTimes(1);
     expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledWith(expect.objectContaining({
       scheduledServiceId: 'svc-1', appointmentTime: SLOT, serviceLabel: 'Pest Control',
-      arrivalWindow: 'between 4:00 PM and 6:00 PM', idempotencyKey: `appointment.rescheduled:svc-1:${NOTICE_AT.getTime()}`,
+      arrivalWindow: 'between 4:00 PM and 6:00 PM', idempotencyKey: `appointment.rescheduled:svc-1:${SLOT.getTime()}:${NOTICE_AT.getTime()}`,
     }));
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a bounced windowless reschedule text emails the unknown-window phrase and promises no slot', async () => {
+    const { UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+    const { rendered_slot_ms: _dropped, ...meta } = rescheduleAudit.metadata;
+    mockDb.first.messaging_audit_log = { ...rescheduleAudit, metadata: { ...meta, window_unknown: true } };
+    mockDb.first.appointment_reminders = { appointment_time: '2099-11-04T13:00:00.000Z', service_type: 'Pest Control', cancelled: false };
+    await bounce();
+    expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledWith(expect.objectContaining({
+      arrivalWindow: UNKNOWN_ARRIVAL_WINDOW, windowUnknown: true, idempotencyKey: `appointment.rescheduled:svc-1:na:${NOTICE_AT.getTime()}`,
+    }));
   });
 
   test('gate on: two recipients\' bounces of one notice share one key', async () => {
@@ -427,9 +441,21 @@ describe('handleReschedule: the reschedule text reached nobody', () => {
     const sent = AppointmentEmail.sendAppointmentRescheduledEmail.mock.calls[0][0];
     expect(sent).toMatchObject({ scheduledServiceId: 'svc-1', serviceLabel: 'Pest Control', arrivalWindow: 'between 4:00 PM and 6:00 PM' });
     expect(sent.appointmentTime.toISOString()).toBe('2099-11-04T21:00:00.000Z');
-    const stamp = Number(sent.idempotencyKey.split(':').pop());
-    expect(stamp).toBeGreaterThanOrEqual(before);
-    expect(sent.idempotencyKey).toMatch(/^appointment\.rescheduled:svc-1:\d+$/);
+    const [, , slot, stamp] = sent.idempotencyKey.split(':');
+    expect(Number(slot)).toBe(Date.parse('2099-11-04T21:00:00.000Z'));
+    expect(Number(stamp)).toBeGreaterThanOrEqual(before);
+    expect(sent.windowUnknown).toBe(false);
+  });
+
+  test('a windowless visit: the email says the unknown-window phrase and its key promises no slot', async () => {
+    const { UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+    mockDb.first.customers = { ...CUSTOMER, line_type: 'landline' };
+    mockDb.first.scheduled_services = { status: 'confirmed', visit_id: null, scheduled_date: '2099-11-04', window_start: null };
+    mockDb.first.appointment_reminders = reminder;
+    await reschedule();
+    const sent = AppointmentEmail.sendAppointmentRescheduledEmail.mock.calls[0][0];
+    expect(sent).toMatchObject({ arrivalWindow: UNKNOWN_ARRIVAL_WINDOW, windowUnknown: true });
+    expect(sent.idempotencyKey).toMatch(/^appointment\.rescheduled:svc-1:na:\d+$/);
   });
 
   test('a delivered text: no email, and the text carries the move stamp for a later bounce', async () => {

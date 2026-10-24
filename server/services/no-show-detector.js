@@ -65,12 +65,14 @@ const DELIVERED_SMS_STATUSES = ['sent', 'delivered', 'read'];
 // The appointment email event types that quote an arrival window — the same
 // list the interaction read filters on, and the first segment of the
 // idempotency key appointment-email.js builds for each of them. Only the
-// three that actually have a sender: there is no appointment.rescheduled
-// producer, and listing it would widen what counts as promise evidence (and
-// the supporting index) for a workflow that does not exist (codex P2 round
-// 13).
+// ones that actually have a sender (codex P2 round 13). appointment.rescheduled
+// has one since GATE_MOVE_NOTICE_EMAIL: the email version of a reschedule text
+// that reached nobody, which may be the only notice of the new window. Its key
+// keeps the slot in the same third segment (`na` for a windowless visit, whose
+// interaction row records no rendered_slot_ms, so its promise is unknown), and
+// 20261025040000 puts it back in the supporting index.
 const APPOINTMENT_EMAIL_EVENTS = ['appointment.confirmation', 'appointment.reminder_72h',
-  'appointment.reminder_24h'];
+  'appointment.reminder_24h', 'appointment.rescheduled'];
 const instant = (value) => value == null ? NaN : new Date(value).getTime();
 // Stamps that prove the tech reached the stop, in the order job-status.js
 // writes them. Any one of them clears the card.

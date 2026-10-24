@@ -126,14 +126,16 @@ describe('move-notice email template seed', () => {
 describe('move-notice email senders', () => {
   const APPT = '2026-06-22T14:00:00.000Z'; // 10:00 AM Eastern, the live slot below
   const CUSTOMER = { id: 'c1', first_name: 'Pat', email: 'pat@example.com', phone: '+19415551234' };
+  let interactions = [];
 
   beforeEach(() => {
     jest.clearAllMocks();
+    interactions = [];
     db.mockImplementation((table) => {
       if (table === 'customers') return { where: () => ({ select: () => ({ first: async () => CUSTOMER }) }) };
       if (table === 'notification_prefs') return { where: () => ({ first: async () => ({ appointment_notify_primary: true }) }) };
       if (table === 'recipient_optin') { const q = { where: () => q, whereNotNull: () => q, whereNull: () => q, first: async () => undefined }; return q; }
-      if (table === 'customer_interactions') return { insert: async () => [1] };
+      if (table === 'customer_interactions') return { insert: async (row) => { interactions.push(JSON.parse(row.metadata)); return [1]; } };
       if (table === 'appointment_reminders') return { where: () => ({ first: async () => null }) };
       if (table === 'scheduled_services') return { where: () => ({ first: async () => ({ scheduled_date: '2026-06-22', window_start: '10:00' }) }) };
       throw new Error(`unexpected db table ${table}`);
@@ -155,6 +157,20 @@ describe('move-notice email senders', () => {
       }),
     });
     expect(call.idempotencyKey).toMatch(/^appointment\.rescheduled:ss1:123:[0-9a-f]{16}$/);
+    // Never re-sent from a stored copy (constants/email-replay-exclusions.js).
+    expect(call.categories).toEqual(expect.arrayContaining(['appointment_rescheduled', 'appointment_move_notice']));
+    // The promised slot the no-show detector reads.
+    expect(interactions[0]).toMatchObject({ event_type: 'appointment.rescheduled', scheduled_service_id: 'ss1', rendered_slot_ms: Date.parse(APPT) });
+  });
+
+  test('a windowless reschedule email records no promised slot', async () => {
+    await AppointmentEmail.sendAppointmentRescheduledEmail({
+      customerId: 'c1', scheduledServiceId: 'ss1', appointmentTime: APPT, serviceLabel: 'Pest Control',
+      arrivalWindow: "at a time we'll confirm", windowUnknown: true, idempotencyKey: 'appointment.rescheduled:ss1:na:123',
+    });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(interactions[0]).toMatchObject({ event_type: 'appointment.rescheduled' });
+    expect(interactions[0]).not.toHaveProperty('rendered_slot_ms');
   });
 
   test('the cancellation email carries the cancelled day and date and no window', async () => {
@@ -166,6 +182,7 @@ describe('move-notice email senders', () => {
     expect(call.templateKey).toBe('appointment.cancelled');
     expect(call.payload).toMatchObject({ appointment_day: formatETDay(new Date(APPT)), appointment_date: formatETDate(new Date(APPT)) });
     expect(call.payload).not.toHaveProperty('arrival_window');
+    expect(call.categories).toEqual(expect.arrayContaining(['appointment_cancelled', 'appointment_move_notice']));
     expect(call.idempotencyKey).toMatch(/^appointment\.cancelled:ss1:r0:[0-9a-f]{16}$/);
   });
 
