@@ -257,11 +257,25 @@ describe('section 179', () => {
     expect(r.carry_out.sec179).toBe(0);
     expect(r.net_profit).toBe(45000); // 100,000 - 20,000 - 5,000 - 30,000
   });
-  test('the year dollar limit also caps it', () => {
+  test('the year dollar limit also caps it, and the election over the limit is not carried forward', () => {
     const K = { ...getYearConstants(2025), sec179_limit: 50000 };
     const r = computeReturn(inputs({ ...base, constants: K, depreciation: { regular: 0, sec179_elected: 70000 } }));
     expect(r.lines.sec179_allowed).toBe(50000);
-    expect(r.carry_out.sec179).toBe(20000);
+    expect(r.carry_out.sec179).toBe(0); // the 20,000 over the dollar limit is not a carryover (Form 4562 line 9)
+    expect(r.sec179.pool).toBe(50000);
+    expect(r.warnings.find((w) => w.code === 'sec179_over_limit').message).toMatch(/the rest is not carried forward/);
+  });
+  test('a carry-in is used up to what the dollar limit leaves; the rest stays carried', () => {
+    // Treas. Reg. 1.179-3(d) example: limit 10,000, business income 100,000,
+    // 8,000 elected, 3,000 carried in: 2,000 of the carry-in is deducted, 1,000 carries on
+    const K = { ...getYearConstants(2025), sec179_limit: 10000 };
+    const r = computeReturn(inputs({ gross_receipts: 100000, constants: K, carry_in: { sec179: 3000 }, depreciation: { regular: 0, sec179_elected: 8000 } }));
+    expect(r.lines.sec179_allowed).toBe(10000);
+    expect(r.carry_out.sec179).toBe(1000);
+    // an election over the limit with a carry-in: only the carry-in carries on
+    const over = computeReturn(inputs({ gross_receipts: 100000, constants: K, carry_in: { sec179: 3000 }, depreciation: { regular: 0, sec179_elected: 12000 } }));
+    expect(over.lines.sec179_allowed).toBe(10000);
+    expect(over.carry_out.sec179).toBe(3000);
   });
   test('the home office comes after it: section 179 uses the whole business income, the home office gets what is left', async () => {
     // income before both 80,000 (100,000 - 20,000); pool 90,000; actual home office 10,000

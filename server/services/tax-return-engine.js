@@ -244,15 +244,20 @@ function computeReturn(inputs = {}) {
   // less every other expense, and it does NOT count the home office. Form 8829
   // line 8 starts from Schedule C line 29, which is AFTER line 13, so the home
   // office is limited by what section 179 leaves (3 below).
+  // Form 4562 line 9: this year's election counts up to the dollar limit only.
+  // Only an amount the income limit holds back carries forward (Treas. Reg.
+  // 1.179-3(a)); the part over the dollar limit does not. A carry-in is used up
+  // to the allowance this year's election leaves (1.179-3(b) and (c)), which is
+  // the dollar limit cap on the total below.
   const elected = round2(inputs.depreciation?.sec179_elected);
-  const pool179 = round2(elected + carryIn.sec179);
+  const pool179 = round2(Math.min(elected, K.sec179_limit) + carryIn.sec179);
   const incomeLimit179 = room;
   const allowed179 = round2(Math.max(0, Math.min(pool179, K.sec179_limit, incomeLimit179)));
   const carryOut179 = round2(pool179 - allowed179);
   if (otherIncome > 0 && pool179 > 0) {
     warnings.push(warn('sec179_wages', "Section 179's income limit can include wages; this engine counts business income only. Check Form 4562 line 11 by hand."));
   }
-  if (elected > K.sec179_limit) warnings.push(warn('sec179_over_limit', `Section 179 elected for ${year} (${fmt(elected)}) is over the ${fmt(K.sec179_limit)} limit. The phase-out for large purchases is not modeled: ask a tax preparer.`));
+  if (elected > K.sec179_limit) warnings.push(warn('sec179_over_limit', `Section 179 elected for ${year} (${fmt(elected)}) is over the ${fmt(K.sec179_limit)} limit. Only the limit counts, and the rest is not carried forward. The phase-out for large purchases is not modeled: ask a tax preparer.`));
 
   // 3. home office, capped at what is left after other expenses, depreciation
   // and the section 179 allowed (floor 0). Actual: this year plus the carry-in,
