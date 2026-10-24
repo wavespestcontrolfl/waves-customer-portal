@@ -25,6 +25,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const QUIET_MINUTES = 5;
 const LOOKBACK_HOURS = 24;
@@ -181,6 +182,8 @@ async function loadThread(phone10, throughAt) {
     .where('created_at', '>=', from)
     .where('created_at', '<=', throughAt)
     .whereRaw("COALESCE(message_body, '') <> ''")
+    // An in-flight send reservation is not a text Waves sent: never show it to the model.
+    .modify(excludeUnresolvedSendReservations)
     .orderBy('created_at', 'desc')
     .limit(MAX_THREAD_MESSAGES)
     .select('direction', 'message_body', 'created_at', 'metadata');
