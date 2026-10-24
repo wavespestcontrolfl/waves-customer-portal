@@ -47,6 +47,18 @@ describe('LawnAssessmentCompletionBlock', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it('score scale 2: a blank Condition on a pending row stays blank on reload, never the worst-of-fungus/thatch guess', async () => {
+    const lookup = (score_scale) => vi.fn(async () => ({
+      assessment: { id: 'la-2', confirmed_by_tech: false, score_scale, turf_density: 82, weed_suppression: 78, color_health: 85, fungus_control: 95, thatch_level: 60, stress_damage: null },
+    }));
+    render(<LawnAssessmentCompletionBlock service={{ id: 'svc-1', customerId: 'cust-1' }} request={lookup(2)} />);
+    expect((await screen.findByLabelText('Condition score')).value).toBe('');
+    cleanup();
+    // Scale 1 keeps the seed that matches the server's confirm fallback.
+    render(<LawnAssessmentCompletionBlock service={{ id: 'svc-1', customerId: 'cust-1' }} request={lookup(null)} />);
+    expect((await screen.findByLabelText('Condition score')).value).toBe('60');
+  });
+
   it('shows no last-visit row when the lookup leaves it out (read failed)', async () => {
     mount();
     await screen.findByLabelText('Add turf photos');
