@@ -149,33 +149,49 @@ describe('the live table is fresh when the price is read', () => {
   });
 });
 
-describe('the price must come from the applied pricing row, not the in-code default', () => {
+describe('the price must be the pricing row\'s own price for the sold solution, not an in-code default', () => {
   test('no row, or a refused row, left the defaults standing: the refill is not priced', async () => {
     config.applyMosquitoMistingPricingConfig(undefined);
-    expect(config.mistingPricingRowApplied()).toBe(false);
+    expect(config.mistingRefillPriceIsFromRow('natural')).toBe(false);
     expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE', status: 409, solution: 'natural' });
     const bad = config.defaultMosquitoMistingPricingData();
     bad.refills.natural.price = -5;
     expect(config.applyMosquitoMistingPricingConfig(bad)).toMatchObject({ applied: false });
-    expect(config.mistingPricingRowApplied()).toBe(false);
+    expect(config.mistingRefillPriceIsFromRow('natural')).toBe(false);
     expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE' });
   });
 
-  test('a valid row applies and prices; the next sync that finds no row withdraws it again', async () => {
-    expect(config.mistingPricingRowApplied()).toBe(true);
+  test('a partial row that leaves the sold solution out is not enough: its price would be the code default', async () => {
+    expect(config.applyMosquitoMistingPricingConfig({ plan: { monthly: 65 } })).toMatchObject({ applied: true });
+    expect(config.mistingRefillPriceIsFromRow('natural')).toBe(false);
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE', solution: 'natural' });
+    // ...a row that supplies exactly that solution's price prices it, and only it
+    expect(config.applyMosquitoMistingPricingConfig({ refills: { natural: { price: 225 } } })).toMatchObject({ applied: true });
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: true, unitPrice: 225 });
+    expect(await attach(db([estimate({ estimate_data: mistingData('premium') })]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE', solution: 'premium' });
+  });
+
+  test('a complete valid row prices every solution; the next sync that finds no row withdraws them again', async () => {
+    for (const solution of ['standard', 'natural', 'premium']) expect(config.mistingRefillPriceIsFromRow(solution)).toBe(true);
     expect(await attach(db([estimate()]))).toMatchObject({ ok: true, unitPrice: 219 });
     config.applyMosquitoMistingPricingConfig(null);
-    expect(config.mistingPricingRowApplied()).toBe(false);
+    expect(config.mistingRefillPriceIsFromRow('natural')).toBe(false);
     expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE' });
   });
 
   test('the sync wires the row result in: syncMosquitoMistingPricingConfig is the apply', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     config.syncMosquitoMistingPricingConfig(config.defaultMosquitoMistingPricingData());
-    expect(config.mistingPricingRowApplied()).toBe(true);
+    expect(config.mistingRefillPriceIsFromRow('premium')).toBe(true);
     config.syncMosquitoMistingPricingConfig({ plan: 'not an object' });
-    expect(config.mistingPricingRowApplied()).toBe(false);
+    expect(config.mistingRefillPriceIsFromRow('premium')).toBe(false);
     warn.mockRestore();
+  });
+
+  test('the solution name is matched the way the price lookup matches it', () => {
+    expect(config.mistingRefillPriceIsFromRow(' Natural ')).toBe(true);
+    expect(config.mistingRefillPriceIsFromRow('bleach')).toBe(false);
+    expect(config.mistingRefillPriceIsFromRow(undefined)).toBe(false);
   });
 });
 

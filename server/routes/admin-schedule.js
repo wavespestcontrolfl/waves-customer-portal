@@ -2122,6 +2122,31 @@ async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceA
   }
 }
 
+// Adding or repricing a misting refill on a visit raises its estimated_price, which the repricing guard reads as a price change on money
+// that is already committed. For a visit covered by an ANNUAL PREPAY that is wrong: the covered base stays as it was and the refill is
+// owed on top, billed once on that visit by annual-prepay-addon-billing. So the guard may skip the annual-prepay coverage reasons for
+// a save whose whole price change is the refill's: the primary line price is not posted as different, and the estimated_price moves by
+// exactly the refill lines' net change. Anything else (another add-on, an appointment discount that shifts the total, a primary price
+// edit) is a different change and keeps the full guard. A live invoice, a card hold or a hand prepayment still block: the guard only
+// loses the annual-prepay term link and the annual-prepay stamp for this one judgement.
+async function refillOnlyPriceChange(trx, visitId, { row, updates, replaceAddons }) {
+  if (!mistingRefill.refillLive() || !row || !updates || !Array.isArray(replaceAddons) || updates.estimated_price === undefined) return false;
+  if (updates.primary_line_price !== undefined && moneyValuesDiffer(row.primary_line_price, updates.primary_line_price)) return false;
+  const cents = (value) => Math.round((Number(value) || 0) * 100);
+  const postedNet = replaceAddons.filter((line) => line && mistingRefill.isRefillKey(line.serviceKey)).reduce((sum, line) => sum + cents(line.price), 0);
+  const stored = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId, service_key_snapshot: MISTING_REFILL_KEY }).select('estimated_price');
+  const storedNet = (Array.isArray(stored) ? stored : []).reduce((sum, line) => sum + cents(line.estimated_price), 0);
+  const refillDelta = postedNet - storedNet;
+  return refillDelta !== 0 && Math.abs((cents(updates.estimated_price) - cents(row.estimated_price)) - refillDelta) <= 1;
+}
+
+// The row as the repricing guard judges it when the change is only a refill on an annual-prepay-covered visit (see above).
+const withoutAnnualPrepayCoverage = (row) => ({
+  ...row,
+  annual_prepay_term_id: null,
+  ...(row.prepaid_method === ANNUAL_PREPAY_METHOD ? { prepaid_amount: null } : {}),
+});
+
 // A service change that reaches later occurrences ('following'/series scope) must not leave a refill on a visit that stops being a misting
 // plan visit. `nextKey` is the catalog key the propagation writes (undefined when it is not known: judged as a change away from the plan).
 async function assertNoStrandedRefill(conn, targets, nextKey) {
@@ -12339,10 +12364,18 @@ async function computeSingleServiceEstimatedPricePlan({
 async function loadRefillVisit(database, id, cols, updates, destinationPropertyId = undefined) {
   const wanted = ['customer_id', 'property_id', 'source_estimate_id', 'service_id', 'service_key_snapshot'].filter((column) => cols[column]);
   const row = (await database('scheduled_services').where({ id }).first(...wanted)) || {};
-  let parentServiceKey = updates && updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : row.service_key_snapshot;
-  if (!parentServiceKey && row.service_id) {
-    const svc = await database('services').where({ id: row.service_id }).first('service_key').catch(() => null);
-    parentServiceKey = svc && svc.service_key;
+  // The service the save leaves the visit with. An explicit identity in this save (even null: an unknown pick) is the answer; the stored
+  // service is only consulted when the save did not change it.
+  let parentServiceKey;
+  if (updates && updates.service_key_snapshot !== undefined) {
+    parentServiceKey = updates.service_key_snapshot;
+  } else {
+    parentServiceKey = row.service_key_snapshot;
+    const serviceId = updates && updates.service_id !== undefined ? updates.service_id : row.service_id;
+    if (!parentServiceKey && serviceId) {
+      const svc = await database('services').where({ id: serviceId }).first('service_key').catch(() => null);
+      parentServiceKey = svc && svc.service_key;
+    }
   }
   return {
     customer_id: row.customer_id || null,
@@ -14917,6 +14950,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       if (priceEditPosted) {
         const priceGuardCols = await trx('scheduled_services').columnInfo();
         const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
+        for (const col of ['estimated_price', 'primary_line_price']) {
+          if (priceGuardCols[col] && !priceGuardSelect.includes(col)) priceGuardSelect.push(col);
+        }
         if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
         if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
         if (priceGuardCols.source_estimate_id) priceGuardSelect.push('source_estimate_id');
@@ -14945,6 +14981,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             if (updates.estimated_price !== undefined) priceGuardRow._proposedPrice = updates.estimated_price;
             priceGuardRow._coverageContext = await cadenceCoverageContext(trx, priceGuardCols);
             priceGuardRow._plannedInserts = await plannedInsertCandidates(trx, priceGuardRow);
+          }
+          // A save whose whole price change is a misting refill on an annual-prepay-covered visit is judged without that coverage.
+          if (priceGuardRow && await refillOnlyPriceChange(trx, req.params.id, { row: priceGuardRow, updates, replaceAddons })) {
+            Object.assign(priceGuardRow, withoutAnnualPrepayCoverage(priceGuardRow));
           }
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
@@ -28753,6 +28793,8 @@ router._test = {
   assertRefillPropertyCurrent,
   assertRefillPlacementOnEdit,
   assertNoStrandedRefill,
+  refillOnlyPriceChange,
+  withoutAnnualPrepayCoverage,
   isOneTimeOnlyAddonKey,
   negativePricePosted,
   discountChangeWithoutPricePosted,

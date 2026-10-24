@@ -447,6 +447,91 @@ describe('Update Details that moves the visit to another house never carries a r
   });
 });
 
+describe('annual prepay path: a refill on a covered occurrence is the add-on owed on top, so the repricing guard lets it save', () => {
+  const { refillOnlyPriceChange, withoutAnnualPrepayCoverage } = router._test;
+  const VISIT = 'occ-2';
+  // The covered occurrence: base 59 stamped as the term's slice, no refill yet.
+  const row = (over = {}) => ({ id: VISIT, estimated_price: '59.00', primary_line_price: '59.00', annual_prepay_term_id: 'term-1', prepaid_method: 'annual_prepay_invoice', prepaid_amount: '59.00', ...over });
+  const trxWith = (storedNets = []) => (table) => {
+    const rows = table === 'scheduled_service_addons' ? storedNets.map((estimated_price) => ({ estimated_price })) : [];
+    return { where: () => ({ select: async () => rows }) };
+  };
+  const refillLine = (price) => ({ serviceKey: 'mosquito_misting_refill', price });
+  const run = (over = {}) => refillOnlyPriceChange(over.trx || trxWith(), VISIT, {
+    row: over.row || row(), updates: over.updates || { estimated_price: 278 }, replaceAddons: over.replaceAddons || [refillLine(219)],
+  });
+
+  test('adding a refill raises the total by exactly its net: only the refill changed', async () => {
+    await expect(run()).resolves.toBe(true);
+    await expect(run({ updates: { estimated_price: 278, primary_line_price: 59 } })).resolves.toBe(true);
+  });
+
+  test('re-pricing a refill the visit already carries counts the change from what is stored', async () => {
+    await expect(run({ trx: trxWith([219]), row: row({ estimated_price: '278.00' }), updates: { estimated_price: 289 }, replaceAddons: [refillLine(230)] })).resolves.toBe(true);
+    await expect(run({ trx: trxWith([219]), row: row({ estimated_price: '278.00' }), updates: { estimated_price: 278 }, replaceAddons: [refillLine(219)] })).resolves.toBe(false);
+  });
+
+  test('anything else in the price change keeps the full guard', async () => {
+    // the total moved by more than the refill (another add-on, an appointment discount, a primary edit)
+    await expect(run({ updates: { estimated_price: 300 } })).resolves.toBe(false);
+    await expect(run({ updates: { estimated_price: 250 } })).resolves.toBe(false);
+    // the primary line price itself is posted as different
+    await expect(run({ updates: { estimated_price: 278, primary_line_price: 40 } })).resolves.toBe(false);
+    // no refill line at all
+    await expect(run({ replaceAddons: [{ serviceKey: 'pest_control', price: 219 }] })).resolves.toBe(false);
+    // add-ons not replaced in this save, or no price posted
+    await expect(refillOnlyPriceChange(trxWith(), VISIT, { row: row(), updates: { estimated_price: 278 }, replaceAddons: undefined })).resolves.toBe(false);
+    await expect(run({ updates: { primary_line_price: 59 } })).resolves.toBe(false);
+    await expect(refillOnlyPriceChange(trxWith(), VISIT, { row: null, updates: { estimated_price: 278 }, replaceAddons: [refillLine(219)] })).resolves.toBe(false);
+  });
+
+  test('gate off: never exempt', async () => {
+    process.env.GATE_MOSQUITO_MISTING = 'false';
+    await expect(run()).resolves.toBe(false);
+  });
+
+  test('the guard judges the row without the annual-prepay term link and stamp, and keeps every other money reason', () => {
+    expect(withoutAnnualPrepayCoverage(row())).toMatchObject({ annual_prepay_term_id: null, prepaid_amount: null, id: VISIT, estimated_price: '59.00' });
+    // a hand-collected prepayment (not the annual writer's method) is still prepaid money
+    expect(withoutAnnualPrepayCoverage(row({ prepaid_method: 'cash' }))).toMatchObject({ annual_prepay_term_id: null, prepaid_amount: '59.00' });
+  });
+
+  test('the committed-money guard uses it, before the coverage check, and only for the refill-only change', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    const exempt = src.indexOf('await refillOnlyPriceChange(trx, req.params.id, { row: priceGuardRow, updates, replaceAddons })');
+    const judged = src.indexOf('findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true })');
+    expect(exempt).toBeGreaterThan(-1);
+    expect(src).toContain('Object.assign(priceGuardRow, withoutAnnualPrepayCoverage(priceGuardRow));');
+    expect(exempt).toBeLessThan(judged);
+  });
+});
+
+describe('an explicit service change is never answered with the old service\'s identity', () => {
+  const VISIT = 'visit-1';
+  const tables = (over = {}) => ({
+    ...baseTables(),
+    __columns: { scheduled_services: ['id', 'customer_id', 'property_id', 'source_estimate_id', 'service_id', 'service_key_snapshot'] },
+    scheduled_services: [{ id: VISIT, customer_id: CUSTOMER.id, property_id: HOUSE, source_estimate_id: null, service_id: PLAN.id, service_key_snapshot: null }],
+    scheduled_service_addons: [],
+    ...over,
+  });
+  const normalize = (updates) => normalizeUpdateDetailsAddons({
+    db: fakeDb(tables()), id: VISIT, addons: [{ serviceId: REFILL_ID, name: REFILL.name }], updates, isRecurring: false, serviceType: PLAN.name, scheduledDate: '2026-11-03',
+  });
+
+  test('an unknown pick (service_key_snapshot null) is not the stored plan service', async () => {
+    await expect(normalize({ service_id: null, service_key_snapshot: null })).rejects.toMatchObject({ code: 'MISTING_REFILL_WRONG_PARENT' });
+  });
+
+  test('a save that did not change the service still reads the stored one (snapshot, else the service row)', async () => {
+    expect((await normalize({})).normalizedAddons[0].price).toBe(219);
+    expect((await normalize({ service_id: PLAN.id })).normalizedAddons[0].price).toBe(219);
+    await expect(normalize({ service_id: PEST.id })).rejects.toMatchObject({ code: 'MISTING_REFILL_WRONG_PARENT' });
+  });
+});
+
 describe('a service change that reaches later occurrences leaves no refill on a non-plan visit', () => {
   const { assertNoStrandedRefill } = router._test;
   const conn = (rows) => (table) => {

@@ -25,7 +25,7 @@ const {
   MISTING_REFILL_CATALOG_KEY, MISTING_SERVICE_CATALOG_KEY, isMistingSelection, mistingProposalIdentity,
 } = require('../utils/mosquito-misting-system');
 const { MOSQUITO_MISTING } = require('./pricing-engine/constants');
-const { mistingRefillPriceFor, mistingPricingRowApplied } = require('./pricing-engine/mosquito-misting-config');
+const { mistingRefillPriceFor, mistingRefillPriceIsFromRow } = require('./pricing-engine/mosquito-misting-config');
 const { storedMistingRows, proposalIsAuthoritative } = require('./estimate-result-container');
 const { estimateDataCarriesMosquitoMisting } = require('./pricing-engine/v1-legacy-mapper');
 
@@ -208,9 +208,9 @@ async function resolveRefillAttachment({
   if (!found) return refusal('MISTING_REFILL_UNPRICED');
   if (!found.solution) return refusal('MISTING_REFILL_SOLUTION_UNREADABLE', { estimateId: found.id });
   if (!(await pricingIsFresh())) return refusal('MISTING_REFILL_PRICING_STALE', { estimateId: found.id });
-  // The sync reports success even when the misting row is missing or refused and the in-code defaults stand: a billed price must be
-  // the row's.
-  if (!mistingPricingRowApplied()) return refusal('MISTING_REFILL_PRICE_UNAVAILABLE', { solution: found.solution, estimateId: found.id });
+  // The sync reports success even when the misting row is missing, refused or partial and the in-code defaults stand: a billed price
+  // must be the row's own price for this solution.
+  if (!mistingRefillPriceIsFromRow(found.solution)) return refusal('MISTING_REFILL_PRICE_UNAVAILABLE', { solution: found.solution, estimateId: found.id });
   const unitPrice = mistingRefillPriceFor(found.solution);
   if (unitPrice == null) return refusal('MISTING_REFILL_PRICE_UNAVAILABLE', { solution: found.solution, estimateId: found.id });
   const solutionLabel = MOSQUITO_MISTING.refills[found.solution].label;
