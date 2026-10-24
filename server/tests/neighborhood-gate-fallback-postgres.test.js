@@ -2,7 +2,7 @@
 // are synthetic.
 const postgres = process.env.DATABASE_URL ? describe : describe.skip;
 const { randomUUID } = require('node:crypto');
-const { neighborhoodGateEntriesForVisits } = require('../services/neighborhood-access');
+const { neighborhoodGateEntriesForVisits, neighborhoodGateWaypointsForVisits } = require('../services/neighborhood-access');
 
 jest.setTimeout(30000);
 postgres('neighborhood gate entries for the day feed', () => {
@@ -106,16 +106,29 @@ postgres('neighborhood gate entries for the day feed', () => {
     expect(map.size).toBe(0);
   });
 
-  test("each entry carries the gate's map point (gate_lat, gate_lng) when the office set one", async () => {
-    const n = await neighborhood('Pinned Grove');
-    await entry(n, { code: '7070', status: 'active', gate_lat: 27.4321, gate_lng: -82.4567 });
-    await entry(n, { code: '7171', status: 'needs_confirm' });
-    const c = await customer([n]);
-    const map = await neighborhoodGateEntriesForVisits(trx, [{ id: 'v', customer_id: c.id, property_id: c.propertyIds[0] }]);
-    expect(map.get('v').map((e) => [e.code, e.gate_lat, e.gate_lng])).toEqual([
-      ['7070', '27.432100', '-82.456700'],
-      ['7171', null, null],
-    ]);
+  test('waypoints: the pinned live entry, read apart from the visibility rule; retired or switched-off = none', async () => {
+    // An unconfirmed instructions entry is hidden from the alerts, but the
+    // office's pin on it still routes (Codex P2).
+    const pinned = await neighborhood('Pinned Grove');
+    await entry(pinned, { access_type: 'instructions', code: null, instructions: 'Text me', status: 'needs_confirm', gate_lat: 27.4321, gate_lng: -82.4567 });
+    await entry(pinned, { code: '7171', status: 'active' });
+    const retiredPin = await neighborhood('Retired Pin');
+    await entry(retiredPin, { code: '8080', status: 'retired', gate_lat: 27.5, gate_lng: -82.5 });
+    await entry(retiredPin, { code: '8181', status: 'active' });
+    const off = await neighborhood('Dark Pin');
+    await trx('neighborhoods').where({ id: off }).update({ active: false });
+    await entry(off, { code: '9090', status: 'active', gate_lat: 27.6, gate_lng: -82.6 });
+    const a = await customer([pinned]);
+    const b = await customer([retiredPin]);
+    const c = await customer([off]);
+    const visits = [
+      { id: 'a', customer_id: a.id, property_id: a.propertyIds[0] },
+      { id: 'b', customer_id: b.id, property_id: b.propertyIds[0] },
+      { id: 'c', customer_id: c.id, property_id: c.propertyIds[0] },
+    ];
+    expect([...await neighborhoodGateWaypointsForVisits(trx, visits)]).toEqual([['a', { lat: 27.4321, lng: -82.4567 }]]);
+    // The entries themselves still follow the visibility rule: the pinned unconfirmed instruction is not shown.
+    expect((await neighborhoodGateEntriesForVisits(trx, visits)).get('a').map((e) => e.code)).toEqual(['7171']);
   });
 
   test('a switched-off neighborhood gives no fallback', async () => {

@@ -6451,7 +6451,7 @@ router.get('/', async (req, res, next) => {
     // The neighborhood's pinned gate per visit (owner 2026-10-24): the
     // Directions link routes through it before the house. Only visits with
     // a pin have a key, so every other row is byte-identical to before.
-    const gateWaypointByVisit = new Map();
+    let gateWaypointByVisit = new Map();
     // Visits whose stop is in an active neighborhood, when a visit's assigned
     // technician may add a gate code or mark one wrong
     // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
@@ -6461,10 +6461,7 @@ router.get('/', async (req, res, next) => {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
         const neighborhoodAccess = require('../services/neighborhood-access');
         neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
-        for (const [visitId, entries] of neighborhoodGateByVisit) {
-          const waypoint = neighborhoodAccess.gateWaypoint(entries);
-          if (waypoint) gateWaypointByVisit.set(visitId, waypoint);
-        }
+        gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
         if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
       }
     } catch (err) {

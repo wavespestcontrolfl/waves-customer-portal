@@ -2,7 +2,7 @@
 // shapes the county rolls return (plat suffixes, book references, situs lines
 // that run on into the city).
 const {
-  neighborhoodNameFromSubdivision, isKeypadCode, matchKey, parcelMatchesProperty, parseGateLocation, gateWaypoint,
+  neighborhoodNameFromSubdivision, isKeypadCode, matchKey, parcelMatchesProperty, parseGateLocation,
 } = require('../services/neighborhood-access');
 
 describe('neighborhoodNameFromSubdivision', () => {
@@ -147,20 +147,5 @@ describe('parseGateLocation', () => {
     ['91, -82.4'], ['27.4, -181'], ['0, 0'], ['27.4'],
   ])('%s → null', (text) => {
     expect(parseGateLocation(text)).toBeNull();
-  });
-});
-
-describe('gateWaypoint', () => {
-  test('the first shown entry with a point, as numbers; a pg decimal string counts', () => {
-    expect(gateWaypoint([
-      { gate_lat: null, gate_lng: null },
-      { gate_lat: '27.432100', gate_lng: '-82.456700' },
-      { gate_lat: 1, gate_lng: 1 },
-    ])).toEqual({ lat: 27.4321, lng: -82.4567 });
-  });
-  test('none, an empty list or a half point = null', () => {
-    expect(gateWaypoint(null)).toBeNull();
-    expect(gateWaypoint([])).toBeNull();
-    expect(gateWaypoint([{ gate_lat: 27.4 }, { gate_lat: null, gate_lng: -82.4 }])).toBeNull();
   });
 });

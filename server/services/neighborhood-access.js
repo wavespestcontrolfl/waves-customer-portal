@@ -780,18 +780,29 @@ function parseGateLocation(value) {
   return null;
 }
 
-// The point a visit's Directions link routes through before the house: the
-// neighborhood's pinned entry (the admin route allows one pin per
-// neighborhood across live entries, so the shown-entries order never picks
-// between two gates). null = the link is the plain address, as before.
-function gateWaypoint(entries) {
-  for (const e of entries || []) {
-    if (e?.gate_lat == null || e?.gate_lng == null) continue;
-    const lat = Number(e.gate_lat);
-    const lng = Number(e.gate_lng);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+// The point each visit's Directions link routes through before the house,
+// keyed by visit id: the neighborhood's one pinned live entry (the admin
+// route and neighborhood_access_pin_uniq allow one per neighborhood). The
+// pin is the office's, so it is read apart from the code/instruction
+// visibility rule below (Codex P2): an unconfirmed instructions entry the
+// office pinned still routes, while its text stays hidden until confirmed.
+// A switched-off neighborhood routes nothing. No key = the plain address.
+async function neighborhoodGateWaypointsForVisits(conn, visits) {
+  const out = new Map();
+  const visitNeighborhood = await visitNeighborhoodIds(conn, visits);
+  if (!visitNeighborhood.size) return out;
+  const pins = await conn('neighborhood_access')
+    .whereIn('neighborhood_id', [...new Set(visitNeighborhood.values())])
+    .whereIn('neighborhood_id', conn('neighborhoods').where({ active: true }).select('id'))
+    .whereNot('status', 'retired')
+    .whereNotNull('gate_lat').whereNotNull('gate_lng')
+    .select('neighborhood_id', 'gate_lat', 'gate_lng');
+  const byNeighborhood = new Map(pins.map((p) => [p.neighborhood_id, { lat: Number(p.gate_lat), lng: Number(p.gate_lng) }]));
+  for (const [visitId, n] of visitNeighborhood) {
+    const pin = byNeighborhood.get(n);
+    if (pin) out.set(visitId, pin);
   }
-  return null;
+  return out;
 }
 
 // ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
@@ -817,8 +828,7 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
     .where((w) => w.where('status', 'active')
       .orWhere((q) => q.where('status', 'needs_confirm').where('access_type', 'keypad').whereNotNull('code')))
     .orderBy([{ column: 'status' }, { column: 'gate_label' }, { column: 'code' }])
-    .select('id', 'neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status', 'flagged_wrong_at',
-      'gate_lat', 'gate_lng');
+    .select('id', 'neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status', 'flagged_wrong_at');
   const byNeighborhood = new Map();
   for (const e of entries) byNeighborhood.set(e.neighborhood_id, [...(byNeighborhood.get(e.neighborhood_id) || []), e]);
   for (const [visitId, n] of visitNeighborhood) {
@@ -850,5 +860,5 @@ module.exports = {
   visitNeighborhoodIds,
   gateActionVisitIds,
   parseGateLocation,
-  gateWaypoint,
+  neighborhoodGateWaypointsForVisits,
 };
