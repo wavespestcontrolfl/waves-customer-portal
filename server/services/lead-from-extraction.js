@@ -722,17 +722,20 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       const onNumber = key.length === 10
         ? await q('leads').whereNull('deleted_at')
           .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
-          .select('extracted_data')
+          .orderBy('created_at', 'desc')
         : [];
       if (onNumber.some((row) => parseJsonObject(row.extracted_data).source !== captureSource)) {
         notOwned = 'lead';
         existingLead = null;
         return;
       }
+      // The reader's own lead, matched on digits: staff may have reformatted its phone.
+      existingLead = onNumber[0] || null;
+    } else {
+      existingLead = phone
+        ? await q('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
+        : null;
     }
-    existingLead = phone
-      ? await q('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
-      : null;
   // ⭐ AN UNVERIFIED SESSION REUSES NOTHING. Nulling identity resolution above
   // is not enough: leads resolve BY PHONE, so an unverified relay caller
   // claiming a victim's number would still land on — and overwrite the rolling

@@ -153,6 +153,21 @@ postgres('text-thread lead reader', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
+  test('a reformatted phone on the reader\'s own lead still fills that lead', async () => {
+    await text('Quote for roaches please', { minutesAgo: 30 });
+    modelSays(answer());
+    await sweep();
+    const [lead] = await leads();
+    await trx('leads').where({ id: lead.id }).update({ phone: '(941) 555-0177' });
+
+    await text('Sam Example here', { minutesAgo: 6 });
+    modelSays(answer({ first_name: 'Sam', last_name: 'Example' }));
+    expect((await sweep()).counts).toEqual({ lead_updated: 1 });
+    const all = await leads();
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ id: lead.id, first_name: 'Sam' });
+  });
+
   test('a customer known by a secondary number is skipped', async () => {
     await trx('customers').insert({ id: randomUUID(), first_name: 'Known', last_name: 'Spouse', phone: '+19415550111', secondary_phone: TEXTER, email: `${randomUUID()}@example.invalid` });
     await text('Is the tech still coming?', { minutesAgo: 10 });
