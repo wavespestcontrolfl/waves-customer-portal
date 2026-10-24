@@ -13,7 +13,8 @@
  * Every row carries a `version` (its updated_at as text, microseconds kept).
  * Every write sets updated_at from the database clock, so a write that lands
  * after a read always changes it. Filing is an optimistic check against the
- * version the return was computed from (markFiled).
+ * versions the return was computed from: the year's row and the prior year's
+ * row, whose filed snapshot feeds the carry-ins (markFiled).
  */
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
@@ -95,7 +96,9 @@ async function getYearDetail(year) {
   // failed read of a prior year that should exist is an error, never a quiet
   // zero carryover: that would feed a wrong number into a return.
   const [cur, prior] = await Promise.all([getYearRow(y), y - 1 >= FIRST_YEAR ? getYearRow(y - 1) : null]);
-  return { year: y, exists: cur.exists, row: cur.row, carry_in: resolveCarryIn(cur.row, prior) };
+  // the prior row's version as read (null: no row), for the filing check
+  const priorVersion = prior && prior.exists ? prior.row.version : null;
+  return { year: y, exists: cur.exists, row: cur.row, carry_in: resolveCarryIn(cur.row, prior), prior_version: priorVersion };
 }
 
 async function upsertYear(year, input = {}) {
@@ -139,23 +142,39 @@ async function ensureRow(year) {
 }
 
 // Freeze the computed return, only if the year is still the draft that return
-// was computed from: `version` is the row's version as read BEFORE computing.
-// A write that landed since (a PUT, or another filing) changed it, so zero rows
-// match and nothing is written: 409, and no snapshot can feed next year's
-// carry-ins. The snapshot is as of the moment it was filed.
-async function markFiled(year, filedOn, snapshot, version) {
+// was computed from: `version` is the row's version as read BEFORE computing,
+// and `priorVersion` the prior year's (null when it had no row), because a
+// NULL carry-in is the prior year's filed carry-out. A write that landed since
+// on either row (a PUT, a filing, an unfiling) changed a version, so nothing is
+// written: 409, and no snapshot can feed next year's carry-ins. The snapshot is
+// as of the moment it was filed.
+async function markFiled(year, filedOn, snapshot, version, priorVersion) {
   const y = parseYear(year);
   if (typeof version !== 'string' || !version) throw new Error('markFiled needs the version of the year row the return was computed from');
-  const [row] = await db('tax_years')
-    .where({ tax_year: y, status: 'draft' })
-    .whereRaw('updated_at::text = ?', [version])
-    .update({ status: 'filed', filed_on: filedOn, filed_snapshot: JSON.stringify(snapshot), updated_at: db.fn.now() })
-    .returning('*');
-  if (row) return present(row);
-  const current = await db('tax_years').where({ tax_year: y }).first('status');
-  throw httpError(409, current && current.status === 'filed'
-    ? `${y} is already marked filed`
-    : 'the year changed while it was being filed; reload and try again');
+  const hasPrior = y - 1 >= FIRST_YEAR;
+  if (hasPrior && priorVersion === undefined) throw new Error('markFiled needs the version of the prior year row the carry-ins were read from (null when it had no row)');
+  return db.transaction(async (trx) => {
+    // Every write to tax_years waits for this short transaction, so neither
+    // row can change between the checks below and the commit. A row lock would
+    // not cover a prior year that has no row yet. Reads are not blocked.
+    await trx.raw('LOCK TABLE tax_years IN SHARE ROW EXCLUSIVE MODE');
+    if (hasPrior) {
+      const prior = await trx('tax_years').where({ tax_year: y - 1 }).first(db.raw('updated_at::text as version'));
+      if ((prior ? prior.version : null) !== priorVersion) {
+        throw httpError(409, `${y - 1} changed while ${y} was being filed; reload and try again`);
+      }
+    }
+    const [row] = await trx('tax_years')
+      .where({ tax_year: y, status: 'draft' })
+      .whereRaw('updated_at::text = ?', [version])
+      .update({ status: 'filed', filed_on: filedOn, filed_snapshot: JSON.stringify(snapshot), updated_at: db.fn.now() })
+      .returning('*');
+    if (row) return present(row);
+    const current = await trx('tax_years').where({ tax_year: y }).first('status');
+    throw httpError(409, current && current.status === 'filed'
+      ? `${y} is already marked filed`
+      : 'the year changed while it was being filed; reload and try again');
+  });
 }
 
 async function unmarkFiled(year) {

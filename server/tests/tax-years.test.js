@@ -13,15 +13,17 @@
  *  4. filed_on is a real day from the start of the year to today.
  *  5. Marking filed is draft to filed only (409 otherwise); unmarking a year
  *     that was never filed is a 409, a year with no record a 404.
- *  6. Filing only matches the version the return was computed from: a write
- *     that landed since (a PUT) is a 409 and the snapshot is never written.
+ *  6. Filing only matches the versions the return was computed from, the
+ *     year's row and the prior year's row (its filed snapshot feeds NULL
+ *     carry-ins), under a table lock: a write that landed since on either (a
+ *     PUT, a filing, an unfiling) is a 409 and the snapshot is never written.
  *  7. A failed read of the prior year is an error, never a zero carryover.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const state = {
   existing: null, upserted: [], upsertReturns: undefined, updateRows: [], inserted: [], rows: {},
-  firstResults: [], firstCalls: 0, wheres: [], store: null,
+  firstResults: [], firstCalls: 0, wheres: [], store: null, raws: [], transactions: 0,
 };
 // state.store (optional) is a one-row fake of tax_years: the filing UPDATE
 // matches it only while it is a draft AND its version equals the whereRaw
@@ -58,10 +60,18 @@ function mockTable() {
   };
   return b;
 }
+// db.transaction(cb): the trx builds the same fake table; trx.raw records its SQL
+function mockTransaction(cb) {
+  state.transactions += 1;
+  const trx = jest.fn(() => mockTable());
+  trx.raw = jest.fn((sql) => { state.raws.push(sql); return Promise.resolve(); });
+  return cb(trx);
+}
 jest.mock('../models/db', () => {
   const d = jest.fn(() => mockTable());
   d.raw = jest.fn((sql) => sql);
   d.fn = { now: jest.fn(() => 'db-now') };
+  d.transaction = jest.fn((cb) => mockTransaction(cb));
   return d;
 });
 
@@ -72,7 +82,7 @@ const httpErr = (status) => expect.objectContaining({ status });
 const year = etParts().year - 1;
 
 beforeEach(() => {
-  Object.assign(state, { existing: null, upserted: [], upsertReturns: undefined, updateRows: [], inserted: [], rows: {}, firstResults: [], firstCalls: 0, wheres: [], store: null });
+  Object.assign(state, { existing: null, upserted: [], upsertReturns: undefined, updateRows: [], inserted: [], rows: {}, firstResults: [], firstCalls: 0, wheres: [], store: null, raws: [], transactions: 0 });
 });
 
 describe('upsertYear validation', () => {
@@ -167,6 +177,13 @@ describe('getYearDetail: the prior year read', () => {
     const d = await ty.getYearDetail(2020);
     expect(state.firstCalls).toBe(1);
     expect(d.carry_in.nol.source).toBe('none');
+    expect(d.prior_version).toBeNull();
+  });
+  test('the prior row version as read comes back for the filing check, null when it has no row', async () => {
+    state.firstResults = [null, { tax_year: year - 1, status: 'draft', version: 'p1', other_income: '0', estimates_paid: '0' }];
+    expect((await ty.getYearDetail(year)).prior_version).toBe('p1');
+    state.firstResults = [null, null];
+    expect((await ty.getYearDetail(year)).prior_version).toBeNull();
   });
 });
 
@@ -195,11 +212,41 @@ describe('parseFiledOn', () => {
 
 describe('markFiled and unmarkFiled', () => {
   const draft = () => ({ status: 'draft', version: 'v1', snapshot: null });
-  test('mark filed freezes the snapshot as JSON when the version still matches', async () => {
+  // the prior year's row as the filing reads it under the lock (null: no row)
+  const priorNow = (version) => { state.firstResults = [version == null ? null : { version }]; };
+  test('mark filed freezes the snapshot as JSON when both versions still match, under the table lock', async () => {
     state.store = draft();
-    const row = await ty.markFiled(2025, '2026-04-15', { result: { total_tax: 1 } }, 'v1');
+    priorNow('p1');
+    const row = await ty.markFiled(2025, '2026-04-15', { result: { total_tax: 1 } }, 'v1', 'p1');
     expect(row.status).toBe('filed');
     expect(state.store.snapshot).toBe(JSON.stringify({ result: { total_tax: 1 } }));
+    expect(state.transactions).toBe(1);
+    expect(state.raws).toEqual(['LOCK TABLE tax_years IN SHARE ROW EXCLUSIVE MODE']);
+    expect(state.wheres).toContainEqual([{ tax_year: 2024 }]);
+  });
+  test('a prior year with no row, then and now, files', async () => {
+    state.store = draft();
+    priorNow(null);
+    expect((await ty.markFiled(2025, '2026-04-15', { result: {} }, 'v1', null)).status).toBe('filed');
+  });
+  test('the prior year changed after the carry-ins were read (filed, unfiled or edited): 409, no snapshot', async () => {
+    state.store = draft();
+    priorNow('p2'); // an unfiling of 2024 committed after the return read it at p1
+    await expect(ty.markFiled(2025, '2026-04-15', { result: {} }, 'v1', 'p1')).rejects.toMatchObject({
+      status: 409, message: '2024 changed while 2025 was being filed; reload and try again',
+    });
+    expect(state.store).toEqual(draft());
+  });
+  test('a prior year row that appeared since is a change too', async () => {
+    state.store = draft();
+    priorNow('p1');
+    await expect(ty.markFiled(2025, '2026-04-15', { result: {} }, 'v1', null)).rejects.toMatchObject({ status: 409 });
+    expect(state.store).toEqual(draft());
+  });
+  test('the first year has no prior year to check', async () => {
+    state.store = draft();
+    expect((await ty.markFiled(2020, '2021-04-15', { result: {} }, 'v1')).status).toBe('filed');
+    expect(state.wheres).not.toContainEqual([{ tax_year: 2019 }]);
   });
   test('ensureRow makes the draft row first, without touching an existing one', async () => {
     await ty.ensureRow(2025);
@@ -208,17 +255,21 @@ describe('markFiled and unmarkFiled', () => {
   test('a PUT landing between the read and the filing is a 409 and writes no snapshot', async () => {
     state.store = draft(); // the row as read: version v1, the return is computed from it
     state.store.version = 'v2'; // a PUT commits now
-    await expect(ty.markFiled(2025, '2026-04-15', { result: {} }, 'v1')).rejects.toMatchObject({
+    priorNow('p1');
+    await expect(ty.markFiled(2025, '2026-04-15', { result: {} }, 'v1', 'p1')).rejects.toMatchObject({
       status: 409, message: 'the year changed while it was being filed; reload and try again',
     });
     expect(state.store).toEqual({ status: 'draft', version: 'v2', snapshot: null });
   });
   test('a year already filed is a 409 that says so', async () => {
     state.store = { status: 'filed', version: 'v1', snapshot: '{}' };
-    await expect(ty.markFiled(2025, '2026-04-15', {}, 'v1')).rejects.toMatchObject({ status: 409, message: '2025 is already marked filed' });
+    priorNow('p1');
+    await expect(ty.markFiled(2025, '2026-04-15', {}, 'v1', 'p1')).rejects.toMatchObject({ status: 409, message: '2025 is already marked filed' });
   });
-  test('a version is required', async () => {
+  test('a version is required, and the prior year version for a year that has a prior year', async () => {
     await expect(ty.markFiled(2025, '2026-04-15', {})).rejects.toThrow(/version/);
+    await expect(ty.markFiled(2025, '2026-04-15', {}, 'v1')).rejects.toThrow(/prior year row/);
+    expect(state.transactions).toBe(0);
   });
   test('unmark: 409 for a year that is not filed, 404 for no record', async () => {
     state.updateRows = [];

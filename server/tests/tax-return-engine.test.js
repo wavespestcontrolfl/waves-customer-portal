@@ -159,6 +159,23 @@ describe('the IRS Tax Table (taxable income under $100,000)', () => {
   });
 });
 
+describe('the fingerprint (what Mark filed is bound to)', () => {
+  const base = { gross_receipts: 60000, other_income: 1000 };
+  test('the same return gives the same fingerprint; any changed figure gives another', () => {
+    const a = computeReturn(inputs(base));
+    expect(a.fingerprint).toMatch(/^[0-9a-f]{32}$/);
+    expect(computeReturn(inputs(base)).fingerprint).toBe(a.fingerprint);
+    expect(computeReturn(inputs({ ...base, gross_receipts: 60000.01 })).fingerprint).not.toBe(a.fingerprint);
+    expect(computeReturn(inputs({ ...base, carry_in: { nol: 1 } })).fingerprint).not.toBe(a.fingerprint);
+  });
+  test('today, the warnings and the status do not change it', () => {
+    const a = computeReturn(inputs({ ...base, today: '2026-01-15' }));
+    const b = computeReturn(inputs({ ...base, today: '2026-04-01', warnings: [{ code: 'x', message: 'y' }], status: 'filed' }));
+    expect(b.reserve).not.toEqual(a.reserve);
+    expect(b.fingerprint).toBe(a.fingerprint);
+  });
+});
+
 describe('Schedule SE', () => {
   const se = (profit, year = 2025) => computeReturn(inputs({ year, gross_receipts: profit }));
   test('nothing when net earnings are under $400', () => {
@@ -526,6 +543,7 @@ describe('gatherInputs and fileYear (database mocked)', () => {
       year: 2025, exists: true,
       row: { filing_status: 'mfj', other_income: 1000, estimates_paid: 200, status: 'draft', filed_on: null, filed_snapshot: null, version: 'v1' },
       carry_in: { nol: { value: 5 }, qbi_loss: { value: 6 }, sec179: { value: 7 }, home_office: { value: 8 } },
+      prior_version: 'p1',
     };
   });
 
@@ -562,35 +580,61 @@ describe('gatherInputs and fileYear (database mocked)', () => {
       taxYears.getYearDetail.mockClear();
     });
 
-    test('the row exists first, the return is computed from the row as read, and its version goes to the filing', async () => {
+    test('the row exists first, the return is computed from the rows as read, and both versions go to the filing', async () => {
+      const { fingerprint } = await engine.computeYear(2025); // the return on screen
+      taxYears.getYearDetail.mockClear();
       taxYears.markFiled.mockResolvedValue({ status: 'filed' });
-      await engine.fileYear(2025, { filed_on: '2026-04-10' });
+      await engine.fileYear(2025, { filed_on: '2026-04-10', fingerprint });
       expect(taxYears.ensureRow).toHaveBeenCalledWith(2025);
       expect(taxYears.ensureRow.mock.invocationCallOrder[0]).toBeLessThan(taxYears.getYearDetail.mock.invocationCallOrder[0]);
-      const [y, date, snapshot, version] = taxYears.markFiled.mock.calls[0];
-      expect([y, date, version]).toEqual([2025, '2026-04-10', 'v1']);
+      const [y, date, snapshot, version, priorVersion] = taxYears.markFiled.mock.calls[0];
+      expect([y, date, version, priorVersion]).toEqual([2025, '2026-04-10', 'v1', 'p1']);
       expect(snapshot.result.lines.gross_receipts).toBe(12345.67);
+      expect(snapshot.result.fingerprint).toBe(fingerprint);
       expect(snapshot.result.warnings).toBeUndefined();
+    });
+
+    test('the books moved after the return was shown: 409, nothing filed', async () => {
+      const { fingerprint } = await engine.computeYear(2025);
+      state.pnl = { ...state.pnl, revenue: { total: 12400 } }; // a payment landed after the screen loaded
+      await expect(engine.fileYear(2025, { fingerprint })).rejects.toMatchObject({
+        status: 409, message: 'the return changed since it was shown; reload it and check it again before marking it filed',
+      });
+      expect(taxYears.markFiled).not.toHaveBeenCalled();
+    });
+
+    test('the prior year moved after the return was shown (its carry-out feeds a carry-in): 409, nothing filed', async () => {
+      const { fingerprint } = await engine.computeYear(2025);
+      state.detail = { ...state.detail, carry_in: { ...state.detail.carry_in, nol: { value: 500 } }, prior_version: 'p2' };
+      await expect(engine.fileYear(2025, { fingerprint })).rejects.toMatchObject({ status: 409 });
+      expect(taxYears.markFiled).not.toHaveBeenCalled();
+    });
+
+    test('no fingerprint is a 400 before the row is touched', async () => {
+      await expect(engine.fileYear(2025, { filed_on: '2026-04-10' })).rejects.toMatchObject({ status: 400, message: /fingerprint/ });
+      expect(taxYears.ensureRow).not.toHaveBeenCalled();
+      expect(taxYears.markFiled).not.toHaveBeenCalled();
     });
 
     test('a PUT that lands while the return is computed is a 409 and nothing is frozen', async () => {
       // the year row as the PUT leaves it; the filing was computed from v1
       const store = { version: 'v1', frozen: null };
       const httpErr = (status, message) => Object.assign(new Error(message), { status });
+      const { fingerprint } = await engine.computeYear(2025);
       pnlReport.buildPnlReport.mockImplementationOnce(async () => { store.version = 'v2'; return state.pnl; }); // the PUT commits mid-compute
       taxYears.markFiled.mockImplementation(async (_y, _d, snapshot, version) => {
         if (version !== store.version) throw httpErr(409, 'the year changed while it was being filed; reload and try again');
         store.frozen = snapshot;
         return { status: 'filed' };
       });
-      await expect(engine.fileYear(2025)).rejects.toMatchObject({ status: 409, message: /changed while it was being filed/ });
+      await expect(engine.fileYear(2025, { fingerprint })).rejects.toMatchObject({ status: 409, message: /changed while it was being filed/ });
       expect(store.frozen).toBeNull();
       expect(taxYears.markFiled.mock.calls[0][3]).toBe('v1'); // the version read before computing, not after
     });
 
     test('a failed read while gathering (the prior year, say) persists nothing', async () => {
       taxYears.getYearDetail.mockRejectedValueOnce(new Error('db down'));
-      await expect(engine.fileYear(2025)).rejects.toThrow('db down');
+      await expect(engine.fileYear(2025, { fingerprint: 'fp' })).rejects.toThrow('db down');
       expect(taxYears.markFiled).not.toHaveBeenCalled();
     });
 

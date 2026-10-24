@@ -56,6 +56,7 @@
  *   - Married filing separately and every credit are not modeled.
  *   - The return is for the whole calendar year; a year in progress is "to date".
  */
+const crypto = require('crypto');
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
 const {
@@ -184,6 +185,14 @@ function snapshotDiffers(snapshot, result) {
     ['home office carryover', old.carry_out?.home_office, result.carry_out.home_office],
   ];
   return pairs.filter(([, a, b]) => round2(a) !== round2(b)).map(([label, a, b]) => `${label} was ${fmt(a)} when filed, now ${fmt(b)}`);
+}
+
+// Filing is bound to the return the owner reviewed (fileYear): the fingerprint
+// covers every figure on it, but not the warnings, the status or the reserve
+// (the reserve moves with today's date).
+function returnFingerprint(result) {
+  const { warnings: _warnings, status: _status, reserve: _reserve, ...figures } = result;
+  return crypto.createHash('sha256').update(JSON.stringify(figures)).digest('hex').slice(0, 32);
 }
 
 /**
@@ -391,6 +400,7 @@ function computeReturn(inputs = {}) {
     reserve: reserve({ year, today, balance: owed }),
     warnings,
   };
+  result.fingerprint = returnFingerprint(result);
   if (isFiled) {
     const diffs = snapshotDiffers(inputs.filed_snapshot, result);
     if (diffs.length) warnings.push(warn('filed_differs', `This year is marked filed, but the books now give a different answer: ${diffs.join('; ')}.`));
@@ -475,6 +485,7 @@ async function gatherInputs(year) {
     filed_on: detail.row.filed_on,
     filed_snapshot: detail.row.filed_snapshot,
     row_version: detail.row.version,
+    prior_version: detail.prior_version,
     warnings,
   };
 }
@@ -483,23 +494,30 @@ async function computeYear(year) {
   return computeReturn(await gatherInputs(year));
 }
 
-// Freeze today's answer. The snapshot keeps the numbers but not the warnings.
-// Calculating and filing are one optimistic step: the year row exists first,
-// the return is computed from the row as read (its version), and the filing
-// UPDATE only matches that same version. A PUT that lands in between is a 409
-// and writes nothing. Expenses and equipment are read live while computing, so
-// the snapshot is the books as of the moment it was filed.
-async function fileYear(year, { filed_on: filedOn } = {}) {
+// Freeze the return the owner reviewed. The snapshot keeps the numbers but not
+// the warnings. `fingerprint` is the one on the return the screen showed: the
+// return is computed again here, and when the books, the equipment, the home
+// office, the year's inputs or the prior year moved since it was shown, the
+// fingerprints differ and it is a 409 with nothing written. Calculating and
+// filing are one optimistic step: the year row exists first, the return is
+// computed from the row as read (its version, and the prior year's version,
+// whose filed snapshot feeds the carry-ins), and the filing only matches those
+// same versions (markFiled). A PUT that lands in between is a 409.
+async function fileYear(year, { filed_on: filedOn, fingerprint } = {}) {
   const y = sharedBills.parseYear(year);
   const date = taxYears.parseFiledOn(filedOn, y);
   getYearConstants(y); // 400 for a year that is not loaded, before a row is made
+  if (typeof fingerprint !== 'string' || !fingerprint) throw sharedBills.httpError(400, 'fingerprint is required: file from the return on screen');
   await taxYears.ensureRow(y);
   const inputs = await gatherInputs(y);
   const { warnings: _warnings, ...result } = computeReturn(inputs);
-  return taxYears.markFiled(y, date, { frozen_at: new Date().toISOString(), result }, inputs.row_version);
+  if (result.fingerprint !== fingerprint) {
+    throw sharedBills.httpError(409, 'the return changed since it was shown; reload it and check it again before marking it filed');
+  }
+  return taxYears.markFiled(y, date, { frozen_at: new Date().toISOString(), result }, inputs.row_version, inputs.prior_version);
 }
 
 module.exports = {
   computeReturn, gatherInputs, computeYear, fileYear, splitDepreciation, bracketTax, incomeTaxFor, taxTableRow, dueDate, reserve,
-  SCHEDULE_C_LABELS,
+  returnFingerprint, SCHEDULE_C_LABELS,
 };

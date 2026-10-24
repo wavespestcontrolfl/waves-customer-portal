@@ -54,6 +54,7 @@ beforeEach(() => {
     estimates: { note: 'To be safe from the underpayment penalty, pay 100% of this year.' },
     reserve: { amount: 8736.87, months_left: 3, monthly: 2912.29, basis: 'the months left in the year' },
     warnings: [{ code: 'year_in_progress', message: 'This year is not over. These figures are to date.' }],
+    fingerprint: 'fp-shown',
   };
   localStorage.setItem('waves_admin_token', 'test-token');
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
@@ -120,12 +121,13 @@ it('Save year posts the typed amounts: a blank amount as 0, a blank carry-in as 
   });
 });
 
-it('Mark filed posts to the file route and reloads the year', async () => {
+it('Mark filed posts the fingerprint of the return on screen to the file route and reloads the year', async () => {
   render(<ReturnTab />);
   const button = await screen.findByRole('button', { name: 'Mark filed' });
   const before = calls.length;
   fireEvent.click(button);
   await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url.endsWith(`/tax-years/${YEAR}/file`))).toBe(true));
+  expect(calls.find((c) => c.method === 'POST' && c.url.endsWith(`/tax-years/${YEAR}/file`)).body).toEqual({ fingerprint: 'fp-shown' });
   await waitFor(() => expect(calls.length).toBeGreaterThan(before + 1));
   expect(calls.filter((c) => c.url.endsWith('/return')).length).toBeGreaterThan(1);
 });

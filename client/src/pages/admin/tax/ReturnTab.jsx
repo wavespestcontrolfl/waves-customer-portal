@@ -313,7 +313,7 @@ export default function ReturnTab() {
                 {filed ? (
                   <Button variant="secondary" disabled={busy} onClick={() => run(() => post(`${T}/tax-years/${year}/unfile`, {}))}>Unmark filed</Button>
                 ) : (
-                  <Button variant="primary" disabled={busy || !detail || dirty} onClick={() => run(() => post(`${T}/tax-years/${year}/file`, {}))}>Mark filed</Button>
+                  <Button variant="primary" disabled={busy || !detail || dirty} onClick={() => run(() => post(`${T}/tax-years/${year}/file`, { fingerprint: ret.fingerprint }))}>Mark filed</Button>
                 )}
                 <div className="text-sm text-ink-secondary">
                   {filed
