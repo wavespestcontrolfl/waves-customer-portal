@@ -1784,8 +1784,8 @@ function CommercialProposalEditor() {
                 {estimate?.acceptedAt && <div>Won {new Date(estimate.acceptedAt).toLocaleString()}</div>}
                 {commercialAgreement && (
                   <div data-testid="proposal-agreement-status">
-                    {commercialAgreement.signingBlocked === 'payment_terms'
-                      ? 'Online signing needs payment terms set to Net 30 (the agreement\u2019s terms).'
+                    {commercialAgreement.signingBlocked === 'terms_conflict'
+                      ? commercialAgreement.note
                       : commercialAgreement.state === 'signed'
                       ? `Agreement signed ${formatETDateTime(commercialAgreement.signedAt, { month: 'short', day: 'numeric', year: 'numeric' })}`
                       : commercialAgreement.state === 'awaiting'

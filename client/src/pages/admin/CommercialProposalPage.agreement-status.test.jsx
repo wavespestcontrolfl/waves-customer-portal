@@ -46,9 +46,13 @@ it('signed: the line names the signing date', async () => {
   expect(screen.getByTestId('proposal-agreement-status')).toHaveTextContent('Agreement signed Oct 25, 2026');
 });
 
-it.each(['none', 'awaiting'])('%s with payment terms other than Net 30: the line says what to change', async (state) => {
-  await mount({ state, since: '2026-10-24T15:00:00.000Z', signingBlocked: 'payment_terms', note: 'server note' });
-  expect(screen.getByTestId('proposal-agreement-status')).toHaveTextContent('Online signing needs payment terms set to Net 30 (the agreement\u2019s terms).');
+it.each([
+  ['none', 'payment_terms', 'Online signing needs the proposal terms to match the agreement: payment terms Net 30.'],
+  ['awaiting', 'initialTermMonths', 'Online signing needs the proposal terms to match the agreement: initial term 12 months (or blank).'],
+  ['none', 'renewal', 'Online signing needs the proposal terms to match the agreement: renewal blank or automatic 12-month terms with 30 days\u2019 notice.'],
+])('%s with a conflicting term (%s): the line shows the server note naming what to change', async (state, field, note) => {
+  await mount({ state, since: '2026-10-24T15:00:00.000Z', signingBlocked: 'terms_conflict', field, note });
+  expect(screen.getByTestId('proposal-agreement-status')).toHaveTextContent(note);
   expect(screen.queryByText(/Agreement not started|awaiting signature/)).not.toBeInTheDocument();
 });
 

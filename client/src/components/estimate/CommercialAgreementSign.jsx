@@ -69,7 +69,7 @@ export default function CommercialAgreementSign({ token, commercialAgreement }) 
       <div data-testid="commercial-agreement-call" style={estimateCard()}>
         <div style={heading}>Ready to go ahead?</div>
         <div style={body}>
-          {reason === 'payment_terms'
+          {reason === 'terms_conflict'
             ? <>Call us at {callLink} and we will finish your agreement with you.</>
             : <>Call us at {callLink} and we will set up your account and finish your agreement with you.</>}
         </div>

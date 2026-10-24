@@ -18,7 +18,7 @@ const NotificationService = require('../services/notification-service');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   TEMPLATE_KEY, SNAPSHOT_SOURCE, START_DATE_TEXT, ensureAgreement, agreementStateForEstimate, agreementCtaFor, agreementAdminStatus,
-  signEligibility, lockEstimateForSign, refuseStaleSignature, handleAgreementSigned,
+  signEligibility, agreementTermsConflict, AGREEMENT_TERMS, lockEstimateForSign, refuseStaleSignature, handleAgreementSigned,
 } = require('../services/commercial-proposal-agreement');
 
 const { TEMPLATE, VERSION, CUSTOMER, estimateRow, makeDb } = require('./helpers/commercial-agreement-fake-db');
@@ -206,67 +206,112 @@ describe('quote fingerprint: an open agreement is reused only for the identical 
   });
 });
 
-describe('payment terms: online signing is offered only for Net 30 (the template promises it)', () => {
+describe('agreement terms: online signing only when EVERY structured term agrees with the agreement (one chokepoint)', () => {
   const withTerms = (commercialTerms) => estimateRow({}, { commercialTerms });
-  const REFUSED = [
-    ['unset', undefined],
-    ['terms authored without a payment term', { initialTermMonths: 12 }],
-    ['due on receipt', { paymentTerms: 'due_on_receipt' }],
-    ['Net-15', { paymentTerms: 'net15' }],
+  const NOTE = (detail) => `Online signing needs the proposal terms to match the agreement: ${detail}.`;
+  const ALIGNED = {
+    paymentTerms: 'net30',
+    initialTermMonths: 12,
+    renewal: AGREEMENT_TERMS.renewal,
+    cancellation: AGREEMENT_TERMS.cancellation,
+    priceAdjustment: AGREEMENT_TERMS.priceAdjustment,
+  };
+  // [label, authored commercialTerms, conflicting field, the builder line's ask]
+  const CONFLICTS = [
+    ['payment terms unset (no terms at all)', undefined, 'paymentTerms', 'payment terms Net 30'],
+    ['terms authored without a payment term', { initialTermMonths: 12 }, 'paymentTerms', 'payment terms Net 30'],
+    ['due on receipt', { paymentTerms: 'due_on_receipt' }, 'paymentTerms', 'payment terms Net 30'],
+    ['Net-15', { paymentTerms: 'net15' }, 'paymentTerms', 'payment terms Net 30'],
+    ['a 6-month initial term', { ...ALIGNED, initialTermMonths: 6 }, 'initialTermMonths', 'initial term 12 months (or blank)'],
+    ['a 24-month initial term', { ...ALIGNED, initialTermMonths: 24 }, 'initialTermMonths', 'initial term 12 months (or blank)'],
+    ['a zero-month (month-to-month) initial term', { ...ALIGNED, initialTermMonths: 0 }, 'initialTermMonths', 'initial term 12 months (or blank)'],
+    ['a different renewal', { ...ALIGNED, renewal: 'Month-to-month, no automatic renewal.' }, 'renewal', 'renewal blank or automatic 12-month terms with 30 days\' notice'],
+    ['a different cancellation', { ...ALIGNED, cancellation: 'Cancel any time with 10 days notice.' }, 'cancellation', 'cancellation blank or 30 days\' written notice'],
+    ['a different price adjustment', { ...ALIGNED, priceAdjustment: 'Annual 5% increase every January.' }, 'priceAdjustment', 'price adjustment blank or at renewal / with 30 days\' notice'],
   ];
 
-  test('Net 30 (any spelling the normalizer accepts) is allowed', async () => {
-    for (const paymentTerms of ['net30', 'Net-30', 'NET 30']) {
-      const estimate = withTerms({ paymentTerms });
-      expect(signEligibility(estimate)).toMatchObject({ ok: true });
-      const { database } = makeDb({ estimate });
-      expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: true, status: 201 });
-    }
+  test.each(CONFLICTS)('%s: the one predicate names the field', (_label, terms, field, detail) => {
+    const eligibility = signEligibility(withTerms(terms));
+    expect(eligibility).toMatchObject({ ok: false, reason: 'terms_conflict', field, note: NOTE(detail) });
   });
 
-  test.each(REFUSED)('%s: the one predicate says payment_terms', (_label, terms) => {
-    const estimate = withTerms(terms);
-    expect(signEligibility(estimate)).toMatchObject({ ok: false, reason: 'payment_terms' });
-  });
-
-  test.each(REFUSED)('%s: the issuer refuses with the generic 404 and writes nothing', async (_label, terms) => {
+  test.each(CONFLICTS)('%s: the issuer refuses with the generic 404 and writes nothing', async (_label, terms) => {
     const estimate = withTerms(terms);
     const { database, state } = makeDb({ estimate });
     expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 404, code: 'not_signable' });
     expect(state.writes).toEqual([]);
   });
 
-  test('the locked re-check refuses too: terms changed to Net-15 between the route read and the lock', async () => {
-    const { database, state } = makeDb({ estimate: withTerms({ paymentTerms: 'net15' }) });
+  test.each(CONFLICTS)('%s: the locked re-check refuses too (terms changed between the route read and the lock)', async (_label, terms) => {
+    const { database, state } = makeDb({ estimate: withTerms(terms) });
     expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: false, status: 404 });
     expect(state.writes).toEqual([]);
   });
 
-  test.each(REFUSED)('%s: /data gets canSign false with a reason (no button)', async (_label, terms) => {
+  test.each(CONFLICTS)('%s: /data gets canSign false with the reason and field (no button)', async (_label, terms, field) => {
     const { database } = makeDb();
-    expect(await agreementCtaFor(withTerms(terms), database)).toEqual({ canSign: false, state: 'none', reason: 'payment_terms' });
+    expect(await agreementCtaFor(withTerms(terms), database)).toEqual({ canSign: false, state: 'none', reason: 'terms_conflict', field });
   });
 
-  test('Net 30 keeps the normal block', async () => {
-    const { database } = makeDb();
-    expect(await agreementCtaFor(estimateRow(), database)).toEqual({ canSign: true, state: 'none' });
-  });
-
-  test.each(REFUSED)('%s: the builder status says what to change', async (_label, terms) => {
+  test.each(CONFLICTS)('%s: the builder status names the field to change', async (_label, terms, field, detail) => {
     const { database } = makeDb();
     expect(await agreementAdminStatus(withTerms(terms), database)).toEqual({
-      state: 'none', signingBlocked: 'payment_terms', note: 'Online signing needs payment terms set to Net 30 (the agreement’s terms).',
+      state: 'none', signingBlocked: 'terms_conflict', field, note: NOTE(detail),
     });
-    expect(await agreementAdminStatus(estimateRow(), database)).toEqual({ state: 'none' });
+  });
+
+  test.each([
+    ['Net 30 alone (every other term blank)', { paymentTerms: 'net30' }],
+    ['Net 30 spelled "Net-30"', { paymentTerms: 'Net-30' }],
+    ['Net 30 with a 12-month initial term', { paymentTerms: 'net30', initialTermMonths: 12 }],
+    ['every term set to the agreement-aligned text', ALIGNED],
+    ['aligned texts in other case, spacing and apostrophe style', {
+      paymentTerms: 'net30',
+      renewal: `  ${AGREEMENT_TERMS.renewal.toUpperCase()}  `,
+      cancellation: AGREEMENT_TERMS.cancellation.replace(/ /g, '   ').replace("'", '’'),
+      priceAdjustment: AGREEMENT_TERMS.priceAdjustment.toLowerCase().replace("'", '’'),
+    }],
+    ['site access instructions (they add to the agreement)', { paymentTerms: 'net30', accessRequirements: 'Check in at the front office; gate code on request.' }],
+  ])('allowed: %s', async (_label, terms) => {
+    const estimate = withTerms(terms);
+    expect(signEligibility(estimate)).toMatchObject({ ok: true });
+    const { database } = makeDb({ estimate });
+    expect(await agreementCtaFor(estimate, database)).toEqual({ canSign: true, state: 'none' });
+    expect(await agreementAdminStatus(estimate, database)).toEqual({ state: 'none' });
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: true, status: 201 });
+  });
+
+  test('free-text additional terms do not block (they add to the agreement)', () => {
+    expect(signEligibility(estimateRow({}, { terms: 'Interior units are treated on request, billed per visit.' }))).toMatchObject({ ok: true });
+  });
+
+  test('an unknown structured term fails closed, and every key the proposal normalizer emits has a rule', () => {
+    expect(agreementTermsConflict({ commercialTerms: { ...ALIGNED, futureTerm: 'anything' } })).toMatchObject({ field: 'futureTerm' });
+    // The normalizer is the source of the field list: if it ever emits a key with no rule, this fails (and so would signing).
+    const { normalizeCommercialTerms } = require('../services/estimate-proposal');
+    const emitted = normalizeCommercialTerms({
+      ...ALIGNED, accessRequirements: 'Front office', futureTerm: 'dropped by the normalizer today',
+    });
+    expect(Object.keys(emitted).sort()).toEqual(['accessRequirements', 'cancellation', 'initialTermMonths', 'paymentTerms', 'priceAdjustment', 'renewal']);
+    expect(agreementTermsConflict({ commercialTerms: emitted })).toBeNull();
+  });
+
+  test('the agreement-aligned texts survive the normalizer unchanged (no length truncation)', () => {
+    const { normalizeCommercialTerms } = require('../services/estimate-proposal');
+    const emitted = normalizeCommercialTerms(ALIGNED);
+    expect(emitted.renewal).toBe(AGREEMENT_TERMS.renewal);
+    expect(emitted.cancellation).toBe(AGREEMENT_TERMS.cancellation);
+    expect(emitted.priceAdjustment).toBe(AGREEMENT_TERMS.priceAdjustment);
   });
 
   test('a signed agreement stays signed in the builder and on the page whatever the terms say now', async () => {
     const { database, state } = makeDb();
     await ensureAgreement({ estimate: estimateRow(), req, database });
     state.contracts[0].status = 'signed';
-    expect(await agreementAdminStatus(withTerms({ paymentTerms: 'net15' }), database)).toMatchObject({ state: 'signed' });
-    expect(await agreementAdminStatus(withTerms({ paymentTerms: 'net15' }), database)).not.toHaveProperty('signingBlocked');
-    expect(await agreementCtaFor(withTerms({ paymentTerms: 'net15' }), database)).toEqual({ canSign: false, state: 'signed' });
+    const changed = withTerms({ paymentTerms: 'net15' });
+    expect(await agreementAdminStatus(changed, database)).toMatchObject({ state: 'signed' });
+    expect(await agreementAdminStatus(changed, database)).not.toHaveProperty('signingBlocked');
+    expect(await agreementCtaFor(changed, database)).toEqual({ canSign: false, state: 'signed' });
   });
 });
 
@@ -310,6 +355,10 @@ describe('sign boundary: a contract may be signed only for the quote it shows', 
     ['the terms changed', () => ({ proposal: { terms: 'Net-45 billing.' } })],
     ['payment terms were changed to Net-15', () => ({ proposal: { commercialTerms: { paymentTerms: 'net15' } } })],
     ['payment terms were cleared', () => ({ proposal: { commercialTerms: null } })],
+    ['the initial term was changed to 6 months', () => ({ proposal: { commercialTerms: { paymentTerms: 'net30', initialTermMonths: 6 } } })],
+    ['the renewal wording was changed', () => ({ proposal: { commercialTerms: { paymentTerms: 'net30', renewal: 'Month-to-month.' } } })],
+    ['the cancellation wording was changed', () => ({ proposal: { commercialTerms: { paymentTerms: 'net30', cancellation: 'Cancel any time.' } } })],
+    ['the price adjustment wording was changed', () => ({ proposal: { commercialTerms: { paymentTerms: 'net30', priceAdjustment: 'Annual 5% increase.' } } })],
     ['the estimate moved to another customer', () => ({ estimate: { customer_id: 'cust-2' } })],
   ])('%s after issue: signing is refused, the stale contract is cancelled, nothing is signed', async (_label, build) => {
     const made = await issued();

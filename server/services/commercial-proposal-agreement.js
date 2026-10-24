@@ -118,15 +118,64 @@ function signableProposal(estimate) {
   return { proposal, totals };
 }
 
-// The agreement template promises Net 30 billing. A proposal can carry other terms (Net-15, due on receipt) or none, so
-// online signing is offered only when the proposal's authored payment term is Net 30 (owner-approved template, not
-// changed here). The ONE predicate behind /data, the route, the issuing re-check and the sign-time re-check.
-const NET_30 = 'net30';
-const PAYMENT_TERMS_NOTE = 'Online signing needs payment terms set to Net 30 (the agreement\u2019s terms).';
+// The Commercial Pest Service Agreement template FIXES its terms: Net 30 billing, a 12-month initial term that renews
+// automatically for 12-month terms unless either party gives written notice at least 30 days before the term ends,
+// cancellation on 30 days' written notice, and price adjustment at renewal or with at least 30 days' notice. A proposal
+// whose structured commercialTerms say anything else would sit beside a contradictory signed agreement, so online
+// signing is offered only when EVERY structured term agrees with the agreement. This is the one chokepoint
+// (agreementTermsConflict, used through signEligibility by /data, the route, the issuing re-check and the sign-time
+// re-check); a new term never gets its own ad-hoc check.
+//
+// The fields are read from the proposal normalizer's own output (normalizeCommercialTerms keeps only its known keys,
+// null when empty), so a field added to the normalizer later arrives here with no rule and FAILS CLOSED until a rule
+// is written. `accessRequirements` (site access) and the free-text `terms` ("Additional terms") do not block: they add
+// to the agreement, they do not contradict a fixed term.
+//
+// These are the agreement-aligned texts the builder will prefill; a field is also fine blank (the agreement governs).
+const AGREEMENT_TERMS = Object.freeze({
+  paymentTerms: 'net30',
+  initialTermMonths: 12,
+  renewal: 'Renews automatically for 12-month terms unless either party gives written notice at least 30 days before the term ends.',
+  priceAdjustment: "Pricing may be adjusted at renewal or with at least 30 days' written notice.",
+  cancellation: "Either party may cancel with 30 days' written notice. Charges for services already performed remain due.",
+});
+
+// Case, whitespace and apostrophe style do not matter ("30 days\u2019" typed on a phone equals "30 days'").
+const normalizeTermText = (value) => String(value).replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+const matchesDefaultText = (key) => (value) => normalizeTermText(value) === normalizeTermText(AGREEMENT_TERMS[key]);
+
+// field -> { detail: what the builder line asks for, allowed(value): the value the agreement can sit beside }.
+// A blank value never reaches allowed(): blank is always fine except for paymentTerms (required, below).
+const TERM_RULES = Object.freeze({
+  paymentTerms: { detail: 'payment terms Net 30', allowed: (v) => v === AGREEMENT_TERMS.paymentTerms },
+  initialTermMonths: { detail: 'initial term 12 months (or blank)', allowed: (v) => Number(v) === AGREEMENT_TERMS.initialTermMonths },
+  renewal: { detail: 'renewal blank or automatic 12-month terms with 30 days\' notice', allowed: matchesDefaultText('renewal') },
+  cancellation: { detail: 'cancellation blank or 30 days\' written notice', allowed: matchesDefaultText('cancellation') },
+  priceAdjustment: { detail: 'price adjustment blank or at renewal / with 30 days\' notice', allowed: matchesDefaultText('priceAdjustment') },
+  accessRequirements: { detail: 'site access', allowed: () => true },
+});
+
+// null = the proposal's structured terms agree with the agreement; else { field, detail } for the first conflict.
+function agreementTermsConflict(proposal) {
+  const terms = proposal?.commercialTerms || {};
+  // Net 30 is REQUIRED (the agreement bills Net 30; a proposal silent on it has not agreed).
+  if (terms.paymentTerms !== AGREEMENT_TERMS.paymentTerms) return { field: 'paymentTerms', detail: TERM_RULES.paymentTerms.detail };
+  for (const [field, value] of Object.entries(terms)) {
+    if (value === null || value === undefined || value === '') continue;
+    const rule = TERM_RULES[field];
+    if (!rule) return { field, detail: 'the terms fields (one is not covered by the agreement)' };
+    if (!rule.allowed(value)) return { field, detail: rule.detail };
+  }
+  return null;
+}
+
+const termsNote = (conflict) => `Online signing needs the proposal terms to match the agreement: ${conflict.detail}.`;
+
 function signEligibility(estimate) {
   const found = signableProposal(estimate);
   if (!found) return { ok: false, reason: 'not_signable' };
-  if (found.proposal.commercialTerms?.paymentTerms !== NET_30) return { ok: false, reason: 'payment_terms', ...found };
+  const conflict = agreementTermsConflict(found.proposal);
+  if (conflict) return { ok: false, reason: 'terms_conflict', field: conflict.field, note: termsNote(conflict), ...found };
   return { ok: true, ...found };
 }
 
@@ -184,7 +233,7 @@ async function agreementCtaFor(estimate, conn = db) {
     if (eligibility.reason === 'not_signable') return null;
     const { state } = await agreementStateForEstimate(estimate.id, conn);
     if (state === 'signed') return { canSign: false, state };
-    if (!eligibility.ok) return { canSign: false, state, reason: eligibility.reason };
+    if (!eligibility.ok) return { canSign: false, state, reason: eligibility.reason, field: eligibility.field };
     return { canSign: Boolean(estimate.customer_id), state };
   } catch (err) {
     logger.warn(`[commercial-agreement] cta skipped for estimate ${estimate?.id}: ${err.code || 'error'}`);
@@ -193,12 +242,12 @@ async function agreementCtaFor(estimate, conn = db) {
 }
 
 // The admin builder's read: the agreement state, plus why online signing is not offered when the proposal's payment
-// terms are not Net 30 (signingBlocked), so the line can say what to change.
+// terms conflict with the agreement (signingBlocked + the field + a ready-to-show note), so the line can say what to change.
 async function agreementAdminStatus(estimate, conn = db) {
   const state = await agreementStateForEstimate(estimate.id, conn);
   const eligibility = signEligibility(estimate);
-  return state.state !== 'signed' && eligibility.reason === 'payment_terms'
-    ? { ...state, signingBlocked: 'payment_terms', note: PAYMENT_TERMS_NOTE }
+  return state.state !== 'signed' && eligibility.reason === 'terms_conflict'
+    ? { ...state, signingBlocked: 'terms_conflict', field: eligibility.field, note: eligibility.note }
     : state;
 }
 
@@ -473,7 +522,8 @@ module.exports = {
   buildAgreementValues,
   signableProposal,
   signEligibility,
-  PAYMENT_TERMS_NOTE,
+  AGREEMENT_TERMS,
+  agreementTermsConflict,
   STALE_PROPOSAL_MESSAGE,
   agreementAdminStatus,
   lockEstimateForSign,

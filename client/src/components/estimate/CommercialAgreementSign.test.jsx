@@ -18,8 +18,8 @@ describe('CommercialAgreementSign', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('payment terms not Net 30 (canSign false, reason): a call-us card with no button and no account wording', () => {
-    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: false, state: 'none', reason: 'payment_terms' }} />);
+  it('terms that conflict with the agreement (canSign false, reason): a call-us card with no button and no account wording', () => {
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: false, state: 'none', reason: 'terms_conflict', field: 'initialTermMonths' }} />);
     expect(screen.queryByRole('button', { name: SIGN_BUTTON_LABEL })).not.toBeInTheDocument();
     const card = screen.getByTestId('commercial-agreement-call');
     expect(card).toHaveTextContent('Call us at (941) 297-5749 and we will finish your agreement with you.');

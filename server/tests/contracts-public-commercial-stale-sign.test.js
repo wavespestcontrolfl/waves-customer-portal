@@ -144,6 +144,20 @@ test('payment terms changed to Net-15 after issue: the same refusal', async () =
   expect(writesTo('customer_contracts', 'update').some((w) => w.payload.status === 'signed')).toBe(false);
 });
 
+test.each([
+  ['initial term', { paymentTerms: 'net30', initialTermMonths: 6 }],
+  ['renewal', { paymentTerms: 'net30', renewal: 'Month-to-month.' }],
+  ['cancellation', { paymentTerms: 'net30', cancellation: 'Cancel any time.' }],
+  ['price adjustment', { paymentTerms: 'net30', priceAdjustment: 'Annual 5% increase.' }],
+])('%s changed to something the agreement does not say, after issue: the same refusal', async (_label, commercialTerms) => {
+  const { made, token } = await issueAndWire();
+  made.state.estimate = estimateRow({}, { commercialTerms });
+  const res = await sign(token);
+  expect(res).toMatchObject({ status: 409, body: { error: MESSAGE } });
+  expect(writesTo('customer_contracts', 'update').some((w) => w.payload.status === 'signed')).toBe(false);
+  expect(writesTo('customer_contracts', 'update')[0].payload.status).toBe('cancelled');
+});
+
 test('the estimate row is locked before the customer row (the issuer\'s order, so the two cannot deadlock)', async () => {
   const { token } = await issueAndWire();
   await sign(token);
