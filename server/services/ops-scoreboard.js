@@ -19,7 +19,7 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const {
   VOICE_AGENT_BOOKING_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
-  isPendingOutboundReviewBooking,
+  isUnreviewedDispatchOwned,
 } = require('./call-booking-source-actions');
 const { selectPlanningSnapshots } = require('./scheduling/route-performance');
 
@@ -179,10 +179,12 @@ async function computeAiCallShare({ from, to }, conn) {
 //
 // ai = source_action IN ('ai_call_pipeline', 'voice_agent',
 // 'ai_call_outbound_review') (see the constants imported/reproduced above).
-// An AI-created booking still awaiting office review
-// (isPendingOutboundReviewBooking — pending, not customer-confirmed) is not
-// a booking yet: it is left out of every bucket and reported as
-// aiPendingReview. Once the office confirms it, it counts as ai — the AI did
+// An AI-created booking still awaiting office review is not a booking yet:
+// it is left out of every bucket and reported as aiPendingReview. The test is
+// isUnreviewedDispatchOwned, the one the customer-facing surfaces use: still
+// pending, or a voice-agent booking a move left confirmed but not
+// customer-confirmed (pre-push P1: the pending-only check counted that moved
+// booking as ai). Once the office confirms it, it counts as ai — the AI did
 // the booking; staff approved it.
 //
 // customer_self_serve = self_booking_id IS NOT NULL (the public /book wizard
@@ -229,7 +231,7 @@ async function computeBookingsWithoutStaff({ from, to }, conn) {
   const counts = { ai: 0, customer_self_serve: 0, staff: 0 };
   let aiPendingReview = 0;
   for (const row of rows) {
-    if (isPendingOutboundReviewBooking(row)) aiPendingReview += 1;
+    if (isUnreviewedDispatchOwned(row)) aiPendingReview += 1;
     else counts[classifyBooking(row)] += 1;
   }
   const total = counts.ai + counts.customer_self_serve + counts.staff;
@@ -302,6 +304,11 @@ async function computeAiRouteDays({ from, to }, conn) {
     .limit(501)
     .select('id', 'created_at', 'result');
   const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now });
+  // The newest 500 runs only, the cap route-performance.js reads with. Past
+  // it, older snapshots are not read, so a completed tech-day with no
+  // snapshot may only be cut off: the result says so and that count is null
+  // (unknown), never a number that blames the planner (pre-push P1).
+  const truncatedPlanningRuns = runs.length > 500;
 
   const plannedIds = [...new Set(plans.flatMap((plan) => plan.plannedStops.map((stop) => stop.id)))];
   const rows = plannedIds.length
@@ -350,7 +357,8 @@ async function computeAiRouteDays({ from, to }, conn) {
     totalTechDaysWithSnapshot: plans.length,
     techDaysWithNoCompletedPlannedStop: plans.length - scored,
     daysWithAppliedReorder: reordered,
-    completedTechDaysWithNoSnapshot,
+    completedTechDaysWithNoSnapshot: truncatedPlanningRuns ? null : completedTechDaysWithNoSnapshot,
+    truncatedPlanningRuns,
   };
 }
 

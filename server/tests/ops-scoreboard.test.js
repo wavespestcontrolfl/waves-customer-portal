@@ -317,6 +317,17 @@ describe('computeOpsScoreboard — bookings_without_staff', () => {
     const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
     expect(out.bookingsWithoutStaff).toMatchObject({ ai: 1, denominator: 1, aiPendingReview: 2 });
   });
+
+  test('a voice-agent booking a move left confirmed but not customer-confirmed still awaits review (pre-push P1)', async () => {
+    const rows = {
+      scheduled_services: [
+        base({ source_action: 'voice_agent', status: 'confirmed', customer_confirmed: false }),
+        base({ source_action: 'voice_agent', status: 'confirmed', customer_confirmed: true }),
+      ],
+    };
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
+    expect(out.bookingsWithoutStaff).toMatchObject({ ai: 1, denominator: 1, aiPendingReview: 1 });
+  });
 });
 
 describe('computeOpsScoreboard — drive_minutes_per_stop', () => {
@@ -440,6 +451,7 @@ describe('computeOpsScoreboard — ai_route_days', () => {
     expect(out.aiRouteDays).toEqual({
       numerator: 1, denominator: 1, share: 1,
       daysFollowed: 1, totalTechDaysWithSnapshot: 1, techDaysWithNoCompletedPlannedStop: 0, daysWithAppliedReorder: 0, completedTechDaysWithNoSnapshot: 0,
+      truncatedPlanningRuns: false,
     });
   });
 
@@ -468,6 +480,21 @@ describe('computeOpsScoreboard — ai_route_days', () => {
     expect(out.aiRouteDays).toEqual({
       numerator: 0, denominator: 0, share: null,
       daysFollowed: 0, totalTechDaysWithSnapshot: 0, techDaysWithNoCompletedPlannedStop: 0, daysWithAppliedReorder: 0, completedTechDaysWithNoSnapshot: 1,
+      truncatedPlanningRuns: false,
     });
+  });
+
+  test('past 500 planner runs the result says so, and the no-snapshot count is unknown, not blamed on the planner (pre-push P1)', async () => {
+    const runs = Array.from({ length: 501 }, (_, i) => ({ ...makeRun({}), id: `run-${i}` }));
+    const db = makeRouteDayDb({
+      runs,
+      plannedRows: [
+        { id: 'a', status: 'completed', arrived_at: '2026-09-08T12:00:00Z', scheduled_date: '2026-09-08', technician_id: TECH_1 },
+        { id: 'b', status: 'completed', arrived_at: '2026-09-08T13:00:00Z', scheduled_date: '2026-09-08', technician_id: TECH_1 },
+      ],
+      completedRows: [{ technician_id: TECH_2, scheduled_date: '2026-09-08' }],
+    });
+    const out = await computeOpsScoreboard(RUN_WINDOW, db);
+    expect(out.aiRouteDays).toMatchObject({ truncatedPlanningRuns: true, completedTechDaysWithNoSnapshot: null, daysFollowed: 1 });
   });
 });
