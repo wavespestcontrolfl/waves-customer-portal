@@ -403,6 +403,13 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
         say(w, fulfilledBy(`visit:${visit}`, 'status completed'));
         return { id: visit, change: () => db('scheduled_services').where({ id: visit }).update({ status: 'confirmed' }) };
       }],
+      ['a visit reverted from completed back to on site', async (w) => {
+        const visit = await addVisit(w, { status: 'completed', completed_at: later(20), created_at: new Date(Date.now() - 30 * DAY) });
+        await db('job_status_history').insert({ job_id: visit, from_status: 'on_site', to_status: 'completed', transitioned_at: later(20) });
+        say(w, fulfilledBy(`visit:${visit}`, 'status completed'));
+        // The completion history stays, so admissibleWitness alone would still pass: the fingerprint carries the state.
+        return { id: visit, change: () => db('scheduled_services').where({ id: visit }).update({ status: 'on_site', completed_at: null }) };
+      }],
       ['a delivery email whose recipient changed', async (w) => {
         const other = await world();
         const [mail] = await db('email_messages').insert({ recipient_type: 'customer', recipient_id: w.customerId, recipient_email_snapshot: `promise${w.n}@example.invalid`,
@@ -545,12 +552,11 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       await cc.refreshFulfillment(db, relinked.w.call.id);
       expect((await row(relinked.w.commitment.id)).status).toBe('open');
 
-      // A visit that kept a scheduling promise and was then cancelled or skipped no longer keeps it; a rescheduled one still does.
+      // A visit that kept a scheduling promise and was then cancelled no longer keeps it.
       const booked = await world({ kind: 'schedule_visit' });
       const visit = await addVisit(booked);
       say(booked, fulfilledBy(`visit:${visit}`, 'status confirmed'));
       expect(await run(booked)).toMatchObject({ closed: 1 });
-      await db('scheduled_services').where({ id: visit }).update({ status: 'rescheduled' });
       await cc.refreshFulfillment(db, booked.call.id);
       expect((await row(booked.commitment.id)).status).toBe('fulfilled');
       await db('scheduled_services').where({ id: visit }).update({ status: 'cancelled' });

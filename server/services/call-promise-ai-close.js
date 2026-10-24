@@ -215,8 +215,10 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
 // delivery, status), so no per-type column list lives here.
 const VOLATILE = ['status', 'opened_at', 'clicked_at', 'updated_at'];
 const KEEP_KEYS = {
-  // A visit: which visit, on which day and window, for what, and the booking/move stamps (not later progress).
-  visit: ['id', 'scheduled_date', 'window_start', 'service_type', 'property_id', 'booked_at', 'moved_at', 'cancelled_at'],
+  // A visit: which visit, its state (a completion reverted to on_site still passes admissibleWitness on its
+  // history), day and window, what for, and the booking/move/completion stamps. A visit that moves forward
+  // re-reads as changed once: the promise reopens and the next run closes it again on the new state.
+  visit: ['id', 'status', 'scheduled_date', 'window_start', 'service_type', 'property_id', 'booked_at', 'moved_at', 'cancelled_at', 'completed_at'],
   estimate: ['id', 'service_interest', 'address', 'property_id', 'text'],
 };
 function witnessFingerprint(record) {
