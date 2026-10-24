@@ -18,7 +18,9 @@
  *                                     Both take gate_location (a Google Maps link or
  *                                     "lat, lng"; null clears): where the gate is, so
  *                                     a visit's Directions link routes through it
- *                                     (owner 2026-10-24). Read back as gateLocation.
+ *                                     (owner 2026-10-24). One pinned live entry per
+ *                                     neighborhood (a second is 409). Read back as
+ *                                     gateLocation.
  * POST   /visits/:visitId/entries   — from a visit: add a keypad code to that
  *                                     visit's neighborhood ({ code, gateLabel? })
  * POST   /visits/:visitId/entries/:entryId/wrong — from a visit: report a
@@ -207,6 +209,22 @@ async function demoteOtherActiveCodes(trx, neighborhoodId, exceptId) {
     .whereNot('id', exceptId)
     .update({ status: 'needs_confirm', updated_at: trx.fn.now() });
 }
+
+// One pinned gate per neighborhood (pre-push audit P1, 2026-10-24): the
+// waypoint is "the pinned gate", so a second pin on another live entry would
+// make the route pick one by sort order and could send a visit through the
+// resident gate this exists to avoid. The office clears the first pin before
+// setting another. Callers hold the neighborhood row lock, so two offices
+// pinning two gates at once still end with one.
+async function pinTakenElsewhere(trx, neighborhoodId, exceptId) {
+  const q = trx('neighborhood_access')
+    .where({ neighborhood_id: neighborhoodId })
+    .whereNot('status', 'retired')
+    .whereNotNull('gate_lat');
+  if (exceptId) q.whereNot('id', exceptId);
+  return !!(await q.first('id'));
+}
+const PIN_TAKEN_ERROR = 'Another gate in this neighborhood already has a location; clear it there first';
 
 async function liveCodeTaken(trx, neighborhoodId, code, exceptId) {
   const q = trx('neighborhood_access')
@@ -661,6 +679,9 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
       if (entry.code && await liveCodeTaken(trx, neighborhoodId, entry.code)) {
         return { status: 409, body: { error: 'That code is already on file for this neighborhood' } };
       }
+      if (entry.gate_lat != null && await pinTakenElsewhere(trx, neighborhoodId)) {
+        return { status: 409, body: { error: PIN_TAKEN_ERROR } };
+      }
       const [ins] = await trx('neighborhood_access').insert({
         neighborhood_id: neighborhoodId,
         ...entry,
@@ -723,6 +744,9 @@ router.patch('/entries/:id', async (req, res) => {
       const next = checked.value;
       if (next.code && await liveCodeTaken(trx, row.neighborhood_id, next.code, id)) {
         return { status: 409, body: { error: 'That code is already on file for this neighborhood' } };
+      }
+      if (next.gate_lat != null && await pinTakenElsewhere(trx, row.neighborhood_id, id)) {
+        return { status: 409, body: { error: PIN_TAKEN_ERROR } };
       }
       // The office changing the value vouches for it: the entry is confirmed.
       // A label-only edit keeps its status and confirmation date.

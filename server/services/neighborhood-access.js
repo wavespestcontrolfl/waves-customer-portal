@@ -767,9 +767,9 @@ function parseGateLocation(value) {
 }
 
 // The point a visit's Directions link routes through before the house: the
-// first of the neighborhood's shown entries (neighborhoodGateEntriesForVisits
-// order: active first, then by label) that carries a location. null = the
-// link is the plain address, as before.
+// neighborhood's pinned entry (the admin route allows one pin per
+// neighborhood across live entries, so the shown-entries order never picks
+// between two gates). null = the link is the plain address, as before.
 function gateWaypoint(entries) {
   for (const e of entries || []) {
     if (e?.gate_lat == null || e?.gate_lng == null) continue;

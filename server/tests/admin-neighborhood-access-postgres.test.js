@@ -268,6 +268,24 @@ postgres('admin neighborhood gate-code routes', () => {
     expect(await trx('neighborhood_access').where({ neighborhood_id: n })).toHaveLength(1);
   });
 
+  test('gate location: one pinned live entry per neighborhood; a second pin is 409 until the first is cleared or retired', async () => {
+    const n = await neighborhood('Two Gates');
+    const main = await entry(n, { code: '1111', gate_lat: 27.4321, gate_lng: -82.4567 });
+    const back = await entry(n, { code: '2222', gate_label: 'Back gate' });
+    const second = await call('PATCH', `/entries/${back}`, { gate_location: '27.5, -82.6' });
+    expect(second).toMatchObject({ status: 409, body: { error: expect.stringContaining('already has a location') } });
+    expect((await call('POST', `/${n}/entries`, { access_type: 'guard', instructions: 'Booth', gate_location: '27.5, -82.6' })).status).toBe(409);
+    expect(await trx('neighborhood_access').where({ id: back }).first('gate_lat')).toEqual({ gate_lat: null });
+    // Re-pinning the pinned entry itself is fine; so is a pin-less edit of the other.
+    expect((await call('PATCH', `/entries/${main}`, { gate_location: '27.44, -82.46' })).status).toBe(200);
+    expect((await call('PATCH', `/entries/${back}`, { gate_label: 'Rear gate' })).status).toBe(200);
+    // Cleared, the other gate may take the pin; a retired pinned entry does not block either.
+    expect((await call('PATCH', `/entries/${main}`, { gate_location: null })).status).toBe(200);
+    expect((await call('PATCH', `/entries/${back}`, { gate_location: '27.5, -82.6' })).status).toBe(200);
+    expect((await call('PATCH', `/entries/${back}`, { action: 'retire' })).status).toBe(200);
+    expect((await call('PATCH', `/entries/${main}`, { gate_location: '27.44, -82.46' })).status).toBe(200);
+  });
+
   test('add: stores a keypad code without inner spaces, office source, confirmed now; duplicate live code is 409', async () => {
     const n = await neighborhood('Rowan Bend');
     const ok = await call('POST', `/${n}/entries`, { access_type: 'keypad', code: '# 4821', gate_label: 'North gate' });
