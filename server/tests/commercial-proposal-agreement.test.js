@@ -179,6 +179,21 @@ describe('gate re-read at the commit boundary', () => {
   });
 });
 
+describe('the signed quote is frozen with the contract', () => {
+  test('the snapshot stores the whole normalized proposal and totals, and a later edit does not change it', async () => {
+    const { database, state } = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database });
+    const snap = () => JSON.parse(state.contracts[0].document_variables_snapshot).estimate;
+    const before = snap();
+    expect(before.proposal).toEqual(expect.objectContaining({ enabled: true }));
+    expect(JSON.stringify(before.proposal)).not.toMatch(/"id":/);
+    expect(before.totals).toEqual(expect.objectContaining({ annualRecurring: before.annualRecurring }));
+    // The estimate is edited after issue: the stored copy is what was offered, untouched.
+    state.estimate = estimateRow({}, { taxRate: 0.06 });
+    expect(snap()).toEqual(before);
+  });
+});
+
 describe('quote fingerprint: an open agreement is reused only for the identical quote', () => {
   const line = (over = {}) => ({ description: 'Quarterly pest service', quantity: 1, unitPrice: 300, frequency: 'quarterly', taxable: true, ...over });
   const building = (lines) => [{ name: 'Main building', lineItems: lines }];

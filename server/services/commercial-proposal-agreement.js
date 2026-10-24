@@ -102,6 +102,10 @@ function buildAgreementValues(estimate, proposal, totals) {
       taxRate: totals.taxRate,
       recurringTax: totals.recurringTax,
       firstYearTotal: totals.firstYearTotal,
+      // The whole quote the signature covers, frozen with the contract: the estimate stays open and editable after
+      // signing, so the hash alone could not show what was signed. Builder-only keys are dropped (see canonical).
+      proposal: canonical(proposal),
+      totals: canonical(totals),
     },
   };
 }
