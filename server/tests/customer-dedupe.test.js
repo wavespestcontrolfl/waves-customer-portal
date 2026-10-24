@@ -547,6 +547,21 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.deleted).toBe(true);
   });
 
+  it('notification_prefs: a confirmation-channel choice on either row survives the merge, never ANDed back to a default (Codex #6593)', async () => {
+    // [winner stamp, loser stamp, kept row's stamp]; null = a row from before the stamp, which counts as chosen.
+    for (const [winnerStamp, loserStamp, kept] of [[false, true, true], [true, false, true], [false, null, true], [false, false, false]]) {
+      const row = (id, customerId, stamp) => ({
+        id, customer_id: customerId, appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: stamp, created_at: 'x', updated_at: 'x',
+      });
+      const { trx, state } = stubTrx({ winnerRow: row('p1', 'W', winnerStamp), loserRow: row('p2', 'L', loserStamp) });
+      await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+      const stamp = state.updated && 'appointment_confirmation_channel_explicit' in state.updated
+        ? state.updated.appointment_confirmation_channel_explicit : winnerStamp;
+      expect([winnerStamp, loserStamp, stamp]).toEqual([winnerStamp, loserStamp, kept]);
+      expect(state.deleted).toBe(true);
+    }
+  });
+
   describe('property_preferences new-sod record (sod_laid_on, sod_covers, sod_area, sod_rooted_on)', () => {
     const SOD_COLUMNS = ['sod_laid_on', 'sod_covers', 'sod_area', 'sod_rooted_on'];
     const blank = { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null };

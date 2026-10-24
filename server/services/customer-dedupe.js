@@ -1400,6 +1400,20 @@ const REPOINT_PK_COLUMNS = { customer_refresh_tokens: 'jti' };
 // Everything else: empty winner fields fill from the loser, then the loser's
 // row is removed. Anything not copied survives in the journal snapshot.
 const SINGLETON_BOOLEAN_SEMANTICS = { notification_prefs: 'and', property_preferences: 'or' };
+// Channel-choice stamps on notification_prefs: provenance, not SMS consent, so
+// they never pass through the boolean AND rule (each is settled on its own).
+const CHANNEL_CHOICE_STAMPS = new Set(['request_channel_explicit', 'appointment_confirmation_channel_explicit']);
+
+// The confirmation channel's choice stamp after a merge (GATE_NEW_CLIENT_CONFIRM_EMAIL):
+// the kept row reads as chosen when either row was chosen or predates the stamp
+// (anything but false). A merge can keep or add a choice, never turn one back
+// into a default, because a lost Text choice would let a first-visit confirmation
+// go out by email too. Returns the update for the winner row, or {}.
+function mergedConfirmationChoice(winnerRow, loserRow) {
+  if (!Object.hasOwn(winnerRow, 'appointment_confirmation_channel_explicit')) return {};
+  const chosen = [winnerRow, loserRow].some((row) => row.appointment_confirmation_channel_explicit !== false);
+  return winnerRow.appointment_confirmation_channel_explicit === chosen ? {} : { appointment_confirmation_channel_explicit: chosen };
+}
 const CHANNEL_RESTRICTIVENESS = { email: 3, push: 2, sms: 1, both: 0 };
 // Column defaults that mean "never filled in", not a real choice — a winner
 // holding one of these must still take the loser's actual value (pet details,
@@ -1458,7 +1472,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId, { co
   // which jsonb rejects. Dates and other typed objects pass through.
   const forUpdate = (v) => (Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object))
     ? JSON.stringify(v) : v;
-  const updates = table === 'notification_prefs' ? mergedBillingChannelUpdates(winnerRow, loserRow) : {};
+  const updates = table === 'notification_prefs'
+    ? { ...mergedBillingChannelUpdates(winnerRow, loserRow), ...mergedConfirmationChoice(winnerRow, loserRow) }
+    : {};
   // Customers cannot turn payment receipts off (owner ruling 2026-09-26): a
   // legacy payment_receipt=false never survives on the kept row.
   if (table === 'notification_prefs' && winnerRow.payment_receipt === false) updates.payment_receipt = true;
@@ -1467,9 +1483,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId, { co
     // These columns are native text[], not JSONB. The shared merge rule
     // above preserves their intersection or refuses incompatible choices.
     if (table === 'notification_prefs' && Object.values(BILLING_DELIVERY_FIELDS).includes(col)) continue;
-    // Choice provenance follows its channel below; it is not SMS consent
-    // and must not pass through the generic boolean AND rule.
-    if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
+    // Choice provenance is settled on its own (the request stamp follows its
+    // channel below, the confirmation stamp in mergedConfirmationChoice above).
+    if (table === 'notification_prefs' && CHANNEL_CHOICE_STAMPS.has(col)) continue;
     // Settled above: receipts are always on after a merge.
     if (table === 'notification_prefs' && col === 'payment_receipt') continue;
     // The new-sod record is settled as one group below, never column by column.
