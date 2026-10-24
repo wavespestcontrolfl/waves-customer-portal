@@ -24,6 +24,14 @@
  *                    AI report writer's PRODUCT FACTS block
  *                    (report-writer-records.js); never printed as a list.
  *                    Absent = the writer gets no main-pest fact.
+ *   labelPests     — the pests the product's current EPA label names, as the
+ *                    fixed terms in label-pest-facts.js (owner 2026-10-24,
+ *                    "labels go"). Read only by the AI report writer's
+ *                    PRODUCT FACTS, and only for a pest the technician named
+ *                    today (GATE_PEST_LABEL_FACTS); never printed as a list.
+ *   labelPestsExcept — species the label leaves out by name, or covers only
+ *                    in part ("foraging red imported fire ants"); they never
+ *                    fall back to their group.
  *
  * Matched PRIMARILY by EPA registration number (the number printed on the
  * label itself, so it survives any catalog display-name spelling), read off
@@ -111,6 +119,12 @@ const REPORT_PRODUCT_COPY = [
     // cross-checked against the EPA PPLS supplemental label accepted
     // 11/04/2015 (EPA Reg. No. 53883-279). -> floors to 25+.
     alsoLabeledForPestCount: 35,
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 053883-00279-20200617 (2020-06-17).
+    // Ants, cockroaches and spiders appear only as closed lists of species, so no group term.
+    // Widow spiders appear only as black widows, so they are an exception.
+    labelPestsExcept: ['Widow spiders'],
+    labelPests: ['Big-headed ants', 'Crazy ants', 'Carpenter ants', 'Argentine ants', 'Pharaoh ants', 'Smokybrown cockroaches', 'Australian cockroaches', 'silverfish', 'millipedes', 'centipedes', 'Paper wasps', 'Yellowjackets'],
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
   },
   {
@@ -125,6 +139,11 @@ const REPORT_PRODUCT_COPY = [
     // 88 distinct pests — Atticus, LLC current specimen label (Talak 7.9 F,
     // EPA Reg. No. 91234-145), read in full 2026-09-29. -> floors to 75+.
     alsoLabeledForPestCount: 88,
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 083520-00003-20130613 (2013-06-13).
+    // Filed as Bifen 7.9 SC (83520-3), the same registration before it moved to Atticus on 2019-04-10; the Atticus
+    // specimen label F20130613a matches.
+    labelPests: ['ants', 'cockroaches', 'spiders', 'wasps', 'flies', 'Carpenter ants', 'Fire ants', 'Widow spiders', 'silverfish', 'earwigs', 'millipedes', 'centipedes', 'springtails', 'crickets', 'Yellowjackets', 'scorpions'],
     petsKids: 'Stay off treated areas until the application has dried.',
   },
   {
@@ -135,6 +154,11 @@ const REPORT_PRODUCT_COPY = [
     // 30 distinct pests — EPA PPLS, accepted 05/01/2019 (BASF Alpine WSG,
     // EPA Reg. No. 499-561; no later PPLS version found). -> floors to 25+.
     alsoLabeledForPestCount: 30,
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 000499-00561-20190501 (2019-05-01).
+    // Wasps and flies appear only as listed species; "Ants (excluding Pharaoh)".
+    labelPests: ['ants', 'cockroaches', 'spiders', 'Carpenter ants', 'Fire ants', 'Argentine ants', 'German cockroaches', 'American cockroaches', 'earwigs', 'millipedes', 'centipedes', 'springtails', 'crickets', 'Paper wasps', 'Yellowjackets', 'House flies'],
+    labelPestsExcept: ['Pharaoh ants'],
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
   },
   {
@@ -145,6 +169,11 @@ const REPORT_PRODUCT_COPY = [
     // Master Label, EPA Reg. No. 100-1066), structural + ornamental + turf
     // tables reconciled. -> floors to 75+.
     alsoLabeledForPestCount: 90,
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 000100-01066-20260128 (2026-01-28).
+    // Bed bugs, pantry pests and termites are narrower on the label (adults, beetles, above ground only), so none
+    // is listed.
+    labelPests: ['ants', 'cockroaches', 'spiders', 'wasps', 'flies', 'Fire ants', 'silverfish', 'earwigs', 'millipedes', 'centipedes', 'crickets', 'scorpions'],
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
   },
   {
@@ -155,6 +184,11 @@ const REPORT_PRODUCT_COPY = [
     // Spider & Scorpion Insecticide, EPA Reg. No. 1021-2574), printed
     // 7/28/2020. -> floors to 150+.
     alsoLabeledForPestCount: 169,
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 001021-02574-20260305 (2026-03-05).
+    // Flies appear only as house flies; "Ants (excluding fire ants)".
+    labelPests: ['ants', 'cockroaches', 'spiders', 'wasps', 'Carpenter ants', 'German cockroaches', 'silverfish', 'earwigs', 'millipedes', 'springtails', 'booklice', 'crickets', 'Yellowjackets', 'House flies', 'scorpions'],
+    labelPestsExcept: ['Fire ants'],
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
   },
   {
@@ -164,6 +198,10 @@ const REPORT_PRODUCT_COPY = [
     howItWorks: 'Roaches eat the gel and share it back where they hide, so it reaches roaches we never see. The placements stay attractive for weeks.',
     // Narrow bait product (owner ruling 2026-09-29): no "also labeled for"
     // line at all — alsoLabeledForPestCount intentionally absent.
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 000100-01484-20240725 (2024-07-25).
+    // The July 2024 label names German and American cockroaches; other cockroaches only as "cockroaches".
+    labelPests: ['cockroaches', 'German cockroaches', 'American cockroaches'],
     petsKids: 'Please leave the small bait placements alone.',
   },
   {
@@ -171,6 +209,12 @@ const REPORT_PRODUCT_COPY = [
     names: ['advion ant bait gel'],
     howItWorks: 'Worker ants carry the gel home and feed it to the queen and young — that’s how whole colonies go down, not just the ants you see.',
     // Narrow bait product (owner ruling 2026-09-29): no line.
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 000100-01498-20200417 (2020-04-17).
+    // Fire ants are limited to foraging red imported fire ants, so they are an
+    // exception and never fall back to "ants".
+    labelPests: ['ants', 'Ghost ants', 'Big-headed ants', 'Crazy ants', 'White-footed ants', 'Carpenter ants', 'Argentine ants', 'Pharaoh ants', 'Rover ants'],
+    labelPestsExcept: ['Fire ants'],
     petsKids: 'Leave the placements undisturbed.',
   },
   {
@@ -186,6 +230,11 @@ const REPORT_PRODUCT_COPY = [
     mainPests: ['roaches'],
     howItWorks: 'An insect growth regulator: young roaches can’t mature or reproduce, so it breaks the breeding cycle. Results build over the following weeks.',
     // Narrow IGR product (owner ruling 2026-09-29): no line.
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 002724-00351-20091201 (2009-12-01).
+    // A growth regulator: the label says exposed cockroaches "become adults incapable of reproducing". Fleas, bed
+    // bugs and pantry pests are never facts here.
+    labelPests: ['cockroaches', 'Drain flies'],
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
   },
   {
@@ -193,6 +242,10 @@ const REPORT_PRODUCT_COPY = [
     names: ['tekko pro igr'],
     howItWorks: 'Two growth regulators in one: eggs don’t hatch and young insects can’t grow into breeding adults.',
     // Narrow IGR product (owner ruling 2026-09-29): no line.
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 053883-00335-20250522 (2025-05-22).
+    // A growth regulator: the label says it "prevents the adult pest from developing".
+    labelPests: ['ants', 'cockroaches', 'flies', 'crickets', 'House flies'],
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
   },
   {
@@ -216,6 +269,11 @@ const REPORT_PRODUCT_COPY = [
     // envu.com's DeltaDust product page rather than the 1999 copy. -> floors
     // to 50+.
     alsoLabeledForPestCount: 66,
+    // Pests its current EPA label names, for the writer's "its label lists" fact
+    // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 000432-00772-20160805 (2016-08-05).
+    // Now Envu 101563-6; PPLS has no newer stamped label, and the current Envu specimen label matches. Flies and
+    // termites are narrower on the label.
+    labelPests: ['ants', 'cockroaches', 'spiders', 'wasps', 'Carpenter ants', 'Fire ants', 'silverfish', 'millipedes', 'centipedes', 'crickets', 'scorpions'],
     petsKids: 'The treated voids stay undisturbed.',
   },
   {
