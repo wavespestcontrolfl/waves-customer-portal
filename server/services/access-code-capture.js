@@ -1269,10 +1269,17 @@ const EMAIL_SEP = '\u0001';
 // link words are capped, and each row is converted once.
 const ANCHOR = /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]{0,500}?)<\/a>/gi;
 const MAX_EMAIL_HTML = 20000;
+// Plain text is bounded the same way: every regex after this one (reply
+// stripping, the verifier) sees at most this many characters.
+const MAX_EMAIL_TEXT = 20000;
 const emailTexts = new WeakMap();
 function emailText(row) {
-  if (String(row?.body_text || '').trim()) return String(row.body_text);
   if (emailTexts.has(row)) return emailTexts.get(row);
+  if (String(row?.body_text || '').trim()) {
+    const plain = String(row.body_text).slice(0, MAX_EMAIL_TEXT);
+    emailTexts.set(row, plain);
+    return plain;
+  }
   const raw = String(row?.body_html || '');
   const body = Math.max(raw.search(/<body\b/i), 0);
   const html = raw.slice(body, body + MAX_EMAIL_HTML).replace(ANCHOR, (whole, dq, sq, bare, inner) => {
@@ -1283,6 +1290,13 @@ function emailText(row) {
   const text = emailPlainText({ body_text: '', body_html: html });
   emailTexts.set(row, text);
   return text;
+}
+
+// The customer's new words (reply history and signature stripped), once per row.
+const emailNewWords = new WeakMap();
+function emailWords(row) {
+  if (!emailNewWords.has(row)) emailNewWords.set(row, stripQuotedAndSignature(emailText(row)));
+  return emailNewWords.get(row);
 }
 
 const emailAddressOf = (row) => String(row.from_address || '').trim().toLowerCase();
@@ -1337,7 +1351,7 @@ function emailAsMessage(row, customerId, ownerId = row.customer_id) {
   return {
     source_kind: 'email', id: row.id, customer_id: customerId || null, owner_id: ownerId || null, source_customer_id: row.customer_id || null,
     direction: 'inbound', sender_email: emailAddressOf(row), from_phone: null, to_phone: null,
-    message_body: stripQuotedAndSignature(emailText(row)), created_at: row.received_at,
+    message_body: emailWords(row), created_at: row.received_at,
   };
 }
 

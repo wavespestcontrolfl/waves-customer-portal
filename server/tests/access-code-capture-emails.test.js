@@ -130,6 +130,14 @@ describe('an HTML email built to stall the link scan', () => {
     emailEligible(row);
     expect(Date.now() - started).toBeLessThan(1000);
   });
+  test.each(['On a ', '> ', 'On Tue wrote:\n'])('a 15 MB plain-text body of %j is bounded before reply stripping', (chunk) => {
+    const row = email({ body_text: chunk.repeat(Math.floor((15 * 1024 * 1024) / chunk.length)) });
+    const started = Date.now();
+    emailAsMessage(row, null);
+    emailAsMessage(row, null);
+    emailEligible(row);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
   test('Outlook styles before <body> do not crowd out the words', () => {
     const html = `<html><head><style>${'.x{color:red}'.repeat(3000)}</style></head><body><p>Gate code is #4821.</p></body></html>`;
     expect(emailAsMessage(email({ body_text: '', body_html: html }), null).message_body).toBe('Gate code is #4821.');
