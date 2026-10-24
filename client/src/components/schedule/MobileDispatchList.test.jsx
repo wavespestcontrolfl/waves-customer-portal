@@ -387,15 +387,15 @@ describe('MobileDispatchList drive legs', () => {
     expect(screen.getByText(/~1h 15m driving/)).toBeInTheDocument();
   });
 
-  it('counts the day as done / left, without a date label', () => {
+  it('counts the day as done / left and shows rain at a stop from 40%, red from 50%', () => {
     render(
       <MobileDispatchList
         mode="day"
         date="2026-07-15"
         services={[
-          { ...SERVICE, customerName: 'Sample One', status: 'completed' },
-          { ...SERVICE, id: 'svc-2', customerName: 'Sample Two', windowStart: '10:00', windowEnd: '11:00' },
-          { ...SERVICE, id: 'svc-3', customerName: 'Sample Three', windowStart: '13:00', windowEnd: '14:00' },
+          { ...SERVICE, customerName: 'Sample One', status: 'completed', rainAtStop: 20 },
+          { ...SERVICE, id: 'svc-2', customerName: 'Sample Two', windowStart: '10:00', windowEnd: '11:00', rainAtStop: 45 },
+          { ...SERVICE, id: 'svc-3', customerName: 'Sample Three', windowStart: '13:00', windowEnd: '14:00', rainAtStop: 60 },
           { ...SERVICE, id: 'svc-4', customerName: 'Sample Four', status: 'cancelled', windowStart: '15:00', windowEnd: '16:00' },
         ]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
@@ -403,6 +403,9 @@ describe('MobileDispatchList drive legs', () => {
     );
     expect(screen.getByText(/1 done · 2 left/)).toBeInTheDocument();
     expect(screen.queryByText(/Today|Tomorrow|July/)).toBeNull();
+    expect(screen.queryByText(/20% rain/)).toBeNull();
+    expect(screen.getByText('· 45% rain', { exact: false })).not.toHaveClass('text-alert-fg');
+    expect(screen.getByText('· 60% rain', { exact: false })).toHaveClass('text-alert-fg');
   });
 
   it('hides the day total when a leg could not be measured', () => {
