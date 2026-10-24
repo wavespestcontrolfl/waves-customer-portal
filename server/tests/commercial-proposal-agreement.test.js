@@ -14,6 +14,7 @@ jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn().
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
 
 const NotificationService = require('../services/notification-service');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   TEMPLATE_KEY, SNAPSHOT_SOURCE, START_DATE_TEXT, ensureAgreement, agreementStateForEstimate, agreementCtaFor, handleAgreementSigned,
 } = require('../services/commercial-proposal-agreement');
@@ -56,7 +57,7 @@ const CUSTOMER = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', email: 
 
 // A tiny in-memory stand-in for the tables the service touches.
 function makeDb({ estimate = estimateRow(), customer = CUSTOMER, contracts = [], template = TEMPLATE, version = VERSION } = {}) {
-  const state = { estimate, contracts: contracts.map((c) => ({ ...c })), events: [], writes: [] };
+  const state = { estimate, customer, template, version, contracts: contracts.map((c) => ({ ...c })), events: [], writes: [] };
   const snapshotEstimateId = (row) => {
     const snap = typeof row.document_variables_snapshot === 'string' ? JSON.parse(row.document_variables_snapshot) : row.document_variables_snapshot;
     return snap?.estimate?.id;
@@ -72,10 +73,10 @@ function makeDb({ estimate = estimateRow(), customer = CUSTOMER, contracts = [],
       orderByRaw() { return api; },
       forUpdate() { return api; },
       async first() {
-        if (table === 'document_templates') return q.where.template_key ? template : { active_version_id: template.active_version_id, status: template.status, template_key: template.template_key };
-        if (table === 'document_template_versions') return version;
+        if (table === 'document_templates') return q.where.template_key ? state.template : { active_version_id: state.template.active_version_id, status: state.template.status, template_key: state.template.template_key };
+        if (table === 'document_template_versions') return state.version;
         if (table === 'estimates') return state.estimate;
-        if (table === 'customers') return customer;
+        if (table === 'customers') return state.customer;
         if (table === 'customer_contracts') {
           const rows = state.contracts
             .filter((c) => (q.where.id ? c.id === q.where.id : c.document_template_key === q.where.document_template_key))
@@ -116,7 +117,15 @@ function makeDb({ estimate = estimateRow(), customer = CUSTOMER, contracts = [],
 const req = { ip: '203.0.113.9', get: () => 'jest-agent' };
 const estimateWrites = (state) => state.writes.filter((w) => w.table === 'estimates');
 
-beforeEach(() => jest.clearAllMocks());
+const ORIGINAL_GATE = process.env.GATE_COMMERCIAL_PROPOSAL_SIGN;
+beforeEach(() => {
+  jest.clearAllMocks();
+  process.env.GATE_COMMERCIAL_PROPOSAL_SIGN = 'true';
+});
+afterAll(() => {
+  if (ORIGINAL_GATE === undefined) delete process.env.GATE_COMMERCIAL_PROPOSAL_SIGN;
+  else process.env.GATE_COMMERCIAL_PROPOSAL_SIGN = ORIGINAL_GATE;
+});
 
 describe('ensureAgreement', () => {
   test('creates ONE agreement from the commercial template with the quote in its variables and snapshot, and never writes the estimate', async () => {
@@ -215,6 +224,76 @@ describe('ensureAgreement', () => {
     const inactive = makeDb({ customer: { ...CUSTOMER, active: false } });
     expect(await ensureAgreement({ estimate: estimateRow(), req, database: inactive.database })).toMatchObject({ ok: false, status: 409, code: 'customer_unavailable' });
     expect(inactive.state.contracts).toHaveLength(0);
+  });
+});
+
+describe('gate re-read at the commit boundary', () => {
+  test('the kill switch thrown while the request waited on locks: 404, and no row, link or event is written', async () => {
+    const { database, state } = makeDb();
+    // The wait happens inside the comms fence; the gate flips off while it is held.
+    lockCustomerComms.mockImplementationOnce(async () => { delete process.env.GATE_COMMERCIAL_PROPOSAL_SIGN; });
+    const result = await ensureAgreement({ estimate: estimateRow(), req, database });
+    expect(result).toMatchObject({ ok: false, status: 404 });
+    expect(state.contracts).toHaveLength(0);
+    expect(state.writes).toEqual([]);
+  });
+
+  test('the same flip does not re-open an existing agreement (its link is not rotated)', async () => {
+    const { database, state } = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database });
+    const hashBefore = state.contracts[0].share_token_hash;
+    const writesBefore = state.writes.length;
+    lockCustomerComms.mockImplementationOnce(async () => { delete process.env.GATE_COMMERCIAL_PROPOSAL_SIGN; });
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: false, status: 404 });
+    expect(state.contracts[0].share_token_hash).toBe(hashBefore);
+    expect(state.writes).toHaveLength(writesBefore);
+  });
+});
+
+describe('quote fingerprint: an open agreement is reused only for the identical quote', () => {
+  const line = (over = {}) => ({ description: 'Quarterly pest service', quantity: 1, unitPrice: 300, frequency: 'quarterly', taxable: true, ...over });
+  const building = (lines) => [{ name: 'Main building', lineItems: lines }];
+
+  test('identical proposal reuses the agreement, even when the editor re-mints row ids', async () => {
+    const { database, state } = makeDb();
+    const first = await ensureAgreement({ estimate: estimateRow({}, { buildings: building([line({ id: 'row-a' })]) }), req, database });
+    state.estimate = estimateRow({}, { buildings: building([line({ id: 'row-b' })]) });
+    const second = await ensureAgreement({ estimate: state.estimate, req, database });
+    expect(second).toMatchObject({ ok: true, status: 200, created: false, contractId: first.contractId });
+    expect(state.contracts).toHaveLength(1);
+    expect(JSON.parse(state.contracts[0].document_variables_snapshot).estimate.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test.each([
+    ['a one-time charge changes (same annual price)', () => ({ proposal: { buildings: building([line(), line({ description: 'Cleanout', unitPrice: 250, frequency: 'one_time', taxable: false })]) } })],
+    ['the tax rate changes (same annual price)', () => ({ proposal: { taxRate: 0.06 } })],
+    ['the scope changes (a property scope item, same price)', () => ({ proposal: { propertyScope: { items: [{ label: 'Buildings', value: '3' }] } } })],
+    ['the terms change (same price)', () => ({ proposal: { terms: 'Net-45 billing.' } })],
+    ['a corrective-work line is added (same recurring price)', () => ({ proposal: { correctiveWork: [{ description: 'Seal entry points', amount: 400, taxable: false }] } })],
+    ['the customer account changes', () => ({ estimate: { customer_id: 'cust-2' }, customer: { ...CUSTOMER, id: 'cust-2', email: 'other@example.com' } })],
+  ])('%s: the open agreement is superseded and a current one issued', async (_label, build) => {
+    const { database, state } = makeDb();
+    const first = await ensureAgreement({ estimate: estimateRow(), req, database });
+    const { proposal = {}, estimate: estimateOver = {}, customer } = build();
+    state.estimate = estimateRow(estimateOver, proposal);
+    if (customer) state.customer = customer;
+    const second = await ensureAgreement({ estimate: state.estimate, req, database });
+    expect(second).toMatchObject({ ok: true, status: 201, created: true });
+    expect(second.contractId).not.toBe(first.contractId);
+    expect(state.contracts).toHaveLength(2);
+    expect(state.contracts[0]).toMatchObject({ status: 'cancelled', share_token_hash: null });
+    expect(state.contracts[1].status).toBe('sent');
+    const fingerprints = state.contracts.map((c) => JSON.parse(c.document_variables_snapshot).estimate.fingerprint);
+    expect(fingerprints[0]).not.toBe(fingerprints[1]);
+    expect(state.events.filter((e) => e.event_type === 'cancelled')).toHaveLength(1);
+  });
+
+  test('a new template version supersedes too', async () => {
+    const { database, state } = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database });
+    state.version = { ...VERSION, id: 'ver-2' };
+    state.template = { ...TEMPLATE, active_version_id: 'ver-2' };
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: true, status: 201, created: true });
   });
 });
 

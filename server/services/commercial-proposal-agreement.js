@@ -16,6 +16,7 @@
 // signed copy ties to the quote and the sign hook can find the estimate.
 // ============================================================
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -117,6 +118,27 @@ function signableProposal(estimate) {
   return { proposal, totals };
 }
 
+// Stable JSON: object keys sorted, builder-only keys dropped (row ids the editor mints, `generated*` provenance
+// of narrative lines), so re-saving the same quote never changes it and any customer-visible change does.
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort()
+      .filter((key) => key !== 'id' && !key.startsWith('generated'))
+      .reduce((acc, key) => ({ ...acc, [key]: canonical(value[key]) }), {});
+  }
+  return value;
+}
+
+// sha256 over the normalized proposal (lines, programs, corrective work, scope, terms, tax rate), its totals, the
+// merge values the contract renders, the customer and the template version.
+function quoteFingerprint({ proposal, totals, values, customerId, templateVersionId }) {
+  const { estimate: _estimate, ...rendered } = values;
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(canonical({ proposal, totals, rendered, customerId: String(customerId), templateVersionId: String(templateVersionId) })))
+    .digest('hex');
+}
+
 function estimateAgreementQuery(estimateId, conn) {
   return conn('customer_contracts')
     .where({ document_template_key: TEMPLATE_KEY })
@@ -198,8 +220,15 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
       return refusal(409, 'customer_unavailable', 'Online signing is not available right now. Please call us.');
     }
     await lockActiveVersionForIssue(trx, { template, activeVersion: version });
+    // The gate is read again here, after the last lock and before any write: a request that waited on those locks
+    // while the kill switch was thrown must not create or re-open an agreement (live gate re-read at the commit boundary).
+    if (!require('../config/feature-gates').commercialProposalSignLive()) return refusal(404, 'not_signable', 'Estimate not found');
 
     const values = buildAgreementValues(locked, lockedFound.proposal, lockedFound.totals);
+    // The whole quote this agreement is for. An open agreement is reused only when the quote is identical.
+    values.estimate.fingerprint = quoteFingerprint({
+      proposal: lockedFound.proposal, totals: lockedFound.totals, values, customerId: customer.id, templateVersionId: version.id,
+    });
     const now = new Date();
     const expiresAt = documentContractExpiresAt(now, template.expire_after_days, template);
 
@@ -211,11 +240,7 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     if (existing?.status === 'signed') return refusal(409, 'already_signed', 'This agreement has already been signed.');
     if (existing) {
       const snap = parseJson(existing.document_variables_snapshot);
-      const sameQuote = snap?.service?.name === values.service.name
-        && snap?.customer?.name === values.customer.name
-        && snap?.customer?.address === values.customer.address
-        && existing.document_template_version_id === version.id;
-      if (sameQuote) {
+      if (snap?.estimate?.fingerprint === values.estimate.fingerprint) {
         // Idempotent: the same open agreement, with a fresh link for this visit.
         await trx('customer_contracts').where({ id: existing.id }).update({
           status: 'sent',
@@ -245,7 +270,7 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
       if (cancelled) {
         await trx('customer_contract_events').insert({
           contract_id: existing.id,
-          customer_id: customer.id,
+          customer_id: existing.customer_id,
           event_type: 'cancelled',
           ...eventContext({ reason: 'superseded', estimateId: locked.id }),
         });

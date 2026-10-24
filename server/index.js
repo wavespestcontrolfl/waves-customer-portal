@@ -502,6 +502,8 @@ app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 // Accept-card phone capture: the same reason. Its privacy headers and its gate-off 404 land before the global limiter.
 app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
+// Commercial proposal signing (GATE_COMMERCIAL_PROPOSAL_SIGN): same reason. Privacy headers and the dark gate's generic 404 land before the global limiter.
+app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 
 app.use('/api/', limiter);
 

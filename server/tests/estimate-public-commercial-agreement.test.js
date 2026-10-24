@@ -223,6 +223,86 @@ describe('POST /:token/commercial-agreement', () => {
   });
 });
 
+// The pre-guard is mounted in server/index.js before the global /api limiter, so privacy headers and the dark gate's 404
+// land ahead of it. The global limiter here is a stand-in that always answers 429.
+describe('commercial-agreement pre-guard (mounted before the global /api limiter)', () => {
+  async function guarded(path, { method = 'POST', estimate } = {}) {
+    estimateRow = estimate;
+    const app = express();
+    app.use(express.json());
+    app.use('/api/estimates', estimatePublicRouter.commercialAgreementPreGuard);
+    app.use('/api/', (_req, res) => res.status(429).json({ error: 'Too many requests' }));
+    const server = app.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/api/estimates/${path}`, { method });
+      return { status: res.status, headers: res.headers, body: await res.json().catch(() => null) };
+    } finally {
+      server.close();
+    }
+  }
+  const expectPrivacyHeaders = (res) => {
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('pragma')).toBe('no-cache');
+    expect(res.headers.get('x-robots-tag')).toBe('noindex');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+  };
+
+  test('server/index.js mounts the guard before the global /api/ limiter', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+    const guardAt = src.indexOf("app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard)");
+    const limiterAt = src.indexOf("app.use('/api/', limiter)");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(limiterAt).toBeGreaterThan(guardAt);
+  });
+
+  test('gate off: the generic 404 with the privacy headers, ahead of the limiter (never a 429)', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      const res = await guarded('abcdefghijklmnopqrstu/commercial-agreement');
+      expect(res).toMatchObject({ status: 404, body: { error: 'Estimate not found' } });
+      expectPrivacyHeaders(res);
+    }
+  });
+
+  test('gate on: a limiter 429 still carries the privacy headers', async () => {
+    gateOn();
+    const res = await guarded('abcdefghijklmnopqrstu/commercial-agreement');
+    expect(res.status).toBe(429);
+    expectPrivacyHeaders(res);
+  });
+
+  test('gate on: a malformed token 404 from the route itself carries the privacy headers', async () => {
+    gateOn();
+    const app = express();
+    app.use(express.json());
+    app.use('/api/estimates', estimatePublicRouter.commercialAgreementPreGuard);
+    app.use('/api/estimates', estimatePublicRouter);
+    const server = app.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/api/estimates/bad!/commercial-agreement`, { method: 'POST' });
+      expect(res.status).toBe(404);
+      expectPrivacyHeaders(res);
+    } finally {
+      server.close();
+    }
+  });
+
+  test('the handler stamps the headers itself too (correct without the mount)', async () => {
+    gateOn();
+    const res = await post(makeEstimate());
+    expectPrivacyHeaders(res);
+  });
+
+  test('other routes and methods pass through untouched', () => {
+    gateOn();
+    const next = jest.fn();
+    const res = { set: jest.fn() };
+    estimatePublicRouter.commercialAgreementPreGuard({ method: 'GET', path: '/abcdefghijklmnopqrstu/commercial-agreement' }, res, next);
+    estimatePublicRouter.commercialAgreementPreGuard({ method: 'POST', path: '/abcdefghijklmnopqrstu/change-request' }, res, next);
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(res.set).not.toHaveBeenCalled();
+  });
+});
+
 describe('GET /:token/data cta.commercialAgreement', () => {
   test('gate off: the payload carries nothing new and the service is not asked', async () => {
     const res = await data(makeEstimate());

@@ -19138,6 +19138,25 @@ const commercialAgreementLimiter = rateLimit({
   message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
 });
 
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like contactPhonePreGuard. It stamps the
+// privacy headers first, so EVERY response of this route carries them: router.param's malformed-token 404, the global
+// limiter's 429, this route's own 429 and the handler's answers. With the gate off it answers the generic 404 here,
+// before any limiter, so a dark route can never read as a 429. Raw-path match (one non-slash token segment, optional
+// trailing slash), POST only.
+const COMMERCIAL_AGREEMENT_PATH_RE = /^\/[^/]+\/commercial-agreement\/?$/i;
+function stampCommercialAgreementHeaders(res) {
+  res.set('Cache-Control', 'no-store');
+  res.set('Pragma', 'no-cache');
+  res.set('X-Robots-Tag', 'noindex');
+  res.set('Referrer-Policy', 'no-referrer');
+}
+function commercialAgreementPreGuard(req, res, next) {
+  if (req.method !== 'POST' || !COMMERCIAL_AGREEMENT_PATH_RE.test(req.path || '')) return next();
+  stampCommercialAgreementHeaders(res);
+  if (!featureGates.commercialProposalSignLive()) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
+
 // POST /api/estimates/:token/commercial-agreement — the proposal's "Accept &
 // sign agreement" tap (GATE_COMMERCIAL_PROPOSAL_SIGN). Issues, or re-opens, the
 // Commercial Pest Service Agreement for the estimate's customer and returns its
@@ -19149,8 +19168,8 @@ const commercialAgreementLimiter = rateLimit({
 // row. The one distinct answer, 409 for an estimate with no customer account,
 // comes only after the token has cleared every eligibility check.
 router.post('/:token/commercial-agreement', commercialAgreementLimiter, async (req, res, next) => {
-  res.set('Cache-Control', 'no-store');
-  res.set('Referrer-Policy', 'no-referrer');
+  // Also stamped here: the handler must be correct on its own, without the pre-guard mount.
+  stampCommercialAgreementHeaders(res);
   const notFound = () => res.status(404).json({ error: 'Estimate not found' });
   try {
     // A staff preview tap (?adminPreview=1) never issues an agreement.
@@ -31868,6 +31887,7 @@ module.exports = router;
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.contactPhonePreGuard = contactPhonePreGuard;
+module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
