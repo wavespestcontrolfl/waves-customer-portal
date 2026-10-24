@@ -22,7 +22,7 @@ const {
   isUnreviewedDispatchOwned,
   DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
 } = require('./call-booking-source-actions');
-const { selectPlanningSnapshots } = require('./scheduling/route-performance');
+const { selectPlanningSnapshots, recordedTiming, withRecordedTimingEvidence } = require('./scheduling/route-performance');
 
 // 'ai_call_pipeline' is a literal in call-recording-processor.js (the
 // inbound-call booking writer) — it is never exported as a named constant
@@ -95,6 +95,14 @@ function dateOnly(value) {
 // scheduled_services.drive_time_minutes / distance_from_previous_miles are
 // empty in prod and are not used.
 const MAX_TAP_DRIVE_MINUTES = 180;
+// The columns recordedTiming (route-performance.js) reads to decide whether
+// a recorded arrival is real: closeout fills arrived_at / check_in_time in
+// from the completion time when no start was tapped
+// (buildCompletionLifecycleUpdates), and that is neither a drive nor the
+// order the stops were driven (pre-push P1). Only an arrival a status event
+// backs is used.
+const TIMING_COLUMNS = ['id', 'customer_id', 'scheduled_date', 'visit_id', 'actual_start_time', 'check_in_time', 'arrived_at',
+  'actual_end_time', 'check_out_time', 'completed_at', 'service_time_minutes', 'actual_duration_minutes', 'time_on_site_adjusted_minutes'];
 
 function tapDriveMinutes(stop) {
   const start = new Date(stop.en_route_at || NaN).getTime();
@@ -131,13 +139,14 @@ async function computeDriveMinutesPerStop({ from, to }, conn) {
       .where('status', 'completed')
       .where('scheduled_date', '>=', from)
       .where('scheduled_date', '<=', to)
-      .select('visit_id', 'en_route_at', 'arrived_at'),
+      .select(...TIMING_COLUMNS, 'en_route_at'),
     conn('mileage_log')
       .where('trip_date', '>=', from)
       .where('trip_date', '<=', to)
       .select('duration_minutes', 'distance_miles'),
   ]);
-  const stops = physicalStops(rows);
+  const enriched = await withRecordedTimingEvidence(rows, conn);
+  const stops = physicalStops(enriched.map((row) => ({ visit_id: row.visit_id, en_route_at: row.en_route_at, arrived_at: recordedTiming(row).arrival })));
   const timed = stops.map(tapDriveMinutes).filter((minutes) => minutes != null);
   const driveMinutes = timed.reduce((sum, minutes) => sum + minutes, 0);
   return {
@@ -305,7 +314,8 @@ async function computeBookingsWithoutStaff({ from, to }, conn) {
 // is the order the tech was meant to drive that day in.
 //
 // A tech-day is "followed" when its completed stops' actual arrival order
-// (arrived_at, falling back to check_in_time) matches the plannedStops order
+// (each row's arrivalAt: a recorded arrival a status event backs, see
+// TIMING_COLUMNS) matches the plannedStops order
 // restricted to those completed stops. Only stops still on the plan's own
 // date and technician count, as in route-performance.js — a stop moved to
 // another day or reassigned says nothing about this route. A tech-day with
@@ -327,8 +337,7 @@ function planFollowed(plan, rowsById) {
   const stopKey = (id) => (rowsById.get(id).visit_id ? `visit:${rowsById.get(id).visit_id}` : id);
   const firstArrival = new Map();
   for (const id of completedIds) {
-    const row = rowsById.get(id);
-    const at = row.arrived_at || row.check_in_time;
+    const at = rowsById.get(id).arrivalAt;
     if (!at) continue;
     const key = stopKey(id);
     const time = new Date(at).getTime();
@@ -362,9 +371,11 @@ async function computeAiRouteDays({ from, to }, conn) {
   const rows = plannedIds.length
     ? await conn('scheduled_services')
       .whereIn('id', plannedIds)
-      .select('id', 'visit_id', 'technician_id', 'scheduled_date', 'status', 'arrived_at', 'check_in_time')
+      .select(...TIMING_COLUMNS, 'technician_id', 'status')
     : [];
-  const rowsById = new Map(rows.map((row) => [row.id, row]));
+  // arrivalAt: the recorded arrival a status event backs (TIMING_COLUMNS).
+  const enriched = await withRecordedTimingEvidence(rows, conn);
+  const rowsById = new Map(enriched.map((row) => [row.id, { ...row, arrivalAt: recordedTiming(row).arrival }]));
 
   let followed = 0;
   let scored = 0;

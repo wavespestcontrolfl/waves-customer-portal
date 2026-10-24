@@ -57,9 +57,9 @@ describe('planFollowed', () => {
   const onRoute = { scheduled_date: '2026-09-08', technician_id: 'tech-1' };
   const stop = (fields) => ({ ...onRoute, ...fields });
   const rowsById = (overrides) => new Map(Object.entries({
-    a: stop({ status: 'completed', arrived_at: '2026-09-08T12:00:00Z' }),
-    b: stop({ status: 'completed', arrived_at: '2026-09-08T13:00:00Z' }),
-    c: stop({ status: 'completed', arrived_at: '2026-09-08T14:00:00Z' }),
+    a: stop({ status: 'completed', arrivalAt: '2026-09-08T12:00:00Z' }),
+    b: stop({ status: 'completed', arrivalAt: '2026-09-08T13:00:00Z' }),
+    c: stop({ status: 'completed', arrivalAt: '2026-09-08T14:00:00Z' }),
     ...overrides,
   }));
 
@@ -69,37 +69,41 @@ describe('planFollowed', () => {
 
   test('grouped members are one physical stop: tapping the second member first still follows the plan (#6652 review P2)', () => {
     const rows = rowsById({
-      a: stop({ status: 'completed', visit_id: 'visit-1', arrived_at: '2026-09-08T12:01:00Z' }),
-      b: stop({ status: 'completed', visit_id: 'visit-1', arrived_at: '2026-09-08T12:00:00Z' }),
+      a: stop({ status: 'completed', visit_id: 'visit-1', arrivalAt: '2026-09-08T12:01:00Z' }),
+      b: stop({ status: 'completed', visit_id: 'visit-1', arrivalAt: '2026-09-08T12:00:00Z' }),
     });
     expect(planFollowed(plan, rows)).toBe(true);
     // The group as a whole after c is still out of order.
     const late = rowsById({
-      a: stop({ status: 'completed', visit_id: 'visit-1', arrived_at: '2026-09-08T15:00:00Z' }),
-      b: stop({ status: 'completed', visit_id: 'visit-1', arrived_at: '2026-09-08T15:00:00Z' }),
+      a: stop({ status: 'completed', visit_id: 'visit-1', arrivalAt: '2026-09-08T15:00:00Z' }),
+      b: stop({ status: 'completed', visit_id: 'visit-1', arrivalAt: '2026-09-08T15:00:00Z' }),
     });
     expect(planFollowed(plan, late)).toBe(false);
   });
 
   test('arrival order out of the plan order -> not followed', () => {
     const rows = rowsById({
-      a: stop({ status: 'completed', arrived_at: '2026-09-08T14:00:00Z' }),
-      c: stop({ status: 'completed', arrived_at: '2026-09-08T12:00:00Z' }),
+      a: stop({ status: 'completed', arrivalAt: '2026-09-08T14:00:00Z' }),
+      c: stop({ status: 'completed', arrivalAt: '2026-09-08T12:00:00Z' }),
     });
     expect(planFollowed(plan, rows)).toBe(false);
   });
 
-  test('falls back to check_in_time when arrived_at is missing', () => {
+  test('a stop with no corroborated arrival is not timed: an inferred closeout stamp never orders the route (pre-push P1)', () => {
+    // arrivalAt is null when no status event backs the stamp (recordedTiming):
+    // c's out-of-order closeout cannot make the day read as not followed.
     const rows = rowsById({
-      a: stop({ status: 'completed', arrived_at: null, check_in_time: '2026-09-08T14:00:00Z' }),
-      c: stop({ status: 'completed', arrived_at: null, check_in_time: '2026-09-08T12:00:00Z' }),
+      a: stop({ status: 'completed', arrivalAt: '2026-09-08T12:00:00Z' }),
+      c: stop({ status: 'completed', arrivalAt: null, arrived_at: '2026-09-08T11:00:00Z' }),
     });
-    expect(planFollowed(plan, rows)).toBe(false);
+    expect(planFollowed(plan, rows)).toBe(true);
+    // The same stop with a backed arrival before a does break the order.
+    expect(planFollowed(plan, rowsById({ c: stop({ status: 'completed', arrivalAt: '2026-09-08T11:00:00Z' }) }))).toBe(false);
   });
 
   test('fewer than 2 timed completed stops cannot violate an order -> followed', () => {
     const onlyOneCompleted = new Map([
-      ['a', stop({ status: 'completed', arrived_at: '2026-09-08T12:00:00Z' })],
+      ['a', stop({ status: 'completed', arrivalAt: '2026-09-08T12:00:00Z' })],
       ['b', stop({ status: 'pending' })],
       ['c', stop({ status: 'cancelled' })],
     ]);
@@ -108,16 +112,16 @@ describe('planFollowed', () => {
 
   test('a missing row (never dispatched) does not count as completed and cannot break the order', () => {
     const rows = new Map([
-      ['a', stop({ status: 'completed', arrived_at: '2026-09-08T12:00:00Z' })],
-      ['b', stop({ status: 'completed', arrived_at: '2026-09-08T13:00:00Z' })],
+      ['a', stop({ status: 'completed', arrivalAt: '2026-09-08T12:00:00Z' })],
+      ['b', stop({ status: 'completed', arrivalAt: '2026-09-08T13:00:00Z' })],
     ]); // 'c' absent entirely
     expect(planFollowed(plan, rows)).toBe(true);
   });
 
   test('a stop moved to another day or reassigned does not judge this route', () => {
     const rows = rowsById({
-      a: { status: 'completed', arrived_at: '2026-09-09T14:00:00Z', scheduled_date: '2026-09-09', technician_id: 'tech-1' },
-      c: { status: 'completed', arrived_at: '2026-09-08T09:00:00Z', scheduled_date: '2026-09-08', technician_id: 'tech-2' },
+      a: { status: 'completed', arrivalAt: '2026-09-09T14:00:00Z', scheduled_date: '2026-09-09', technician_id: 'tech-1' },
+      c: { status: 'completed', arrivalAt: '2026-09-08T09:00:00Z', scheduled_date: '2026-09-08', technician_id: 'tech-2' },
     });
     // Only b is still on this route: nothing left to contradict the plan.
     expect(planFollowed(plan, rows)).toBe(true);
@@ -126,7 +130,7 @@ describe('planFollowed', () => {
   test('a tech-day with no completed stop left on it is not scored', () => {
     const rows = new Map([
       ['a', stop({ status: 'pending' })],
-      ['b', { status: 'completed', arrived_at: '2026-09-09T13:00:00Z', scheduled_date: '2026-09-09', technician_id: 'tech-1' }],
+      ['b', { status: 'completed', arrivalAt: '2026-09-09T13:00:00Z', scheduled_date: '2026-09-09', technician_id: 'tech-1' }],
     ]);
     expect(planFollowed(plan, rows)).toBeNull();
   });
@@ -237,6 +241,16 @@ function makeFilteringDb(rowsByTable, { throwOnTable } = {}) {
   };
   dbFn.raw = (sql) => sql;
   return dbFn;
+}
+
+// Each row's arrival backed by an on_site status event, as a tap leaves it
+// (recordedTiming reads these); a row marked inferred gets none, like a stamp
+// closeout filled in from the completion time.
+function withArrivalEvents(rowsByTable) {
+  const services = (rowsByTable.scheduled_services || []).map((row, i) => ({ id: `svc-${i}`, customer_id: 'cust-1', ...row }));
+  const events = services.filter((row) => row.arrived_at && !row.inferred)
+    .map((row) => ({ job_id: row.id, from_status: 'en_route', to_status: 'on_site', transitioned_at: row.arrived_at }));
+  return { ...rowsByTable, scheduled_services: services, job_status_history: events };
 }
 
 const WIN = { from: '2026-09-01', to: '2026-09-07' };
@@ -377,7 +391,7 @@ describe('computeOpsScoreboard — drive_minutes_per_stop', () => {
         { trip_date: '2026-08-20', duration_minutes: 99, distance_miles: 99 },
       ],
     };
-    const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(withArrivalEvents(rows)));
     expect(out.driveMinutesPerStop).toMatchObject({ denominator: 2, completedStops: 2, timedStops: 2, vanDrivingMinutes: 75, vanDrivingMiles: 32.5 });
     expect(out.driveMinutesPerStop.share).toBeCloseTo(15);
   });
@@ -391,9 +405,22 @@ describe('computeOpsScoreboard — drive_minutes_per_stop', () => {
       ],
       mileage_log: [],
     };
-    const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(withArrivalEvents(rows)));
     expect(out.driveMinutesPerStop).toMatchObject({ completedStops: 2, timedStops: 2, denominator: 2 });
     expect(out.driveMinutesPerStop.share).toBeCloseTo(15);
+  });
+
+  test('an arrival closeout inferred (no status event backs it) is no drive (pre-push P1)', async () => {
+    const rows = {
+      scheduled_services: [
+        { status: 'completed', scheduled_date: '2026-09-02', en_route_at: '2026-09-02T13:00:00Z', arrived_at: '2026-09-02T13:20:00Z', inferred: true },
+        { status: 'completed', scheduled_date: '2026-09-03', en_route_at: '2026-09-03T14:00:00Z', arrived_at: '2026-09-03T14:10:00Z' },
+      ],
+      mileage_log: [],
+    };
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(withArrivalEvents(rows)));
+    expect(out.driveMinutesPerStop).toMatchObject({ completedStops: 2, timedStops: 1, denominator: 1 });
+    expect(out.driveMinutesPerStop.share).toBeCloseTo(10);
   });
 
   test('a stop missing a tap, a reversed pair, or a >3h gap is not timed — but still counts as completed', async () => {
@@ -407,7 +434,7 @@ describe('computeOpsScoreboard — drive_minutes_per_stop', () => {
       ],
       mileage_log: [],
     };
-    const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(withArrivalEvents(rows)));
     expect(out.driveMinutesPerStop).toMatchObject({ completedStops: 4, timedStops: 1, vanDrivingMinutes: 0 });
     expect(out.driveMinutesPerStop.share).toBeCloseTo(8);
   });
@@ -447,6 +474,18 @@ describe('computeOpsScoreboard — ai_route_days', () => {
       if (table === 'route_optimization_planner_runs') {
         const recorder = makeRecorder();
         recorder.then = (resolve) => resolve(runs);
+        return recorder;
+      }
+      if (table === 'service_records' || table === 'service_completion_attempts') {
+        const recorder = makeRecorder();
+        recorder.then = (resolve) => resolve([]);
+        return recorder;
+      }
+      if (table === 'job_status_history') {
+        // Each planned row's arrival backed by its on_site event (recordedTiming).
+        const recorder = makeRecorder();
+        recorder.then = (resolve) => resolve(plannedRows.filter((row) => row.arrived_at && !row.inferred)
+          .map((row) => ({ job_id: row.id, from_status: 'en_route', to_status: 'on_site', transitioned_at: row.arrived_at })));
         return recorder;
       }
       if (table === 'scheduled_services') {
@@ -501,6 +540,19 @@ describe('computeOpsScoreboard — ai_route_days', () => {
       daysFollowed: 1, totalTechDaysWithSnapshot: 1, techDaysWithNoCompletedPlannedStop: 0, daysWithAppliedReorder: 0, completedTechDaysWithNoSnapshot: 0,
       truncatedPlanningRuns: false,
     });
+  });
+
+  test('an arrival closeout inferred (no status event backs it) never orders the route (pre-push P1)', async () => {
+    const db = makeRouteDayDb({
+      runs: [makeRun({})],
+      plannedRows: [
+        { id: 'a', status: 'completed', arrived_at: '2026-09-08T12:00:00Z', scheduled_date: '2026-09-08', technician_id: TECH_1 },
+        { id: 'b', status: 'completed', arrived_at: '2026-09-08T11:00:00Z', scheduled_date: '2026-09-08', technician_id: TECH_1, inferred: true },
+      ],
+      completedRows: [{ technician_id: TECH_1, scheduled_date: '2026-09-08' }],
+    });
+    const out = await computeOpsScoreboard(RUN_WINDOW, db);
+    expect(out.aiRouteDays).toMatchObject({ daysFollowed: 1, denominator: 1 });
   });
 
   test('a tech-day driven out of plan order is not followed, and an applied_reorder snapshot is counted separately', async () => {
