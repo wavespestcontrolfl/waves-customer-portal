@@ -241,8 +241,8 @@ describe('the detector behind the alert and the completion hold', () => {
     test('the completion path subtracts the carried partial at both its sites, deduped by invoice id', () => {
       const fs = require('fs');
       const src = fs.readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-      expect(src).toContain('partialElsewhereCents(unmintedSetupFeeObligation?.settledElsewherePartial, termFeeRows)');
-      expect(src).toContain('partialElsewhereCents(unmintedSetupFeeObligation.settledElsewherePartial, [...liveStampedRows');
+      expect(src).toContain('partialElsewhereCents(settledNowTerm.partial, termFeeRows)');
+      expect(src).toContain('partialElsewhereCents(settledNow.partial, [...liveStampedRows');
       const { partialElsewhereCents } = require('../services/setup-fee-obligation');
       const partial = [{ id: 'a', cents: 5000 }, { id: 'b', cents: 300 }];
       const counted = { id: 'a', line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 50 }] };
@@ -250,6 +250,41 @@ describe('the detector behind the alert and the completion hold', () => {
       expect(partialElsewhereCents(partial, [{ id: 'a', line_items: [] }])).toBe(5300); // row counted none of it
       expect(partialElsewhereCents(partial, [])).toBe(5300);
       expect(partialElsewhereCents(undefined, [])).toBe(0);
+    });
+  });
+
+  describe('the locked completion recheck reads FRESH evidence, never the unlocked lookup', () => {
+    const PARTIAL50 = { id: 'inv-p', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 50 }] };
+    const FULL99 = { id: 'inv-p', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 99 }] };
+
+    test('unlocked lookup saw $50 (owed, $49 remains); the office then paid $99 -> the locked re-read settles', async () => {
+      process.env[GATE] = 'true';
+      mockTables = obligationTables([PARTIAL50]);
+      const unlocked = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
+      expect(unlocked.owed).toBe(true);
+      expect(unlocked.setupFeeRemainingCents).toBe(4900);
+      mockTables = obligationTables([FULL99]);
+      const locked = await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900, lock: true });
+      expect(locked.settled).toBe(true);
+    });
+
+    test('reverse: unlocked lookup saw $99 settled; the payment was refunded-away/voided -> the locked re-read is not settled', async () => {
+      process.env[GATE] = 'true';
+      mockTables = obligationTables([FULL99]);
+      expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST })).owed).toBe(false);
+      mockTables = obligationTables([{ ...FULL99, status: 'void' }]);
+      const locked = await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900, lock: true });
+      expect(locked.settled).toBe(false);
+      expect(locked.partial).toBeUndefined();
+    });
+
+    test('both completion rechecks call the predicate on the transaction with lock:true and use ITS result', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+      expect(src).toMatch(/settledNowTerm = unmintedSetupFeeObligation\s*\?\s*await SetupFeeObligationNow\.setupFeeSettledElsewhere\(trx, \{[\s\S]*?lock: true/);
+      expect(src).toMatch(/settledNow = await SetupFeeObligationFresh\.setupFeeSettledElsewhere\(trx, \{[\s\S]*?lock: true/);
+      expect(src).toContain('partialElsewhereCents(settledNowTerm.partial, termFeeRows)');
+      expect(src).toContain('partialElsewhereCents(settledNow.partial, [...liveStampedRows');
+      expect(src).not.toContain('settledElsewherePartial, ');
     });
   });
 
