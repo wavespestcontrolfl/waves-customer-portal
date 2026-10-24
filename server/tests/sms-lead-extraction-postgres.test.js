@@ -187,10 +187,11 @@ postgres('text-thread lead reader', () => {
     expect(lead).toMatchObject({ id: webLeadId, first_name: 'Web', email: null });
     expect(lead.extracted_data).toBeNull();
 
+    // A customer who took the number as a SECONDARY phone, under another name.
     const other = '+19415550199';
     await text('Need spider spray', { minutesAgo: 10, from: other });
     dispatchWithFallback.mockImplementationOnce(async () => {
-      await trx('customers').insert({ id: randomUUID(), first_name: 'New', last_name: 'Customer', phone: other, email: `${randomUUID()}@example.invalid` });
+      await trx('customers').insert({ id: randomUUID(), first_name: 'Other', last_name: 'Name', phone: '+19415550122', secondary_phone: other, email: `${randomUUID()}@example.invalid` });
       return { ok: true, json: answer() };
     });
     expect((await sweep()).counts).toEqual({ known_customer: 1 });
@@ -201,7 +202,8 @@ postgres('text-thread lead reader', () => {
   test('a bell that fails is owed and retried by the next sweep, up to 3 tries', async () => {
     await text('Quote for ants please', { minutesAgo: 10 });
     modelSays(answer());
-    NotificationService.notifyAdmin.mockRejectedValueOnce(Object.assign(new Error('down'), { code: 'ECONNRESET' }));
+    // notifyAdmin answers null, not a throw, when its insert fails.
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
     expect((await sweep()).counts).toEqual({ created_unrung: 1 });
     expect((await runs())[0]).toMatchObject({ status: 'created_unrung', attempts: 1 });
 

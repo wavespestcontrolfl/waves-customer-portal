@@ -260,7 +260,7 @@ async function ringLeadBell(leadId, extracted) {
   const service = redactedWords(lead?.service_interest || extracted.requested_service || 'service').replace(/[.!?]+/g, ',');
   const missing = [!name && 'name', !lead?.address && 'address', !lead?.email && 'email'].filter(Boolean);
   const tail = missing.length ? `; not given yet: ${missing.join(', ')}.` : '; name, address and email are on the lead.';
-  await raiseAdminAlert('lead', {
+  const raised = await raiseAdminAlert('lead', {
     area: 'Leads',
     action: fitAction('Leads', name || 'a new texter', [
       (who) => `reply to ${who} about a texted request`,
@@ -283,6 +283,9 @@ async function ringLeadBell(leadId, extracted) {
     ].filter(Boolean).join('\n'),
     metadata: { leadId, source: 'sms_lead_extraction' },
   });
+  // notifyAdmin answers null when the row could not be saved (a dedupe or a
+  // muted category still answers an object): that is a bell still owed.
+  if (!raised) throw Object.assign(new Error('bell not saved'), { code: 'bell_not_saved' });
 }
 
 // A written lead whose bell is not raised yet carries status created_unrung /

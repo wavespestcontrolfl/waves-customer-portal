@@ -641,6 +641,14 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       identityPhone = ownAni && ownAni === lookupNumber ? phone : opts.aniPhone;
     }
   }
+  // The text reader only writes for a number nobody owns (sms-lead-extraction.js
+  // knownState). Re-checked here, on every identity phone column and before the
+  // voice path's single-match and name rules, because a customer may have
+  // taken the number while the model was reading.
+  if (viaSms && phone) {
+    const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
+    if (await knownCallerPhoneExists(db, phone)) return { leadId: null, customerId: null, created: false, notOwned: 'customer' };
+  }
   let customer = opts.identityCustomerId
     ? await db('customers').where({ id: opts.identityCustomerId }).whereNull('deleted_at').first()
     : (identityPhone ? await findCustomerByPhone(identityPhone) : null);
@@ -669,10 +677,6 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       return { leadId: null, customerId: null, created: false, superseded: true };
     }
   }
-
-  // The text reader only writes for a number nobody owns (sms-lead-extraction.js
-  // knownState); a customer that appeared since is the office's, not a lead.
-  if (viaSms && customerId) return { leadId: null, customerId, created: false, notOwned: 'customer' };
 
   // Non-routing language hint on the matched customer — applied even if the lead
   // is skipped below. Best-effort; only fills when empty so a prior preference
