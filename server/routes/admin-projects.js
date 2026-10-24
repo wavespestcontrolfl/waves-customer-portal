@@ -45,6 +45,7 @@ const {
   redactProjectFreeTextForWrite,
   projectTypeConfigHasInternalFindingKeys,
   filingBinaryMayDiscloseFee,
+  woodBasePlatePct,
 } = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
@@ -124,10 +125,11 @@ const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_c
 // access code is refused, not stored. reports-public blanks the same keys at
 // egress, and the detail payload names them for the staff preview.
 const { failingFinalExteriorKeys, isClockTime } = require('../services/final-exterior-screen');
-// The final exterior date is a completed treatment on a legal document:
+// A date of something already done, on a legal document (the final
+// exterior treatment, the framing inspection, the Bora-Care application):
 // blank, or a real YYYY-MM-DD no later than today (ET), like project_date,
-// and never before the initial treatment (same day allowed).
-function finalExteriorDateProblem(value, initialDate) {
+// and never before `initialDate` when one is given (same day allowed).
+function pastCertificateDateProblem(value, initialDate) {
   const raw = String(value ?? '').trim();
   if (!raw) return false;
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
@@ -234,11 +236,12 @@ function legalDocCreateRejection(projectType, projectDate, findings) {
   return finalExteriorRejection(projectType, findings, projectDate);
 }
 
-// 422 body for a final-exterior field the certificate can't carry, or null.
+// 422 body for a final-exterior or Bora-Care field the certificate can't
+// carry, or null.
 function finalExteriorRejection(projectType, rawFindings, projectDate) {
   if (projectType !== 'pre_treatment_termite_certificate') return null;
   const findings = normalizeFindings(rawFindings);
-  if (finalExteriorDateProblem(findings.final_exterior_date, findings.treatment_date || projectDate)) {
+  if (pastCertificateDateProblem(findings.final_exterior_date, findings.treatment_date || projectDate)) {
     return {
       error: 'The final exterior treatment date must be a real date between the initial treatment and today — enter it after the visit is done.',
       code: 'final_exterior_date_invalid', field: 'final_exterior_date',
@@ -256,6 +259,32 @@ function finalExteriorRejection(projectType, rawFindings, projectDate) {
     return {
       error: 'The final exterior treatment fields print on the customer notice — remove the claim or code and save again.',
       code: 'final_exterior_copy', field: failingKey,
+    };
+  }
+  return borateRecordRejection(findings, projectDate);
+}
+
+// The Bora-Care record prints on the certificate and the warranty: the
+// framing inspection is a real date no later than today, the Bora-Care
+// application fits between the initial treatment and today, and the base
+// plate share is a plain percent.
+function borateRecordRejection(findings, projectDate) {
+  if (pastCertificateDateProblem(findings.framing_inspection_date, null)) {
+    return {
+      error: 'The final framing inspection date must be a real date no later than today.',
+      code: 'framing_inspection_date_invalid', field: 'framing_inspection_date',
+    };
+  }
+  if (pastCertificateDateProblem(findings.borate_treatment_date, findings.treatment_date || projectDate)) {
+    return {
+      error: 'The Bora-Care application date must be a real date between the initial treatment and today.',
+      code: 'borate_treatment_date_invalid', field: 'borate_treatment_date',
+    };
+  }
+  if (String(findings.wood_base_plate_pct ?? '').trim() && woodBasePlatePct(findings.wood_base_plate_pct) === null) {
+    return {
+      error: 'Enter the wood base plates as a percent from 0 to 100, like 85.',
+      code: 'wood_base_plate_pct_invalid', field: 'wood_base_plate_pct',
     };
   }
   return null;

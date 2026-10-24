@@ -9,6 +9,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { WAVES_FDACS_LICENSE_NUMBER } = require('../constants/business');
 const { warranty13692CheckLive } = require('../config/feature-gates');
 const { CONSUMER_NOTICE_GRACE_END, findConsumerNotice } = require('./consumer-notices');
+const { woodBasePlatePct } = require('./project-types');
 
 const NEW_CONSTRUCTION_WARRANTY_KEY = 'service_agreement.termite_new_construction_warranty';
 const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
@@ -165,13 +166,28 @@ function targetsSubterranean(value) {
   return targets.some((target) => SUBTERRANEAN_TARGETS.includes(oneLine(target)));
 }
 
-// Same rule as the admin button: one soil-barrier application with a plan,
-// aimed at subterranean termites.
+// The warranty has wording for three methods (owner 10-24 Q6): a soil
+// barrier alone; Bora-Care alone as the primary treatment; or a soil barrier
+// with one Bora-Care application as its secondary treatment (Rule
+// 5E-14.106(9)). Anything else (a bait system, a borate primary with soil,
+// two extra applications) has no wording and is refused.
+const SOIL = 'Soil barrier (chemical)';
+const BORATE = 'Wood treatment (borate)';
+function warrantyMethod(findings) {
+  const extras = extraApplications(findings.additional_applications);
+  const first = treatmentMethod(findings);
+  if (first === SOIL && extras.length === 0) return 'soil';
+  if (first === BORATE && extras.length === 0) return 'borate';
+  if (first === SOIL && extras.length === 1 && treatmentMethod(extras[0]) === BORATE) return 'combined';
+  return null;
+}
+
+// Same rule as the admin button: a plan, a method with wording, aimed at
+// subterranean termites.
 function warrantyEligible(findings) {
   return Boolean(PLAN_YEARS[oneLine(findings.warranty_type)])
-    && treatmentMethod(findings) === 'Soil barrier (chemical)'
-    && targetsSubterranean(findings.wdo_target)
-    && extraApplications(findings.additional_applications).length === 0;
+    && Boolean(warrantyMethod(findings))
+    && targetsSubterranean(findings.wdo_target);
 }
 
 // The treated site from the certificate only: the customer's own address may
@@ -291,21 +307,30 @@ function isShortText(value) {
 function amount(findings, field) {
   return Number(withoutUnit(findings[field], AMOUNT_FIELDS[field]).replace(/,/g, '')) || 0;
 }
-function positiveAmountProblems(findings) {
+
+// A soil liquid's finished solution: its concentration and gallons must be
+// above zero. Bora-Care has none to record: the certificate form clears
+// both for it (1:1 label dilution; volume varies by saturation), and the
+// send gate measures it by treated area alone.
+const LIQUID_AMOUNTS = ['concentration_pct', 'gallons_applied'];
+
+// An application's amounts: plain numbers once their unit is removed, a
+// positive treated area, and each of `positive` above zero.
+function amountProblems(application, positive) {
   return [
-    ...['concentration_pct', 'gallons_applied'].filter((field) => !(amount(findings, field) > 0)),
-    ...(amount(findings, 'square_footage') > 0 || amount(findings, 'linear_feet') > 0 ? [] : ['square_footage or linear_feet']),
+    ...Object.entries(AMOUNT_FIELDS)
+      .filter(([field, unit]) => oneLine(application[field]) && !/^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?$/.test(withoutUnit(application[field], unit)))
+      .map(([field]) => field),
+    ...positive.filter((field) => !(amount(application, field) > 0)),
+    ...(amount(application, 'square_footage') > 0 || amount(application, 'linear_feet') > 0 ? [] : ['square_footage or linear_feet']),
   ];
 }
 
-function assertStructuredCertificate(findings) {
+function assertStructuredCertificate(findings, positive) {
   const failing = [
     ...SHORT_TEXT_FIELDS.filter((field) => !isShortText(findings[field])),
-    ...Object.entries(AMOUNT_FIELDS)
-      .filter(([field, unit]) => oneLine(findings[field]) && !/^(\d{1,3}(,\d{3})+|\d+)?(\.\d+)?$/.test(withoutUnit(findings[field], unit)))
-      .map(([field]) => field),
     ...(/^[A-Z0-9-]{3,20}$/i.test(oneLine(findings.applicator_fdacs_id)) ? [] : ['applicator_fdacs_id']),
-    ...positiveAmountProblems(findings),
+    ...amountProblems(findings, positive),
   ];
   if (failing.length) throw bad(`Fix these certificate fields first (a short value, not a sentence): ${failing.join(', ')}.`, 409);
 }
@@ -314,8 +339,8 @@ function assertStructuredCertificate(findings) {
 // date, an owner contract from the initial one (Rule 5E-14.105(3)(a) allows
 // either; owner 10-24 Q3). The term, its end and the 30-day issue window
 // count from that date.
-function certificateValues(project, findings, { basisKind } = {}) {
-  assertStructuredCertificate(findings);
+function certificateValues(project, findings, { basisKind, positive } = {}) {
+  assertStructuredCertificate(findings, positive);
   // project_date is the certificate's treatment date; a legacy
   // findings.treatment_date must agree with it, never override it.
   const initial = parseIso(project.project_date);
@@ -329,7 +354,8 @@ function certificateValues(project, findings, { basisKind } = {}) {
   if (finalDate && (key(finalDate) < key(initial) || key(finalDate) > key(today))) {
     throw bad('The final exterior date on the certificate must be between the treatment date and today.', 409);
   }
-  const fromFinal = basisKind === 'master';
+  // A Bora-Care only job has one treatment: it is the initial and the final.
+  const fromFinal = basisKind === 'master' && warrantyMethod(findings) !== 'borate';
   if (fromFinal && !finalDate) {
     throw bad('A builder lot warranty runs from the final exterior treatment. Record its date on the certificate and send the certificate again first.', 409);
   }
@@ -341,8 +367,6 @@ function certificateValues(project, findings, { basisKind } = {}) {
   if (recordedRenewal && us(recordedRenewal) !== termEnd) {
     throw bad(`Renewal due by on the certificate must be the term end, ${termEnd}.`, 409);
   }
-  // The send gate takes square or linear feet; one of them must be there.
-  if (!oneLine(findings.square_footage) && !oneLine(findings.linear_feet)) throw bad('The certificate has no square or linear feet.', 409);
   const product = oneLine(findings.product_name) === 'Other' ? oneLine(findings.product_name_other) : oneLine(findings.product_name);
   return {
     initial,
@@ -364,7 +388,7 @@ function certificateValues(project, findings, { basisKind } = {}) {
         // The whole project id: a shortened one can repeat across jobs.
         number: `NCW-${String(project.id).toUpperCase()}`,
         plan: oneLine(findings.warranty_type),
-        start_basis: fromFinal ? 'final' : 'initial',
+        start_basis: basisKind === 'master' ? 'final' : 'initial',
         start_date: us(start),
         term_end: termEnd,
         renewal_due: termEnd,
@@ -449,6 +473,131 @@ function soilLiquid(treatment) {
   return { product: known.product, active_ingredient: treatment.active_ingredient || known.ingredient };
 }
 
+// ── Method wording (owner 10-24 Q6) ─────────────────────────────────────────
+// Section 3's treatment paragraph and three CONDITIONS lines (template
+// version 9) are fixed text from this file, chosen by the certificate's
+// method. The soil text is version 8's, word for word.
+const SOIL_CONDITIONS = {
+  first: 'The final exterior treatment must be completed before the building is occupied. If the builder does not allow it, we tell the owner in writing, and the untreated exterior is excluded until it is treated.',
+  second: 'These can break the treated barrier: soil, mulch or landscaping added against the foundation; new slabs, patios or stoops; digging next to the foundation; plumbing or irrigation leaks; wood, siding or stucco touching soil; moisture against the foundation.',
+  third: 'Call us before work that disturbs treated soil. We can re-treat the disturbed area for a fee.',
+};
+const BORATE_CONDITIONS = {
+  first: 'Wood added, replaced or exposed after our treatment is not treated. Tell us before such work; we can treat it for a fee.',
+  second: 'These can let termites reach untreated wood or wear away the treatment: rain, standing water or leaks on treated wood; wood, siding, stucco or foam touching soil; soil or mulch above the slab edge; moisture against the walls.',
+  third: 'The borate treatment lasts while the treated wood is kept from rain, continuous water and contact with the ground, as its label states.',
+};
+const COMBINED_CONDITIONS = {
+  ...SOIL_CONDITIONS,
+  third: `${SOIL_CONDITIONS.third} The Bora-Care wood treatment is a secondary treatment: wood added after it is not treated, and its treated wood must be kept from rain, continuous water and contact with the ground. This does not reduce the coverage of the soil barrier.`,
+};
+const BORA_CARE = { product: 'Bora-Care', ingredient: 'disodium octaborate tetrahydrate', epa: '64405-1' };
+// Label: "Do not use for new construction treatments if the total linear
+// footage of the cellulosic base plates is less than 60%" (no override).
+const BORATE_PLATE_MINIMUM = 60;
+const FINAL_EXTERIOR_KEYS = ['final_exterior_date', 'final_exterior_time', 'final_exterior_product', 'final_exterior_active_ingredient', 'final_exterior_applicator_name'];
+
+// A Bora-Care application's product, ingredient and EPA number must be
+// Bora-Care's; the certificate is corrected, never rewritten.
+function assertBoraCare(app) {
+  const product = oneLine(app.product_name) === 'Other' ? oneLine(app.product_name_other) : oneLine(app.product_name);
+  if (product.toLowerCase() !== BORA_CARE.product.toLowerCase()) {
+    throw bad(`The borate wording is written for Bora-Care. The certificate names "${product}".`, 409);
+  }
+  const ingredient = oneLine(app.active_ingredient);
+  if (ingredient && !/^disodium octaborate tetrahydrate(\s*\d+(\.\d+)?\s*%)?$/i.test(ingredient)) {
+    throw bad(`The certificate's active ingredient (${ingredient}) does not match Bora-Care (${BORA_CARE.ingredient}). Fix the certificate first.`, 409);
+  }
+  const epa = oneLine(app.epa_registration);
+  if (epa && epa !== BORA_CARE.epa) throw bad(`Bora-Care is EPA Reg. No. ${BORA_CARE.epa}; the certificate says ${epa}.`, 409);
+}
+
+// "2400 sq ft · 220 linear ft": the area a Bora-Care application records,
+// in checked numbers.
+function boraCareArea(app) {
+  return [['square_footage', 'sq ft'], ['linear_feet', 'linear ft']]
+    .filter(([field]) => amount(app, field) > 0)
+    .map(([field, unit]) => `${withoutUnit(app[field], AMOUNT_FIELDS[field])} ${unit}`)
+    .join(' · ');
+}
+
+// Bora-Care alone, as the primary treatment (application 1). Its label
+// treats after the final framing inspection and only with wood base plates
+// at 60% or more; its text says no soil barrier was installed.
+function boraCareOnlyRecord(findings, initial) {
+  assertBoraCare(findings);
+  if (FINAL_EXTERIOR_KEYS.some((field) => oneLine(findings[field]))) {
+    throw bad('This certificate records a final exterior treatment, so the job is not Bora-Care only. A Bora-Care job with a soil treatment has no warranty wording.', 409);
+  }
+  const applied = certificateDate(findings, 'borate_treatment_date', 'The Bora-Care application date');
+  if (applied && key(applied) !== key(initial)) {
+    throw bad('On a Bora-Care only job the Bora-Care date is the treatment date. Clear the separate Bora-Care application date.', 409);
+  }
+  const framing = certificateDate(findings, 'framing_inspection_date', 'The final framing inspection date');
+  if (!framing) throw bad('Record the final framing inspection date on the certificate first. The Bora-Care label treats after it.', 409);
+  if (key(framing) > key(initial)) {
+    throw bad('The Bora-Care label treats after the final framing inspection, and this inspection date is after the treatment date (the label then requires a second visit).', 409);
+  }
+  const pct = woodBasePlatePct(findings.wood_base_plate_pct);
+  if (pct === null) throw bad('Record the wood base plates as a percent of all base plates (0 to 100) on the certificate first.', 409);
+  if (pct < BORATE_PLATE_MINIMUM) {
+    throw bad('The Bora-Care label does not allow a new-construction treatment when wood base plates are under 60% of all base plates. This job cannot have a Bora-Care only warranty.', 409);
+  }
+  return { framing, pct, area: boraCareArea(findings) };
+}
+
+// Bora-Care as the secondary treatment on a soil job (Rule 5E-14.106(9)):
+// the one additional application, on its own date with its own amounts.
+function secondaryBoraCareRecord(findings, initial) {
+  const app = extraApplications(findings.additional_applications)[0];
+  assertBoraCare(app);
+  const applied = certificateDate(findings, 'borate_treatment_date', 'The Bora-Care application date');
+  if (!applied) throw bad('Record the date of the Bora-Care application on the certificate first.', 409);
+  if (key(applied) < key(initial) || key(applied) > key(parseIso(etDateString()))) {
+    throw bad('The Bora-Care application date must be between the treatment date and today.', 409);
+  }
+  const failing = amountProblems(app, []);
+  if (failing.length) throw bad(`Fix these fields on the Bora-Care application first (a short value, not a sentence): ${failing.join(', ')}.`, 409);
+  return { date: applied, area: boraCareArea(app) };
+}
+
+function soilText(t) {
+  return `A preventive soil treatment for subterranean termites during construction. No termite infestation was known to be present. Product: ${t.product} (${t.active_ingredient}) at ${t.concentration}% · ${t.gallons} gallons · ${t.sq_ft} sq ft · ${t.linear_ft} linear ft. Initial treatment date: ${t.initial_date}. ${t.final_exterior_line} Applicator: ${t.applicator}, ID card ${t.applicator_id}.`;
+}
+
+// Per method: application 1's amounts that must be above zero, the checked
+// record its wording needs, the treatment fields it prints, and its wording.
+// `wording` gets screened values (`t`) and the record, whose values are
+// checked dates and numbers.
+const METHODS = {
+  soil: {
+    positive: LIQUID_AMOUNTS,
+    record: () => null,
+    treatment: soilLiquid,
+    wording: (t) => ({ description: soilText(t), conditions: SOIL_CONDITIONS }),
+  },
+  borate: {
+    positive: [],
+    record: boraCareOnlyRecord,
+    // No final exterior line: there is no soil treatment. Left blank, it also
+    // stops version 8, whose soil paragraph prints it, from rendering this job.
+    treatment: (t) => ({ product: BORA_CARE.product, active_ingredient: t.active_ingredient || BORA_CARE.ingredient, final_exterior_line: '' }),
+    wording: (t, b) => ({
+      description: `A preventive borate wood treatment for subterranean termites during construction, applied to the structural wood as the primary treatment, as its label directs (Florida Building Code 1816.1 / R318.1; Rule 5E-14.106(6), F.A.C.). No termite infestation was known to be present. No soil-applied termiticide barrier was installed under or around the foundation. Product: ${BORA_CARE.product} (${BORA_CARE.ingredient}), EPA Reg. No. ${BORA_CARE.epa}, mixed as its label directs. Area treated: ${b.area}. Treatment date: ${t.initial_date}, after the final framing inspection on ${us(b.framing)}. Wood base plates: ${b.pct}% of all base plates. Applicator: ${t.applicator}, ID card ${t.applicator_id}.`,
+      conditions: BORATE_CONDITIONS,
+    }),
+  },
+  combined: {
+    positive: LIQUID_AMOUNTS,
+    record: secondaryBoraCareRecord,
+    treatment: soilLiquid,
+    wording: (t, b) => ({
+      description: `${soilText(t)} Secondary treatment (Rule 5E-14.106(9), F.A.C.): ${BORA_CARE.product} (${BORA_CARE.ingredient}), EPA Reg. No. ${BORA_CARE.epa}, mixed as its label directs and applied to the structural wood on ${us(b.date)}. Area treated: ${b.area}.`,
+      conditions: COMBINED_CONDITIONS,
+    }),
+  },
+};
+
 function dayKey(value) {
   const day = parseIso(value);
   return day ? us(day) : '';
@@ -519,8 +668,10 @@ async function templateIssueWithWarnings(templateKey, body, customer, conn = db)
   assertCustomerPrintable(locked);
   const { asSent, findings } = sentCertificate(project, customer);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
-  const { initial, values } = certificateValues(asSent, findings, { basisKind: body?.values?.basis?.kind });
-  Object.assign(values.treatment, soilLiquid(values.treatment));
+  const method = METHODS[warrantyMethod(findings)];
+  const { initial, values } = certificateValues(asSent, findings, { basisKind: body?.values?.basis?.kind, positive: method.positive });
+  const record = method.record(findings, initial);
+  Object.assign(values.treatment, method.treatment(values.treatment));
   const issuer = body?.values?.issuer || {};
   const notice = await consumerNoticeOnFile(body, customer, initial, conn);
   const printed = screenValues({
@@ -536,7 +687,11 @@ async function templateIssueWithWarnings(templateKey, body, customer, conn = db)
     },
     issuer: { name: oneLine(issuer.name), title: oneLine(issuer.title), license: WAVES_FDACS_LICENSE_NUMBER },
   });
-  return { values: printed, warnings: notice.warnings };
+  // The method's fixed wording, filled with the screened values and the
+  // checked record. The fixed text itself is not screened: version 8 printed
+  // "No termite infestation was known to be present." unscreened.
+  const { description, conditions } = method.wording(printed.treatment, record);
+  return { values: { ...printed, treatment: { ...printed.treatment, description }, conditions }, warnings: notice.warnings };
 }
 
 // ── Builder Master Agreement and Lot Order (owner 10-24) ────────────────────

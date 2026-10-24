@@ -16,18 +16,25 @@
  * ("SPECTRUM855 707 7328MO" after normalizing), store the pattern as the glued
  * text ("SPECTRUM855"), because the normalized text has no word break there.
  *
- * The home office is the simplified method: $5 a square foot, 300 sq ft at
- * most ($1,500 a year), kept per tax year and computed on read.
+ * The home office is kept per tax year and computed on read. Simplified
+ * method: $5 a square foot, 300 sq ft at most ($1,500 a year). Actual method
+ * (Form 8829, GATE_TAX_RETURN_ENGINE; writes are refused while that gate is
+ * off, an existing row still computes for the tax package): the year's rent, utilities, insurance
+ * and other home costs times office sq ft over home sq ft, no 300 sq ft limit
+ * and no proration by months. The simplified method is valid only on a timely
+ * original return (Rev. Proc. 2013-13 section 4.03).
  */
 const db = require('../models/db');
 const { etParts } = require('../utils/datetime-et');
-const { taxSharedBillsLive } = require('../config/feature-gates');
+const { taxSharedBillsLive, taxReturnEngineLive } = require('../config/feature-gates');
 
 const DESC_CAP = 300;
 const PATTERN_MIN = 3;
 const PATTERN_MAX = 60;
 const LABEL_MAX = 80;
 const NOTES_MAX = 500;
+const HOME_SQ_FT_MAX = 100000;
+const HOME_AMOUNT_MAX = 10000000;
 const HOME_OFFICE_RATE = 5; // dollars per square foot, simplified method
 const HOME_OFFICE_MAX_SQ_FT = 300;
 const FIRST_YEAR = 2020;
@@ -97,9 +104,17 @@ function bookedSharePct(notes) {
   return Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null;
 }
 
-function homeOfficeDeduction({ sq_ft: sqFt, months } = {}) {
-  const sq = Math.min(Math.max(Number(sqFt) || 0, 0), HOME_OFFICE_MAX_SQ_FT);
-  const m = Math.min(Math.max(Number(months) || 0, 0), 12);
+function homeOfficeDeduction(row = {}) {
+  if (row.method === 'actual') {
+    const office = Number(row.sq_ft) || 0;
+    const home = Number(row.home_sq_ft) || 0;
+    if (office <= 0 || home <= 0) return 0;
+    const cents = ['rent', 'utilities', 'insurance', 'other']
+      .reduce((sum, k) => sum + Math.round((Number(row[k]) || 0) * 100), 0);
+    return Math.round((cents * Math.min(office, home)) / home) / 100;
+  }
+  const sq = Math.min(Math.max(Number(row.sq_ft) || 0, 0), HOME_OFFICE_MAX_SQ_FT);
+  const m = Math.min(Math.max(Number(row.months) || 0, 0), 12);
   return Math.round((HOME_OFFICE_RATE * 100 * sq * m) / 12) / 100;
 }
 
@@ -121,6 +136,13 @@ function parseIntIn(value, min, max, name) {
   const n = strictNumber(value);
   if (!Number.isInteger(n) || n < min || n > max) throw httpError(400, `${name} must be a whole number from ${min} to ${max}`);
   return n;
+}
+
+function parseAmount(value, name) {
+  if (value == null || value === '') return 0;
+  const n = strictNumber(value);
+  if (!Number.isFinite(n) || n < 0 || n > HOME_AMOUNT_MAX) throw httpError(400, `${name} must be an amount from 0 to ${HOME_AMOUNT_MAX}`);
+  return Math.round(n * 100) / 100;
 }
 
 function parsePattern(value) {
@@ -237,18 +259,29 @@ async function getHomeOffice(year) {
 
 async function upsertHomeOffice(year, input = {}) {
   const y = parseYear(year);
-  const sqFt = parseIntIn(input.sq_ft, 1, HOME_OFFICE_MAX_SQ_FT, 'sq_ft');
+  const method = input.method === undefined ? 'simplified' : input.method;
+  if (method !== 'simplified' && method !== 'actual') throw httpError(400, 'method must be simplified or actual');
+  const actual = method === 'actual';
+  // the actual method is only read by the return engine: no writes while it is off
+  if (actual && !taxReturnEngineLive()) throw httpError(400, 'the actual method needs the return engine');
+  const sqFt = parseIntIn(input.sq_ft, 1, actual ? HOME_SQ_FT_MAX : HOME_OFFICE_MAX_SQ_FT, 'sq_ft');
   const months = parseIntIn(input.months === undefined ? 12 : input.months, 1, 12, 'months');
   let notes = null;
   if (input.notes != null && input.notes !== '') {
     if (typeof input.notes !== 'string' || input.notes.length > NOTES_MAX) throw httpError(400, `notes must be text of ${NOTES_MAX} characters or less`);
     notes = input.notes.trim() || null;
   }
+  const fields = { method, sq_ft: sqFt, months, notes, home_sq_ft: null, rent: null, utilities: null, insurance: null, other: null };
+  if (actual) {
+    fields.home_sq_ft = parseIntIn(input.home_sq_ft, 1, HOME_SQ_FT_MAX, 'home_sq_ft');
+    if (fields.home_sq_ft < sqFt) throw httpError(400, 'home_sq_ft must be at least sq_ft (the office is part of the home)');
+    for (const k of ['rent', 'utilities', 'insurance', 'other']) fields[k] = parseAmount(input[k], k);
+  }
   const now = new Date();
   const [row] = await db('tax_home_office')
-    .insert({ tax_year: y, method: 'simplified', sq_ft: sqFt, months, notes, updated_at: now })
+    .insert({ tax_year: y, ...fields, updated_at: now })
     .onConflict('tax_year')
-    .merge({ method: 'simplified', sq_ft: sqFt, months, notes, updated_at: now })
+    .merge({ ...fields, updated_at: now })
     .returning('*');
   return row;
 }
@@ -262,5 +295,6 @@ module.exports = {
   isOn, normalize, patternMatches, matchBill, shareOf, sharedNote, bookedSharePct, homeOfficeDeduction,
   listBills, loadEnabledBills, createBill, updateBill, deleteBill,
   getHomeOffice, upsertHomeOffice, deleteHomeOffice,
+  strictNumber, parseYear, httpError, FIRST_YEAR,
   PATTERN_MIN, PATTERN_MAX, HOME_OFFICE_RATE, HOME_OFFICE_MAX_SQ_FT,
 };
