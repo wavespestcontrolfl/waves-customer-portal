@@ -511,6 +511,11 @@ async function computeYear(year) {
 // computed from the row as read (its version, and the prior year's version,
 // whose filed snapshot feeds the carry-ins), and the filing only matches those
 // same versions (markFiled). A PUT that lands in between is a 409.
+// The books (expenses, equipment, home office) are read without a lock, on
+// purpose: a book edit that lands while this request runs is the same as one
+// that lands just after it. The snapshot is still the return the owner
+// reviewed, and the filed year then warns that the books disagree
+// (filed_differs). Locking those shared tables would stall every other writer.
 async function fileYear(year, { filed_on: filedOn, fingerprint } = {}) {
   const y = sharedBills.parseYear(year);
   const date = taxYears.parseFiledOn(filedOn, y);
