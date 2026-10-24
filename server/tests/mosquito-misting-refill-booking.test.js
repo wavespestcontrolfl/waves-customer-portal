@@ -678,3 +678,41 @@ describe('the refill is one-time on every series path (item 3, monthly path)', (
     expect(edit.normalizedAddons[0].recurringPattern).toBe('one_time');
   });
 });
+
+describe('the shared address mover refuses a refill it would carry to another house, for every caller', () => {
+  const { assertNoMistingRefillMoves } = require('../services/appointment-address');
+  const REFILL = 'mosquito_misting_refill';
+  const rows = [{ id: 'v1', property_id: 'house-a' }, { id: 'v2', property_id: 'house-a' }];
+  const trxWith = (withRefill, seen = []) => (table) => ({
+    whereIn: (col, ids) => { seen.push({ table, ids }); return { where: () => ({ first: async () => (withRefill ? { id: 'a1' } : undefined) }) }; },
+  });
+
+  test('a moved visit that stores a refill is refused (the Intelligence Bar and geocode review pass no edited visit)', async () => {
+    await expect(assertNoMistingRefillMoves(trxWith(true), rows, 'house-b', null)).rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE', statusCode: 409 });
+  });
+
+  test('no refill stored, or a visit already at the destination, moves freely', async () => {
+    await expect(assertNoMistingRefillMoves(trxWith(false), rows, 'house-b', null)).resolves.toBeUndefined();
+    const seen = [];
+    await expect(assertNoMistingRefillMoves(trxWith(true, seen), rows, 'house-a', null)).resolves.toBeUndefined();
+    expect(seen).toEqual([]);
+  });
+
+  test('the visit the same save edits is judged by what the save leaves on it, not by the rows it is dropping', async () => {
+    const seen = [];
+    // the save removes the stored refill: only the other moved visit's rows are read
+    await expect(assertNoMistingRefillMoves(trxWith(false, seen), rows, 'house-b', { id: 'v1', rowKeys: ['pest_control'] })).resolves.toBeUndefined();
+    expect(seen[0].ids).toEqual(['v2']);
+    // the save posts a refill along with the move
+    await expect(assertNoMistingRefillMoves(trxWith(false), rows, 'house-b', { id: 'v1', rowKeys: [REFILL] })).rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
+    // the only moved visit is the edited one and the save drops the refill: nothing else to read
+    const none = [];
+    await expect(assertNoMistingRefillMoves(trxWith(true, none), [rows[0]], 'house-b', { id: 'v1', rowKeys: [] })).resolves.toBeUndefined();
+    expect(none).toEqual([]);
+  });
+
+  test('gate off: the mover is untouched', async () => {
+    process.env.GATE_MOSQUITO_MISTING = 'false';
+    await expect(assertNoMistingRefillMoves(trxWith(true), rows, 'house-b', null)).resolves.toBeUndefined();
+  });
+});
