@@ -4,7 +4,9 @@
 // the harness still blocks every /api request that leaks past the stub.
 /* global document */
 
-const noApi = () => null; // preview mains stub fetch in-page; anything reaching the network is a leak we record
+// Preview mains stub api methods in-page; the dashboard's raw social-feed
+// fetch gets an empty synthetic feed here. Everything else remains a leak.
+const noApi = ({ method, path }) => method === 'GET' && path === '/api/public/social-feed' ? { body: { posts: [] } } : null;
 
 const hoverFirstCard = {
   name: 'hover-card', widths: [1440], fullPage: false,
@@ -30,6 +32,13 @@ module.exports = [
       { name: 'forced-colors', forcedColors: true, widths: [390], skipFocusProbe: true },
     ],
     interactions: [
+      { name: 'ask-disclosure', fullPage: false, run: async (page) => {
+        const details = page.locator('[data-portal-ask] details');
+        await details.locator('summary').focus();
+        await page.keyboard.press('Enter');
+        if (!await details.evaluate((node) => node.open)) throw new Error('Ask Waves did not open with the keyboard');
+        await details.locator('summary').press('Enter');
+      } },
       hoverFirstCard,
       { name: 'more-sheet', widths: [390], fullPage: false, run: async (page) => { await page.getByRole('button', { name: /^More$/ }).first().click({ force: true }); } },
       // Interactions run in sequence on the same page: the More sheet (390) is still open here, so close
@@ -44,7 +53,18 @@ module.exports = [
   },
   { id: 'portal-plan', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=plan', url: '/preview-portal.html?tab=plan', ready: 'css:[data-glass="card"]', handle: noApi },
   { id: 'portal-visits', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=schedule|services', url: '/preview-portal.html?tab=schedule', ready: 'css:[data-glass="card"]', handle: noApi,
-    states: [{ name: 'upcoming' }, { name: 'completed', url: '/preview-portal.html?tab=services', ready: 'css:[data-glass="card"]' }] },
+    states: [{ name: 'upcoming' }, { name: 'completed', url: '/preview-portal.html?tab=services', ready: 'css:[data-glass="card"]',
+      interactions: [{ name: 'completed-disclosure', fullPage: false, run: async (page) => {
+        const trigger = page.locator('button[aria-controls][aria-expanded]').filter({ hasText: 'Quarterly Pest Control' }).first();
+        await trigger.focus();
+        await trigger.press('Enter');
+        const panelId = await trigger.getAttribute('aria-controls');
+        if (await trigger.getAttribute('aria-expanded') !== 'true') throw new Error('Completed visit did not expose its expanded state');
+        await page.locator(`[id="${panelId}"]`).waitFor({ state: 'visible' });
+        await trigger.press('Space');
+        if (await trigger.getAttribute('aria-expanded') !== 'false') throw new Error('Completed visit did not expose its collapsed state');
+      } }],
+    }] },
   { id: 'portal-billing', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=billing', url: '/preview-portal.html?tab=billing', ready: 'css:[data-glass="card"]', handle: noApi,
     interactions: [{ name: 'open-first-dialog', fullPage: false, run: async (page) => { await page.getByRole('button', { name: /add|update|change|manage/i }).first().click(); } }] },
   { id: 'portal-refer', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=refer', url: '/preview-portal.html?tab=refer', ready: 'css:[data-glass="card"]', handle: noApi },

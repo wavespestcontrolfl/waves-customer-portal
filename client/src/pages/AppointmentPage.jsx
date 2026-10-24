@@ -137,7 +137,7 @@ function MessageCard({ title, body, action }) {
       </div>
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{body}</div>
       {action ? (
-        <a href={action.href} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+        <a href={action.href} data-glass-accent="" data-glass-size="primary" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
           {action.label}
         </a>
       ) : null}
@@ -501,6 +501,7 @@ export default function AppointmentPage() {
             <button
               type="button"
               data-glass-accent=""
+              data-glass-size="primary"
               onClick={confirm}
               disabled={confirming}
               style={{ ...PRIMARY_CTA, marginTop: 16, opacity: confirming ? 0.5 : 1, cursor: confirming ? 'default' : 'pointer' }}
@@ -568,7 +569,7 @@ export default function AppointmentPage() {
           <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
             Open times near your route, one tap to move — no call needed.
           </div>
-          <a href={`/reschedule/${data.rescheduleToken}`} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+          <a href={`/reschedule/${data.rescheduleToken}`} data-glass-accent="" data-glass-size="primary" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
             See open times
           </a>
         </Card>

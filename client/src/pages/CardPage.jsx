@@ -140,12 +140,13 @@ function ContactPill({ href, label, icon }) {
   return (
     <a className="wcard-tap" href={href} style={{
       ...GLASS_MATERIAL,
-      display: 'flex', alignItems: 'center', gap: 6,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
       borderRadius: 999, padding: '9px 13px',
-      fontSize: 14, fontWeight: 600, whiteSpace: 'nowrap',
+      minHeight: 44, maxWidth: '100%', boxSizing: 'border-box',
+      fontSize: 14, fontWeight: 600,
     }}>
       {icon}
-      {label}
+      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{label}</span>
     </a>
   );
 }
@@ -289,8 +290,8 @@ export default function CardPage() {
         gap: 16,
       }}>
         {/* Top row: Text — logo — Call */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center', gap: 8 }}>
-          <div style={{ justifySelf: 'start' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto minmax(0, 1fr)', alignItems: 'center', gap: 8 }}>
+          <div style={{ justifySelf: 'start', minWidth: 0, maxWidth: '100%' }}>
             <ContactPill
               href={`sms:${data.phone.e164}`}
               label={techFirst ? `Text ${techFirst}` : 'Text us'}
@@ -302,7 +303,7 @@ export default function CardPage() {
             alt="Waves Pest Control"
             style={{ height: 54, width: 54, objectFit: 'contain', justifySelf: 'center', filter: 'drop-shadow(0 2px 6px rgba(1,16,28,0.35))' }}
           />
-          <div style={{ justifySelf: 'end' }}>
+          <div style={{ justifySelf: 'end', minWidth: 0, maxWidth: '100%' }}>
             <ContactPill
               href={`tel:${data.phone.e164}`}
               label={techFirst ? `Call ${techFirst}` : 'Call us'}
@@ -314,7 +315,7 @@ export default function CardPage() {
         <div style={{ height: 1, background: 'rgba(255,255,255,0.16)' }} />
 
         {/* Tech identity + share/save */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 13 }}>
           {data.tech?.photoUrl && !photoFailed ? (
             <img
               src={data.tech.photoUrl}
@@ -339,11 +340,11 @@ export default function CardPage() {
               fontSize: 16, fontWeight: 600,
             }}>{initials || 'W'}</div>
           )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 130px', gap: 2, minWidth: 0, overflowWrap: 'anywhere' }}>
             <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em' }}>{techName}</div>
             <div style={{ fontSize: 14, color: AQUA }}>Your Waves technician</div>
           </div>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', flexShrink: 0, gap: 8 }}>
             <button
               type="button"
               className="wcard-tap"
@@ -351,7 +352,7 @@ export default function CardPage() {
               aria-label="Share with a friend"
               title="Share"
               data-glass-pill=""
-              style={{ ...GLASS_MATERIAL, width: 40, height: 40, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center', font: 'inherit' }}
+              style={{ ...GLASS_MATERIAL, width: 44, height: 44, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center', font: 'inherit' }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M12 15V3" />
@@ -364,7 +365,7 @@ export default function CardPage() {
               href={`${API_BASE}/card/${token}/contact.vcf`}
               aria-label="Save contact"
               title="Save contact"
-              style={{ ...GLASS_MATERIAL, width: 40, height: 40, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              style={{ ...GLASS_MATERIAL, width: 44, height: 44, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M12 3v11" />
@@ -390,7 +391,7 @@ export default function CardPage() {
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
               background: '#000000', color: '#FFFFFF', borderRadius: 14,
-              padding: '11px 18px', fontSize: 15, fontWeight: 620,
+              minHeight: 48, padding: '11px 18px', fontSize: 16, fontWeight: 620,
               textDecoration: 'none', boxShadow: '0 8px 20px rgba(1,16,28,0.40)',
             }}
           >
@@ -409,18 +410,18 @@ export default function CardPage() {
         {/* Get the app */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9, alignItems: 'center' }}>
           <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.70)' }}>Get the Waves app</div>
-          <div style={{ display: 'flex', gap: 10, width: '100%' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, width: '100%' }}>
             <a className="wcard-tap" href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download the Waves app on the App Store"
-              style={{ ...GLASS_MATERIAL, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 13, padding: '9px 10px' }}>
-              <svg width="20" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d={APPLE_GLYPH_PATH} /></svg>
+              style={{ ...GLASS_MATERIAL, flex: '1 1 144px', minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 13, padding: '9px 10px' }}>
+              <svg width="20" height="24" viewBox="0 0 24 24" aria-hidden="true" style={{ flexShrink: 0 }}><path fill="currentColor" d={APPLE_GLYPH_PATH} /></svg>
               <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.12, textAlign: 'left' }}>
                 <span style={{ fontSize: 14, letterSpacing: '0.02em', opacity: 0.85, whiteSpace: 'nowrap' }}>Download on the</span>
                 <span style={{ fontSize: 16, fontWeight: 640, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>App Store</span>
               </span>
             </a>
             <a className="wcard-tap" href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Get the Waves app on Google Play"
-              style={{ ...GLASS_MATERIAL, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 13, padding: '9px 10px' }}>
-              <svg width="19" height="21" viewBox="0 0 24 24" aria-hidden="true">
+              style={{ ...GLASS_MATERIAL, flex: '1 1 144px', minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 13, padding: '9px 10px' }}>
+              <svg width="19" height="21" viewBox="0 0 24 24" aria-hidden="true" style={{ flexShrink: 0 }}>
                 <path fill="#00C3FF" d="M4 3 13 12 4 21Z" />
                 <path fill="#00E676" d="M4 3 16.5 9.8 13 12Z" />
                 <path fill="#FFD500" d="M16.5 9.8 20.5 12 16.5 14.2Z" />
@@ -435,7 +436,7 @@ export default function CardPage() {
         </div>
 
         {/* Socials */}
-        <div style={{ display: 'flex', justifyContent: 'center', gap: 9 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 9 }}>
           {SOCIAL_ICON_PATHS.map((s) => (
             <a
               key={s.name}
@@ -445,7 +446,7 @@ export default function CardPage() {
               rel="noopener noreferrer"
               aria-label={`Waves on ${s.name}`}
               title={s.name}
-              style={{ ...GLASS_MATERIAL, width: 37, height: 37, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              style={{ ...GLASS_MATERIAL, flexShrink: 0, width: 44, height: 44, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d={s.path} /></svg>
             </a>
@@ -457,7 +458,7 @@ export default function CardPage() {
           <>
             <div style={{ height: 1, background: 'rgba(255,255,255,0.16)' }} />
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, textAlign: 'center', paddingTop: 2 }}>
-              <span style={{ fontSize: 15, fontWeight: 620, color: 'rgba(255,255,255,0.88)' }}>
+              <span style={{ fontSize: 16, fontWeight: 620, color: 'rgba(255,255,255,0.88)' }}>
                 {techFirst ? `Did ${techFirst} take good care of you?` : 'Did we take good care of you?'}
               </span>
               <div style={{
@@ -475,7 +476,8 @@ export default function CardPage() {
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{
-                  fontSize: 15, fontWeight: 640, color: '#BFE3F5',
+                  minHeight: 44, display: 'inline-flex', alignItems: 'center',
+                  fontSize: 16, fontWeight: 640, color: '#BFE3F5',
                   textDecoration: 'underline', textUnderlineOffset: 3,
                   textDecorationColor: 'rgba(191,227,245,0.5)',
                 }}

@@ -635,7 +635,7 @@ export default function SecureAppointmentPage() {
             </p>
           ) : null}
           {data ? <VisitSummary data={data} /> : null}
-          <a href={data?.payUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+          <a href={data?.payUrl} data-glass-accent="" data-glass-size="primary" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
             Pay your annual invoice
           </a>
           {/* The card form is deliberately NOT rendered here: switching to
@@ -731,7 +731,7 @@ export default function SecureAppointmentPage() {
               justifyContent: 'space-between',
             }}
           >
-            <span style={{ fontSize: 14.5, fontWeight: 700, color: S.text }}>Your service total</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: S.text }}>Your service total</span>
             <span style={{ fontSize: 22, fontWeight: 700, color: S.text }}>{fmtMoney(planContext.perVisit)}</span>
           </div>
         ) : null}
@@ -767,6 +767,7 @@ export default function SecureAppointmentPage() {
             <button
               type="button"
               data-glass-accent=""
+              data-glass-size="primary"
               onClick={handleSave}
               disabled={busy || !(captureState.ready && captureState.agreed)}
               style={{
@@ -783,7 +784,7 @@ export default function SecureAppointmentPage() {
                   : (planRecurring ? 'Save card & confirm my plan' : 'Save card & secure my visit')}
             </button>
             {(planRecurring || planOneTime) ? (
-              <p style={{ textAlign: 'center', fontSize: 14.5, color: S.muted, marginTop: 10, marginBottom: 0 }}>
+              <p style={{ textAlign: 'center', fontSize: 16, color: S.muted, lineHeight: 1.5, marginTop: 10, marginBottom: 0 }}>
                 Nothing is charged today.
               </p>
             ) : null}

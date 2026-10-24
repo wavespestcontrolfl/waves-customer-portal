@@ -611,6 +611,7 @@ function EnRouteCard({ data }) {
         <a
           href={WAVES_SUPPORT_SMS_TEL}
           data-glass-accent=""
+          data-glass-size="primary"
           style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >
           TEXT {techFirst.toUpperCase()}
@@ -731,6 +732,7 @@ function CancelledCard({ data }) {
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
         data-glass-accent=""
+        data-glass-size="primary"
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
           background: COLORS.glassNavy, color: COLORS.white,
@@ -759,6 +761,7 @@ function NoShowCard({ data }) {
       <a
         href={WAVES_SUPPORT_PHONE_TEL}
         data-glass-accent=""
+        data-glass-size="primary"
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
           background: COLORS.glassNavy, color: COLORS.white,

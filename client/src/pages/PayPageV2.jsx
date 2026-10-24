@@ -1489,6 +1489,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
         <button
           type="button"
+          data-glass-accent=""
+          data-glass-size="primary"
           onClick={() => { onError?.(null); setLoadFailed(false); setLoadNonce((n) => n + 1); }}
           style={{
             justifySelf: 'center',
@@ -1871,6 +1873,8 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
       )}
       <button
         type="button"
+        data-glass-accent=""
+        data-glass-size="primary"
         onClick={submit}
         disabled={!ready || processing}
         style={{
@@ -2554,6 +2558,8 @@ export default function PayPageV2() {
                     </div>
                     <button
                       type="button"
+                      data-glass-accent=""
+                      data-glass-size="primary"
                       onClick={() => setSetupCapture({ status: 'minting' })}
                       style={{
                         ...docButton('primary'),

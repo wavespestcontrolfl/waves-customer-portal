@@ -486,13 +486,13 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
 });
 
 // Shared HTML page wrapper for the confirm flow's GET + POST renders.
-// Single self-contained document — no template engine, no client code.
+// Single self-contained document — no template engine or external client code.
 //
 // Glass UI (owner rule 2026-07-17: the newsletter and every secondary
 // customer page render in the glass language — see
 // docs/design/DECISIONS.md). Tokens mirror GLASS_THEME in
 // email-template.js: canonical navy #04395E ink, orb-scene background,
-// frosted card, gold action bar; 15px body, nothing under 14px.
+// frosted card, gold action bar; 16px prose, nothing under 14px.
 function renderConfirmPage(heading, bodyHtml) {
   return `
       <!doctype html>
@@ -504,14 +504,22 @@ function renderConfirmPage(heading, bodyHtml) {
         <style>
           * { box-sizing: border-box; }
           body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Inter, Arial, sans-serif; margin: 0; padding: clamp(40px, 8vw, 72px) 20px; color: #04395E; min-height: 100vh; background: #EDF4FA; background-image: radial-gradient(1200px 800px at -8% 12%,rgba(10,126,194,.22),transparent 60%),radial-gradient(1000px 700px at 108% 0%,rgba(56,170,225,.16),transparent 60%),radial-gradient(900px 700px at 96% 90%,rgba(6,90,140,.13),transparent 62%),radial-gradient(800px 600px at -6% 100%,rgba(240,165,0,.15),transparent 58%),linear-gradient(180deg,#EAF3FB 0%,#F6FAFE 48%,#EAF2F9 100%); background-attachment: fixed; }
-          main { max-width: 520px; margin: 0 auto; }
+          main { max-width: 520px; margin: 0 auto; overflow-wrap: anywhere; }
           h1 { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Inter, Arial, sans-serif; font-size: 32px; line-height: 1.15; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 10px; color: #04395E; }
           p { line-height: 1.6; color: #2A3F5F; font-size:16px; }
           .box { background: #FFFFFF; background: rgba(255,255,255,0.55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border: 1px solid #EFF6FC; border-radius:12px; padding: 26px; margin-top: 24px; box-shadow: 0 18px 60px rgba(4,57,94,0.12), inset 0 1px 0 rgba(255,255,255,0.6); }
+          @media screen and (prefers-reduced-motion: no-preference) {
+            .box { transform-origin: center top; animation: glass-card-turn-in 1000ms cubic-bezier(.16,1,.3,1); }
+            @keyframes glass-card-turn-in {
+              from { opacity: .55; transform: perspective(1200px) translateY(16px) rotateX(10deg) rotateY(-4deg) scale(.96); }
+              to { opacity: 1; transform: none; }
+            }
+          }
           .email { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #04395E; }
           a { color: #0A7EC2; }
-          .btn { display:block; width:100%; text-align:center; background:#F5B520; background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%); color:#04395E; border:1px solid #FFEEB4; border-radius:10px; padding:13px 24px; font-weight:700; letter-spacing:0; cursor:pointer; font-size:16px; font-family:inherit; text-decoration:none; }
+          .btn { display:block; width:100%; min-height:48px; text-align:center; background:#F5B520; background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%); color:#04395E; border:1px solid #FFEEB4; border-radius:10px; padding:13px 24px; font-weight:700; letter-spacing:0; cursor:pointer; font-size:16px; font-family:inherit; text-decoration:none; }
           .btn:hover { filter: brightness(0.97); }
+          :is(a, button, input, textarea):focus-visible { outline: 2px solid #04395E; outline-offset: 3px; }
           form { margin: 0; padding: 0; }
           .footer { margin-top: 32px; font-size: 14px; color: #4F5B70; text-align: center; }
         </style>
@@ -524,6 +532,38 @@ function renderConfirmPage(heading, bodyHtml) {
           </div>
           <div class="footer">${glassUniversalFooterHtml()}</div>
         </main>
+        <script>
+          (() => {
+            const card = document.querySelector('.box');
+            if (!card) return;
+            const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
+            const printing = window.matchMedia('print');
+            let pointerHeld = false;
+            const settle = () => {
+              card.style.animation = 'none';
+              card.style.animationPlayState = '';
+            };
+            card.addEventListener('animationend', (event) => {
+              if (event.target === card && event.animationName === 'glass-card-turn-in') settle();
+            });
+            card.addEventListener('focusin', () => { if (!pointerHeld) settle(); });
+            card.addEventListener('pointerdown', () => {
+              pointerHeld = true;
+              card.style.animationPlayState = 'paused';
+            }, { capture: true, passive: true });
+            const release = () => {
+              if (!pointerHeld) return;
+              setTimeout(() => { pointerHeld = false; settle(); }, 0);
+            };
+            window.addEventListener('pointerup', release, true);
+            window.addEventListener('pointercancel', release, true);
+            window.addEventListener('blur', release, true);
+            window.addEventListener('beforeprint', settle);
+            reduced.addEventListener('change', settle);
+            printing.addEventListener('change', settle);
+            if (reduced.matches || printing.matches) settle();
+          })();
+        </script>
       </body>
       </html>
     `;

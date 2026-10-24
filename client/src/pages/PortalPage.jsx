@@ -318,7 +318,7 @@ function WavesAiBar({ tab, onAsk }) {
       <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', color: PORTAL_SHELL.text, fontSize: 16, fontWeight: 700 }}>
         <Icon name="chat" size={18} />
         <span style={{ flex: 1 }}>Ask Waves AI</span>
-        <Icon name="chevronDown" size={16} />
+        <Icon className="waves-ask-chevron" name="chevronDown" size={16} />
       </summary>
       <form className="waves-ask-form" onSubmit={(e) => { e.preventDefault(); submit(); }}>
         <input
@@ -532,6 +532,7 @@ const PORTAL_PRIMARY_ACTION = {
   background: B.glassNavy,
   color: '#fff',
   border: 'none',
+  minHeight: 48,
 };
 
 function PortalStatePanel({
@@ -547,6 +548,7 @@ function PortalStatePanel({
   actionLabel,
   onAction,
   actionStyle = PORTAL_SECONDARY_ACTION,
+  actionIsPrimary = false,
 }) {
   return (
     <section data-glass="card" style={{
@@ -591,7 +593,7 @@ function PortalStatePanel({
       )}
       {children}
       {actionLabel && onAction && (
-        <button type="button" onClick={onAction} data-glass-accent="" style={{ ...actionStyle, marginTop: 16, position: 'relative' }}>
+        <button type="button" onClick={onAction} data-glass-accent="" data-glass-size={actionIsPrimary ? 'primary' : undefined} style={{ ...actionStyle, marginTop: 16, position: 'relative' }}>
           {actionLabel}
         </button>
       )}
@@ -1229,6 +1231,7 @@ function RecommendationsCard({ data, customer }) {
                       type="button"
                       onClick={() => setPurchaseCard(card)}
                       data-glass-accent=""
+                      data-glass-size="primary"
                       style={{ ...PORTAL_PRIMARY_ACTION, width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center' }}
                     >
                       Add now — {fmtMoney(card.option.perVisit)} per application
@@ -1239,6 +1242,7 @@ function RecommendationsCard({ data, customer }) {
                       disabled={state === 'sending'}
                       onClick={() => handleRequest(card)}
                       data-glass-accent=""
+                      data-glass-size={card.kind === 'offer' && priced ? 'primary' : undefined}
                       style={{ ...(card.kind === 'offer' && priced ? PORTAL_PRIMARY_ACTION : PORTAL_SECONDARY_ACTION), width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center' }}
                     >
                       {/* One consistent label across offer and ask cards
@@ -1706,7 +1710,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                   {init.terms?.text}
                 </div>
               </div>
-              <button type="button" data-glass-accent="" style={PORTAL_PRIMARY_ACTION} onClick={() => setStep('time')}>
+              <button type="button" data-glass-accent="" data-glass-size="primary" style={PORTAL_PRIMARY_ACTION} onClick={() => setStep('time')}>
                 Agree and choose a time
               </button>
             </>
@@ -1815,6 +1819,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               <button
                 type="button"
                 data-glass-accent=""
+                data-glass-size="primary"
                 style={{ ...PORTAL_PRIMARY_ACTION, opacity: mustCollectCard || confirming ? 0.55 : 1 }}
                 disabled={mustCollectCard || confirming}
                 onClick={handleConfirm}
@@ -1852,7 +1857,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                   ? 'A confirmation email and an app notification are on the way.'
                   : 'A confirmation notification is on the way.'}
               </div>
-              <button type="button" data-glass-accent="" style={PORTAL_PRIMARY_ACTION} onClick={onClose}>
+              <button type="button" data-glass-accent="" data-glass-size="primary" style={PORTAL_PRIMARY_ACTION} onClick={onClose}>
                 Done
               </button>
             </>
@@ -1894,7 +1899,7 @@ function PropertyAlertsCard({ data }) {
           <Icon name="cloudRain" size={14} strokeWidth={2} />Property Alerts
         </div>
         <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>What to watch this week</div>
-        <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Based on weather and your visit history.</div>
+        <div style={{ marginTop: 4, fontSize: 16, color: muted, lineHeight: 1.45 }}>Based on weather and your visit history.</div>
       </div>
       <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
         {data.alerts.map((alert) => (
@@ -1909,7 +1914,7 @@ function PropertyAlertsCard({ data }) {
                 <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{alert.title}</div>
                 <div style={{ fontSize: 14, color: muted, whiteSpace: 'nowrap' }}>{formatAlertWhen(alert.firedAt)}</div>
               </div>
-              <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.5 }}>{alert.body}</div>
+              <div style={{ marginTop: 4, fontSize: 16, color: muted, lineHeight: 1.5 }}>{alert.body}</div>
             </div>
           </div>
         ))}
@@ -1979,16 +1984,24 @@ function PhotoGallery({ photos }) {
     <div>
       <div style={{ display: 'flex', gap: 8, overflowX: 'auto', WebkitOverflowScrolling: 'touch', paddingBottom: 4 }}>
         {visiblePhotos.map((p, i) => (
-          <div key={p.id || i} onClick={() => setSelected(selected === i ? null : i)} style={{
+          <button
+            key={p.id || i}
+            type="button"
+            className="waves-focus-ring"
+            aria-label={`View ${p.labelPicked || (p.type && p.type !== 'general' ? p.type.replace(/_/g, ' ') : 'service')} photo`}
+            aria-pressed={selected === i}
+            onClick={() => setSelected(selected === i ? null : i)}
+            style={{
             position: 'relative', flex: '0 0 auto', width: visiblePhotos.length === 1 ? '100%' : 140,
             height: visiblePhotos.length === 1 ? 180 : 105,
             borderRadius: 12, overflow: 'hidden', cursor: 'pointer',
             border: p.isBest ? `2px solid ${B.teal}` : `1px solid ${B.grayLight}`,
             boxShadow: selected === i ? `0 0 0 3px ${B.teal}44` : 'none',
+            padding: 0, background: 'none', fontFamily: FONTS.body,
           }}>
             {/* Eager: presigned URL — lazy deferred the fetch past expiry
                 and thumbnails rendered blank. */}
-            <img src={p.url} alt={p.labelPicked ? `Lawn ${p.labelPicked.toLowerCase()}` : `Lawn ${p.type || ''}`} style={{
+            <img src={p.url} alt="" style={{
               width: '100%', height: '100%', objectFit: 'cover',
             }} />
             {p.isBest && (
@@ -2007,7 +2020,7 @@ function PhotoGallery({ photos }) {
                 {p.labelPicked || p.type.replace(/_/g, ' ')}
               </div>
             )}
-          </div>
+          </button>
         ))}
       </div>
 
@@ -2635,13 +2648,13 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
               )}
               {post.title && (
                 <div style={{
-                  fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.3,
+                  fontSize: 16, fontWeight: 700, color: B.glassNavy, lineHeight: 1.3,
                   display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
                 }}>{post.title}</div>
               )}
               {post.text && (
                 <div style={{
-                  fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.45,
+                  fontSize: 16, color: PORTAL_SHELL.body, lineHeight: 1.45,
                   display: '-webkit-box', WebkitLineClamp: post.title ? 2 : (compact ? 2 : 3), WebkitBoxOrient: 'vertical', overflow: 'hidden',
                 }}>{post.text}</div>
               )}
@@ -3126,7 +3139,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                   } finally {
                     setConfirmingVisit(false);
                   }
-                }} data-glass-accent="" style={{
+                }} data-glass-accent="" data-glass-size="primary" style={{
                   ...dashboardPrimaryButton,
                   ...(confirmingVisit ? { opacity: 0.6, cursor: 'default' } : {}),
                 }}>
@@ -3177,7 +3190,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
-              <button type="button" onClick={() => onSwitchTab?.('request')} data-glass-accent="" style={{
+              <button type="button" onClick={() => onSwitchTab?.('request')} data-glass-accent="" data-glass-size="primary" style={{
                 ...dashboardPrimaryButton,
               }}>
                 Request Service
@@ -3498,6 +3511,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
 function ServicesTab() {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
+  const reportPanelIdPrefix = useId();
   const [services, setServices] = useState([]);
   // The Completed list stays CUSTOMER-wide by ruling (PR 2 r1f; kept in PR 4
   // after review): a retired house has no picker entry left to reach its
@@ -3734,7 +3748,7 @@ function ServicesTab() {
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
           Visit history
         </div>
-        <div style={{ marginTop: 4, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
+        <div style={{ marginTop: 4, fontSize: 16, color: B.grayDark, lineHeight: 1.55 }}>
           Service reports and photos from completed visits.
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginTop: 18 }}>
@@ -3757,7 +3771,7 @@ function ServicesTab() {
           box) read as clutter on a phone (owner 08-28). */}
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div data-glass="chip" style={sectionTitle}><Icon name="search" size={14} strokeWidth={2} />Filter Visits</div>
-        <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Narrow by service type, year, or a note.</div>
+        <div style={{ marginTop: 4, fontSize: 16, color: muted, lineHeight: 1.45 }}>Narrow by service type, year, or a note.</div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : '1fr 1fr 2fr', gap: 10, marginTop: 12 }}>
           <label style={{ display: 'block', minWidth: 0 }}>
             <div style={filterLabel}>Type</div>
@@ -3818,6 +3832,7 @@ function ServicesTab() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {monthServices.map(s => {
                 const status = getStatus(s);
+                const reportPanelId = `${reportPanelIdPrefix}-${s.id}`;
                 return (
                   <div key={s.id} style={{
                     ...card,
@@ -3828,6 +3843,7 @@ function ServicesTab() {
                   }}>
                     {/* Header — always visible */}
                     <button type="button" onClick={() => toggleExpand(s)} data-glass="soft"
+                      aria-expanded={expanded === s.id} aria-controls={reportPanelId}
                       style={{ width: '100%', padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, flexWrap: compact ? 'wrap' : 'nowrap', border: 'none', background: 'rgba(255,255,255,0.64)', textAlign: 'left', fontFamily: FONTS.body, position: 'relative' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: '1 1 280px' }}>
                         <div style={{
@@ -3907,7 +3923,7 @@ function ServicesTab() {
                       };
                       const actionStyle = { ...PORTAL_SECONDARY_ACTION, minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, position: 'relative' };
                       return (
-                        <div style={{ borderTop: '1px solid #E7E2D7', padding: compact ? 14 : 18, background: subtle }}>
+                        <div id={reportPanelId} style={{ borderTop: '1px solid #E7E2D7', padding: compact ? 14 : 18, background: subtle }}>
                           <div style={{ ...detailCard, padding: 0, overflow: 'hidden' }}>
                             <div style={{ position: 'relative', height: 260, overflow: 'hidden', background: '#fff' }} aria-hidden="true">
                               {previewSrc ? (
@@ -5102,7 +5118,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 48,
     position: 'relative',
   };
   const secondaryButton = {
@@ -5219,7 +5235,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     if (readOnlyVisits) return null;
     const busy = !!confirmingIds[s.id];
     return (
-      <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" style={{
+      <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" data-glass-size="primary" style={{
         ...primaryButton, padding: compact ? '9px 14px' : '10px 14px', flex: compact ? undefined : 1,
         fontSize: 14,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
@@ -5405,7 +5421,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 ? `${upcomingOnly.length} ${upcomingOnly.length === 1 ? 'visit' : 'visits'} scheduled${multiProperty ? ` at ${currentLabel}` : ''}`
                 : multiProperty ? `Nothing scheduled at ${currentLabel}` : 'Schedule status'}
             </div>
-            <div style={{ marginTop: 5, fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+            <div style={{ marginTop: 5, fontSize: 16, color: B.grayDark, lineHeight: 1.55 }}>
               {scopeStale
                 ? 'Your property selection changed. Refreshing…'
                 : multiProperty
@@ -5416,7 +5432,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           {/* Requests create work — a cancelled account (C4) passes no
               handler and gets no button. */}
           {onRequestVisit && (
-            <button type="button" onClick={onRequestVisit} data-glass-accent="" style={{ ...primaryButton, minHeight: 44, flexShrink: 0, ...(compact ? { width: '100%' } : {}) }}>
+            <button type="button" onClick={onRequestVisit} data-glass-accent="" data-glass-size="primary" style={{ ...primaryButton, flexShrink: 0, ...(compact ? { width: '100%' } : {}) }}>
               Request Visit
             </button>
           )}
@@ -5482,6 +5498,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           actionLabel={readOnlyVisits ? undefined : 'Request a Visit'}
           onAction={readOnlyVisits ? undefined : onRequestVisit}
           actionStyle={primaryButton}
+          actionIsPrimary
         />
       )}
 
@@ -6570,7 +6587,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 48,
     position: 'relative',
   };
   const secondaryButton = {
@@ -7429,6 +7446,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                 type="button"
                 disabled={!defaultConsentChecked || defaultConsentSaving}
                 onClick={confirmDefaultConsent}
+                data-glass-size="primary"
                 style={{ ...primaryButton, opacity: (!defaultConsentChecked || defaultConsentSaving) ? 0.55 : 1, cursor: (!defaultConsentChecked || defaultConsentSaving) ? 'default' : 'pointer' }}
               >
                 {defaultConsentSaving ? 'Saving...' : 'Agree & Set Default'}
@@ -7477,7 +7495,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
             <div style={{ marginBottom: 12 }}>
               <SaveCardConsent locked onChange={() => {}} methodType={addMethodType} />
             </div>
-            <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} data-glass-accent="" style={{
+            <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} data-glass-accent="" data-glass-size="primary" style={{
               ...primaryButton,
               width: '100%',
               padding: 14,
@@ -7936,7 +7954,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               : 'Couldn’t save your billing preferences. Please try again.'}
           </div>
         )}
-        <button type="submit" disabled={billingPrefsSaving} data-glass-accent="" style={{
+        <button type="submit" disabled={billingPrefsSaving} data-glass-accent="" data-glass-size="primary" style={{
           ...primaryButton,
           opacity: billingPrefsSaving ? 0.6 : 1,
           width: '100%',
@@ -10333,12 +10351,12 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
                         position: 'relative',
                       }}
                     >
-                      <span style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, flex: 1 }}>{q.q}</span>
+                      <span style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, flex: 1 }}>{q.q}</span>
                       <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: muted, transform: isOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
                     </button>
                     {isOpen && (
                       <div style={{ padding: '0 14px 14px', borderTop: '1px solid #E7E2D7' }}>
-                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, marginTop: 10 }}>
+                        <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.65, marginTop: 10 }}>
                           {personalizeFaqAnswer(q.a)}
                         </div>
                         {/* Callback-coverage banner removed 2026-07-22: it promised
@@ -10609,9 +10627,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
             }}
           />
         </div>
-        <button type="submit" disabled={loading} data-glass-accent="" style={{
+        <button type="submit" disabled={loading} data-glass-accent="" data-glass-size="primary" style={{
           ...primaryButton,
-          minHeight: 44,
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -10760,7 +10777,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       <Icon name="check" size={15} strokeWidth={2} /> Request sent
                     </span>
                   ) : (
-                    <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" style={{
+                    <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" data-glass-size="primary" style={{
                       ...primaryButton,
                       width: compact ? '100%' : 'fit-content',
                       display: 'inline-flex',
@@ -11019,9 +11036,8 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
               </div>
             </div>
             {canPriceTier ? (
-              <button type="button" onClick={runPricing} disabled={loading} data-glass-accent="" style={{
+              <button type="button" onClick={runPricing} disabled={loading} data-glass-accent="" data-glass-size="primary" style={{
                 ...primaryButton,
-                minHeight: 44,
                 fontSize: 16,
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -11134,10 +11150,9 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                           <Icon name="check" size={15} strokeWidth={2} /> Request sent
                         </span>
                       ) : (
-                        <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" style={{
+                        <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" data-glass-size="primary" style={{
                           ...primaryButton,
                           width: compact ? '100%' : 'fit-content',
-                          minHeight: 44,
                           fontSize: 16,
                           display: 'inline-flex',
                           alignItems: 'center',
@@ -11689,7 +11704,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 48,
     position: 'relative',
   };
   const secondaryButton = {
@@ -11768,7 +11783,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
             }}>
               {customer.firstName ? `${customer.firstName}'s plan` : 'Your plan'}
             </h1>
-            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+            <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.55 }}>
               {/* A rodent-only customer has no WaveGuard plan but DOES have a
                   recurring service on the schedule — "no recurring plan"
                   would contradict the row rendered below (codex P2). */}
@@ -12395,9 +12410,10 @@ function TermiteAnnualRenewalCard({
                 <button
                   type="button"
                   data-glass-accent=""
+                  data-glass-size="primary"
                   onClick={handleDecline}
                   disabled={submitting}
-                  style={{ ...primaryButton, minHeight: 44 }}
+                  style={primaryButton}
                 >
                   {submitting ? 'Saving…' : 'Confirm'}
                 </button>
@@ -13121,7 +13137,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
           <div style={{ fontSize: 14, color: B.textCaption, marginBottom: 4 }}>Today's visit</div>
           <div style={{ fontSize: 16, fontWeight: 600, color: B.navy }}>{svcType}</div>
           {serviceDescription && (
-            <div style={{ fontSize: 15, color: B.textBody, marginTop: 6, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 16, color: B.textBody, marginTop: 6, lineHeight: 1.5 }}>
               {serviceDescription}
             </div>
           )}
@@ -13152,7 +13168,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
         {step === 3 && office?.phone && (
           <a
             href={`sms:${office.phone.replace(/\D/g, '')}`}
-            data-glass-accent="" style={{
+            data-glass-accent="" data-glass-size="primary" style={{
               ...PORTAL_PRIMARY_ACTION,
               width: '100%',
               minHeight: 48,
@@ -13246,11 +13262,11 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
         <div style={{ display: 'flex', gap: 8 }}>
           <a
             href={`tel:${office.phone.replace(/\D/g, '')}`}
-            data-glass-accent="" style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
+            data-glass-accent="" data-glass-size="primary" style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
           >Call</a>
           <a
             href={`sms:${office.phone.replace(/\D/g, '')}`}
-            data-glass-accent="" style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
+            data-glass-accent="" data-glass-size="primary" style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
           >Text</a>
         </div>
       </div>
@@ -13433,7 +13449,7 @@ function ReferTab({ customer, onSwitchTab }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 48,
     position: 'relative',
   };
   const secondaryButton = {
@@ -13686,7 +13702,7 @@ function ReferTab({ customer, onSwitchTab }) {
                 {referralCode || 'Auto-assigned'}
               </div>
             </div>
-            <button type="button" onClick={() => handleCopy(shareLink)} data-glass-accent="" style={{
+            <button type="button" onClick={() => handleCopy(shareLink)} data-glass-accent="" data-glass-size="primary" style={{
               ...primaryButton,
               whiteSpace: 'nowrap',
               position: 'relative',
@@ -13774,7 +13790,7 @@ function ReferTab({ customer, onSwitchTab }) {
                 marginBottom: 14,
               }}
             />
-            <button type="submit" disabled={!form.name.trim() || !form.phone.trim() || submitting} data-glass-accent="" style={{
+            <button type="submit" disabled={!form.name.trim() || !form.phone.trim() || submitting} data-glass-accent="" data-glass-size="primary" style={{
               ...primaryButton,
               width: '100%',
               opacity: submitting || !form.name.trim() || !form.phone.trim() ? 0.65 : 1,
@@ -13844,7 +13860,7 @@ function ReferTab({ customer, onSwitchTab }) {
               marginBottom: 14,
             }}
           />
-          <button type="submit" disabled={!emailForm.name.trim() || !emailForm.email.trim() || emailSubmitting} data-glass-accent="" style={{
+          <button type="submit" disabled={!emailForm.name.trim() || !emailForm.email.trim() || emailSubmitting} data-glass-accent="" data-glass-size="primary" style={{
             ...primaryButton,
             width: '100%',
             opacity: emailSubmitting || !emailForm.name.trim() || !emailForm.email.trim() ? 0.65 : 1,
@@ -14073,7 +14089,7 @@ function TermiteBondCard({ bonds, compact, card, sectionTitle, primaryButton, se
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
         <a href="tel:+19412975749" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>Call us</a>
-        <a href="sms:+19412975749?body=Hi Waves, I have a question about my termite bond." data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>Text us</a>
+        <a href="sms:+19412975749?body=Hi Waves, I have a question about my termite bond." data-glass-accent="" data-glass-size="primary" style={{ ...primaryButton, textDecoration: 'none', position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>Text us</a>
       </div>
     </section>
   );
@@ -14119,7 +14135,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     border: 'none',
     borderRadius: 10,
     boxShadow: 'none',
-    padding: '10px 16px', minHeight: 44,
+    padding: '10px 16px', minHeight: 48,
     fontSize: 14,
     position: 'relative',
     letterSpacing: 0,
@@ -14636,7 +14652,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
           <a href="tel:+19412975749" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
             Call
           </a>
-          <a href="sms:+19412975749" data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+          <a href="sms:+19412975749" data-glass-accent="" data-glass-size="primary" style={{ ...primaryButton, textDecoration: 'none', position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
             Text
           </a>
           <a href="mailto:contact@wavespestcontrol.com?subject=Document%20request" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -16554,7 +16570,7 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
             }}>
               Visits
             </h1>
-            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+            <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.55 }}>
               Upcoming appointments, completed reports, reminders, and service notes.
             </div>
           </div>
@@ -16599,7 +16615,14 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
 // and target; only a self-serve reschedule or re-service page, or a known
 // portal tab, renders.
 const CHAT_ACTION_TABS = ['billing', 'schedule', 'services', 'plan', 'documents', 'refer'];
-const CHAT_ACTION_BUTTON = { ...PORTAL_SECONDARY_ACTION, padding: '11px 18px', fontSize: 14 };
+const CHAT_ACTION_BUTTON = {
+  ...PORTAL_SECONDARY_ACTION,
+  padding: '11px 18px',
+  fontSize: 14,
+  maxWidth: '100%',
+  whiteSpace: 'normal',
+  overflowWrap: 'anywhere',
+};
 function chatActionsOf(actions) {
   if (!Array.isArray(actions)) return [];
   return actions.filter((a) => a && typeof a.label === 'string' && a.label && (
@@ -16914,7 +16937,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
                 maxWidth: '84%',
                 padding: '10px 13px',
                 borderRadius: 8,
-                fontSize: 15,
+                fontSize: 16,
                 lineHeight: 1.5,
                 fontFamily: FONTS.body,
                 boxShadow: '0 1px 2px rgba(15,23,42,0.04)',

@@ -139,7 +139,7 @@ function QuoteRequestForm({ token, firstName }) {
       <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" aria-label="Phone" type="tel" autoComplete="tel" className="waves-focus-ring" style={inputStyle} />
       <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" aria-label="Email" type="email" autoComplete="email" className="waves-focus-ring" style={inputStyle} />
       <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" aria-label="Best time to reach you (optional)" className="waves-focus-ring" style={inputStyle} />
-      <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 48, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 700, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
+      <button data-glass-accent="" data-glass-size="primary" type="submit" disabled={busy} style={{ minHeight: 48, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 700, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
         {status === 'loading' ? 'Sending…' : 'Get my free lawn plan'}
       </button>
       {error ? (
