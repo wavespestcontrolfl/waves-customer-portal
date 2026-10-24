@@ -59,6 +59,19 @@ const normalized = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').tri
 // got it" is always in view.
 // `now` null reads with no upper bound: a close is re-validated against every
 // text that exists by then, including one stamped after the tick began.
+// Non-conversation inbound rows (opt-outs, reactions, help keywords) are never part of the thread.
+const conversationOnly = (q) => q.where((w) => w.whereNull('message_type').orWhereNotIn('message_type', NOT_CONVERSATION));
+
+// The time of the newest text the customer sent after `message`, from any of their phones, read straight from
+// sms_log with the thread's own filters: not limited to the newest THREAD_LIMIT rows, so later staff texts cannot
+// hide it. Null when there is none.
+async function latestCustomerTextAt(conn, message) {
+  const row = await conversationOnly(excludeRecruitingSmsLog(conn('sms_log').where({ customer_id: message.customer_id, direction: 'inbound' })
+    .where('created_at', '>', new Date(message.created_at)).whereNot('id', message.id)))
+    .max({ at: 'created_at' }).first();
+  return row?.at ? new Date(row.at) : null;
+}
+
 async function loadThreadMessages(conn, message, now) {
   const after = new Date(message.created_at);
   // The same conversation only: the number the source text came from (or went
@@ -78,8 +91,7 @@ async function loadThreadMessages(conn, message, now) {
     .whereNot('id', message.id)
     .orderBy('created_at', 'desc').limit(THREAD_LIMIT)
     .select('id', 'direction', 'message_body', 'created_at'));
-  const inbound = onPeer(base().where({ direction: 'inbound' }), 'from_phone')
-    .where((q) => q.whereNull('message_type').orWhereNotIn('message_type', NOT_CONVERSATION));
+  const inbound = conversationOnly(onPeer(base().where({ direction: 'inbound' }), 'from_phone'));
   const outbound = excludeUnresolvedSendReservations(onPeer(base().where({ direction: 'outbound' }), 'to_phone'))
     .whereIn('status', ['sent', 'delivered']).whereRaw(operatorReplySql('sms_log'))
     // A scheduled text is stamped at handoff; one QUEUED before the source
@@ -180,4 +192,4 @@ async function revalidateThreadCompletion(trx, commitment, message, verdict) {
   return !!cited && normalized(cited.text).includes(normalized(verdict.quote));
 }
 
-module.exports = { BASIS, THREAD_PROMPT_VERSION, THREAD_POLICY, THREAD_LIMIT, loadThreadMessages, threadFingerprint, groundThreadVerdict, verifyThreadCompletion, revalidateThreadCompletion };
+module.exports = { BASIS, THREAD_PROMPT_VERSION, THREAD_POLICY, THREAD_LIMIT, loadThreadMessages, latestCustomerTextAt, threadFingerprint, groundThreadVerdict, verifyThreadCompletion, revalidateThreadCompletion };

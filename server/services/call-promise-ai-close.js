@@ -51,7 +51,7 @@ const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive } = require(
 const { etDateString } = require('../utils/datetime-et');
 const commitments = require('./call-commitments');
 const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
-const { verifyThreadCompletion, loadThreadMessages, THREAD_LIMIT, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
+const { verifyThreadCompletion, loadThreadMessages, latestCustomerTextAt, THREAD_LIMIT, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
 
 const { associationFrom, evidenceBoundary, storedProof, refreshableVerdictSql, staleAiRowSql, speakerTurns, normalizeForMatch } = commitments;
@@ -147,11 +147,7 @@ async function subjectOf(conn, row, from, cache) {
 // The newest text the CUSTOMER sent (any of their phones) after the promise's floor, or null. The record loader
 // reads outbound texts only, so a record that says "done" cannot see a newer "no one came": a close on a record
 // must not stand over a customer text that came after the record, and the later conversation decides instead.
-async function latestCustomerInbound(conn, message) {
-  const { records } = await loadThreadMessages(conn, message, null);
-  const times = records.filter((r) => r.who === 'customer').map((r) => new Date(r.created_at).getTime()).filter(Number.isFinite);
-  return times.length ? new Date(Math.max(...times)) : null;
-}
+const latestCustomerInbound = (conn, message) => latestCustomerTextAt(conn, message);
 const laterThan = (a, b) => !!a && (!b || a.getTime() > new Date(b).getTime());
 
 // A call record proves the promise only in Waves' own words (the transcript's

@@ -563,11 +563,25 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
         ? { ok: true, json: { verdict: 'completed', record_ref: `sms:${reply}`, quote: 'Got the report' } } : { ok: true, json: { verdict: 'open', record_ref: null, quote: null } }));
       expect(await run(w)).toMatchObject({ closed: 1 });
       // 30 later staff texts push the confirming text out of the newest-30 page.
+      // (Also proves a customer text 30 staff texts back is still seen: see the second case below.)
       for (let i = 0; i < 30; i += 1) await addSms(w, { message_body: `Follow-up note ${i}`, created_at: new Date(Date.now() - 2 * 60 * 60 * 1000 + i * 1000) });
       await cc.refreshFulfillment(db, w.call.id);
       expect((await row(w.commitment.id)).status).toBe('fulfilled');
       await addSms(w, { direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, message_type: null, status: 'received', metadata: null, message_body: 'Never mind, still nothing', created_at: new Date(Date.now() - 60 * 1000) });
       await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+  });
+
+  describe('the newest customer text is read directly', () => {
+    test('30 later staff texts cannot hide a customer\'s "still not done"', async () => {
+      const w = await world();
+      const text = await addSms(w, { created_at: later(10) });
+      await addSms(w, { direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, message_type: null, status: 'received', metadata: null, message_body: 'Still not done', created_at: later(20) });
+      for (let i = 0; i < 31; i += 1) await addSms(w, { message_body: `Staff note ${i}`, created_at: new Date(later(30).getTime() + i * 1000) });
+      say(w, (payload) => (payload.text.includes(THREAD_PROMPT)
+        ? { ok: true, json: { verdict: 'not_completed', record_ref: null, quote: null } } : fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment')));
+      expect(await run(w)).toMatchObject({ closed: 0 });
       expect((await row(w.commitment.id)).status).toBe('open');
     });
   });
