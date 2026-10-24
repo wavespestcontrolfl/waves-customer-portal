@@ -1167,26 +1167,29 @@ const OTHER_RELATIVE_RE = /\b(?:last|next|this|past|coming)\s+(?:week|month|year
 // "Service: ..."), and only a quote that also carries the sentence's content:
 // the date has to belong to the fact being claimed.
 const RECORD_HEADER_RE = /^\s*(?:Customer first name|Service|Today|Termite service|Technician \(you\))\s*:/i;
-// The record lines a cited quote is dated by. Off: the first line holding it.
-// GATE_REVIEW_ASK_EXACT_QUOTES: every data line holding it, so words the
-// customer sent twice are dated by both messages (an older and today's "ants
-// by the door" both stand behind "today"), never by the oldest alone
-// (#5893 r6: the thread is oldest first).
-function quoteLines(quote, recordLines) {
-  const nq = normalizeForMatch(quote);
-  if (!isEnabled("reviewAskExactQuotes")) {
-    const line = recordLines.find((l) => normalizeForMatch(l).includes(nq));
-    return line ? [line] : [];
-  }
-  return recordLines.filter((l) => !RECORD_HEADER_RE.test(l) && normalizeForMatch(l).includes(nq));
-}
 // A line's calendar day; an undated line (the visit report) is the visit day.
 function lineDay(line, visitDay) {
-  const dated = /\b(\d{4}-\d{2}-\d{2})\b/.exec(line);
+  const dated = line && /\b(\d{4}-\d{2}-\d{2})\b/.exec(line);
   return dated ? dated[1] : visitDay;
 }
-function timingEvidence(sentence, quotes, recordLines) {
-  return quotes.filter((q) => quoteLines(q, recordLines).some((line) => !RECORD_HEADER_RE.test(line)) && sharesContentWord(sentence, q));
+// The record line a cited quote is dated by. Off: the first line holding it.
+// GATE_REVIEW_ASK_EXACT_QUOTES: the newest data line holding it, so words a
+// customer sent twice are dated by the latest message, not by the oldest
+// alone (#5893 r6: the thread is oldest first). One line per quote either
+// way, so its date, weekday and time of day all come from the same message.
+function quoteLine(quote, recordLines, visitDay) {
+  const nq = normalizeForMatch(quote);
+  if (!isEnabled("reviewAskExactQuotes")) return recordLines.find((l) => normalizeForMatch(l).includes(nq)) || null;
+  const stamp = (line) => `${lineDay(line, visitDay) || ""} ${(/\b\d{4}-\d{2}-\d{2} (\d{2}:\d{2}) ET\b/.exec(line) || [])[1] || "00:00"}`;
+  return recordLines
+    .filter((l) => !RECORD_HEADER_RE.test(l) && normalizeForMatch(l).includes(nq))
+    .reduce((newest, line) => (!newest || stamp(line) >= stamp(newest) ? line : newest), null);
+}
+function timingEvidence(sentence, quotes, recordLines, visitDay) {
+  return quotes.filter((q) => {
+    const line = quoteLine(q, recordLines, visitDay);
+    return !!line && !RECORD_HEADER_RE.test(line) && sharesContentWord(sentence, q);
+  });
 }
 // At least one real content word in common (not filler, timing or request
 // words): the quote is about what the sentence says.
@@ -1195,7 +1198,9 @@ function sharesContentWord(sentence, quote) {
   return [...stemSet(sentence)].some((w) => !isStop(w) && !TIME_STEMS.has(w) && !GREETING_STEMS.has(w) && !ASK_STEMS.has(w) && quoteWords.has(w));
 }
 function timingUnsupported(sentence, allQuotes, recordLines, visitDay) {
-  const quotes = timingEvidence(sentence, allQuotes, recordLines);
+  const quotes = timingEvidence(sentence, allQuotes, recordLines, visitDay);
+  // Each cited quote's own day (its one dated line; see quoteLine).
+  const dayOf = (q) => lineDay(quoteLine(q, recordLines, visitDay), visitDay);
   const today = etCalendarDayOf(new Date());
   let rest = String(sentence);
   if (DURATION_RE.test(rest)) {
@@ -1217,18 +1222,16 @@ function timingUnsupported(sentence, allQuotes, recordLines, visitDay) {
   const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
   const named = (rest.toLowerCase().match(/\b(?:sun|mon|tues|wednes|thurs|fri|satur)day\b/g) || []);
   if (named.length) {
-    const weekdaysOf = (q) => quoteLines(q, recordLines).map((line) => lineDay(line, visitDay)).filter(Boolean)
-      .map((day) => WEEKDAYS[new Date(`${day}T12:00:00Z`).getUTCDay()]);
-    const quoted = new Set(quotes.flatMap(weekdaysOf));
+    const quoted = new Set(quotes.map(dayOf).filter(Boolean).map((day) => WEEKDAYS[new Date(`${day}T12:00:00Z`).getUTCDay()]));
     if (named.some((d) => !quoted.has(d))) return true;
     // "last / this / past Friday" is the most recent one: the cited line must
     // also be dated within the past week.
     if (/\b(?:last|this|past)\s+(?:sun|mon|tues|wednes|thurs|fri|satur)day\b/i.test(rest)) {
-      const recent = quotes.some((q) => quoteLines(q, recordLines).some((line) => {
-        const day = lineDay(line, visitDay);
+      const recent = quotes.some((q) => {
+        const day = dayOf(q);
         const age = day ? Math.round((Date.parse(`${today}T12:00:00Z`) - Date.parse(`${day}T12:00:00Z`)) / 86400000) : null;
         return age != null && age >= 0 && age <= 7;
-      }));
+      });
       if (!recent) return true;
     }
   }
@@ -1243,17 +1246,15 @@ function timingUnsupported(sentence, allQuotes, recordLines, visitDay) {
     const inPart = (h) => (part === "morning" ? h < 12 : part === "afternoon" ? h >= 12 && h < 17 : h >= 17);
     const proved = quotes.some((q) => {
       if (new RegExp(`\\b${partOfDay[1]}\\b`, "i").test(q)) return true;
-      return quoteLines(q, recordLines).some((line) => {
-        const clock = /\b\d{4}-\d{2}-\d{2} (\d{2}):\d{2} ET\b/.exec(line);
-        return !!clock && inPart(parseInt(clock[1], 10));
-      });
+      const clock = /\b\d{4}-\d{2}-\d{2} (\d{2}):\d{2} ET\b/.exec(quoteLine(q, recordLines, visitDay) || "");
+      return !!clock && inPart(parseInt(clock[1], 10));
     });
     if (!proved) return true;
   }
   const required = SAME_DAY_RE.test(rest) ? today
     : YESTERDAY_RE.test(rest) ? etCalendarDayOf(new Date(Date.parse(`${today}T12:00:00Z`) - 86400000)) : null;
   if (!required) return false;
-  return !quotes.some((q) => quoteLines(q, recordLines).some((line) => lineDay(line, visitDay) === required));
+  return !quotes.some((q) => dayOf(q) === required);
 }
 
 function sentenceVerdictReject(j, sentence, { names, techNames, recordLines = [], visitDay = null }, normRecord) {

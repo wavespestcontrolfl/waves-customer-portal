@@ -1186,9 +1186,10 @@ describe('numbers and exact quotes (#5893 follow-up; owner 2026-10-05: fix it in
     expect(onWriter.replace(/\n- Say each fact in its SOURCE's own words[^\n]*/, '')).toBe(offWriter);
   });
 
-  test('gate on: words the customer sent twice are dated by both messages; off: by the older one, as before', () => {
+  test('gate on: words the customer sent twice are dated by the newest message; off: by the older one, as before', () => {
     const { timingUnsupported } = Drafter.__private;
-    const today = require('../utils/datetime-et').etCalendarDayOf(new Date());
+    const { etCalendarDayOf } = require('../utils/datetime-et');
+    const today = etCalendarDayOf(new Date());
     const lines = ['- [customer, 2026-09-10] ants by the door', `- [customer, ${today}] ants by the door`];
     const sentence = 'You mentioned ants by the door today.';
     expect(timingUnsupported(sentence, ['ants by the door'], lines, '2026-09-10')).toBe(true);
@@ -1197,5 +1198,13 @@ describe('numbers and exact quotes (#5893 follow-up; owner 2026-10-05: fix it in
     // The old line alone still never proves "today", and a header line never dates a quote.
     expect(timingUnsupported(sentence, ['ants by the door'], lines.slice(0, 1), '2026-09-10')).toBe(true);
     expect(timingUnsupported(sentence, ['ants by the door'], [`Today: ${today} ants by the door`, lines[0]], '2026-09-10')).toBe(true);
+    // One line per quote: yesterday morning's copy never lends its hour to
+    // today's afternoon copy (pre-push P1 on this change).
+    const yesterday = etCalendarDayOf(new Date(Date.now() - 86400000));
+    const twice = [`- [customer, ${yesterday} 09:00 ET] ants by the door`, `- [customer, ${today} 15:00 ET] ants by the door`];
+    expect(timingUnsupported('You mentioned ants by the door this morning.', ['ants by the door'], twice, today)).toBe(true);
+    expect(timingUnsupported('You mentioned ants by the door this afternoon.', ['ants by the door'], twice, today)).toBe(false);
+    mockGates.reviewAskExactQuotes = false;
+    expect(timingUnsupported('You mentioned ants by the door this morning.', ['ants by the door'], twice, today)).toBe(true);
   });
 });

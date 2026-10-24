@@ -1228,7 +1228,7 @@ const gates = {
   // #5893: fix it in the prompts, keep the code checks): the checker is asked
   // for the bare words of one record line (no "Visit report:" frame), the
   // writer for each fact in its source's own words, and a quote held by
-  // several record lines is dated by each of them, not the oldest alone.
+  // several record lines is dated by the newest of them, not the oldest.
   // Off = today's prompts and dating. Customer-facing text, so opt-in in
   // EVERY env. Rollback: unset.
   reviewAskExactQuotes: process.env.GATE_REVIEW_ASK_EXACT_QUOTES === 'true',
