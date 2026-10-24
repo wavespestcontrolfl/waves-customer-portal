@@ -2066,7 +2066,7 @@ async function neighborPasses(conn, customerId, hoodId, visitHomeId) {
 }
 
 // Every code waiting for a decision: the rows the Found in messages list
-// (listFound) and the found-codes bell (listFoundIds) both read.
+// (listFound) and the found-codes bell (listFoundWaiting) both read.
 function foundRows(conn) {
   return conn('customer_access_codes as a')
     .leftJoin('customers as c', 'c.id', 'a.customer_id')
@@ -2079,10 +2079,12 @@ function foundRows(conn) {
     });
 }
 
-// The id of every code waiting for a decision, whatever the list's page size:
-// the found-codes bell compares them from one run to the next.
-async function listFoundIds(conn) {
-  return (await foundRows(conn).select('a.id')).map((row) => String(row.id));
+// Every code waiting for a decision, whatever the list's page size: its id and
+// when it was sent (filed, for a code with no message time). The found-codes
+// bell compares the ids from one run to the next and names the oldest day.
+async function listFoundWaiting(conn) {
+  return (await foundRows(conn).select('a.id', conn.raw('COALESCE(a.source_at, a.created_at) AS sent_at')))
+    .map((row) => ({ id: String(row.id), sentAt: row.sent_at }));
 }
 
 // Every code waiting for a decision. A row with no customer yet carries the
@@ -2598,7 +2600,7 @@ module.exports = {
   mirrorProfileCodes,
   listForCustomer,
   listFound,
-  listFoundIds,
+  listFoundWaiting,
   accept,
   link,
   dismiss,
