@@ -36,7 +36,9 @@ const PHONE_CANDIDATE_RE = /(?<![A-Za-z0-9])(\+?\d[\d\s().-]{6,}\d)(?:\s*(?:exte
 // the alphanumeric "B", which the identifier lookbehind above would skip —
 // handle the encoded form first, before the boundary logic runs.
 const URL_ENCODED_PHONE_RE = /%2B(\d{7,15})(?![A-Za-z0-9])/gi;
-const STREET_ADDRESS_RE = /\b\d{1,6}\s+[A-Za-z0-9 .'-]+?\s(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Court|Ct|Circle|Cir|Boulevard|Blvd|Trail|Trl|Terrace|Ter|Place|Pl|Parkway|Pkwy|Way)\b/gi;
+// The house number is not the minutes of a clock time ("8:00 AM at 421 Spring Ave" kept "8:[address]") and not an
+// hour followed by AM/PM ("8 AM at ..."): those numbers start no address.
+const STREET_ADDRESS_RE = /\b(?<![\d:])\d{1,6}(?!\s*(?:a\.?m\b|p\.?m\b))\s+[A-Za-z0-9 .'-]+?\s(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Court|Ct|Circle|Cir|Boulevard|Blvd|Trail|Trl|Terrace|Ter|Place|Pl|Parkway|Pkwy|Way)\b/gi;
 const SENSITIVE_TEXT_KEY_RE = /(message|body|note|reason|summary|text|description|title)/i;
 
 function maskPhone(value) {

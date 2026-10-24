@@ -569,7 +569,7 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT, invoiceIds = null } =
     .orderBy('m.first_application_invoice_id', 'asc')
     .orderBy('m.id', 'asc')
     .select(
-      'm.id', 'm.scheduled_date', 'm.completed_at', 'm.status',
+      'm.id', 'm.scheduled_date', 'm.completed_at', 'm.status', 'm.service_type',
       'm.customer_id', 'm.source_estimate_id',
       'm.first_application_invoice_id as invoice_id',
     );
@@ -674,15 +674,19 @@ const MONEY_ALERT_COPY = Object.freeze({
     actionSentence: 'Wait for that payment to settle, fail, or be reconciled before refunding or crediting that share — this alert updates when it resolves.',
   },
 });
+// A member as the office reads it: its service and a short id, never the bare uuid
+// (owner 2026-10-21: alerts name what the office recognizes).
+const visitLabel = (d) => `${d.service_type ? `${d.service_type} visit` : 'visit'} ${String(d.id).slice(0, 8)}`;
+
 function buildDivergenceAlertCopy({ diverging, anchorDate, alertKind }) {
   const neverRanMembers = diverging.filter((d) => neverRan(d.status));
   const movedMembers = diverging.filter((d) => !neverRan(d.status));
   const moneyCopy = MONEY_ALERT_COPY[alertKind] || null;
   const detailParts = [
-    ...movedMembers.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`),
+    ...movedMembers.map((d) => `${visitLabel(d)} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`),
     ...neverRanMembers.map((d) => (moneyCopy
-      ? `visit ${d.id} ${neverRanPhrase(d.status)} — ${moneyCopy.memberAction}`
-      : `visit ${d.id} ${neverRanPhrase(d.status)} — remove its charge from the combined invoice`)),
+      ? `${visitLabel(d)} ${neverRanPhrase(d.status)} — ${moneyCopy.memberAction}`
+      : `${visitLabel(d)} ${neverRanPhrase(d.status)} — remove its charge from the combined invoice`)),
   ];
   if (moneyCopy) {
     return { detail: detailParts.join('; '), leadSentence: moneyCopy.leadSentence, actionSentence: moneyCopy.actionSentence };
@@ -751,9 +755,13 @@ async function raiseDivergenceAlert(conn, {
   const anchorDate = dateOnly(anchor.scheduled_date);
   const { detail, leadSentence, actionSentence } = buildDivergenceAlertCopy({ diverging, anchorDate, alertKind });
   const invoiceRef = alertInvoiceReference(invoice, estimateId);
+  // The headline names the customer (owner 2026-10-21: promise and billing headlines must name who).
+  const who = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
+  const name = [who?.first_name, who?.last_name].filter(Boolean).join(' ').trim();
+  const baseTitle = ALERT_TITLES[alertKind] || ALERT_TITLES.diverged;
   await require('./notification-service').notifyAdmin(
     'billing',
-    ALERT_TITLES[alertKind] || ALERT_TITLES.diverged,
+    name ? `${baseTitle}: ${name}` : baseTitle,
     `${leadSentence}: ${detail}. ${actionSentence} ${invoiceRef}`,
     {
       // Query form only — the admin app has no /admin/estimates/:id page
@@ -998,7 +1006,7 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
   const freshMembers = await conn('scheduled_services as m')
     .where('m.first_application_invoice_id', invoiceId)
     .select(
-      'm.id', 'm.scheduled_date', 'm.completed_at', 'm.status',
+      'm.id', 'm.scheduled_date', 'm.completed_at', 'm.status', 'm.service_type',
       'm.customer_id', 'm.source_estimate_id',
       'm.first_application_invoice_id as invoice_id',
     );
