@@ -9,8 +9,11 @@
  * go down again. This appends ONE dated line to the next live LAWN visit's
  * staff-only job-card note (next-visit-note.js; never shown to the customer):
  *
- *   [From 10/24 visit] The customer was told to water Advion Insect Granule in
- *   with Dylox 6.2 G, whose label needs it. The bait may need to go down again.
+ *   [From 10/24 visit] Advion Insect Granule went down with Dylox 6.2 G, which
+ *   must be watered in, so the bait may get wet. It may need to go down again.
+ *
+ * Written when the instruction freezes, before (or without) any text, so it
+ * never says the customer was told or that the bait was watered.
  *
  * Best-effort: never throws, never blocks or fails the completion. No lawn
  * visit ahead, or no `yielded` field, writes nothing.
@@ -26,7 +29,7 @@ function yieldNoteText(yielded) {
   const holds = names(yielded && yielded.holds);
   if (!holds.length) return null;
   const waterIns = names(yielded.waterIns).join(' and ') || 'another product';
-  return `The customer was told to water ${holds.join(' and ')} in with ${waterIns}, whose label needs it. The bait may need to go down again.`;
+  return `${holds.join(' and ')} went down with ${waterIns}, which must be watered in, so the bait may get wet. It may need to go down again.`;
 }
 
 // The customer's live future visits after the completed visit's day (the

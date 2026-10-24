@@ -58,9 +58,9 @@ describe('lawn watering tech note', () => {
     expect(h.tech).toHaveBeenCalledTimes(1);
     expect(h.tech).toHaveBeenCalledWith('tech-1', {
       type: 'lawn_watering_tech_note',
-      message: 'Dylox 6.2 G needs watering in, and Anuew EZ needs time with no water. No text to the customer can do both. Water Dylox 6.2 G in on site before you leave. Next time, water it in before you apply Anuew EZ.',
+      message: 'Do not water now: Anuew EZ needs time with no water. Dylox 6.2 G needs watering in, and no time is left today for both, so the customer got no watering text. Ask the customer to water Dylox 6.2 G in first thing tomorrow. Next time, water Dylox 6.2 G in before you apply Anuew EZ.',
       payload: {
-        headline: 'Water this in before you leave',
+        headline: 'Do not water this lawn now',
         customer_name: 'Pat Sample',
         address: '1 Example Way, Venice',
         service_id: 'svc-1',
@@ -90,7 +90,7 @@ describe('lawn watering tech note', () => {
   test('without the optional fields: first product, and "another product on this visit"', async () => {
     const h = harness({ noClaim: { reason: 'water_in_conflict', products: ['Dylox 6.2 G', 'Anuew EZ'] } });
     await sendLawnWateringSms(h.state, h.deps);
-    expect(h.tech.mock.calls[0][1].message).toBe('Dylox 6.2 G needs watering in, and another product on this visit needs time with no water. No text to the customer can do both. Water Dylox 6.2 G in on site before you leave. Next time, water it in before you apply another product on this visit.');
+    expect(h.tech.mock.calls[0][1].message).toBe('Do not water now: another product on this visit needs time with no water. Dylox 6.2 G needs watering in, and no time is left today for both, so the customer got no watering text. Ask the customer to water Dylox 6.2 G in first thing tomorrow. Next time, water Dylox 6.2 G in before you apply another product on this visit.');
   });
 
   test('several names join with " and "; the payload leaves out a missing address', async () => {
@@ -100,7 +100,7 @@ describe('lawn watering tech note', () => {
     });
     await sendLawnWateringSms(h.state, h.deps);
     const [, card] = h.tech.mock.calls[0];
-    expect(card.message).toContain('Dylox 6.2 G and Merit 0.5 G needs watering in, and Anuew EZ and Scimitar CS needs time');
+    expect(card.message).toContain('Do not water now: Anuew EZ and Scimitar CS need time with no water. Dylox 6.2 G and Merit 0.5 G need watering in,');
     expect(card.payload).not.toHaveProperty('address');
   });
 
@@ -165,11 +165,11 @@ describe('the note from a real clash', () => {
   const DYLOX = { name: 'Dylox 6.2 G', rule: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'owner' } };
   const ANUEW = { name: 'Anuew EZ', rule: { mode: 'hold', hold_hours: 4, source: 'label' } };
 
-  test('Dylox with Anuew EZ after 5 PM: water the Dylox in on site', () => {
-    // Tue 6 PM ET: Anuew's 4 hours end at 10 PM, too late for a full run before midnight.
-    const ins = buildWateringInstruction({ rules: [DYLOX, ANUEW], completedAt: '2026-10-27T22:00:00Z', plainWhenNoSetup: true, labelFirst: true });
+  test('Dylox with Anuew EZ after 7 PM: do not water now, water in first thing tomorrow', () => {
+    // Tue 7:30 PM ET: Anuew's 4 hours end at midnight; at 6 PM the customer still gets a text (until 10 PM, then water).
+    const ins = buildWateringInstruction({ rules: [DYLOX, ANUEW], completedAt: '2026-10-27T23:30:00Z', plainWhenNoSetup: true, labelFirst: true });
     expect(ins.state).toBeNull();
-    expect(techNoteMessage(ins.noClaim)).toBe('Dylox 6.2 G needs watering in, and Anuew EZ needs time with no water. No text to the customer can do both. Water Dylox 6.2 G in on site before you leave. Next time, water it in before you apply Anuew EZ.');
+    expect(techNoteMessage(ins.noClaim)).toBe('Do not water now: Anuew EZ needs time with no water. Dylox 6.2 G needs watering in, and no time is left today for both, so the customer got no watering text. Ask the customer to water Dylox 6.2 G in first thing tomorrow. Next time, water Dylox 6.2 G in before you apply Anuew EZ.');
   });
 
   test('Dylox alone after 9 PM: water it in on site', () => {

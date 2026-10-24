@@ -8,7 +8,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { storeLawnWateringYieldNote, yieldNoteText } = require('../services/service-report/lawn-watering-yield-note');
 
 const YIELDED = { holds: ['Advion Insect Granule'], waterIns: ['Dylox 6.2 G'] };
-const NOTE = 'The customer was told to water Advion Insect Granule in with Dylox 6.2 G, whose label needs it. The bait may need to go down again.';
+const NOTE = 'Advion Insect Granule went down with Dylox 6.2 G, which must be watered in, so the bait may get wet. It may need to go down again.';
 const TODAY = etDateString();
 // Noon UTC keeps the ET calendar day equal to the UTC one.
 const day = (n) => new Date(Date.parse(`${TODAY}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
@@ -96,7 +96,7 @@ describe('lawn watering yield note', () => {
   });
 
   test('text joins several names with " and "', () => {
-    expect(yieldNoteText({ holds: ['A', 'B'], waterIns: ['C', 'D'] })).toBe('The customer was told to water A and B in with C and D, whose label needs it. The bait may need to go down again.');
+    expect(yieldNoteText({ holds: ['A', 'B'], waterIns: ['C', 'D'] })).toBe('A and B went down with C and D, which must be watered in, so the bait may get wet. It may need to go down again.');
   });
 });
 
@@ -112,6 +112,6 @@ describe('the yield note from a real visit', () => {
     ];
     const ins = buildWateringInstruction({ rules, completedAt: '2026-10-27T13:00:00Z', plainWhenNoSetup: true, labelFirst: true });
     expect(ins.state).toBe('water_in');
-    expect(yieldNoteText(ins.yielded)).toBe('The customer was told to water Advion Insect Granule in with Dylox 6.2 G, whose label needs it. The bait may need to go down again.');
+    expect(yieldNoteText(ins.yielded)).toBe('Advion Insect Granule went down with Dylox 6.2 G, which must be watered in, so the bait may get wet. It may need to go down again.');
   });
 });

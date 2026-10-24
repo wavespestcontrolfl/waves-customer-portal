@@ -7,10 +7,12 @@
  * Two reasons only: `water_in_conflict` (one product needs a water-in while
  * another needs time with no water) and `same_day_too_late` (a water-in is due
  * today but the visit ended too late for the customer to run a full watering).
- * Both are fixed by the technician watering the product in before leaving, so
- * the visit's technician gets a Today-screen card (tech_notifications, type
- * `lawn_watering_tech_note`) instead of an office alert. Every other reason
- * keeps the office alert (lawn-watering-sms.js).
+ * The visit's technician gets a Today-screen card (tech_notifications, type
+ * `lawn_watering_tech_note`) instead of an office alert: too late with no hold,
+ * water the product in on site; a clash, never water during the hold (it is a
+ * label direction, or the label ladder would have shortened it), and ask the
+ * customer to water in first thing tomorrow. Every other reason keeps the
+ * office alert (lawn-watering-sms.js).
  *
  * The caller falls back to the office alert when this returns null (no
  * technician on the visit, or the card could not be written), so someone always
@@ -21,19 +23,24 @@ const logger = require('../logger');
 const TECH_NOTE_TYPE = 'lawn_watering_tech_note';
 const TECH_NOTE_REASONS = Object.freeze(['water_in_conflict', 'same_day_too_late']);
 const TECH_NOTE_HEADLINE = 'Water this in before you leave';
+// A clash leaves a hold no label lets end early: nobody waters during it.
+const CLASH_HEADLINE = 'Do not water this lawn now';
 const OTHER_PRODUCT = 'another product on this visit';
 
 const names = (list) => (Array.isArray(list) ? list.filter((n) => typeof n === 'string' && n.trim() !== '') : []);
 
 // W = the product(s) to water in; H = the product(s) that need time with no water.
 function techNoteMessage(noClaim) {
-  const waterIn = names(noClaim.waterInProducts);
-  const w = (waterIn.length ? waterIn : names(noClaim.products).slice(0, 1)).join(' and ') || 'A product';
+  const waterInNames = names(noClaim.waterInProducts);
+  const waterIns = waterInNames.length ? waterInNames : names(noClaim.products).slice(0, 1);
+  const w = waterIns.join(' and ') || 'A product';
   if (noClaim.reason === 'same_day_too_late') {
-    return `${w} must be watered in today, and this visit ended too late for the customer to run a full watering. Water it in on site before you leave.`;
+    return `${w} must be watered in today, and this visit ended too late for the customer to run a full watering. Water ${waterIns.length > 1 ? 'them' : 'it'} in on site before you leave.`;
   }
-  const h = names(noClaim.holdProducts).join(' and ') || OTHER_PRODUCT;
-  return `${w} needs watering in, and ${h} needs time with no water. No text to the customer can do both. Water ${w} in on site before you leave. Next time, water it in before you apply ${h}.`;
+  const holds = names(noClaim.holdProducts);
+  const h = holds.join(' and ') || OTHER_PRODUCT;
+  const needs = (list) => (list.length > 1 ? 'need' : 'needs');
+  return `Do not water now: ${h} ${needs(holds)} time with no water. ${w} ${needs(waterIns)} watering in, and no time is left today for both, so the customer got no watering text. Ask the customer to water ${w} in first thing tomorrow. Next time, water ${w} in before you apply ${h}.`;
 }
 
 // Only the fields the visit row actually carries: first_name / last_name come
@@ -42,7 +49,7 @@ function techNotePayload({ svc, noClaim }) {
   const customerName = [svc.first_name, svc.last_name].filter(Boolean).join(' ').trim();
   const street = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');
   return {
-    headline: TECH_NOTE_HEADLINE,
+    headline: noClaim.reason === 'water_in_conflict' ? CLASH_HEADLINE : TECH_NOTE_HEADLINE,
     ...(customerName ? { customer_name: customerName } : {}),
     ...(svc.service_address_line1 ? { address: street } : {}),
     service_id: svc.id,
@@ -89,4 +96,4 @@ async function sendWateringTechNote({ record, svc, notes, noClaim }, deps) {
   return 'tech_noted_no_instruction';
 }
 
-module.exports = { sendWateringTechNote, techNoteMessage, TECH_NOTE_TYPE, TECH_NOTE_REASONS, TECH_NOTE_HEADLINE };
+module.exports = { sendWateringTechNote, techNoteMessage, TECH_NOTE_TYPE, TECH_NOTE_REASONS, TECH_NOTE_HEADLINE, CLASH_HEADLINE };

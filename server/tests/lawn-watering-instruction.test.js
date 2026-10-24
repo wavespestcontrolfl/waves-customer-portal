@@ -1159,21 +1159,32 @@ describe('label ladder for clashing products (rule E, Y, H)', () => {
         'Run it even if it is not your usual day.',
       ]);
     }
-    // Too late even for that: no claim.
-    expect(build(named(DYLOX, SEDGEHAMMER), at(TUE_830PM)).noClaim.reason).toBe('water_in_conflict');
+    // Later still, the run starts after the hold with what is left of the day; past that, no claim.
+    expect(linesOf(named(DYLOX, SEDGEHAMMER), TUE_830PM)[0]).toBe('Skip your turf watering until 10 PM tonight.');
+    expect(build(named(DYLOX, SEDGEHAMMER), at('2026-10-28T02:01:00Z')).noClaim.reason).toBe('water_in_conflict');
   });
 
-  test('late day: a minimum that is a label direction is never cut', () => {
-    // 7 PM: advice may end at 9 PM; SpeedZone's "do not irrigate within 3 hours" ends at 10 PM, too late for a full run.
+  test('late day: a minimum that is a label direction is never cut; the run starts after it', () => {
+    // 7 PM: advice may end at 9 PM for a full run; SpeedZone's "do not irrigate within 3 hours" ends at 10 PM.
     expect(linesOf(named(DYLOX, SEDGEHAMMER), TUE_7PM)[0]).toBe('Skip your turf watering until 9 PM tonight.');
-    const direction = build(named(DYLOX, SPEEDZONE), at(TUE_7PM));
-    expect(direction.state).toBeNull();
-    expect(direction.noClaim).toMatchObject({ reason: 'water_in_conflict', holdProducts: ['SpeedZone'], waterInProducts: ['Dylox'] });
+    expect(linesOf(named(DYLOX, SPEEDZONE), TUE_7PM)).toEqual([
+      'Skip your turf watering until 10 PM tonight.',
+      'After that, water in today’s treatment with about ¼ inch by 11:59 PM tonight.',
+      'Run it even if it is not your usual day.',
+    ]);
+    // 8:01 PM: SpeedZone ends at midnight, no time is left: no claim.
+    expect(build(named(DYLOX, SPEEDZONE), at('2026-10-28T00:01:00Z')).noClaim).toMatchObject({ reason: 'water_in_conflict', holdProducts: ['SpeedZone'], waterInProducts: ['Dylox'] });
   });
 
-  test('two label musts that cannot both be met late in the day are no claim, for the technician', () => {
-    expect(linesOf(named(DYLOX, ANUEW), TUE_5PM)[1]).toBe('After that, water in today’s treatment with about ¼ inch by 11:59 PM tonight.');
-    const late = build(named(DYLOX, ANUEW), at(TUE_6PM));
+  test('two label musts late in the day: water right after the hold while an hour is left, else no claim', () => {
+    expect(linesOf(named(DYLOX, ANUEW), TUE_5PM)[0]).toBe('Skip your turf watering until 9 PM tonight.');
+    // 6 PM: Anuew's "Do not irrigate treated area for 4 hours" ends at 10 PM; the customer waters after it, before midnight.
+    expect(linesOf(named(DYLOX, ANUEW), TUE_6PM).slice(0, 2)).toEqual([
+      'Skip your turf watering until 10 PM tonight.',
+      'After that, water in today’s treatment with about ¼ inch by 11:59 PM tonight.',
+    ]);
+    // 7:01 PM: the hold ends at midnight: no claim, never water during the hold.
+    const late = build(named(DYLOX, ANUEW), at('2026-10-27T23:01:00Z'));
     expect(late.state).toBeNull();
     expect(late.noClaim).toEqual({ reason: 'water_in_conflict', products: ['Dylox', 'Anuew'], holdProducts: ['Anuew'], waterInProducts: ['Dylox'] });
     expect(JSON.parse(JSON.stringify(late)).noClaim).toBeUndefined();
