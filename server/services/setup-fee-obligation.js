@@ -465,8 +465,34 @@ async function settledVisitDate(conn, visitId) {
   return row?.scheduled_date ? require('./estimate-first-application-invoice').dateOnly(row.scheduled_date) : null;
 }
 
+function invoiceLineItems(row) {
+  if (Array.isArray(row.line_items)) return row.line_items;
+  try {
+    const items = JSON.parse(row.line_items);
+    return Array.isArray(items) ? items : [];
+  } catch { return []; }
+}
+
+// What one invoice line proves about the WaveGuard fee: { kind: 'waived' },
+// { kind: 'annual_prepay' }, { kind: 'paid', cents } or null. A REFUNDED invoice
+// keeps its fee-line evidence (never instruct a re-bill of money that was
+// collected and deliberately refunded), but a refunded waived or prepay bundle
+// settles nothing; a waived line riding a positive amount needs the invoice PAID.
+function feeLineEvidence(li, status, createdAt) {
+  const cents = settledLineCents(li);
+  if (cents === null || !waveguardFeeLine(li)) return null;
+  const desc = String(li?.description || '');
+  if (/(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0)) {
+    return status !== 'refunded' && (cents === 0 || status === 'paid') ? { kind: 'waived' } : null;
+  }
+  if (cents <= 0) return null;
+  const recent = createdAt && Date.now() - new Date(createdAt).getTime() <= SETUP_FEE_SETTLED_PREPAY_WINDOW_MS;
+  if (status === 'paid' && recent && /annual prepay/i.test(String(li?.category || ''))) return { kind: 'annual_prepay' };
+  return ['paid', 'refunded'].includes(status) && settledFeeLineName(li) ? { kind: 'paid', cents } : null;
+}
+
 async function setupFeeSettledElsewhere(conn, {
-  customerId, expectedFeeCents = 0, visitDate = null, lock = false,
+  customerId, expectedFeeCents = 0, visitDate, lock,
 } = {}) {
   if (!require('../config/feature-gates').setupFeeSettledAnywhereLive()) return { settled: false };
   if (!customerId) return { settled: false };
@@ -475,51 +501,21 @@ async function setupFeeSettledElsewhere(conn, {
     .whereRaw(`(line_items::text ILIKE '%fee%' OR line_items::text ILIKE '%membership%' OR line_items::text ILIKE '%prepay%' OR line_items::text ILIKE '%prepaid%')`);
   if (lock) query = query.forUpdate();
   const rows = await query.select('id', 'status', 'line_items', 'created_at');
-  // A REFUNDED invoice keeps its fee-line evidence (never instruct a re-bill of
-  // money that was collected and deliberately refunded), but a refunded waived
-  // or prepay bundle settles nothing.
   const dead = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void', 'draft']);
   dead.delete('refunded');
-  let paidFeeCents = 0;
-  let paidFeeInvoiceId = null;
   const paidByInvoice = new Map();
-  const addPaid = (row, cents) => {
-    paidFeeCents += cents;
-    paidFeeInvoiceId = paidFeeInvoiceId || row.id;
-    paidByInvoice.set(String(row.id), (paidByInvoice.get(String(row.id)) || 0) + cents);
-  };
   for (const row of rows) {
     const status = String(row.status || '').toLowerCase();
     if (dead.has(status)) continue;
-    let items = row.line_items;
-    if (typeof items === 'string') {
-      try { items = JSON.parse(items); } catch { items = null; }
-    }
-    if (!Array.isArray(items)) continue;
-    for (const li of items) {
-      const cents = settledLineCents(li);
-      if (cents === null) continue;
-      const desc = String(li?.description || '');
-      const waived = waveguardFeeLine(li) && /(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0);
-      if (status === 'refunded') {
-        if (cents > 0 && !waived && settledFeeLineName(li)) addPaid(row, cents);
-        continue;
-      }
-      if (waived && (cents === 0 || status === 'paid')) {
-        return { settled: true, reason: 'waived', invoiceId: row.id };
-      }
-      if (status !== 'paid') continue;
-      // A termite (or bait/install) prepay never waives the WaveGuard fee, the
-      // same exclusion the term lookup below applies (annual_plan_version).
-      if (/annual prepay/i.test(String(li?.category || '')) && cents > 0 && waveguardFeeLine(li)
-        && row.created_at && Date.now() - new Date(row.created_at).getTime() <= SETUP_FEE_SETTLED_PREPAY_WINDOW_MS) {
-        return { settled: true, reason: 'annual_prepay', invoiceId: row.id };
-      }
-      if (cents > 0 && !waived && settledFeeLineName(li)) addPaid(row, cents);
+    for (const li of invoiceLineItems(row)) {
+      const evidence = feeLineEvidence(li, status, row.created_at);
+      if (evidence && evidence.kind !== 'paid') return { settled: true, reason: evidence.kind, invoiceId: row.id };
+      if (evidence) paidByInvoice.set(String(row.id), (paidByInvoice.get(String(row.id)) || 0) + evidence.cents);
     }
   }
+  const paidFeeCents = [...paidByInvoice.values()].reduce((a, b) => a + b, 0);
   if (paidFeeCents > 0 && paidFeeCents >= expectedFeeCents) {
-    return { settled: true, reason: 'paid_fee', invoiceId: paidFeeInvoiceId };
+    return { settled: true, reason: 'paid_fee', invoiceId: [...paidByInvoice.keys()][0] };
   }
   const AnnualPrepayRenewals = require('./annual-prepay-renewals');
   const term = await AnnualPrepayRenewals.coveredTermsAsOf(conn, visitDate || require('../utils/datetime-et').etDateString(new Date()))
