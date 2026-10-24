@@ -3,6 +3,7 @@ import { isNativeApp, hasSessionToken } from '../native/platform';
 import { authenticateBiometric } from '../native/biometric';
 import { NATIVE_PICKER_EVENT } from '../native/camera';
 import { COLORS, FONTS } from '../theme-brand';
+import { useGlassMotion } from '../glass/glass-motion';
 import '../glass/glass-theme.css';
 
 export const BiometricLockContext = createContext(false);
@@ -73,6 +74,7 @@ const PICKER_GRACE_MS = 3 * 60 * 1000;
 export default function BiometricGate({ children }) {
   const [locked, setLocked] = useState(() => isNativeApp() && hasSessionToken());
   const [checking, setChecking] = useState(false);
+  useGlassMotion(locked);
   const contentRef = useRef(null);
   const unlockBtnRef = useRef(null);
   // Guards against the Face ID prompt looping: the iOS biometric sheet briefly sends
