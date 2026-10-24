@@ -36,6 +36,8 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import DocumentActionBar from '../components/DocumentActionBar';
+import PropertyLineGroups from '../components/billing/PropertyLineGroups';
+import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -249,6 +251,8 @@ export default function ReceiptPage() {
 
   const { invoice, service, customer, payment, payer } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
+  // Multi-property invoice (lines at 2+ saved properties): grouped rows; else null.
+  const propertyGroups = groupInvoiceLinesByProperty(invoice.lineItems);
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   // When account credit (fully or partly) covered the invoice there may be no
   // payments row — fall back to the amount DUE net of applied credit (zero for a
@@ -504,7 +508,13 @@ export default function ReceiptPage() {
                 </>
               )}
             </DetailBlock>
-            {payer && (
+            {propertyGroups ? (
+              <DetailBlock label="Service addresses">
+                {propertyGroups.map((group) => (
+                  <div key={group.property_id}>{group.label}</div>
+                ))}
+              </DetailBlock>
+            ) : payer && (
               <DetailBlock label="Service address">
                 <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                 {customer.address && <div>{customer.address}</div>}
@@ -555,7 +565,9 @@ export default function ReceiptPage() {
                   <div style={{ textAlign: 'right' }}>Qty</div>
                   <div style={{ textAlign: 'right', minWidth: 82 }}>Amount</div>
                 </div>
-                {visibleLineItems.map((item, idx) => (
+                {propertyGroups ? (
+                  <PropertyLineGroups groups={propertyGroups} fmtCurrency={fmtCurrency} />
+                ) : visibleLineItems.map((item, idx) => (
                   <div
                     key={idx}
                     style={{

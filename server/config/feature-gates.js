@@ -2416,6 +2416,11 @@ const gates = {
   rescheduleProposalCard: gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD'),
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
+  // Multi-property invoices: the admin invoice editor shows a per-line
+  // property picker for a customer with 2+ saved properties (read at call
+  // time by GET /admin/invoices/customers/:customerId/properties). Rendering
+  // of a stored multi-property invoice is data-driven and never gated.
+  invoiceMultiPropertyLines: gateEnvValue('GATE_INVOICE_MULTI_PROPERTY_LINES'),
   // Customer-intelligence AI legs (nightly sentiment mining + retention
   // drafts). Read at CALL time inside signal-detector / the 3 AM pipeline;
   // this entry is for logGateStatus only. Dark by default (owner 2026-09-25).

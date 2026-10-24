@@ -12,6 +12,7 @@ const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
 // pdf-tokens.js for provenance). Navy is the canonical customer ink
 // #04395E (owner ruling); print documents carry the same ink as the pages.
 const { PDF_COLORS, PDF_TYPE } = require('./pdf-tokens');
+const { groupInvoiceLinesByProperty, propertyStreetLine } = require('@waves/invoice-property-groups');
 const {
   navy: NAVY, // headings, header bar
   ink: INK,
@@ -257,8 +258,51 @@ function invoiceLineParts(item) {
   return { description: String(item.description || '').slice(0, 200), qty, rate, amount: Number(item.amount ?? qty * rate) };
 }
 
+// One service row, exactly as the flat table has always printed it. Returns the next y.
+function drawLineItemRow(doc, item, x, y, width) {
+  const { description, qty, rate, amount } = invoiceLineParts(item);
+  const descHeight = doc.heightOfString(description, { width: width - 210 });
+  const rowHeight = Math.max(descHeight + 6, 18);
+  doc.text(description, x, y, { width: width - 210 });
+  doc.text(String(qty), x + width - 190, y, { width: 40, align: 'right' });
+  doc.text(currency(rate), x + width - 140, y, { width: 60, align: 'right' });
+  doc.text(currency(amount), x + width - 70, y, { width: 70, align: 'right' });
+  return y + rowHeight;
+}
+
+// Multi-property invoice: the lines grouped under each property's address, with
+// that property's line-item discounts and subtotal (@waves/invoice-property-groups).
+// Document-wide discounts stay in the totals block, as on a flat invoice.
+function groupedLineItemsTable(doc, groups, x, y, width) {
+  for (const group of groups) {
+    const headingHeight = Math.max(doc.heightOfString(group.label, { width: width - 12 }) + 8, 18);
+    doc.save().rect(x, y, width, headingHeight).fill(SOFT).restore();
+    doc.fontSize(PDF_TYPE.body).font('Helvetica-Bold').fillColor(INK)
+      .text(group.label, x + 6, y + 4, { width: width - 12 });
+    y += headingHeight + 4;
+    doc.font('Helvetica').fillColor(INK);
+    for (const item of group.lines) y = drawLineItemRow(doc, item, x, y, width);
+    for (const item of group.discounts) {
+      const { description, amount } = invoiceLineParts(item);
+      const rowHeight = Math.max(doc.heightOfString(description, { width: width - 210 }) + 6, 18);
+      doc.fillColor(GREEN).text(description, x, y, { width: width - 210 });
+      doc.text(`- ${currency(Math.abs(amount))}`, x + width - 70, y, { width: 70, align: 'right' });
+      doc.fillColor(INK);
+      y += rowHeight;
+    }
+    const streetLine = propertyStreetLine(group.address);
+    doc.font('Helvetica-Bold').fillColor(MUTED)
+      .text(`${streetLine || 'Property'} subtotal`, x, y, { width: width - 80, align: 'right' });
+    doc.fillColor(INK).text(currency(group.subtotal), x + width - 70, y, { width: 70, align: 'right' });
+    doc.font('Helvetica');
+    y += 22;
+  }
+  return y;
+}
+
 function lineItemsTable(doc, lineItems, x, y, width) {
   const visibleLineItems = visibleInvoiceLines(lineItems);
+  const propertyGroups = groupInvoiceLinesByProperty(lineItems);
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 8;
@@ -272,15 +316,10 @@ function lineItemsTable(doc, lineItems, x, y, width) {
   y += 6;
 
   doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(INK);
-  for (const item of visibleLineItems) {
-    const { description, qty, rate, amount } = invoiceLineParts(item);
-    const descHeight = doc.heightOfString(description, { width: x + width - 210 - x });
-    const rowHeight = Math.max(descHeight + 6, 18);
-    doc.text(description, x, y, { width: width - 210 });
-    doc.text(String(qty), x + width - 190, y, { width: 40, align: 'right' });
-    doc.text(currency(rate), x + width - 140, y, { width: 60, align: 'right' });
-    doc.text(currency(amount), x + width - 70, y, { width: 70, align: 'right' });
-    y += rowHeight;
+  if (propertyGroups) {
+    y = groupedLineItemsTable(doc, propertyGroups, x, y, width);
+  } else {
+    for (const item of visibleLineItems) y = drawLineItemRow(doc, item, x, y, width);
   }
   doc.restore();
   return y;

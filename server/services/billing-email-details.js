@@ -20,6 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { propertyStreetAddress } = require('../utils/property-display');
 const { invoiceCustomerAddress, correctedInvoiceAddress } = require('./invoice-address');
+const { invoicePropertyLabels } = require('@waves/invoice-property-groups');
 const { formatDateOnly } = require('../utils/date-only');
 const { parseRawAddress } = require('../utils/address-normalizer');
 const featureGates = require('../config/feature-gates');
@@ -270,6 +271,13 @@ async function invoicePropertyAddress(invoice, customer) {
     // receipt page and PDF. A correction always carries a street line.
     const corrected = correctedInvoiceAddress(invoice);
     if (corrected) return propertyStreetAddress(corrected);
+    // A multi-property invoice (lines frozen at 2+ saved properties) names
+    // every property, in line order — the same groups the pay page, receipt
+    // and PDF print. A frozen line address outranks any visit link.
+    const propertyLabels = invoicePropertyLabels(invoice.line_items);
+    if (propertyLabels.length) {
+      return propertyLabels.length === 2 ? propertyLabels.join(' and ') : propertyLabels.join('; ');
+    }
     if (invoice.visit_completion_packet_id) {
       // A combined-visit invoice: every verified member must name the SAME
       // street address; a member that cannot be resolved omits the row. This
