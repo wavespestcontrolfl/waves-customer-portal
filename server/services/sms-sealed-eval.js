@@ -868,11 +868,13 @@ async function finalizeRun({ runId, dbi = db } = {}) {
     const baselineResults = await dbi('sms_sealed_eval_results')
       .where({ run_id: run.baseline_run_id })
       .select('item_id', 'verdict', 'scores');
-    // Different rulers (or a mixed run) make McNemar meaningless: leave significance unset, as with no baseline.
-    if (judgeRulerOf(results) === judgeRulerOf(baselineResults)) {
+    // Different rulers (or a run that mixes them, even against an equally mixed baseline) make McNemar
+    // meaningless: leave significance unset, as with no baseline. A mixed ruler reads 'j1+j2'.
+    const ruler = judgeRulerOf(results);
+    if (!ruler.includes('+') && ruler === judgeRulerOf(baselineResults)) {
       significance = computeSignificance({ candidateResults: results, baselineResults });
     } else {
-      logger.warn(`[sealed-eval] run ${String(runId).slice(0, 8)}: no significance verdict, judge ruler differs from its baseline (${judgeRulerOf(results)} vs ${judgeRulerOf(baselineResults)})`);
+      logger.warn(`[sealed-eval] run ${String(runId).slice(0, 8)}: no significance verdict, judge ruler differs from its baseline (${ruler} vs ${judgeRulerOf(baselineResults)})`);
     }
   }
 

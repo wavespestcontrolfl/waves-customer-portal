@@ -377,6 +377,27 @@ describe('runSealedExam — GATE_SMS_JUDGE_V2 could_send (owner 2026-10-24)', ()
     expect(JSON.parse(complete.patch.significance)).toMatchObject({ newlySafe: 1, direction: 'improved' });
   });
 
+  test('two equally mixed runs (j1 and j2 items in each) get no significance verdict', async () => {
+    const mixed = (runId, v1, v2) => [
+      { run_id: runId, item_id: 'i1', verdict: v1, scores: JSON.stringify(scoresObj) },
+      { run_id: runId, item_id: 'i2', verdict: v2, scores: JSON.stringify({ ...scoresObj, could_send: 'no', judge_version: 'j2' }) },
+    ];
+    const dbi = makeRunnerDb({
+      runs: [
+        { id: 'r-base', status: 'complete', provider_leg: 'openai', prompt_version: 'house_voice_v8' },
+        { id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', baseline_run_id: 'r-base' },
+      ],
+      items: [item('i1'), item('i2')],
+      results: [...mixed('r-base', 'draft_unsafe', 'draft_unsafe'), { run_id: 'r1', item_id: 'i1', verdict: 'equivalent', scores: JSON.stringify(scoresObj) }],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue({ ...judgment('equivalent', scoresObj), judge_version: 'j2', could_send: 'yes' });
+    await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    const complete = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(complete.patch.items_judged).toBe(2);
+    expect(complete.patch.significance).toBeUndefined();
+  });
+
   test('computeSignificance ignores the extra scores key', () => {
     const rows = (ck) => [{ item_id: 'a', verdict: 'equivalent', scores: JSON.stringify({ ...scoresObj, ...(ck ? { could_send: ck } : {}) }) }];
     const sig = sealedEval.computeSignificance({ candidateResults: rows('no'), baselineResults: rows(null) });
