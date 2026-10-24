@@ -16,6 +16,8 @@ const {
   PROPERTY_ADDRESS_FIELDS, isDiscountLine, propertyAddressSnapshot,
 } = require('@waves/invoice-property-groups');
 
+const crypto = require('crypto');
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function linePropertyError(message) {
@@ -89,8 +91,16 @@ async function attachInvoiceLineProperties(conn, customerId, items = [], { exist
     if (isDiscountLine(item)) return item;
     const { property_address: _stale, ...rest } = item;
     const propertyId = cleanPropertyId(item.property_id);
+    // A property-tagged line gets a stable identity when it has none (an API
+    // create without client_ids), so a later edit can recognise it as
+    // unchanged and keep its frozen address instead of re-reading the property.
     const next = propertyId
-      ? { ...rest, property_id: propertyId, property_address: keptByLine.get(item) || snapshots.get(propertyId) }
+      ? {
+        ...rest,
+        ...(rest.client_id ? {} : { client_id: `li_${crypto.randomUUID()}` }),
+        property_id: propertyId,
+        property_address: keptByLine.get(item) || snapshots.get(propertyId),
+      }
       : (() => { const { property_id: _none, ...bare } = rest; return bare; })();
     if (next.client_id) parentByClientId.set(String(next.client_id), next);
     return next;

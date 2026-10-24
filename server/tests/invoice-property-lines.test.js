@@ -53,6 +53,19 @@ describe('attachInvoiceLineProperties (write path)', () => {
     expect(items.map((i) => i.amount)).toEqual([149, -14.9, 149, -14.9]);
   });
 
+  test('a property-tagged line without a client_id gets a stable one, so a later edit keeps its frozen address', async () => {
+    const created = await attachInvoiceLineProperties(fakeConn(), CUSTOMER, [service(undefined, PALM), service(undefined, BAY)]);
+    expect(created.map((l) => l.client_id)).toEqual([expect.stringMatching(/^li_[0-9a-f-]{36}$/), expect.stringMatching(/^li_[0-9a-f-]{36}$/)]);
+    expect(created[0].client_id).not.toBe(created[1].client_id);
+    // The same lines resubmitted on an edit are recognised as unchanged: no property read, snapshots kept.
+    const neverCalled = () => { throw new Error('no property read expected'); };
+    const edited = await attachInvoiceLineProperties(neverCalled, CUSTOMER, created.map((l) => ({ ...l, property_address: undefined })), { existingLineItems: created });
+    expect(edited.map((l) => l.property_address)).toEqual(created.map((l) => l.property_address));
+    // An untagged line is left exactly as sent (no identity minted).
+    const plain = await attachInvoiceLineProperties(neverCalled, CUSTOMER, [{ description: 'Service', quantity: 1, unit_price: 10, amount: 10 }]);
+    expect(plain[0]).not.toHaveProperty('client_id');
+  });
+
   test('refuses a property that is not this customer\'s (400, invalid_line_property)', async () => {
     await expect(attachInvoiceLineProperties(fakeConn(), CUSTOMER, [service('a', PALM), service('b', OTHER)]))
       .rejects.toMatchObject({ statusCode: 400, code: 'invalid_line_property' });
