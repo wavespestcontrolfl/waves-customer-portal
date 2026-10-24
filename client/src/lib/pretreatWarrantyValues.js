@@ -94,12 +94,15 @@ function propertyAddress(findings, lot) {
   return '';
 }
 
-export function pretreatWarrantyValues({ project = {}, findings = {}, today = etDateString() } = {}) {
+export function pretreatWarrantyValues({ project = {}, findings = {}, today = etDateString(), basisKind = 'signed' } = {}) {
   // project_date is the treatment date (the server refuses a legacy findings date that disagrees).
   const initial = parseDateOnly(project.project_date);
   const years = warrantyPlanYears(findings.warranty_type);
-  const termEnd = initial && years ? formatUs(addYears(initial, years)) : '';
   const finalDate = parseDateOnly(findings.final_exterior_date);
+  // A builder lot under the master agreement runs from its final treatment
+  // date; an owner contract from the initial one (the server's rule).
+  const start = basisKind === 'master' ? finalDate : initial;
+  const termEnd = start && years ? formatUs(addYears(start, years)) : '';
   const lot = [text(findings.lot_block), text(findings.subdivision)].filter(Boolean).join(', ');
   // A legacy "Other" pick keeps the real product in product_name_other, as
   // the certificate page and the send gate read it.
@@ -130,6 +133,8 @@ export function pretreatWarrantyValues({ project = {}, findings = {}, today = et
       number: project.id ? `NCW-${String(project.id).toUpperCase()}` : '',
       structures: WARRANTY_DEFAULT_STRUCTURES,
       plan: text(findings.warranty_type),
+      start_basis: basisKind === 'master' ? 'final' : 'initial',
+      start_date: start ? formatUs(start) : '',
       term_end: termEnd,
       renewal_due: termEnd,
       payer: '',

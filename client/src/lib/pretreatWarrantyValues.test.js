@@ -52,6 +52,16 @@ describe('pretreatWarrantyValues', () => {
     expect(v.warranty.plan_price).toBe('');
   });
 
+  it('runs a builder lot from its final treatment date, and gives no term until that date is recorded', () => {
+    const project = { project_date: '2026-10-01' };
+    const lot = pretreatWarrantyValues({ project, findings: { ...findings, final_exterior_date: '2026-12-15' }, basisKind: 'master' });
+    expect(lot.warranty).toMatchObject({ start_basis: 'final', start_date: '12/15/2026', term_end: '12/15/2027', renewal_due: '12/15/2027' });
+    const unfinished = pretreatWarrantyValues({ project, findings, basisKind: 'master' });
+    expect(unfinished.warranty).toMatchObject({ start_date: '', term_end: '' });
+    const owner = pretreatWarrantyValues({ project, findings: { ...findings, final_exterior_date: '2026-12-15' } });
+    expect(owner.warranty).toMatchObject({ start_basis: 'initial', start_date: '10/01/2026', term_end: '10/01/2027' });
+  });
+
   it('takes the treatment date from the project and handles Feb 29', () => {
     const v = pretreatWarrantyValues({ project: { project_date: '2028-02-29' }, findings: { ...findings, treatment_date: '' } });
     expect(v.treatment.initial_date).toBe('02/29/2028');

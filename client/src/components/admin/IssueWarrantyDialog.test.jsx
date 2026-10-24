@@ -22,6 +22,8 @@ const findings = {
   applicator_fdacs_id: 'JF000000',
   warranty_type: 'Builder 1-year, renewable yearly to year 5',
   wdo_target: ['Subterranean termites'],
+  // The dialog opens on a builder lot, which runs from the final treatment.
+  final_exterior_date: '2026-10-20',
 };
 
 function fillOfficeFields() {
@@ -94,7 +96,15 @@ describe('IssueWarrantyDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview warranty' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The certificate is missing: treatment.product'));
   });
+  it('blocks a builder lot until the final treatment date is recorded, and names the $149.00 cap', () => {
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={{ ...findings, final_exterior_date: '' }} />);
+    fillOfficeFields();
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
+    expect(screen.getByText(/A builder lot warranty runs from the final exterior treatment/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/not more than \$149.00/)).toBeInTheDocument();
+  });
 });
+
 
 
 describe('IssueWarrantyAction', () => {
