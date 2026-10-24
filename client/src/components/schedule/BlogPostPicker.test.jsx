@@ -19,9 +19,9 @@ const POST = {
   url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-ghost-ants-in-sarasota/',
 };
 
-function Harness({ search, suggest = null, initial = null }) {
+function Harness({ search, suggest = null, initial = null, note = null, canChange = false }) {
   const [value, setValue] = React.useState(initial);
-  return <BlogPostPicker search={search} suggest={suggest} value={value} onChange={setValue} />;
+  return <BlogPostPicker search={search} suggest={suggest} value={value} onChange={setValue} note={note} canChange={canChange} />;
 }
 
 const NEAR = {
@@ -233,3 +233,31 @@ describe('BlogPostPicker', () => {
     expect(screen.queryByRole('button', { name: /Suggest a post/ })).toBeNull();
   });
 });
+
+describe('a pick filled in from a tip (tips with facts, GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  const MICE = { id: 'post-2', title: 'How to Get Rid of Mice in Southwest Florida', url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-mice/' };
+
+  test('the note prints under the pick', () => {
+    render(<Harness search={vi.fn()} initial={POST} note="Filled from the tip “Pet bowls up overnight”" />);
+    expect(screen.getByText('Filled from the tip “Pet bowls up overnight”')).toBeTruthy();
+  });
+
+  test('Change opens the search under the kept pick, and a post picked there replaces it', async () => {
+    const search = vi.fn(async () => ({ posts: [MICE] }));
+    render(<Harness search={search} initial={POST} canChange />);
+    expect(screen.queryByLabelText('Search the Waves blog')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    expect(screen.getByText(/Picked · pest-control\/get-rid-of-ghost-ants-in-sarasota\//)).toBeTruthy();
+    await searchFor('mice');
+    fireEvent.click(await screen.findByRole('button', { name: /Get Rid of Mice/ }));
+    expect(screen.getByText(/Picked · pest-control\/get-rid-of-mice\//)).toBeTruthy();
+    expect(screen.queryByLabelText('Search the Waves blog')).toBeNull();
+  });
+
+  test('without canChange (the gate off) there is only Remove', () => {
+    render(<Harness search={vi.fn()} initial={POST} />);
+    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
+  });
+});
+

@@ -24,6 +24,7 @@
 
 const { isSiteUrl, SITE_HOST } = require('../link-library');
 const { detectServiceLine } = require('./service-line-configs');
+const { CITY_COUNTY } = require('../../config/address-county');
 const logger = require('../logger');
 
 const MAX_RESULTS = 8;
@@ -256,12 +257,15 @@ const liveRegistryRows = (knex) => knex('content_registry')
     "(live_url ~* ? OR (COALESCE(live_url, '') !~* ? AND (COALESCE(canonical_url, '') !~* ? OR canonical_url ~* ?)))",
     [HUB_URL_RE, ABSOLUTE_URL_RE, ABSOLUTE_URL_RE, HUB_URL_RE],
   );
+// The columns registryLink judges a row by, with only the frontmatter of the
+// metadata (the sites a post renders on).
+const registrySelect = (knex) => [
+  ...REGISTRY_COLUMNS.filter((column) => column !== 'metadata'),
+  knex.raw("jsonb_build_object('frontmatter', metadata -> 'frontmatter', 'astro', jsonb_build_object('frontmatter', metadata -> 'astro' -> 'frontmatter')) AS metadata"),
+];
 function registryMatches(knex, terms) {
   return anyTermIn(liveRegistryRows(knex), REGISTRY_FIELDS, terms, 'published_at')
-    .select([
-      ...REGISTRY_COLUMNS.filter((column) => column !== 'metadata'),
-      knex.raw("jsonb_build_object('frontmatter', metadata -> 'frontmatter', 'astro', jsonb_build_object('frontmatter', metadata -> 'astro' -> 'frontmatter')) AS metadata"),
-    ]);
+    .select(registrySelect(knex));
 }
 // A registry row's deployed words, by where they sit: the title (and the
 // headline), the keyword, and the summary.
@@ -305,6 +309,68 @@ async function linkableEntries(knex, terms) {
     found.set(key, { post, texts, ...matchOf(texts, terms), when: row.published_at ? new Date(row.published_at).getTime() || 0 : 0 });
   }
   return [...found.values()].filter((entry) => entry.held.some(Boolean));
+}
+
+/**
+ * The live hub post at each of the given paths (`/{category}/{slug}/`), as a
+ * Map path → post; a path with no live post is absent. The registry rows the
+ * search reads, judged by registryLink and matched on the live URL's own
+ * path, so a path links only what the sweep verified on the hub (tips with
+ * facts, owner 2026-10-24).
+ */
+async function liveBlogPostsByPath(knex, paths) {
+  const wanted = new Map();
+  for (const raw of Array.isArray(paths) ? paths : []) {
+    const key = pathKey(`https://www.${SITE_HOST}${String(raw || '')}`);
+    if (key) wanted.set(key, String(raw));
+  }
+  if (!wanted.size) return new Map();
+  // Each path, anchored: the normalized canonical (a hub post's own path), or
+  // the live or canonical URL ending in it. Every pattern is a binding.
+  const keys = [...wanted.keys()];
+  const anchored = keys.map((key) => `${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`);
+  const rows = await liveRegistryRows(knex)
+    .where(function atPaths() {
+      this.whereIn('canonical_url_normalized', keys.map((key) => `${key}/`));
+      for (const pattern of anchored) this.orWhereRaw("COALESCE(live_url, '') ~* ?", [pattern]).orWhereRaw("COALESCE(canonical_url, '') ~* ?", [pattern]);
+    })
+    .select(registrySelect(knex))
+    .limit(MAX_READ);
+  const found = new Map();
+  for (const row of rows) {
+    const post = registryLink(row);
+    if (!post) continue;
+    const path = wanted.get(pathKey(post.url));
+    if (path && !found.has(path)) found.set(path, post);
+  }
+  return found;
+}
+
+// A post titled for one town ("Get Rid Of Fleas In Lakewood Ranch, FL",
+// "Ghost Ants in Sarasota"): never filled in from a tip, since the customer
+// may live in another (owner 2026-10-24, decision 2). The service-area towns,
+// whole-county and straddling, read as "in <town>" or "<town>, FL", so
+// "Palmetto Bugs" or an osprey stays a generic title.
+const TOWNS = [...Object.keys(CITY_COUNTY), 'lakewood ranch', 'longboat key', 'englewood', 'sarasota']
+  .map((town) => town.replace(/\s+/g, '\\s+')).join('|');
+const TOWN_TITLE_RE = new RegExp(`\\b(?:in|near)\\s+(?:${TOWNS})\\b|\\b(?:${TOWNS}),?\\s+(?:fl|florida)\\b`, 'i');
+
+/**
+ * The live hub post each tip names (tip-library `blog.path`), by tip id, for
+ * the office form to fill an empty blog slot when the tip is picked (tips
+ * with facts, GATE_TECH_TIP_SOURCES, owner 2026-10-24). A tip whose path has
+ * no live post is absent, and so is one whose post is titled for a town.
+ */
+async function tipBlogPosts(knex, tips) {
+  const linking = (Array.isArray(tips) ? tips : []).filter((tip) => tip?.blog?.path);
+  if (!linking.length) return {};
+  const live = await liveBlogPostsByPath(knex, linking.map((tip) => tip.blog.path));
+  const posts = {};
+  for (const tip of linking) {
+    const post = live.get(tip.blog.path);
+    if (post && !TOWN_TITLE_RE.test(String(post.title || ''))) posts[tip.id] = post;
+  }
+  return posts;
 }
 
 /**
@@ -475,4 +541,6 @@ module.exports = {
   searchTerms,
   registryLink,
   wordsOnTheSite,
+  liveBlogPostsByPath,
+  tipBlogPosts,
 };

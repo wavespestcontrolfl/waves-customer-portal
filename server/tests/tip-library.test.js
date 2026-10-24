@@ -862,3 +862,44 @@ describe('tips matched to the yard (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', (
     }
   });
 });
+
+describe('the picker shows the sources and names the post (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  const served = (opts) => {
+    const library = tipsForVisit(opts);
+    return [...library.groups.flatMap((group) => group.tips), ...library.more];
+  };
+
+  test('gate on: a sourced tip carries the citations the completion would freeze that day; off, none', () => {
+    const on = served({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).find((tip) => tip.id === 'lawn_water_morning');
+    expect(on.citations).toEqual(resolveTipIds(['lawn_water_morning'], { sourced: true, date: '2026-07-15' })[0].citations);
+    expect(on.citations.map((citation) => citation.label)).toEqual(['UF/IFAS', 'SWFWMD']);
+    expect(Object.isFrozen(on.citations)).toBe(true);
+    expect(served({ serviceLine: 'lawn', date: '2026-07-15' }).some((tip) => tip.citations)).toBe(false);
+    // The water-shortage order ends 2027-03-31: from the next day the picker,
+    // like the freeze, names UF/IFAS alone.
+    const after = served({ serviceLine: 'lawn', date: '2027-04-01', sourced: true }).find((tip) => tip.id === 'lawn_water_morning');
+    expect(after.citations.map((citation) => citation.label)).toEqual(['UF/IFAS']);
+  });
+
+  test('a named post is a hub path on a line that carries posts, and never one the review found titled for a town (decision 2)', () => {
+    const named = TIPS.filter((tip) => tip.blog);
+    expect(named.length).toBeGreaterThan(0);
+    for (const tip of named) {
+      expect(Object.keys(tip.blog)).toEqual(['path']);
+      expect(tip.blog.path).toMatch(/^\/[a-z0-9-]+\/[a-z0-9-]+\/$/);
+      // tree, shrub & palm reports carry no post (NO_POST_LINES)
+      expect(tip.lines.some((line) => line !== 'tree_shrub')).toBe(true);
+    }
+    // The six posts titled for one town (2026-10-24), and the porch-light post
+    // that still says warm bulbs draw fewer insects (held until the blog is
+    // corrected), are named by no tip.
+    const NEVER = [
+      '/pest-control/get-rid-of-roof-rats-lakewood-ranch/', '/termite/termite-infestation-in-venice/',
+      '/mosquito/professional-mosquito-treatment/', '/pest-control/get-rid-of-ghost-ants-in-sarasota/',
+      '/pest-control/get-rid-of-cockroaches/', '/pest-control/get-rid-of-fleas/',
+      '/pest-control/why-spiders-come-back-after-treatment/',
+    ];
+    expect(named.filter((tip) => NEVER.includes(tip.blog.path)).map((tip) => tip.id)).toEqual([]);
+  });
+});
+

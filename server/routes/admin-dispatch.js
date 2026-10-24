@@ -54,7 +54,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
 const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
-const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
+const { TIPS, tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
 const { loadTechTipYard } = require('../services/service-report/tech-tip-yard');
 
 const {
@@ -758,6 +758,11 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         city: svc.service_address_city || svc.current_property_city,
       })
       : null;
+    // The live post each tip names, for the office form to fill an empty
+    // blog slot on a pick (gate on only; a failed read offers none).
+    const blogPosts = tipSources
+      ? await require('../services/service-report/report-blog-post').tipBlogPosts(db, TIPS).catch(() => ({}))
+      : null;
     const library = tipsForVisit({
       serviceLine,
       serviceKey,
@@ -813,8 +818,14 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       lastSent,
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
       ...(completionChoicesEnabled ? { previousRecommendations } : {}),
-      // What the tips were matched to, for the picker's one-line note.
-      ...(yard ? { yard: { grass: yard.grassTrusted ? yard.grassLabel : null, irrigationSystem: yard.irrigationSystem, county: yard.county } } : {}),
+      // Tips with facts (gate on): what the tips were matched to, for the
+      // picker's one-line note, and the post each tip fills in. The flag also
+      // offers the blog post on a lawn visit (owner 2026-10-24, decision 6).
+      ...(tipSources ? {
+        tipSources: true,
+        ...(yard ? { yard: { grass: yard.grassTrusted ? yard.grassLabel : null, irrigationSystem: yard.irrigationSystem, county: yard.county } } : {}),
+        blogPosts,
+      } : {}),
     });
   } catch (err) { next(err); }
 });

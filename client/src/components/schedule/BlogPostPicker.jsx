@@ -170,8 +170,11 @@ function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
   );
 }
 
-export default function BlogPostPicker({ search, suggest = null, value = null, onChange, disabled = false, tokens = {} }) {
+export default function BlogPostPicker({ search, suggest = null, value = null, onChange, disabled = false, tokens = {}, note = null, canChange = false }) {
   const inputId = useId();
+  // Change (tips with facts): the search opens under the kept pick, and a
+  // post picked there replaces it.
+  const [changing, setChanging] = useState(false);
   const { query, setQuery, results, status, covered, typing, shown, canSuggest } = useBlogPostSearch(search);
   const suggestion = useBlogSuggestion(suggest, query);
   const phrase = query.trim();
@@ -189,6 +192,9 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
   const rowStyle = (picked) => ({
     display: "block",
     width: "100%",
+    // the padding and border inside the width, so a row never spills past
+    // the form's column
+    boxSizing: "border-box",
     textAlign: "left",
     padding: "10px 12px",
     marginTop: 6,
@@ -203,20 +209,35 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
 
   return (
     <div style={{ fontFamily: tokens.font, color: ink }} data-testid="blog-post-picker">
-      {value ? (
+      {value && (
         <div style={{ ...rowStyle(true), cursor: "default" }}>
           <div style={{ fontWeight: 500, lineHeight: 1.35 }}>{value.title}</div>
           <div style={{ fontSize: 14, color: muted, overflowWrap: "anywhere" }}>Picked · {blogPostPath(value.url)}</div>
-          <button
-            type="button"
-            onClick={() => onChange(null)}
-            disabled={disabled}
-            style={{ marginTop: 8, padding: "6px 12px", borderRadius: 999, border: `1px solid ${border}`, background: card, color: ink, fontSize: 14, cursor: disabled ? "default" : "pointer" }}
-          >
-            Remove
-          </button>
+          {note && <div style={{ fontSize: 14, color: muted }}>{note}</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            {canChange && (
+              <button
+                type="button"
+                onClick={() => setChanging((open) => !open)}
+                disabled={disabled}
+                aria-expanded={changing}
+                style={{ padding: "6px 12px", borderRadius: 999, border: `1px solid ${border}`, background: card, color: ink, fontSize: 14, cursor: disabled ? "default" : "pointer" }}
+              >
+                Change
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => { setChanging(false); onChange(null); }}
+              disabled={disabled}
+              style={{ padding: "6px 12px", borderRadius: 999, border: `1px solid ${border}`, background: card, color: ink, fontSize: 14, cursor: disabled ? "default" : "pointer" }}
+            >
+              Remove
+            </button>
+          </div>
         </div>
-      ) : (
+      )}
+      {(!value || (canChange && changing)) && (
         <>
           <input
             id={inputId}
@@ -226,11 +247,11 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search the Waves blog, e.g. ghost ants"
             disabled={disabled}
-            style={{ ...(tokens.inputStyle || {}), width: "100%", boxSizing: "border-box" }}
+            style={{ ...(tokens.inputStyle || {}), width: "100%", boxSizing: "border-box", ...(value ? { marginTop: 8 } : {}) }}
           />
           <SearchStatusLines status={status} results={results} uncovered={uncovered} phrase={phrase} ink={ink} muted={muted} />
           {(status === "done" ? shown : results).map((post) => (
-            <button key={post.id} type="button" disabled={disabled} onClick={() => onChange(post)} style={rowStyle(false)}>
+            <button key={post.id} type="button" disabled={disabled} onClick={() => { setChanging(false); onChange(post); }} style={rowStyle(false)}>
               <span style={{ display: "block", fontWeight: 500, lineHeight: 1.35 }}>{post.title}</span>
               <span style={{ display: "block", fontSize: 14, color: muted, overflowWrap: "anywhere" }}>{blogPostPath(post.url)}</span>
             </button>
