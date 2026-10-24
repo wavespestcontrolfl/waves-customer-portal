@@ -56,8 +56,13 @@ postgres('reply outcome signals', () => {
     await text(ask, { at: after(-10) });
     return text('We can do that for a fair price, happy to explain.', { at: REPLY_AT, direction: 'outbound', type, metadata });
   };
-  const call = async ({ minutes, direction = 'inbound', from = phone }) => trx('call_log').insert({
-    direction, from_phone: from, to_phone: OUR_NUMBER, created_at: after(minutes), status: 'completed',
+  const call = async ({ minutes, direction = 'inbound', from = phone, source = null }) => trx('call_log').insert({
+    direction, from_phone: from, to_phone: OUR_NUMBER, created_at: after(minutes), status: 'completed', source,
+  });
+  // The send wrapper's audit row (messaging/audit.js persistAudit): provider_message_id is the sms_log twilio_sid.
+  const audit = (sid, metadata) => trx('messaging_audit_log').insert({
+    to_hash: 'h'.repeat(64), to_last4: '0123', audience: 'customer', purpose: 'conversational', channel: 'sms',
+    body_hash: 'b'.repeat(64), provider: 'twilio', provider_message_id: sid, metadata: JSON.stringify(metadata),
   });
 
   beforeAll(async () => {
@@ -169,6 +174,48 @@ postgres('reply outcome signals', () => {
     expect(await rowFor(noCall)).toMatchObject({ called_back: false, silent: true });
   });
 
+  test('call back: a voice-agent sandbox call is a test call and never counts', async () => {
+    const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+    const replyId = await askAndReply();
+    await call({ minutes: 10, source: VOICE_RELAY_SANDBOX_SOURCE });
+    await sweep();
+    expect(await rowFor(replyId)).toMatchObject({ called_back: false, silent: true });
+  });
+
+  test('texts a handler consumed (retyped reschedule_reply / lead_intake) still count as the question and the follow-up', async () => {
+    const asked = await text('Can we move my visit to Friday?', { at: after(-10), type: 'reschedule_reply' });
+    const replyId = await text('Sure, Friday works.', { at: REPLY_AT, direction: 'outbound' });
+    await text('huh?', { at: after(5), type: 'lead_intake' });
+    await sweep();
+    expect(await rowFor(replyId)).toMatchObject({ status: 'computed', replied_to_sms_log_id: asked, confused: true, silent: false });
+
+    phone = `+1${ten.slice(0, 6)}${Number(ten.slice(6)) + 500}`;
+    const second = await askAndReply();
+    await text('Thanks!', { at: after(4), type: 'reschedule_reply' });
+    await sweep();
+    expect(await rowFor(second)).toMatchObject({ positive_close: true });
+  });
+
+  test('a scheduled reply is measured once: the provider row is, the queue row it dispatched from is not', async () => {
+    await text('Can you text me the details tomorrow morning?', { at: after(-10) });
+    const queueId = await text('Here are the details you asked for.', { at: new Date(REPLY_AT.getTime() + 20_000), direction: 'outbound' });
+    const providerId = await text('Here are the details you asked for.', { at: REPLY_AT, direction: 'outbound', metadata: { pre_handoff_stamp: true, scheduled_sms_log_id: queueId } });
+    await text('Thanks!', { at: after(5) });
+    const result = await sweep();
+    expect(result).toMatchObject({ failed: 0 });
+    expect(await rowFor(providerId)).toMatchObject({ status: 'computed', positive_close: true });
+    expect(await rowFor(queueId)).toMatchObject({ status: 'not_a_reply', positive_close: false, silent: false, replied_to_sms_log_id: null });
+    expect(await trx('sms_reply_outcomes').where({ status: 'computed', phone_last10: ten })).toHaveLength(1);
+  });
+
+  test('a queue row whose provider row is not a reply type or not sent is still measured', async () => {
+    await text('Please text me later', { at: after(-10) });
+    const queueId = await text('Later text', { at: new Date(REPLY_AT.getTime() + 20_000), direction: 'outbound' });
+    await text('Later text', { at: REPLY_AT, direction: 'outbound', status: 'failed', metadata: { scheduled_sms_log_id: queueId } });
+    await sweep();
+    expect(await rowFor(queueId)).toMatchObject({ status: 'computed' });
+  });
+
   test('positive close: thanks, a thumbs-up or a like as the first text', async () => {
     const thanks = await askAndReply();
     await text('Thanks so much!', { at: after(20) });
@@ -245,7 +292,11 @@ postgres('reply outcome signals', () => {
     const inboundId = await text('Do you treat for ants?', { at: after(-10), customerId: hasCustomer ? customerId : null });
     const draftA = randomUUID();
     await trx('message_drafts').insert({ id: draftA, sms_log_id: inboundId, drafter: 'house_voice', status: 'shadow', prompt_version: 'house_voice_v99' });
-    const approved = await text('Yes we do.', { at: REPLY_AT, direction: 'outbound', type: 'ai_approved', metadata: { draft_id: draftA }, customerId: hasCustomer ? customerId : null });
+    // Production shape: the provider writes sms_log.metadata WITHOUT draft_id (twilio.js buildSmsLogRow);
+    // the draft id lives only in the send audit row that holds the same provider SID.
+    const approved = await text('Yes we do.', { at: REPLY_AT, direction: 'outbound', type: 'ai_approved', metadata: { pre_handoff_stamp: true }, customerId: hasCustomer ? customerId : null });
+    const approvedSid = (await trx('sms_log').where({ id: approved }).first('twilio_sid')).twilio_sid;
+    await audit(approvedSid, { original_message_type: 'ai_approved', draft_id: draftA, adminUserId: randomUUID() });
 
     phone = `+1${ten.slice(0, 6)}${Number(ten.slice(6)) + 500}`;
     const inboundB = await text('Do you treat for roaches?', { at: after(-10) });

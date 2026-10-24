@@ -26,7 +26,8 @@
  * the same number in the REPLY_WINDOW_HOURS before it. Any other outbound of
  * those types is recorded as not_a_reply so the sweep never picks it twice.
  * AI replies carry the draft id and prompt_version, so the summary can compare
- * prompt versions by customer behavior.
+ * prompt versions by customer behavior. A scheduled reply leaves two outbound rows
+ * (the provider's and the queue row); only the provider row is measured.
  *
  * MEASUREMENT ONLY: this file never sends, changes or holds a message, and
  * writes only sms_reply_outcomes. Phones match on the full digits with or
@@ -38,6 +39,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { detectSmsOptCommand } = require('./messaging/opt-out-detector');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { isCourtesyOnly, isSmsReaction, isAffirmativeSmsReaction } = require('./sms-intent');
 
 const CONFUSION_WINDOW_MINUTES = 30;
@@ -63,8 +65,10 @@ const MIN_SAMPLE = 20;
 // Outbound sms_log.message_type values that answer a customer text.
 const REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised', 'ai_autosent', 'ai_gratitude'];
 const SENT_STATUSES = ['queued', 'sent', 'delivered'];
-// Customer-facing inbound texts (twilio-webhook.js messageType) and tapbacks.
-const TEXT_TYPES = ['inbound', 'domain_lead', 'van_lead'];
+// Customer-facing inbound texts (twilio-webhook.js messageType), including the two a handler
+// retypes after it consumed the text (retypeConsumedInbound: a reschedule reply, a lead-intake
+// answer), and tapbacks.
+const TEXT_TYPES = ['inbound', 'domain_lead', 'van_lead', 'reschedule_reply', 'lead_intake'];
 const REACTION_TYPE = 'sms_reaction';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -123,15 +127,35 @@ function whereSamePhone(query, column, phone) {
     );
 }
 
+// The draft behind each reply. An auto-send stamps agent_decision_id on the sms_log row. An
+// approved or revised draft passes draft_id only in the send wrapper's metadata, which the
+// provider does not copy onto sms_log, so it is read from the send audit row that holds the
+// same provider SID (messaging_audit_log.provider_message_id = sms_log.twilio_sid).
 async function resolveDrafts(replies, dbh) {
   const byReply = new Map();
-  const decisionIds = new Set();
+  const auditedSids = [];
   for (const reply of replies) {
     const meta = reply.metadata && typeof reply.metadata === 'object' ? reply.metadata : {};
-    const entry = { draftId: asUuid(meta.draft_id), decisionId: asUuid(meta.agent_decision_id) };
-    byReply.set(reply.id, entry);
-    if (!entry.draftId && entry.decisionId) decisionIds.add(entry.decisionId);
+    byReply.set(reply.id, { draftId: asUuid(meta.draft_id), decisionId: asUuid(meta.agent_decision_id) });
+    if (reply.twilio_sid && !asUuid(meta.draft_id)) auditedSids.push(reply.twilio_sid);
   }
+  if (auditedSids.length) {
+    const audits = await dbh('messaging_audit_log')
+      .whereIn('provider_message_id', auditedSids).where({ channel: 'sms' })
+      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .select('provider_message_id', 'metadata');
+    const auditBySid = new Map();
+    for (const a of audits) if (!auditBySid.has(a.provider_message_id)) auditBySid.set(a.provider_message_id, a.metadata || {});
+    for (const reply of replies) {
+      const entry = byReply.get(reply.id);
+      const audit = auditBySid.get(reply.twilio_sid);
+      if (!audit || entry.draftId) continue;
+      entry.draftId = asUuid(audit.draft_id);
+      entry.decisionId = entry.decisionId || asUuid(audit.agentDecisionId) || asUuid(audit.agent_decision_id);
+    }
+  }
+  const decisionIds = new Set();
+  for (const entry of byReply.values()) if (!entry.draftId && entry.decisionId) decisionIds.add(entry.decisionId);
   if (decisionIds.size) {
     const decisions = await dbh('agent_decisions')
       .whereIn('id', [...decisionIds]).where({ entity_type: 'message_draft' }).select('id', 'entity_id');
@@ -153,6 +177,24 @@ async function resolveDrafts(replies, dbh) {
   return out;
 }
 
+// A scheduled reply leaves TWO outbound rows: the provider's sent row (metadata.scheduled_sms_log_id
+// = the queue row) and the queue row itself, flipped to sent. Returns the ids of queue rows in this
+// batch that have a measurable provider row, so one delivery is measured once (on the provider row).
+async function findQueueRowsWithProviderRow(replies, dbh) {
+  if (!replies.length) return new Set();
+  const times = replies.map((r) => new Date(r.created_at).getTime());
+  const dayMs = 86400 * 1000;
+  const query = excludeUnresolvedSendReservations(dbh('sms_log'))
+    .where({ direction: 'outbound' })
+    .whereIn('message_type', REPLY_TYPES)
+    .whereIn('status', SENT_STATUSES)
+    .where('created_at', '>=', new Date(Math.min(...times) - dayMs))
+    .where('created_at', '<=', new Date(Math.max(...times) + dayMs))
+    .whereRaw("metadata->>'scheduled_sms_log_id' = ANY(?::text[])", [replies.map((r) => r.id)]);
+  const twins = await query.select(dbh.raw("metadata->>'scheduled_sms_log_id' AS queue_id"), 'id');
+  return new Set(twins.filter((t) => t.id !== t.queue_id).map((t) => t.queue_id));
+}
+
 async function readReplyCandidates({ dbh, now, limit, lookbackDays }) {
   const newest = new Date(now.getTime() - SETTLE_HOURS * 3600 * 1000);
   const oldest = new Date(now.getTime() - lookbackDays * 86400 * 1000);
@@ -170,7 +212,7 @@ async function readReplyCandidates({ dbh, now, limit, lookbackDays }) {
     })
     .orderBy('s.created_at', 'asc')
     .limit(limit)
-    .select('s.id', 's.customer_id', 's.to_phone', 's.message_type', 's.created_at', 's.metadata');
+    .select('s.id', 's.customer_id', 's.to_phone', 's.twilio_sid', 's.message_type', 's.created_at', 's.metadata');
 }
 
 // The customer text this reply answered: newest customer-facing inbound from the
@@ -223,7 +265,8 @@ async function findOptOut({ dbh, reply, phone }) {
 async function readCallBack({ dbh, reply, phone }) {
   const start = new Date(reply.created_at);
   const end = new Date(start.getTime() + CALL_WINDOW_MINUTES * 60 * 1000);
-  const query = dbh('call_log')
+  // Voice-agent sandbox calls are test calls, never a customer calling back.
+  const query = whereNotSandboxCall(dbh('call_log'))
     .where({ direction: 'inbound' })
     .where('created_at', '>', start)
     .where('created_at', '<=', end);
@@ -279,7 +322,7 @@ function classifyFollowUps({ replyAt, followUps, answeredBody, calledBack, opted
   };
 }
 
-async function measureReply({ dbh, reply, draft, now }) {
+async function measureReply({ dbh, reply, draft, now, duplicateOfProviderRow = false }) {
   const phone = nanpDigits(reply.to_phone);
   const base = {
     reply_sms_log_id: reply.id,
@@ -291,6 +334,7 @@ async function measureReply({ dbh, reply, draft, now }) {
     prompt_version: draft?.promptVersion ? String(draft.promptVersion).slice(0, 60) : null,
     computed_at: now,
   };
+  if (duplicateOfProviderRow) return { ...base, status: 'not_a_reply', replied_to_sms_log_id: null };
   const answered = phone ? await readAnsweredText({ dbh, reply, phone }) : null;
   if (!answered) return { ...base, status: 'not_a_reply', replied_to_sms_log_id: null };
   const followUps = await readInboundPage({ dbh, reply, phone, windowMs: POSITIVE_WINDOW_MINUTES * 60 * 1000 });
@@ -310,10 +354,11 @@ async function sweepReplyOutcomes({ now = new Date(), limit = DEFAULT_LIMIT, loo
 
   const replies = await readReplyCandidates({ dbh, now, limit, lookbackDays });
   const drafts = replies.length ? await resolveDrafts(replies, dbh) : new Map();
+  const queueRows = await findQueueRowsWithProviderRow(replies, dbh);
   const result = { considered: replies.length, computed: 0, not_a_reply: 0, failed: 0 };
   for (const reply of replies) {
     try {
-      const row = await measureReply({ dbh, reply, draft: drafts.get(reply.id), now });
+      const row = await measureReply({ dbh, reply, draft: drafts.get(reply.id), now, duplicateOfProviderRow: queueRows.has(reply.id) });
       await dbh('sms_reply_outcomes').insert(row).onConflict('reply_sms_log_id').ignore();
       result[row.status] += 1;
     } catch (err) {
