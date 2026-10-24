@@ -3731,6 +3731,14 @@ const gates = {
   // and the tax package behave exactly as before.
   taxSharedBills: gateEnvValue('GATE_TAX_SHARED_BILLS'),
 
+  // Tax return engine (2026-10-24): tax-year records (filing status, other
+  // income, estimates paid, carryovers in), a federal return computed from the
+  // P&L and the books (Schedule C, Schedule SE, NOL, QBI, income tax) and a
+  // Return tab under Admin > Tax > Reports. Nested under GATE_BANK_IMPORT; read
+  // at call time via taxReturnEngineLive(); dark by default. Off = the routes
+  // 404 and the tab stays hidden; nothing else reads it.
+  taxReturnEngine: gateEnvValue('GATE_TAX_RETURN_ENGINE'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic
@@ -5576,6 +5584,11 @@ function commercialProposalSignLive() {
 // GATE_TAX_SHARED_BILLS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
 function taxSharedBillsLive() {
   return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
+}
+
+// GATE_TAX_RETURN_ENGINE read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
+function taxReturnEngineLive() {
+  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_RETURN_ENGINE');
 }
 
 // GATE_PUBLIC_LLM_SHARED_CAP read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -7647,6 +7660,8 @@ module.exports.bidKitLive = bidKitLive;
 module.exports.commercialProposalSignLive = commercialProposalSignLive;
 // GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
 module.exports.taxSharedBillsLive = taxSharedBillsLive;
+// GATE_TAX_RETURN_ENGINE reader, on its own line so gate PRs never conflict.
+module.exports.taxReturnEngineLive = taxReturnEngineLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.
 module.exports.publicLlmSharedCapLive = publicLlmSharedCapLive;
 // GATE_SMS_FOLLOWUP_WITNESS_FIX reader, on its own line so gate PRs never conflict.
