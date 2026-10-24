@@ -561,6 +561,23 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(rung('new')).toHaveLength(1);
     });
 
+    test('the backfill dry run and real run agree on Blue Book mail in Gmail Spam: only the signed one counts', async () => {
+      await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
+      const at = new Date(NOW.getTime() - 3 * DAY);
+      const bluebook = (over) => storeEmail({
+        from_address: 'FixtureBuild.oneteam.build@bbbid.thebluebook.com', subject: 'Invitation to Bid',
+        label_ids: JSON.stringify(['SPAM']), created_at: at, received_at: at,
+        body_text: ['Bid is due by 2:00 PM (Eastern) on October 20, 2026', 'You\u2019ve been invited to bid on a - Gas Station Project in Sampleton, FL.'].join('\n'),
+        ...over,
+      });
+      await bluebook({ authentication_results: 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=bbbid.thebluebook.com y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=bbbid.thebluebook.com y"@evil.example' });
+      await bluebook({ authentication_results: null, subject: 'Invitation to Bid: unsigned' });
+      const signed = await bluebook({});
+      expect(await service.runBackfill({ days: 180, dryRun: true, now: NOW })).toMatchObject({ matched: 1, created: 0 });
+      expect(await service.runBackfill({ days: 180, dryRun: false, now: NOW })).toMatchObject({ matched: 1, created: 1 });
+      expect(await mockPg('bid_opportunities').where({ first_email_id: signed.id }).first()).toMatchObject({ source: 'bluebook', historical: true });
+    });
+
     test('the backfill leaves rows after the cursor id to the live intake, even at the same created_at', async () => {
       const at = new Date(NOW.getTime() - 3 * DAY);
       const a = await storeEmail({ id: '00000000-0000-4000-8000-000000000001', created_at: at, received_at: at, body_text: BC_BODY('Alpha Fixture Plaza') });

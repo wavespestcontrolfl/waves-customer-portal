@@ -506,8 +506,12 @@ async function sendDateReminders({ now = new Date() } = {}) {
  * Files the last `days` days of mail as historical rows, oldest first. `dryRun` counts and writes nothing.
  * Never notifies. Safe to re-run: filed emails are skipped.
  */
-async function backfillOne(email, { dryRun, previewThreads, result }) {
-  const detected = await detectWithThread(withProviderCheck(email));
+async function backfillOne(rawEmail, { dryRun, previewThreads, result }) {
+  const email = withProviderCheck(rawEmail);
+  // The query lets Blue Book mail past Gmail's SPAM label; the same check as ingestEmail decides, so the dry run
+  // never counts an email the real run would skip.
+  if (isSpam(email)) return;
+  const detected = await detectWithThread(email);
   const thread = email.gmail_thread_id;
   const previewJoin = dryRun && !detected.bid && THREAD_JOIN_REASONS.has(detected.reason) && thread && previewThreads.has(thread);
   if (!detected.bid && !previewJoin) return;
