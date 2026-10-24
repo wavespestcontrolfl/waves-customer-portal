@@ -850,7 +850,9 @@ describe('completion freeze contract', () => {
     const start = completionSource.indexOf('async function completeScheduledService(');
     expect(start).toBeGreaterThan(-1);
     const block = completionSource.slice(start);
-    expect(block).toContain('freezeTechTips(completionInput.body?.techTips)');
+    // the sourced words and citations freeze only behind GATE_TECH_TIP_SOURCES,
+    // read at the freeze (owner 2026-10-24)
+    expect(block).toContain('freezeTechTips(completionInput.body?.techTips, { sourced: techTipSourcesOn() })');
     expect(block).toMatch(/techTips: techTipsFreeze\.tips/);
     // a rejected pick is an actionable 400 for a FRESH attempt, never a silent drop —
     // deferred past replay/conflict handling so a same-key retry keeps replaying

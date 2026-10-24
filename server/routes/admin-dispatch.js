@@ -752,6 +752,8 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       serviceKeys: addonKeys,
       findings: [...lawnFindingsFromAssessment(lawnAssessment), ...lawnFindingsFromRun(lawnRun)],
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
+      // the words the completion freezes behind GATE_TECH_TIP_SOURCES
+      sourced: require('../config/feature-gates').techTipSourcesLive?.() === true,
     });
     // The 90-day window is ET calendar days: the database's own current
     // date follows the session zone (UTC on Railway) and would roll the
