@@ -10,6 +10,12 @@
 //
 // Hidden here, not deleted: the Visit Timeline, the Weather call block, "Your documents", the
 // re-entry card (its sentence moves into "Your part"). The PDF document never uses this file.
+//
+// GATE_LAWN_REPORT_STORY (owner 2026-10-23/24) adds a second order, STORY_LAYOUT_ORDER, used while the
+// payload's lawnLayout key carries story:true: the review invitation and the technician's note lead, each
+// applied product is explained inside "what we did" (visible, with its Poison Control note), Ask Waves sits
+// in the page, and the plan, the next visit, the re-service card and the blog follow the lawn sections.
+// Without the key the page prints LAYOUT_ORDER exactly as before.
 
 import { Fragment, cloneElement, useEffect, useState } from 'react';
 import ReportText, { reportSectionsForText } from '../ReportSections';
@@ -42,6 +48,7 @@ import {
 import {
   LAYOUT_COPY,
   OFFICE_PHONE,
+  appliedRepeatsResult,
   bannerRepeatsAftercare,
   bannerShowsAnything,
   insightsWithoutRepeats,
@@ -155,7 +162,9 @@ function NextVisit({ data, slots }) {
 }
 
 // ── (c) what we did + why now ───────────────────────────────────────────────
-function WhatWeDid({ data, slots }) {
+// The parts both orders print: the lead's "since last visit" lines, the technician paragraph (less an applied
+// sentence the lead says in full) and the Visit Summary card.
+function whatWeDidParts(data, slots) {
   const v2 = data.reportV2;
   const { lead } = v2;
   const sinceLast = Array.isArray(lead.sinceLast?.lines) ? lead.sinceLast.lines.filter(Boolean) : [];
@@ -169,27 +178,62 @@ function WhatWeDid({ data, slots }) {
   // The "What's next" date line prints only when no earlier printer (the plan area, the status card) printed the same visit.
   const summaryNextLabel = summary && !nextVisitPlacement(data, { summaryPrintsNext: summaryPrintsNextVisit(slots) }).summaryDrops ? summary.nextVisitLabel : null;
   const summaryText = summary && !sectioned ? withoutRepeatedApplied(summary.text, lead.applied) : (summary && summary.text) || null;
+  const sinceLastBox = sinceLast.length ? (
+    <LeadBox label={sinceLastLabel(lead.sinceLast)} testId="lawn-since-last">
+      {sinceLast.map((line, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{line}</div>)}
+    </LeadBox>
+  ) : null;
+  const visitSummary = summaryText || slots.recordedFindings ? (
+    <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
+      <h2>Visit Summary</h2>
+      {summaryText ? <ReportText text={summaryText} sections={summary.sections} nextVisitLabel={summaryNextLabel} /> : null}
+      {slots.recordedFindings}
+    </section>
+  ) : null;
+  return { v2, lead, sinceLastBox, tech, visitSummary };
+}
+
+function WhatWeDid({ data, slots }) {
+  const { v2, lead, sinceLastBox, tech, visitSummary } = whatWeDidParts(data, slots);
   return (
     <>
-      {sinceLast.length || lead.applied || tech ? (
+      {sinceLastBox || lead.applied || tech ? (
         <Card style={{ background: TAN, display: 'grid', gap: 10 }}>
-          {sinceLast.length ? (
-            <LeadBox label={sinceLastLabel(lead.sinceLast)} testId="lawn-since-last">
-              {sinceLast.map((line, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{line}</div>)}
-            </LeadBox>
-          ) : null}
+          {sinceLastBox}
           {lead.applied ? <LeadBox label="What we applied today">{lead.applied}</LeadBox> : null}
           {tech ? <LeadBox label="From your technician" testId="lawn-lead-tech">{tech}</LeadBox> : null}
         </Card>
       ) : null}
-      {summaryText || slots.recordedFindings ? (
-        <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
-          <h2>Visit Summary</h2>
-          {summaryText ? <ReportText text={summaryText} sections={summary.sections} nextVisitLabel={summaryNextLabel} /> : null}
-          {slots.recordedFindings}
-        </section>
-      ) : null}
+      {visitSummary}
       <LawnProgramLine snapshot={v2.snapshot} />
+    </>
+  );
+}
+
+// GATE_LAWN_REPORT_STORY (owner 2026-10-23: "we dont incorporate the products along with the content"): the
+// applied sentence opens the products section, which explains each product where the customer reads about the
+// visit ("Your treatment, explained", visible, with its Poison Control note). An applied sentence with no
+// product cards to open stays in the card. The Visit Summary card is collapsed under one line.
+function StoryWhatWeDid({ data, slots }) {
+  const { v2, lead, sinceLastBox, tech, visitSummary } = whatWeDidParts(data, slots);
+  const applied = appliedRepeatsResult(lead.applied, v2.todaysResult) ? null : lead.applied;
+  const appliedWithoutProducts = applied && slots.productsKind !== 'products';
+  return (
+    <>
+      {sinceLastBox || tech || appliedWithoutProducts ? (
+        <Card style={{ background: TAN, display: 'grid', gap: 10 }}>
+          {sinceLastBox}
+          {tech ? <LeadBox label="What we noticed" testId="lawn-lead-tech">{tech}</LeadBox> : null}
+          {appliedWithoutProducts ? <p style={{ margin: 0 }}>{applied}</p> : null}
+        </Card>
+      ) : null}
+      {cloneElement(slots.products, { presentation: 'story', intro: applied })}
+      <LawnProgramLine snapshot={v2.snapshot} />
+      {visitSummary ? (
+        <Collapsible summary={<span className="lawn-story-summary-label">{LAYOUT_COPY.storySummaryToggle} <span aria-hidden="true">▾</span></span>} className="lawn-story-summary">
+          {visitSummary}
+        </Collapsible>
+      ) : null}
     </>
   );
 }
@@ -222,7 +266,7 @@ function ScoreSection({ data }) {
   const explanation = snapshot.scoreExplanation && snapshot.scoreExplanation !== lead.why ? snapshot.scoreExplanation : null;
   const hasNext = Boolean(snapshot.nextVisit?.label && snapshot.nextVisit.label !== 'Invalid Date');
   const summary = (
-    <div data-testid="lawn-layout-score" style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+    <div data-testid="lawn-layout-score" className="report-template-column" style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
       <div style={{ flex: 'none' }}><ScoreRing value={snapshot.overallScore} status={status} size={72} stroke={8} /></div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div data-gt="eyebrow" style={{ ...eyebrow, marginBottom: 2 }}>Overall Lawn Status</div>
@@ -331,8 +375,32 @@ export const LAYOUT_ORDER = [
   'products',
 ];
 
+// GATE_LAWN_REPORT_STORY (owner 2026-10-23: "How did Adam do today ... towards the top", the technician's note
+// "near the top", products with "why are we doing this"; 2026-10-24 "keep both": Ask Waves in the page, the plan
+// and the next visit after the lawn sections):
+//   status, then the review invitation and the technician's note together (personal)
+//   Your part, new sod
+//   what we did with each product explained, the program line, the Visit Summary (collapsed)
+//   photos and findings, recap, treatment map
+//   score (collapsed), what to expect, water this week, Ask Waves
+//   plan, upcoming visits, the next lawn visit, re-service
+//   when to call, near you, the blog post, cross-sell, referral
+export const STORY_LAYOUT_ORDER = [
+  'status', 'personal',
+  'yourPart', 'newSod',
+  'whatWeDidStory',
+  'photos', 'recap', 'treatmentMap',
+  'score',
+  'expect', 'water', 'ask',
+  'plan', 'upcoming', 'nextVisit', 'reservice',
+  'whenToCall', 'nearYou', 'blog', 'crossSell', 'referral',
+];
+
 const SECTIONS = {
   status: ({ slots }) => slots.status,
+  personal: ({ slots }) => <div className="lawn-story-personal">{slots.review}{slots.techNote}</div>,
+  ask: ({ slots }) => slots.ask,
+  whatWeDidStory: (props) => <StoryWhatWeDid {...props} />,
   blog: ({ slots }) => slots.blog,
   reservice: ({ slots }) => slots.reservice,
   plan: ({ slots }) => slots.plan,
@@ -370,6 +438,33 @@ const LAYOUT_CSS = `
      it is not shown a second time. */
   .lawn-layout-products .poison-control-note { display: none; }
   .lawn-layout-collapse > summary::-webkit-details-marker { display: none; }
+  /* GATE_LAWN_REPORT_STORY: every rule below names a class only the story order prints. */
+  .lawn-story-summary-label { display: flex; justify-content: space-between; font-size: 16px; font-weight: 600; color: ${COLORS.glassNavy}; }
+  .lawn-story-personal { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin: 0 0 24px; }
+  .lawn-story-personal > .sr-section,
+  .lawn-story-personal > .report-card { margin: 0; }
+  .lawn-story-personal #tech-note .tech-photo { width: 48px !important; height: 48px !important; }
+  .lawn-story-personal #tech-note blockquote { padding-left: 22px !important; }
+  .lawn-story-personal #tech-note p { font-size: 16px; line-height: 1.6; }
+  .lawn-story-personal .review-request-card { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 20px; }
+  .lawn-story-personal .review-request-card h3 { font-size: 24px !important; line-height: 1.25; text-align: left !important; }
+  .lawn-story-personal .review-request-card .review-cta { min-height: 48px; width: 100%; text-align: center; }
+  .lawn-story-section { min-width: 0; scroll-margin-top: 80px; }
+  .lawn-story-section:empty { display: none; }
+  .lawn-story-section > .sr-section:first-child { margin-top: 0; }
+  .lawn-story-section[data-story-section="whatWeDidStory"] { margin-top: 28px; }
+  .lawn-story-section[data-story-section="ask"] { margin: 24px 0; }
+  .lawn-story-section[data-story-section="blog"] .blog-post-image { max-height: 240px; }
+  .lawn-story-section .treatment-story { margin: 0 0 20px; }
+  .lawn-story-section .lawn-layout-collapse { margin: 20px 0; }
+  @media (max-width: 600px) {
+    .lawn-story-personal .review-request-card { gap: 16px; padding: 20px; }
+    .lawn-story-personal .review-request-card h3 { font-size: 20px !important; }
+  }
+  @media print {
+    .lawn-story-personal { display: block; }
+    .lawn-story-section { break-inside: auto; }
+  }
 `;
 
 // "Now" for every rule that depends on the watering banner. The banner ends at its expiresAt and then
@@ -392,7 +487,8 @@ function useBannerClock(banner) {
   return nowMs;
 }
 
-export function LawnLayoutBody({ data, slots }) {
+// story: GATE_LAWN_REPORT_STORY (lawnStoryActive on the page) picks STORY_LAYOUT_ORDER.
+export function LawnLayoutBody({ data, slots, story = false }) {
   const nowMs = useBannerClock(data.reportV2?.banner);
   // The same signal LawnWateringBanner reads (usePrintRequested: the browser's print pass): while printing, the
   // banner prints its lines even after expiry, so the dedupe must follow it.
@@ -402,7 +498,9 @@ export function LawnLayoutBody({ data, slots }) {
     <PrintContext.Provider value={false}>
       <div className={`lawn-layout${banner}`} style={{ display: 'contents' }}>
         <style>{LAYOUT_CSS}</style>
-        {LAYOUT_ORDER.map((key) => <Fragment key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</Fragment>)}
+        {story
+          ? STORY_LAYOUT_ORDER.map((key) => <div className="lawn-story-section" data-story-section={key} id={`lawn-section-${key}`} key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</div>)
+          : LAYOUT_ORDER.map((key) => <Fragment key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</Fragment>)}
       </div>
     </PrintContext.Provider>
   );
