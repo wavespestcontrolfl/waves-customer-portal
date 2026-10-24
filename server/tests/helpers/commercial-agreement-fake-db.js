@@ -55,13 +55,15 @@ function makeDb({ estimate = estimateRow(), customer = CUSTOMER, contracts = [],
       whereNotIn(col, vals) { if (col === 'status') q.statusNotIn = vals; return api; },
       whereRaw(_sql, binds) { q.estimateId = binds[0]; return api; },
       orderByRaw() { return api; },
-      forUpdate() { return api; },
+      forUpdate() { q.locked = true; return api; },
       async first() {
         if (table === 'document_templates') return q.where.template_key ? state.template : { active_version_id: state.template.active_version_id, status: state.template.status, template_key: state.template.template_key };
         if (table === 'document_template_versions') return state.version;
         if (table === 'estimates') return state.estimate;
         if (table === 'customers') return state.customer;
         if (table === 'customer_contracts') {
+          // Lets a test act while the contract row lock is being waited on.
+          if (q.locked && typeof state.onContractLock === 'function') await state.onContractLock();
           const rows = state.contracts
             .filter((c) => (q.where.id ? c.id === q.where.id : c.document_template_key === q.where.document_template_key))
             .filter((c) => q.estimateId == null || String(snapshotEstimateId(c)) === String(q.estimateId))

@@ -147,6 +147,26 @@ describe('gate re-read at the commit boundary', () => {
     expect(state.writes).toEqual([]);
   });
 
+  test('the kill switch thrown while waiting on the CONTRACT row lock (the last lock): 404, no link rotated, nothing written', async () => {
+    const { database, state } = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database });
+    const hashBefore = state.contracts[0].share_token_hash;
+    const writesBefore = state.writes.length;
+    state.onContractLock = async () => { delete process.env.GATE_COMMERCIAL_PROPOSAL_SIGN; };
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: false, status: 404 });
+    expect(state.contracts).toHaveLength(1);
+    expect(state.contracts[0].share_token_hash).toBe(hashBefore);
+    expect(state.writes).toHaveLength(writesBefore);
+  });
+
+  test('the same flip at the contract lock does not issue a first agreement either', async () => {
+    const { database, state } = makeDb();
+    state.onContractLock = async () => { delete process.env.GATE_COMMERCIAL_PROPOSAL_SIGN; };
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: false, status: 404 });
+    expect(state.contracts).toHaveLength(0);
+    expect(state.writes).toEqual([]);
+  });
+
   test('the same flip does not re-open an existing agreement (its link is not rotated)', async () => {
     const { database, state } = makeDb();
     await ensureAgreement({ estimate: estimateRow(), req, database });

@@ -300,9 +300,6 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
       return refusal(409, 'customer_unavailable', 'Online signing is not available right now. Please call us.');
     }
     await lockActiveVersionForIssue(trx, { template, activeVersion: version });
-    // The gate is read again here, after the last lock and before any write: a request that waited on those locks
-    // while the kill switch was thrown must not create or re-open an agreement (live gate re-read at the commit boundary).
-    if (!require('../config/feature-gates').commercialProposalSignLive()) return refusal(404, 'not_signable', 'Estimate not found');
 
     const values = buildAgreementValues(locked, lockedFound.proposal, lockedFound.totals);
     // The whole quote this agreement is for. An open agreement is reused only when the quote is identical.
@@ -315,6 +312,10 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
       .orderByRaw("(status = 'signed') DESC, created_at DESC")
       .forUpdate()
       .first();
+    // The gate is read again here, after the LAST lock (the contract row) and before any write: a request that
+    // waited on those locks while the kill switch was thrown must not create, re-open or re-link an agreement
+    // (live gate re-read at the commit boundary).
+    if (!require('../config/feature-gates').commercialProposalSignLive()) return refusal(404, 'not_signable', 'Estimate not found');
     if (existing?.status === 'signed') return refusal(409, 'already_signed', 'This agreement has already been signed.');
     if (existing) {
       const snap = parseJson(existing.document_variables_snapshot);
