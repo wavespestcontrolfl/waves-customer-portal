@@ -2129,9 +2129,9 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // DAILY 07:20 — new construction warranty renewal reminder (GATE_WARRANTY_RENEWAL_REMINDER, dark): one admin
-  // notification 45 days before each signed warranty renews, closed when staff mark the notice sent. It sends
-  // nothing to a customer. Gate read per run, so a flip needs no restart. runExclusive records the job health.
+  // DAILY 07:20 — new construction warranty renewal reminder: one admin notification 45 days before each
+  // signed warranty renews, closed when staff mark the notice sent. It sends nothing to a customer.
+  // runExclusive records the job health.
   cron.schedule('20 7 * * *', async () => {
     try {
       await runExclusive('warranty-renewal-reminder', async () => {

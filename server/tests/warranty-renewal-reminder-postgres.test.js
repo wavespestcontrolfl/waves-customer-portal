@@ -20,16 +20,6 @@ const { runWarrantyRenewalReminder, _private: { alertKey, alertSpec, isoFromUs }
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 
 describe('warranty renewal reminder (pure)', () => {
-  const OLD = process.env.GATE_WARRANTY_RENEWAL_REMINDER;
-  afterEach(() => { if (OLD === undefined) delete process.env.GATE_WARRANTY_RENEWAL_REMINDER; else process.env.GATE_WARRANTY_RENEWAL_REMINDER = OLD; });
-
-  test('off: the job returns before any query', async () => {
-    delete process.env.GATE_WARRANTY_RENEWAL_REMINDER;
-    const conn = jest.fn(() => { throw new Error('must not query'); });
-    await expect(runWarrantyRenewalReminder({ conn, today: '2027-08-20' })).resolves.toEqual({ skipped: 'gated' });
-    expect(conn).not.toHaveBeenCalled();
-  });
-
   test('reads the signed MM/DD/YYYY date and composes a rule-clean office notification', () => {
     expect(isoFromUs('10/01/2027')).toBe('2027-10-01');
     expect(isoFromUs('02/30/2027')).toBeNull();
@@ -48,7 +38,6 @@ jest.setTimeout(30000);
 postgres('warranty renewal reminder (PostgreSQL)', () => {
   let database;
   let trx;
-  const OLD = process.env.GATE_WARRANTY_RENEWAL_REMINDER;
 
   const customer = async () => {
     const id = randomUUID();
@@ -82,13 +71,11 @@ postgres('warranty renewal reminder (PostgreSQL)', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_WARRANTY_RENEWAL_REMINDER = 'true';
     trx = await database.transaction();
     mockConnection = trx;
   });
   afterEach(async () => {
     await trx.rollback();
-    if (OLD === undefined) delete process.env.GATE_WARRANTY_RENEWAL_REMINDER; else process.env.GATE_WARRANTY_RENEWAL_REMINDER = OLD;
   });
   afterAll(async () => { await database?.destroy(); });
 

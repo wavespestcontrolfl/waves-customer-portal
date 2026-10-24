@@ -1,6 +1,6 @@
 /**
  * Office reminder before a new construction termite warranty renews
- * (GATE_WARRANTY_RENEWAL_REMINDER, owner 10-23 option A on #6515).
+ * (owner 10-23 option A on #6515).
  *
  * The signed warranty says "We send a renewal notice about 30 days before."
  * Nothing tracked that date, so this daily job:
@@ -13,7 +13,7 @@
  *   4. closes that notification once staff mark the notice sent (the existing
  *      Customer 360 "Notice" button) or the warranty is cancelled.
  * It sends nothing to a customer and charges nothing. A cancelled warranty
- * stops it. Off: the job returns before any query.
+ * stops it.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -21,7 +21,6 @@ const { raiseAdminAlert } = require('./admin-alert-compose');
 const { closeAdminAlertKeys } = require('./admin-alert-episodes');
 const { fitAction, fullName, shortDateET } = require('./admin-alert-names');
 const { etDateString } = require('../utils/datetime-et');
-const { warrantyRenewalReminderLive } = require('../config/feature-gates');
 const { NEW_CONSTRUCTION_WARRANTY_KEY } = require('./new-construction-warranty');
 
 const LOG = '[warranty-renewal-reminder]';
@@ -148,7 +147,6 @@ async function closeSentReminders(conn, today) {
 }
 
 async function runWarrantyRenewalReminder({ conn = db, today = etDateString() } = {}) {
-  if (!warrantyRenewalReminderLive()) return { skipped: 'gated' };
   const filled = await fillRenewalDates(conn);
   const rolled = await rollPastRenewals(conn, today);
   const closed = await closeSentReminders(conn, today);
