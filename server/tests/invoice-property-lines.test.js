@@ -73,6 +73,15 @@ describe('attachInvoiceLineProperties (write path)', () => {
     expect(items[2]).toMatchObject({ property_id: PALM, property_address: frozen });
     expect(reads).toEqual(['customer_properties']);
 
+    // A NEW line for a property another unchanged line already names is still looked up and frozen
+    // from the live row (per-line history, not per-property), so it gets the current address.
+    const added = await attachInvoiceLineProperties(fakeConn(), CUSTOMER, [service('a', PALM), service('c', PALM)], { existingLineItems: existing });
+    expect(added[0].property_address).toEqual(frozen);
+    expect(added[1].property_address).toMatchObject({ address_line1: '1842 Palm Harbor Dr' });
+    // ...and a new line naming a property that no longer exists is refused even beside an unchanged line.
+    await expect(attachInvoiceLineProperties(fakeConn(), CUSTOMER, [service('a', PALM), service('c', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd')], { existingLineItems: existing }))
+      .rejects.toMatchObject({ statusCode: 400, code: 'invalid_line_property' });
+
     // Nothing changed → no read at all, so a property edited or removed since never blocks the edit.
     const neverCalled = () => { throw new Error('no property read expected'); };
     const same = await attachInvoiceLineProperties(neverCalled, CUSTOMER, existing.map((l) => ({ ...l, property_address: undefined })), { existingLineItems: existing });

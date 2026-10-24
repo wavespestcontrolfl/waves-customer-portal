@@ -56,17 +56,21 @@ async function attachInvoiceLineProperties(conn, customerId, items = [], { exist
       .map((line) => [String(line.client_id), line]),
   );
   const services = items.filter((item) => !isDiscountLine(item));
-  const snapshots = new Map();
+  // Kept snapshots are per LINE (an unchanged line keeps its own history); a
+  // new or changed assignment is always looked up and frozen from the live
+  // row, even when another unchanged line names the same property.
+  const keptByLine = new Map();
   for (const item of services) {
     const kept = storedSnapshotFor(item, existingByClientId);
-    if (kept) snapshots.set(cleanPropertyId(item.property_id), kept);
+    if (kept) keptByLine.set(item, kept);
   }
-  const wanted = [...new Set(services.map((item) => cleanPropertyId(item.property_id)).filter(Boolean))]
-    .filter((id) => !snapshots.has(id));
+  const wanted = [...new Set(services.filter((item) => !keptByLine.has(item))
+    .map((item) => cleanPropertyId(item.property_id)).filter(Boolean))];
   if (wanted.some((id) => !UUID_RE.test(id))) {
     throw linePropertyError('A line item names an invalid property.');
   }
 
+  const snapshots = new Map();
   if (wanted.length) {
     if (!customerId) throw linePropertyError('A line item names a property but the invoice has no customer.');
     const rows = await conn('customer_properties')
@@ -86,7 +90,7 @@ async function attachInvoiceLineProperties(conn, customerId, items = [], { exist
     const { property_address: _stale, ...rest } = item;
     const propertyId = cleanPropertyId(item.property_id);
     const next = propertyId
-      ? { ...rest, property_id: propertyId, property_address: snapshots.get(propertyId) }
+      ? { ...rest, property_id: propertyId, property_address: keptByLine.get(item) || snapshots.get(propertyId) }
       : (() => { const { property_id: _none, ...bare } = rest; return bare; })();
     if (next.client_id) parentByClientId.set(String(next.client_id), next);
     return next;
