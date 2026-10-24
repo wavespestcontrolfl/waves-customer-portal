@@ -257,7 +257,14 @@ describe('estimate document render pin', () => {
   test('round-trips validThrough for the token it was signed for', () => {
     const pin = signEstimateDocPin(TOKEN, { validThrough: VALID_THROUGH });
     expect(pin).toBeTruthy();
-    expect(verifyEstimateDocPin(pin, TOKEN)).toEqual({ validThrough: VALID_THROUGH });
+    expect(verifyEstimateDocPin(pin, TOKEN)).toEqual({ validThrough: VALID_THROUGH, staffPreview: false });
+  });
+
+  test('the staff-preview claim is only present when minted, and rides the same token binding', () => {
+    const pin = signEstimateDocPin(TOKEN, { staffPreview: true });
+    expect(verifyEstimateDocPin(pin, TOKEN)).toEqual({ validThrough: null, staffPreview: true });
+    expect(verifyEstimateDocPin(pin, 'b'.repeat(64))).toBeNull();
+    expect(estimateDocumentUrl(TOKEN, { staffPreview: true })).toContain('dpin=');
   });
 
   test('rejects a pin presented for a different token', () => {
@@ -279,7 +286,7 @@ describe('estimate document render pin', () => {
     expect(plain).toContain(`/estimate/${TOKEN}?mode=pdf`);
     expect(plain).toContain('dpin=');
     const pinNoOverride = signEstimateDocPin(TOKEN);
-    expect(verifyEstimateDocPin(pinNoOverride, TOKEN)).toEqual({ validThrough: null });
+    expect(verifyEstimateDocPin(pinNoOverride, TOKEN)).toEqual({ validThrough: null, staffPreview: false });
     const pinned = estimateDocumentUrl(TOKEN, { validThrough: VALID_THROUGH });
     expect(pinned).toContain('mode=pdf');
     expect(pinned).toContain('dpin=');

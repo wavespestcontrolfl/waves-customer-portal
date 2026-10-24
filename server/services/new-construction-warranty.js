@@ -402,6 +402,51 @@ function soilLiquid(treatment) {
   return { product: known.product, active_ingredient: treatment.active_ingredient || known.ingredient };
 }
 
+function dayKey(value) {
+  const day = parseIso(value);
+  return day ? us(day) : '';
+}
+
+// Key-order-free JSON, to compare a live record with its sent copy.
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+// The certificate as it went out (the copy each delivered send stores),
+// never edits made after the send: those were not attested and the owner
+// never received them. No copy = never sent. The copy must pass the same
+// staff send gate (lazy: the route module); the gate knows only today's plan
+// labels, so a legacy one is read as the plan it names.
+function sentCertificate(project, customer) {
+  const sentCopy = parseFindings(project.pretreat_sent_snapshot);
+  // The copy is the proof of sending: a send writes it only once the report
+  // reached the owner (even when a payer leg left the send "partial"), and
+  // the backfills wrote it only for certificates already sent.
+  if (!sentCopy.findings) {
+    throw bad('Send the pre-treat certificate first, then issue its warranty.', 409);
+  }
+  const findings = parseFindings(sentCopy.findings);
+  // The owner's certificate link shows the live record, so a warranty is
+  // issued only while that record is the version last sent: after an edit,
+  // the certificate goes out again first and both documents agree.
+  const changed = stableJson(parseFindings(project.findings)) !== stableJson(findings)
+    || dayKey(project.project_date) !== dayKey(sentCopy.project_date);
+  if (changed) {
+    throw bad('The certificate changed after it was sent. Send it again so the owner has this version, then issue the warranty.', 409);
+  }
+  const asSent = { ...project, findings, project_date: sentCopy.project_date };
+  const { evaluateProjectSendReadiness } = require('../routes/admin-projects')._private;
+  const plan = LEGACY_PLAN_LABELS[oneLine(findings.warranty_type)];
+  const gated = plan ? { ...asSent, findings: { ...findings, warranty_type: plan } } : asSent;
+  const { missing } = evaluateProjectSendReadiness({ project: gated, customer, staffSend: true });
+  if (missing.length) throw bad(`Complete the certificate first: ${missing.map((item) => item.label).join('; ')}.`, 409);
+  return { asSent, findings };
+}
+
 // Values for one issue of the warranty, built server-side from the project
 // named in the request. The issue route calls it again inside its
 // transaction with `trx`, which locks the certificate row, so the snapshot is
@@ -424,22 +469,9 @@ async function templateIssueValues(templateKey, body, customer, conn = db) {
     throw bad('Pre-treat certificate not found for this customer.', 404);
   }
   assertCustomerPrintable(locked);
-  // A sent certificate passed the full send gate (attestation, application
-  // record); a draft has not, so it cannot back a signed warranty yet.
-  if (!(project.sent_at || project.status === 'sent')) throw bad('Send the pre-treat certificate first, then issue its warranty.', 409);
-  // An edit after the send can still clear a field, so the certificate as it
-  // stands now must pass the same staff send gate (lazy: the route module).
-  const { evaluateProjectSendReadiness } = require('../routes/admin-projects')._private;
-  // The send gate knows only today's plan labels; a legacy one is read as
-  // the plan it names (PLAN_YEARS keeps both).
-  const current = parseFindings(project.findings);
-  const plan = LEGACY_PLAN_LABELS[oneLine(current.warranty_type)];
-  const asSent = plan ? { ...project, findings: { ...current, warranty_type: plan } } : project;
-  const { missing } = evaluateProjectSendReadiness({ project: asSent, customer, staffSend: true });
-  if (missing.length) throw bad(`Complete the certificate first: ${missing.map((item) => item.label).join('; ')}.`, 409);
-  const findings = parseFindings(project.findings);
+  const { asSent, findings } = sentCertificate(project, customer);
   if (!warrantyEligible(findings)) throw bad('This certificate does not qualify for the new construction warranty.', 409);
-  const { initial, values } = certificateValues(project, findings);
+  const { initial, values } = certificateValues(asSent, findings);
   Object.assign(values.treatment, soilLiquid(values.treatment));
   const issuer = body?.values?.issuer || {};
   return screenValues({

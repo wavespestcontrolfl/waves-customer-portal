@@ -98,19 +98,37 @@ describe('IssueWarrantyDialog', () => {
 
 
 describe('IssueWarrantyAction', () => {
-  const certificate = { ...project, project_type: 'pre_treatment_termite_certificate', sent_at: '2026-10-02T12:00:00Z' };
-  it('shows for a certificate with a warranty plan, not for an addition or without a customer', () => {
-    const { rerender } = render(<IssueWarrantyAction project={certificate} findings={findings} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+  // A sent certificate carries its as-sent copy; the button reads that copy.
+  const sentAs = (sentFindings) => ({
+    ...project,
+    project_type: 'pre_treatment_termite_certificate',
+    pretreat_sent_snapshot: { findings: sentFindings, project_date: '2026-10-01' },
+  });
+  const certificate = sentAs(findings);
+  const action = (props) => <IssueWarrantyAction findings={findings} allowed blocked={false} buttonStyle={{}} {...props} />;
+
+  it('shows for a sent certificate with a warranty plan, not for an addition, a borate job or without a customer', () => {
+    const { rerender } = render(action({ project: certificate }));
     expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeEnabled();
-    rerender(<IssueWarrantyAction project={certificate} findings={{ ...findings, warranty_type: 'Addition to an existing building (no warranty required)' }} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+    rerender(action({ project: sentAs({ ...findings, warranty_type: 'Addition to an existing building (no warranty required)' }) }));
     expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
-    rerender(<IssueWarrantyAction project={{ ...certificate, customer_id: null }} findings={findings} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+    rerender(action({ project: { ...certificate, customer_id: null } }));
     expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
-    rerender(<IssueWarrantyAction project={certificate} findings={{ ...findings, treatment_method: 'Wood treatment (borate)' }} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+    rerender(action({ project: sentAs({ ...findings, treatment_method: 'Wood treatment (borate)' }) }));
     expect(screen.queryByRole('button', { name: 'Issue warranty' })).toBeNull();
-    rerender(<IssueWarrantyAction project={certificate} findings={findings} allowed blocked={false} unsaved buttonStyle={{}} />);
-    expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeDisabled();
-    rerender(<IssueWarrantyAction project={{ ...certificate, sent_at: null, status: 'draft' }} findings={findings} allowed blocked={false} unsaved={false} buttonStyle={{}} />);
+  });
+
+  it('reads the certificate as sent: a later live edit neither hides nor blocks it; no copy = disabled', () => {
+    const { rerender } = render(action({
+      project: certificate,
+      findings: { ...findings, additional_applications: [{ treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care' }] },
+    }));
+    expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeEnabled();
+    // A partial combined send: the copy exists without a sent stamp.
+    rerender(action({ project: { ...certificate, sent_at: null, status: 'in_progress' } }));
+    expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeEnabled();
+    rerender(action({ project: { ...certificate, pretreat_sent_snapshot: null } }));
     expect(screen.getByRole('button', { name: 'Issue warranty' })).toBeDisabled();
   });
 });
+

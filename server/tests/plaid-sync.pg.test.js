@@ -325,6 +325,55 @@ async function activate(itemId, overrides = {}) {
     expect(rows['t-d'].matched_expense_id).toBe(exp2.id);
   });
 
+  test('an open row shelved from the ledger Inbox (Later / Income) is reviewed: a correction parks, a withdrawal flags, the decision stays', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([
+      txn('t-later', 'acc-card', 10, '2026-09-05'),
+      txn('t-income', 'acc-chk', -50, '2026-09-05'),
+      txn('t-gone', 'acc-chk', -60, '2026-09-05'),
+      txn('t-open', 'acc-card', 30, '2026-09-05'),
+    ], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    const at = '2026-09-06T12:00:00.000Z';
+    const decided = {
+      't-later': { later: true, decision: 'later', decidedAt: at },
+      't-income': { income: true, decision: 'income', decidedAt: at },
+      't-gone': { income: true, decision: 'income', decidedAt: at },
+    };
+    for (const [id, suggestion] of Object.entries(decided)) await mockPg('bank_transactions').where({ plaid_transaction_id: id }).update({ suggestion });
+
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [
+      txn('t-later', 'acc-card', 11, '2026-09-06', { name: 'CORRECTED' }),
+      txn('t-income', 'acc-chk', -51, '2026-09-06'),
+      txn('t-open', 'acc-card', 31, '2026-09-06'),
+    ], [{ transaction_id: 't-gone' }], 'cursor-2'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ updated: 1, deleted: 0, flagged: 3 });
+
+    const rows = Object.fromEntries((await mockPg('bank_transactions')).map(r => [r.plaid_transaction_id, r]));
+    // the shelved rows keep their values and their decision; the change is parked for the owner
+    expect(rows['t-later']).toMatchObject({ status: 'unmatched', description: 'TXN t-later' });
+    expect(Number(rows['t-later'].amount)).toBe(10);
+    expect(rows['t-later'].suggestion).toMatchObject({ ...decided['t-later'], plaidModified: { amount: 11, description: 'CORRECTED' } });
+    expect(Number(rows['t-income'].amount)).toBe(50);
+    expect(rows['t-income'].suggestion).toMatchObject({ ...decided['t-income'], plaidModified: { amount: 51 } });
+    expect(rows['t-gone']).toMatchObject({ status: 'unmatched', suggestion: { ...decided['t-gone'], plaidRemoved: true } });
+    // an open row nobody decided is replaced as before
+    expect(Number(rows['t-open'].amount)).toBe(31);
+    expect(rows['t-open'].suggestion).toBeNull();
+
+    // the owner dismisses the correction on the Later row: its values and decision stand, and the same correction is not raised again
+    await mockPg('bank_transactions').where({ id: rows['t-later'].id }).update({
+      suggestion: mockPg.raw("(suggestion - 'plaidModified') || ?::jsonb", [JSON.stringify({ plaidDismissed: rows['t-later'].suggestion.plaidModified })]),
+    });
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-later', 'acc-card', 11, '2026-09-06', { name: 'CORRECTED' })], [], 'cursor-3'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ updated: 0, flagged: 0 });
+    const kept = await mockPg('bank_transactions').where({ id: rows['t-later'].id }).first();
+    expect(Number(kept.amount)).toBe(10);
+    expect(kept.suggestion).toMatchObject({ decision: 'later', later: true });
+    expect(kept.suggestion.plaidModified).toBeUndefined();
+  });
+
   test('a newer correction on an unlinked row supersedes the one parked while it was reviewed', async () => {
     const itemId = await connect();
     await activate(itemId);
@@ -589,6 +638,8 @@ async function activate(itemId, overrides = {}) {
 
   test('the hourly run keeps matching while work remains, even when nothing new synced', async () => {
     const bankImport = require('../services/bank-import');
+    const taxLedgerRules = require('../services/tax-ledger-rules');
+    const rulePass = jest.spyOn(taxLedgerRules, 'applyAfterImport').mockResolvedValue(null);
     const itemId = await connect();
     await activate(itemId);
     plaid.transactionsSync.mockResolvedValueOnce(page([], [], [], 'cursor-1'));
@@ -601,6 +652,9 @@ async function activate(itemId, overrides = {}) {
     expect(out).toMatchObject({ items: 1, matchingPasses: 3, matchingError: null });
     expect(out.results[0]).toMatchObject({ inserted: 0, matching: null }); // no per-item pass in the cron
     expect(bankImport.runDeterministicMatching).toHaveBeenCalledTimes(3);
+    // the rule pass gets the budget the matcher used this cycle (3 passes × 500), not a fixed 2,000
+    expect(rulePass).toHaveBeenCalledWith('hourly sync', { budget: 1500 });
+    rulePass.mockRestore();
     await plaidSync.disconnectItem(itemId);
   });
 

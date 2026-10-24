@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const db = require('../models/db');
 const logger = require('./logger');
+const { gateEnvValue } = require('../config/feature-gates');
 
 const PAYOUT_DATE_WINDOW_DAYS = 3;  // Stripe arrival vs bank posting drift
 const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
@@ -589,9 +590,13 @@ function isPlausibleRefundTarget(row, expense) {
 // (optionally subtracting keys first) so concurrent suggestion writers —
 // the matcher, /suggest's AI categorizer, unlink — can only append to each
 // other, never erase each other via a stale-snapshot rebuild.
-function suggestionMerge(patch, removeKeys = []) {
+// alsoWhen = { sql, keys }: keys that go only when the stored row says so,
+// judged inside the UPDATE (never from a read that may be stale by then).
+function suggestionMerge(patch, removeKeys = [], { alsoWhen = null } = {}) {
+  const drop = (k) => ` - '${String(k).replace(/'/g, "''")}'`;
   let expr = "coalesce(suggestion, '{}'::jsonb)";
-  for (const k of removeKeys) expr += ` - '${String(k).replace(/'/g, "''")}'`;
+  for (const k of removeKeys) expr += drop(k);
+  if (alsoWhen) expr = `(case when ${alsoWhen.sql} then ${expr}${alsoWhen.keys.map(drop).join('')} else ${expr} end)`;
   return db.raw(`${expr} || ?::jsonb`, [JSON.stringify(patch)]);
 }
 
@@ -1366,6 +1371,45 @@ function hasUnresolvedBankChange(row) {
   return !!(row && row.suggestion && (row.suggestion.plaidModified || row.suggestion.plaidRemoved));
 }
 
+// The matcher writes its transfer flag only on a row that carries no flag
+// and no owner ruling. An Inbox decision (suggestion.decision) is the
+// owner's explicit word and always holds. An owner RULE's override
+// ('examined' without a decision: tax-ledger-rules replaced the flag with the
+// rule's classification) holds only while GATE_TAX_LEDGER is on: with the
+// ledger off its classification is hidden, so the matcher's warning comes
+// back rather than leaving a card payment as a plain debit. The human
+// actions on the row are still refreshed. The UPDATE repeats the check so a
+// ruling made after the read wins too.
+function transferFlagWanted(sug, ledgerOn) {
+  if (!sug) return true;
+  if (sug.decision) return false;
+  const matcherIgnore = !!sug.ignore && !sug.rule; // this pass's own flag
+  const ruleIgnore = !!sug.ignore && !!sug.rule;   // a transfer RULE's flag: hidden from Bank Import while the ledger is off
+  return !matcherIgnore && !(ledgerOn && (ruleIgnore || sug.examined));
+}
+// With the ledger off, the matcher's flag REPLACES a rule's reading: every
+// key a rule owns goes with it (tax-ledger-rules CLASSIFICATION_KEYS minus
+// the flag the matcher is writing and the decision keys a rule never
+// writes; the stamp too, so the rule pass re-applies the rule when the
+// ledger is on again). A category only goes when a rule wrote it: a model's
+// (categorySource 'ai') is not the ledger's.
+const LEDGER_RULE_KEYS = ['rule', 'rulesAt', 'examined', 'personal', 'income', 'review', 'note'];
+const LEDGER_RULE_CATEGORY_KEYS = ['categoryId', 'categoryName', 'irsLine', 'categorySource'];
+function ruleKeysToDrop(sug, ledgerOn) {
+  if (ledgerOn || !sug || !sug.rule) return [];
+  return sug.categorySource === 'rule' ? [...LEDGER_RULE_KEYS, ...LEDGER_RULE_CATEGORY_KEYS] : LEDGER_RULE_KEYS;
+}
+const NO_DECISION_SQL = "(suggestion is null or (suggestion -> 'decision') is null)";
+// An Income decision from the ledger Inbox holds against the matcher: the
+// row stays open on its shelf, is never read by a pass, and every per-row
+// write of a pass already in flight (claims, parked candidates, flags,
+// rotation bumps) repeats the check, so a decision that lands mid-pass is
+// never followed by a candidate list that would pull the receipt off the
+// Income shelf and then never refresh. A Later row stays matchable: a link
+// would explain it.
+const NO_INCOME_DECISION_SQL = "coalesce(suggestion ->> 'decision', '') <> 'income'";
+const NO_OWNER_RULING_SQL = "(suggestion is null or ((suggestion -> 'decision') is null and not jsonb_exists(suggestion, 'examined')))";
+function ledgerRulesOn() { return !!(gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_LEDGER')); }
 // A row whose link is the owner's call: the ledger import parks a row that
 // may already be an expense in the portal with suggestion.manualLink. A
 // pass offers its candidates in Bank Import and never claims one, however
@@ -1384,6 +1428,7 @@ async function runDeterministicMatching({ limit } = {}) {
   const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })
     .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+    .whereRaw(NO_INCOME_DECISION_SQL)
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion');
   // Rows the matcher already examined (transfer-flagged, parked candidates)
@@ -1394,7 +1439,10 @@ async function runDeterministicMatching({ limit } = {}) {
   // jsonb_exists_any = the function form of the ?| any-key operator —
   // knex.raw treats bare ? (and ??) as binding placeholders and would eat
   // the operator, silently binding the LIMIT value into it.
-  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch'])";
+  // 'examined' is the ledger's marker (tax-ledger-rules): an owner rule or
+  // an Income decision replaced this pass's transfer flag and kept the
+  // examination evidence under that key, so the row is not a fresh row.
+  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch','examined'])";
   // A processed row that produced NOTHING (no candidates at all, or a
   // credit the matcher never matches) must still leave the fresh pool, or a
   // bounded pass would rescan the same oldest rows forever while
@@ -1408,7 +1456,7 @@ async function runDeterministicMatching({ limit } = {}) {
       // leftover budget forever while newer examined rows never get a turn.
       if (bounded) {
         await db('bank_transactions')
-          .where({ id: row.id, status: 'unmatched' })
+          .where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL)
           .update({ updated_at: new Date() });
       }
       return;
@@ -1418,7 +1466,7 @@ async function runDeterministicMatching({ limit } = {}) {
     // (deleted, claimed elsewhere, or out of window) — leaving them would
     // keep the UI offering targets that can only 404/409.
     await db('bank_transactions')
-      .where({ id: row.id, status: 'unmatched' })
+      .where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL)
       .update({
         suggestion: suggestionMerge({ noMatch: true }, ['candidates', 'candidatesTotal', 'payoutCandidates', 'payoutCandidatesTotal', 'refundCandidates', 'refundCandidatesTotal']),
         updated_at: new Date(),
@@ -1460,6 +1508,7 @@ async function runDeterministicMatching({ limit } = {}) {
         .where({ status: 'unmatched' })
         .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
         .whereRaw(`suggestion is not null and ${EXAMINED_SQL}`)
+        .whereRaw(NO_INCOME_DECISION_SQL)
         .orderBy('updated_at', 'asc')
         .limit(fill + 1)
         .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion');
@@ -1473,6 +1522,8 @@ async function runDeterministicMatching({ limit } = {}) {
   // caller's "more rows pending" surface must not read as done
   moreRemaining = moreRemaining || reconciliation.morePending;
   const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted, claimVerifyReverted: reconciliation.claimVerifyReverted, payoutVerifyReverted: reconciliation.payoutVerifyReverted };
+  const ledgerOn = ledgerRulesOn();
+  const rulingGuardSql = ledgerOn ? NO_OWNER_RULING_SQL : NO_DECISION_SQL;
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
@@ -1523,11 +1574,11 @@ async function runDeterministicMatching({ limit } = {}) {
       const staleActionKeys = row.direction === 'credit'
         ? ['refundCandidates', 'refundCandidatesTotal']
         : ['candidates', 'candidatesTotal'];
-      if (!row.suggestion || !row.suggestion.ignore) {
+      if (transferFlagWanted(row.suggestion, ledgerOn)) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-          suggestion: suggestionMerge({ ...transfer, ...actionPatch }, hasActions ? ['noMatch'] : []),
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).whereRaw(rulingGuardSql).update({
+          suggestion: suggestionMerge({ ...transfer, ...actionPatch }, [...(hasActions ? ['noMatch'] : []), ...ruleKeysToDrop(row.suggestion, ledgerOn)]),
           updated_at: new Date(),
         });
         summary.transferFlagged++;
@@ -1537,13 +1588,13 @@ async function runDeterministicMatching({ limit } = {}) {
         // already flagged — REFRESH the action list on every rescan
         // (targets appear and disappear; a stale list can only 404/409)
         // and rotate via updated_at like every other examined row
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
           suggestion: suggestionMerge(actionPatch, hasActions ? ['noMatch'] : staleActionKeys),
           updated_at: new Date(),
         });
       } else if (bounded) {
         // nothing to park and nothing stale to clear — plain rotation bump
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ updated_at: new Date() });
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({ updated_at: new Date() });
       }
       continue; // transfer-looking rows never auto-match anything
     }
@@ -1566,7 +1617,7 @@ async function runDeterministicMatching({ limit } = {}) {
         const refunds = await refundCandidateList();
         if (refunds.length) {
           summary.ambiguous++;
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
             suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal', 'noMatch']),
             updated_at: new Date(),
           });
@@ -1594,8 +1645,10 @@ async function runDeterministicMatching({ limit } = {}) {
           const changed = await db('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
             // re-checked at the claim: the row may have been linked, got a
-            // bank change parked, and been unlinked since this pass read it
+            // bank change parked, and been unlinked since this pass read it,
+            // or decided as Income in the ledger Inbox (that decision holds)
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            .whereRaw(NO_INCOME_DECISION_SQL)
             // ...or been marked for the owner's own link (manualLinkOnly)
             .whereRaw(NO_MANUAL_LINK_SQL)
             .update({
@@ -1727,7 +1780,7 @@ async function runDeterministicMatching({ limit } = {}) {
         const refunds = await refundCandidateList();
         const arrivalDistance = (c) => Math.abs(new Date(`${toDateStr(c.arrival_date)}T00:00:00Z`) - new Date(`${txnDate}T00:00:00Z`));
         const parkedPayouts = [...candidates].sort((a, b) => (arrivalDistance(a) - arrivalDistance(b)) || String(a.id).localeCompare(String(b.id)));
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
           suggestion: suggestionMerge({
             payoutCandidates: parkedPayouts.slice(0, 20).map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
@@ -1743,7 +1796,7 @@ async function runDeterministicMatching({ limit } = {}) {
         const refunds = await refundCandidateList();
         if (refunds.length) {
           summary.ambiguous++;
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
             suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal', 'noMatch']),
             updated_at: new Date(),
           });
@@ -1810,8 +1863,10 @@ async function runDeterministicMatching({ limit } = {}) {
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
             // re-checked at the claim: the row may have been linked, got a
-            // bank change parked, and been unlinked since this pass read it
+            // bank change parked, and been unlinked since this pass read it,
+            // or decided as Income in the ledger Inbox (that decision holds)
             .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
+            .whereRaw(NO_INCOME_DECISION_SQL)
             // ...or been marked for the owner's own link (manualLinkOnly)
             .whereRaw(NO_MANUAL_LINK_SQL)
             .update({
@@ -1835,7 +1890,7 @@ async function runDeterministicMatching({ limit } = {}) {
           // now, so the operator gets a picker immediately instead of an
           // unmatched row a bounded pass just reported as done
           summary.ambiguous++;
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
             suggestion: suggestionMerge(expenseCandidatePatch(recheckPlural), ['noMatch']),
             updated_at: new Date(),
           });
@@ -1892,7 +1947,7 @@ async function runDeterministicMatching({ limit } = {}) {
       // slice made the visible subset arbitrary run-to-run
       const parkedCandidates = [...candidates].sort((a, b) => String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
         || String(a.id).localeCompare(String(b.id)));
-      await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+      await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).update({
         suggestion: suggestionMerge({
           // amount included (the GROSS reading for refund-reduced
           // candidates — that is the figure the statement debit carries):
@@ -1985,6 +2040,8 @@ async function ledgerCoverage(year) {
 }
 
 module.exports = {
+  LEDGER_RULE_KEYS,
+  LEDGER_RULE_CATEGORY_KEYS,
   EXPENSE_DATE_WINDOW_DAYS,
   LEDGER_NAMED_SOURCES,
   LEDGER_LOCK_KEY,

@@ -310,6 +310,50 @@ describe('GET /:token/data — proposal line projection', () => {
     });
   });
 
+  test('a draft is served to the staff-preview render pin only: a bare request, a bare ?mode=pdf and a pin without the claim all stay 404, and the pinned pass has no side effects', async () => {
+    const { signEstimateDocPin, verifyEstimateDocPin } = require('../services/pdf/estimate-doc-pdf');
+    const draft = { ...estimateRow(), id: 'est-draft-staff-pin', status: 'draft', expires_at: null };
+    let writes = 0;
+    dbRows.__update = () => { writes += 1; return 1; };
+    const dataUrl = (qs = '') => `/estimates/unitprojectiontoken/data${qs}`;
+    const staffPin = signEstimateDocPin('unitprojectiontoken', { staffPreview: true });
+    const plainPin = signEstimateDocPin('unitprojectiontoken');
+    // The claim is explicit and only present when minted.
+    expect(verifyEstimateDocPin(staffPin, 'unitprojectiontoken')).toEqual({ validThrough: null, staffPreview: true });
+    expect(verifyEstimateDocPin(plainPin, 'unitprojectiontoken')).toEqual({ validThrough: null, staffPreview: false });
+    try {
+      await withServer(async (baseUrl) => {
+        dbRows.estimates = draft;
+        expect((await fetch(`${baseUrl}${dataUrl()}`)).status).toBe(404);
+        expect((await fetch(`${baseUrl}${dataUrl('?mode=pdf')}`)).status).toBe(404);
+        // A verified pin WITHOUT the staff claim (every send-path render) does not unlock a draft.
+        expect((await fetch(`${baseUrl}${dataUrl(`?mode=pdf&dpin=${encodeURIComponent(plainPin)}`)}`)).status).toBe(404);
+        // The claim needs mode=pdf, and is bound to this estimate's token.
+        expect((await fetch(`${baseUrl}${dataUrl(`?dpin=${encodeURIComponent(staffPin)}`)}`)).status).toBe(404);
+        const otherToken = signEstimateDocPin('someothertoken', { staffPreview: true });
+        expect((await fetch(`${baseUrl}${dataUrl(`?mode=pdf&dpin=${encodeURIComponent(otherToken)}`)}`)).status).toBe(404);
+        // Archived and scheduled-then-archived rows stay 404 even with the claim.
+        dbRows.estimates = { ...draft, archived_at: '2026-10-01T00:00:00Z' };
+        expect((await fetch(`${baseUrl}${dataUrl(`?mode=pdf&dpin=${encodeURIComponent(staffPin)}`)}`)).status).toBe(404);
+        expect(writes).toBe(0);
+
+        // The staff pin serves the draft as the emailed document, with no banner flag and no view side effects.
+        for (const status of ['draft', 'scheduled']) {
+          dbRows.estimates = { ...draft, status };
+          const res = await fetch(`${baseUrl}${dataUrl(`?mode=pdf&dpin=${encodeURIComponent(staffPin)}`)}`);
+          expect(res.status).toBe(200);
+          const body = await res.json();
+          expect(body.documentRender).toBe(true);
+          expect(body.adminDraftPreview).toBeUndefined();
+          expect(body.verifiedStaffPreview).toBeUndefined();
+        }
+        expect(writes).toBe(0);
+      });
+    } finally {
+      dbRows.__update = null;
+    }
+  });
+
   test('document mode: a row that freezes between the read and the evidence write restarts the payload from the frozen row (pre-push Codex on #5434)', async () => {
     dbRows.estimates = {
       ...estimateRow(),

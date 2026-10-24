@@ -191,6 +191,15 @@ jest.mock('../services/bank-import', () => ({
   retryPendingEchoes: jest.fn(() => Promise.resolve({ pending: 0, morePending: false, retried: 0, humanRejected: 0 })),
 }));
 
+// The ledger Inbox's Always rule is written by create-expense inside its
+// claim transaction; the rule service has its own suite — stub its writes.
+jest.mock('../services/tax-ledger-rules', () => ({
+  ...jest.requireActual('../services/tax-ledger-rules'),
+  createRule: jest.fn(() => Promise.resolve({ id: 'rule-new' })),
+  applyRulesForPattern: jest.fn(() => Promise.resolve({ examined: 0, suggested: 0, complete: true })),
+}));
+const taxLedgerRules = require('../services/tax-ledger-rules');
+
 const express = require('express');
 const taxRouter = require('../routes/admin-tax');
 
@@ -342,6 +351,7 @@ describe('upload (gate on)', () => {
 });
 
 describe('create-expense (gate on)', () => {
+  afterAll(() => { delete process.env.GATE_TAX_LEDGER; });
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
     state.bankRow = {
@@ -410,6 +420,169 @@ describe('create-expense (gate on)', () => {
     state.category = null;
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'nope' })).status).toBe(400);
     expect(state.insertedExpenses).toHaveLength(0);
+  });
+
+  test('a category a ledger rule suggested never gets the AI-verify note; a model\'s does', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.suggestion = { noMatch: true, rule: { id: 'r', kind: 'expense' }, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'rule' };
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].category_id).toBe('cat-meals');
+    expect(state.insertedExpenses[0].notes).not.toContain('AI-categorized');
+    state.insertedExpenses = [];
+    state.bankRow.suggestion = { noMatch: true, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'ai' };
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].notes).toContain('AI-categorized');
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
+  test('the claim replaces a Later decision, refuses any other newer Inbox decision (fromLedger) and an Income decision (any path) in its CAS', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.suggestion = { noMatch: true, later: true, decision: 'later', decidedAt: '2026-10-01T00:00:00Z' };
+    state.bankUpdates = []; state.insertedExpenses = [];
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true })).status).toBe(200);
+    const claim = state.bankUpdates.find((u) => u.patch.status === 'created_expense');
+    expect(claim.wheres).toContainEqual(["coalesce(suggestion ->> 'decision', '') in ('', 'later')", undefined]);
+    expect(claim.wheres).not.toContainEqual(["(suggestion -> 'decision') is null", undefined]);
+    expect(claim.wheres).toContainEqual(["coalesce(suggestion ->> 'decision', '') <> 'income'", undefined]);
+    // Business is offered on the Later shelf: the claim drops that decision and its shelf key with the booking
+    for (const k of ['later', 'decision', 'decidedAt']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
+    // and the rule reading the row carried, category included: the owner's decision supersedes it, so a reopened row (expense deleted) gets a fresh rule pass with no stale default
+    for (const k of ['rule', 'rulesAt', 'examined', 'categoryId', 'categoryName', 'irsLine', 'categorySource']) expect(String(claim.patch.suggestion.sql)).toContain(`- '${k}'`);
+    // a transfer rule's own flag and reason go with it, decided on the stored row inside the UPDATE (a reopened row must not read as a matcher-flagged transfer)
+    expect(String(claim.patch.suggestion.sql)).toMatch(/^\(case when coalesce\(suggestion->'rule'->>'kind',''\) = 'transfer' then coalesce\(suggestion, '\{\}'::jsonb\)(?: - '\w+')+ - 'ignore' - 'reason' else coalesce\(suggestion, '\{\}'::jsonb\)(?: - '\w+')+ end\) \|\| \?::jsonb$/);
+    // the plain Bank Import path: an Income item is never an expense; a Later row may still be booked
+    state.bankUpdates = []; state.insertedExpenses = [];
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);
+    const plain = state.bankUpdates.find((u) => u.patch.status === 'created_expense');
+    expect(plain.wheres).toContainEqual(["coalesce(suggestion ->> 'decision', '') <> 'income'", undefined]);
+    expect(plain.wheres).not.toContainEqual(["coalesce(suggestion ->> 'decision', '') in ('', 'later')", undefined]);
+    expect(plain.patch.suggestion).toBeUndefined();
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
+  test('fromLedger + always on a description with no payee word is a 400 before any insert', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.description = 'ACH DEBIT 1234';
+    state.bankRow.suggestion = { noMatch: true };
+    const res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/no payee word/);
+    expect(state.insertedExpenses).toHaveLength(0);
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
+  test('with GATE_TAX_LEDGER off, a category a ledger rule suggested is not used; with it on, it is', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    state.bankRow.suggestion = { noMatch: true, rule: { id: 'r', kind: 'expense' }, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'rule' };
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].category_id).toBeNull();
+    state.insertedExpenses = []; process.env.GATE_TAX_LEDGER = 'true';
+    await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(state.insertedExpenses[0].category_id).toBe('cat-meals');
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
+  // The ledger Inbox (GATE_TAX_LEDGER) marks its calls fromLedger: the row
+  // must be one the Inbox may decide, and the claim repeats the check.
+  test('fromLedger with the ledger gate off is a 404, like every ledger route', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    state.bankRow.suggestion = { noMatch: true };
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true })).status).toBe(404);
+    expect(state.insertedExpenses).toHaveLength(0);
+    // the plain Bank Import button is untouched by the ledger gate
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);
+  });
+
+  test('fromLedger: a row with parked link candidates or one the matcher never examined is a 409 before any insert', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.suggestion = { categoryId: 'cat-meals', candidates: [{ id: 'exp-7' }] };
+    let res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/Bank Import/);
+    state.bankRow.suggestion = { categoryId: 'cat-meals' };
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/matcher has not examined/);
+    expect(state.insertedExpenses).toHaveLength(0);
+    // the same rows are still Bank Import's to create from (its own UI shows the candidates)
+    state.bankRow.suggestion = { categoryId: 'cat-meals', candidates: [{ id: 'exp-7' }] };
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' })).status).toBe(200);
+  });
+
+  test('fromLedger + always: the owner rule is written inside the claim transaction and the payee pass runs after; a lost claim writes none', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    taxLedgerRules.createRule.mockClear(); taxLedgerRules.applyRulesForPattern.mockClear();
+    state.bankRow.suggestion = { noMatch: true };
+    let res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(expect.objectContaining({ ruleCreated: true, propagated: true }));
+    expect(taxLedgerRules.createRule).toHaveBeenCalledWith(expect.objectContaining({ pattern: '\\bwawa\\b', kind: 'expense', categoryId: 'cat-meals', priority: 10, source: 'owner', conn: mockDb }));
+    expect(taxLedgerRules.applyRulesForPattern).toHaveBeenCalledWith('\\bwawa\\b');
+    taxLedgerRules.createRule.mockClear();
+    state.bankUpdateResult = 0;
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true, always: true });
+    expect(res.status).toBe(409);
+    expect(taxLedgerRules.createRule).not.toHaveBeenCalled();
+    // without always, or outside the ledger, no rule
+    state.bankUpdateResult = 1;
+    await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
+    await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', always: true });
+    expect(taxLedgerRules.createRule).not.toHaveBeenCalled();
+  });
+
+  test('fromLedger + always with an untouched suggested category (no categoryId sent): the rule takes the suggested category; the expense keeps its provenance', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    taxLedgerRules.createRule.mockClear(); taxLedgerRules.applyRulesForPattern.mockClear();
+    state.bankRow.suggestion = { noMatch: true, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'ai' };
+    const res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, always: true, expectedCategoryId: 'cat-meals' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(expect.objectContaining({ ruleCreated: true, propagated: true }));
+    expect(taxLedgerRules.createRule).toHaveBeenCalledWith(expect.objectContaining({ pattern: '\\bwawa\\b', kind: 'expense', categoryId: 'cat-meals', source: 'owner' }));
+    // the expense itself still carries the model's note: the owner accepted a suggestion, a rule did not decide it
+    expect(state.insertedExpenses.at(-1)).toEqual(expect.objectContaining({ category_id: 'cat-meals', notes: expect.stringContaining('AI-categorized') }));
+    // no visible category at all (ledger suggestion of a disabled source, or none): no rule, and a plain 200
+    taxLedgerRules.createRule.mockClear();
+    state.bankRow.suggestion = { noMatch: true };
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, always: true, expectedCategoryId: null })).status).toBe(200);
+    expect(taxLedgerRules.createRule).not.toHaveBeenCalled();
+  });
+
+  test('fromLedger with an untouched default: expectedCategoryId is required; a default that changed since the Inbox showed it is a 409 before any insert, and the claim repeats the check', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.suggestion = { noMatch: true, categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', categorySource: 'ai' };
+    let res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/expectedCategoryId/);
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, expectedCategoryId: 'cat-other' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/suggested category changed/);
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, expectedCategoryId: null });
+    expect(res.status).toBe(409);
+    expect(state.insertedExpenses).toHaveLength(0);
+    // the default as shown: booked, and the claim's CAS carries it
+    res = await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, expectedCategoryId: 'cat-meals' });
+    expect(res.status).toBe(200);
+    const claim = state.bankUpdates.find((u) => u.patch.status === 'created_expense');
+    expect(claim.wheres).toContainEqual(["coalesce(suggestion ->> 'categoryId', '') = ?", ['cat-meals']]);
+    // a picked category needs no expectation: the operator's choice is the category
+    state.bankUpdates = [];
+    expect((await post('/admin/tax/bank-import/bt-1/create-expense', { fromLedger: true, categoryId: 'cat-meals' })).status).toBe(200);
+    expect(JSON.stringify(state.bankUpdates.find((u) => u.patch.status === 'created_expense').wheres)).not.toContain("suggestion ->> 'categoryId'");
+  });
+
+  test('fromLedger: the claim also requires examined + no candidates, so a list parked mid-flight loses the race', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow.suggestion = { categoryId: 'cat-meals', noMatch: true };
+    const res = await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals', fromLedger: true });
+    expect(res.status).toBe(200);
+    const raws = state.bankUpdates[0].wheres.filter((w) => Array.isArray(w)).map((w) => w[0]);
+    expect(raws).toContainEqual(expect.stringContaining("jsonb_exists_any(coalesce(suggestion, '{}'::jsonb), array['noMatch'"));
+    expect(raws).toContainEqual(expect.stringContaining("jsonb_typeof(suggestion->'candidates') = 'array'"));
+    // without the flag the claim stays what Bank Import's own button needs
+    state.bankUpdates = [];
+    await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'cat-meals' });
+    const plain = state.bankUpdates[0].wheres.filter((w) => Array.isArray(w)).map((w) => w[0]);
+    expect(plain).not.toContainEqual(expect.stringContaining('jsonb_exists_any'));
   });
 });
 
@@ -875,6 +1048,27 @@ describe('apply-refund (gate on)', () => {
     expect(sugOf(claim).releasedRefundOf).toBe('exp-9'); // durable double-apply guard
   });
 
+  test('unignore drops an Inbox Personal/Transfer decision with the status, and leaves a matcher flag alone', async () => {
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { noMatch: true, ignore: true, reason: 'transfer per the owner', decision: 'transfer', decidedAt: '2026-09-01T00:00:00Z' } };
+    state.bankUpdates = [];
+    expect((await post('/admin/tax/bank-import/bt-1/unignore', {})).status).toBe(200);
+    expect(state.bankUpdates).toHaveLength(1);
+    expect(state.bankUpdates[0].patch.status).toBe('unmatched');
+    const write = JSON.stringify(state.bankUpdates[0].patch.suggestion);
+    // the rule's keys go too: no stale rule label, unstamped for the next ordinary pass
+    for (const key of ['decision', 'decidedAt', 'personal', 'ignore', 'reason', 'rule', 'rulesAt', 'examined']) expect(write).toContain(key);
+    // a recorded receipt reopens to the Open shelf: decision and income keys go
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { noMatch: true, income: true, decision: 'recorded', decidedAt: '2026-09-01T00:00:00Z' } };
+    state.bankUpdates = [];
+    expect((await post('/admin/tax/bank-import/bt-1/unignore', {})).status).toBe(200);
+    for (const key of ['decision', 'income']) expect(JSON.stringify(state.bankUpdates[0].patch.suggestion)).toContain(key);
+    // the matcher's own flag is a reading, not a decision: the row reopens with it
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { ignore: true, reason: 'looks like an internal transfer' } };
+    state.bankUpdates = [];
+    expect((await post('/admin/tax/bank-import/bt-1/unignore', {})).status).toBe(200);
+    expect(state.bankUpdates[0].patch).toEqual({ status: 'unmatched', updated_at: expect.any(Date) });
+  });
+
   test('a RELEASED refund cannot be unignored — the terminal state is genuinely terminal', async () => {
     state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { releasedRefundOf: 'exp-9', refundUndone: { releasedWithoutRestore: true } } };
     const res = await post('/admin/tax/bank-import/bt-1/unignore', {});
@@ -1064,7 +1258,9 @@ describe('suggest scoped to visible rows (gate on)', () => {
     // atomic jsonb merge — never a rebuild that could erase keys the
     // matcher wrote during the model call
     const sug = state.bankUpdates[0].patch.suggestion;
-    expect(sug.sql).toContain("coalesce(suggestion, '{}'::jsonb) ||");
+    // still an atomic jsonb merge (the matcher's keys written during the model call survive);
+    // a dormant rule's own keys are subtracted first
+    expect(sug.sql).toMatch(/^coalesce\(suggestion, '\{\}'::jsonb\)( - '[a-zA-Z]+')* \|\| \?::jsonb$/);
     expect(JSON.parse(sug.bindings[0])).toMatchObject({ categoryId: 'cat-1', categoryName: 'Supplies' });
   });
 });
@@ -1153,5 +1349,145 @@ describe('unlink (gate on)', () => {
   test('a concurrent status change loses the CAS and answers 409', async () => {
     state.bankUpdateResult = 0;
     expect((await post('/admin/tax/bank-import/bt-1/unlink', {})).status).toBe(409);
+  });
+});
+
+describe('generic Ignore and the ledger Income shelf', () => {
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; state.bankUpdates = []; state.bankUpdateResult = 1; });
+  afterEach(() => { delete process.env.GATE_TAX_LEDGER; state.bankUpdateResult = 1; });
+  test('with the ledger on, a row on the Income shelf is not ignored from Bank Import: 409 with the way out', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankUpdateResult = 0;
+    state.bankRow = { id: 'bt-1', status: 'unmatched', suggestion: { noMatch: true, income: true, rule: { id: 'r', kind: 'income' } } };
+    const res = await post('/admin/tax/bank-import/bt-1/ignore', {});
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/Income shelf.*Recorded/);
+    expect(state.bankUpdates[0].wheres).toContainEqual([`not (coalesce(suggestion->>'income','') = 'true' and ${taxLedgerRules.NO_LIVE_CANDIDATES_SQL})`, undefined]);
+    // any other refused row keeps the plain answer
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: null };
+    expect((await (await post('/admin/tax/bank-import/bt-1/ignore', {})).json()).error).toMatch(/only unmatched rows/);
+  });
+  test('with the ledger on, an Income-shelf row with live link candidates is ignored from Bank Import: the Inbox cannot take it, so the guard leaves it alone', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRow = { id: 'bt-1', status: 'unmatched', suggestion: { noMatch: true, income: true, rule: { id: 'r', kind: 'income' }, payoutCandidates: [{ id: 'po-1' }] } };
+    expect((await post('/admin/tax/bank-import/bt-1/ignore', {})).status).toBe(200);
+    const guard = state.bankUpdates[0].wheres.find((w) => Array.isArray(w) && String(w[0]).startsWith('not ('));
+    expect(guard[0]).toContain("jsonb_array_length(suggestion->'payoutCandidates')");
+    // the refusal with candidates (a race: the row changed) is the plain one, not the shelf's
+    state.bankUpdateResult = 0;
+    expect((await (await post('/admin/tax/bank-import/bt-1/ignore', {})).json()).error).toMatch(/only unmatched rows/);
+    // the same row once its candidates are gone: refused, so it is decided on the shelf
+    state.bankRow.suggestion.payoutCandidates = [];
+    expect((await (await post('/admin/tax/bank-import/bt-1/ignore', {})).json()).error).toMatch(/Income shelf/);
+  });
+  test('with the ledger off there is no shelf: the update carries no Income guard', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    state.bankRow = { id: 'bt-1', status: 'unmatched', suggestion: { income: true, decision: 'income' } };
+    expect((await post('/admin/tax/bank-import/bt-1/ignore', {})).status).toBe(200);
+    expect(JSON.stringify(state.bankUpdates[0].wheres)).not.toContain("'income'");
+  });
+});
+
+describe('AI suggest eligibility follows the ledger kill switch', () => {
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; state.listRows = []; });
+  afterAll(() => { delete process.env.GATE_TAX_LEDGER; });
+  const scopeRaws = () => {
+    const b = mockDb.mock.results.map((r) => r.value).find((v) => v && v.whereRaw && v.whereRaw.mock.calls.some((c) => /categoryId/.test(c[0])));
+    return b.whereRaw.mock.calls.map((c) => c[0]);
+  };
+  test('gate off: a category or transfer flag a ledger rule wrote does not take the row out of the AI pass', async () => {
+    delete process.env.GATE_TAX_LEDGER; mockDb.mockClear();
+    expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
+    const raws = scopeRaws();
+    expect(raws).toContainEqual(expect.stringContaining("(suggestion->>'categorySource') = 'rule'"));
+    expect(raws).toContainEqual(expect.stringContaining("(suggestion->'rule'->>'kind') = 'transfer'"));
+  });
+  test('an AI category written over a rule category carries its own provenance', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    state.listRows = [{ id: 'bt-7', description: 'WAWA 5211', amount: '58.12', suggestion: { categoryId: 'cat-old', categorySource: 'rule', rule: { id: 'r', kind: 'expense' } } }];
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+    state.bankUpdates = [];
+    const res = await post('/admin/tax/bank-import/suggest', { ids: ['bt-7'] });
+    expect((await res.json()).processed).toBe(1);
+    const merged = JSON.parse(state.bankUpdates[0].patch.suggestion.bindings[0]);
+    expect(merged).toEqual(expect.objectContaining({ categoryId: 'cat-meals', categorySource: 'ai' }));
+    // the dormant rule's keys go with its category: nothing to resurface when the gate comes back on
+    for (const k of ['rule', 'rulesAt', 'personal', 'review', 'note', 'examined']) expect(String(state.bankUpdates[0].patch.suggestion.sql)).toContain(`- '${k}'`);
+  });
+  test('a shelved row (decision: later) keeps its examination evidence through an AI categorization, gate off or on: the rule keys go, examined stays', async () => {
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    for (const gate of [undefined, 'true']) {
+      if (gate) process.env.GATE_TAX_LEDGER = gate; else delete process.env.GATE_TAX_LEDGER;
+      // an owner expense rule replaced the matcher's transfer flag: examined is the row's only matcher evidence; the owner shelved it as Later
+      state.listRows = [{ id: 'bt-9', description: 'CAPITAL ONE CRCARDPMT', amount: '500.00', suggestion: { examined: true, later: true, decision: 'later', decidedAt: '2026-10-02T00:00:00Z', rule: { id: 'r', kind: 'expense', source: 'owner' }, categoryId: 'cat-old', categorySource: 'rule', rulesAt: '2026-10-01T00:00:00Z' } }];
+      autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+      state.bankUpdates = [];
+      const out = await (await post('/admin/tax/bank-import/suggest', { ids: ['bt-9'] })).json();
+      if (!out.results || !out.results[0] || !out.results[0].applied) continue; // the gate-on pass may not admit the row (category present); the gate-off write is the case
+      const sql = String(state.bankUpdates[0].patch.suggestion.sql);
+      for (const k of ['rule', 'rulesAt']) expect(sql).toContain(`- '${k}'`);
+      expect(sql).not.toContain("- 'examined'");
+    }
+    delete process.env.GATE_TAX_LEDGER;
+  });
+  test('gate off: a transfer rule\'s hidden flag goes with the rule when the model\'s category replaces it; a row read without a flag keeps its no-flag check', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    state.listRows = [{ id: 'bt-8', description: 'ONLINE TRANSFER TO SAVINGS', amount: '500.00', suggestion: { ignore: true, reason: 'internal transfer (rule)', rule: { id: 'r', kind: 'transfer' }, rulesAt: '2026-10-01T00:00:00Z' } }];
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+    state.bankUpdates = [];
+    expect((await (await post('/admin/tax/bank-import/suggest', { ids: ['bt-8'] })).json()).results[0].applied).toBe(true);
+    const flagged = state.bankUpdates[0];
+    for (const k of ['rule', 'rulesAt', 'ignore', 'reason']) expect(String(flagged.patch.suggestion.sql)).toContain(`- '${k}'`);
+    // the write repeats the case it read: the rule's flag must still be there, undecided
+    expect(flagged.wheres).toContainEqual([expect.stringContaining("(suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null"), undefined]);
+    // a row read without a flag: no flag may have appeared during the model call, and only the rule's keys go
+    state.listRows = [{ id: 'bt-9', description: 'WAWA 5211', amount: '58.12', suggestion: { noMatch: true } }];
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+    state.bankUpdates = [];
+    expect((await (await post('/admin/tax/bank-import/suggest', { ids: ['bt-9'] })).json()).results[0].applied).toBe(true);
+    expect(String(state.bankUpdates[0].patch.suggestion.sql)).not.toContain("- 'ignore'");
+    expect(state.bankUpdates[0].wheres).toContainEqual(["coalesce(suggestion->>'ignore','') <> 'true'", undefined]);
+  });
+  test('gate off: a personal rule\'s hidden reason goes with the rule when the model\'s category replaces it; the write requires the rule to still be there', async () => {
+    delete process.env.GATE_TAX_LEDGER;
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    state.listRows = [{ id: 'bt-10', description: 'STREAMING SVC 0042', amount: '15.49', suggestion: { personal: true, reason: 'personal per ledger rule', rule: { id: 'r', kind: 'personal' }, rulesAt: '2026-10-01T00:00:00Z' } }];
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+    state.bankUpdates = [];
+    expect((await (await post('/admin/tax/bank-import/suggest', { ids: ['bt-10'] })).json()).results[0].applied).toBe(true);
+    for (const k of ['rule', 'rulesAt', 'personal', 'reason']) expect(String(state.bankUpdates[0].patch.suggestion.sql)).toContain(`- '${k}'`);
+    expect(String(state.bankUpdates[0].patch.suggestion.sql)).not.toContain("- 'ignore'");
+    expect(state.bankUpdates[0].wheres).toContainEqual(["coalesce(suggestion->>'ignore','') <> 'true' and (suggestion->'rule') is not null", undefined]);
+  });
+  test('gate on: the AI write repeats the eligibility (no personal rule, no transfer flag) and reports applied only when it lands', async () => {
+    process.env.GATE_TAX_LEDGER = 'true';
+    state.listRows = [{ id: 'bt-7', description: 'WAWA 5211', amount: '58.12', suggestion: { noMatch: true } }];
+    const { autoCategorizeExpense } = require('../services/expense-categorizer');
+    autoCategorizeExpense.mockResolvedValueOnce({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment', reasoning: 'food' });
+    state.bankUpdates = []; state.bankUpdateResult = 0; // a ledger pass marked the row personal during the model call
+    const res = await post('/admin/tax/bank-import/suggest', { ids: ['bt-7'] });
+    const body = await res.json();
+    expect(body.results[0]).toEqual({ id: 'bt-7', applied: false, error: expect.stringMatching(/classified or settled meanwhile/) });
+    expect(state.bankUpdates[0].wheres).toContainEqual([expect.stringContaining("coalesce(suggestion->>'personal','') <> 'true'"), undefined]);
+    // and the category eligibility: a rule category that landed during the model call is not overwritten
+    expect(state.bankUpdates[0].wheres).toContainEqual(["(suggestion is null or (suggestion->>'categoryId') is null)", undefined]);
+    state.bankUpdateResult = 1;
+    delete process.env.GATE_TAX_LEDGER;
+  });
+
+  test('gate on: the stored category and flag count as they are', async () => {
+    process.env.GATE_TAX_LEDGER = 'true'; mockDb.mockClear();
+    expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
+    const raws = scopeRaws();
+    expect(raws).toContainEqual("(suggestion is null or (suggestion->>'categoryId') is null)");
+    // a review rule's row (card interest, a dues split) is the owner's to categorize: not the model's
+    expect(raws).toContainEqual("coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true' and coalesce(suggestion->>'review','') <> 'true'");
+  });
+  test('gate off: the hidden personal key does not take the row out of the AI pass', async () => {
+    delete process.env.GATE_TAX_LEDGER; mockDb.mockClear();
+    expect((await post('/admin/tax/bank-import/suggest', { limit: 5 })).status).toBe(200);
+    expect(scopeRaws().join(' ')).not.toContain("'personal'");
   });
 });

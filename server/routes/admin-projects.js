@@ -183,6 +183,31 @@ function publishedCertificateEditRejection(project, updates, current) {
   };
 }
 
+// The pre-treat certificate as it went out (owner 10-23 option A on #6515):
+// the new construction warranty is built from this copy, never from edits
+// made after the send. Every delivered send overwrites it with what that send
+// carried. Other project types, or a deploy without the column, get nothing.
+function pretreatSentSnapshot(project, projectCols) {
+  if (project?.project_type !== 'pre_treatment_termite_certificate' || !projectCols?.pretreat_sent_snapshot) return {};
+  return {
+    pretreat_sent_snapshot: JSON.stringify({
+      findings: normalizeFindings(project.findings),
+      project_date: normalizeDateOnly(project.project_date),
+      sent_at: new Date().toISOString(),
+    }),
+  };
+}
+
+// Send with invoice: save the copy once the report leg reached the owner,
+// fenced on the send claim (a stale takeover owns the row otherwise). A held
+// report sent only the invoice, so it saves nothing (the release saves it).
+// The row passed in is the post-claim re-read the send delivered.
+async function savePretreatSentCopy(project, projectCols, { reportReached, held, claimToken }) {
+  const copy = reportReached && !held ? pretreatSentSnapshot(project, projectCols) : {};
+  if (!copy.pretreat_sent_snapshot) return;
+  await db('projects').where({ id: project.id, delivery_claim_token: claimToken }).update(copy);
+}
+
 // Re-judges the staff-send checks on the row as it stands after the send
 // claim (an edit can land between the first read and the claim; edits are
 // fenced once the row is 'sending'). Throws an operational 422; both send
@@ -3836,6 +3861,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       // (closed_at stays set and closeout artifacts key on status='closed').
       deliveryUpdate.status = project.status === 'closed' ? project.status : 'sent';
       deliveryUpdate.sent_at = project.sent_at || db.fn.now();
+      // The row re-read after the claim is what this send delivered.
+      Object.assign(deliveryUpdate, pretreatSentSnapshot(updatedProject, projectCols));
       if (wdoFiling && projectCols.wdo_sent_filings) {
         // Atomic jsonb append — /send has no send claim, so a concurrent send
         // must not lose a filing record to read-modify-write.
@@ -4369,6 +4396,7 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     const releaseUpdate = {
       status: refreshed.status === 'closed' ? refreshed.status : 'sent',
       sent_at: refreshed.sent_at || db.fn.now(),
+      ...pretreatSentSnapshot(refreshed, projectCols),
       last_delivery_at: db.fn.now(),
       delivery_channels: channels,
       delivery_status: deliveryStatus,
@@ -5538,6 +5566,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       await revertHeldReportClaimOnAbort();
     }
 
+    // The sent copy follows the report leg alone: a report that reached the
+    // owner is the copy even when a payer leg failed the send as a whole.
+    await savePretreatSentCopy(refreshed, projectCols, { reportReached: delivered_report, held: holdActive, claimToken: deliveryClaimToken });
+
     // Both delivered-branch finalizes are fenced on the claim token (same
     // contract as /send): zero rows = a stale takeover owns the row now.
     let finalized = !delivered;
@@ -6199,6 +6231,7 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
 });
 
 router._private = {
+  pretreatSentSnapshot,
   assertTechnicianProjectLinkStillAssigned,
   canAccessProject,
   hasProjectAccess,

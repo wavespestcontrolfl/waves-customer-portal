@@ -490,6 +490,17 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).not.toContain('CORRECTIVE WORK');
     expect(text).not.toContain('CUSTOMER RESPONSIBILITIES');
   });
+
+  test('a non-zero tax rate prints a tax row with the rate and amount; rate 0 prints none', async () => {
+    // taxable quarterly 120 x 4 = 480/yr + taxable corrective 450 => 930 x 7% = 65.10
+    const taxed = extractPdfText(await buildEstimateProposalPDFBuffer(STRUCTURED_ESTIMATE, { billsPerApplication: false }));
+    expect(taxed).toContain('Sales tax (7.00%)');
+    expect(taxed).toContain('$65.10');
+    const untaxed = structuredClone(STRUCTURED_ESTIMATE);
+    untaxed.estimate_data.proposal.taxRate = 0;
+    const text = extractPdfText(await buildEstimateProposalPDFBuffer(untaxed, { billsPerApplication: false }));
+    expect(text).not.toContain('Sales tax (');
+  });
 });
 
 describe('pdfkit fallback — recorded acceptance block', () => {
