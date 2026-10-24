@@ -6448,6 +6448,10 @@ router.get('/', async (req, res, next) => {
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
+    // The neighborhood's pinned gate per visit (owner 2026-10-24): the
+    // Directions link routes through it before the house. Only visits with
+    // a pin have a key, so every other row is byte-identical to before.
+    let gateWaypointByVisit = new Map();
     // Visits whose stop is in an active neighborhood, when a visit's assigned
     // technician may add a gate code or mark one wrong
     // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
@@ -6457,6 +6461,7 @@ router.get('/', async (req, res, next) => {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
         const neighborhoodAccess = require('../services/neighborhood-access');
         neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+        gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
         if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
       }
     } catch (err) {
@@ -6933,6 +6938,7 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,

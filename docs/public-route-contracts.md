@@ -658,6 +658,15 @@ These values freeze the billed row's service ownership for combined-visit
 closeout. They are opaque, non-bearer references that grant no read or write
 access; no sibling invoice, report, receipt, or other bearer token rides a line
 item. Legacy and unrelated invoice rows may omit the ownership fields.
+On a multi-property invoice, a service line may also carry `property_id` (the
+customer's own `customer_properties` row; opaque, non-bearer, grants no access)
+and `property_address` (the street, city, state and ZIP frozen from that
+property when the invoice was written). Line-item discount rows inherit both
+from their parent line. When the service lines span two or more properties,
+`/api/pay/:token`, `/api/receipt/:token` and both PDFs group the lines under
+each property's address with that property's discounts and subtotal; every
+other invoice renders as the flat list. Amounts, recipients, payer bill-to and
+tokens are unchanged.
 
 Visit note: `/api/pay/:token` returns `service.techNotes` only as the reviewed
 report text (`customerSafeVisitNotes` with `projectLine`, server/services/context-aggregator.js;

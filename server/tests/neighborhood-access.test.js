@@ -2,7 +2,7 @@
 // shapes the county rolls return (plat suffixes, book references, situs lines
 // that run on into the city).
 const {
-  neighborhoodNameFromSubdivision, isKeypadCode, matchKey, parcelMatchesProperty,
+  neighborhoodNameFromSubdivision, isKeypadCode, matchKey, parcelMatchesProperty, parseGateLocation,
 } = require('../services/neighborhood-access');
 
 describe('neighborhoodNameFromSubdivision', () => {
@@ -106,5 +106,46 @@ describe('parcelMatchesProperty', () => {
   });
   test('a property with no house number never matches', () => {
     expect(parcelMatchesProperty({ situsAddress: '100 EXAMPLE PL' }, { address_line1: 'Example Pl' })).toBe(false);
+  });
+});
+
+// The gate's map point as the office pastes it on the Gate codes page (owner
+// 2026-10-24): the Directions link for every visit in the neighborhood routes
+// through it. Coordinates here are synthetic points in the Gulf.
+describe('parseGateLocation', () => {
+  test.each([
+    ['27.4321, -82.4567', { lat: 27.4321, lng: -82.4567 }],
+    ['27.4321,-82.4567', { lat: 27.4321, lng: -82.4567 }],
+    ['27.4321 -82.4567', { lat: 27.4321, lng: -82.4567 }],
+    ['  27.4321 / -82.4567 ', { lat: 27.4321, lng: -82.4567 }],
+    ['https://www.google.com/maps/place/Main+Gate/@27.4321,-82.4567,17z/data=!3m1!4b1', { lat: 27.4321, lng: -82.4567 }],
+    ['https://www.google.com/maps?q=27.4321,-82.4567', { lat: 27.4321, lng: -82.4567 }],
+    ['https://www.google.com/maps/search/?api=1&query=27.4321%2C-82.4567', { lat: 27.4321, lng: -82.4567 }],
+    ['https://maps.google.com/?ll=27.4321,-82.4567&z=17', { lat: 27.4321, lng: -82.4567 }],
+    ['https://www.google.com/maps/place/Gate/data=!4m5!3m4!1s0x0:0x0!8m2!3d27.4321!4d-82.4567', { lat: 27.4321, lng: -82.4567 }],
+    // A place link carries both the viewport centre (/@) and the pin (!3d!4d): the pin wins.
+    ['https://www.google.com/maps/place/Main+Gate/@27.43,-82.45,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d27.4321!4d-82.4567', { lat: 27.4321, lng: -82.4567 }],
+  ])('%s → point', (text, point) => {
+    expect(parseGateLocation(text)).toEqual(point);
+  });
+
+  test('rounds to six places', () => {
+    expect(parseGateLocation('27.43214567891, -82.45678912345')).toEqual({ lat: 27.432146, lng: -82.456789 });
+  });
+
+  test.each([
+    [''], ['   '], [null], [undefined],
+    ['Lakewood Ranch main gate'],
+    ['https://maps.app.goo.gl/AbCdEf'],
+    ['https://www.google.com/maps/place/Lakewood+Ranch,+FL'],
+    // A link is read only from a Google host (pre-push audit): the same
+    // query on another site, or a bare path, pins nothing.
+    ['https://example.com/?q=27.4321,-82.4567'],
+    ['https://notgoogle.com/maps/@27.4321,-82.4567,17z'],
+    ['https://evil-google.com/maps?q=27.4321,-82.4567'],
+    ['/maps/@27.4321,-82.4567,17z'],
+    ['91, -82.4'], ['27.4, -181'], ['0, 0'], ['27.4'],
+  ])('%s → null', (text) => {
+    expect(parseGateLocation(text)).toBeNull();
   });
 });

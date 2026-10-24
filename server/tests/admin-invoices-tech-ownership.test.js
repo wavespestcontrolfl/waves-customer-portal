@@ -131,6 +131,28 @@ describe('admin-invoices GET /:id — technician ownership scoping (ADMIN-BUG-R0
     });
   });
 
+  test('a servicing technician never receives the frozen property addresses of a multi-property invoice (money fields kept)', async () => {
+    technicianServicesCustomer.mockResolvedValue(true);
+    const palm = { address_line1: '1842 Palm Harbor Dr', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+    const bay = { address_line1: '410 Bayshore Rd', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' };
+    InvoiceService.getById.mockResolvedValue({
+      ...FOREIGN_INVOICE,
+      line_items: [
+        { client_id: 'a', description: 'Quarterly pest', quantity: 1, unit_price: 149, amount: 149, property_id: 'p1', property_address: palm },
+        { client_id: 'a-d', _kind: 'discount', discount_for: 'a', description: 'Multi-Home Discount (10%)', quantity: 1, unit_price: -14.9, amount: -14.9, property_id: 'p1', property_address: palm },
+        { client_id: 'b', description: 'Quarterly pest', quantity: 1, unit_price: 149, amount: 149, property_id: 'p2', property_address: bay },
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/api/admin/invoices/${FOREIGN_INVOICE.id}`);
+      const body = await r.json();
+      expect(r.status).toBe(200);
+      expect(JSON.stringify(body)).not.toMatch(/Bayshore|Palm Harbor|property_id|property_address/);
+      expect(body.line_items.map((l) => l.amount)).toEqual([149, -14.9, 149]);
+      expect(body.line_items[1]).toMatchObject({ discount_for: 'a', _kind: 'discount' });
+    });
+  });
+
   test('technician who DOES service the invoice\'s customer (own tap-to-pay checkout) still gets 200 with the full payload', async () => {
     technicianServicesCustomer.mockResolvedValue(true);
     await withServer(async (baseUrl) => {

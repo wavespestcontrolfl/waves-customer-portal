@@ -139,6 +139,7 @@ import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll
 import PropertyServiceAreas from './PropertyServiceAreas';
 import CallBridgeLink from '../admin/CallBridgeLink';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
+import { directionsHref } from '../../lib/directionsHref';
 import { Button, ActionFeedback, Input } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -1338,7 +1339,7 @@ function CustomerContact({ service, visit, request }) {
       {customerId
         ? <a className="tech-lawn-name" href={`/admin/customers?customerId=${encodeURIComponent(customerId)}`}>{name}</a>
         : <div className="tech-lawn-name">{name}</div>}
-      {address ? <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer">{address}</a> : null}
+      {address ? <a href={directionsHref(address, service?.gateWaypoint)} target="_blank" rel="noopener noreferrer">{address}</a> : null}
       {service?.customerPhone
         ? (canCall
           ? <CallBridgeLink styledButton className="tech-lawn-call" phone={service.customerPhone} customerName={name === 'Customer' ? '' : name} customerIdHint={customerId}>{service.customerPhone}</CallBridgeLink>
