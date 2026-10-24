@@ -54,6 +54,14 @@
  * what it was. The lint (tip-library.test.js) holds every figure in the
  * sourced words to the facts' quotes.
  *
+ * Behind the same gate a tip may also be matched to the yard (owner
+ * 2026-10-24): `yard: { grass: [...], irrigation: 'system', county: [...],
+ * city: [...] }` and `showMonths: [1-12]`. The picker leaves a tip out when
+ * the yard does not match (yardMatches) or the visit falls outside its
+ * months. Grass, county and city need a known fact (fail closed); an
+ * irrigation tip hides only where the yard is known to have no system. With
+ * the gate off, nothing is filtered.
+ *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
  */
@@ -490,6 +498,7 @@ const TIPS = Object.freeze([
     // (migration 20260828000002). The live note renders the My Property link.
     condition: 'irrigation_on_file',
     link: { label: 'My Property', path: '/portal?tab=property' },
+    yard: { irrigation: 'system' },
     copy: "If you add your irrigation settings to your Waves portal — the watering days, run minutes per zone, and whether you have a rain sensor — under My Property, I can compare what the lawn is actually getting against what it needs each season and adjust the program to match. It takes about two minutes and makes every lawn report after it more accurate.",
   },
   {
@@ -516,6 +525,7 @@ const TIPS = Object.freeze([
     id: 'lawn_shade_dry_between', group: 'lawn', label: 'Let shaded areas dry between waterings',
     keywords: ['shade', 'wet', 'patch', 'fungus', 'large patch', 'irrigation'], lines: ['lawn'], season: 'all',
     findings: ['large_patch', 'shade'], months: [10],
+    showMonths: [11, 12, 1, 2, 3, 4, 5],
     sources: [{ fact: 'fact-large-patch', label: 'UF/IFAS' }],
     sourcedCopy: "Large patch is a cool-weather fungus. UF/IFAS sees it mostly from November through May, below 80°F, and infection starts when leaves stay wet for 48 hours or more. Letting shaded spots dry out between waterings takes that away.",
     copy: "Turf in the shade stays wet much longer than turf in full sun, and wet shaded turf is where large patch and other fungus get started. If one sprinkler zone covers both sun and shade, check that the shaded part is not still soggy when the sunny part is dry.",
@@ -592,6 +602,7 @@ const TIPS = Object.freeze([
     id: 'lawn_check_heads_after_mow', group: 'lawn', label: 'Check the sprinkler heads after a mow',
     keywords: ['heads', 'coverage', 'dry spot', 'sprinkler', 'irrigation', 'mow crew', 'broken'], lines: ['lawn'], season: 'all',
     findings: ['drought'],
+    yard: { irrigation: 'system' },
     copy: "Mowers and edgers knock sprinkler heads out of line and sometimes crack them. That leaves a dry spot in one place and a soggy spot in another. Run each zone once after the lawn is mowed and watch for heads that spray the wrong way, spray weakly, or sit buried in grass.",
   },
   {
@@ -1241,6 +1252,7 @@ const TIPS = Object.freeze([
     id: 'lk_fills_from_edges', group: 'lawn', label: "Brown spots fill in from the edges",
     aftercare: true, keywords: ["brown spots", "dead grass", "runners", "chinch", "recovery"], lines: ["lawn"], season: 'all',
     services: ["lawn_pest_knockdown"],
+    yard: { grass: ['st_augustine', 'zoysia'] },
     copy: "Grass that the insects already killed stays brown; it does not turn green again. St. Augustine and Zoysia fill those spots by sending runners in from the healthy edges over several weeks. Regular watering and a normal mowing height help it cover faster.",
   },
   {
@@ -1475,9 +1487,14 @@ function registryLineFor(serviceLine) {
  * visit that finds roaches or fleas can reach that advice. It is never listed
  * unasked, so a tip that names work still leads only its own services.
  */
-function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [], sourced = false } = {}) {
+function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [], sourced = false, yard = null } = {}) {
   const line = registryLineFor(serviceLine);
   const season = seasonForDate(date);
+  // Behind GATE_TECH_TIP_SOURCES a tip that does not fit this yard, or this
+  // visit's month, is left out of every list, search included.
+  const month = monthForDate(date);
+  const fits = (tip) => !sourced || (yardMatches(tip.yard, yard) && (!tip.showMonths || tip.showMonths.includes(month)));
+  const TIPS_HERE = TIPS.filter(fits);
   // Within a group the best fit leads: this visit's confirmed findings, then
   // the month, then the season; ties keep registry order (the sort is stable).
   const rankCtx = { season, month: monthForDate(date), findings: new Set(Array.isArray(findings) ? findings : []) };
@@ -1485,7 +1502,7 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   const groups = GROUP_ORDER[season]
     .map((groupId) => {
       const group = TIP_GROUPS.find((g) => g.id === groupId);
-      const tips = TIPS.filter((tip) => tip.group === groupId && tip.lines.includes(line) && !tip.services)
+      const tips = TIPS_HERE.filter((tip) => tip.group === groupId && tip.lines.includes(line) && !tip.services)
         .sort(bySeason);
       return { ...group, primary: tips.some((tip) => tip.lines.includes(line)), tips };
     })
@@ -1493,7 +1510,7 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   // Every service on the visit (the primary and its add-on lines) leads with
   // its own tips (Codex #5582).
   const keys = new Set([serviceKey, ...serviceKeys].filter(Boolean));
-  const forService = keys.size ? TIPS.filter((tip) => tip.services?.some((key) => keys.has(key))).sort(bySeason) : [];
+  const forService = keys.size ? TIPS_HERE.filter((tip) => tip.services?.some((key) => keys.has(key))).sort(bySeason) : [];
   const listed = new Set([...forService, ...groups.flatMap((group) => group.tips)]);
   // Behind GATE_TECH_TIP_SOURCES the picker shows the words the completion
   // will freeze (a sourced tip's sourcedCopy), so the technician approves
@@ -1504,8 +1521,23 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
     line,
     season,
     groups: allGroups.map((group) => ({ ...group, tips: group.tips.map(shown) })),
-    more: TIPS.filter((tip) => !listed.has(tip)).map(shown),
+    more: TIPS_HERE.filter((tip) => !listed.has(tip)).map(shown),
   };
+}
+
+// Whether a tip's `yard` filter fits this yard (tips with facts, owner
+// 2026-10-24). No filter fits every yard. Grass, county and city need a known
+// fact that matches; a grass counts only when it can be trusted (staff or the
+// estimate set it). An irrigation tip fits unless the yard is known to have
+// no system.
+function yardMatches(filter, yard) {
+  if (!filter) return true;
+  const known = yard || {};
+  if (filter.grass && !(known.grassTrusted && filter.grass.includes(known.grass))) return false;
+  if (filter.county && !filter.county.includes(known.county)) return false;
+  if (filter.city && !filter.city.includes(known.city)) return false;
+  if (filter.irrigation === 'system' && known.irrigationSystem === false) return false;
+  return true;
 }
 
 // The one shape a source link may take: https, on an allowed host, nothing in
@@ -1641,6 +1673,7 @@ function freezeTechTips(input, { sourced = false, date = new Date() } = {}) {
 }
 
 module.exports = {
+  yardMatches,
   CITATION_HOSTS,
   citationUrlAllowed,
   printableCitations,

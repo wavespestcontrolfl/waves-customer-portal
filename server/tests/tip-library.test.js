@@ -795,3 +795,70 @@ describe('the picker shows the words the completion freezes (GATE_TECH_TIP_SOURC
     expect(tip).toBe(TIPS.find((t) => t.id === 'water_gutters'));
   });
 });
+
+describe('tips matched to the yard (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  const { yardMatches } = require('../services/service-report/tip-library');
+  const ids = (opts) => {
+    const library = tipsForVisit(opts);
+    return new Set([...library.groups.flatMap((group) => group.tips), ...library.more].map((tip) => tip.id));
+  };
+  const knockdown = { serviceLine: 'lawn', serviceKey: 'lawn_pest_knockdown', date: '2026-07-15' };
+
+  test('no filter fits every yard; grass, county and city need a known match (fail closed)', () => {
+    expect(yardMatches(undefined, null)).toBe(true);
+    expect(yardMatches({ grass: ['st_augustine'] }, { grass: 'st_augustine', grassTrusted: true })).toBe(true);
+    expect(yardMatches({ grass: ['st_augustine'] }, { grass: 'st_augustine', grassTrusted: false })).toBe(false);
+    expect(yardMatches({ grass: ['st_augustine'] }, { grass: 'bahia', grassTrusted: true })).toBe(false);
+    expect(yardMatches({ grass: ['st_augustine'] }, null)).toBe(false);
+    expect(yardMatches({ county: ['Sarasota'] }, { county: 'Sarasota' })).toBe(true);
+    expect(yardMatches({ county: ['Sarasota'] }, { county: null })).toBe(false);
+    expect(yardMatches({ city: ['north port'] }, { city: 'north port' })).toBe(true);
+    expect(yardMatches({ city: ['north port'] }, { city: 'venice' })).toBe(false);
+  });
+
+  test('an irrigation tip hides only where the yard is known to have no system', () => {
+    expect(yardMatches({ irrigation: 'system' }, { irrigationSystem: false })).toBe(false);
+    expect(yardMatches({ irrigation: 'system' }, { irrigationSystem: true })).toBe(true);
+    expect(yardMatches({ irrigation: 'system' }, { irrigationSystem: null })).toBe(true);
+    expect(yardMatches({ irrigation: 'system' }, null)).toBe(true);
+  });
+
+  test('gate off: nothing is filtered', () => {
+    expect(ids(knockdown).has('lk_fills_from_edges')).toBe(true);
+    expect(ids(knockdown).has('lawn_shade_dry_between')).toBe(true);
+    expect(ids({ ...knockdown, yard: { irrigationSystem: false } }).has('lawn_check_heads_after_mow')).toBe(true);
+  });
+
+  test('gate on: a grass tip needs a trusted, matching grass, in every list including search', () => {
+    expect(ids({ ...knockdown, sourced: true }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'bahia', grassTrusted: true } }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'zoysia', grassTrusted: false } }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'zoysia', grassTrusted: true } }).has('lk_fills_from_edges')).toBe(true);
+  });
+
+  test('gate on: the sprinkler tips leave a yard known to have no system', () => {
+    const noSystem = ids({ ...knockdown, sourced: true, yard: { irrigationSystem: false } });
+    expect(noSystem.has('lawn_check_heads_after_mow')).toBe(false);
+    expect(noSystem.has('lawn_irrigation_portal')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true }).has('lawn_check_heads_after_mow')).toBe(true);
+  });
+
+  test('gate on: a month-bound tip shows only in its months (large patch, November through May)', () => {
+    expect(ids({ ...knockdown, sourced: true }).has('lawn_shade_dry_between')).toBe(false);
+    expect(ids({ ...knockdown, sourced: true, date: '2026-01-15' }).has('lawn_shade_dry_between')).toBe(true);
+  });
+
+  test('every yard filter and month list names real values', () => {
+    const GRASSES = new Set(['st_augustine', 'bermuda', 'zoysia', 'bahia']);
+    for (const tip of TIPS.filter((t) => t.yard)) {
+      expect(Object.keys(tip.yard).every((key) => ['grass', 'irrigation', 'county', 'city'].includes(key))).toBe(true);
+      for (const grass of tip.yard.grass || []) expect(GRASSES.has(grass)).toBe(true);
+      for (const county of tip.yard.county || []) expect(['Manatee', 'Sarasota', 'Charlotte']).toContain(county);
+      for (const city of tip.yard.city || []) expect(city).toBe(city.toLowerCase());
+      if (tip.yard.irrigation) expect(tip.yard.irrigation).toBe('system');
+    }
+    for (const tip of TIPS.filter((t) => t.showMonths)) {
+      for (const month of tip.showMonths) expect(Number.isInteger(month) && month >= 1 && month <= 12).toBe(true);
+    }
+  });
+});
