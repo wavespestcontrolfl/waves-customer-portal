@@ -52,7 +52,7 @@ const ownText = (el) => {
   return s.trim();
 };
 
-function classify(revealIO, statIO) {
+function classify(statIO) {
   for (const el of document.querySelectorAll('#root *')) {
     if (el.closest('svg')) continue;
     const cs = getComputedStyle(el);
@@ -199,17 +199,8 @@ function classify(revealIO, statIO) {
     header.style.setProperty('box-shadow', '0 14px 40px rgba(4,57,94,.16), inset 0 1px 0 rgba(255,255,255,.6), inset 1px 1px 0 rgba(175,225,255,.3)', 'important');
   }
 
-  // scroll-reveal (below-fold cards) + sq-ft count-up registration
-  if (revealIO) {
-    document.querySelectorAll('[data-glass="card"]').forEach((c) => {
-      if (c.hasAttribute('data-g-revealed')) return;
-      c.setAttribute('data-g-revealed', '');
-      if (c.getBoundingClientRect().top > window.innerHeight * 0.92) {
-        c.classList.add('glass-reveal-pending');
-        revealIO.observe(c);
-      }
-    });
-  }
+  // Card entrances are owned by the shared glass engine. This adapter only
+  // registers the estimate's existing square-foot count-up.
   if (statIO) {
     for (const el of document.querySelectorAll('#root *')) {
       if (el.hasAttribute('data-g-stat')) continue;
@@ -235,15 +226,6 @@ export function useGlassTheme(active) {
     const html = document.documentElement;
     const { orbs, cleanup: sceneCleanup } = applyGlassScene();
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const revealIO = new IntersectionObserver((ents) => {
-      ents.forEach((en) => {
-        if (!en.isIntersecting) return;
-        en.target.classList.add('glass-reveal-in');
-        en.target.classList.remove('glass-reveal-pending');
-        revealIO.unobserve(en.target);
-      });
-    }, { threshold: 0.06 });
-
     const statIO = new IntersectionObserver((ents) => {
       ents.forEach((en) => {
         if (!en.isIntersecting) return;
@@ -264,7 +246,7 @@ export function useGlassTheme(active) {
       });
     }, { threshold: 0.5 });
 
-    const run = () => classify(revealIO, statIO);
+    const run = () => classify(statIO);
     run();
 
     // Re-tag after React re-renders. childList covers mount/unmount;
@@ -308,7 +290,6 @@ export function useGlassTheme(active) {
       detachFx();
       if (retagTimer) clearTimeout(retagTimer);
       mo.disconnect();
-      if (revealIO) revealIO.disconnect();
       if (statIO) statIO.disconnect();
       sceneCleanup();
     };
