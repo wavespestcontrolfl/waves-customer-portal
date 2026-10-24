@@ -70,6 +70,10 @@ describe('CreateAppointmentModal address-first best times', () => {
     fireEvent.click(chips[0]);
     // The Time select (its options carry HH:MM values) now holds the chip's hour.
     await waitFor(() => expect(Array.from(document.querySelectorAll('select')).some((el) => el.value === '10:00')).toBe(true));
+    // No service is known yet, so the chip's technician is NOT pinned: the
+    // re-check after the pick is still an all-technician search.
+    await waitFor(() => expect(findTimeBodies().length).toBeGreaterThan(1));
+    expect(findTimeBodies().at(-1).technicianId ?? null).toBeNull();
     // Still nothing written: no customer, no visit.
     // (find-time and the dispatch slot-check are read-only POSTs.)
     const writes = fetcher.mock.calls.map(([url, o]) => [String(url), o?.method]).filter(([url, m]) => m === 'POST' && !/\/find-time|\/slot-check/.test(url));

@@ -4005,6 +4005,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // block's picked address is the search subject instead. Only while the
   // block is open: collapsing it hides the address, so the chips for it go too.
   const addressOnlyTimes = addressFirstTimes && !selectedCustomer && showQuickAdd && !!quickAddTarget;
+  // A chip was scored for one technician, so taking it books that technician
+  // (leaving Auto would let assignment land elsewhere and falsify the
+  // advertised detour). Not in address-only mode: no service is known yet,
+  // so that technician may not perform the one added next, and pinning them
+  // would scope the later re-check to their route and hide the mismatch
+  // (Codex #6411 r1 on the retired drawer). Day and hour only, then.
+  const adoptChipTechnician = (slot) => {
+    if (addressOnlyTimes || !slot.technicianId) return;
+    setTechMode('choose');
+    setTechId(slot.technicianId);
+    appliedSuggestionRef.current = true;
+  };
   const bestTimesTarget = addressOnlyTimes ? quickAddTarget : bookingPropertyTarget(selectedBookingProperty);
   // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
   // availability strip (days around the chosen date) instead.
@@ -5521,15 +5533,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             currentStart={windowStart}
             currentTechnicianId={techMode === 'choose' ? techId : null}
             onPick={(slot) => {
-              // Same adoption as the hint chips: the hour was scored for
-              // one technician, so taking it books that technician.
               setApptDate(slot.date);
               setWindowStart(slot.start);
-              if (slot.technicianId) {
-                setTechMode('choose');
-                setTechId(slot.technicianId);
-                appliedSuggestionRef.current = true;
-              }
+              adoptChipTechnician(slot);
             }}
             style={{ marginBottom: 10 }}
           />
@@ -5554,25 +5560,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentTechnicianId={techMode === 'choose' ? techId : null}
             onPick={(slot) => {
-              // Mirror applySlot: the detour was scored for a specific
-              // technician, so picking the chip adopts that tech too —
-              // leaving auto mode would let assignment land elsewhere and
-              // falsify the advertised detour.
               setWindowStart(slot.start);
-              if (slot.technicianId) {
-                setTechMode('choose');
-                setTechId(slot.technicianId);
-                appliedSuggestionRef.current = true;
-              }
+              adoptChipTechnician(slot);
             }}
             onPickDate={(slot) => {
               setApptDate(slot.date);
               setWindowStart(slot.start);
-              if (slot.technicianId) {
-                setTechMode('choose');
-                setTechId(slot.technicianId);
-                appliedSuggestionRef.current = true;
-              }
+              adoptChipTechnician(slot);
             }}
             style={{ marginBottom: 10 }}
           />
