@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { createHash } = require('node:crypto');
-const { etDateString, parseETDateTime, addETDays, etParts } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, addETDays, etParts, etNthWeekdayOfMonth } = require('../utils/datetime-et');
 
 // Minimum plausible gap in DAYS between two visits of a series, per
 // recurring_pattern: ~70% of the nominal interval (a month counts 21 days).
@@ -482,20 +482,26 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
     appointmentIds: rows.map((row) => row.id) };
 }
 
-// The weekend day the seeder walked to before shifting a visit off it. A
-// series anchored on a Saturday or Sunday (stored recurring_weekday 6 or 0)
-// places each visit on that weekday, then moves it to the Monday after (or
-// the Friday before, weekend_shift 'back'). Near a month end the shift
-// crosses into another month (Sat Feb 27 -> Mon Mar 1), and a month walk
-// from the shifted date lands a month off. Any other date is its own base.
-function weekendShiftBaseDate(row, dateStr) {
+// The weekend day the seeder walked to before it shifted a follow-up. A
+// series anchored on a Saturday or Sunday (stored recurring_nth and
+// recurring_weekday 6 or 0) places each follow-up on that nth weekend day of
+// its month, then shiftPastWeekend moves it to the Monday after (or the
+// Friday before, weekend_shift 'back'). Near a month end the shift crosses
+// into another month (Sat Feb 27 -> Mon Mar 1), and a month walk from the
+// shifted date lands a month off. Only a follow-up on exactly that shifted
+// slot is walked back. A root is never shifted: the seeder walks from its
+// own date, even a weekday one with an office-set weekend anchor.
+function weekendShiftBaseDate(row, dateStr, seeder) {
   const weekday = Number.parseInt(row.recurring_weekday, 10);
-  if (weekday !== 0 && weekday !== 6) return dateStr;
-  const back = row.weekend_shift === 'back';
+  const nth = Number.parseInt(row.recurring_nth, 10);
+  if (!row.recurring_parent_id || (weekday !== 0 && weekday !== 6) || !(nth > 0)) return dateStr;
   const at = parseETDateTime(`${dateStr}T12:00`);
-  if (etParts(at).dayOfWeek !== (back ? 5 : 1)) return dateStr;
-  const shiftDays = back ? (weekday === 6 ? -1 : -2) : (weekday === 6 ? 2 : 1);
-  return etDateString(addETDays(at, -shiftDays));
+  for (const offset of [-2, -1, 1, 2]) {
+    const { year, month } = etParts(addETDays(at, offset));
+    const slot = etDateString(etNthWeekdayOfMonth(year, month, nth, weekday));
+    if (seeder.shiftPastWeekend(slot, true, row.weekend_shift || undefined) === dateStr) return slot;
+  }
+  return dateStr;
 }
 
 function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
@@ -515,7 +521,7 @@ function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
     }
     if (index === anchorIndex) {
       expectedTerm = seeder.buildRecurringFollowUpRows({
-        ...row, scheduled_date: weekendShiftBaseDate(row, formatDateOnly(row.scheduled_date)),
+        ...row, scheduled_date: weekendShiftBaseDate(row, formatDateOnly(row.scheduled_date), seeder),
       }, { pattern, plannedCount: sorted.length - index });
       return false;
     }
@@ -525,7 +531,7 @@ function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
     if (currentDate <= previousDate) return true;
     // Walk from where the seeder placed the previous visit, as it does:
     // a weekend shift never becomes the base for the next occurrence.
-    const [next] = seeder.buildRecurringFollowUpRows({ ...previous, scheduled_date: weekendShiftBaseDate(previous, previousDate) }, { pattern, plannedCount: 2 });
+    const [next] = seeder.buildRecurringFollowUpRows({ ...previous, scheduled_date: weekendShiftBaseDate(previous, previousDate, seeder) }, { pattern, plannedCount: 2 });
     if (!next) return false;
     // Ordinary rescheduling/weekend drift has room; a monthly plan with
     // quarterly dates still pages even if all its stored patterns say monthly.

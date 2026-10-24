@@ -128,6 +128,13 @@ test('a weekend first visit cannot disguise quarterly dates as monthly', () => {
   expect(check(estimate(), rows)[0].issues).toContain('application_spacing_needs_review');
 });
 
+test('a weekday first visit with an office-set weekend anchor is walked from its own date', () => {
+  const root = parent({ scheduled_date: '2040-10-01', recurring_pattern: 'quarterly', recurring_nth: 1, recurring_weekday: 0, skip_weekends: true });
+  const children = buildRecurringFollowUpRows(root, { pattern: 'quarterly', plannedCount: 4 });
+  expect(children.map((row) => row.scheduled_date)).toEqual(['2041-01-07', '2041-04-08', '2041-07-08']);
+  expect(check(quarterlyPest(), [root, ...children.map((row, index) => ({ ...row, id: `child-${index}` }))])).toEqual([]);
+});
+
 test.each([
   { recurring: { rodentBaitMo: 25 } },
   { result: { results: { rodBaitMo: 25 } } },
