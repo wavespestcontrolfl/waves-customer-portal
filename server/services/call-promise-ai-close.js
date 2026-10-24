@@ -108,6 +108,22 @@ function safeQuote(recordType, quote) {
   return clean || null;
 }
 
+// The words (and the facts) a close rested on, as one md5 per record type, in SQL over the record's own
+// (unqualified) columns: stamped on the proof at close time, read again by the stand check and, in the same
+// expression, by the lapse scan. A transcript re-written by a reprocess, an edited or failed text, an email whose
+// body changed, a visit or estimate moved to another service or property: the fingerprint no longer matches and
+// the promise is owed again; the next run judges the evidence as it is now.
+const FS = "E'\\x1f'";
+const fingerprintSql = (...parts) => `md5(concat_ws(${FS}, ${parts.join(', ')}))`;
+const FINGERPRINT_SQL = {
+  sms_log: fingerprintSql("COALESCE(message_body, '')", "COALESCE(direction, '')", "(COALESCE(status, '') IN ('sent', 'delivered', 'received'))::text", "COALESCE(message_type, '')"),
+  call_log: fingerprintSql("COALESCE(transcription, '')", "COALESCE(direction, '')", "COALESCE(status, '')", "COALESCE(source, '')", "COALESCE(duration_seconds, 0)::text"),
+  email: fingerprintSql("COALESCE(body_text, '')", "COALESCE(subject, '')"),
+  email_message: fingerprintSql("COALESCE(text_snapshot, '')", "COALESCE(subject_snapshot, '')", "(COALESCE(status, '') IN ('delivered', 'opened', 'clicked'))::text", '(bounced_at IS NOT NULL)::text'),
+  scheduled_service: fingerprintSql("COALESCE(service_type, '')", "COALESCE(property_id::text, '')"),
+  estimate: fingerprintSql("COALESCE(service_interest, '')", "COALESCE(property_id::text, '')"),
+};
+
 const callEnd = (call) => require('./call-booking-link-text').callEndFor(call);
 const CALL_TIMING = ['created_at', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'direction', 'metadata'];
 const md5 = (text) => crypto.createHash('md5').update(text, 'utf8').digest('hex');
@@ -220,7 +236,7 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
 
 // ── The close ───────────────────────────────────────────────────────────────
 
-function proofOf(row, verdict, evidence) {
+function proofOf(row, verdict, evidence, witnessFp) {
   // The cited visit was kept by its cancellation (a promise to cancel it), not by a booking or field progress.
   const record = verdict.record_type === 'visit' && evidence?.records.find((r) => r.ref === `visit:${verdict.record_id}`);
   const visitCancel = !!record?.cancelled_at && !record.progressed_at && !record.booked_at && !record.moved_at;
@@ -229,7 +245,7 @@ function proofOf(row, verdict, evidence) {
   return storedProof({ strength: 'association', kind: AI_CHECK_KIND, basis: AI_CHECK_BASIS, closed_agent: AGENT,
     record_type: recordType, record_id: verdict.record_id, label: RECORD_LABEL[recordType] || 'record', matched_at: matchedAt,
     quote: safeQuote(recordType, verdict.quote), check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
-    promise_md5: promiseMd5(row), evidence_hash: verdict.evidence_hash, extractor_version: VERSION, ...(visitCancel ? { visit_cancel: true } : {}) }, row.call_customer_id);
+    promise_md5: promiseMd5(row), witness_fp: witnessFp, evidence_hash: verdict.evidence_hash, extractor_version: VERSION, ...(visitCancel ? { visit_cancel: true } : {}) }, row.call_customer_id);
 }
 
 // One transaction: the promise (never waiting: a busy row fails the close and
@@ -256,7 +272,10 @@ async function closeOnVerdict(conn, row, judged, { now }) {
     const after = await evidenceBoundary(trx, row, lockedCall, { endOf: callEnd });
     if (!after || associationFrom(row, after).getTime() !== new Date(message.created_at).getTime()) return false;
     if (!await revalidateSmsFulfillment(trx, current, message, verdict, now)) return false;
-    const proof = proofOf(row, verdict, judged.evidence);
+    const recordType = LEDGER_RECORD_TYPE[verdict.record_type] || verdict.record_type;
+    const cited = await trx(RECORD_TABLES[recordType][0]).where({ id: verdict.record_id }).first(trx.raw(`${FINGERPRINT_SQL[recordType]} AS fp`));
+    if (!cited) return false;
+    const proof = proofOf(row, verdict, judged.evidence, cited.fp);
     const written = await snapshot(trx('call_commitments'))
       .whereExists(function callStillHasThatCustomer() {
         this.select(trx.raw('1')).from('call_log').where({ id: row.call_log_id, customer_id: row.call_customer_id }).forShare();
@@ -276,9 +295,12 @@ async function aiCloseStands(conn, commitment, call, prior) {
   if (prior.promise_md5 !== promiseMd5(commitment) || !call?.customer_id || prior.judged_customer_id !== call.customer_id) return false;
   const [table, customerColumn, stillCounts] = RECORD_TABLES[prior.record_type] || [];
   if (!table || !UUID_RE.test(String(prior.record_id))) return false;
-  return !!await conn(table).where({ id: prior.record_id })
+  const cited = await conn(table).where({ id: prior.record_id })
     .modify((q) => { if (customerColumn) q.where(customerColumn, call.customer_id); })
-    .modify((q) => { if (stillCounts) stillCounts(q, prior, call.customer_id); }).first('id');
+    .modify((q) => { if (stillCounts) stillCounts(q, prior, call.customer_id); })
+    .first(conn.raw(`${FINGERPRINT_SQL[prior.record_type]} AS fp`));
+  // A missing stamp never equals the fingerprint computed now.
+  return !!cited && cited.fp === prior.witness_fp;
 }
 
 // The watchdog's lapse scan (listLapsedAssociationCloses) asks, per closed row of
@@ -287,15 +309,18 @@ async function aiCloseStands(conn, commitment, call, prior) {
 // branch only (a text cast would defeat the primary-key index). `cc` is the
 // closed row's alias (its fulfillment), `cl` its call.
 function aiCheckLapsedSql(cc = 'cc', cl = 'cl') {
-  const alive = {
-    scheduled_service: `NOT EXISTS (SELECT 1 FROM scheduled_services r WHERE r.id = (${cc}.fulfillment ->> 'record_id')::uuid AND r.customer_id = ${cl}.customer_id
-      AND (CASE WHEN (${cc}.fulfillment ->> 'visit_cancel') = 'true' THEN r.status IN (${sqlList(CANCELLED_VISIT_STATUSES)}) ELSE r.status NOT IN (${sqlList(DEAD_VISIT_STATUSES)}) END))`,
+  const record = `(${cc}.fulfillment ->> 'record_id')::uuid`;
+  // Per type: FROM + the conditions under which the cited record still holds. The fingerprint is compared last;
+  // a missing stamp never equals it.
+  const holds = {
+    scheduled_service: ['scheduled_services r', `r.id = ${record} AND r.customer_id = ${cl}.customer_id
+      AND (CASE WHEN (${cc}.fulfillment ->> 'visit_cancel') = 'true' THEN r.status IN (${sqlList(CANCELLED_VISIT_STATUSES)}) ELSE r.status NOT IN (${sqlList(DEAD_VISIT_STATUSES)}) END)`],
     // The unaliased table name: the shared ownership predicate names its columns `estimates.`.
-    estimate: `NOT EXISTS (SELECT 1 FROM estimates WHERE estimates.id = (${cc}.fulfillment ->> 'record_id')::uuid AND ${commitments.estimateOwnershipSql(`${cl}.customer_id`)})`,
+    estimate: ['estimates', `estimates.id = ${record} AND ${commitments.estimateOwnershipSql(`${cl}.customer_id`)}`],
   };
   const branches = Object.entries(RECORD_TABLES).map(([type, [table, customerColumn]]) => {
-    const owner = customerColumn ? ` AND r.${customerColumn} = ${cl}.customer_id` : '';
-    return `WHEN '${type}' THEN ${alive[type] || `NOT EXISTS (SELECT 1 FROM ${table} r WHERE r.id = (${cc}.fulfillment ->> 'record_id')::uuid${owner})`}`;
+    const [from, where] = holds[type] || [`${table} r`, `r.id = ${record}${customerColumn ? ` AND r.${customerColumn} = ${cl}.customer_id` : ''}`];
+    return `WHEN '${type}' THEN NOT EXISTS (SELECT 1 FROM ${from} WHERE ${where} AND ${FINGERPRINT_SQL[type]} = ${cc}.fulfillment ->> 'witness_fp')`;
   });
   return `((${cc}.fulfillment ->> 'basis') = '${AI_CHECK_BASIS}' AND CASE (${cc}.fulfillment ->> 'record_type') ${branches.join(' ')} ELSE TRUE END)`;
 }

@@ -376,6 +376,60 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     });
   });
 
+  describe('the cited record\'s content is fingerprinted at close', () => {
+    // Each case closes a promise on one record, changes that record, and expects the lapse scan to list the call and a
+    // refresh to reopen the promise; the control (nothing changed) keeps it with no further model call.
+    const cases = [
+      ['a call re-transcribed without the quoted words', async (w) => {
+        const call = await addCall(w);
+        say(w, fulfilledBy(`call:${call}`, 'it covers the retreatment'));
+        return { id: call, change: () => db('call_log').where({ id: call }).update({ transcription: 'Agent: Sorry, nothing yet.\nCustomer: OK.' }) };
+      }],
+      ['a text edited', async (w) => {
+        const text = await addSms(w);
+        say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+        return { id: text, change: () => db('sms_log').where({ id: text }).update({ message_body: 'Sorry, wrong customer.' }) };
+      }],
+      ['a text that later failed', async (w) => {
+        const text = await addSms(w);
+        say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+        return { id: text, change: () => db('sms_log').where({ id: text }).update({ status: 'failed' }) };
+      }],
+      ['a visit moved to another service', async (w) => {
+        // An "other" promise: the fixed rules never re-close it, so the reopen is the fingerprint's doing.
+        const visit = await addVisit(w, { status: 'completed', created_at: new Date(Date.now() - 30 * DAY) });
+        await db('job_status_history').insert({ job_id: visit, from_status: 'on_site', to_status: 'completed', transitioned_at: later(20) });
+        say(w, fulfilledBy(`visit:${visit}`, 'status completed'));
+        return { id: visit, change: () => db('scheduled_services').where({ id: visit }).update({ service_type: 'Lawn Care' }) };
+      }],
+    ];
+    test.each(cases)('%s reopens the promise; unchanged, it keeps it with no model call', async (_label, setup, kind = 'other') => {
+      const w = await world({ kind });
+      const { change } = await setup(w);
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      expect((await row(w.commitment.id)).fulfillment.witness_fp).toMatch(/^[0-9a-f]{32}$/);
+      const before = dispatchWithFallback.mock.calls.length;
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      expect(dispatchWithFallback.mock.calls.length).toBe(before);
+      await change();
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('a text whose status only moves from sent to delivered keeps the close', async () => {
+      const w = await world();
+      const text = await addSms(w, { status: 'sent' });
+      say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      // The provider later confirms delivery: the status moves within the delivered family, the words are the same.
+      await db('sms_log').where({ id: text }).update({ status: 'delivered' });
+      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+    });
+  });
+
   describe('cost', () => {
     test('an unchanged promise with unchanged evidence is never asked twice; a new record is asked again', async () => {
       const w = await world();
