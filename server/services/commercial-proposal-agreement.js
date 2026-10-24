@@ -259,6 +259,35 @@ function refusal(status, code, error) {
   return { ok: false, status, code, error };
 }
 
+// The customer_contracts row for a newly issued agreement: a pure mapping from the rendered template and the locked
+// customer (the same columns the document-template issuer writes).
+function newContractRow({ customer, template, version, rendered, context, tokenHash, expiresAt, now }) {
+  const { ESIGN_DISCLOSURE, signerName } = require('./contracts');
+  const { jsonb } = require('./document-template-library');
+  return {
+    customer_id: customer.id,
+    created_by: null,
+    contract_type: 'document_template',
+    title: rendered.title || version.title || template.name,
+    status: 'sent',
+    recipient_name: signerName(customer),
+    recipient_email: customer.email || null,
+    recipient_phone: customer.phone || null,
+    service_name: context.service?.name || null,
+    esign_disclosure_snapshot: version.signer_disclosure || ESIGN_DISCLOSURE,
+    contract_text_snapshot: rendered.body,
+    share_token_hash: tokenHash,
+    share_token_expires_at: expiresAt,
+    shared_at: now,
+    document_template_id: template.id,
+    document_template_version_id: version.id,
+    document_template_key: template.template_key,
+    requires_signature_snapshot: template.requires_signature !== false,
+    document_variables_snapshot: jsonb(context, {}),
+    document_render_summary: jsonb(rendered.renderSummary, {}),
+  };
+}
+
 // Issue the agreement for this estimate, or return the open one with a fresh
 // signing link (only a hash of the link is stored, so every call rotates it).
 // `blockedFor(trx, lockedEstimate)` re-runs the route's eligibility checks on
@@ -269,9 +298,7 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     return refusal(409, 'no_customer', 'We need to set up your account before you can sign online. Please call us and we will get you started.');
   }
   const { renderDocumentTemplate, buildCustomerDocumentContext, lockActiveVersionForIssue, jsonb } = require('./document-template-library');
-  const {
-    ESIGN_DISCLOSURE, documentContractExpiresAt, hashContractToken, mintContractToken, publicContractUrl, signerName,
-  } = require('./contracts');
+  const { documentContractExpiresAt, hashContractToken, mintContractToken, publicContractUrl } = require('./contracts');
   const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
   const template = await database('document_templates').where({ template_key: TEMPLATE_KEY, status: 'active' }).first();
@@ -281,12 +308,10 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
   if (!template || !version) return refusal(409, 'template_unavailable', 'Online signing is not available right now. Please call us.');
 
   const token = mintContractToken();
-  const eventContext = (metadata) => ({
-    actor_type: 'customer',
-    actor_id: null,
-    ip: req.ip || null,
-    user_agent: req.get ? (req.get('user-agent') || null) : null,
-    metadata: jsonb(metadata, {}),
+  const actor = { actor_type: 'customer', actor_id: null, ip: req.ip || null, user_agent: req.get ? (req.get('user-agent') || null) : null };
+  // Every contract event this issuer writes has the same shape.
+  const addEvent = (trx, contractId, customerId, eventType, metadata) => trx('customer_contract_events').insert({
+    contract_id: contractId, customer_id: customerId, event_type: eventType, ...actor, metadata: jsonb(metadata, {}),
   });
 
   const outcome = await database.transaction(async (trx) => {
@@ -333,12 +358,7 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
           shared_at: now,
           updated_at: now,
         });
-        await trx('customer_contract_events').insert({
-          contract_id: existing.id,
-          customer_id: customer.id,
-          event_type: 'share_link_created',
-          ...eventContext({ source: SNAPSHOT_SOURCE, estimateId: locked.id, expiresAt: expiresAt.toISOString() }),
-        });
+        await addEvent(trx, existing.id, customer.id, 'share_link_created', { source: SNAPSHOT_SOURCE, estimateId: locked.id, expiresAt: expiresAt.toISOString() });
         return { ok: true, status: 200, created: false, contractId: existing.id };
       }
       // The proposal (or the template) changed since it was issued: retire the
@@ -351,14 +371,7 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
         share_token_expires_at: null,
         updated_at: now,
       });
-      if (cancelled) {
-        await trx('customer_contract_events').insert({
-          contract_id: existing.id,
-          customer_id: existing.customer_id,
-          event_type: 'cancelled',
-          ...eventContext({ reason: 'superseded', estimateId: locked.id }),
-        });
-      }
+      if (cancelled) await addEvent(trx, existing.id, existing.customer_id, 'cancelled', { reason: 'superseded', estimateId: locked.id });
     }
 
     const context = buildCustomerDocumentContext(customer, values);
@@ -368,40 +381,11 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
       logger.warn(`[commercial-agreement] unresolved variables for estimate ${locked.id}: ${rendered.unresolvedVariables.join(', ')}`);
       return refusal(409, 'template_unavailable', 'Online signing is not available right now. Please call us.');
     }
-    const [row] = await trx('customer_contracts').insert({
-      customer_id: customer.id,
-      created_by: null,
-      contract_type: 'document_template',
-      title: rendered.title || version.title || template.name,
-      status: 'sent',
-      recipient_name: signerName(customer),
-      recipient_email: customer.email || null,
-      recipient_phone: customer.phone || null,
-      service_name: context.service?.name || null,
-      esign_disclosure_snapshot: version.signer_disclosure || ESIGN_DISCLOSURE,
-      contract_text_snapshot: rendered.body,
-      share_token_hash: hashContractToken(token),
-      share_token_expires_at: expiresAt,
-      shared_at: now,
-      document_template_id: template.id,
-      document_template_version_id: version.id,
-      document_template_key: template.template_key,
-      requires_signature_snapshot: template.requires_signature !== false,
-      document_variables_snapshot: jsonb(context, {}),
-      document_render_summary: jsonb(rendered.renderSummary, {}),
-    }).returning('*');
-    await trx('customer_contract_events').insert({
-      contract_id: row.id,
-      customer_id: customer.id,
-      event_type: 'created_from_document_template',
-      ...eventContext({ source: SNAPSHOT_SOURCE, estimateId: locked.id, templateKey: template.template_key, templateVersionId: version.id }),
-    });
-    await trx('customer_contract_events').insert({
-      contract_id: row.id,
-      customer_id: customer.id,
-      event_type: 'share_link_created',
-      ...eventContext({ source: SNAPSHOT_SOURCE, estimateId: locked.id, expiresAt: expiresAt.toISOString() }),
-    });
+    const [row] = await trx('customer_contracts')
+      .insert(newContractRow({ customer, template, version, rendered, context, tokenHash: hashContractToken(token), expiresAt, now }))
+      .returning('*');
+    await addEvent(trx, row.id, customer.id, 'created_from_document_template', { source: SNAPSHOT_SOURCE, estimateId: locked.id, templateKey: template.template_key, templateVersionId: version.id });
+    await addEvent(trx, row.id, customer.id, 'share_link_created', { source: SNAPSHOT_SOURCE, estimateId: locked.id, expiresAt: expiresAt.toISOString() });
     return { ok: true, status: 201, created: true, contractId: row.id };
   });
 
