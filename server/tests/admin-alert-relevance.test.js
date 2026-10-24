@@ -613,8 +613,9 @@ describe('class rules', () => {
     mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'admin-click', bridged_at: AFTER_BELL, created_at: AFTER_BELL }];
     expect((await reasonFor(repeat())).reason).toBeNull();
     mockTables.call_log = [];
-    // Work on the lead after the alert closes it too.
-    mockTables.leads = [lead({ estimate_id: EST })];
+    // Work on the lead after the alert closes it too. The fake answers the
+    // handoff witness (handedOffWithin + the ownership fence) with whatever
+    // estimates it holds; a suppressed send is proved in the Postgres suite.
     mockTables.estimates = [{ id: EST, customer_id: CUST, sent_at: AFTER_BELL }];
     expect((await reasonFor(repeat())).reason).toBe('Estimate was sent');
     mockTables.estimates = [];

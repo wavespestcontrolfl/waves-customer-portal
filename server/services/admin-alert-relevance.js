@@ -170,7 +170,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), chatQuoted: new Set(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The latest valid time per customer across rows (a bad time is skipped).
@@ -206,21 +206,22 @@ async function loadSubjects(rows, conn = db) {
   if (promiseIds.length) {
     data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'human_state', 'reviewed_at'));
   }
-  // Each add-a-service portal chat bell: was an estimate handed off to its
-  // customer after the bell? The promise lane's own handoff witness
-  // (call-commitments.js handedOffWithin: a real delivery or the customer's
-  // acceptance after the boundary) and its estimate-ownership fence, never
-  // sent_at: a suppressed send stamps sent_at with nothing delivered, and an
-  // estimate accepted during its first send is delivered with sent_at still
-  // null. One small query per bell (the class is a handful of rows).
+  // Each add-a-service portal chat bell and repeat-form alert: was an
+  // estimate handed off to its customer after the bell? The promise lane's
+  // own handoff witness (call-commitments.js handedOffWithin: a real delivery
+  // or the customer's acceptance after the boundary) and its estimate-ownership
+  // fence, never sent_at: a suppressed send stamps sent_at with nothing
+  // delivered, and an estimate accepted during its first send is delivered
+  // with sent_at still null. One small query per bell (both classes are a
+  // handful of rows).
   for (const row of rows) {
     const meta = parseMeta(row.metadata);
-    const customerId = isAddServiceChat(meta) ? uuidOrNull(meta.customerId) : null;
+    const customerId = isAddServiceChat(meta) ? uuidOrNull(meta.customerId) : uuidOrNull(repeatFormCustomerId(meta));
     const bellAt = row.created_at ? new Date(row.created_at) : null;
     if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
     const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
     const handedOff = await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), bellAt), customerId).first('estimates.id');
-    if (handedOff) data.chatQuoted.add(String(row.id));
+    if (handedOff) data.quoteHandedOff.add(String(row.id));
   }
   if (visitIds.length) {
     // The service date as text: a DATE parsed to a JS Date lands at the
@@ -314,8 +315,8 @@ function subjectFor(row, data, todayET) {
     // version (loaded for stale-consent bells only).
     consentRecordedAt: (() => { const id = idTextOrNull(resolved.refs.meta.customerId); return id ? data.consents.get(id) : null; })(),
     // An estimate was handed off to the bell's customer after the bell
-    // (loaded for add-a-service portal chat bells only).
-    chatQuoted: data.chatQuoted.has(String(row.id)),
+    // (loaded for add-a-service portal chat bells and repeat-form alerts only).
+    quoteHandedOff: data.quoteHandedOff.has(String(row.id)),
     // The latest staff text that reached the bell's customer (loaded for
     // repeat-form alerts only).
     leadContactedAt: repeatCustomer ? data.contacts.get(repeatCustomer) : null,
@@ -389,19 +390,20 @@ function newLeadMovedOn(s) {
 }
 
 // The repeat-form alert asks the office to call a lead who sent the quote
-// form again (GATE_LEAD_REPEAT_FORM). Only timestamped facts from after its
-// latest form count: a staff text that reached the customer, a quote sent, a
-// live visit booked, the lead deleted. A call alone is a person's to mark done
-// (no call row proves the customer leg was reached). Never the new-lead
+// form again (GATE_LEAD_REPEAT_FORM). Only what reached the customer after
+// its latest form counts, each by its shared witness: a staff text
+// (deliveredTexts), an estimate handed off (handedOffWithin, never sent_at),
+// a live visit booked; or the lead deleted. A call alone is a person's to mark
+// done (no call row proves the customer leg was reached). Never the new-lead
 // bell's handled shortcut: a lead marked handled before this form is the
 // lead coming back.
 function repeatFormSettled(s) {
   if (!s.bellAt) return null;
   const after = (at) => !!at && new Date(at).getTime() > s.bellAt.getTime();
   if (after(s.leadContactedAt)) return 'Lead was contacted';
-  if (after(s.lead?.deleted_at)) return 'Lead was deleted';
-  if (after(s.estimate?.sent_at) || after(s.leadQuotedAt)) return 'Estimate was sent';
+  if (s.quoteHandedOff) return 'Estimate was sent';
   if (after(s.leadBookedAt)) return 'A visit was booked';
+  if (after(s.lead?.deleted_at)) return 'Lead was deleted';
   return null;
 }
 
@@ -465,7 +467,7 @@ function isAddServiceChat(meta) {
   return String(meta.dedupeKey || '').startsWith(PORTAL_CHAT_PREFIX) && meta.topic === 'add_service';
 }
 function addServiceQuoted(s) {
-  return isAddServiceChat(s.meta) && s.chatQuoted ? 'Estimate was sent' : null;
+  return isAddServiceChat(s.meta) && s.quoteHandedOff ? 'Estimate was sent' : null;
 }
 
 // A re-service request bell (notification-triggers.js reservice_self_booked)
