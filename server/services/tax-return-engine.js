@@ -98,6 +98,8 @@ const LINE_ORDER = ['1', '8', '9', '10', '11', '13', '15', '16a', '16b', '17', '
 const FALLBACK_LINE = '27a';
 // computed below from their own sources, never summed from expense rows
 const COMPUTED_LINES = ['13', '30'];
+// gross receipts and net profit: totals, never an expense line, always printed
+const TOTAL_LINES = ['1', '31'];
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => Number(v) || 0;
@@ -206,6 +208,105 @@ function returnFingerprint(result) {
   return crypto.createHash('sha256').update(JSON.stringify(figures)).digest('hex').slice(0, 32);
 }
 
+// Schedule C lines 8 to 27a from the expense rows. Lines 13 and 30 are
+// computed from their own sources, so their rows are skipped; a line the engine
+// does not know (or a total line) goes to 27a and is counted for a warning.
+function classifyExpenses(expenseLines) {
+  const byLine = new Map();
+  let unknownTotal = 0;
+  for (const e of expenseLines || []) {
+    const given = String(e.line ?? '').trim().toLowerCase();
+    if (COMPUTED_LINES.includes(given)) continue;
+    const known = Boolean(SCHEDULE_C_LABELS[given]) && !TOTAL_LINES.includes(given);
+    if (!known) unknownTotal += num(e.amount);
+    const line = known ? given : FALLBACK_LINE;
+    byLine.set(line, round2((byLine.get(line) || 0) + num(e.amount)));
+  }
+  return { byLine, unknownTotal };
+}
+
+// The home office, capped at `room` (what is left after the other expenses and
+// section 179). Actual (Form 8829): the carry-in joins this year's amount and
+// the excess carries out. Simplified: this year only, the excess expires and a
+// carry-in waits untouched.
+function homeOfficeLimit(ho, carryIn, room) {
+  const carries = ho?.method === 'actual';
+  const full = ho ? round2(ho.deduction) : 0;
+  const pool = round2(full + (carries ? carryIn : 0));
+  const allowed = round2(Math.min(pool, room));
+  return {
+    allowed,
+    carryOut: carries ? round2(pool - allowed) : carryIn,
+    summary: ho ? { method: ho.method, full_amount: full, carry_in: carryIn, pool, allowed } : null,
+  };
+}
+
+// Every warning a return can carry, in the order they show: when it applies and
+// what it says. r is the computed return; f holds the working figures the
+// return does not show (the year's constants, today, the filing record, the
+// SE earnings, taxable income before QBI, QBI after the carried loss, and how
+// the books differ from a filed snapshot).
+const RETURN_WARNINGS = [
+  {
+    code: 'unknown_line',
+    when: (r, f) => f.unknownTotal !== 0,
+    text: (r, f) => `${fmt(f.unknownTotal)} of expenses have no Schedule C line the engine knows. They are shown on line 27a.`,
+  },
+  {
+    code: 'sec179_wages',
+    when: (r) => r.lines.other_income > 0 && r.sec179.pool > 0,
+    text: () => "Section 179's income limit can include wages; this engine counts business income only. Check Form 4562 line 11 by hand.",
+  },
+  {
+    code: 'sec179_over_limit',
+    when: (r, f) => r.sec179.elected > f.K.sec179_limit,
+    text: (r, f) => `Section 179 elected for ${r.year} (${fmt(r.sec179.elected)}) is over the ${fmt(f.K.sec179_limit)} limit. Only the limit counts, and the rest is not carried forward. The phase-out for large purchases is not modeled: ask a tax preparer.`,
+  },
+  {
+    code: 'home_office_carry_idle',
+    when: (r) => r.home_office?.method !== 'actual' && r.carry_in.home_office > 0,
+    text: (r) => (r.home_office
+      ? `${fmt(r.carry_in.home_office)} of home office carryover cannot be used with the simplified method. It stays carried forward.`
+      : `${fmt(r.carry_in.home_office)} of home office carryover is not used because no home office is entered for ${r.year}. It stays carried forward.`),
+  },
+  {
+    code: 'addl_medicare_wages',
+    when: (r, f) => f.seBase > 0 && r.lines.other_income > 0 && f.seBase + r.lines.other_income > f.K.addl_medicare_threshold[r.filing_status],
+    text: () => 'The Additional Medicare Tax counts self-employment earnings only. Wages in Other income are not added: ask a tax preparer.',
+  },
+  {
+    code: 'ss_wage_base_wages',
+    when: (r, f) => r.se_tax > 0 && r.lines.other_income > 0 && round2(f.seBase + r.lines.other_income) > f.K.ss_wage_base,
+    text: () => 'Wages use up the Social Security wage base before self-employment earnings do. This engine does not subtract wages in Other income, so the SE tax can be too high. Check Schedule SE lines 8a to 10 by hand.',
+  },
+  {
+    code: 'qbi_threshold',
+    when: (r, f) => f.taxableAfterNol > f.K.qbi_threshold[r.filing_status],
+    text: (r, f) => `Taxable income is over the ${fmt(f.K.qbi_threshold[r.filing_status])} QBI threshold. The wage and property limit is not modeled: ask a tax preparer.`,
+  },
+  {
+    code: 'qbi_minimum',
+    when: (r, f) => Boolean(f.K.qbi_minimum) && f.qbiNet >= f.K.qbi_minimum.qbi && r.qbi_deduction < f.K.qbi_minimum.deduction && r.taxable_income > 0,
+    text: (r, f) => `The ${fmt(f.K.qbi_minimum.deduction)} minimum QBI deduction (IRC 199A(i)) may apply to an active business with at least ${fmt(f.K.qbi_minimum.qbi)} of QBI. This engine does not add it: check Form 8995 with a tax preparer.`,
+  },
+  {
+    code: 'year_in_progress',
+    when: (r, f) => f.today <= `${r.year}-12-31`,
+    text: (r) => `${r.year} is not over. These figures are to date.`,
+  },
+  {
+    // a filed year is judged on its filing date, a draft on today
+    code: 'simplified_late',
+    when: (r, f) => r.home_office?.method === 'simplified' && ((f.isFiled && f.filedOn) || f.today) > r.due_date,
+    text: (r, f) => `The simplified home office method is only valid on a timely original return (Rev. Proc. 2013-13 section 4.03). The ${r.year} return was due ${r.due_date}${f.isFiled ? ' and was filed later' : ''}. If no extension applies, use the actual method.`,
+  },
+  {
+    code: 'filed_differs',
+    when: (r, f) => f.isFiled && f.filedDiffs.length > 0,
+    text: (r, f) => `This year is marked filed, but the books now give a different answer: ${f.filedDiffs.join('; ')}.`,
+  },
+];
+
 /**
  * inputs: {
  *   year, filing_status, other_income, estimates_paid, gross_receipts,
@@ -216,6 +317,7 @@ function returnFingerprint(result) {
  *   status, filed_on, filed_snapshot,             the tax-year record
  *   today (ET 'YYYY-MM-DD', default now), warnings (extra, from the readers), constants (tests)
  * }
+ * Amounts are never negative (the year record and the books refuse them).
  */
 function computeReturn(inputs = {}) {
   const year = Number(inputs.year);
@@ -225,27 +327,18 @@ function computeReturn(inputs = {}) {
     const e = new Error(`filing_status must be one of ${FILING_STATUSES.join(', ')}`); e.status = 400; throw e;
   }
   const today = inputs.today || etDateString();
-  const warnings = [...(inputs.warnings || [])];
-
-  const gross = round2(inputs.gross_receipts);
+  const given = inputs.carry_in || {};
   const carryIn = {
-    nol: round2(inputs.carry_in?.nol), qbi_loss: round2(inputs.carry_in?.qbi_loss),
-    sec179: round2(inputs.carry_in?.sec179), home_office: round2(inputs.carry_in?.home_office),
+    nol: round2(given.nol), qbi_loss: round2(given.qbi_loss), sec179: round2(given.sec179), home_office: round2(given.home_office),
   };
+  const dep = inputs.depreciation || {};
+  const gross = round2(inputs.gross_receipts);
   const otherIncome = round2(inputs.other_income);
   const estimatesPaid = round2(inputs.estimates_paid);
 
   // 1. expense lines (13 and 30 come from their own sources)
-  const byLine = new Map();
-  let unknownTotal = 0;
-  for (const e of inputs.expense_lines || []) {
-    let line = String(e.line == null ? '' : e.line).trim().toLowerCase();
-    if (COMPUTED_LINES.includes(line)) continue;
-    if (!SCHEDULE_C_LABELS[line] || line === '1' || line === '31') { unknownTotal += num(e.amount); line = FALLBACK_LINE; }
-    byLine.set(line, round2((byLine.get(line) || 0) + num(e.amount)));
-  }
-  if (unknownTotal) warnings.push(warn('unknown_line', `${fmt(unknownTotal)} of expenses have no Schedule C line the engine knows. They are shown on line 27a.`));
-  const regularDep = round2(inputs.depreciation?.regular);
+  const { byLine, unknownTotal } = classifyExpenses(inputs.expense_lines);
+  const regularDep = round2(dep.regular);
   const expenseTotal = round2([...byLine.values()].reduce((s, v) => s + v, 0));
   const otherExpenses = round2(expenseTotal + regularDep);
   // income before section 179 and the home office
@@ -260,56 +353,23 @@ function computeReturn(inputs = {}) {
   // 1.179-3(a)); the part over the dollar limit does not. A carry-in is used up
   // to the allowance this year's election leaves (1.179-3(b) and (c)), which is
   // the dollar limit cap on the total below.
-  const elected = round2(inputs.depreciation?.sec179_elected);
+  const elected = round2(dep.sec179_elected);
   const pool179 = round2(Math.min(elected, K.sec179_limit) + carryIn.sec179);
-  const incomeLimit179 = room;
-  const allowed179 = round2(Math.max(0, Math.min(pool179, K.sec179_limit, incomeLimit179)));
-  const carryOut179 = round2(pool179 - allowed179);
-  if (otherIncome > 0 && pool179 > 0) {
-    warnings.push(warn('sec179_wages', "Section 179's income limit can include wages; this engine counts business income only. Check Form 4562 line 11 by hand."));
-  }
-  if (elected > K.sec179_limit) warnings.push(warn('sec179_over_limit', `Section 179 elected for ${year} (${fmt(elected)}) is over the ${fmt(K.sec179_limit)} limit. Only the limit counts, and the rest is not carried forward. The phase-out for large purchases is not modeled: ask a tax preparer.`));
+  const allowed179 = round2(Math.max(0, Math.min(pool179, K.sec179_limit, room)));
 
   // 3. home office, capped at what is left after other expenses, depreciation
-  // and the section 179 allowed (floor 0). Actual: this year plus the carry-in,
-  // the excess carries out. Simplified: this year only, the excess expires.
-  const hoRoom = Math.max(round2(room - allowed179), 0);
-  const ho = inputs.home_office || null;
-  const hoRaw = ho ? round2(ho.deduction) : 0;
-  let hoAllowed = 0;
-  let hoCarryOut = carryIn.home_office;
-  let hoPool = 0;
-  if (ho && ho.method === 'actual') {
-    hoPool = round2(hoRaw + carryIn.home_office);
-    hoAllowed = Math.min(hoPool, hoRoom);
-    hoCarryOut = round2(hoPool - hoAllowed);
-  } else {
-    hoAllowed = Math.min(hoRaw, hoRoom);
-    if (carryIn.home_office > 0) {
-      warnings.push(warn('home_office_carry_idle', ho
-        ? `${fmt(carryIn.home_office)} of home office carryover cannot be used with the simplified method. It stays carried forward.`
-        : `${fmt(carryIn.home_office)} of home office carryover is not used because no home office is entered for ${year}. It stays carried forward.`));
-    }
-  }
-  hoAllowed = round2(hoAllowed);
+  // and the section 179 allowed (floor 0)
+  const ho = homeOfficeLimit(inputs.home_office, carryIn.home_office, Math.max(round2(room - allowed179), 0));
 
   // 4. profit, Schedule SE, AGI
-  const profit = round2(gross - otherExpenses - hoAllowed - allowed179);
-  const totalExpenses = round2(gross - profit);
-  const seBase = profit > 0 ? round2(profit * K.se_factor) : 0;
-  const seTax = seBase >= K.se_min_earnings
-    ? round2(Math.min(seBase, K.ss_wage_base) * K.ss_rate + seBase * K.medicare_rate) : 0;
+  const profit = round2(gross - otherExpenses - ho.allowed - allowed179);
+  const seBase = Math.max(round2(profit * K.se_factor), 0);
+  const owesSe = seBase >= K.se_min_earnings;
+  const seTax = owesSe ? round2(Math.min(seBase, K.ss_wage_base) * K.ss_rate + seBase * K.medicare_rate) : 0;
   // half of the SE tax, a half cent rounds up (cents in whole numbers: no float tie)
   const halfSe = Math.ceil(Math.round(seTax * 100) / 2) / 100;
-  const addlThreshold = K.addl_medicare_threshold[filing];
-  const addlMedicare = seBase >= K.se_min_earnings && seBase > addlThreshold
-    ? round2((seBase - addlThreshold) * K.addl_medicare_rate) : 0;
-  if (seBase > 0 && otherIncome > 0 && seBase + otherIncome > addlThreshold) {
-    warnings.push(warn('addl_medicare_wages', 'The Additional Medicare Tax counts self-employment earnings only. Wages in Other income are not added: ask a tax preparer.'));
-  }
-  if (seTax > 0 && otherIncome > 0 && round2(seBase + otherIncome) > K.ss_wage_base) {
-    warnings.push(warn('ss_wage_base_wages', 'Wages use up the Social Security wage base before self-employment earnings do. This engine does not subtract wages in Other income, so the SE tax can be too high. Check Schedule SE lines 8a to 10 by hand.'));
-  }
+  // the Additional Medicare Tax on SE earnings above the threshold, outside the half-SE deduction
+  const addlMedicare = owesSe ? round2(Math.max(seBase - K.addl_medicare_threshold[filing], 0) * K.addl_medicare_rate) : 0;
   // income before the NOL deduction: the base of the 80% limit
   const agiBeforeNol = round2(profit + otherIncome - halfSe);
   const standard = K.standard_deduction[filing];
@@ -321,64 +381,41 @@ function computeReturn(inputs = {}) {
   // The NOL deduction is Schedule 1 line 8a, a part of total income, so the
   // AGI on the return (and the 1040-ES 110% test below) is after it.
   const agi = round2(agiBeforeNol - nolUsed);
-  const qbiIncome = round2(profit - halfSe);
-  const qbiNet = round2(qbiIncome - carryIn.qbi_loss);
+  const qbiNet = round2(round2(profit - halfSe) - carryIn.qbi_loss);
   const qbiDeduction = round2(Math.min(K.qbi_rate * Math.max(qbiNet, 0), K.qbi_rate * taxableAfterNol));
-  if (taxableAfterNol > K.qbi_threshold[filing]) {
-    warnings.push(warn('qbi_threshold', `Taxable income is over the ${fmt(K.qbi_threshold[filing])} QBI threshold. The wage and property limit is not modeled: ask a tax preparer.`));
-  }
   const taxable = round2(Math.max(taxableAfterNol - qbiDeduction, 0));
-  if (K.qbi_minimum && qbiNet >= K.qbi_minimum.qbi && qbiDeduction < K.qbi_minimum.deduction && taxable > 0) {
-    warnings.push(warn('qbi_minimum', `The ${fmt(K.qbi_minimum.deduction)} minimum QBI deduction (IRC 199A(i)) may apply to an active business with at least ${fmt(K.qbi_minimum.qbi)} of QBI. This engine does not add it: check Form 8995 with a tax preparer.`));
-  }
-  const nolGenerated = profit < 0 ? round2(Math.max(-profit - otherIncome, 0)) : 0;
-  const nolOut = round2(carryIn.nol - nolUsed + nolGenerated);
-  const qbiLossOut = round2(Math.max(-qbiNet, 0));
+  // a loss year adds the loss less other income to the NOL (a profit adds nothing:
+  // other income is never negative)
+  const nolOut = round2(carryIn.nol - nolUsed + Math.max(-profit - otherIncome, 0));
 
   // 6. tax
   const incomeTax = incomeTaxFor(taxable, K.brackets[filing]);
   const totalTax = round2(incomeTax + seTax + addlMedicare);
   const owed = round2(totalTax - estimatesPaid);
 
-  // next year's 1040-ES
-  const noEstimates = totalTax === 0;
+  // next year's 1040-ES (a $0 total tax makes the safe harbor $0 too)
   const pct = agi > K.estimate_high_agi ? K.estimate_safe_harbor_high_pct : K.estimate_safe_harbor_pct;
   const safeHarbor = round2(totalTax * pct);
   const estimates = {
-    no_estimates_required: noEstimates,
-    note: noEstimates
+    no_estimates_required: totalTax === 0,
+    note: totalTax === 0
       ? `No estimated payments are required for ${year + 1}: this year's total tax is $0 on a full 12-month year (IRC 6654(e)(2)).`
       : `To be safe from the underpayment penalty for ${year + 1}, pay ${Math.round(pct * 100)}% of this year's total tax (${fmt(safeHarbor)}), about ${fmt(safeHarbor / 4)} each quarter.`,
     safe_harbor_pct: pct,
-    next_year_safe_harbor: noEstimates ? 0 : safeHarbor,
-    quarterly: noEstimates ? 0 : round2(safeHarbor / 4),
+    next_year_safe_harbor: safeHarbor,
+    quarterly: round2(safeHarbor / 4),
   };
 
-  // warnings that depend on the record
-  const isFiled = inputs.status === 'filed';
-  if (today <= `${year}-12-31`) warnings.push(warn('year_in_progress', `${year} is not over. These figures are to date.`));
-  if (ho && ho.method === 'simplified') {
-    const due = dueDate(year);
-    const asOf = isFiled && inputs.filed_on ? inputs.filed_on : today;
-    if (asOf > due) {
-      warnings.push(warn('simplified_late', `The simplified home office method is only valid on a timely original return (Rev. Proc. 2013-13 section 4.03). The ${year} return was due ${due}${isFiled ? ' and was filed later' : ''}. If no extension applies, use the actual method.`));
-    }
-  }
-
-  const scheduleC = [{ line: '1', label: SCHEDULE_C_LABELS[1], amount: gross }];
-  const amounts = new Map(byLine);
-  if (regularDep) amounts.set('13', regularDep);
-  if (hoAllowed) amounts.set('30', hoAllowed);
-  for (const line of LINE_ORDER) {
-    if (line === '1' || line === '31') continue;
-    if (line === '13' && (amounts.get('13') || allowed179)) {
-      if (regularDep) scheduleC.push({ line: '13', label: 'Depreciation', amount: regularDep });
-      if (allowed179) scheduleC.push({ line: '13', label: 'Section 179 deduction', amount: allowed179 });
-    } else if (line !== '13' && amounts.get(line)) {
-      scheduleC.push({ line, label: SCHEDULE_C_LABELS[line], amount: amounts.get(line) });
-    }
-  }
-  scheduleC.push({ line: '31', label: SCHEDULE_C_LABELS[31], amount: profit });
+  // Schedule C as printed: the form's order, lines 1 and 31 always, the rest when not zero
+  const computedLines = {
+    1: [[SCHEDULE_C_LABELS[1], gross]],
+    13: [['Depreciation', regularDep], ['Section 179 deduction', allowed179]],
+    30: [[SCHEDULE_C_LABELS[30], ho.allowed]],
+    31: [[SCHEDULE_C_LABELS[31], profit]],
+  };
+  const scheduleC = LINE_ORDER.flatMap((line) => (computedLines[line] || [[SCHEDULE_C_LABELS[line], byLine.get(line)]])
+    .filter(([, amount]) => amount || TOTAL_LINES.includes(line))
+    .map(([label, amount]) => ({ line, label, amount })));
 
   const result = {
     year,
@@ -389,9 +426,9 @@ function computeReturn(inputs = {}) {
     lines: {
       gross_receipts: gross,
       regular_depreciation: regularDep,
-      home_office_deduction: hoAllowed,
+      home_office_deduction: ho.allowed,
       sec179_allowed: allowed179,
-      total_expenses: totalExpenses,
+      total_expenses: round2(gross - profit),
       net_profit: profit,
       other_income: otherIncome,
       standard_deduction: standard,
@@ -411,19 +448,23 @@ function computeReturn(inputs = {}) {
     total_tax: totalTax,
     estimates_paid: estimatesPaid,
     owed,
-    home_office: ho ? { method: ho.method, full_amount: hoRaw, carry_in: carryIn.home_office, pool: hoPool || hoRaw, allowed: hoAllowed } : null,
-    sec179: { elected, carry_in: carryIn.sec179, pool: pool179, income_limit: incomeLimit179, allowed: allowed179 },
+    home_office: ho.summary,
+    sec179: { elected, carry_in: carryIn.sec179, pool: pool179, income_limit: room, allowed: allowed179 },
     carry_in: carryIn,
-    carry_out: { nol: nolOut, qbi_loss: qbiLossOut, sec179: carryOut179, home_office: hoCarryOut },
+    carry_out: { nol: nolOut, qbi_loss: round2(Math.max(-qbiNet, 0)), sec179: round2(pool179 - allowed179), home_office: ho.carryOut },
     estimates,
     reserve: reserve({ year, today, balance: owed }),
-    warnings,
+    warnings: [],
   };
   result.fingerprint = returnFingerprint(result);
-  if (isFiled) {
-    const diffs = snapshotDiffers(inputs.filed_snapshot, result);
-    if (diffs.length) warnings.push(warn('filed_differs', `This year is marked filed, but the books now give a different answer: ${diffs.join('; ')}.`));
-  }
+  const facts = {
+    K, today, isFiled: inputs.status === 'filed', filedOn: inputs.filed_on, unknownTotal, seBase, taxableAfterNol, qbiNet,
+    filedDiffs: snapshotDiffers(inputs.filed_snapshot, result),
+  };
+  result.warnings = [
+    ...(inputs.warnings || []),
+    ...RETURN_WARNINGS.filter((w) => w.when(result, facts)).map((w) => warn(w.code, w.text(result, facts))),
+  ];
   return result;
 }
 

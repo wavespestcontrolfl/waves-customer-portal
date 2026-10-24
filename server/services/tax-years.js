@@ -101,30 +101,29 @@ async function getYearDetail(year) {
   return { year: y, exists: cur.exists, row: cur.row, carry_in: resolveCarryIn(cur.row, prior), prior_version: priorVersion };
 }
 
-async function upsertYear(year, input = {}) {
+async function upsertYear(year, input) {
   const y = parseYear(year);
-  const keys = Object.keys(input || {});
-  const unknown = keys.filter((k) => !EDITABLE.includes(k));
+  const body = input || {};
+  const unknown = Object.keys(body).filter((k) => !EDITABLE.includes(k));
   if (unknown.length) throw httpError(400, `unknown field: ${unknown[0]}`);
   const patch = {};
-  if ('filing_status' in input) {
-    if (!FILING_STATUSES.includes(input.filing_status)) throw httpError(400, `filing_status must be one of ${FILING_STATUSES.join(', ')}`);
-    patch.filing_status = input.filing_status;
+  if ('filing_status' in body) {
+    if (!FILING_STATUSES.includes(body.filing_status)) throw httpError(400, `filing_status must be one of ${FILING_STATUSES.join(', ')}`);
+    patch.filing_status = body.filing_status;
   }
-  for (const k of MONEY_FIELDS) if (k in input) patch[k] = parseMoney(input[k], k);
+  for (const k of MONEY_FIELDS) if (k in body) patch[k] = parseMoney(body[k], k);
   // null clears a carry-in back to the default; a number (0 too) is the owner's own
-  for (const k of CARRY_COLUMNS) if (k in input) patch[k] = input[k] === null ? null : parseMoney(input[k], k);
-  if ('notes' in input) {
-    if (input.notes != null && input.notes !== '' && (typeof input.notes !== 'string' || input.notes.length > NOTES_MAX)) {
-      throw httpError(400, `notes must be text of ${NOTES_MAX} characters or less`);
-    }
-    patch.notes = typeof input.notes === 'string' && input.notes.trim() ? input.notes.trim() : null;
+  for (const k of CARRY_COLUMNS) if (k in body) patch[k] = body[k] === null ? null : parseMoney(body[k], k);
+  if ('notes' in body) {
+    // null and blank both clear the notes
+    const notes = body.notes ?? '';
+    if (typeof notes !== 'string' || notes.length > NOTES_MAX) throw httpError(400, `notes must be text of ${NOTES_MAX} characters or less`);
+    patch.notes = notes.trim() || null;
   }
   if (!Object.keys(patch).length) throw httpError(400, 'nothing to update');
-  const existing = await db('tax_years').where({ tax_year: y }).first('status');
-  if (existing && existing.status === 'filed') throw httpError(409, `${y} is marked filed: unmark it before changing it`);
-  // the status guard in the WHERE makes a filing that lands between the read
-  // above and this write win: zero rows updated reads as the 409
+  // A filed year is refused by the write itself: the upsert merges only into a
+  // draft row, so a filed row (filed before this request, or during it) updates
+  // nothing and the empty answer is the 409.
   const [row] = await db('tax_years')
     .insert({ tax_year: y, ...patch })
     .onConflict('tax_year')

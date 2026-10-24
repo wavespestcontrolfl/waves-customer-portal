@@ -6,7 +6,8 @@
  * Locked-down behaviors:
  *  1. A PUT takes only the editable fields, each a strict number (no "50junk",
  *     no blank, no negative) or a known filing status; an unknown field is a 400.
- *  2. A filed year cannot be edited: 409, before and at the write.
+ *  2. A filed year cannot be edited: the upsert merges only into a draft row,
+ *     so a filed row updates nothing and that is the 409.
  *  3. A NULL carry-in takes the prior year's FILED snapshot (or 0); any number
  *     the owner entered, 0 included, wins; a PUT of null clears it back to the
  *     default; a prior year that is only a draft gives nothing.
@@ -122,13 +123,19 @@ describe('upsertYear validation', () => {
     await expect(ty.upsertYear(2019, { other_income: 1 })).rejects.toEqual(httpErr(400));
     await expect(ty.upsertYear('abc', { other_income: 1 })).rejects.toEqual(httpErr(400));
   });
-  test('a filed year is a 409 before the write, and at the write when it was filed meanwhile', async () => {
-    state.existing = { status: 'filed' };
-    await expect(ty.upsertYear(year, { other_income: 1 })).rejects.toEqual(httpErr(409));
-    expect(state.upserted).toEqual([]);
-    state.existing = { status: 'draft' };
-    state.upsertReturns = []; // the status guard in the upsert matched nothing
-    await expect(ty.upsertYear(year, { other_income: 1 })).rejects.toEqual(httpErr(409));
+  test('a filed year is a 409 from the write itself: the merge only matches a draft row', async () => {
+    state.upsertReturns = []; // the row is filed, so the status guard in the upsert matched nothing
+    await expect(ty.upsertYear(year, { other_income: 1 })).rejects.toMatchObject({ status: 409, message: `${year} is marked filed: unmark it before changing it` });
+    expect(state.wheres).toContainEqual(['tax_years.status', 'draft']);
+    expect(state.firstCalls).toBe(0); // no separate read first: the guarded write is the check
+  });
+  test('notes: null and blank clear them, text is trimmed, anything else is a 400', async () => {
+    await ty.upsertYear(year, { notes: null });
+    await ty.upsertYear(year, { notes: '   ' });
+    await ty.upsertYear(year, { notes: '  call the CPA  ' });
+    expect(state.upserted.map((p) => p.notes)).toEqual([null, null, 'call the CPA']);
+    await expect(ty.upsertYear(year, { notes: 5 })).rejects.toEqual(httpErr(400));
+    await expect(ty.upsertYear(year, { notes: ['x'] })).rejects.toEqual(httpErr(400));
   });
 });
 
