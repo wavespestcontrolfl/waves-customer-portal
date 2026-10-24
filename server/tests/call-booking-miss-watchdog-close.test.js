@@ -347,6 +347,29 @@ describe('close pass', () => {
     expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['d1'], payload: { done_by: 'call-booking-miss', resolution: 'Visit done Wed Oct 28' } }]);
   });
 
+  test('the close pass and the ring path share one alert budget per run (pre-push P1)', async () => {
+    const { MAX_ALERTS_PER_RUN } = require('../services/call-booking-miss-watchdog');
+    const n = MAX_ALERTS_PER_RUN + 1;
+    mockState.calls = [];
+    mockState.open = [];
+    mockState.booked = [];
+    for (let i = 0; i < n; i += 1) {
+      mockState.calls.push(call({ id: `c${i}`, customer_id: `cust-${i}` }));
+      mockState.open.push({ ...open(`n${i}`, '10'), call_log_id: `c${i}` });
+      mockState.booked.push(visit({ id: `v${i}`, customer_id: `cust-${i}`, sched_date: '2026-10-28' }));
+    }
+    // A fresh miss inside the first-ring window: it would ring if any budget were left.
+    mockState.calls.push(call({ id: 'c-new', customer_id: 'cust-new', created_at: '2026-10-25T14:00:00Z' }));
+    const result = await tick();
+    expect(result).toMatchObject({ raised: MAX_ALERTS_PER_RUN, alerted: 0, closed: MAX_ALERTS_PER_RUN });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(MAX_ALERTS_PER_RUN);
+    // The plan over budget keeps its old bell open for the next tick.
+    const closedIds = mockState.updates.flatMap((u) => u.ids);
+    expect(closedIds).toHaveLength(MAX_ALERTS_PER_RUN);
+    expect(closedIds).not.toContain(`n${n - 1}`);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/close pass: alert cap hit \(8\); 1 replacement\(s\) wait for the next tick/));
+  });
+
   test('a raise that fails closes nothing: the alert is never lost', async () => {
     mockState.open = [open('n1', '10')];
     mockState.booked = wrongWeek();

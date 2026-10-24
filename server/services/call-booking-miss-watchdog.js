@@ -610,7 +610,7 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
 // Returns { closed, raised } (rows); with `dryRun` it makes every read, writes
 // nothing, and returns { closed: 0, rewritten: 0, raised: 0, plans } (one plan
 // per call examined).
-async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false } = {}) {
+async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false, maxRaises = MAX_ALERTS_PER_RUN } = {}) {
   const NotificationService = require('./notification-service');
   const none = dryRun ? { closed: 0, rewritten: 0, raised: 0, plans: [] } : { closed: 0, raised: 0 };
   const openRows = await db('notifications')
@@ -681,10 +681,15 @@ async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false 
 
   let closed = 0;
   let raised = 0;
+  let waiting = 0;
   const closeRows = ({ ids, resolution }, callId) => NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }).whereIn('id', ids), BELL_DEDUPE_PREFIX)
     .update(NotificationService._private.doneColumns({ by: BELL_DEDUPE_PREFIX, resolution, keepExisting: true, conn: db }))
     .catch((err) => { logger.warn(`[call-booking-miss] failed to close bell(s) for call ${callId}: ${err.message}`); return 0; });
   for (const { call, slot, plan } of plans) {
+    // One alert budget per run (MAX_ALERTS_PER_RUN), shared with the ring path: past
+    // it, a plan that needs a new bell waits for the next tick with its old bells open;
+    // plain closes still run.
+    if ((plan.raise || plan.rebook) && raised >= maxRaises) { waiting += 1; continue; }
     if (plan.raise) {
       const { visit_id: visitId, date, time } = plan.raise;
       const outcome = await ringMiss(
@@ -706,6 +711,7 @@ async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false 
     }
     for (const close of plan.closes) closed += await closeRows(close, call.id);
   }
+  if (waiting) logger.warn(`[call-booking-miss] close pass: alert cap hit (${maxRaises}); ${waiting} replacement(s) wait for the next tick`);
   if (closed || raised) logger.info(`[call-booking-miss] close pass: closed=${closed} raised=${raised}`);
   return { closed, raised };
 }
@@ -821,7 +827,7 @@ async function runInner({ now = new Date() } = {}) {
   let alerted = 0;
   let repeated = 0;
   for (const m of misses) {
-    if (alerted + repeated >= MAX_ALERTS_PER_RUN) {
+    if (alerted + repeated + (closed.raised || 0) >= MAX_ALERTS_PER_RUN) {
       logger.warn(`[call-booking-miss] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
       break;
     }
