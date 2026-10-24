@@ -14,7 +14,7 @@
  */
 
 const db = require('../models/db');
-const { lookupCountyParcelByPoint, subdivisionBaseName } = require('./property-lookup/county-parcel-gis');
+const { lookupCountyParcelByPoint, lookupSarasotaPlatNames, subdivisionBaseName } = require('./property-lookup/county-parcel-gis');
 const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const { TECH_DEAD_ASSIGNMENT_STATUSES } = require('./technician-visit-scope');
 
@@ -72,7 +72,7 @@ function isKeypadCode(value) {
 // an alias so a later phase maps without another lookup. Returns the alias
 // list and updated_at as they were before this call (null for a new row) so
 // a backfill can undo the alias append exactly.
-async function upsertNeighborhood(conn, { county, subdivision }) {
+async function upsertNeighborhood(conn, { county, subdivision, source = 'county' }) {
   const name = neighborhoodNameFromSubdivision(subdivision);
   if (!name) return null;
   const key = matchKey(county, name);
@@ -88,14 +88,14 @@ async function upsertNeighborhood(conn, { county, subdivision }) {
     .first('subdivision_names', conn.raw('updated_at::text AS updated_at'));
   const [row] = await conn.raw(
     `INSERT INTO neighborhoods (name, county, match_key, subdivision_names, source)
-     VALUES (?, ?, ?, jsonb_build_array(?::text), 'county')
+     VALUES (?, ?, ?, jsonb_build_array(?::text), ?)
      ON CONFLICT (match_key) DO UPDATE SET
        subdivision_names = CASE
          WHEN neighborhoods.subdivision_names @> jsonb_build_array(?::text) THEN neighborhoods.subdivision_names
          ELSE neighborhoods.subdivision_names || jsonb_build_array(?::text) END,
        updated_at = now()
      RETURNING id, name, (xmax = 0) AS inserted, updated_at::text AS written_at`,
-    [name, county || null, key, raw, raw, raw],
+    [name, county || null, key, raw, source, raw, raw],
   ).then((r) => r.rows);
   const existing = row.inserted || !prior ? null : prior;
   // addedAlias: the one name this call appended (null when it was already
@@ -159,6 +159,9 @@ function sameStreet(a, b) {
 }
 
 const leadingNumber = (s) => (String(s || '').match(/^\s*(\d+)/) || [])[1] || null;
+// Same house number on the same street, whatever the spelling: a call's stated
+// address against a property's.
+const sameHouse = (a, b) => Boolean(leadingNumber(a)) && leadingNumber(a) === leadingNumber(b) && sameStreet(streetLine(a), streetLine(b));
 
 // A stored pin can be a ZIP centroid or a wrong-city geocode that still falls
 // inside the service area (ops/agents/reset-out-of-area-coords.js leaves
@@ -181,26 +184,57 @@ function parcelMatchesProperty(parcel, property) {
   return /^\d{5}$/.test(zip) && zip === situsZip;
 }
 
+// Sarasota's parcel roll gives a plat's NUMBER ("3491"; "0000" = none), and
+// the plat layer holds its name. Behind GATE_NEIGHBORHOOD_NAMING the caller
+// swaps that name in: returns the parcel with `platName` (a raw plat name,
+// which then goes through the same community collapse as any county name) when
+// the number names exactly one community, else the parcel unchanged. THROWS
+// when the plat layer cannot answer, so no caller stamps "checked, no name"
+// on an outage. `subdivision` itself is untouched: the estimator's median
+// query keys on the number.
+const PLAT_NUMBER = /^(?!0+$)\d{1,6}$/;
+async function withPlatName(parcel, platLookup = lookupSarasotaPlatNames) {
+  const number = String(parcel.subdivision || '').trim();
+  if (parcel.county !== 'Sarasota' || !PLAT_NUMBER.test(number)) return parcel;
+  const named = (await platLookup(number)).filter((n) => neighborhoodNameFromSubdivision(n));
+  const communities = new Set(named.map(neighborhoodNameFromSubdivision));
+  return communities.size === 1 ? { ...parcel, platName: named[0] } : parcel;
+}
+
 // Link one property to its neighborhood from the county roll. An office pick
 // (neighborhood_source='office') is never overwritten, and nothing is written
-// unless the parcel under the pin is this property's own parcel. With
-// onlyUnchecked (the backfill), the property is claimed under a row lock and
-// written only if it is still unlinked and unchecked, so two runs can never
-// both write — and journal — the same row. Returns { status, neighborhood?,
+// unless the parcel under the pin is this property's own parcel. A 'caller'
+// link (the community the customer said, unconfirmed) is open to the county:
+// the county always wins over it, and a county that cannot name the home
+// leaves it standing. With onlyUnchecked (the backfill and the naming pass),
+// the property is claimed under a row lock and written only if it is still
+// unlinked (or caller-linked) and unchecked, so two runs can never both write
+// — and journal — the same row. With recheck (the naming pass's second look
+// at a CHECKED home the county could only give a plat number), the claim is
+// the same except the home must be checked and still carry the
+// county_subdivision it was read with. Returns { status, neighborhood?,
 // subdivision?, wrote } for the caller's report.
-async function resolvePropertyNeighborhood(property, { conn = db, lookup = lookupCountyParcelByPoint, onlyUnchecked = false } = {}) {
+async function resolvePropertyNeighborhood(property, { conn = db, lookup = lookupCountyParcelByPoint, onlyUnchecked = false, recheck = false } = {}) {
   if (property.neighborhood_source === 'office') return { status: 'office_pick', wrote: false };
   const lat = Number(property.latitude);
   const lng = Number(property.longitude);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { status: 'no_coords', wrote: false };
+  // The sum is finite only when both are (NaN and Infinity never survive it).
+  if (!Number.isFinite(lat + lng)) return { status: 'no_coords', wrote: false };
 
   const parcel = await lookup(lat, lng);
   if (!parcel) return { status: 'no_parcel', wrote: false };
   if (!parcelMatchesProperty(parcel, property)) return { status: 'situs_mismatch', wrote: false };
-  const unchecked = (q) => (onlyUnchecked ? q.whereNull('neighborhood_id').whereNull('neighborhood_checked_at') : q);
+  const claiming = onlyUnchecked || recheck;
+  const claimable = (q) => {
+    if (!claiming) return q;
+    const open = q.where((w) => w.whereNull('neighborhood_id').orWhere('neighborhood_source', 'caller'));
+    return recheck
+      ? open.whereNotNull('neighborhood_checked_at').where('county_subdivision', property.county_subdivision)
+      : open.whereNull('neighborhood_checked_at');
+  };
   const notOffice = (q) => q.where((w) => w.whereNull('neighborhood_source').orWhereNot('neighborhood_source', 'office'));
-  if (onlyUnchecked) {
-    const claimed = await unchecked(notOffice(conn('customer_properties').where({ id: property.id })))
+  if (claiming) {
+    const claimed = await claimable(notOffice(conn('customer_properties').where({ id: property.id })))
       .forUpdate().first('address_line1', 'city', 'zip', 'latitude', 'longitude');
     if (!claimed) return { status: 'already_checked', wrote: false };
     // The lookup ran on an earlier snapshot; an address move since then
@@ -210,12 +244,17 @@ async function resolvePropertyNeighborhood(property, { conn = db, lookup = looku
     if (!same) return { status: 'stale_lookup', wrote: false };
   }
   const subdivision = parcel.subdivision || null;
-  const neighborhood = subdivision ? await upsertNeighborhood(conn, { county: parcel.county, subdivision }) : null;
+  // upsertNeighborhood answers null for a roll value that is no name.
+  const neighborhood = await upsertNeighborhood(conn, { county: parcel.county, subdivision: parcel.platName || subdivision });
 
-  const wrote = await unchecked(notOffice(conn('customer_properties').where({ id: property.id })))
+  // No county name: clear the link, except a caller's, which stays.
+  const keepCaller = (col) => conn.raw(`CASE WHEN neighborhood_source = 'caller' THEN ${col} END`);
+  const link = neighborhood
+    ? { neighborhood_id: neighborhood.id, neighborhood_source: 'county' }
+    : { neighborhood_id: keepCaller('neighborhood_id'), neighborhood_source: keepCaller('neighborhood_source') };
+  const wrote = await claimable(notOffice(conn('customer_properties').where({ id: property.id })))
     .update({
-      neighborhood_id: neighborhood ? neighborhood.id : null,
-      neighborhood_source: neighborhood ? 'county' : null,
+      ...link,
       county_subdivision: subdivision,
       neighborhood_checked_at: conn.fn.now(),
     });
@@ -377,7 +416,7 @@ async function unfiledGateCodeCustomers(conn) {
 // File one customer's current code. Lock order matches every preference
 // writer (customer preference advisory lock → customer → properties →
 // preferences), then the neighborhood row inside fileNeighborhoodCode.
-async function fileOneSavedCode(customerId, lookup) {
+async function fileOneSavedCode(customerId, lookup, platLookup) {
   // County lookup (network) runs outside any transaction, only for a single
   // active property that was never checked.
   const props = await db('customer_properties').where({ customer_id: customerId, active: true })
@@ -389,9 +428,15 @@ async function fileOneSavedCode(customerId, lookup) {
   // 0 is the placeholder customer-geocode-review.js also treats as no pin).
   const hasPin = [snapshot.latitude, snapshot.longitude].every((v) => v !== null && v !== undefined && String(v).trim() !== ''
     && Number.isFinite(Number(v)) && Number(v) !== 0);
-  const parcel = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office' && hasPin
+  let parcel = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office' && hasPin
     ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude), { county: countyHint(snapshot.zip) })
     : null;
+  // Naming gate: a Sarasota plat number gets its plat name (network, so before
+  // the transaction). The plat layer failing leaves the home unchecked, to be
+  // tried again next pass — never stamped "checked, no name".
+  if (parcel && require('../config/feature-gates').neighborhoodNamingLive()) {
+    parcel = await withPlatName(parcel, platLookup).catch(() => null);
+  }
 
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
@@ -399,7 +444,7 @@ async function fileOneSavedCode(customerId, lookup) {
       .first('id');
     if (!customer) return { status: 'customer_gone' };
     const active = await trx('customer_properties').where({ customer_id: customerId, active: true }).forUpdate()
-      .select('id', 'neighborhood_id');
+      .select('id', 'neighborhood_id', 'neighborhood_source');
     if (active.length !== 1 || active[0].id !== snapshot.id) return { status: 'property_changed' };
     const prefs = await trx('property_preferences').where({ customer_id: customerId }).forUpdate()
       .first('neighborhood_gate_code', 'access_notes');
@@ -409,7 +454,7 @@ async function fileOneSavedCode(customerId, lookup) {
     // (and flags an existing copy) — only while the note names THIS code
     // ("Gate code 2424 is unconfirmed: confirm on site."); a replacement code
     // saved later, with the old note left behind, is not the one it doubted.
-    const markedUnconfirmed = String(prefs?.access_notes || '').includes(`Gate code ${value} ${UNCONFIRMED_MARK}`);
+    const markedUnconfirmed = String(prefs?.access_notes).includes(`Gate code ${value} ${UNCONFIRMED_MARK}`);
     let neighborhoodId = active[0].neighborhood_id;
     if (!neighborhoodId && parcel) {
       const linked = await resolvePropertyNeighborhood(snapshot, { conn: trx, lookup: async () => parcel, onlyUnchecked: true });
@@ -429,7 +474,10 @@ async function fileOneSavedCode(customerId, lookup) {
     // since retired, because fileNeighborhoodCode skips retired rows.
     if (carried?.same_value && carried.neighborhood_id === neighborhoodId) return { status: 'already_filed', neighborhoodId };
     const carriedFromElsewhere = Boolean(carried?.same_value && carried.neighborhood_id && carried.neighborhood_id !== neighborhoodId);
-    const unconfirmed = markedUnconfirmed || carriedFromElsewhere;
+    // A home linked from the community the customer SAID (not the county) files
+    // every code needs_confirm, whatever the code looks like.
+    const callerLinked = active[0].neighborhood_source === 'caller';
+    const unconfirmed = markedUnconfirmed || carriedFromElsewhere || callerLinked;
     const filed = await fileNeighborhoodCode(trx, { neighborhoodId, value, source: SOURCE, sourceCustomerId: customerId, unconfirmed });
     if (FINAL_OUTCOMES.has(filed.status)) {
       // Ledger the value filed, in the same transaction as the filing.
@@ -493,7 +541,7 @@ async function settleConflicts(touched, logger) {
   return { failed, conflicts };
 }
 
-async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) {
+async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint, platLookup = lookupSarasotaPlatNames } = {}) {
   const { neighborhoodAccessLive } = require('../config/feature-gates');
   if (!neighborhoodAccessLive()) return { skipped: 'gate_off' };
   const logger = require('./logger');
@@ -505,15 +553,26 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
   await db.raw(`DELETE FROM neighborhood_access_filings f WHERE NOT EXISTS (
     SELECT 1 FROM property_preferences pp
     WHERE pp.customer_id = f.customer_id AND btrim(coalesce(pp.neighborhood_gate_code, '')) <> '')`);
+  let failed = 0;
+  // Naming pass first, so a home it links is filed in this same sweep. A crash
+  // here must not stop the filing below; it counts as a failed step.
+  let naming = null;
+  if (require('../config/feature-gates').neighborhoodNamingLive()) {
+    try {
+      naming = await require('./neighborhood-naming').runNamingPass({ lookup, platLookup });
+    } catch (err) {
+      failed += 1;
+      logger.warn(`[neighborhood-access] naming pass failed (${err.code || err.name || 'error'})`);
+    }
+  }
   const customerIds = await unfiledGateCodeCustomers(db);
   const tally = {};
-  let failed = 0;
   // Neighborhoods where this pass filed a new code or flagged an existing one
   // (a duplicate that demoted an active copy can create a conflict too).
   const touched = new Set();
   for (const customerId of customerIds) {
     try {
-      const r = await fileOneSavedCode(customerId, lookup);
+      const r = await fileOneSavedCode(customerId, lookup, platLookup);
       tally[r.status] = (tally[r.status] || 0) + 1;
       if (r.status === 'filed_conflict' || (r.status === 'duplicate' && r.flagged?.length)) touched.add(r.neighborhoodId);
     } catch (err) {
@@ -523,7 +582,7 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
     }
   }
   const bells = await settleConflicts(touched, logger);
-  return { customers: customerIds.length, tally, failed, bellsFailed: bells.failed, conflicts: bells.conflicts };
+  return { customers: customerIds.length, tally, failed, bellsFailed: bells.failed, conflicts: bells.conflicts, ...(naming ? { naming } : {}) };
 }
 
 // Visit id → the neighborhood its stop is in: the visit's own property, or
@@ -627,6 +686,8 @@ module.exports = {
   upsertNeighborhood,
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
+  withPlatName,
+  sameHouse,
   fileNeighborhoodCode,
   countyHint,
   VALUE_HASH_SQL,

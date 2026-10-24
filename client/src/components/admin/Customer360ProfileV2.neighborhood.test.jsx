@@ -92,6 +92,12 @@ describe('CustomerNeighborhoodBlock', () => {
     expect(screen.getByText('Home · 200 Sample Ct, Lakewood Ranch')).toBeInTheDocument();
   });
 
+  it('a link from the customer\'s own words reads "From the customer, confirm"', async () => {
+    stubFetch(() => response({ properties: [linked({ neighborhoodSource: 'caller' })] }));
+    render(<CustomerNeighborhoodBlock customerId="customer-a" />);
+    expect(await screen.findByText('From the customer, confirm')).toBeInTheDocument();
+  });
+
   it('two units in one building read (and their Change buttons name) different rows', async () => {
     stubFetch(() => response({ properties: [
       unlinked({ id: 'p1', label: 'Unit A', addressLine2: 'Apt 101' }),

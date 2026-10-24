@@ -7421,7 +7421,7 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets,
 // nothing at all when the directory is off (404) or the viewer is not an
 // admin (403).
 const NEIGHBORHOOD_COUNTIES = ["Manatee", "Sarasota", "Charlotte"];
-const NEIGHBORHOOD_SOURCE_LABEL = { office: "Set by office", county: "County records" };
+const NEIGHBORHOOD_SOURCE_LABEL = { office: "Set by office", county: "County records", caller: "From the customer, confirm" };
 const NEIGHBORHOOD_SEARCH_DEBOUNCE_MS = 250;
 
 function NeighborhoodPicker({ property, onSaved, onCancel }) {
