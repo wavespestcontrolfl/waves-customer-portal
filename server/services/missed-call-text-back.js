@@ -77,8 +77,8 @@
  * asks an unknown caller on STIR attestation B to press 1, and stamps
  * metadata.preconnect_screen 'failed' when no key came and the call fell to
  * the voicemail recorder. With the gate on, such a call is skipped
- * (skipped:screen_failed). In the 4 weeks to 2026-10-24, 18 of this lane's 27
- * texts went to failed-screen callers (the Oct 14-16 robocall bursts) and, in
+ * (skipped:screen_failed). In the 4 weeks to 2026-10-24, 17 of this lane's 27
+ * texts went to failed-screen callers (16 in the Oct 14-16 robocall bursts) and, in
  * 90 days of failed-screen calls, no text-back case was a real prospect.
  * Unlike the robodialer pattern rules below, nobody can be primed into it: a
  * real person passes by pressing 1. Only the explicit 'failed' stamp counts;
