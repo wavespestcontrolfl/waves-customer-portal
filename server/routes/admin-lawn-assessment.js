@@ -1191,9 +1191,23 @@ router.post('/assess', async (req, res, next) => {
       }
     }
 
+    // The read-only Last visit row on THIS read's score scale (GATE_LAWN_SCORE_SCALE_V2):
+    // a retake can change the scale, so the screen takes the row from this response,
+    // never from its earlier lookup. A failed read leaves the key out, never fails Analyze.
+    let lastVisit;
+    if (visitAssessmentEnabled && scheduledService) {
+      try {
+        lastVisit = await require('../services/lawn-last-visit-scores')
+          .lastVisitScores(scheduledService, db, { scoreScale: visitAnalysis?.scoreScale === 2 ? 2 : 1 });
+      } catch (err) {
+        logger.warn(`[lawn-assessment] last visit scores failed after analyze for ${serviceId}: ${err.message}`);
+      }
+    }
+
     res.json({
       success: true,
       assessment: { ...assessment, overall_score: overallScore, best_photo_id: bestPhotoId },
+      ...(lastVisit === undefined ? {} : { lastVisit }),
       rawComposite: mergedComposite,
       detectedGrassType: mergedComposite.grass_type || null,
       displayScores,

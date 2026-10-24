@@ -455,6 +455,9 @@ function LawnAssessmentCompletionBlock({
         return;
       }
       const scores = response.adjustedScores || response.displayScores || {};
+      // The Last visit row on this read's score scale: a retake can change the scale
+      // (GATE_LAWN_SCORE_SCALE_V2), so the earlier lookup's row is replaced.
+      if (Object.prototype.hasOwnProperty.call(response, "lastVisit")) setLastVisit(response.lastVisit ?? null);
       setResult({ ...response, aiScores: resolveAiScores(response.assessment, response.visitAssessment) });
       setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
       setTechScores({ ...scores });

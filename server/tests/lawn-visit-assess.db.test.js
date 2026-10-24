@@ -118,9 +118,13 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
       json: complete({ scores: { turf_density: rating(82), weed_control: rating(78), color_health: rating(85), condition: rating(90) } }),
     });
     try {
-      const { body } = await request({ customerId: await customer(), photos });
+      const scale2Customer = await customer();
+      const [visit] = await mockKnex('scheduled_services').insert({ customer_id: scale2Customer, scheduled_date: '2026-10-20', service_type: 'lawn' }).returning('*');
+      const { body } = await request({ customerId: scale2Customer, photos, serviceId: visit.id });
       const stored = await mockKnex('lawn_assessments').where({ id: body.assessment.id }).first();
       expect(stored).toMatchObject({ score_scale: 2, turf_density: 82, weed_suppression: 78, color_health: 85, stress_damage: 90, confirmed_by_tech: false });
+      // The screen's Last visit row on this read's scale comes back with the read (none here).
+      expect(body).toHaveProperty('lastVisit', null);
       expect((await runs.loadRun(body.assessment.id, mockKnex)).prompt_version).toBe('lawn-visit-v1-scale2');
       // Both providers miss: the technician scores this visit by hand, on scale 2 too.
       dispatch.mockResolvedValue({ ok: false, reason: 'gemini_timeout', failures: [] });
