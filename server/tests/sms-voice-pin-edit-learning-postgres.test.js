@@ -13,7 +13,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const logger = require('../services/logger');
 const drafter = require('../services/sms-shadow-drafter');
-const { getApprovedVoiceProfile } = require('../services/voice-profile-distiller');
+const { getApprovedVoiceProfile, reviewVoiceProfile } = require('../services/voice-profile-distiller');
 const { _test: { mineSmsPairs } } = require('../services/sms-voice-corpus-miner');
 
 jest.setTimeout(30000);
@@ -70,12 +70,21 @@ suite('voice profile pin and edit learning (PostgreSQL)', () => {
   describe('GATE_SMS_VOICE_PROFILE_PIN', () => {
     async function seedProfiles() {
       await mockDb('voice_profiles').del();
-      await mockDb('voice_profiles').insert([
+      const rows = await mockDb('voice_profiles').insert([
         { version: 1, profile_text: 'profile one', status: 'superseded' },
         { version: 2, profile_text: 'profile two', status: 'approved' },
         { version: 3, profile_text: 'profile three', status: 'pending' },
         { version: 4, profile_text: 'profile four', status: 'rejected' },
-      ]);
+        // a pending exception the distiller replaced: superseded, but never approved
+        { version: 5, profile_text: 'profile five', status: 'superseded', reviewed_by: 'auto:distiller' },
+      ]).returning(['id', 'version']);
+      const idOf = Object.fromEntries(rows.map((r) => [r.version, r.id]));
+      // reviewVoiceProfile writes this row in the same transaction as every approval
+      await mockDb('activity_log').insert([1, 2].map((v) => ({
+        action: 'voice_profile_reviewed', description: `Voice profile v${v} approved`,
+        metadata: JSON.stringify({ source: 'auto_distiller', profile_id: idOf[v], action: 'approve' }),
+      })));
+      return idOf;
     }
 
     test('unset: the newest approved profile, exactly as before', async () => {
@@ -111,7 +120,7 @@ suite('voice profile pin and edit learning (PostgreSQL)', () => {
       expect((await drafter.resolveEffectiveVoiceProfile({ dbi: mockDb })).version).toBe(3);
     });
 
-    test.each([[99, 'does not exist'], [3, 'is pending'], [4, 'is rejected or revoked']])('pin v%i (%s) falls back to the newest approved profile and logs once', async (pin) => {
+    test.each([[99, 'does not exist'], [3, 'is pending'], [4, 'is rejected or revoked'], [5, 'was superseded without ever being approved']])('pin v%i (%s) falls back to the newest approved profile and logs once', async (pin) => {
       await seedProfiles();
       process.env.GATE_SMS_VOICE_PROFILE_PIN = String(pin);
       expect((await drafter.resolveEffectiveVoiceProfile({ dbi: mockDb })).version).toBe(2);
@@ -119,6 +128,21 @@ suite('voice profile pin and edit learning (PostgreSQL)', () => {
       const pinWarnings = logger.warn.mock.calls.filter(([m]) => String(m).includes(`pin v${pin} `));
       expect(pinWarnings).toHaveLength(1);
       expect(pinWarnings[0][0]).not.toMatch(/profile (one|two|three|four)/);
+    });
+
+    test('revoking a pinned superseded profile ends the pin: the drafter falls back to the newest approved profile', async () => {
+      const idOf = await seedProfiles();
+      const relay = require('../services/voice-agent/relay-conversation');
+      const invalidate = jest.spyOn(relay, 'invalidateVoiceProfileCache').mockImplementation(() => {});
+      process.env.GATE_SMS_VOICE_PROFILE_PIN = '1';
+      expect((await drafter.resolveEffectiveVoiceProfile({ dbi: mockDb })).version).toBe(1);
+      const result = await reviewVoiceProfile({ id: idOf[1], action: 'revoke', reviewedBy: 'Test', dbi: mockDb });
+      expect(result).toMatchObject({ ok: true, version: 1, status: 'rejected' });
+      expect((await drafter.resolveEffectiveVoiceProfile({ dbi: mockDb })).version).toBe(2);
+      // the newest approved profile is untouched, and a superseded exception that was never approved cannot be "revoked"
+      expect((await getApprovedVoiceProfile({ dbi: mockDb })).version).toBe(2);
+      expect(await reviewVoiceProfile({ id: idOf[5], action: 'revoke', reviewedBy: 'Test', dbi: mockDb })).toMatchObject({ ok: false, status: 409 });
+      invalidate.mockRestore();
     });
 
     test('a value that is not a version number is no pin: newest approved, one warning', async () => {
