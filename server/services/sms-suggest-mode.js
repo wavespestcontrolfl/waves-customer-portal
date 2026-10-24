@@ -248,6 +248,9 @@ const PICKER_OFFER_ID_FIELD = Object.freeze({
   [OFFER_SOURCES.ESTIMATE_OFFER_SOURCE]: 'estimateId',
   [OFFER_SOURCES.BOOK_OFFER_SOURCE]: 'serviceKey',
   [OFFER_SOURCES.WEBSITE_OFFER_SOURCE]: 'serviceKey',
+  // GATE_SMS_PROMPT_B1: the free re-service page's openings; serviceKey names the reported lane(s) the send-time recheck asks it about.
+  // A suggestion card only: a person books the pick, and nothing here books or sends.
+  [OFFER_SOURCES.RESERVICE_OFFER_SOURCE]: 'serviceKey',
 });
 
 /**

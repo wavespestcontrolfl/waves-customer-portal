@@ -95,6 +95,27 @@ describe('resolveDeliveryMode for scheduling drafts', () => {
     await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: website })).resolves.toBe('shadow');
   });
 
+  // Codex r1 P2 on #6615 (GATE_SMS_PROMPT_B1): a covered pest report that offers the free re-service page's openings carries a
+  // 'reservice' snapshot; it must reach staff as a suggestion card (a person books the pick), never stay in silent shadow.
+  test('the re-service snapshot (serviceKey = the reported lane): a suggestion with the gate on, shadow with it off; no serviceKey is no picker offer', async () => {
+    const { RESERVICE_OFFER_SOURCE } = require('../services/sms-offer-sources');
+    const { hasSchedulingIntent } = require('../services/sms-intent');
+    const reservice = picker({ source: RESERVICE_OFFER_SOURCE, serviceKey: 'pest' });
+    const inbound = 'The ants are back. Can someone come back out?';
+    expect(hasSchedulingIntent(inbound)).toBe(true); // the text that carries schedulingIntent=true
+    expect(suggest.isPickerOfferSnapshot(reservice)).toBe(true);
+    expect(suggest.isPickerOfferSnapshot(picker({ source: RESERVICE_OFFER_SOURCE }))).toBe(false);
+    process.env[GATE] = 'true';
+    mockModeRow = { mode: 'auto_send' };
+    // a suggestion even on the auto-send rung: the scheduling path never rides auto-send
+    await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: reservice })).resolves.toBe('suggest');
+    mockModeRow = { mode: 'shadow' };
+    await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: reservice })).resolves.toBe('suggest');
+    await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: picker({ source: RESERVICE_OFFER_SOURCE }) })).resolves.toBe('shadow');
+    delete process.env[GATE];
+    await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: reservice })).resolves.toBe('shadow');
+  });
+
   test('gate off, or no picker snapshot: shadow, as before', async () => {
     await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: snapshot })).resolves.toBe('shadow');
     process.env[GATE] = 'true';
