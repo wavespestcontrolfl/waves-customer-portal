@@ -50,28 +50,58 @@ afterEach(() => {
 });
 
 describe('ProjectReportViewPage theme gate', () => {
-  it('WDO inspection reports render as the paper document (no glass scene)', async () => {
-    const { findAllByText, queryByRole } = renderProjectReport(payload('wdo_inspection'));
+  it('WDO inspection reports render as the paper document (no glass scene), even with the shared template on', async () => {
+    const { container, findAllByText, queryByRole } = renderProjectReport(payload('wdo_inspection', { reportTemplate: true }));
     await findAllByText(/wdo inspection/i);
+    expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
+    expect(container.querySelector('.project-report-page')).not.toHaveClass('customer-report-template');
+    expect(container.querySelector('.report-header')).toBeNull();
     expect(queryByRole('region', { name: 'Share feedback' })).not.toBeInTheDocument();
   });
 
-  it('the pre-construction certificate stays the paper document', async () => {
-    const { findAllByText, queryByRole } = renderProjectReport(payload('pre_treatment_termite_certificate'));
+  it('the pre-construction certificate stays the paper document, even with the shared template on', async () => {
+    const { container, findAllByText, queryByRole } = renderProjectReport(payload('pre_treatment_termite_certificate', { reportTemplate: true }));
     await findAllByText(/Certificate of Compliance/i);
+    expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
+    expect(container.querySelector('.project-report-page')).not.toHaveClass('customer-report-template');
+    expect(container.querySelector('.report-header')).toBeNull();
     expect(queryByRole('region', { name: 'Share feedback' })).not.toBeInTheDocument();
   });
 
-  it('a regular termite treatment report keeps the glass theme', async () => {
-    const { findByRole } = renderProjectReport(payload('termite_treatment'));
+  it('a regular termite treatment report keeps the glass theme (shared template off: its own header)', async () => {
+    const { container, findByRole } = renderProjectReport(payload('termite_treatment'));
     await waitFor(() => {
       expect(document.documentElement).toHaveAttribute('data-glass-theme');
     });
+    // The glass attribute is set before the fetch resolves: wait for the loaded report before reading its classes.
     expect(await findByRole('heading', { level: 3, name: "How did today's visit go?" })).toBeInTheDocument();
+    expect(container.querySelector('.project-report-page')).not.toBeNull();
+    expect(container.querySelector('.project-report-page')).not.toHaveClass('customer-report-template');
+    expect(container.querySelector('.report-header')).toBeNull();
     expect(await findByRole('region', { name: 'Share feedback' }))
       .toHaveAttribute('data-section', 'review-request-project');
+  });
+
+  it('shared template on: a regular report takes the template class and the shared header with the project title and recorded address', async () => {
+    const { container, findByRole } = renderProjectReport(payload('termite_treatment', {
+      reportTemplate: true,
+      title: 'Perimeter treatment',
+      customerEmail: 'TEST@EXAMPLE.COM',
+      customerPhone: '9415551212',
+      customerAddress: '123 Test St, Testville, FL 34000',
+    }));
+    await findByRole('heading', { level: 1, name: "Hi Test, here's your termite treatment report!" });
+    expect(container.querySelector('.project-report-page')).toHaveClass('customer-report-template');
+    expect(container.querySelector('.report-template-stack')).not.toBeNull();
+    const header = container.querySelector('.report-header');
+    expect(header).not.toBeNull();
+    expect(header).toHaveTextContent('Project report · Perimeter treatment');
+    expect(header).toHaveTextContent('Test Customer');
+    expect(header).toHaveTextContent('test@example.com');
+    expect(header).toHaveTextContent('(941) 555-1212');
+    expect(header).toHaveTextContent('123 Test St, Testville, FL 34000');
   });
 });
 

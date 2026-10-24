@@ -257,7 +257,7 @@ export function TreeShrubSnapshotHero({ snapshot = {}, techParagraph }) {
     : null;
   return (
     <Card style={{ background: TAN }}>
-      <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
+      <div className="report-template-column" style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ flex: 'none' }}>
           <ScoreRing value={overallScore} status={status} size={116} />
         </div>
@@ -486,7 +486,7 @@ export function LandscapeWaterContextCard({ water = null }) {
     <Card>
       <CardTitle sub="Landscape beds may use spray, drip, micro-spray, bubblers, or hand watering, so we read this softly.">Landscape Water Context</CardTitle>
       {(Number.isFinite(rain) || Number.isFinite(irrigation) || Number.isFinite(total)) ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
+        <div className="report-template-stack report-template-facts" style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
           {Number.isFinite(rain) ? <><span style={{ color: MUTED }}>Rain this week</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(rain)}</strong></> : null}
           {Number.isFinite(irrigation) ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
           {water.irrigationType ? <><span style={{ color: MUTED }}>Watering type</span><strong style={{ textAlign: 'right', color: TEXT }}>{water.irrigationType}</strong></> : null}
@@ -556,7 +556,7 @@ export function TreeShrubPhotoCards({ photos = [], summary = null }) {
   return (
     <Card>
       <CardTitle sub="Conditions your technician identified and photographed during today’s inspection — each one is tracked visit to visit as part of your plant health program.">Plant Health Documentation</CardTitle>
-      <div style={{ display: 'grid', gridTemplateColumns: print ? '1fr 1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+      <div className="report-template-stack report-template-photos" style={{ display: 'grid', gridTemplateColumns: print ? '1fr 1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
         {pics.map((p, i) => (
           <figure key={i} style={{ margin: 0 }}>
             {/* Eager: presigned URLs — lazy deferred fetches past expiry

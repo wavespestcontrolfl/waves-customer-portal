@@ -507,6 +507,34 @@ describe('GET /api/public/lawn-diagnostic/:token', () => {
     });
   });
 
+  describe('GATE_REPORT_SHARED_TEMPLATE', () => {
+    const previous = process.env.GATE_REPORT_SHARED_TEMPLATE;
+    afterEach(() => {
+      if (previous === undefined) delete process.env.GATE_REPORT_SHARED_TEMPLATE; else process.env.GATE_REPORT_SHARED_TEMPLATE = previous;
+    });
+    const fetchBody = async () => {
+      const { server, baseUrl } = appServer();
+      try {
+        const res = await fetch(`${baseUrl}/api/public/lawn-diagnostic/${TOKEN}`);
+        expect(res.status).toBe(200);
+        return await res.json();
+      } finally { server.close(); }
+    };
+
+    test('off: no reportTemplate key; on: reportTemplate true beside glassDefault and an unchanged report', async () => {
+      delete process.env.GATE_REPORT_SHARED_TEMPLATE;
+      mockDiagnosticRow = sentDiagnostic();
+      const off = await fetchBody();
+      expect('reportTemplate' in off).toBe(false);
+      process.env.GATE_REPORT_SHARED_TEMPLATE = 'true';
+      mockDiagnosticRow = sentDiagnostic();
+      const on = await fetchBody();
+      expect(on.reportTemplate).toBe(true);
+      expect(on.glassDefault).toBe(true);
+      expect(on.report).toEqual(off.report);
+    });
+  });
+
   describe('GATE_LAWN_DIAGNOSTIC_EVIDENCE', () => {
     const previous = process.env.GATE_LAWN_DIAGNOSTIC_EVIDENCE;
     afterEach(() => {
