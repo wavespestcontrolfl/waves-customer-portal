@@ -172,14 +172,14 @@ it('Apply rules now follows the continuation cursor until the server has no more
   expect(applies[1].body).toEqual({ after: { txn_date: '2026-03-01', id: '11111111-1111-4111-8111-111111111111' } });
 });
 
-it('Apply rules now follows a retried page (more with no cursor) from the start until the server is done', async () => {
+it('Apply rules now stops on an unjudged page (more with no cursor), says a slow rule was disabled, and the next click takes the page again from the start', async () => {
   const base = fetch;
   const applyBodies = [];
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
     if (String(url).includes('/rules/apply')) {
       applyBodies.push(JSON.parse(opts.body || '{}'));
       return applyBodies.length === 1
-        ? json({ success: true, examined: 0, suggested: 0, cleared: 0, more: true, cursor: null }) // the page's matching ran out of time: retried from the start
+        ? json({ success: true, examined: 0, suggested: 0, cleared: 0, more: true, cursor: null }) // the page's matching ran out of time
         : json({ success: true, examined: 7, suggested: 1, cleared: 0, more: false, cursor: null });
     }
     return base(url, opts);
@@ -187,9 +187,12 @@ it('Apply rules now follows a retried page (more with no cursor) from the start 
   render(<LedgerInboxTab />);
   await screen.findByTestId('ledger-row-row-1');
   fireEvent.click(screen.getByRole('button', { name: 'Apply rules now' }));
-  await waitFor(() => expect(applyBodies).toHaveLength(2));
+  await screen.findByText(/A rule that was too slow on these rows was disabled .* click Apply rules now again to take the page again\./);
+  expect(applyBodies).toHaveLength(1); // one click never loops on an unjudged page
+  fireEvent.click(screen.getByRole('button', { name: 'Apply rules now' }));
   await screen.findByText('Examined 7, suggested 1, cleared 0.');
-  expect(applyBodies[1]).toEqual({}); // no cursor: from the start
+  expect(applyBodies).toHaveLength(2);
+  expect(applyBodies[1]).toEqual({}); // no cursor kept: the page is taken again from the start
 });
 
 it('Apply rules now stops after its per-click page cap, says more rows remain, and the next click resumes from the kept cursor', async () => {
