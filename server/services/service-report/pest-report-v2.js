@@ -25,6 +25,7 @@
 const { validateCustomerCopy } = require('./premium-experience');
 const { detectServiceLine } = require('./service-line-configs');
 const { pestReportExpectationsGateOn, buildPestExpectations } = require('./pest-report-expectations');
+const { pestRainOutlookGateOn } = require('./pest-rain-outlook');
 
 // propertyDefenseStatus.overallLabel → the customer-facing protection status.
 // tone drives the client accent (good = green, watch = amber, attention = red).
@@ -390,11 +391,16 @@ function pestReportV2PdfSignature(service = {}) {
   // '-pex4' (owner 2026-10-05): Gentrol's line gained its 4-month label duration.
   // '-pex5' (owner 2026-10-12): Alpine WSG with no ant tag lost its timeframe sentence.
   const pexSuffix = pestReportExpectationsGateOn() ? '-pex5' : '';
+  // '-rain1' rides every pest-line key while the rain outlook gate is on
+  // (owner 2026-10-24): the Weather call card may then add the frozen
+  // outlook's forecast sentence after its own text, so cached pest PDFs
+  // re-render once. Same append-not-switch pattern, independent of PEST_REPORT_V2.
+  const rainSuffix = pestRainOutlookGateOn() ? '-rain1' : '';
   // '-noarea1' rides every pest-line key, gate or not: the pest PDF dropped
   // its Areas serviced section and per-product Areas / Target lines (owner
   // 2026-10-05), so PDFs cached before that re-render once.
   const areaSuffix = '-noarea1';
-  if (process.env.PEST_REPORT_V2 !== 'true') return `${tonSuffix}${pexSuffix}${areaSuffix}`;
+  if (process.env.PEST_REPORT_V2 !== 'true') return `${tonSuffix}${pexSuffix}${rainSuffix}${areaSuffix}`;
   // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a
   // cockroach PDF cached under '-pestv2b' would keep serving the perimeter
@@ -403,7 +409,7 @@ function pestReportV2PdfSignature(service = {}) {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
       : service.service_data;
-    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}${pexSuffix}${areaSuffix}`;
+    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}${pexSuffix}${rainSuffix}${areaSuffix}`;
   } catch { /* fall through to the line suffix */ }
   // 'c' = the trust-fix composition (codex P2 #3043): the customer-concern
   // card, softened no-activity copy, facts-only weather, and property-gated
@@ -412,7 +418,7 @@ function pestReportV2PdfSignature(service = {}) {
   // ('b' was the typed-activity composition, owner ruling 2026-07-14.)
   // Bump this suffix whenever the pest-line report COMPOSITION changes —
   // each pest PDF re-renders once on next view.
-  return `-pestv2c${tonSuffix}${pexSuffix}${areaSuffix}`;
+  return `-pestv2c${tonSuffix}${pexSuffix}${rainSuffix}${areaSuffix}`;
 }
 
 module.exports = {
