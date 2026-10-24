@@ -26,11 +26,17 @@
 const logger = require('../logger');
 const {
   lawnWateringSmsLive, lawnWateringRuleLive, lawnWateringForecastLive, lawnWateringTextForecastLive, lawnWateringEveryVisitLive,
+  lawnWateringShortTextLive,
 } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
 const { textForecastLine } = require('./lawn-watering-forecast');
+const { shortWateringText, shortForecastSentence } = require('./lawn-watering-short-text');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
+// GATE_LAWN_WATERING_SHORT_TEXT (owner 2026-10-23): the short steps go out
+// under their own template ("Lawn watering: {watering_lines}"). A shape the
+// short writer does not know, or a missing short row, sends the full lines.
+const SHORT_TEMPLATE_KEY = 'lawn_watering_instruction_short';
 const PURPOSE = 'lawn_watering_instruction';
 const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']);
 // GATE_LAWN_WATERING_EVERY_VISIT (owner 2026-10-22, "for all combinations, a
@@ -99,6 +105,31 @@ function wateringInstructionFresh(instruction, completedAt, nowMs) {
   return true;
 }
 
+// GATE_LAWN_WATERING_SHORT_TEXT: the short steps from the same frozen fields,
+// and the short rain sentence when the full one is due. Null = full lines.
+function shortPlan(enabled, instruction, forecastLine) {
+  const short = enabled === true ? shortWateringText(instruction) : null;
+  if (!short) return null;
+  const rain = forecastLine && (shortForecastSentence(instruction, forecastLine) || forecastLine);
+  return { send: true, templateKey: SHORT_TEMPLATE_KEY, vars: { watering_lines: [short, rain].filter(Boolean).map(smsSafe).join(' ') } };
+}
+
+// The text body for a plan. A missing or inactive short row falls back to the
+// full text under the original row. Returns { plan, body } (body null = none).
+async function renderWateringBody(plan, planInput, record, deps) {
+  const render = (p) => deps.getTemplate(
+    p.templateKey || TEMPLATE_KEY,
+    p.vars,
+    { service_record_id: record.id, entry_point: 'lawn_watering_sms' },
+    { requiredVars: ['watering_lines'] },
+  );
+  const body = await render(plan);
+  if (body || plan.templateKey !== SHORT_TEMPLATE_KEY) return { plan, body };
+  logger.warn(`[lawn-watering-sms] template ${SHORT_TEMPLATE_KEY} missing or inactive; sending the full text for service_record ${record.id}`);
+  const full = lawnWateringSmsPlan({ ...planInput, shortText: false });
+  return { plan: full, body: full.send ? await render(full) : null };
+}
+
 function lawnWateringSmsPlan({
   instruction = null,
   isBackfill = false,
@@ -112,6 +143,7 @@ function lawnWateringSmsPlan({
   completionTextRequested = true,
   everyVisit = false,
   forecastLine,
+  shortText,
   nowMs = Date.now(),
 } = {}) {
   if (!gateOn) return { send: false, reason: 'gate_off' };
@@ -132,6 +164,8 @@ function lawnWateringSmsPlan({
   const lines = wateringLinesOf(instruction);
   if (!lines.length) return { send: false, reason: 'no_lines' };
   if (!wateringInstructionFresh(instruction, completedAt, nowMs)) return { send: false, reason: 'stale' };
+  const short = shortPlan(shortText, instruction, forecastLine);
+  if (short) return short;
   // GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence frozen with the
   // instruction (both sources agreed; textForecastLine) closes the text.
   return { send: true, vars: { watering_lines: [...lines, forecastLine].filter(Boolean).map(smsSafe).join(' ') } };
@@ -162,7 +196,7 @@ async function sendLawnWateringSms(args, deps) {
     const instruction = notes?.lawnWateringFreeze?.wateringInstruction || null;
     const completedAt = instruction?.completedAt || null;
     const everyVisit = lawnWateringEveryVisitLive();
-    const plan = lawnWateringSmsPlan({
+    const planInput = {
       instruction,
       isBackfill: args.isBackfill === true,
       deliveryMode: args.deliveryMode,
@@ -175,29 +209,27 @@ async function sendLawnWateringSms(args, deps) {
       completionTextRequested: args.completionTextRequested === true,
       everyVisit,
       forecastLine: lawnWateringTextForecastLive() && lawnWateringForecastLive() ? textForecastLine(instruction) : null,
+      shortText: lawnWateringShortTextLive(),
       nowMs: Date.now(),
-    });
-    if (!plan.send) {
+    };
+    const planned = lawnWateringSmsPlan(planInput);
+    if (!planned.send) {
       // GATE_LAWN_WATERING_EVERY_VISIT: the text was due (every earlier skip,
       // such as no phone or a backfill, means it was not) but the visit froze
       // no instruction. One office alert names the product or the clash, so a
       // person can give the customer the steps.
-      if (everyVisit && plan.reason === 'no_instruction' && !instruction) {
+      if (everyVisit && planned.reason === 'no_instruction' && !instruction) {
         return alertNoInstruction({ record, svc, notes, noClaim: args.noClaim }, deps);
       }
-      return { status: `skip_${plan.reason}` };
+      return { status: `skip_${planned.reason}` };
     }
 
     // Fail closed on a missing/inactive template row: no body, no send. No
     // marker either, so a later retry after the row is fixed can still send.
-    const body = await deps.getTemplate(
-      TEMPLATE_KEY,
-      plan.vars,
-      { service_record_id: record.id, entry_point: 'lawn_watering_sms' },
-      { requiredVars: ['watering_lines'] },
-    );
+    const { plan, body } = await renderWateringBody(planned, planInput, record, deps);
+    const templateKey = plan.templateKey || TEMPLATE_KEY;
     if (!body) {
-      logger.warn(`[lawn-watering-sms] template ${TEMPLATE_KEY} missing, inactive or unrenderable; no text sent for service_record ${record.id}`);
+      logger.warn(`[lawn-watering-sms] template ${templateKey} missing, inactive or unrenderable; no text sent for service_record ${record.id}`);
       return { status: 'skip_no_template' };
     }
 
@@ -242,7 +274,7 @@ async function sendLawnWateringSms(args, deps) {
           service_record_id: record.id,
           notificationEventKey: `scheduled-service:${svc.id}:lawn-watering`,
           useCustomerChannel: true,
-          templateKey: TEMPLATE_KEY,
+          templateKey,
         },
       };
 
@@ -428,6 +460,7 @@ async function alertNoInstruction({ record, svc, notes, noClaim }, deps) {
 
 module.exports = {
   TEMPLATE_KEY,
+  SHORT_TEMPLATE_KEY,
   PURPOSE,
   SENDABLE_STATES,
   EVERY_VISIT_STATES,
