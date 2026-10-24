@@ -318,6 +318,20 @@ function refundsToCSV(refunds) {
   return lines.join('\n');
 }
 
+function homeOfficeToCSV(homeOffice, deduction) {
+  const lines = [row(['tax_year', 'method', 'sq_ft', 'months', 'deduction'])];
+  lines.push(row([homeOffice.tax_year, homeOffice.method, homeOffice.sq_ft, homeOffice.months, Number(deduction || 0).toFixed(2)]));
+  return lines.join('\n');
+}
+
+function sharedBillsToCSV(bills) {
+  const lines = [row(['label', 'pattern', 'business_pct', 'category', 'enabled'])];
+  for (const b of bills) {
+    lines.push(row([b.label, b.pattern, Number(b.business_pct).toFixed(2), b.category_name || '', b.enabled === false ? 'no' : 'yes']));
+  }
+  return lines.join('\n');
+}
+
 module.exports = {
   transactionsToCSV,
   expensesToCSV,
@@ -328,4 +342,6 @@ module.exports = {
   refundsToCSV,
   generateReadme,
   geoGridToCSV,
+  homeOfficeToCSV,
+  sharedBillsToCSV,
 };

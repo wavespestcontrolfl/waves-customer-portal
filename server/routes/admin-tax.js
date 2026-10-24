@@ -1796,6 +1796,17 @@ router.get('/export/tax-package', async (req, res, next) => {
     // and full-year unprorated depreciation.)
     const pnlData = await buildPnlReport(db, sd, ed);
 
+    // Shared bills + home office (GATE_TAX_SHARED_BILLS): two extra files, read
+    // before the ZIP starts so a failure is an error response, not a cut stream
+    let homeOffice = null;
+    let sharedBillRows = null;
+    if (sharedBills.isOn()) {
+      try {
+        if (/^\d{4}$/.test(String(year))) homeOffice = await sharedBills.getHomeOffice(year).catch(e => (e?.status === 400 ? null : Promise.reject(e)));
+        sharedBillRows = await sharedBills.listBills();
+      } catch (e) { if (e?.code !== '42P01') throw e; /* migration not run yet */ }
+    }
+
     // Stream ZIP
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="waves-tax-package-${year}.zip"`);
@@ -1813,6 +1824,8 @@ router.get('/export/tax-package', async (req, res, next) => {
     // payroll expense schedule (owner labor is not deductible).
     archive.append(csv.laborToCSV(laborSummaries), { name: 'labor-timetracking-informational.csv' });
     archive.append(csv.pnlToCSV(pnlData), { name: 'pnl.csv' });
+    if (homeOffice) archive.append(csv.homeOfficeToCSV(homeOffice, sharedBills.homeOfficeDeduction(homeOffice)), { name: 'home-office.csv' });
+    if (sharedBillRows && sharedBillRows.length) archive.append(csv.sharedBillsToCSV(sharedBillRows), { name: 'shared-bills.csv' });
     archive.append(csv.generateReadme(year, pnlData), { name: 'README.txt' });
 
     await archive.finalize();
@@ -1830,6 +1843,7 @@ router.get('/export/tax-package', async (req, res, next) => {
 const nodeCrypto = require('crypto');
 const bankImport = require('../services/bank-import');
 const taxLedgerRules = require('../services/tax-ledger-rules');
+const sharedBills = require('../services/tax-shared-bills');
 const { gateEnvValue } = require('../config/feature-gates');
 
 const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
@@ -2476,18 +2490,27 @@ async function resolveCreateExpenseCategory(req, row) {
   const { visible, suggested, categoryId } = effectiveCreateExpenseCategory(req, row);
   // the verify note is for a model's category: not a deterministic rule's, and not one the ledger import carried (the owner's own books)
   const usedAi = !req.body?.categoryId && !!suggested && !['rule', 'ledger'].includes(visible?.categorySource);
+  // a shared bill (GATE_TAX_SHARED_BILLS) fills in a category only when the
+  // operator and the suggestion left none, and cuts the deductible to its
+  // business share after the category's own partial rule
+  const bill = sharedBills.isOn() ? sharedBills.matchBill(row.description, await sharedBills.loadEnabledBills()) : null;
+  const finalCategoryId = categoryId || bill?.category_id || null;
   let deductible = parseFloat(row.amount);
-  if (categoryId) {
-    const cat = await db('expense_categories').where({ id: categoryId }).first('name');
+  if (finalCategoryId) {
+    const cat = await db('expense_categories').where({ id: finalCategoryId }).first('name');
     if (!cat) return { error: [400, 'unknown categoryId'] };
     const partial = categoryDeductibleAmount(cat.name, deductible);
     if (partial !== null) deductible = partial;
   }
-  return { categoryId, usedAi, deductible };
+  if (!bill) return { categoryId: finalCategoryId, usedAi, deductible };
+  return {
+    categoryId: finalCategoryId, usedAi, deductible: sharedBills.shareOf(deductible, bill.business_pct),
+    noteSuffix: ` [Shared bill: ${bill.label} ${bill.business_pct}%]`,
+  };
 }
 
 // Insert + claim in ONE transaction with a CAS on status='unmatched'.
-async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnPeriod, fromLedger, ownerRule, expectedCategoryId }) {
+async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, noteSuffix = '', txnPeriod, fromLedger, ownerRule, expectedCategoryId }) {
   return db.transaction(async trx => {
     const [inserted] = await trx('expenses').insert({
       category_id: categoryId,
@@ -2500,7 +2523,7 @@ async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnP
       payment_method: row.account_type === 'card' ? 'card' : 'ach',
       tax_year: txnPeriod.tax_year,
       quarter: txnPeriod.quarter,
-      notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
+      notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}${noteSuffix}`,
     }).returning('*');
     let claim = trx('bank_transactions')
       .where({ id: row.id, status: 'unmatched' })
@@ -3328,6 +3351,65 @@ router.put('/bank-import/ledger/rules/:id', async (req, res, next) => {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
   }
+});
+
+// ── Shared bills + home office (GATE_TAX_SHARED_BILLS, nested under GATE_BANK_IMPORT) ──
+// Part-business bills book at their business share in create-expense above;
+// the home office is the simplified method, one row per tax year. /status
+// answers {enabled:false} when dark; every other route here 404s when dark.
+router.get('/shared-bills/status', (req, res) => {
+  res.json({ enabled: !!sharedBills.isOn() });
+});
+
+function sharedBillsDark(req, res, next) {
+  if (!sharedBills.isOn()) return res.status(404).json({ error: 'not found' });
+  next();
+}
+router.use('/shared-bills', sharedBillsDark);
+router.use('/home-office', sharedBillsDark);
+
+function sharedBillsError(err, res, next) {
+  if (err.status) return res.status(err.status).json({ error: err.message });
+  return next(err);
+}
+
+router.get('/shared-bills', async (req, res, next) => {
+  try { res.json({ bills: await sharedBills.listBills() }); } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.post('/shared-bills', async (req, res, next) => {
+  try { res.status(201).json({ bill: await sharedBills.createBill(req.body || {}) }); } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.put('/shared-bills/:id', async (req, res, next) => {
+  try { res.json({ bill: await sharedBills.updateBill(req.params.id, req.body || {}) }); } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.delete('/shared-bills/:id', async (req, res, next) => {
+  try { await sharedBills.deleteBill(req.params.id); res.json({ success: true }); } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.get('/home-office/:year', async (req, res, next) => {
+  try {
+    const row = await sharedBills.getHomeOffice(req.params.year);
+    const year = parseInt(req.params.year, 10);
+    if (!row) return res.json({ year, row: null, deduction: 0 });
+    res.json({ year, row, deduction: sharedBills.homeOfficeDeduction(row) });
+  } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.put('/home-office/:year', async (req, res, next) => {
+  try {
+    const row = await sharedBills.upsertHomeOffice(req.params.year, req.body || {});
+    res.json({ year: row.tax_year, row, deduction: sharedBills.homeOfficeDeduction(row) });
+  } catch (err) { sharedBillsError(err, res, next); }
+});
+
+router.delete('/home-office/:year', async (req, res, next) => {
+  try {
+    await sharedBills.deleteHomeOffice(req.params.year);
+    res.json({ success: true });
+  } catch (err) { sharedBillsError(err, res, next); }
 });
 
 module.exports = router;
