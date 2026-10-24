@@ -38,8 +38,8 @@
  *      after line 13); actual: the excess is the carryover out; simplified: it
  *      expires
  *   4. net profit; Schedule SE; AGI = profit + other income - half the SE tax
- *   5. NOL deduction = the smaller of the NOL carried in and 80% of taxable
- *      income before the NOL and QBI; QBI deduction = 20% of (profit - half SE
+ *   5. NOL deduction (Schedule 1 line 8a, so AGI is after it) = the smaller of
+ *      the NOL carried in and 80% of taxable income before the NOL and QBI; QBI deduction = 20% of (profit - half SE
  *      - QBI loss carried in), at most 20% of taxable income after the NOL
  *   6. income tax from the brackets; total tax = income tax + SE tax (+ the
  *      Additional Medicare Tax on SE earnings above its threshold)
@@ -252,13 +252,17 @@ function computeReturn(inputs = {}) {
   if (seBase > 0 && otherIncome > 0 && seBase + otherIncome > addlThreshold) {
     warnings.push(warn('addl_medicare_wages', 'The Additional Medicare Tax counts self-employment earnings only. Wages in Other income are not added: ask a tax preparer.'));
   }
-  const agi = round2(profit + otherIncome - halfSe);
+  // income before the NOL deduction: the base of the 80% limit
+  const agiBeforeNol = round2(profit + otherIncome - halfSe);
   const standard = K.standard_deduction[filing];
 
   // 5. NOL and QBI
-  const taxableBeforeNol = Math.max(round2(agi - standard), 0);
+  const taxableBeforeNol = Math.max(round2(agiBeforeNol - standard), 0);
   const nolUsed = round2(Math.min(carryIn.nol, round2(K.nol_limit_pct * taxableBeforeNol)));
   const taxableAfterNol = round2(taxableBeforeNol - nolUsed);
+  // The NOL deduction is Schedule 1 line 8a, a part of total income, so the
+  // AGI on the return (and the 1040-ES 110% test below) is after it.
+  const agi = round2(agiBeforeNol - nolUsed);
   const qbiIncome = round2(profit - halfSe);
   const qbiNet = round2(qbiIncome - carryIn.qbi_loss);
   const qbiDeduction = round2(Math.min(K.qbi_rate * Math.max(qbiNet, 0), K.qbi_rate * taxableAfterNol));
@@ -336,6 +340,7 @@ function computeReturn(inputs = {}) {
     se_tax: seTax,
     half_se_deduction: halfSe,
     additional_medicare_tax: addlMedicare,
+    agi_before_nol: agiBeforeNol,
     agi,
     standard_deduction: standard,
     nol_used: nolUsed,

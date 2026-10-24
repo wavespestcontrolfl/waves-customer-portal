@@ -130,6 +130,52 @@ it('Mark filed posts to the file route and reloads the year', async () => {
   expect(calls.filter((c) => c.url.endsWith('/return')).length).toBeGreaterThan(1);
 });
 
+it('Mark filed waits for a saved year: edits disable it, saving reloads the return, and only then it files', async () => {
+  const returnCalls = () => calls.filter((c) => c.url.endsWith('/return')).length;
+  const filePosts = () => calls.filter((c) => c.method === 'POST' && c.url.endsWith(`/tax-years/${YEAR}/file`)).length;
+  render(<ReturnTab />);
+  const button = await screen.findByRole('button', { name: 'Mark filed' });
+  await screen.findByLabelText('Other income');
+  expect(button).not.toBeDisabled(); // a clean year
+  expect(screen.queryByText(/Save the year first/)).toBeNull();
+  // edit a field: dirty
+  fireEvent.change(screen.getByLabelText('Other income'), { target: { value: '500' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark filed' })).toBeDisabled());
+  expect(screen.getByText(/Save the year first/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Mark filed' }));
+  expect(filePosts()).toBe(0); // a disabled button files nothing
+  // reverting the edit is clean again
+  fireEvent.change(screen.getByLabelText('Other income'), { target: { value: '' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark filed' })).not.toBeDisabled());
+  fireEvent.change(screen.getByLabelText('Other income'), { target: { value: '500' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark filed' })).toBeDisabled());
+  // save: the return reloads, and only then can the year be filed
+  const before = returnCalls();
+  fireEvent.click(screen.getByRole('button', { name: 'Save year' }));
+  await waitFor(() => expect(returnCalls()).toBe(before + 1));
+  const again = await screen.findByRole('button', { name: 'Mark filed' });
+  await waitFor(() => expect(again).not.toBeDisabled());
+  expect(screen.queryByText(/Save the year first/)).toBeNull();
+  expect(filePosts()).toBe(0);
+  fireEvent.click(again);
+  await waitFor(() => expect(filePosts()).toBe(1));
+});
+
+it('a failed save leaves the year dirty and Mark filed disabled', async () => {
+  const base = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, opts = {}) => {
+    if (opts.method === 'PUT') return json({ error: 'nope' }, false);
+    return base(url, opts);
+  });
+  render(<ReturnTab />);
+  await screen.findByRole('button', { name: 'Mark filed' });
+  fireEvent.change(screen.getByLabelText('Other income'), { target: { value: '500' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save year' }));
+  await screen.findByText('nope');
+  expect(screen.getByRole('button', { name: 'Mark filed' })).toBeDisabled();
+  expect(screen.getByText(/Save the year first/)).toBeInTheDocument();
+});
+
 it('a filed year shows its date, locks the form, and Unmark filed posts to unfile', async () => {
   detail = { ...detail, row: { ...baseRow, status: 'filed', filed_on: '2026-04-10' } };
   render(<ReturnTab />);

@@ -122,9 +122,9 @@ function Lines({ ret }) {
   const rows = [
     ["Self-employment tax (Schedule SE)", ret.se_tax],
     ["Half of self-employment tax (deduction)", -ret.half_se_deduction],
+    ["Net operating loss deduction (Schedule 1 line 8a)", -ret.nol_used],
     ["Adjusted gross income", ret.agi, true],
     [`Standard deduction (${ret.filing_status})`, -ret.standard_deduction],
-    ["Net operating loss deduction", -ret.nol_used],
     ["Qualified business income deduction", -ret.qbi_deduction],
     ["Taxable income", ret.taxable_income, true],
     ["Income tax", ret.income_tax],
@@ -181,9 +181,12 @@ function Planning({ ret }) {
   );
 }
 
-function YearForm({ detail, disabled, busy, onSave }) {
+function YearForm({ detail, disabled, busy, onSave, onDirty }) {
   const [form, setForm] = useState(() => formFrom(detail.row));
   useEffect(() => { setForm(formFrom(detail.row)); }, [detail]);
+  // dirty = what would be saved differs from what is saved (a reverted edit is clean)
+  const dirty = JSON.stringify(bodyFrom(form)) !== JSON.stringify(bodyFrom(formFrom(detail.row)));
+  useEffect(() => { onDirty(dirty); }, [dirty, onDirty]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = (e) => { e.preventDefault(); onSave(bodyFrom(form)); };
   return (
@@ -219,6 +222,8 @@ export default function ReturnTab() {
   const [retError, setRetError] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // unsaved edits in the year form: the return on screen is not for them
+  const [dirty, setDirty] = useState(false);
   // only the newest year's answers may land: a slow answer for a year the
   // owner already left must not fill the screen under the new year
   const seq = useRef(0);
@@ -233,6 +238,7 @@ export default function ReturnTab() {
 
   const load = useCallback(() => {
     const mine = ++seq.current;
+    setDirty(false);
     setDetail(null);
     setRet(null);
     setRetError("");
@@ -280,7 +286,7 @@ export default function ReturnTab() {
             Computed from your sales, expenses, equipment and home office. Review it with your tax preparer before you file.
           </div>
           {detail && (
-            <YearForm detail={detail} disabled={filed} busy={busy} onSave={(body) => run(() => put(`${T}/tax-years/${year}`, body))} />
+            <YearForm detail={detail} disabled={filed} busy={busy} onSave={(body) => run(() => put(`${T}/tax-years/${year}`, body))} onDirty={setDirty} />
           )}
           {filed && <div className="text-sm text-ink-secondary">This year is marked filed. Unmark it to change the numbers above.</div>}
           {error && <ActionFeedback error>{error}</ActionFeedback>}
@@ -307,10 +313,14 @@ export default function ReturnTab() {
                 {filed ? (
                   <Button variant="secondary" disabled={busy} onClick={() => run(() => post(`${T}/tax-years/${year}/unfile`, {}))}>Unmark filed</Button>
                 ) : (
-                  <Button variant="primary" disabled={busy || !detail} onClick={() => run(() => post(`${T}/tax-years/${year}/file`, {}))}>Mark filed</Button>
+                  <Button variant="primary" disabled={busy || !detail || dirty} onClick={() => run(() => post(`${T}/tax-years/${year}/file`, {}))}>Mark filed</Button>
                 )}
                 <div className="text-sm text-ink-secondary">
-                  {filed ? "Unmarking lets you edit this year again." : "Marking a year filed freezes these numbers and passes the carryovers to the next year."}
+                  {filed
+                    ? "Unmarking lets you edit this year again."
+                    : dirty
+                      ? "Save the year first. The return above does not include your changes."
+                      : "Marking a year filed freezes these numbers and passes the carryovers to the next year."}
                 </div>
               </div>
             </>

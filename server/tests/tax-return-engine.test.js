@@ -223,8 +223,9 @@ describe('NOL and QBI', () => {
     const r = computeReturn(inputs({ gross_receipts: 60000, carry_in: { nol: 50000 } }));
     expect(r.se_tax).toBe(8477.73);
     expect(r.half_se_deduction).toBe(4238.87);
-    expect(r.agi).toBe(55761.13);
+    expect(r.agi_before_nol).toBe(55761.13);
     expect(r.nol_used).toBe(32008.9);
+    expect(r.agi).toBe(23752.23); // AGI is after the NOL deduction (Schedule 1 line 8a): 55,761.13 - 32,008.90
     expect(r.carry_out.nol).toBe(17991.1);
     // taxable after NOL 8,002.23; QBI 20% of 55,761.13 = 11,152.23 vs 20% of 8,002.23 = 1,600.45
     expect(r.qbi_deduction).toBe(1600.45);
@@ -282,6 +283,17 @@ describe('estimates, reserve and due dates', () => {
     expect(high.estimates.safe_harbor_pct).toBe(1.1);
     expect(high.estimates.next_year_safe_harbor).toBe(Math.round(high.total_tax * 1.1 * 100) / 100);
     expect(high.estimates.quarterly).toBe(Math.round(high.estimates.next_year_safe_harbor / 4 * 100) / 100);
+  });
+  test('the 110% switch tests AGI after the NOL, at the boundary', () => {
+    // profit 0 so there is no SE tax: AGI is the other income less the NOL
+    const run = (otherIncome, nol) => computeReturn(inputs({ other_income: otherIncome, carry_in: { nol } }));
+    expect(run(150000, 0)).toMatchObject({ agi: 150000, estimates: { safe_harbor_pct: 1 } }); // not over
+    expect(run(150000.01, 0)).toMatchObject({ agi: 150000.01, estimates: { safe_harbor_pct: 1.1 } });
+    // 160,000 less a 10,000 NOL is exactly 150,000 after the NOL: still 100%
+    const after = run(160000, 10000);
+    expect(after).toMatchObject({ agi_before_nol: 160000, nol_used: 10000, agi: 150000, estimates: { safe_harbor_pct: 1 } });
+    // one cent less NOL leaves 150,000.01: 110%
+    expect(run(160000, 9999.99)).toMatchObject({ agi: 150000.01, estimates: { safe_harbor_pct: 1.1 } });
   });
   test('the due date is April 15, moved off a weekend', () => {
     expect(dueDate(2024)).toBe('2025-04-15');
@@ -354,8 +366,9 @@ describe('cross-check against the structure of the 2025 working script', () => {
   //   actual home office 5,850 + carry-in 1,150 = 7,000, capped at 133,000 - 61,000 = 72,000: allowed
   //   profit = 150,000 - 17,000 - 7,000 - 61,000 = 65,000
   //   SE base 65,000 x 0.9235 = 60,027.50; SE tax x 15.3% = 9,184.21 (9,184.2075)
-  //   half 4,592.11; AGI 65,000 - 4,592.11 = 60,407.89; standard (2025 single) 15,750
+  //   half 4,592.11; income before the NOL 65,000 - 4,592.11 = 60,407.89; standard (2025 single) 15,750
   //   taxable before NOL 44,657.89; 80% = 35,726.31; NOL 26,000 used in full -> 18,657.89
+  //   AGI on the return is after the NOL: 60,407.89 - 26,000 = 34,407.89
   //   QBI: (60,407.89 - 3,000 loss) = 57,407.89 x 20% = 11,481.58 vs 20% x 18,657.89 = 3,731.58 -> 3,731.58
   //   taxable 18,657.89 - 3,731.58 = 14,926.31
   //   income tax 10% x 11,925 = 1,192.50 + 12% x 3,001.31 = 360.16 -> 1,552.66
@@ -372,7 +385,7 @@ describe('cross-check against the structure of the 2025 working script', () => {
   test('a year with tax', () => {
     const r = computeReturn(cross);
     expect(r).toMatchObject({
-      net_profit: 65000, se_tax: 9184.21, half_se_deduction: 4592.11, agi: 60407.89, nol_used: 26000,
+      net_profit: 65000, se_tax: 9184.21, half_se_deduction: 4592.11, agi_before_nol: 60407.89, agi: 34407.89, nol_used: 26000,
       qbi_deduction: 3731.58, taxable_income: 14926.31, income_tax: 1552.66, total_tax: 10736.87, owed: 8736.87,
     });
     expect(r.lines).toMatchObject({ home_office_deduction: 7000, sec179_allowed: 61000, total_expenses: 85000 });
