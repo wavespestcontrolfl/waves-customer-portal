@@ -1990,7 +1990,7 @@ async function listForVisit(conn, req, visitId) {
   // OTHER live customers whose home sits in this home's neighborhood, read now
   // (never copied), so a pass follows its home's current neighborhood and
   // leaves when its owner retires it. Only the pass text is projected.
-  const shared = visitHood && neighborhoodAccessLive() ? await neighborPasses(conn, visit.customer_id, visitHood) : [];
+  const shared = visitHood && neighborhoodAccessLive() ? await neighborPasses(conn, visit.customer_id, visitHood, visitHome) : [];
   // The visit may have been reassigned or moved to another home while the
   // codes were read: answer only if it is still in scope with the same home
   // and neighborhood.
@@ -2036,7 +2036,7 @@ function passLinkKey(text) {
   return links.length === 1 && /^https:\/\//i.test(links[0]) ? links[0] : '';
 }
 
-async function neighborPasses(conn, customerId, hoodId) {
+async function neighborPasses(conn, customerId, hoodId, visitHomeId) {
   const rows = await conn('customer_access_codes as a')
     .join('customer_properties as p', 'p.id', 'a.property_id')
     // a neighborhood switched off shows its credentials nowhere
@@ -2044,6 +2044,11 @@ async function neighborPasses(conn, customerId, hoodId) {
     .join('customers as c', 'c.id', 'a.customer_id')
     .where({ 'a.status': 'active', 'a.kind': 'pass', 'a.life': 'standing', 'p.active': true, 'p.neighborhood_id': hoodId })
     .whereNot('a.customer_id', customerId).whereNull('c.deleted_at')
+    // A home linked from the customer's own words (neighborhood_source
+    // 'caller') is unconfirmed: its pass is never shared out, and no pass is
+    // shared INTO a visit at such a home.
+    .whereRaw("p.neighborhood_source IS DISTINCT FROM 'caller'")
+    .whereRaw("NOT EXISTS (SELECT 1 FROM customer_properties v WHERE v.id = ? AND v.neighborhood_source = 'caller')", [visitHomeId || null])
     .whereNull('a.code').whereRaw("btrim(coalesce(a.instructions, '')) <> ''")
     .whereRaw(OWNED_SOURCE_SQL)
     .orderBy('a.decided_at', 'desc').orderBy('a.id').select('a.id', 'a.instructions');

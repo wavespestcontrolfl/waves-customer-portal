@@ -322,4 +322,50 @@ postgres('neighborhood gate codes from a visit', () => {
     expect(r.status).toBe(201);
     expect((await rows(n))[0]).toMatchObject({ code: '4040', gate_label: 'Back gate' });
   });
+
+  // A home linked from the customer's own words (neighborhood_source 'caller')
+  // is kept out of the shared directory until the county or the office confirms it.
+  describe('a caller-linked home', () => {
+    const callerVisit = async (n) => {
+      const v = await visit(n);
+      await trx('customer_properties').where({ id: v.property_id }).update({ neighborhood_source: 'caller' });
+      return v;
+    };
+
+    test('its visit gets no directory entries and no tech actions, and a tech can neither add nor flag one there', async () => {
+      const n = await neighborhood('Caller Glen');
+      const id = await entry(n, { code: '1111' });
+      const v = await callerVisit(n);
+      expect((await neighborhoodGateEntriesForVisits(trx, [v])).size).toBe(0);
+      expect((await gateActionVisitIds(trx, [v])).size).toBe(0);
+      const add = await call('POST', `/visits/${v.id}/entries`, { code: '2222' });
+      expect(add.status).toBeGreaterThanOrEqual(400);
+      expect((await wrong(v.id, id)).status).toBeGreaterThanOrEqual(400);
+      expect((await rows(n)).map((e) => [e.code, e.status])).toEqual([['1111', 'active']]);
+    });
+
+    test('after the office confirms the link (the existing pick), the same visit reads and writes the directory', async () => {
+      const n = await neighborhood('Confirmed Glen');
+      await entry(n, { code: '1111' });
+      const v = await callerVisit(n);
+      mockStaff = admin;
+      const confirmed = await call('PUT', `/properties/${v.property_id}/neighborhood`, { neighborhoodId: n });
+      expect(confirmed.status).toBe(200);
+      expect(await trx('customer_properties').where({ id: v.property_id }).first()).toMatchObject({ neighborhood_id: n, neighborhood_source: 'office' });
+      mockStaff = tech;
+      expect((await neighborhoodGateEntriesForVisits(trx, [v])).get(v.id).map((e) => e.code)).toEqual(['1111']);
+      expect([...(await gateActionVisitIds(trx, [v]))]).toEqual([v.id]);
+      expect((await call('POST', `/visits/${v.id}/entries`, { code: '2222' })).status).toBe(201);
+    });
+
+    test('the office view of a caller-linked property names the neighborhood but lists none of its entries', async () => {
+      const n = await neighborhood('View Glen');
+      await entry(n, { code: '1111' });
+      const v = await callerVisit(n);
+      mockStaff = admin;
+      const view = await call('GET', `/customers/${v.customer_id}/properties`);
+      expect(view.status).toBe(200);
+      expect(view.body.properties[0]).toMatchObject({ neighborhood: { name: 'View Glen' }, neighborhoodSource: 'caller', entries: [] });
+    });
+  });
 });
