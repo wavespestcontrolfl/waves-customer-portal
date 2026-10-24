@@ -190,8 +190,8 @@ function DriveLine({ service, statusById }) {
   const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
     <div
-      className={'flex items-center u-nums border-b border-hairline ' + 'border-zinc-200 ' + (late ? 'bg-alert-bg text-alert-fg font-medium' : 'bg-zinc-50 text-ink-tertiary')}
-      style={{ fontSize: 14, padding: '5px 14px 5px 22px', gap: 8 }}
+      className={'flex items-center u-nums font-bold border-b border-hairline ' + 'border-zinc-200 ' + (late ? 'bg-alert-bg text-alert-fg' : 'bg-zinc-50 text-ink-tertiary')}
+      style={{ fontSize: 13, padding: '5px 14px 5px 22px', gap: 8 }}
     >
       <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: late ? 1 : 0.4, flexShrink: 0 }} />
       <span className="min-w-0">
@@ -598,22 +598,22 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
           {rainChance != null && rainChance >= 40 && (
             <span
               className={
-                'u-nums font-medium ' +
+                'u-nums font-bold ' +
                 (rainChance >= 50 ? 'text-alert-fg' : 'text-amber-700')
               }
-              style={{ fontSize: 11 }}
+              style={{ fontSize: 13 }}
               title={`${rainChance}% chance of rain`}
             >
               {rainChance}% rain
             </span>
           )}
         </span>
-        <span className="u-nums text-ink-tertiary" style={{ fontSize: 11 }}>
+        <span className="u-nums font-bold text-ink-tertiary" style={{ fontSize: 13 }}>
           {sorted.length} {sorted.length === 1 ? 'appt' : 'appts'}
           {openHours.length > 0 && (
-            <span className="text-zinc-900 font-medium" style={{ fontSize: 14 }}> · {openHours.length} open</span>
+            <span className="text-zinc-900"> · {openHours.length} open {openHours.length === 1 ? 'hr' : 'hrs'}</span>
           )}
-          {driveLabel && <span style={{ fontSize: 14 }}> · {driveLabel} driving</span>}
+          {driveLabel && <span> · {driveLabel} driving</span>}
         </span>
       </header>
       {rows.length === 0 ? (

@@ -277,7 +277,7 @@ describe('MobileDispatchList open hours', () => {
     );
     vi.useRealTimers();
 
-    expect(screen.getByText('· 10 open', { exact: false })).toBeInTheDocument();
+    expect(screen.getByText('· 10 open hrs', { exact: false })).toBeInTheDocument();
     const rows = screen.getAllByRole('button', { name: /^Book open hour/ });
     expect(rows.map((b) => b.getAttribute('aria-label'))).toEqual([
       'Book open hour 7–8 AM',
