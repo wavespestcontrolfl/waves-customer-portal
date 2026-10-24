@@ -258,7 +258,7 @@ function CommercialProposalEditor() {
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
   const [prospectBrief, setProspectBrief] = useState(null);
-  // GATE_COMMERCIAL_PROPOSAL_SIGN: { state: 'none' | 'awaiting' | 'signed', since?, signedAt? }; null with the gate off.
+  // GATE_COMMERCIAL_PROPOSAL_SIGN: { state: 'none' | 'awaiting' | 'signed', since?, signedAt?, signingBlocked? }; null with the gate off.
   const [commercialAgreement, setCommercialAgreement] = useState(null);
   const [briefOpen, setBriefOpen] = useState(true);
 
@@ -1784,7 +1784,9 @@ function CommercialProposalEditor() {
                 {estimate?.acceptedAt && <div>Won {new Date(estimate.acceptedAt).toLocaleString()}</div>}
                 {commercialAgreement && (
                   <div data-testid="proposal-agreement-status">
-                    {commercialAgreement.state === 'signed'
+                    {commercialAgreement.signingBlocked === 'payment_terms'
+                      ? 'Online signing needs payment terms set to Net 30 (the agreement\u2019s terms).'
+                      : commercialAgreement.state === 'signed'
                       ? `Agreement signed ${formatETDateTime(commercialAgreement.signedAt, { month: 'short', day: 'numeric', year: 'numeric' })}`
                       : commercialAgreement.state === 'awaiting'
                         ? `Agreement awaiting signature since ${formatETDateTime(commercialAgreement.since, { month: 'short', day: 'numeric', year: 'numeric' })}`

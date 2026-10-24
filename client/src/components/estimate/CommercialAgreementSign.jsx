@@ -25,7 +25,7 @@ export default function CommercialAgreementSign({ token, commercialAgreement }) 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   if (!commercialAgreement) return null;
-  const { canSign, state } = commercialAgreement;
+  const { canSign, state, reason } = commercialAgreement;
 
   const start = async () => {
     if (inFlight.current) return;
@@ -68,7 +68,11 @@ export default function CommercialAgreementSign({ token, commercialAgreement }) 
     return (
       <div data-testid="commercial-agreement-call" style={estimateCard()}>
         <div style={heading}>Ready to go ahead?</div>
-        <div style={body}>Call us at {callLink} and we will set up your account and finish your agreement with you.</div>
+        <div style={body}>
+          {reason === 'payment_terms'
+            ? <>Call us at {callLink} and we will finish your agreement with you.</>
+            : <>Call us at {callLink} and we will set up your account and finish your agreement with you.</>}
+        </div>
       </div>
     );
   }

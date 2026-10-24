@@ -118,6 +118,18 @@ function signableProposal(estimate) {
   return { proposal, totals };
 }
 
+// The agreement template promises Net 30 billing. A proposal can carry other terms (Net-15, due on receipt) or none, so
+// online signing is offered only when the proposal's authored payment term is Net 30 (owner-approved template, not
+// changed here). The ONE predicate behind /data, the route, the issuing re-check and the sign-time re-check.
+const NET_30 = 'net30';
+const PAYMENT_TERMS_NOTE = 'Online signing needs payment terms set to Net 30 (the agreement\u2019s terms).';
+function signEligibility(estimate) {
+  const found = signableProposal(estimate);
+  if (!found) return { ok: false, reason: 'not_signable' };
+  if (found.proposal.commercialTerms?.paymentTerms !== NET_30) return { ok: false, reason: 'payment_terms', ...found };
+  return { ok: true, ...found };
+}
+
 // Stable JSON: object keys sorted, builder-only keys dropped (row ids the editor mints, `generated*` provenance
 // of narrative lines), so re-saving the same quote never changes it and any customer-visible change does.
 function canonical(value) {
@@ -137,6 +149,13 @@ function quoteFingerprint({ proposal, totals, values, customerId, templateVersio
   return crypto.createHash('sha256')
     .update(JSON.stringify(canonical({ proposal, totals, rendered, customerId: String(customerId), templateVersionId: String(templateVersionId) })))
     .digest('hex');
+}
+
+// The fingerprint of the quote as it stands now, for one customer and one template version (the issuer passes the
+// active version; the sign-time check passes the version the customer's contract was rendered from).
+function currentFingerprint(estimate, { proposal, totals }, templateVersionId) {
+  const values = buildAgreementValues(estimate, proposal, totals);
+  return quoteFingerprint({ proposal, totals, values, customerId: estimate.customer_id, templateVersionId });
 }
 
 function estimateAgreementQuery(estimateId, conn) {
@@ -161,13 +180,26 @@ async function agreementStateForEstimate(estimateId, conn = db) {
 // account to hang the agreement on (the page then says to call) or once signed.
 async function agreementCtaFor(estimate, conn = db) {
   try {
-    if (!signableProposal(estimate)) return null;
+    const eligibility = signEligibility(estimate);
+    if (eligibility.reason === 'not_signable') return null;
     const { state } = await agreementStateForEstimate(estimate.id, conn);
-    return { canSign: Boolean(estimate.customer_id) && state !== 'signed', state };
+    if (state === 'signed') return { canSign: false, state };
+    if (!eligibility.ok) return { canSign: false, state, reason: eligibility.reason };
+    return { canSign: Boolean(estimate.customer_id), state };
   } catch (err) {
     logger.warn(`[commercial-agreement] cta skipped for estimate ${estimate?.id}: ${err.code || 'error'}`);
     return null;
   }
+}
+
+// The admin builder's read: the agreement state, plus why online signing is not offered when the proposal's payment
+// terms are not Net 30 (signingBlocked), so the line can say what to change.
+async function agreementAdminStatus(estimate, conn = db) {
+  const state = await agreementStateForEstimate(estimate.id, conn);
+  const eligibility = signEligibility(estimate);
+  return state.state !== 'signed' && eligibility.reason === 'payment_terms'
+    ? { ...state, signingBlocked: 'payment_terms', note: PAYMENT_TERMS_NOTE }
+    : state;
 }
 
 function refusal(status, code, error) {
@@ -179,8 +211,7 @@ function refusal(status, code, error) {
 // `blockedFor(trx, lockedEstimate)` re-runs the route's eligibility checks on
 // the estimate row locked here; true = the estimate stopped being signable.
 async function ensureAgreement({ estimate, req = {}, blockedFor = async () => false, database = db }) {
-  const found = signableProposal(estimate);
-  if (!found) return refusal(404, 'not_signable', 'Estimate not found');
+  if (!signEligibility(estimate).ok) return refusal(404, 'not_signable', 'Estimate not found');
   if (!estimate.customer_id) {
     return refusal(409, 'no_customer', 'We need to set up your account before you can sign online. Please call us and we will get you started.');
   }
@@ -210,8 +241,8 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
     // the order the accept path and the contract sign route already hold.
     const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
     if (!locked || await blockedFor(trx, locked)) return refusal(404, 'not_signable', 'Estimate not found');
-    const lockedFound = signableProposal(locked);
-    if (!lockedFound) return refusal(404, 'not_signable', 'Estimate not found');
+    const lockedFound = signEligibility(locked);
+    if (!lockedFound.ok) return refusal(404, 'not_signable', 'Estimate not found');
     if (!locked.customer_id) return refusal(409, 'no_customer', 'We need to set up your account before you can sign online. Please call us and we will get you started.');
 
     await lockCustomerComms(trx, locked.customer_id);
@@ -226,9 +257,7 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
 
     const values = buildAgreementValues(locked, lockedFound.proposal, lockedFound.totals);
     // The whole quote this agreement is for. An open agreement is reused only when the quote is identical.
-    values.estimate.fingerprint = quoteFingerprint({
-      proposal: lockedFound.proposal, totals: lockedFound.totals, values, customerId: customer.id, templateVersionId: version.id,
-    });
+    values.estimate.fingerprint = currentFingerprint(locked, lockedFound, version.id);
     const now = new Date();
     const expiresAt = documentContractExpiresAt(now, template.expire_after_days, template);
 
@@ -325,6 +354,61 @@ async function ensureAgreement({ estimate, req = {}, blockedFor = async () => fa
   return { ...outcome, signingUrl: publicContractUrl(token) };
 }
 
+const STALE_PROPOSAL_MESSAGE = 'This proposal was updated. Please open the latest proposal to sign.';
+
+// Sign boundary, step 1 (contracts-public POST /:token/sign, BEFORE it locks the customer row): for a contract this
+// feature issued, lock the estimate row and run the issuer's own locked re-check. Lock order is the issuer's:
+// estimates → leads → call_log → customers → contracts, so the two paths cannot deadlock. null = not ours.
+async function lockEstimateForSign(trx, contractPeek) {
+  if (contractPeek?.document_template_key !== TEMPLATE_KEY) return null;
+  const snapEstimate = parseJson(contractPeek.document_variables_snapshot)?.estimate;
+  if (snapEstimate?.source !== SNAPSHOT_SOURCE || !snapEstimate.id) return null;
+  const estimate = await trx('estimates').where({ id: snapEstimate.id }).forUpdate().first();
+  const { commercialAgreementBlockedFor } = require('../routes/estimate-public');
+  return { estimate, blocked: !estimate || await commercialAgreementBlockedFor(trx, estimate) };
+}
+
+// Sign boundary, step 2 (inside the sign transaction, with the contract locked, before it writes 'signed'): the
+// contract may be signed only while the quote it shows is still the quote: gate on, estimate still open, Net 30 still
+// authored, same customer, same fingerprint. Otherwise the stale open contract is cancelled in the same transaction
+// (the caller commits it) and the caller answers 409 with the returned message. null = fine to sign.
+async function refuseStaleSignature({ trx, contract, estimateLock, req = {} }) {
+  let reason = null;
+  const { estimate } = estimateLock;
+  if (!require('../config/feature-gates').commercialProposalSignLive()) reason = 'gate_off';
+  else if (estimateLock.blocked) reason = 'estimate_closed';
+  else {
+    const eligibility = signEligibility(estimate);
+    if (!eligibility.ok) reason = eligibility.reason;
+    else if (String(estimate.customer_id) !== String(contract.customer_id)) reason = 'customer_changed';
+    else if (parseJson(contract.document_variables_snapshot)?.estimate?.fingerprint
+      !== currentFingerprint(estimate, eligibility, contract.document_template_version_id)) reason = 'proposal_changed';
+  }
+  if (!reason) return null;
+  const now = new Date();
+  const cancelled = await trx('customer_contracts').where({ id: contract.id }).whereIn('status', OPEN_STATUSES).update({
+    status: 'cancelled',
+    cancelled_at: now,
+    cancelled_reason: 'Superseded: the proposal changed before it was signed',
+    share_token_hash: null,
+    share_token_expires_at: null,
+    updated_at: now,
+  });
+  if (cancelled) {
+    await trx('customer_contract_events').insert({
+      contract_id: contract.id,
+      customer_id: contract.customer_id,
+      event_type: 'cancelled',
+      actor_type: 'system',
+      actor_id: null,
+      ip: req.ip || null,
+      user_agent: req.get ? (req.get('user-agent') || null) : null,
+      metadata: JSON.stringify({ reason: 'stale_at_signature', cause: reason, estimateId: estimate?.id || null }),
+    });
+  }
+  return STALE_PROPOSAL_MESSAGE;
+}
+
 // After a customer signs (contracts-public, after commit): tell the office the
 // agreement is in, and leave an activity row on the estimate. Never throws.
 // Inert for any contract this module did not issue. The estimate is NOT touched.
@@ -388,6 +472,12 @@ module.exports = {
   START_DATE_TEXT,
   buildAgreementValues,
   signableProposal,
+  signEligibility,
+  PAYMENT_TERMS_NOTE,
+  STALE_PROPOSAL_MESSAGE,
+  agreementAdminStatus,
+  lockEstimateForSign,
+  refuseStaleSignature,
   agreementStateForEstimate,
   agreementCtaFor,
   ensureAgreement,

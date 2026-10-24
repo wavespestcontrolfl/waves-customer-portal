@@ -151,11 +151,18 @@ router.post('/:token/sign', async (req, res, next) => {
       // decision below reads the LOCKED rows).
       const contractPeek = await trx('customer_contracts')
         .where({ share_token_hash: tokenHash })
-        .first('id', 'customer_id');
+        .first('id', 'customer_id', 'document_template_key', 'document_variables_snapshot');
       if (!contractPeek) {
         response = { status: 404, body: { error: 'Contract not found' } };
         return;
       }
+      // Commercial proposal agreement (GATE_COMMERCIAL_PROPOSAL_SIGN): the estimate row is locked FIRST, before the
+      // customer row, the order the agreement issuer holds (estimates → leads → call_log → customers → contracts), so
+      // the two paths cannot deadlock. Null for every other contract (the service is not even loaded).
+      const commercial = contractPeek.document_template_key === COMMERCIAL_AGREEMENT_TEMPLATE_KEY
+        ? require('../services/commercial-proposal-agreement')
+        : null;
+      const estimateLock = commercial ? await commercial.lockEstimateForSign(trx, contractPeek) : null;
       if (contractPeek.customer_id) {
         await trx('customers').where({ id: contractPeek.customer_id }).forUpdate().first('id');
       }
@@ -185,6 +192,16 @@ router.post('/:token/sign', async (req, res, next) => {
       if (['cancelled', 'voided'].includes(locked.status)) {
         response = { status: 410, body: { error: 'Contract is no longer available', status: locked.status } };
         return;
+      }
+
+      // The signature is only good for the quote the contract shows: a proposal edited, an estimate closed, Net 30 dropped
+      // or the gate thrown since it was issued cancels the stale contract (committed with this transaction) and refuses.
+      if (estimateLock) {
+        const stale = await commercial.refuseStaleSignature({ trx, contract: locked, estimateLock, req });
+        if (stale) {
+          response = { status: 409, body: { error: stale, code: 'proposal_changed' } };
+          return;
+        }
       }
 
       const contract = await contractQuery(trx).where('cc.id', locked.id).first();

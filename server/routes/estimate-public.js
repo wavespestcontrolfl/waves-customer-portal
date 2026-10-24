@@ -19157,6 +19157,22 @@ function commercialAgreementPreGuard(req, res, next) {
   return next();
 }
 
+// The eligibility checks the commercial-agreement issuer and the contract sign route both re-run on the estimate row they
+// have locked (estimates → leads → call_log): a decline, expiry, archive or linkage correction landing in between wins.
+// true = the estimate is no longer open for online signing.
+async function commercialAgreementBlockedFor(trx, locked) {
+  if (!isEstimateCustomerViewable(locked) || !isEstimateAcceptActive(locked)) return true;
+  const linkData = parseEstimateDataSafe(locked);
+  const eng = linkData?.estimatorEngine;
+  if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+  if (await callSideBlockForEstimateData(trx, linkData, { estimateStatus: locked.status })) return true;
+  const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+  if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+    await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+  }
+  return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true, estimateStatus: locked.status }));
+}
+
 // POST /api/estimates/:token/commercial-agreement — the proposal's "Accept &
 // sign agreement" tap (GATE_COMMERCIAL_PROPOSAL_SIGN). Issues, or re-opens, the
 // Commercial Pest Service Agreement for the estimate's customer and returns its
@@ -19178,21 +19194,7 @@ router.post('/:token/commercial-agreement', commercialAgreementLimiter, async (r
     if (!estimate) return notFound();
     if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return notFound();
     if (!isEstimateCustomerViewable(estimate) || !isEstimateAcceptActive(estimate)) return notFound();
-    // The same checks again on the row the service locks (estimates → leads →
-    // call_log): a decline, expiry or linkage correction landing in between wins.
-    const blockedFor = async (trx, locked) => {
-      if (!isEstimateCustomerViewable(locked) || !isEstimateAcceptActive(locked)) return true;
-      const linkData = parseEstimateDataSafe(locked);
-      const eng = linkData?.estimatorEngine;
-      if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
-      if (await callSideBlockForEstimateData(trx, linkData, { estimateStatus: locked.status })) return true;
-      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
-      if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
-        await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
-      }
-      return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true, estimateStatus: locked.status }));
-    };
-    const result = await require('../services/commercial-proposal-agreement').ensureAgreement({ estimate, req, blockedFor });
+    const result = await require('../services/commercial-proposal-agreement').ensureAgreement({ estimate, req, blockedFor: commercialAgreementBlockedFor });
     if (!result.ok) {
       return res.status(result.status).json(result.status === 404 ? { error: 'Estimate not found' } : { error: result.error, code: result.code });
     }
@@ -31888,6 +31890,7 @@ module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
+module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;

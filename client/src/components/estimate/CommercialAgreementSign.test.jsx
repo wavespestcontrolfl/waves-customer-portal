@@ -18,6 +18,19 @@ describe('CommercialAgreementSign', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('payment terms not Net 30 (canSign false, reason): a call-us card with no button and no account wording', () => {
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: false, state: 'none', reason: 'payment_terms' }} />);
+    expect(screen.queryByRole('button', { name: SIGN_BUTTON_LABEL })).not.toBeInTheDocument();
+    const card = screen.getByTestId('commercial-agreement-call');
+    expect(card).toHaveTextContent('Call us at (941) 297-5749 and we will finish your agreement with you.');
+    expect(card).not.toHaveTextContent('set up your account');
+  });
+
+  it('no account (canSign false, no reason): the account wording', () => {
+    render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: false, state: 'none' }} />);
+    expect(screen.getByTestId('commercial-agreement-call')).toHaveTextContent('set up your account');
+  });
+
   it('awaiting: offers to pick up where the customer left off', () => {
     render(<CommercialAgreementSign token="tok-1" commercialAgreement={{ canSign: true, state: 'awaiting' }} />);
     expect(screen.getByText(/Pick up where you left off/)).toBeInTheDocument();

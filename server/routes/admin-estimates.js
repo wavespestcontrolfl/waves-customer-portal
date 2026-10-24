@@ -4368,7 +4368,7 @@ router.get('/:id/proposal', async (req, res, next) => {
     let commercialAgreement = null;
     if (require('../config/feature-gates').commercialProposalSignLive()) {
       try {
-        commercialAgreement = await require('../services/commercial-proposal-agreement').agreementStateForEstimate(estimate.id);
+        commercialAgreement = await require('../services/commercial-proposal-agreement').agreementAdminStatus(estimate);
       } catch (_) { commercialAgreement = null; }
     }
     res.json({

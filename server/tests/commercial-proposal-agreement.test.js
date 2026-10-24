@@ -11,108 +11,17 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('../routes/estimate-public', () => ({ commercialAgreementBlockedFor: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
 
 const NotificationService = require('../services/notification-service');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
-  TEMPLATE_KEY, SNAPSHOT_SOURCE, START_DATE_TEXT, ensureAgreement, agreementStateForEstimate, agreementCtaFor, handleAgreementSigned,
+  TEMPLATE_KEY, SNAPSHOT_SOURCE, START_DATE_TEXT, ensureAgreement, agreementStateForEstimate, agreementCtaFor, agreementAdminStatus,
+  signEligibility, lockEstimateForSign, refuseStaleSignature, handleAgreementSigned,
 } = require('../services/commercial-proposal-agreement');
 
-const BODY = [
-  'Commercial Pest Service Agreement',
-  'Business / account: {{customer.name}}',
-  'Service location(s): {{customer.address}}',
-  'Service plan: {{service.name}}',
-  'Start date: {{agreement.start_date}}',
-].join('\n');
-const TEMPLATE = { id: 'tpl-1', template_key: TEMPLATE_KEY, status: 'active', active_version_id: 'ver-1', requires_signature: true, expire_after_days: 14, name: 'Commercial Pest Service Agreement' };
-const VERSION = { id: 'ver-1', template_id: 'tpl-1', version_number: 1, title: 'Commercial Pest Service Agreement', body: BODY, signer_disclosure: 'I agree to sign electronically.' };
-
-function estimateRow(overrides = {}, proposalOverrides = {}) {
-  return {
-    id: 'est-0001',
-    estimate_slug: 'EST-2026-0042',
-    customer_id: 'cust-1',
-    status: 'viewed',
-    customer_name: 'Harbor Plaza Association',
-    address: '100 Sample Way, Bradenton, FL 34205',
-    estimate_data: {
-      proposal: {
-        enabled: true,
-        title: 'Commercial Service Proposal',
-        preparedFor: 'Harbor Plaza Association LLC',
-        propertyAddress: '100 Sample Way, Bradenton, FL 34205',
-        taxRate: 0.07,
-        taxLabel: 'Sales tax',
-        buildings: [{ name: 'Main building', lineItems: [{ description: 'Quarterly pest service', quantity: 1, unitPrice: 300, frequency: 'quarterly', taxable: true }] }],
-        ...proposalOverrides,
-      },
-    },
-    ...overrides,
-  };
-}
-
-const CUSTOMER = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', email: 'pat@example.com', phone: '+19415550100', address_line1: '9 Home St', active: true };
-
-// A tiny in-memory stand-in for the tables the service touches.
-function makeDb({ estimate = estimateRow(), customer = CUSTOMER, contracts = [], template = TEMPLATE, version = VERSION } = {}) {
-  const state = { estimate, customer, template, version, contracts: contracts.map((c) => ({ ...c })), events: [], writes: [] };
-  const snapshotEstimateId = (row) => {
-    const snap = typeof row.document_variables_snapshot === 'string' ? JSON.parse(row.document_variables_snapshot) : row.document_variables_snapshot;
-    return snap?.estimate?.id;
-  };
-  const make = (table) => {
-    const q = { where: {}, statusIn: null, statusNotIn: null, estimateId: null };
-    const api = {
-      where(obj) { Object.assign(q.where, obj); return api; },
-      whereNull() { return api; },
-      whereIn(col, vals) { if (col === 'status') q.statusIn = vals; return api; },
-      whereNotIn(col, vals) { if (col === 'status') q.statusNotIn = vals; return api; },
-      whereRaw(_sql, binds) { q.estimateId = binds[0]; return api; },
-      orderByRaw() { return api; },
-      forUpdate() { return api; },
-      async first() {
-        if (table === 'document_templates') return q.where.template_key ? state.template : { active_version_id: state.template.active_version_id, status: state.template.status, template_key: state.template.template_key };
-        if (table === 'document_template_versions') return state.version;
-        if (table === 'estimates') return state.estimate;
-        if (table === 'customers') return state.customer;
-        if (table === 'customer_contracts') {
-          const rows = state.contracts
-            .filter((c) => (q.where.id ? c.id === q.where.id : c.document_template_key === q.where.document_template_key))
-            .filter((c) => q.estimateId == null || String(snapshotEstimateId(c)) === String(q.estimateId))
-            .filter((c) => !q.statusIn || q.statusIn.includes(c.status))
-            .filter((c) => !q.statusNotIn || !q.statusNotIn.includes(c.status))
-            .sort((a, b) => (b.status === 'signed') - (a.status === 'signed'));
-          return rows[0] || null;
-        }
-        return null;
-      },
-      async update(payload) {
-        state.writes.push({ table, op: 'update', payload });
-        if (table !== 'customer_contracts') return 1;
-        const row = state.contracts.find((c) => c.id === q.where.id && (!q.statusIn || q.statusIn.includes(c.status)));
-        if (!row) return 0;
-        Object.assign(row, payload);
-        return 1;
-      },
-      insert(row) {
-        state.writes.push({ table, op: 'insert', payload: row });
-        const stored = { id: `contract-${state.contracts.length + 1}`, created_at: new Date(), ...row };
-        if (table === 'customer_contracts') state.contracts.push(stored);
-        if (table === 'customer_contract_events') state.events.push(row);
-        const result = Promise.resolve([1]);
-        result.returning = async () => [stored];
-        return result;
-      },
-    };
-    return api;
-  };
-  const database = (table) => make(table);
-  database.transaction = async (cb) => cb(database);
-  database.raw = (s) => s;
-  return { database, state };
-}
+const { TEMPLATE, VERSION, CUSTOMER, estimateRow, makeDb } = require('./helpers/commercial-agreement-fake-db');
 
 const req = { ip: '203.0.113.9', get: () => 'jest-agent' };
 const estimateWrites = (state) => state.writes.filter((w) => w.table === 'estimates');
@@ -294,6 +203,155 @@ describe('quote fingerprint: an open agreement is reused only for the identical 
     state.version = { ...VERSION, id: 'ver-2' };
     state.template = { ...TEMPLATE, active_version_id: 'ver-2' };
     expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: true, status: 201, created: true });
+  });
+});
+
+describe('payment terms: online signing is offered only for Net 30 (the template promises it)', () => {
+  const withTerms = (commercialTerms) => estimateRow({}, { commercialTerms });
+  const REFUSED = [
+    ['unset', undefined],
+    ['terms authored without a payment term', { initialTermMonths: 12 }],
+    ['due on receipt', { paymentTerms: 'due_on_receipt' }],
+    ['Net-15', { paymentTerms: 'net15' }],
+  ];
+
+  test('Net 30 (any spelling the normalizer accepts) is allowed', async () => {
+    for (const paymentTerms of ['net30', 'Net-30', 'NET 30']) {
+      const estimate = withTerms({ paymentTerms });
+      expect(signEligibility(estimate)).toMatchObject({ ok: true });
+      const { database } = makeDb({ estimate });
+      expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: true, status: 201 });
+    }
+  });
+
+  test.each(REFUSED)('%s: the one predicate says payment_terms', (_label, terms) => {
+    const estimate = withTerms(terms);
+    expect(signEligibility(estimate)).toMatchObject({ ok: false, reason: 'payment_terms' });
+  });
+
+  test.each(REFUSED)('%s: the issuer refuses with the generic 404 and writes nothing', async (_label, terms) => {
+    const estimate = withTerms(terms);
+    const { database, state } = makeDb({ estimate });
+    expect(await ensureAgreement({ estimate, req, database })).toMatchObject({ ok: false, status: 404, code: 'not_signable' });
+    expect(state.writes).toEqual([]);
+  });
+
+  test('the locked re-check refuses too: terms changed to Net-15 between the route read and the lock', async () => {
+    const { database, state } = makeDb({ estimate: withTerms({ paymentTerms: 'net15' }) });
+    expect(await ensureAgreement({ estimate: estimateRow(), req, database })).toMatchObject({ ok: false, status: 404 });
+    expect(state.writes).toEqual([]);
+  });
+
+  test.each(REFUSED)('%s: /data gets canSign false with a reason (no button)', async (_label, terms) => {
+    const { database } = makeDb();
+    expect(await agreementCtaFor(withTerms(terms), database)).toEqual({ canSign: false, state: 'none', reason: 'payment_terms' });
+  });
+
+  test('Net 30 keeps the normal block', async () => {
+    const { database } = makeDb();
+    expect(await agreementCtaFor(estimateRow(), database)).toEqual({ canSign: true, state: 'none' });
+  });
+
+  test.each(REFUSED)('%s: the builder status says what to change', async (_label, terms) => {
+    const { database } = makeDb();
+    expect(await agreementAdminStatus(withTerms(terms), database)).toEqual({
+      state: 'none', signingBlocked: 'payment_terms', note: 'Online signing needs payment terms set to Net 30 (the agreement’s terms).',
+    });
+    expect(await agreementAdminStatus(estimateRow(), database)).toEqual({ state: 'none' });
+  });
+
+  test('a signed agreement stays signed in the builder and on the page whatever the terms say now', async () => {
+    const { database, state } = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database });
+    state.contracts[0].status = 'signed';
+    expect(await agreementAdminStatus(withTerms({ paymentTerms: 'net15' }), database)).toMatchObject({ state: 'signed' });
+    expect(await agreementAdminStatus(withTerms({ paymentTerms: 'net15' }), database)).not.toHaveProperty('signingBlocked');
+    expect(await agreementCtaFor(withTerms({ paymentTerms: 'net15' }), database)).toEqual({ canSign: false, state: 'signed' });
+  });
+});
+
+describe('sign boundary: a contract may be signed only for the quote it shows', () => {
+  const { commercialAgreementBlockedFor } = require('../routes/estimate-public');
+  const MESSAGE = 'This proposal was updated. Please open the latest proposal to sign.';
+
+  async function issued() {
+    const made = makeDb();
+    await ensureAgreement({ estimate: estimateRow(), req, database: made.database });
+    return made;
+  }
+  // What contracts-public does: lock the estimate (step 1), then refuse or allow at signing (step 2).
+  async function signAttempt({ database, state }) {
+    const contract = state.contracts[0];
+    const estimateLock = await lockEstimateForSign(database, contract);
+    return { estimateLock, refusal: await refuseStaleSignature({ trx: database, contract, estimateLock, req }) };
+  }
+  const cancelledEvents = (state) => state.events.filter((e) => e.event_type === 'cancelled');
+
+  beforeEach(() => commercialAgreementBlockedFor.mockReset().mockResolvedValue(false));
+
+  test('the contract as issued (nothing edited) is fine to sign: issue and sign-time fingerprints agree', async () => {
+    const made = await issued();
+    const { estimateLock, refusal } = await signAttempt(made);
+    expect(estimateLock).toMatchObject({ blocked: false });
+    expect(refusal).toBeNull();
+    expect(made.state.contracts[0].status).toBe('sent');
+    expect(cancelledEvents(made.state)).toHaveLength(0);
+  });
+
+  test('a proposal re-saved with new row ids is still the same quote', async () => {
+    const made = await issued();
+    made.state.estimate = estimateRow({}, { buildings: [{ name: 'Main building', lineItems: [{ id: 'new-row-id', description: 'Quarterly pest service', quantity: 1, unitPrice: 300, frequency: 'quarterly', taxable: true }] }] });
+    expect((await signAttempt(made)).refusal).toBeNull();
+  });
+
+  test.each([
+    ['a one-time charge was added', () => ({ proposal: { buildings: [{ name: 'Main building', lineItems: [{ description: 'Quarterly pest service', quantity: 1, unitPrice: 300, frequency: 'quarterly', taxable: true }, { description: 'Cleanout', quantity: 1, unitPrice: 250, frequency: 'one_time' }] }] } })],
+    ['the tax rate changed', () => ({ proposal: { taxRate: 0.06 } })],
+    ['the terms changed', () => ({ proposal: { terms: 'Net-45 billing.' } })],
+    ['payment terms were changed to Net-15', () => ({ proposal: { commercialTerms: { paymentTerms: 'net15' } } })],
+    ['payment terms were cleared', () => ({ proposal: { commercialTerms: null } })],
+    ['the estimate moved to another customer', () => ({ estimate: { customer_id: 'cust-2' } })],
+  ])('%s after issue: signing is refused, the stale contract is cancelled, nothing is signed', async (_label, build) => {
+    const made = await issued();
+    const { proposal = {}, estimate = {} } = build();
+    made.state.estimate = estimateRow(estimate, proposal);
+    const { refusal } = await signAttempt(made);
+    expect(refusal).toBe(MESSAGE);
+    expect(made.state.contracts[0]).toMatchObject({ status: 'cancelled', share_token_hash: null, share_token_expires_at: null });
+    expect(made.state.contracts[0].signed_at).toBeUndefined();
+    expect(cancelledEvents(made.state)).toHaveLength(1);
+    expect(JSON.parse(cancelledEvents(made.state)[0].metadata)).toMatchObject({ reason: 'stale_at_signature' });
+    expect(estimateWrites(made.state)).toEqual([]);
+  });
+
+  test('an estimate that is no longer open (accepted, declined, expired, archived) refuses and cancels', async () => {
+    const made = await issued();
+    commercialAgreementBlockedFor.mockResolvedValue(true);
+    expect((await signAttempt(made)).refusal).toBe(MESSAGE);
+    expect(made.state.contracts[0].status).toBe('cancelled');
+    expect(JSON.parse(cancelledEvents(made.state)[0].metadata)).toMatchObject({ cause: 'estimate_closed' });
+  });
+
+  test('the gate off at signing refuses and cancels', async () => {
+    const made = await issued();
+    delete process.env.GATE_COMMERCIAL_PROPOSAL_SIGN;
+    expect((await signAttempt(made)).refusal).toBe(MESSAGE);
+    expect(made.state.contracts[0].status).toBe('cancelled');
+    expect(JSON.parse(cancelledEvents(made.state)[0].metadata)).toMatchObject({ cause: 'gate_off' });
+  });
+
+  test('the locked re-check the route uses is the one handed to the sign boundary', async () => {
+    const made = await issued();
+    await signAttempt(made);
+    expect(commercialAgreementBlockedFor).toHaveBeenCalledWith(made.database, expect.objectContaining({ id: 'est-0001' }));
+  });
+
+  test('a contract this feature did not issue is not ours: no estimate lock, no check', async () => {
+    const made = await issued();
+    const contract = made.state.contracts[0];
+    expect(await lockEstimateForSign(made.database, { ...contract, document_template_key: 'service_agreement.residential_pest' })).toBeNull();
+    expect(await lockEstimateForSign(made.database, { ...contract, document_variables_snapshot: JSON.stringify({ customer: { name: 'Hand Issued LLC' } }) })).toBeNull();
+    expect(commercialAgreementBlockedFor).not.toHaveBeenCalled();
   });
 });
 
