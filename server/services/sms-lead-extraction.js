@@ -42,6 +42,14 @@ const DEFAULT_LIMIT = 10;
 const INBOUND_TYPES = ['inbound', 'domain_lead', 'van_lead'];
 // Lines nobody uses to ask for service (twilio-numbers.js `type`).
 const SKIP_SOURCES = ['tech_line', 'internal_alert'];
+// The same lines by NUMBER: with GATE_TECH_LINES off a tech line, and always
+// the internal alert line, route (and are stored) as type 'location'.
+function internalLineDigits() {
+  const numbers = require('../config/twilio-numbers');
+  const alert = numbers.internalAlertLine();
+  return [...numbers.fieldTech.map((t) => t.number), ...(alert ? [alert.number] : [])]
+    .map((n) => String(n || '').replace(/\D/g, '')).filter(Boolean);
+}
 
 const KINDS = ['new_service_request', 'existing_job', 'spam_or_solicitation', 'wrong_number', 'job_seeker', 'vendor', 'other'];
 const NULLABLE_STRING = { type: ['string', 'null'] };
@@ -105,6 +113,7 @@ async function findCandidates({ limit = DEFAULT_LIMIT, now = new Date() } = {}) 
          AND created_at >= ?
          AND COALESCE(message_body, '') <> ''
          AND COALESCE(metadata->>'source', '') <> ALL(?::text[])
+         AND regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g') <> ALL(?::text[])
          AND regexp_replace(from_phone, '[^0-9]', '', 'g') ~ '^1{0,1}[0-9]{10}$'
        ORDER BY RIGHT(regexp_replace(from_phone, '[^0-9]', '', 'g'), 10), created_at DESC
     )
@@ -121,7 +130,7 @@ async function findCandidates({ limit = DEFAULT_LIMIT, now = new Date() } = {}) 
        )
      ORDER BY latest.created_at DESC
      LIMIT ?`,
-  [INBOUND_TYPES, since, SKIP_SOURCES, quietBefore, MAX_ATTEMPTS,
+  [INBOUND_TYPES, since, SKIP_SOURCES, internalLineDigits(), quietBefore, MAX_ATTEMPTS,
     new Date(now.getTime() - STALE_RUNNING_MINUTES * 60_000), limit]);
   return rows;
 }
@@ -179,13 +188,14 @@ async function knownState(phone, phone10) {
   return { status: 'existing_lead' };
 }
 
-async function loadThread(phone10, throughAt) {
-  const from = new Date(new Date(throughAt).getTime() - THREAD_LOOKBACK_HOURS * 3_600_000);
+// Bounded by the newest inbound row's own stored timestamp, read in SQL: a JS
+// Date drops Postgres's microseconds, which would cut that very text off.
+async function loadThread(phone10, throughSmsLogId) {
   const rows = await db('sms_log')
     .where((q) => q.whereRaw(nanpSql('from_phone'), nanpKeys(phone10))
       .orWhereRaw(nanpSql('to_phone'), nanpKeys(phone10)))
-    .where('created_at', '>=', from)
-    .where('created_at', '<=', throughAt)
+    .whereRaw(`created_at >= (SELECT created_at FROM sms_log WHERE id = ?) - interval '${THREAD_LOOKBACK_HOURS} hours'`, [throughSmsLogId])
+    .whereRaw('created_at <= (SELECT created_at FROM sms_log WHERE id = ?)', [throughSmsLogId])
     .whereRaw("COALESCE(message_body, '') <> ''")
     // An in-flight send reservation is not a text Waves sent: never show it to the model.
     .modify(excludeUnresolvedSendReservations)
@@ -333,7 +343,7 @@ async function processCandidate(candidate) {
       await finish(id, { status: known.status });
       return { status: known.status };
     }
-    const rows = await loadThread(candidate.phone_last10, candidate.created_at);
+    const rows = await loadThread(candidate.phone_last10, candidate.sms_log_id);
     if (spamScreened(rows)) {
       await finish(id, { status: 'spam_screen' });
       return { status: 'spam_screen' };

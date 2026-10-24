@@ -31,12 +31,12 @@ postgres('text-thread lead reader', () => {
   const NOW = new Date();
   const ago = (minutes) => new Date(NOW.getTime() - minutes * 60_000);
 
-  const text = async (body, { minutesAgo = 10, direction = 'inbound', from = TEXTER, type, metadata = null } = {}) => {
+  const text = async (body, { minutesAgo = 10, direction = 'inbound', from = TEXTER, to = OUR_NUMBER, type, metadata = null } = {}) => {
     const id = randomUUID();
     await trx('sms_log').insert({
       id, customer_id: null, direction,
-      from_phone: direction === 'inbound' ? from : OUR_NUMBER,
-      to_phone: direction === 'inbound' ? OUR_NUMBER : from,
+      from_phone: direction === 'inbound' ? from : to,
+      to_phone: direction === 'inbound' ? to : from,
       message_body: body, created_at: ago(minutesAgo),
       status: direction === 'inbound' ? 'received' : 'sent',
       message_type: type || (direction === 'inbound' ? 'inbound' : 'manual'),
@@ -285,8 +285,19 @@ postgres('text-thread lead reader', () => {
     expect(lead.customer_id).toBeNull();
   });
 
-  test('texts to the tech line are not candidates', async () => {
+  test('texts to the tech line are not candidates, even when routed as an office line', async () => {
     await text('Running late to the next stop', { minutesAgo: 10, metadata: { source: 'tech_line' } });
+    // GATE_TECH_LINES off: the webhook stores the tech line's texts with source 'location'.
+    await text('Gate code for the next stop?', { minutesAgo: 10, from: '+19415550133', to: numbers.fieldTech[0].number, metadata: { source: 'location' } });
     expect((await sweep()).candidates).toBe(0);
+  });
+
+  test('a text whose stored time has microseconds is still in its own thread', async () => {
+    // The webhook lets Postgres stamp created_at (microsecond precision).
+    const id = await text('Need a quote for mosquito control', { minutesAgo: 10 });
+    await trx.raw("UPDATE sms_log SET created_at = created_at + interval '456 microseconds' WHERE id = ?", [id]);
+    modelSays(answer({ requested_service: 'mosquito control' }));
+    await sweep();
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('Need a quote for mosquito control');
   });
 });
