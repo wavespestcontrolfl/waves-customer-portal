@@ -20,9 +20,9 @@ afterEach(() => {
 
 const CONFLICT = {
   reason: 'water_in_conflict',
-  products: ['Dylox 6.2 G', 'Advion Insect Granule'],
+  products: ['Dylox 6.2 G', 'Anuew EZ'],
   waterInProducts: ['Dylox 6.2 G'],
-  holdProducts: ['Advion Insect Granule'],
+  holdProducts: ['Anuew EZ'],
 };
 const TOO_LATE = { reason: 'same_day_too_late', products: ['Dylox 6.2 G'], waterInProducts: ['Dylox 6.2 G'] };
 
@@ -58,7 +58,7 @@ describe('lawn watering tech note', () => {
     expect(h.tech).toHaveBeenCalledTimes(1);
     expect(h.tech).toHaveBeenCalledWith('tech-1', {
       type: 'lawn_watering_tech_note',
-      message: 'Dylox 6.2 G needs watering in, and Advion Insect Granule needs time with no water. No text to the customer can do both. Water Dylox 6.2 G in on site before you leave. Next time, water it in before you apply Advion Insect Granule.',
+      message: 'Dylox 6.2 G needs watering in, and Anuew EZ needs time with no water. No text to the customer can do both. Water Dylox 6.2 G in on site before you leave. Next time, water it in before you apply Anuew EZ.',
       payload: {
         headline: 'Water this in before you leave',
         customer_name: 'Pat Sample',
@@ -88,19 +88,19 @@ describe('lawn watering tech note', () => {
   });
 
   test('without the optional fields: first product, and "another product on this visit"', async () => {
-    const h = harness({ noClaim: { reason: 'water_in_conflict', products: ['Dylox 6.2 G', 'Advion Insect Granule'] } });
+    const h = harness({ noClaim: { reason: 'water_in_conflict', products: ['Dylox 6.2 G', 'Anuew EZ'] } });
     await sendLawnWateringSms(h.state, h.deps);
     expect(h.tech.mock.calls[0][1].message).toBe('Dylox 6.2 G needs watering in, and another product on this visit needs time with no water. No text to the customer can do both. Water Dylox 6.2 G in on site before you leave. Next time, water it in before you apply another product on this visit.');
   });
 
   test('several names join with " and "; the payload leaves out a missing address', async () => {
     const h = harness({
-      noClaim: { ...CONFLICT, waterInProducts: ['Dylox 6.2 G', 'Merit 0.5 G'], holdProducts: ['Advion Insect Granule', 'Scimitar CS'] },
+      noClaim: { ...CONFLICT, waterInProducts: ['Dylox 6.2 G', 'Merit 0.5 G'], holdProducts: ['Anuew EZ', 'Scimitar CS'] },
       svc: { service_address_line1: null },
     });
     await sendLawnWateringSms(h.state, h.deps);
     const [, card] = h.tech.mock.calls[0];
-    expect(card.message).toContain('Dylox 6.2 G and Merit 0.5 G needs watering in, and Advion Insect Granule and Scimitar CS needs time');
+    expect(card.message).toContain('Dylox 6.2 G and Merit 0.5 G needs watering in, and Anuew EZ and Scimitar CS needs time');
     expect(card.payload).not.toHaveProperty('address');
   });
 
@@ -155,5 +155,25 @@ describe('lawn watering tech note', () => {
     const [, , opts] = h.raiseAdminAlert.mock.calls[0];
     expect(opts.detail).toContain('the visit ended too late to fit a run that day');
     expect(opts.detail).not.toContain('11 PM');
+  });
+});
+
+// The real producer: the label ladder's no-claim names which product to water in.
+describe('the note from a real clash', () => {
+  const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const { techNoteMessage } = require('../services/service-report/lawn-watering-tech-note');
+  const DYLOX = { name: 'Dylox 6.2 G', rule: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'owner' } };
+  const ANUEW = { name: 'Anuew EZ', rule: { mode: 'hold', hold_hours: 4, source: 'label' } };
+
+  test('Dylox with Anuew EZ after 5 PM: water the Dylox in on site', () => {
+    // Tue 6 PM ET: Anuew's 4 hours end at 10 PM, too late for a full run before midnight.
+    const ins = buildWateringInstruction({ rules: [DYLOX, ANUEW], completedAt: '2026-10-27T22:00:00Z', plainWhenNoSetup: true, labelFirst: true });
+    expect(ins.state).toBeNull();
+    expect(techNoteMessage(ins.noClaim)).toBe('Dylox 6.2 G needs watering in, and Anuew EZ needs time with no water. No text to the customer can do both. Water Dylox 6.2 G in on site before you leave. Next time, water it in before you apply Anuew EZ.');
+  });
+
+  test('Dylox alone after 9 PM: water it in on site', () => {
+    const ins = buildWateringInstruction({ rules: [DYLOX], completedAt: '2026-10-28T01:30:00Z', plainWhenNoSetup: true, labelFirst: true });
+    expect(techNoteMessage(ins.noClaim)).toBe('Dylox 6.2 G must be watered in today, and this visit ended too late for the customer to run a full watering. Water it in on site before you leave.');
   });
 });

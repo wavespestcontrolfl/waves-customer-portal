@@ -99,3 +99,19 @@ describe('lawn watering yield note', () => {
     expect(yieldNoteText({ holds: ['A', 'B'], waterIns: ['C', 'D'] })).toBe('The customer was told to water A and B in with C and D, whose label needs it. The bait may need to go down again.');
   });
 });
+
+// The real producer: the label ladder records which bait gave way, and to what.
+describe('the yield note from a real visit', () => {
+  const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const { yieldNoteText } = require('../services/service-report/lawn-watering-yield-note');
+
+  test('Advion Insect Granule beside Dylox: the bait gives way and the note names both', () => {
+    const rules = [
+      { name: 'Dylox 6.2 G', rule: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'owner' } },
+      { name: 'Advion Insect Granule', rule: { mode: 'hold', hold_hours: 72, yields_to_label_water_in: true, source: 'owner' } },
+    ];
+    const ins = buildWateringInstruction({ rules, completedAt: '2026-10-27T13:00:00Z', plainWhenNoSetup: true, labelFirst: true });
+    expect(ins.state).toBe('water_in');
+    expect(yieldNoteText(ins.yielded)).toBe('The customer was told to water Advion Insect Granule in with Dylox 6.2 G, whose label needs it. The bait may need to go down again.');
+  });
+});
