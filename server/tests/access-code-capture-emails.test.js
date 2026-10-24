@@ -118,6 +118,42 @@ describe('the customer\'s new words only', () => {
   });
 });
 
+describe('an HTML-only email keeps the links behind its words', () => {
+  const PASS = 'https://example.invalid/pass/token?a=1&b=2';
+  const html = (inner) => emailAsMessage(email({ body_text: '', body_html: `<div>Your visitor pass: ${inner}</div>` }), null).message_body;
+
+  test('a link whose words are not the link stays in the text, and the verifier accepts the pass', () => {
+    const body = html('<a href="https://example.invalid/pass/token?a=1&amp;b=2">Open pass</a>');
+    expect(body).toContain(`Open pass (${PASS})`);
+    const quote = `Your visitor pass: Open pass (${PASS})`;
+    expect(flagsAccess(body)).toBe(true);
+    const kept = verifyEmailItems([item({ kind: 'pass', code: null, instructions: PASS, quote })], emailAsMessage(email({ body_text: '', body_html: `<div>Your visitor pass: <a href="https://example.invalid/pass/token?a=1&amp;b=2">Open pass</a></div>` }), null), {});
+    expect(kept).toEqual([expect.objectContaining({ kind: 'pass', code: null, instructions: PASS })]);
+    // a link cropped part-way is still refused
+    expect(verifyEmailItems([item({ kind: 'pass', code: null, instructions: 'https://example.invalid/pass/tok', quote })],
+      emailAsMessage(email({ body_text: '', body_html: `<div>Your visitor pass: <a href="${PASS.replace('&', '&amp;')}">Open pass</a></div>` }), null), {})).toEqual([]);
+  });
+
+  test('single-quoted and bare hrefs count; a link already shown in the words is not repeated', () => {
+    expect(html(`<a class="b" href='${PASS}'>Open pass</a>`)).toContain(`Open pass (${PASS})`);
+    expect(html(`<a href=${PASS}>Open pass</a>`)).toContain(`Open pass (${PASS})`);
+    const shown = html(`<a href="${PASS}">${PASS}</a>`);
+    expect(shown.split('example.invalid/pass').length - 1).toBe(1);
+  });
+
+  test('a mailto:, tel: or script href adds nothing', () => {
+    const words = (text) => text.replace(/\s+/g, ' ');
+    const plain = words(html('Open pass'));
+    for (const href of ['mailto:pat@example.invalid', 'tel:+19415550123', 'javascript:alert(1)', 'ftp://example.invalid/x', '#top', '/relative/path']) {
+      expect(words(html(`<a href="${href}">Open pass</a>`))).toBe(plain);
+    }
+  });
+
+  test('text mail is untouched', () => {
+    expect(emailAsMessage(email({ body_text: 'The gate code is #4821', body_html: '<a href="https://example.invalid/x">y</a>' }), null).message_body).toBe('The gate code is #4821');
+  });
+});
+
 describe('verifyEmailItems', () => {
   test('a code in the customer\'s own words is kept', () => {
     expect(verify('Hi, the gate code is #4821. Thanks!', [item({ quote: 'the gate code is #4821' })]))

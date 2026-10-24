@@ -2945,6 +2945,16 @@ postgres('access codes section', () => {
         expect(readEmail.mock.calls[0][0].message.message_body).toContain('the gate code is #4821');
       });
 
+      test('an HTML-only visitor pass keeps its link and is filed', async () => {
+        const c = await owner();
+        const pass = 'https://example.invalid/pass/token';
+        const id = await mail('', { customerId: c.id, html: `<p>Your visitor pass: <a href="${pass}">Open pass</a></p>` });
+        const readEmail = stub([{ kind: 'pass', code: null, instructions: pass, life: 'standing', quote: `Your visitor pass: Open pass (${pass})` }]);
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { read: 1, found: 1 } });
+        expect(readEmail.mock.calls[0][0].message.message_body).toContain(`(${pass})`);
+        expect(await emailRows({ source_id: id })).toEqual([expect.objectContaining({ kind: 'pass', code: null, instructions: pass })]);
+      });
+
       test('mail that is not a customer\'s is not read', async () => {
         await owner();
         const readEmail = stub([emailItem()]);

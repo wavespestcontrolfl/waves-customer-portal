@@ -1256,6 +1256,23 @@ const AUTO_REPLY_SUBJECT = /^\s*(?:auto(?:matic)?[- ]?repl(?:y|ies)|out of offic
 const PHONE_NUMBER = /(?<![A-Za-z0-9])(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)/g;
 const EMAIL_SEP = '\u0001';
 
+// The email's words: body_text, or its HTML converted to text. The shared
+// converter (emailPlainText, used by other lanes and left alone) drops an
+// anchor's href, and a visitor pass is often only a link behind words like
+// "Open pass". Here each http(s) href the visible text does not already show is
+// kept in the text as "Open pass (https://...)"; mailto:, tel: and other
+// schemes add nothing.
+const ANCHOR = /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi;
+function emailText(row) {
+  if (String(row?.body_text || '').trim()) return String(row.body_text);
+  const html = String(row?.body_html || '').replace(ANCHOR, (whole, dq, sq, bare, inner) => {
+    const href = String(dq ?? sq ?? bare ?? '').replace(/&amp;/gi, '&').trim();
+    const shown = inner.replace(/<[^>]+>/g, '').replace(/&amp;/gi, '&');
+    return /^https?:\/\/[^\s<>"']+$/i.test(href) && !shown.includes(href) ? `${inner} (${href}) ` : whole;
+  });
+  return emailPlainText({ body_text: '', body_html: html });
+}
+
 const emailAddressOf = (row) => String(row.from_address || '').trim().toLowerCase();
 function emailLabelsOf(row) {
   let labels = row.label_ids;
@@ -1308,7 +1325,7 @@ function emailAsMessage(row, customerId, ownerId = row.customer_id) {
   return {
     source_kind: 'email', id: row.id, customer_id: customerId || null, owner_id: ownerId || null, source_customer_id: row.customer_id || null,
     direction: 'inbound', sender_email: emailAddressOf(row), from_phone: null, to_phone: null,
-    message_body: stripQuotedAndSignature(emailPlainText(row)), created_at: row.received_at,
+    message_body: stripQuotedAndSignature(emailText(row)), created_at: row.received_at,
   };
 }
 
@@ -1320,7 +1337,7 @@ function emailEligible(row) {
   const sender = emailAddressOf(row);
   const domain = domainFromAddress(sender);
   return [
-    sender !== '', !!row.received_at, emailPlainText(row).trim() !== '',
+    sender !== '', !!row.received_at, emailText(row).trim() !== '',
     !emailLabelsOf(row).some((label) => EMAIL_EXCLUDED_LABELS.includes(label)),
     !isInternalEmailRecipient(sender), !isOperationalDomain(domain), !domainMatches(domain, OWN_EMAIL_DOMAINS),
     !isAutomatedSender(sender), !BOUNCE_SENDER.test(sender), !AUTO_REPLY_SUBJECT.test(String(row.subject || '')),
@@ -1348,7 +1365,7 @@ async function withoutOurOwnWords(conn, row, items) {
   if (!items.length || !row.gmail_thread_id) return items;
   const sent = await conn('emails').where({ gmail_thread_id: row.gmail_thread_id }).whereRaw(personSentFilter('emails'))
     .where('received_at', '<=', row.received_at).select('body_text', 'body_html');
-  const ours = sent.map((mail) => normalizeText(emailPlainText(mail)).toLowerCase());
+  const ours = sent.map((mail) => normalizeText(emailText(mail)).toLowerCase());
   return items.filter((item) => !ours.some((text) => text.includes(normalizeText(item.quote).toLowerCase())));
 }
 
