@@ -33,7 +33,7 @@
       "unresolved": [
         "routes/admin-sms-templates.js#db.update"
       ],
-      "hash": "d96d19699dcef913403982375e9139d3"
+      "hash": "1e491108e4a433c94f4072e6625149f7"
     },
     {
       "method": "PUT",
