@@ -54,12 +54,10 @@
 //          figure or "avoid applying when rain is forecast", never a "do not
 //          irrigate" direction) ends by LATE_HOLD_END, so a full run fits
 //          before the day ends. Any other minimum stays.
-//      E4. still without room, the holds being label directions that cannot
-//          shorten (Anuew EZ: "Do not irrigate treated area for 4 hours"):
-//          both labels' own words still fit when the run starts at the hold
-//          end and has LATE_MIN_LEAD before the day ends. The customer waters
-//          as much as the day allows; nobody waters during the hold.
-//      Still no deadline: no claim (water_in_conflict), for the technician.
+//      Still no deadline: no claim (water_in_conflict). Two label directions
+//      that leave no full run (Dylox with Anuew EZ, "Do not irrigate treated
+//      area for 4 hours", after about 5 PM) go to the technician, who must not
+//      water during the hold either (lawn-watering-tech-note.js).
 //   Y. (labelFirst only) a hold that only protects a bait
 //      (yields_to_label_water_in: Advion Insect Granule, whose label only
 //      warns that water may weaken it) gives way to a water-in the label
@@ -132,8 +130,6 @@ const SAME_DAY_MIN_LEAD_MS = 3 * HOUR_MS;
 const LATE_SAME_DAY_CUTOFF = '23:59';
 // E3: the latest end of an hours minimum shortened for a late same-day run.
 const LATE_HOLD_END = '21:00';
-// E4: the least time a same-day run needs after a hold no label lets shorten.
-const LATE_MIN_LEAD_MS = 1 * HOUR_MS;
 // A water-in window longer than LONG_WINDOW_HOURS is met by rain and the
 // customer's regular schedule (rule D), never by a one-off run. One constant:
 // the rule validator refuses a same-day rule on such a window.
@@ -421,9 +417,8 @@ function emptyInstruction() {
 // (so a 24-hour hold beside Dylox stays no claim).
 // `follow` false (E): the window is the label's own and counts from the
 // application, so a hold that reaches it leaves no deadline (never re-anchored).
-// `lateDay` (label first): a same-day deadline may run to LATE_SAME_DAY_CUTOFF;
-// `minLeadMs` is the least time the run needs there (E4 shortens it).
-function waterInDeadline(at, waterIns, byHours, holdEnd, { timedEnd = null, follow = true, lateDay = false, minLeadMs = SAME_DAY_MIN_LEAD_MS } = {}) {
+// `lateDay` (label first): a same-day deadline may run to LATE_SAME_DAY_CUTOFF.
+function waterInDeadline(at, waterIns, byHours, holdEnd, { timedEnd = null, follow = true, lateDay = false } = {}) {
   let by = deadlineAfter(at, byHours);
   if (holdEnd && holdEnd.getTime() >= by.getTime()) {
     if (!follow || !timedEnd || timedEnd.getTime() < holdEnd.getTime()) return null;
@@ -437,7 +432,7 @@ function waterInDeadline(at, waterIns, byHours, holdEnd, { timedEnd = null, foll
     if (!lateDay) return null;
     // The day's last minute ends at midnight: the lead is counted to it.
     cutoff = parseETDateTime(`${etDateString(at)}T${LATE_SAME_DAY_CUTOFF}`);
-    if (cutoff.getTime() + 60000 - start < minLeadMs) return null;
+    if (cutoff.getTime() + 60000 - start < SAME_DAY_MIN_LEAD_MS) return null;
   }
   if (cutoff.getTime() < by.getTime()) by = cutoff;
   return by;
@@ -446,11 +441,11 @@ function waterInDeadline(at, waterIns, byHours, holdEnd, { timedEnd = null, foll
 // The water-in half of the instruction: amount, deadline and minutes. Fills the
 // water-in fields of `out` and returns the detail the lines are written from,
 // or null when no honest deadline exists (C. see waterInDeadline).
-function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd, timedEnd, followLabel = false, besideHold = false, labelFirst = false, minLeadMs }) {
+function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd, timedEnd, followLabel = false, besideHold = false, labelFirst = false }) {
   const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
   const detail = { inches, ...minutesFor(runtime, inches, plainWhenNoSetup) };
   const by = labelFirst
-    ? earliestDeadline(at, waterIns, { holdEnd, timedEnd, followLabel, besideHold, minLeadMs })
+    ? earliestDeadline(at, waterIns, { holdEnd, timedEnd, followLabel, besideHold })
     : waterInDeadline(at, waterIns, Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24))), holdEnd, { timedEnd });
   if (!by) return null;
   out.minutes = detail.minutes;
@@ -466,11 +461,11 @@ function applyWaterIn(out, { waterIns, runtime, plainWhenNoSetup, at, holdEnd, t
 // `followLabel` lets a "for best results" one follow the hold); our own window
 // follows the hold (rule C). One water-in with no honest deadline leaves the
 // visit none. (Gate off: one deadline from the shortest window, as before.)
-function earliestDeadline(at, waterIns, { holdEnd, timedEnd, followLabel, besideHold, minLeadMs }) {
+function earliestDeadline(at, waterIns, { holdEnd, timedEnd, followLabel, besideHold }) {
   const deadlines = waterIns.map((r) => {
     const strength = windowStrength(r);
     const follow = !strength || (followLabel && strength === 'best_results');
-    return waterInDeadline(at, [r], windowHoursOf(r, besideHold), holdEnd, { timedEnd, follow, lateDay: true, ...(minLeadMs ? { minLeadMs } : {}) });
+    return waterInDeadline(at, [r], windowHoursOf(r, besideHold), holdEnd, { timedEnd, follow, lateDay: true });
   });
   if (deadlines.some((deadline) => !deadline)) return null;
   return new Date(Math.min(...deadlines.map((deadline) => deadline.getTime())));
@@ -710,10 +705,7 @@ function clashTries(holds, waterIns, at, besideHold) {
   if (!strength) return [];
   const tries = bentWindows(holds, at, strength).map((window) => ({ window, followLabel: false }));
   if (strength === 'best_results') tries.push({ window: first, followLabel: true });
-  if (clashing.some((r) => r.water_in_same_day === true)) {
-    const late = lateDayHold(holds, at);
-    tries.push({ window: late, followLabel: false }, { window: late, followLabel: false, minLeadMs: LATE_MIN_LEAD_MS });
-  }
+  if (clashing.some((r) => r.water_in_same_day === true)) tries.push({ window: lateDayHold(holds, at), followLabel: false });
   return tries;
 }
 
@@ -726,9 +718,9 @@ function decideShortWaterIn(out, { holds, waterIns, list, resolved, runtime, pla
   const besideHold = labelFirst && holds.length > 0;
   // The hold as it stands first (rule C for our own windows); then, label first, E1-E3.
   const tries = [{ window: first, followLabel: false }, ...(labelFirst && first ? clashTries(holds, waterIns, at, besideHold) : [])];
-  for (const { window, followLabel, minLeadMs } of tries) {
+  for (const { window, followLabel } of tries) {
     const short = applyWaterIn(out, {
-      waterIns, runtime, plainWhenNoSetup, at, followLabel, besideHold, labelFirst, minLeadMs, holdEnd: window && window.effectiveEnd, timedEnd: window && window.timedEnd,
+      waterIns, runtime, plainWhenNoSetup, at, followLabel, besideHold, labelFirst, holdEnd: window && window.effectiveEnd, timedEnd: window && window.timedEnd,
     });
     if (short) return { hold: window, short };
   }

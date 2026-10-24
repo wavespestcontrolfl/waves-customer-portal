@@ -2638,10 +2638,8 @@ whose part above the minimum is the label's own "for best results" line
 (`label_best_results`) then goes first and that window follows it (a
 hold-then-water-in, the deadline counted from the printed hold end). Late in
 the day a same-day deadline may read "by 11:59 PM tonight", and a minimum
-marked `advisory` may end by 9 PM to leave a 3-hour run; when the holds left
-are label directions that cannot shorten, the water-in starts at the printed
-hold end with as little as 1 hour left in the day. A hold that still leaves no
-deadline keeps the visit no claim, as before. (3) A hold's
+marked `advisory` may end by 9 PM to leave a 3-hour run. A hold that still
+leaves no deadline keeps the visit no claim, as before. (3) A hold's
 `then_water_in` adds the long-window sentences ("Today’s treatment then needs
 about ½ inch of water by <date>." / "Rain and your regular watering both
 count.") whatever the window's length. (4) A bait hold marked

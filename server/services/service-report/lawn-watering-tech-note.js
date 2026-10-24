@@ -57,17 +57,30 @@ function techNotePayload({ svc, noClaim }) {
   };
 }
 
-async function writeTechNoteCard({ svc, noClaim }, deps) {
+// One card per visit, atomically: the visit's marker is claimed only while it
+// is absent, and the card row is written in the same transaction, so two
+// callers never both write a card and a failed card leaves no claim.
+async function claimAndWriteCard({ record, svc, noClaim, marker }, deps) {
+  const database = deps.db || require('../../models/db');
   const send = deps.sendTechNotification || require('../tech-notify').sendTechNotification;
   try {
-    return (await send(svc.technician_id, {
-      type: TECH_NOTE_TYPE,
-      message: techNoteMessage(noClaim),
-      payload: techNotePayload({ svc, noClaim }),
-    })) === true;
+    return await database.transaction(async (trx) => {
+      const claimed = await trx('service_records')
+        .where({ id: record.id })
+        .whereRaw("NOT jsonb_exists(COALESCE(structured_notes::jsonb, '{}'::jsonb), 'lawnWateringTechNoteAt')")
+        .update({ structured_notes: trx.raw("COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb", [JSON.stringify(marker)]) });
+      if (!claimed) return 'claimed_before';
+      const written = await send(svc.technician_id, {
+        type: TECH_NOTE_TYPE,
+        message: techNoteMessage(noClaim),
+        payload: techNotePayload({ svc, noClaim }),
+      }, { knex: trx });
+      if (written !== true) throw new Error('card not written');
+      return 'written';
+    });
   } catch (err) {
     logger.warn(`[lawn-watering-sms] tech note failed for service ${svc.id}: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
@@ -81,18 +94,14 @@ async function sendWateringTechNote({ record, svc, notes, noClaim }, deps) {
   // One card per visit: a resumed completion never writes a second one.
   if (notes && notes.lawnWateringTechNoteAt) return 'tech_noted_no_instruction';
   if (!svc.technician_id) return null;
-  if (!(await writeTechNoteCard({ svc, noClaim }, deps))) return null;
-  try {
-    const marker = {
-      lawnWateringSmsStatus: 'skipped_no_instruction',
-      lawnWateringNoClaimReason: noClaim.reason,
-      lawnWateringTechNoteAt: new Date().toISOString(),
-    };
-    await deps.mergeNotes(record.id, marker);
-    Object.assign(notes, marker);
-  } catch (err) {
-    logger.warn(`[lawn-watering-sms] tech-note marker write failed for service_record ${record.id}: ${err.message}`);
-  }
+  const marker = {
+    lawnWateringSmsStatus: 'skipped_no_instruction',
+    lawnWateringNoClaimReason: noClaim.reason,
+    lawnWateringTechNoteAt: new Date().toISOString(),
+  };
+  const outcome = await claimAndWriteCard({ record, svc, noClaim, marker }, deps);
+  if (!outcome) return null;
+  if (outcome === 'written' && notes) Object.assign(notes, marker);
   return 'tech_noted_no_instruction';
 }
 

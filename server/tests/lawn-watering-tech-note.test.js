@@ -26,8 +26,22 @@ const CONFLICT = {
 };
 const TOO_LATE = { reason: 'same_day_too_late', products: ['Dylox 6.2 G'], waterInProducts: ['Dylox 6.2 G'] };
 
-function harness({ noClaim, notes = {}, svc = {}, sendTechNotification } = {}) {
+// A database whose transaction claims the visit's marker (`claimed` rows) and
+// rolls back when the body throws; `updates` records each claim attempt.
+function fakeDb({ claimed = 1 } = {}) {
+  const updates = [];
+  const trx = (table) => {
+    const query = { where: () => query, whereRaw: () => query, update: async (row) => { updates.push({ table, row }); return claimed; } };
+    return query;
+  };
+  trx.raw = (sql, bindings) => ({ sql, bindings });
+  return { transaction: async (body) => body(trx), updates, trx };
+}
+const claimedMarker = (db) => JSON.parse(db.updates[0].row.structured_notes.bindings[0]);
+
+function harness({ noClaim, notes = {}, svc = {}, sendTechNotification, claimed = 1 } = {}) {
   const mergeNotes = jest.fn(async () => {});
+  const db = fakeDb({ claimed });
   const raiseAdminAlert = jest.fn(async (category, spec) => ({ id: 'n-1', composed: composeAdminAlert(spec) }));
   const tech = sendTechNotification || jest.fn(async () => true);
   const state = {
@@ -45,10 +59,10 @@ function harness({ noClaim, notes = {}, svc = {}, sendTechNotification } = {}) {
     noClaim,
   };
   const deps = {
-    db: {}, sendCustomerMessage: jest.fn(), getTemplate: jest.fn(), mergeNotes, raiseAdminAlert,
+    db, sendCustomerMessage: jest.fn(), getTemplate: jest.fn(), mergeNotes, raiseAdminAlert,
     sendTechNotification: tech, throwIfDeliveryUnverified: (r) => r,
   };
-  return { state, deps, mergeNotes, raiseAdminAlert, tech };
+  return { state, deps, mergeNotes, raiseAdminAlert, tech, db };
 }
 
 describe('lawn watering tech note', () => {
@@ -56,6 +70,7 @@ describe('lawn watering tech note', () => {
     const h = harness({ noClaim: CONFLICT });
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'tech_noted_no_instruction' });
     expect(h.tech).toHaveBeenCalledTimes(1);
+    expect(h.tech.mock.calls[0][2]).toEqual({ knex: h.db.trx });
     expect(h.tech).toHaveBeenCalledWith('tech-1', {
       type: 'lawn_watering_tech_note',
       message: 'Do not water now: Anuew EZ needs time with no water. Dylox 6.2 G needs watering in, and no time is left today for both, so the customer got no watering text. Ask the customer to water Dylox 6.2 G in as soon as the no-water time for Anuew EZ is over. Next time, water Dylox 6.2 G in before you apply Anuew EZ.',
@@ -66,11 +81,14 @@ describe('lawn watering tech note', () => {
         service_id: 'svc-1',
         reason: 'water_in_conflict',
       },
-    });
+    }, expect.anything());
     expect(h.raiseAdminAlert).not.toHaveBeenCalled();
     expect(h.deps.sendCustomerMessage).not.toHaveBeenCalled();
-    expect(h.mergeNotes).toHaveBeenCalledTimes(1);
-    expect(h.mergeNotes).toHaveBeenCalledWith('rec-1', {
+    // The marker is claimed in the card's own transaction, never by a separate write.
+    expect(h.mergeNotes).not.toHaveBeenCalled();
+    expect(h.db.updates).toHaveLength(1);
+    expect(h.db.updates[0].table).toBe('service_records');
+    expect(claimedMarker(h.db)).toEqual({
       lawnWateringSmsStatus: 'skipped_no_instruction',
       lawnWateringNoClaimReason: 'water_in_conflict',
       lawnWateringTechNoteAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
@@ -129,12 +147,12 @@ describe('lawn watering tech note', () => {
     expect(h.mergeNotes).not.toHaveBeenCalled();
   });
 
-  test('a marker write that fails after the card still reports the note and keeps the card', async () => {
-    const h = harness({ noClaim: CONFLICT });
-    h.deps.mergeNotes = jest.fn(async () => { throw new Error('write failed'); });
+  test('another caller claimed the visit first: no second card and no alert', async () => {
+    const h = harness({ noClaim: CONFLICT, claimed: 0 });
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'tech_noted_no_instruction' });
-    expect(h.tech).toHaveBeenCalledTimes(1);
+    expect(h.tech).not.toHaveBeenCalled();
     expect(h.raiseAdminAlert).not.toHaveBeenCalled();
+    expect(h.state.notes.lawnWateringTechNoteAt).toBeUndefined();
   });
 
   test.each([
@@ -165,9 +183,9 @@ describe('the note from a real clash', () => {
   const DYLOX = { name: 'Dylox 6.2 G', rule: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'owner' } };
   const ANUEW = { name: 'Anuew EZ', rule: { mode: 'hold', hold_hours: 4, source: 'label' } };
 
-  test('Dylox with Anuew EZ after 7 PM: do not water now, water in once the no-water time is over', () => {
-    // Tue 7:30 PM ET: Anuew's 4 hours end at midnight; at 6 PM the customer still gets a text (until 10 PM, then water).
-    const ins = buildWateringInstruction({ rules: [DYLOX, ANUEW], completedAt: '2026-10-27T23:30:00Z', plainWhenNoSetup: true, labelFirst: true });
+  test('Dylox with Anuew EZ after 5 PM: do not water now, water in once the no-water time is over', () => {
+    // Tue 6 PM ET: Anuew's 4 hours end at 10 PM, too late for a full run before midnight.
+    const ins = buildWateringInstruction({ rules: [DYLOX, ANUEW], completedAt: '2026-10-27T22:00:00Z', plainWhenNoSetup: true, labelFirst: true });
     expect(ins.state).toBeNull();
     expect(techNoteMessage(ins.noClaim)).toBe('Do not water now: Anuew EZ needs time with no water. Dylox 6.2 G needs watering in, and no time is left today for both, so the customer got no watering text. Ask the customer to water Dylox 6.2 G in as soon as the no-water time for Anuew EZ is over. Next time, water Dylox 6.2 G in before you apply Anuew EZ.');
   });
