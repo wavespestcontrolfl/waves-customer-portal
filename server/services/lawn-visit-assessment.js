@@ -74,6 +74,9 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
       ...base, status: 'unavailable', reason: outcome.reason || 'error',
       provider: null, model: null, fallbackUsed: false, usage: null, raw: null,
       ...emptyAnalysis(photos.length),
+      // The scale the visit was read under, so the technician's own scores on an
+      // unavailable read are stamped and compared on it too (GATE_LAWN_SCORE_SCALE_V2).
+      ...(scale2 ? { scoreScale: 2 } : {}),
       ...(refereeOn ? { referee: skippedReferee('gemini_unavailable') } : {}),
     };
   }

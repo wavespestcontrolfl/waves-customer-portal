@@ -122,6 +122,11 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
       const stored = await mockKnex('lawn_assessments').where({ id: body.assessment.id }).first();
       expect(stored).toMatchObject({ score_scale: 2, turf_density: 82, weed_suppression: 78, color_health: 85, stress_damage: 90, confirmed_by_tech: false });
       expect((await runs.loadRun(body.assessment.id, mockKnex)).prompt_version).toBe('lawn-visit-v1-scale2');
+      // Both providers miss: the technician scores this visit by hand, on scale 2 too.
+      dispatch.mockResolvedValue({ ok: false, reason: 'gemini_timeout', failures: [] });
+      const missed = await request({ customerId: await customer(), photos });
+      expect(missed.body.aiAvailable).toBe(false);
+      expect((await mockKnex('lawn_assessments').where({ id: missed.body.assessment.id }).first()).score_scale).toBe(2);
     } finally {
       spy.mockRestore();
     }

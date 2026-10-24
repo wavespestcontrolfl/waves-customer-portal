@@ -183,6 +183,21 @@ describe('scores kept as read', () => {
     expect(one.adjustedScores.turf_density).toBe(79);
   });
 
+  test('confirm never derives a scale-2 Condition from the severity words: unrated, it stays unknown and the row stays pending', () => {
+    const scoreValue = (value) => Math.max(0, Math.min(100, Math.round(Number(value))));
+    const options = { scoreValue, calculateOverallScore: () => 77 };
+    const read = { turf_density: 82, weed_suppression: 78, color_health: 85, fungus_control: 95, thatch_level: 60, stress_damage: null };
+    const run = { status: 'complete', severities: {}, scores_adjusted: { ...read } };
+    const two = visitScores.confirmScores({ ...read, score_scale: 2 }, run, {}, options);
+    expect(two).toMatchObject({ confirmed: false, missing: ['stress_damage'], overallScore: null });
+    expect(two.finalScores.stress_damage).toBeNull();
+    // The technician's entry completes it.
+    expect(visitScores.confirmScores({ ...read, score_scale: 2 }, run, { stress_damage: 88 }, options))
+      .toMatchObject({ confirmed: true, finalScores: { stress_damage: 88 } });
+    // Scale 1 keeps the worst-component derivation.
+    expect(visitScores.confirmScores({ ...read }, run, {}, options)).toMatchObject({ confirmed: true, finalScores: { stress_damage: 60 } });
+  });
+
   test('the eval scores a scale-2 replay as read', () => {
     const scored = evalLib.scoreResult({ assessmentId: 'a', visitDate: '2026-10-01', photos: [{}, {}], month: 12, confirmed: {}, legacyAi: {} },
       { ...scale2(), provider: 'gemini', model: 'm', raw: scale2Answer(), promptVersion: 'lawn-visit-v1-scale2' });
@@ -203,6 +218,13 @@ describe('analyzeVisit', () => {
     expect(options.validate({ json: scale2Answer() })).toBeNull();
     expect(out).toMatchObject({ promptVersion: 'lawn-visit-v1-scale2', scoreScale: 2, scores: { turf_density: 82, weed_control: 78, color_health: 85, condition: 90 } });
     expect(out.contextHash).toBe(input.contextHash({ photos: [photo('YQ==', 'front'), photo('Yg==')], photoZones: ['front', null], visionContext: {}, scale2: true }));
+  });
+
+  test('gate on, both providers miss: the unavailable read still carries scale 2', async () => {
+    on();
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'gemini_timeout', failures: [{ provider: 'gemini', reason: 'gemini_timeout' }] });
+    const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')] });
+    expect(out).toMatchObject({ status: 'unavailable', promptVersion: 'lawn-visit-v1-scale2', scoreScale: 2 });
   });
 
   test('gate off, or on without property history: the scale-1 read', async () => {

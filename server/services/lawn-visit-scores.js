@@ -128,8 +128,10 @@ function independentStressFloor(run) {
 // persisted marker of an earlier one (see confirmScores). With no entry and
 // no AI read, Condition is re-derived fresh from the known components plus
 // `stressFloor`, the run's INDEPENDENT stressors (insect/drought/mechanical);
-// `undefined` (no run) leaves the floor out.
-function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor, aiScores, stressExplicit } = {}) {
+// `undefined` (no run) leaves the floor out. `deriveCondition: false` (a score-scale-2
+// row, GATE_LAWN_SCORE_SCALE_V2) skips that derivation: Condition is then a rating like
+// the other three, unknown until the AI or the technician gives it.
+function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor, aiScores, stressExplicit, deriveCondition = true } = {}) {
   const adjusted = adjustedScores && typeof adjustedScores === 'object' ? adjustedScores : {};
   const ai = aiScores && typeof aiScores === 'object' ? aiScores : null;
   const present = (value) => value != null && value !== '';
@@ -162,6 +164,8 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
     final.stress_damage = scoreValue(stressExplicit);
   } else if (aiRead('stress_damage') != null) {
     final.stress_damage = aiRead('stress_damage');
+  } else if (!deriveCondition) {
+    final.stress_damage = null;
   } else {
     const floor = stressFloor === undefined ? null : stressFloor;
     const parts = [final.fungus_control, final.thatch_level, floor]
@@ -275,6 +279,8 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
     ...(run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {}),
     aiScores,
     stressExplicit,
+    // Score scale 2: Condition is never derived from the severity words.
+    deriveCondition: Number(assessment?.score_scale) !== 2,
   }), { posted: adjusted, conditionEntered: known(stressExplicit) });
   const confirmed = scoresComplete(finalScores);
   return {
