@@ -132,49 +132,30 @@ function whereSamePhone(query, column, phone) {
 // provider does not copy onto sms_log, so it is read from the send audit row that holds the
 // same provider SID (messaging_audit_log.provider_message_id = sms_log.twilio_sid).
 async function resolveDrafts(replies, dbh) {
-  const byReply = new Map();
-  const auditedSids = [];
-  for (const reply of replies) {
-    const meta = reply.metadata && typeof reply.metadata === 'object' ? reply.metadata : {};
-    byReply.set(reply.id, { draftId: asUuid(meta.draft_id), decisionId: asUuid(meta.agent_decision_id) });
-    if (reply.twilio_sid && !asUuid(meta.draft_id)) auditedSids.push(reply.twilio_sid);
-  }
-  if (auditedSids.length) {
-    const audits = await dbh('messaging_audit_log')
-      .whereIn('provider_message_id', auditedSids).where({ channel: 'sms' })
-      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-      .select('provider_message_id', 'metadata');
-    const auditBySid = new Map();
-    for (const a of audits) if (!auditBySid.has(a.provider_message_id)) auditBySid.set(a.provider_message_id, a.metadata || {});
-    for (const reply of replies) {
-      const entry = byReply.get(reply.id);
-      const audit = auditBySid.get(reply.twilio_sid);
-      if (!audit || entry.draftId) continue;
-      entry.draftId = asUuid(audit.draft_id);
-      entry.decisionId = entry.decisionId || asUuid(audit.agentDecisionId) || asUuid(audit.agent_decision_id);
-    }
-  }
-  const decisionIds = new Set();
-  for (const entry of byReply.values()) if (!entry.draftId && entry.decisionId) decisionIds.add(entry.decisionId);
-  if (decisionIds.size) {
-    const decisions = await dbh('agent_decisions')
-      .whereIn('id', [...decisionIds]).where({ entity_type: 'message_draft' }).select('id', 'entity_id');
-    const draftByDecision = new Map(decisions.map((d) => [d.id, d.entity_id]));
-    for (const entry of byReply.values()) {
-      if (!entry.draftId && entry.decisionId) entry.draftId = draftByDecision.get(entry.decisionId) || null;
-    }
-  }
-  const draftIds = [...new Set([...byReply.values()].map((e) => e.draftId).filter(Boolean))];
-  const versions = new Map();
-  if (draftIds.length) {
-    const drafts = await dbh('message_drafts').whereIn('id', draftIds).select('id', 'prompt_version');
-    for (const d of drafts) versions.set(d.id, d.prompt_version || null);
-  }
-  const out = new Map();
-  for (const [replyId, entry] of byReply) {
-    out.set(replyId, { draftId: entry.draftId, promptVersion: entry.draftId ? (versions.get(entry.draftId) ?? null) : null });
-  }
-  return out;
+  const audits = await dbh('messaging_audit_log')
+    .whereIn('provider_message_id', replies.map((r) => r.twilio_sid).filter(Boolean)).where({ channel: 'sms' })
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .select('provider_message_id', 'metadata');
+  const auditBySid = new Map();
+  for (const a of audits) if (!auditBySid.has(a.provider_message_id)) auditBySid.set(a.provider_message_id, a.metadata || {});
+  // One ordered lookup per reply: sms_log metadata, then the audit row, then the agent decision.
+  const keyed = replies.map((reply) => {
+    const meta = reply.metadata || {};
+    const audit = auditBySid.get(reply.twilio_sid) || {};
+    return {
+      id: reply.id,
+      draftId: [meta.draft_id, audit.draft_id].map(asUuid).find(Boolean) || null,
+      decisionId: [meta.agent_decision_id, audit.agentDecisionId, audit.agent_decision_id].map(asUuid).find(Boolean) || null,
+    };
+  });
+  const decisions = await dbh('agent_decisions')
+    .whereIn('id', keyed.map((k) => k.decisionId).filter(Boolean)).where({ entity_type: 'message_draft' })
+    .select('id', 'entity_id');
+  const draftByDecision = new Map(decisions.map((d) => [d.id, d.entity_id]));
+  for (const k of keyed) k.draftId = k.draftId || draftByDecision.get(k.decisionId) || null;
+  const drafts = await dbh('message_drafts').whereIn('id', keyed.map((k) => k.draftId).filter(Boolean)).select('id', 'prompt_version');
+  const versions = new Map(drafts.map((d) => [d.id, d.prompt_version || null]));
+  return new Map(keyed.map((k) => [k.id, { draftId: k.draftId, promptVersion: versions.get(k.draftId) ?? null }]));
 }
 
 // A scheduled reply leaves TWO outbound rows: the provider's sent row (metadata.scheduled_sms_log_id
@@ -360,7 +341,7 @@ async function sweepReplyOutcomes({ now = new Date(), limit = DEFAULT_LIMIT, loo
   if (!isEnabled('smsReplyOutcomes')) return { skipped: 'gate_off' };
 
   const replies = await readReplyCandidates({ dbh, now, limit, lookbackDays });
-  const drafts = replies.length ? await resolveDrafts(replies, dbh) : new Map();
+  const drafts = await resolveDrafts(replies, dbh);
   const queueRows = await findQueueRowsWithProviderRow(replies, dbh);
   const result = { considered: replies.length, computed: 0, not_a_reply: 0, failed: 0 };
   for (const reply of replies) {
