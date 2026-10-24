@@ -1496,7 +1496,7 @@ const TIPS = Object.freeze([
     yard: { irrigation: 'system' },
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-lawn-skip-after-rain', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/LH025' }],
-    copy: "Got a good rain the day before your watering day? UF/IFAS says that with at least half an inch of rain, you don't need to water that day. On a one-day-a-week schedule, that's the whole week's watering saved.",
+    copy: "Got a good rain the day before your watering day? UF/IFAS says that with at least half an inch of rain, you don't need to water that day.",
   },
   {
     id: 'lawn_soil_moisture_sensor', group: 'lawn', label: 'A soil moisture sensor pays off',
@@ -1620,7 +1620,7 @@ const TIPS = Object.freeze([
     showMonths: [5, 6, 7],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-ts-palm-hurricane-cut', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/EP443' }],
-    copy: "Skip the “hurricane cut” on palms. UF/IFAS found that after the 2004 and 2005 hurricanes, palms trimmed that way were more likely to have their crowns snapped off than palms with fuller crowns. Taking off the dead fronds before the season is the part that helps.",
+    copy: "Skip the “hurricane cut” on palms. UF/IFAS found that after the 2004 and 2005 hurricanes, palms trimmed that way were more likely to have their crowns snapped off than palms with fuller crowns. Pruning the dead fronds before the season may reduce the chance they come loose in a storm.",
   },
   {
     id: 'ts_right_plant_right_place', group: 'tree_shrub', label: 'The right plant for the spot',
@@ -1642,7 +1642,7 @@ const TIPS = Object.freeze([
     showMonths: [3, 4, 5, 6],
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-storm-structural-pruning', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/FR173' }],
-    copy: "Structural pruning pays off in a storm. After Hurricane Andrew, 73 percent of pruned trees survived compared with 47 percent of unpruned ones, UF/IFAS reports, and topping makes trees more likely to fail in wind.",
+    copy: "Structural pruning pays off in a storm. UF/IFAS reports that 73 percent of pruned trees survived compared with 47 percent of unpruned ones, and that topping makes trees more likely to fail in wind.",
   },
   {
     id: 'ts_crape_myrtle_topping', group: 'tree_shrub', label: "Don't top the crape myrtle",
@@ -1678,7 +1678,7 @@ const TIPS = Object.freeze([
     keywords: ['hibiscus', 'mealybug', 'curled', 'sooty mold'], lines: ['tree_shrub'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-ts-hibiscus-mealybug', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN156' }],
-    copy: "Curled, twisted new growth on a hibiscus can be pink hibiscus mealybug. UF/IFAS says its saliva curls and contorts the leaves, and its honeydew grows black sooty mold. Point it out to me.",
+    copy: "Curled, twisted new growth on a hibiscus can be mealybug. UF/IFAS says its saliva curls and contorts the leaves, and its honeydew grows black sooty mold. Point it out to me.",
   },
   {
     id: 'ts_chilli_thrips', group: 'tree_shrub', label: 'Bronzed rose and plumbago leaves',
@@ -1706,7 +1706,7 @@ const TIPS = Object.freeze([
     keywords: ['citrus', 'greening', 'psyllid', 'mottle', 'orange tree'], lines: ['tree_shrub'], season: 'all',
     sourcedOnly: true,
     sources: [{ fact: 'fact-tip-ts-citrus-greening', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/HS141' }],
-    copy: "If you have citrus, watch the leaves. UF/IFAS says there's no cure for citrus greening, which the tiny Asian citrus psyllid spreads from tree to tree, and an early sign is a blotchy mottle on the leaves. Tell me if you see it.",
+    copy: "If you have citrus, watch the leaves. UF/IFAS says there's no cure for citrus greening, which psyllids spread from tree to tree, and an early sign is a blotchy mottle on the leaves. Tell me if you see it.",
   },
   {
     id: 'ts_ficus_whitefly', group: 'tree_shrub', label: 'Ficus hedges and whitefly',
