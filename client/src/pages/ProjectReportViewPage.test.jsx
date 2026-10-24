@@ -53,6 +53,7 @@ describe('ProjectReportViewPage theme gate', () => {
   it('WDO inspection reports render as the paper document (no glass scene), even with the shared template on', async () => {
     const { container, findAllByText, queryByRole } = renderProjectReport(payload('wdo_inspection', { reportTemplate: true }));
     await findAllByText(/wdo inspection/i);
+    expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
     expect(container.querySelector('.project-report-page')).not.toHaveClass('customer-report-template');
     expect(container.querySelector('.report-header')).toBeNull();
@@ -62,6 +63,7 @@ describe('ProjectReportViewPage theme gate', () => {
   it('the pre-construction certificate stays the paper document, even with the shared template on', async () => {
     const { container, findAllByText, queryByRole } = renderProjectReport(payload('pre_treatment_termite_certificate', { reportTemplate: true }));
     await findAllByText(/Certificate of Compliance/i);
+    expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
     expect(container.querySelector('.project-report-page')).not.toHaveClass('customer-report-template');
     expect(container.querySelector('.report-header')).toBeNull();
@@ -73,9 +75,11 @@ describe('ProjectReportViewPage theme gate', () => {
     await waitFor(() => {
       expect(document.documentElement).toHaveAttribute('data-glass-theme');
     });
+    // The glass attribute is set before the fetch resolves: wait for the loaded report before reading its classes.
+    expect(await findByRole('heading', { level: 3, name: "How did today's visit go?" })).toBeInTheDocument();
+    expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(container.querySelector('.project-report-page')).not.toHaveClass('customer-report-template');
     expect(container.querySelector('.report-header')).toBeNull();
-    expect(await findByRole('heading', { level: 3, name: "How did today's visit go?" })).toBeInTheDocument();
     expect(await findByRole('region', { name: 'Share feedback' }))
       .toHaveAttribute('data-section', 'review-request-project');
   });

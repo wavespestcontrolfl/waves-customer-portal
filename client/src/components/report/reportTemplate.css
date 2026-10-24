@@ -61,6 +61,9 @@
 .customer-report-template .report-template-price { flex-direction: column; align-items: flex-start !important; }
 .customer-report-template .report-template-price > div { text-align: left !important; }
 .customer-report-template .plan-visit-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+/* A row turned into a column keeps each item at its own height: a horizontal flex-basis (the visit label's
+   1 1 200px, the lawn hero's 1 1 220px text column) would otherwise become a vertical allocation. */
+.customer-report-template :is(.plan-visit-row, .report-template-column, .report-template-price, .service-status-main, .premium-section-header, .readiness-card-header, .coverage-section-header, .coverage-summary-row, .treatment-map-header, .service-coverage-summary) > * { flex-basis: auto !important; }
 html[data-glass-theme] .customer-report-template .waves-ask-card[data-report-ask-slim],
 html[data-glass-theme] .customer-report-template .waves-ask-form { grid-template-columns: minmax(0, 1fr) !important; }
 html[data-glass-theme] .customer-report-template :is(button, a)[data-glass-accent] { min-height: 48px !important; }
