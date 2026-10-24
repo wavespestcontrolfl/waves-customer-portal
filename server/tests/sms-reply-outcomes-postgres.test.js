@@ -141,6 +141,17 @@ postgres('reply outcome signals', () => {
     expect(await rowFor(late)).toMatchObject({ opted_out: false, silent: true });
   });
 
+  test('opt-out: a STOP behind more than 100 earlier texts in the window is still found', async () => {
+    const replyId = await askAndReply();
+    await trx('sms_log').insert(Array.from({ length: 230 }, (_, i) => ({
+      direction: 'inbound', from_phone: phone, to_phone: OUR_NUMBER, message_body: `Update number ${i}`, status: 'received',
+      message_type: 'inbound', created_at: after(60 + i), twilio_sid: `SM${randomUUID().replace(/-/g, '').slice(0, 32)}`,
+    })));
+    await text('STOP', { at: after(60 * 60), type: 'opt_out' });
+    await sweep();
+    expect(await rowFor(replyId)).toMatchObject({ opted_out: true, silent: false });
+  });
+
   test('call back: an inbound call within an hour counts; later, outbound and foreign-number calls do not', async () => {
     const replyId = await askAndReply();
     await call({ minutes: 30 });

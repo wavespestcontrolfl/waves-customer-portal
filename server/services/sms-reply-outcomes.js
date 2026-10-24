@@ -55,6 +55,7 @@ const REPLY_WINDOW_HOURS = 24;
 const LOOKBACK_DAYS = 30;
 const DEFAULT_LIMIT = 200;
 const MAX_INBOUND_ROWS = 100;
+const MAX_OPTOUT_PAGES = 50;
 const REPEAT_JACCARD = 0.7;
 const REPEAT_MIN_TOKENS = 3;
 const MIN_SAMPLE = 20;
@@ -186,19 +187,37 @@ async function readAnsweredText({ dbh, reply, phone }) {
     .first('id', 'message_body');
 }
 
-async function readFollowUps({ dbh, reply, phone }) {
+// Customer-facing inbound rows after the reply, oldest first, from the row after `afterId`.
+// The cursor is a row id, not a JS Date: pg keeps microseconds that a Date drops, and a Date
+// cursor would read its own row again.
+async function readInboundPage({ dbh, reply, phone, windowMs, afterId = null, limit = MAX_INBOUND_ROWS }) {
   const start = new Date(reply.created_at);
-  const end = new Date(start.getTime() + OPTOUT_WINDOW_HOURS * 3600 * 1000);
   const query = excludeUnresolvedSendReservations(dbh('sms_log'))
     .where({ direction: 'inbound' })
     .where('created_at', '>', start)
-    .where('created_at', '<=', end)
+    .where('created_at', '<=', new Date(start.getTime() + windowMs))
     .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
     .whereRaw("COALESCE(message_type, 'inbound') NOT IN ('help_request', 'opt_in')");
+  if (afterId) query.whereRaw('(created_at, id) > ((SELECT created_at FROM sms_log WHERE id = ?), ?)', [afterId, afterId]);
   return whereSamePhone(query, 'from_phone', phone)
-    .orderBy('created_at', 'asc')
-    .limit(MAX_INBOUND_ROWS)
+    .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .limit(limit)
     .select('id', 'message_type', 'message_body', 'created_at');
+}
+
+const isOptOutRow = (row) => (row.message_type || 'inbound') === 'opt_out' || detectSmsOptCommand(row.message_body).action === 'opt_out';
+
+// The whole 72-hour window, a page at a time, until an opt-out turns up: a long thread
+// must not hide a STOP behind its first rows.
+async function findOptOut({ dbh, reply, phone }) {
+  let afterId = null;
+  for (let page = 0; page < MAX_OPTOUT_PAGES; page += 1) {
+    const rows = await readInboundPage({ dbh, reply, phone, windowMs: OPTOUT_WINDOW_HOURS * 3600 * 1000, afterId });
+    if (rows.some(isOptOutRow)) return true;
+    if (rows.length < MAX_INBOUND_ROWS) return false;
+    afterId = rows[rows.length - 1].id;
+  }
+  return false;
 }
 
 async function readCallBack({ dbh, reply, phone }) {
@@ -223,18 +242,18 @@ function isPositiveClose(first, windowEnd) {
 }
 
 // Pure: the signals for one reply from its follow-up rows.
-function classifyFollowUps({ replyAt, followUps, answeredBody, calledBack }) {
+function classifyFollowUps({ replyAt, followUps, answeredBody, calledBack, optedOut: optedOutElsewhere = false }) {
   const start = new Date(replyAt).getTime();
   const confusionEnd = start + CONFUSION_WINDOW_MINUTES * 60 * 1000;
   const positiveEnd = start + POSITIVE_WINDOW_MINUTES * 60 * 1000;
-  let optedOut = false;
+  let optedOut = Boolean(optedOutElsewhere);
   let confused = false;
   let confusionWhy = null;
   let first = null;
   for (const row of followUps) {
     const type = row.message_type || 'inbound';
     const at = new Date(row.created_at).getTime();
-    if (type === 'opt_out' || detectSmsOptCommand(row.message_body).action === 'opt_out') {
+    if (isOptOutRow(row)) {
       optedOut = true;
       continue;
     }
@@ -274,9 +293,10 @@ async function measureReply({ dbh, reply, draft, now }) {
   };
   const answered = phone ? await readAnsweredText({ dbh, reply, phone }) : null;
   if (!answered) return { ...base, status: 'not_a_reply', replied_to_sms_log_id: null };
-  const followUps = await readFollowUps({ dbh, reply, phone });
+  const followUps = await readInboundPage({ dbh, reply, phone, windowMs: POSITIVE_WINDOW_MINUTES * 60 * 1000 });
   const calledBack = await readCallBack({ dbh, reply, phone });
-  const signals = classifyFollowUps({ replyAt: reply.created_at, followUps, answeredBody: answered.message_body, calledBack });
+  const optedOut = await findOptOut({ dbh, reply, phone });
+  const signals = classifyFollowUps({ replyAt: reply.created_at, followUps, answeredBody: answered.message_body, calledBack, optedOut });
   return { ...base, status: 'computed', replied_to_sms_log_id: answered.id, ...signals };
 }
 
