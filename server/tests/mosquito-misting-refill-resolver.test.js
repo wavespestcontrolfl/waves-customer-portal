@@ -12,6 +12,7 @@ const mapper = require('../services/pricing-engine/v1-legacy-mapper');
 const config = require('../services/pricing-engine/mosquito-misting-config');
 const { MOSQUITO_MISTING } = require('../services/pricing-engine/constants');
 const refill = require('../services/misting-refill');
+const pricingEngine = require('../services/pricing-engine');
 
 const PROPERTY = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, propertyType: 'single_family' };
 const CUSTOMER = 'cust-1';
@@ -20,8 +21,14 @@ const OTHER_HOUSE = 'prop-other';
 const PLAN = 'mosquito_misting_service';
 
 const saved = process.env.GATE_MOSQUITO_MISTING;
-beforeEach(() => { process.env.GATE_MOSQUITO_MISTING = 'true'; });
+beforeEach(() => {
+  process.env.GATE_MOSQUITO_MISTING = 'true';
+  // The live table was synced a moment ago; the staleness cases below override these.
+  jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
+  jest.spyOn(pricingEngine, 'syncConstantsFromDB').mockResolvedValue(true);
+});
 afterEach(() => {
+  jest.restoreAllMocks();
   config.rebaseMosquitoMisting();
   if (saved === undefined) delete process.env.GATE_MOSQUITO_MISTING; else process.env.GATE_MOSQUITO_MISTING = saved;
 });
@@ -100,6 +107,43 @@ describe('price: the sold solution at the live table price', () => {
     try {
       expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE', status: 409 });
     } finally { MOSQUITO_MISTING.refills.natural.price = real; }
+  });
+});
+
+describe('the live table is fresh when the price is read', () => {
+  test('a refresh that is due runs first, then the price is read', async () => {
+    pricingEngine.needsSync.mockReturnValue(true);
+    pricingEngine.syncConstantsFromDB.mockImplementation(async () => {
+      const data = JSON.parse(JSON.stringify(config.defaultMosquitoMistingPricingData()));
+      data.refills.natural.price = 233;
+      config.applyMosquitoMistingPricingConfig(data);
+      return true;
+    });
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: true, unitPrice: 233 });
+    expect(pricingEngine.syncConstantsFromDB).toHaveBeenCalledTimes(1);
+  });
+
+  test('no refresh is due: no sync call', async () => {
+    await attach(db([estimate()]));
+    expect(pricingEngine.syncConstantsFromDB).not.toHaveBeenCalled();
+  });
+
+  test('a due refresh that fails (returns false or throws) refuses with a retryable 503; nothing is priced from stale or default prices', async () => {
+    pricingEngine.needsSync.mockReturnValue(true);
+    pricingEngine.syncConstantsFromDB.mockResolvedValue(false);
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICING_STALE', status: 503 });
+    pricingEngine.syncConstantsFromDB.mockRejectedValue(new Error('connection lost'));
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICING_STALE', status: 503 });
+  });
+
+  test('the refresh is not asked for when there is nothing to price (no estimate)', async () => {
+    pricingEngine.needsSync.mockReturnValue(true);
+    expect(await attach(db([]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_UNPRICED' });
+    expect(pricingEngine.syncConstantsFromDB).not.toHaveBeenCalled();
+  });
+
+  test('a stale-pricing refusal on an existing line is not a keep-stored case: the edit retries instead of billing an old price', () => {
+    expect(refill.KEEP_STORED_ON.has('MISTING_REFILL_PRICING_STALE')).toBe(false);
   });
 });
 

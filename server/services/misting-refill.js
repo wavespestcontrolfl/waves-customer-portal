@@ -51,6 +51,7 @@ const REFUSALS = {
   MISTING_REFILL_SOLUTION_UNREADABLE: [409, 'This misting refill cannot be priced: the accepted misting estimate does not say which refill solution was sold. Re-send the estimate or ask the office to fix it.'],
   MISTING_REFILL_PRICE_UNAVAILABLE: [409, 'This misting refill cannot be priced: the live misting price table has no price for the refill solution that was sold.'],
   MISTING_REFILL_LOOKUP_FAILED: [503, 'The accepted misting estimate could not be read, so the refill was not priced. Try again in a moment.'],
+  MISTING_REFILL_PRICING_STALE: [503, 'The live misting prices could not be refreshed, so the refill was not priced. Try again in a moment.'],
 };
 
 function refusal(code, extra = {}) {
@@ -128,6 +129,19 @@ async function readSoleActivePropertyId(customerId, database) {
   return Array.isArray(rows) && rows.length === 1 ? rows[0].id : null;
 }
 
+// The live pricing table, fresh. The bridge keeps the sync interval (needsSync); a refresh that is due and fails (missing table,
+// connection failure) means the in-memory prices may be stale or the code defaults, so the refill is NOT priced from them.
+async function pricingIsFresh() {
+  try {
+    const engine = require('./pricing-engine');
+    if (typeof engine.needsSync === 'function' && engine.needsSync()) return (await engine.syncConstantsFromDB()) === true;
+    return true;
+  } catch (err) {
+    logger.warn(`[misting-refill] live pricing refresh failed: ${err.message}`);
+    return false;
+  }
+}
+
 // An estimate is for this property when it names it. An estimate that names no property (written before the linkage) belongs to the
 // customer's sole property only.
 const sameProperty = (row, propertyId, soleId) => (row.property_id
@@ -193,6 +207,7 @@ async function resolveRefillAttachment({
   }
   if (!found) return refusal('MISTING_REFILL_UNPRICED');
   if (!found.solution) return refusal('MISTING_REFILL_SOLUTION_UNREADABLE', { estimateId: found.id });
+  if (!(await pricingIsFresh())) return refusal('MISTING_REFILL_PRICING_STALE', { estimateId: found.id });
   const unitPrice = mistingRefillPriceFor(found.solution);
   if (unitPrice == null) return refusal('MISTING_REFILL_PRICE_UNAVAILABLE', { solution: found.solution, estimateId: found.id });
   const solutionLabel = MOSQUITO_MISTING.refills[found.solution].label;

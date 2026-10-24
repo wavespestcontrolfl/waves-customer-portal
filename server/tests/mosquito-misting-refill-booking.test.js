@@ -19,6 +19,7 @@ const { generateEstimate } = require('../services/pricing-engine/estimate-engine
 const mapper = require('../services/pricing-engine/v1-legacy-mapper');
 const config = require('../services/pricing-engine/mosquito-misting-config');
 const router = require('../routes/admin-schedule');
+const pricingEngine = require('../services/pricing-engine');
 
 const { normalizeUpdateDetailsAddons, lineDueOnRecurringDate, addonRecursAfterAnchor, filterAddonLinesForDate, isOneTimeOnlyAddonKey } = router._test;
 const { buildAppointmentPricing } = router;
@@ -32,8 +33,12 @@ const REFILL = { id: REFILL_ID, service_key: 'mosquito_misting_refill', category
 const PEST = { id: 'svc-pest', service_key: 'pest_control', category: 'pest_control', base_price: 50, name: 'Pest Control' };
 
 const saved = process.env.GATE_MOSQUITO_MISTING;
-beforeEach(() => { process.env.GATE_MOSQUITO_MISTING = 'true'; });
+beforeEach(() => {
+  process.env.GATE_MOSQUITO_MISTING = 'true';
+  jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
+});
 afterEach(() => {
+  jest.restoreAllMocks();
   config.rebaseMosquitoMisting();
   if (saved === undefined) delete process.env.GATE_MOSQUITO_MISTING; else process.env.GATE_MOSQUITO_MISTING = saved;
 });
