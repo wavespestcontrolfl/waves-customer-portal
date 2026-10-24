@@ -3903,15 +3903,6 @@ const gates = {
   // unset — every route starts and ends at the office, as before.
   techStartPoints: gateEnvValue('GATE_TECH_START_POINTS'),
 
-  // Best-times chip stop names (owner 2026-10-21): each best-times chip in
-  // the admin availability strip names the stop it would follow ("after
-  // <customer>") or "from home base" for a first stop, so the office sees
-  // why an hour is cheap without opening the route. Display only: which
-  // hours fit, their order and the save are unchanged. OFF in every
-  // environment; scheduling/find-time-hints.js reads it through
-  // gateEnvValue() at call time. Kill switch: unset — chips show numbers only.
-  bestTimesChipStopNames: gateEnvValue('GATE_BEST_TIMES_CHIP_STOP_NAMES'),
-
   // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
   // customer booking surfaces. buildBookingAvailability (routes/booking.js:
   // /book, the inspection link, public reschedule) ranks its recommended

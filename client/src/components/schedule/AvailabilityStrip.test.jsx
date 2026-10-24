@@ -242,7 +242,7 @@ describe('best-times rows', () => {
       day: [chip('2035-01-02', '12:00', 34, 19, { driveSource: 'google', fromName: 'Stop A', rainChance: 60, technicianName: 'Fixture Tech' })],
       week: [chip('2035-01-01', '08:00', 9, 7, { driveSource: 'google', fromHomeBase: true })],
     };
-    render(<AvailabilityStrip bestRows availability={withBest(null, { best: named, chipStopNames: true })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    render(<AvailabilityStrip bestRows availability={withBest(null, { best: named })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
     const rows = screen.getAllByTestId('best-row');
     expect(rows[0].querySelector('button').textContent).toBe('12 PM19 min');
     expect(rows[1].querySelector('button').textContent).toBe('Mon 18 AM7 min');
