@@ -93,7 +93,7 @@ postgres('SMS prompt auto-promote', () => {
       baseline_run_id: baselineId, voice_profile_version: profile?.version ?? null, model: sealed.EXAM_LEG_ROUTES.anthropic.model,
       prompt_patch_id: patchId, started_at: new Date(NOW.getTime() - 3600_000), finished_at: status === 'complete' ? new Date(NOW.getTime() - 1800_000) : null, ...over,
     }).returning('*');
-    await trx('sms_sealed_eval_results').insert(items.map((itemId, i) => ({
+    if (items.length) await trx('sms_sealed_eval_results').insert(items.map((itemId, i) => ({
       run_id: run.id, item_id: itemId, verdict: i < unsafe ? 'draft_unsafe' : 'equivalent', scores: scoreJson(overall, actions),
     })));
     return run;
@@ -581,6 +581,19 @@ postgres('SMS prompt auto-promote', () => {
       expect(drafter.currentPromptVersion()).toBe(IDENTITY);
     });
 
+    test('an automatic baseline never picks an exam-only candidate run (a rule that never went live is not the previous prompt)', async () => {
+      jest.spyOn(drafter, 'currentPromptVersionBase').mockReturnValue(IDENTITY);
+      jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue(IDENTITY);
+      const items = await seedItems(2, V12_FACTS);
+      const patch = await insertPatch();
+      await insertRun({ items, version: patchLib.stampPatchVersion(IDENTITY, patch.version_tag), patchId: patch.id });
+      const run = await sealed.createExamRun({ providerLeg: 'anthropic', dbi: trx });
+      expect(run.baseline_run_id).toBeNull();
+      const plain = await insertRun({ items, version: 'house_voice_v12_real_answers_o' });
+      await trx('sms_sealed_eval_runs').where({ id: run.id }).del();
+      expect((await sealed.createExamRun({ providerLeg: 'anthropic', dbi: trx })).baseline_run_id).toBe(plain.id);
+    });
+
     test('a resumed candidate run keeps drafting WITH the block (the patch comes from the run row, not the caller)', async () => {
       jest.spyOn(drafter, 'currentPromptVersionBase').mockReturnValue(IDENTITY);
       jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue(IDENTITY);
@@ -600,11 +613,17 @@ postgres('SMS prompt auto-promote', () => {
   });
 
   describe('promote', () => {
-    const decided = async (over = {}) => insertPatch({ over: { decided_at: NOW, would_promote: true, ...over } });
+    // The finished exam behind a decision (what examineCandidate records on the candidate).
+    const withExam = async (patch, runOver = {}) => {
+      const run = await insertRun({ items: [], version: patchLib.stampPatchVersion(patch.base_version, patch.version_tag), patchId: patch.id, over: runOver });
+      await trx('sms_prompt_patches').where({ id: patch.id }).update({ exam_run_id: run.id });
+      return rowOf(patch.id);
+    };
+    const decided = async (over = {}, runOver = {}, rules) => withExam(await insertPatch({ rules, over: { decided_at: NOW, would_promote: true, ...over } }), runOver);
 
     test('retires the previous active patch; one active at a time; the prior version is recorded for the monitor', async () => {
       const previous = await activate(await insertPatch({ rules: [GOOD_RULE] }));
-      const next = await insertPatch({ rules: [GOOD_RULE, SECOND_RULE], over: { parent_patch_id: previous.id, decided_at: NOW, would_promote: true } });
+      const next = await decided({ parent_patch_id: previous.id }, {}, [GOOD_RULE, SECOND_RULE]);
       const notify = jest.fn();
       expect(await auto.promoteCandidate({ dbi: trx, patchId: next.id, now: NOW, notify })).toMatchObject({ promoted: next.id });
       expect(await rowOf(previous.id)).toMatchObject({ status: 'retired', retired_reason: 'superseded' });
@@ -622,6 +641,16 @@ postgres('SMS prompt auto-promote', () => {
 
       const moved = await decided({ base_version: 'house_voice_v12_real_answers24_n' });
       expect(await auto.promoteCandidate({ dbi: trx, patchId: moved.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: moved.id, reason: 'base_changed' });
+      expect(patchLib.getActivePatch()).toBeNull();
+    });
+
+    test('refuses a decision whose exam no longer matches the live model or voice profile (re-propose, never activate stale evidence)', async () => {
+      const otherModel = await decided({}, { model: 'some-older-model' });
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: otherModel.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: otherModel.id, reason: 'exam_model_changed' });
+      const otherProfile = await decided({}, { voice_profile_version: 987 });
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: otherProfile.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: otherProfile.id, reason: 'exam_profile_changed' });
+      const noExam = await insertPatch({ over: { decided_at: NOW, would_promote: true } });
+      expect(await auto.promoteCandidate({ dbi: trx, patchId: noExam.id, now: NOW, notify: jest.fn() })).toEqual({ rejected: noExam.id, reason: 'exam_missing' });
       expect(patchLib.getActivePatch()).toBeNull();
     });
 

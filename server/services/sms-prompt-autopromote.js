@@ -230,6 +230,8 @@ function decidePromotion({ candidateRun, baselineRun, candidateResults, baseline
   const reject = (reason, detail) => ({ promote: false, reason, detail: detail || {} });
   if (!candidateRun || candidateRun.status !== 'complete') return reject('exam_incomplete');
   if (!baselineRun || baselineRun.status !== 'complete') return reject('baseline_incomplete');
+  // One model and one voice profile on both sides: a resumed run can keep an older profile.
+  if (candidateRun.model !== baselineRun.model || (candidateRun.voice_profile_version ?? null) !== (baselineRun.voice_profile_version ?? null)) return reject('run_mismatch');
   const sig = computeSignificance({ candidateResults, baselineResults });
   const deltas = pairedMeanDeltas(candidateResults, baselineResults, ['overall', 'actions']);
   const detail = {
@@ -393,7 +395,7 @@ async function examineCandidate({ dbi = db, now = new Date(), runner, lock, noti
   if (!decision.promote) return recordRejection({ dbi, patch, reason: decision.reason, detail: decision.detail, now });
   await dbi.transaction(async (trx) => {
     await trx(PATCHES).where({ id: patch.id }).update({
-      decided_at: now, would_promote: true, decision_reason: decision.reason, decision_detail: JSON.stringify(decision.detail), updated_at: now,
+      decided_at: now, would_promote: true, decision_reason: decision.reason, decision_detail: JSON.stringify(decision.detail), exam_run_id: ran.run.id, baseline_run_id: ran.baseline.id, updated_at: now,
     });
     await logEvent(trx, now, patch.id, 'would_promote', decision.reason, decision.detail);
   });
@@ -424,10 +426,22 @@ async function raiseRuleAlert({ notify, patchNo, patchId, kind, reason }) {
   }
 }
 
+// The exam that earned the decision must still describe the live setup: same model and same
+// effective voice profile (a profile approval or a model swap between an observe-mode decision and
+// its activation, or a resumed run, leaves the base identity unchanged). null = still valid.
+async function staleEvidenceReason(dbi, cand) {
+  const { EXAM_LEG_ROUTES } = require('./sms-sealed-eval');
+  const run = cand.exam_run_id ? await dbi('sms_sealed_eval_runs').where({ id: cand.exam_run_id }).first('status', 'model', 'voice_profile_version') : null;
+  if (!run || run.status !== 'complete') return 'exam_missing';
+  if (run.model !== EXAM_LEG_ROUTES[EXAM_LEG].model) return 'exam_model_changed';
+  const profile = await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile({ dbi });
+  return (run.voice_profile_version ?? null) === (profile?.version ?? null) ? null : 'exam_profile_changed';
+}
+
 /**
  * Mark a decided candidate active and retire the previous active patch, in one transaction. The
  * partial unique index keeps it to one active row. Refuses a candidate whose parent is no longer
- * the active patch or whose base version moved since it was examined (the exam no longer
+ * the active patch or whose base version, model or voice profile moved since it was examined (the exam no longer
  * describes the live prompt). Needs mode 'true'.
  */
 async function promoteCandidate({ dbi = db, patchId, now = new Date(), notify } = {}) {
@@ -443,6 +457,7 @@ async function promoteCandidate({ dbi = db, patchId, now = new Date(), notify } 
     if ((cand.parent_patch_id || null) !== (active ? active.id : null)) refuse = 'stale_parent';
     else if (cand.base_version !== liveBase) refuse = 'base_changed';
     else if (!stamped) refuse = 'version_too_long';
+    else refuse = await staleEvidenceReason(trx, cand);
     if (refuse) {
       await trx(PATCHES).where({ id: cand.id }).update({ status: 'rejected', decided_at: now, would_promote: false, decision_reason: refuse, updated_at: now });
       await logEvent(trx, now, cand.id, 'rejected', refuse, null);

@@ -249,6 +249,8 @@ describe('promotion bar (pure)', () => {
   test.each([
     ['exam_incomplete', {}, { candidate: { status: 'failed' } }],
     ['baseline_incomplete', {}, { baseline: { status: 'running' } }],
+    ['run_mismatch', {}, { candidate: { model: 'm1' }, baseline: { model: 'm2' } }],
+    ['run_mismatch', {}, { candidate: { voice_profile_version: 4 }, baseline: { voice_profile_version: null } }],
     ['too_few_items', { n: 19 }, {}],
     ['unsafe_rose', { newlyUnsafe: 2, newlySafe: 1 }, {}],
     ['overall_not_improved', { overall: 6.1 }, {}],
