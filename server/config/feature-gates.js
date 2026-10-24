@@ -3872,9 +3872,9 @@ const gates = {
   // NEW caller open New Appointment, pick the address in its New customer
   // block, and the time box (now above Services) shows the best hours for
   // that address alone, no customer record needed, on a 30-minute search
-  // until a service sets the length. A chip fills the day, hour and
-  // technician as it does for an existing customer. Nothing is written until
-  // staff save. It needs GATE_BEST_TIME_HINTS + GATE_RESCHEDULE_AVAILABILITY
+  // until a service sets the length. A chip fills the day and hour only: no
+  // service is known yet, so the chip's technician is not pinned (Codex #6411
+  // r1 on the retired drawer). Nothing is written until staff save. It needs GATE_BEST_TIME_HINTS + GATE_RESCHEDULE_AVAILABILITY
   // on to get an answer. OFF in every environment; the admin schedule day
   // view carries it to Dispatch as addressFirstTimes. Kill switch: unset —
   // the time box waits for a customer, as before.
