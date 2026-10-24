@@ -585,6 +585,71 @@ describe("Finance workflow preservation", () => {
       window.history.replaceState(null, "", "/");
     }
   });
+  const activePlaidItem = () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: true, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({ transactions: [], hasMore: false }));
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () => response({
+      configured: true, tokenKey: true, env: "sandbox", existingLabels: [],
+      items: [{
+        id: "item-1", institutionName: "Synthetic Bank", status: "active", lastSyncedAt: null, lastError: null,
+        accounts: [{
+          id: "acct-1", name: "Checking", mask: "0001", plaidType: "depository", plaidSubtype: "checking",
+          accountLabel: "synthetic-bank-checking-0001", accountType: "bank", syncFrom: "2026-01-01", enabled: true,
+        }],
+      }],
+    }));
+  };
+  it("adds accounts to a connection: Link opens with account selection, then a new account waits for confirmation", async () => {
+    activePlaidItem();
+    overrides.set("POST /api/admin/tax/bank-import/plaid/link-token", () => response({ linkToken: "link-sandbox-2" }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/items/item-1/accounts-changed", () =>
+      response({ success: true, added: 1, setup: true, unshared: [], sync: null }));
+    let resumeDuringLink = null;
+    const create = vi.fn((config) => ({
+      open: () => {
+        resumeDuringLink = JSON.parse(localStorage.getItem("waves_plaid_link_resume"));
+        config.onSuccess("public-sandbox-2", {});
+      },
+      destroy: () => {},
+    }));
+    vi.stubGlobal("Plaid", { create });
+    open(TaxPage);
+    await taxSection("Expenses", "Import");
+    fireEvent.click(await screen.findByRole("button", { name: "Add accounts" }));
+    await screen.findByText(/^Confirm the accounts below: tick Import for each account to sync/);
+    expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/link-token").body)
+      .toEqual({ itemId: "item-1", addAccounts: true });
+    // a bank's OAuth redirect resumes this session as Add accounts, not as a re-login
+    expect(resumeDuringLink).toEqual({ linkToken: "link-sandbox-2", itemId: "item-1", addAccounts: true });
+    expect(requests.some((r) => r.key.endsWith("/reconnected"))).toBe(false);
+  });
+  it("resumes an Add accounts session after the bank's OAuth redirect and flags an account left unticked", async () => {
+    activePlaidItem();
+    overrides.set("POST /api/admin/tax/bank-import/plaid/items/item-1/accounts-changed", () =>
+      response({
+        success: true, added: 0, setup: false,
+        unshared: [{ id: "acct-1", name: "Checking", mask: "0001" }],
+        sync: { inserted: 0, updated: 0, deleted: 0, flagged: 0 },
+      }));
+    const create = vi.fn((config) => ({ open: () => config.onSuccess("public-sandbox-3", {}), destroy: () => {} }));
+    vi.stubGlobal("Plaid", { create });
+    localStorage.setItem("waves_plaid_link_resume",
+      JSON.stringify({ linkToken: "link-sandbox-3", itemId: "item-1", addAccounts: true }));
+    window.history.pushState(null, "", "/admin/tax?oauth_state_id=state-2");
+    try {
+      open(TaxPage);
+      expect(await screen.findByText(/The bank no longer shares Checking ••0001/)).toHaveTextContent(
+        "No new account was shared. Synced: 0 new. The bank no longer shares Checking ••0001, so no new transactions arrive for it — click Add accounts again and tick it.",
+      );
+      expect(create.mock.calls[0][0].token).toBe("link-sandbox-3");
+      expect(requests.some((r) => r.key.endsWith("/reconnected"))).toBe(false);
+      expect(requests.some((r) => r.key === "POST /api/admin/tax/bank-import/plaid/link-token")).toBe(false);
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
   it("keeps the bank-import gate closed on a failed status read", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>
       response({ error: "Read unavailable" }, 503),

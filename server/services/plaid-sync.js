@@ -290,7 +290,9 @@ async function getStatus() {
 
 // ── connect / setup / disconnect ────────────────────────────────────────────
 
-async function createLinkToken({ clientUserId, itemId } = {}) {
+// itemId = update mode for that connection: a re-login, or (addAccounts)
+// changing which of the login's accounts it shares.
+async function createLinkToken({ clientUserId, itemId, addAccounts = false } = {}) {
   if (!itemId) return plaid.createLinkToken({ clientUserId });
   const item = await db('plaid_items').where({ id: itemId }).first();
   if (!item || item.status === 'removed') {
@@ -300,7 +302,7 @@ async function createLinkToken({ clientUserId, itemId } = {}) {
   if (!accessToken) {
     const e = new Error('stored bank token cannot be read — disconnect and connect again'); e.status = 409; throw e;
   }
-  return plaid.createLinkToken({ clientUserId, accessToken });
+  return plaid.createLinkToken({ clientUserId, accessToken, accountSelection: addAccounts });
 }
 
 // Link's onSuccess → exchange, store the (encrypted) token, list accounts.
@@ -510,6 +512,37 @@ async function markReconnected(itemId) {
     .whereIn('status', ['login_required', 'error'])
     .update({ status: 'active', last_error: null, updated_at: db.fn.now() });
   return n > 0;
+}
+
+// After an "Add accounts" Link session (update mode with account selection).
+// Plaid fetches a newly shared account's history in the background, so the
+// sync can miss it for a while: the account list is read now, and a new
+// account goes to the operator at once (registerNewAccounts: off until
+// confirmed, connection back in setup). An imported account Plaid no longer
+// lists was unticked in the bank's screen and gets no more data — it is
+// reported, never dropped silently. Update mode re-authenticates as well.
+async function refreshAccounts(itemId) {
+  await markReconnected(itemId);
+  const item = await db('plaid_items').where({ id: itemId }).first('*', db.raw('updated_at::text as row_version'));
+  if (!item || item.status === 'removed') { const e = new Error('connection not found'); e.status = 404; throw e; }
+  const accessToken = await decryptToken(db, item.access_token_enc);
+  if (!accessToken) {
+    const e = new Error('stored bank token cannot be read — disconnect and connect again'); e.status = 409; throw e;
+  }
+  const { accounts } = await plaid.getAccounts(accessToken);
+  const stored = await db('plaid_accounts').where({ plaid_item_id: itemId });
+  const storedIds = new Set(stored.map(a => a.account_id));
+  const listedIds = new Set(accounts.map(a => a.account_id));
+  const newIds = [...listedIds].filter(id => !storedIds.has(id));
+  if (newIds.length && !(await registerNewAccounts(item, accounts, newIds))) {
+    const e = new Error('the connection changed while its accounts were read — try again'); e.status = 409; throw e;
+  }
+  return {
+    added: newIds.length,
+    // an hourly run that registered the account first left it waiting too
+    setup: newIds.length > 0 || item.status === 'setup',
+    unshared: stored.filter(a => a.enabled && !listedIds.has(a.account_id)).map(publicAccount),
+  };
 }
 
 // `confirmedRemovedAtPlaid`: the stored token can't be read (key missing or
@@ -752,8 +785,8 @@ async function supersedeUnmatchedRow(trx, rowId, values) {
   return row.id;
 }
 
-async function registerNewAccounts(item, accessToken, unknownIds) {
-  const { accounts } = await plaid.getAccounts(accessToken);
+// `accounts` = Plaid's current /accounts/get list for the item.
+async function registerNewAccounts(item, accounts, unknownIds) {
   const existing = await db('plaid_accounts').where({ plaid_item_id: item.id }).select('account_label');
   const used = new Set(existing.map(r => String(r.account_label).trim().toUpperCase()));
   const rows = [];
@@ -841,7 +874,8 @@ async function syncItem(itemId, { runMatching = true } = {}) {
     const known = new Set((await db('plaid_accounts').where({ plaid_item_id: itemId }).select('account_id')).map(r => r.account_id));
     const unknownIds = [...new Set(changes.upserts.map(t => t.account_id).filter(id => id && !known.has(id)))];
     if (unknownIds.length) {
-      const paused = await registerNewAccounts(item, accessToken, unknownIds);
+      const { accounts } = await plaid.getAccounts(accessToken);
+      const paused = await registerNewAccounts(item, accounts, unknownIds);
       return { itemId, skipped: paused ? 'new_accounts' : 'concurrent' };
     }
     result = await db.transaction(async (trx) => {
@@ -935,6 +969,7 @@ module.exports = {
   connectItem,
   setupItem,
   markReconnected,
+  refreshAccounts,
   disconnectItem,
   syncItem,
   syncAllItems,

@@ -50,6 +50,18 @@ test('update-mode link token passes the access token and no products', async () 
   const body = JSON.parse(init.body);
   expect(body.access_token).toBe('access-1');
   expect(body.products).toBeUndefined();
+  expect(body.update).toBeUndefined();
+});
+
+test('an "Add accounts" link token turns on account selection, in update mode only', async () => {
+  fetch.mockResolvedValue(ok({ link_token: 'link-3' }));
+  await plaid.createLinkToken({ clientUserId: 'tech-1', accessToken: 'access-1', accountSelection: true });
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({
+    access_token: 'access-1', update: { account_selection_enabled: true },
+  });
+  // a new connection chooses its accounts in Link anyway
+  await plaid.createLinkToken({ clientUserId: 'tech-1', accountSelection: true });
+  expect(JSON.parse(fetch.mock.calls[1][1].body).update).toBeUndefined();
 });
 
 test('errors carry the Plaid code and never the secret or token', async () => {
