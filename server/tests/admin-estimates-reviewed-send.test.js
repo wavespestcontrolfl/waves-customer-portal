@@ -1646,12 +1646,19 @@ describe('GET /:id/proposal suggestedTaxRate', () => {
     expect(calculate).not.toHaveBeenCalled();
   });
 
-  test('does not fail the read when the resolver cannot run', async () => {
+  test('a failed customer / exemption / county lookup suggests nothing, never the unchecked 7% default', async () => {
     row.customer_id = 'synthetic-customer';
-    jest.spyOn(require('../services/estimate-converter'), 'resolveCommercialPrepayBaseRate').mockRejectedValue(new Error('synthetic lookup failure'));
+    jest.spyOn(TaxCalculator, 'calculateTax').mockRejectedValue(new Error('synthetic lookup failure'));
     const res = await invoke('/:id/proposal', 'get');
     expect(res.body.suggestedTaxRate).toBeNull();
     expect(res.body.proposal).toBeTruthy();
+  });
+
+  test('the accept-path resolver keeps failing soft to the FL default', async () => {
+    jest.spyOn(TaxCalculator, 'calculateTax').mockRejectedValue(new Error('synthetic lookup failure'));
+    const { resolveCommercialPrepayBaseRate, FL_COMMERCIAL_TAX_RATE } = require('../services/estimate-converter');
+    await expect(resolveCommercialPrepayBaseRate('synthetic-customer', {})).resolves.toBe(FL_COMMERCIAL_TAX_RATE);
+    await expect(resolveCommercialPrepayBaseRate('synthetic-customer', { strict: true })).rejects.toThrow('synthetic lookup failure');
   });
 });
 

@@ -4355,12 +4355,13 @@ router.get('/:id/proposal', async (req, res, next) => {
     const proposal = normalizeProposal(estimate);
     // Suggested tax rate (a fraction) for the builder's tax field: the same
     // canonical resolver the Generate-from-estimate draft uses (verified
-    // exemption -> 0, county rate, FL commercial default). Never throws the
-    // read; null when it cannot be resolved.
+    // exemption -> 0, county rate, FL commercial default), in strict mode: a
+    // failed customer / exemption / county lookup is null (no autofill), never
+    // the unchecked default labelled as the customer's rate. Never throws the read.
     let suggestedTaxRate = null;
     try {
       const rate = await require('../services/estimate-converter')
-        .resolveCommercialPrepayBaseRate(estimate.customer_id ?? null, { database: db });
+        .resolveCommercialPrepayBaseRate(estimate.customer_id ?? null, { database: db, strict: true });
       suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
     } catch (_) { suggestedTaxRate = null; }
     res.json({

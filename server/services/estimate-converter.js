@@ -3200,8 +3200,10 @@ function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscount
 // commercial pest (0 if tax-exempt, else their county rate / FL default). Pass
 // the transaction connection when resolving inside the accept trx so the
 // just-written property_type='commercial' is visible. Fails soft to the FL
-// default so a lookup hiccup never blocks acceptance.
-async function resolveCommercialPrepayBaseRate(customerId, { database, forceCommercial = true } = {}) {
+// default so a lookup hiccup never blocks acceptance. `strict: true` rethrows
+// a lookup failure instead (the proposal builder's suggestion must not label
+// an unchecked default as the customer's rate).
+async function resolveCommercialPrepayBaseRate(customerId, { database, forceCommercial = true, strict = false } = {}) {
   if (!customerId) return FL_COMMERCIAL_TAX_RATE;
   try {
     const TaxCalculator = require('./tax-calculator');
@@ -3212,7 +3214,8 @@ async function resolveCommercialPrepayBaseRate(customerId, { database, forceComm
     if (result && result.taxable === false) return 0; // exemption / non-taxable
     const rate = Number(result?.rate);
     return Number.isFinite(rate) && rate >= 0 ? rate : FL_COMMERCIAL_TAX_RATE;
-  } catch (_) {
+  } catch (err) {
+    if (strict) throw err;
     return FL_COMMERCIAL_TAX_RATE;
   }
 }
