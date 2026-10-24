@@ -19,6 +19,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const { isEnabled } = require('../config/feature-gates');
 const { rateLimitKey } = require('../middleware/rate-limit-key');
+const { consumeSharedDailyCap, DAILY_LIMIT_MESSAGE, ASK_WAVES_CAP } = require('../middleware/public-llm-shared-cap');
 const { processIntakeMessage, _internals } = require('../services/ask-waves-intake');
 
 // Chat needs more headroom than the wizard's 10/hr quoteLimiter (a quote
@@ -60,6 +61,11 @@ router.post('/message', intakeLimiter, async (req, res, next) => {
       const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
       return res.status(400).json({ error: message ? 'Message too long' : 'Message required' });
     }
+    // Shared daily paid-LLM ceiling (GATE_PUBLIC_LLM_SHARED_CAP): counted here,
+    // after the gate, limiter and validation, once per request, right before
+    // the paid call (the model fallback inside it does not count again).
+    const sharedCap = await consumeSharedDailyCap(ASK_WAVES_CAP);
+    if (!sharedCap.allowed) return res.status(429).json(DAILY_LIMIT_MESSAGE);
     const result = await processIntakeMessage({
       message: req.body.message.trim(),
       history: req.body?.history,
