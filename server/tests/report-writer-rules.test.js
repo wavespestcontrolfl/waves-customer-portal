@@ -806,6 +806,73 @@ describe('product facts for the pest writer', () => {
     expect(PEST_WRITER_ADAPTER).toContain('PRODUCT FACTS are how you know what each treatment is for');
     expect(PEST_WRITER_ADAPTER).toContain('when the TECHNICIAN NOTE names the places swept, name only those places');
   });
+
+  // GATE_PEST_LABEL_FACTS (owner 2026-10-24, "labels go"): the route passes
+  // the pests named today; null (the gate off) keeps every line as it was.
+  describe('label facts (GATE_PEST_LABEL_FACTS)', () => {
+    const { pestsNamedToday } = require('../services/service-report/label-pest-facts');
+    const named = (text, targets = []) => pestsNamedToday({ texts: [text], targets });
+    const withNamed = (applications, namedPests) => block(buildWriterRecords({
+      serviceYmd: '2026-10-12', line: 'pest', serviceKind: 'recurring', applications, namedPests,
+    }));
+    const ALPINE_KITCHEN = app('Alpine WSG', 'insect-control application', 'spot_treatment', 'Kitchen', []);
+    const TAURUS_OUT = app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', []);
+
+    test('a pest named today that the label names adds "its label lists", with one header line', () => {
+      const text = withNamed([ALPINE_KITCHEN], named('Found a German cockroach under the kitchen sink'));
+      expect(text).toContain('- insect-control application, spot treatment, Kitchen: mainly used for ants and roaches; not tagged today (its reason is not recorded here); its label lists German cockroaches.');
+      expect(text).toContain('"Its label lists" names a pest from today\'s note');
+      expect(text).toContain('Say it once in WHAT WE DID AND WHY, as a treatment "labeled for" that pest');
+      expect(text).toContain('never that it kills the pest');
+      expect(text).not.toMatch(/alpine|dinotefuran|\d/i);
+    });
+
+    test('the gate off, or no pest named, keeps the block byte-identical', () => {
+      const off = withNamed([ALPINE_KITCHEN, TAURUS_OUT], null);
+      expect(off).toBe(block(facts([ALPINE_KITCHEN, TAURUS_OUT])));
+      expect(withNamed([ALPINE_KITCHEN, TAURUS_OUT], named('Quiet visit, sprayed around the house'))).toBe(off);
+      expect(off).not.toContain('label lists');
+    });
+
+    test('Taurus SC names only some ant species: ghost ants and bare "ants" get no label fact', () => {
+      expect(withNamed([TAURUS_OUT], named('Ghost ants trailing on the slider'))).not.toContain('label lists');
+      expect(withNamed([TAURUS_OUT], named('Ants on the front walk'))).not.toContain('label lists');
+      expect(withNamed([TAURUS_OUT], named('Big-headed ants along the driveway'))).toContain('its label lists big-headed ants.');
+    });
+
+    test('a species the label leaves out by name never falls back to its group', () => {
+      // Alpine WSG: "Ants (excluding Pharaoh)".
+      expect(withNamed([ALPINE_KITCHEN], named('Pharaoh ants in the kitchen'))).not.toContain('label lists');
+      expect(withNamed([ALPINE_KITCHEN], named('Ghost ants in the kitchen'))).toContain('its label lists ants.');
+    });
+
+    test('a product with no main pests gets a line only when its label names a pest named today', () => {
+      const demand = app('Demand CS', 'insect-control application', 'perimeter_spray', 'Eaves / soffits', []);
+      expect(withNamed([demand], null)).toBeNull();
+      expect(withNamed([demand], named('Spiders and webs on the eaves'))).toContain('- insect-control application, perimeter spray, Eaves / soffits: its label lists spiders.');
+    });
+
+    test('pests tagged on the product rows count as named today', () => {
+      const text = withNamed([ALPINE_KITCHEN], named('', ['American cockroaches']));
+      expect(text).toContain('its label lists American cockroaches.');
+    });
+
+    test('termites, mosquitoes, bed bugs, fleas and ticks never become a fact', () => {
+      const demand = app('Demand CS', 'insect-control application', 'perimeter_spray', 'Outside', []);
+      expect(withNamed([demand], named('Mosquitoes by the pool, fleas on the dog, ticks in the yard, termite swarmers'))).toBeNull();
+    });
+
+    test('every reviewed list uses only terms the matcher reads, and no excluded pest', () => {
+      const { SPECIES, PEST_GROUPS } = require('../services/service-report/label-pest-facts');
+      const known = new Set([...SPECIES.map((entry) => entry.term), ...PEST_GROUPS.map((group) => group.term)]);
+      for (const entry of REPORT_PRODUCT_COPY) {
+        for (const term of [...(entry.labelPests || []), ...(entry.labelPestsExcept || [])]) {
+          expect([entry.names[0], term, known.has(term)]).toEqual([entry.names[0], term, true]);
+        }
+        expect((entry.labelPests || []).join(' ')).not.toMatch(/termite|mosquito|bed ?bug|flea|tick/i);
+      }
+    });
+  });
 });
 
 // GATE_PEST_QUIET_VISIT's input trim (the route passes `quiet` only under the
