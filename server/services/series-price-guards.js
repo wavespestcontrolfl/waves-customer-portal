@@ -63,6 +63,20 @@ async function lastPaidSeriesVisitAmount(conn, rootId) {
   return positiveAmount(Math.round((Number(invoice.total) - (Number(invoice.tax_amount) || 0)) * 100) / 100);
 }
 
+// Any annual-prepay term link on any visit of the series. The link can sit
+// on a child only (prepay activated mid-series never links the older root —
+// seriesTermIds in admin-schedule.js), so the root alone is not enough.
+// Discovery only: such a series is left to applyExtensionPrepayCoverage and
+// never held or alerted here.
+async function seriesCarriesPrepayTerm(conn, parentId, parent) {
+  if (parent?.annual_prepay_term_id) return true;
+  const linked = await conn('scheduled_services')
+    .where((q) => q.where('id', parentId).orWhere('recurring_parent_id', parentId))
+    .whereNotNull('annual_prepay_term_id')
+    .first('id');
+  return !!linked;
+}
+
 // The verdict for one extension child about to be inserted. null = insert
 // as before, no alert. Callers check seriesPriceGuardsLive() first, so the
 // gate-off path makes no reads at all.
@@ -74,7 +88,7 @@ async function lastPaidSeriesVisitAmount(conn, rootId) {
 async function extensionPriceVerdict(conn, { parent, parentId, child }) {
   const price = positiveAmount(child?.estimated_price);
   if (!price || child?.is_callback || isAlwaysFreeServiceType(child?.service_type)) return null;
-  if (parent?.annual_prepay_term_id) return null;
+  if (await seriesCarriesPrepayTerm(conn, parentId, parent)) return null;
   const lastPaid = await lastPaidSeriesVisitAmount(conn, parentId);
   const over = lastPaid != null && Math.round(price * 100) > Math.round(lastPaid * OVER_LAST_PAID_RATIO * 100);
   if (parent?.status === 'cancelled' && (lastPaid == null || over)) {

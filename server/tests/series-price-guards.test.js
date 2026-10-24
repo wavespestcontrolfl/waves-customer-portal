@@ -21,22 +21,32 @@ function fakeConn(answers) {
   const seen = [];
   const conn = (table) => {
     const b = {};
-    for (const m of ['where', 'orWhere', 'orWhereIn', 'select', 'orderBy']) {
+    const calls = [];
+    for (const m of ['where', 'orWhere', 'orWhereIn', 'whereNotNull', 'select', 'orderBy']) {
       b[m] = (...args) => {
         seen.push([table, m, ...args]);
+        calls.push([m, ...args]);
         if (typeof args[0] === 'function') args[0](b);
         return b;
       };
     }
-    b.first = async (...cols) => { seen.push([table, 'first', ...cols]); return answers[table]; };
+    b.first = async (...cols) => {
+      seen.push([table, 'first', ...cols]);
+      const answer = answers[table];
+      return typeof answer === 'function' ? answer(calls) : answer;
+    };
     return b;
   };
   conn.seen = seen;
   return conn;
 }
 
-const lastPaidConn = (amount) => fakeConn({
-  scheduled_services: { id: 'visit-9' },
+// scheduled_services answers two reads: the prepay-link probe (whereNotNull)
+// and the newest completed visit.
+const lastPaidConn = (amount, { prepayLinked = false } = {}) => fakeConn({
+  scheduled_services: (calls) => (calls.some((c) => c[0] === 'whereNotNull')
+    ? (prepayLinked ? { id: 'linked-child' } : undefined)
+    : { id: 'visit-9' }),
   invoices: amount == null ? undefined : { total: String(amount + 7), tax_amount: '7.00' },
 });
 
@@ -83,7 +93,12 @@ describe('extensionPriceVerdict', () => {
   test('live root with no paid visit: no verdict', async () => {
     await expect(guards.extensionPriceVerdict(lastPaidConn(null), { parent: live, parentId: 'r', child: child(500) })).resolves.toBeNull();
   });
-  test('exempt: callback, always-free type, unpriced child, annual-prepay series — and no reads', async () => {
+  test('exempt: a series whose prepay term links only a child (mid-series prepay), even under a cancelled root', async () => {
+    const conn = lastPaidConn(null, { prepayLinked: true });
+    await expect(guards.extensionPriceVerdict(conn, { parent: cancelled, parentId: 'r', child: child(333.45) })).resolves.toBeNull();
+    expect(conn.seen.some(([t, m]) => t === 'invoices' && m === 'first')).toBe(false);
+  });
+  test('exempt: callback, always-free type, unpriced child, root-linked prepay series — and no reads', async () => {
     const cases = [
       { parent: cancelled, child: child(333.45, { is_callback: true }) },
       { parent: cancelled, child: child(333.45, { service_type: 'Re-Service' }) },
