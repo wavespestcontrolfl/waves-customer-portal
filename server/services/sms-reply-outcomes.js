@@ -249,17 +249,20 @@ async function readInboundPage({ dbh, reply, phone, windowMs, afterId = null, li
 
 const isOptOutRow = (row) => (row.message_type || 'inbound') === 'opt_out' || detectSmsOptCommand(row.message_body).action === 'opt_out';
 
-// The whole 72-hour window, a page at a time, until an opt-out turns up: a long thread
-// must not hide a STOP behind its first rows.
-async function findOptOut({ dbh, reply, phone }) {
+// The whole 72-hour window, a page at a time: whether any opt-out turns up, and the first text or
+// tapback (however late). A long thread must not hide a STOP behind its first rows, and a customer
+// who answers the next morning is not silent.
+async function scanOutcomeWindow({ dbh, reply, phone }) {
   let afterId = null;
+  let firstEngagement = null;
   for (let page = 0; page < MAX_OPTOUT_PAGES; page += 1) {
     const rows = await readInboundPage({ dbh, reply, phone, windowMs: OPTOUT_WINDOW_HOURS * 3600 * 1000, afterId });
-    if (rows.some(isOptOutRow)) return true;
-    if (rows.length < MAX_INBOUND_ROWS) return false;
+    firstEngagement = firstEngagement || rows.find(isEngagementRow) || null;
+    if (rows.some(isOptOutRow)) return { optedOut: true, firstEngagement };
+    if (rows.length < MAX_INBOUND_ROWS) break;
     afterId = rows[rows.length - 1].id;
   }
-  return false;
+  return { optedOut: false, firstEngagement };
 }
 
 async function readCallBack({ dbh, reply, phone }) {
@@ -276,6 +279,8 @@ async function readCallBack({ dbh, reply, phone }) {
 // A tapback ("Liked “…”"): the webhook stores one on a conversational question as an ordinary
 // 'inbound' row, and only a quiet one as 'sms_reaction', so the body decides, not the type.
 const isReactionRow = (row) => (row.message_type || 'inbound') === REACTION_TYPE || isSmsReaction(row.message_body);
+
+const isEngagementRow = (row) => !isOptOutRow(row) && (TEXT_TYPES.includes(row.message_type || 'inbound') || isReactionRow(row));
 
 // The first text or tapback after the reply is a thanks / ok / thumbs-up / like, inside the window.
 function isPositiveClose(first, windowEnd) {
@@ -339,7 +344,9 @@ async function measureReply({ dbh, reply, draft, now, duplicateOfProviderRow = f
   if (!answered) return { ...base, status: 'not_a_reply', replied_to_sms_log_id: null };
   const followUps = await readInboundPage({ dbh, reply, phone, windowMs: POSITIVE_WINDOW_MINUTES * 60 * 1000 });
   const calledBack = await readCallBack({ dbh, reply, phone });
-  const optedOut = await findOptOut({ dbh, reply, phone });
+  const { optedOut, firstEngagement } = await scanOutcomeWindow({ dbh, reply, phone });
+  // A first answer after the confusion and positive windows still ends silence; those windows reject it by time.
+  if (firstEngagement && !followUps.some((r) => r.id === firstEngagement.id)) followUps.push(firstEngagement);
   const signals = classifyFollowUps({ replyAt: reply.created_at, followUps, answeredBody: answered.message_body, calledBack, optedOut });
   return { ...base, status: 'computed', replied_to_sms_log_id: answered.id, ...signals };
 }

@@ -157,6 +157,15 @@ postgres('reply outcome signals', () => {
     expect(await rowFor(replyId)).toMatchObject({ opted_out: true, silent: false });
   });
 
+  test('a customer who answers the next morning is not silent, and the late answer is not confusion or a close', async () => {
+    const replyId = await askAndReply();
+    await text('Thanks!', { at: after(60 * 18) });
+    await sweep();
+    expect(await rowFor(replyId)).toMatchObject({ silent: false, positive_close: false, confused: false, first_inbound_seconds: 60 * 18 * 60 });
+    expect(await rowFor(replyId)).toHaveProperty('first_inbound_at');
+    expect((await rowFor(replyId)).first_inbound_at).not.toBeNull();
+  });
+
   test('call back: an inbound call within an hour counts; later, outbound and foreign-number calls do not', async () => {
     const replyId = await askAndReply();
     await call({ minutes: 30 });
