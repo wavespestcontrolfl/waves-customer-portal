@@ -413,7 +413,7 @@ describe('palm capture fields (owner 2026-10-23)', () => {
     expect(byKey.palm_symptoms.type).toBe('multi_select');
     expect(byKey.palm_symptoms.options).toEqual([
       'None seen', 'Frizzle-top (new fronds yellow / small / withered)', 'Yellow / orange spotting on older fronds',
-      'Browning / bronzing fronds', 'Spear leaf collapse',
+      'Browning / bronzing fronds', 'Spear leaf collapse', 'Unsure (something looks wrong)',
     ]);
     expect(byKey.palm_types_seen.options).toEqual(
       require('../config/tree-shrub-field-guide.json').palmTypes.rows.map((row) => row.name),
