@@ -35,6 +35,8 @@ const ANSWER_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FIRST_SLOT_MINUTES = 8 * 60;
 const LAST_SLOT_MINUTES = 19 * 60 + 45;
 const SLOT_MINUTES = 15;
+// Same set as lead-call-reply-ring.js: a row in one of these is a customer.
+const REAL_CUSTOMER_STAGES = ['active_customer', 'won', 'at_risk'];
 
 function phoneDigits(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
@@ -84,8 +86,10 @@ function parseCallTime(text) {
   return { minutes: hour * 60 + minute };
 }
 
-// The ET day a night ask is for: after 8 PM it is the next day; between
-// midnight and 8 AM "tomorrow" still means the coming morning, today.
+// The ET day a night ask is for: after 8 PM it is the next day. Between
+// midnight and 8 AM "tomorrow" is read as the coming morning (a lead texting
+// at 1 AM means after they sleep), so the day is today; the confirmation
+// names it ("today at 10:00 AM"), so the lead sees which day was booked.
 function targetDateFor(askedAt) {
   return etParts(askedAt).hour >= 20 ? etDateString(addETDays(askedAt, 1)) : etDateString(askedAt);
 }
@@ -171,12 +175,18 @@ async function raiseLeadBell({ customer, leadId, requestId, why }) {
   }
 }
 
+// Settles only a row still in the claimed state: a TEXT answer or a
+// daytime CALL that cancelled it while our text was going out wins.
 async function settleSend(requestId, outcome, { sentState, now }) {
-  await db('lead_callback_requests').where({ id: requestId }).update({
+  await db('lead_callback_requests').where({ id: requestId, state: 'asked' }).update({
     send_outcome: outcome,
     state: outcome === 'not_sent' ? 'cancelled' : sentState,
     updated_at: now,
   });
+  if (outcome !== 'not_sent') {
+    await db('lead_callback_requests').where({ id: requestId }).whereNot({ state: 'asked' }).whereNull('send_outcome')
+      .update({ send_outcome: outcome, updated_at: now });
+  }
 }
 
 // ── Flows ────────────────────────────────────────────────────────────────
@@ -319,6 +329,11 @@ async function handleLeadReply({ customer, body, fromPhone, smsLogId = null, now
       .orderBy('created_at', 'desc')
       .first();
     if (!open) return { action: 'none', reason: 'no_open_ask' };
+    // Still a lead? A row that became a customer since the question closes.
+    if (REAL_CUSTOMER_STAGES.includes(customer.pipeline_stage)) {
+      await db('lead_callback_requests').where({ id: open.id, state: 'asked' }).update({ state: 'cancelled', updated_at: now });
+      return { action: 'none', reason: 'existing_customer' };
+    }
     return answerTimeAsk({ customer, request: open, body, smsLogId, now });
   } catch (err) {
     // Code only: a knex message carries the bindings (the phone digits).

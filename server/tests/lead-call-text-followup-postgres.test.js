@@ -148,6 +148,24 @@ jest.setTimeout(30000);
     expect((await database('lead_callback_requests').where({ customer_id: c.id }).first()).state).toBe('cancelled');
   });
 
+  test('a lead who became a customer after the question is not booked', async () => {
+    const c = await lead('+19415550112');
+    await reply(c, 'call', NIGHT);
+    await expect(reply({ ...c, pipeline_stage: 'active_customer' }, '10am', NIGHT)).resolves.toMatchObject({ reason: 'existing_customer' });
+    expect(sentBodies()).toEqual([NIGHT_CALL_BODY]);
+    expect((await database('lead_callback_requests').where({ customer_id: c.id }).first()).state).toBe('cancelled');
+  });
+
+  test('a TEXT that cancels the ask while our question is still sending stays cancelled', async () => {
+    const c = await lead('+19415550113');
+    sendCustomerMessage.mockImplementationOnce(async () => {
+      await database('lead_callback_requests').where({ customer_id: c.id }).update({ state: 'cancelled' });
+      return REAL_SEND;
+    });
+    await reply(c, 'call', NIGHT);
+    expect((await database('lead_callback_requests').where({ customer_id: c.id }).first())).toMatchObject({ state: 'cancelled', send_outcome: 'sent' });
+  });
+
   test('an existing customer and a phone with no lead text are never answered', async () => {
     const customer = await lead('+19415550108', { stage: 'active_customer' });
     await expect(reply(customer, 'text', DAY)).resolves.toMatchObject({ reason: 'existing_customer' });
