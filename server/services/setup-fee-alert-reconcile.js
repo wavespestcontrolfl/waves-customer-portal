@@ -19,7 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
-const { setupFeeSettledElsewhere } = require('./setup-fee-obligation');
+const { setupFeeSettledElsewhere, settledVisitDate } = require('./setup-fee-obligation');
 
 // All note-stamped writers use the same case-insensitive linkage and lower-
 // case lock key, including historical stamps with the original loose shape.
@@ -234,7 +234,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               return Number.isFinite(v) ? v : 0;
             }));
             const tFeeProven = feeWaivedByTerm
-              || (await setupFeeSettledElsewhere(trx, { customerId: tCustomer, expectedFeeCents: tExpect, lock: true })).settled
+              || (await setupFeeSettledElsewhere(trx, { customerId: tCustomer, expectedFeeCents: tExpect, visitDate: await settledVisitDate(trx, tVisitIds[0]), lock: true })).settled
               || (tExpect > 0
               ? (tLiveFeeCents + tRefundedFeeCents) >= tExpect
               : tRefundedFeeCents > 0);
@@ -365,7 +365,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // (Codex P0) — the estate alert must never instruct a waived
           // $99 while the term stands.
           const feeProven = feeWaivedByTerm
-            || (await setupFeeSettledElsewhere(trx, { customerId: scanCustomerId, expectedFeeCents: expectedFeeCents || 0, lock: true })).settled
+            || (await setupFeeSettledElsewhere(trx, { customerId: scanCustomerId, expectedFeeCents: expectedFeeCents || 0, visitDate: await settledVisitDate(trx, parkedIds[0] || (Array.isArray(staleMeta?.historicVisitIds) ? staleMeta.historicVisitIds[0] : null)), lock: true })).settled
             || (expectedFeeCents !== null
               ? (liveFeeCents + refundedFeeCents) >= expectedFeeCents
               : (refundedFeeCents > 0 || uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine)));

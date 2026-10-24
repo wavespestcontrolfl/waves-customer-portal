@@ -29,12 +29,12 @@ jest.mock('../models/db', () => {
       return typeof val === 'function' ? val(mockCounters[table]) : val;
     };
     const chain = {};
-    ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orWhereIn', 'orderBy', 'forUpdate', 'leftJoin', 'andWhere', 'orWhereNotNull', 'whereNotIn'].forEach((m) => {
+    ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orWhereIn', 'orderBy', 'forUpdate', 'leftJoin', 'andWhere', 'orWhereNotNull', 'whereNotIn', 'whereExists'].forEach((m) => {
       chain[m] = jest.fn((...args) => {
         if (table === 'invoices' && m === 'where' && args[0] === 'notes') state.stamped = true;
         if (table === 'invoices' && m === 'whereRaw' && String(args[0]).includes('line_items::text')) state.customerScan = true;
         if (table === 'annual_prepay_terms as t') mockTermCalls.push([m, ...args]);
-        if (typeof args[0] === 'function') args[0].call(chain, chain);
+        if (m !== 'whereExists' && typeof args[0] === 'function') args[0].call(chain, chain);
         return chain;
       });
     });
@@ -179,6 +179,24 @@ describe('the detector behind the alert and the completion hold', () => {
     expect(mockTermCalls).toContainEqual(['whereNull', 't.annual_plan_version']);
   });
 
+  test('gate ON, a paid fee that was later REFUNDED stays settled (never re-instruct); a refunded prepay bundle does not', async () => {
+    process.env[GATE] = 'true';
+    mockTables = obligationTables([{ ...PAID_MEMBERSHIP[0], status: 'refunded' }]);
+    expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST })).owed).toBe(false);
+    mockTables = obligationTables([{ id: 'i', status: 'refunded', created_at: recent, line_items: [{ description: 'WaveGuard Membership — 12 months prepaid (setup fee waived)', category: 'Annual prepay', amount: 388 }] }]);
+    expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST })).owed).toBe(true);
+  });
+
+  test('the term check is bounded to the visit date (completion) and to a real date when none is known', async () => {
+    process.env[GATE] = 'true';
+    mockTables = { 'annual_prepay_terms as t': null, invoices: { stamped: [], customer: [], other: [] }, scheduled_services: { scheduled_date: '2026-10-23' } };
+    await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900, visitDate: '2026-10-23' });
+    expect(mockTermCalls).toContainEqual(['where', 't.term_start', '<=', '2026-10-23']);
+    mockTermCalls = [];
+    await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900 });
+    expect(mockTermCalls.find((c) => c[1] === 't.term_start')[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
   test('gate off returns before any read', async () => {
     delete process.env[GATE];
     expect(await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900 })).toEqual({ settled: false });
@@ -226,6 +244,13 @@ describe('the reconcile reopen trap: billing the visit must not re-demand a sett
     const text = mockUpdates[0].payload.detail || mockUpdates[0].payload.body;
     expect(text).toContain('Still owed');
     expect(text).toContain('one-time WaveGuard setup fee');
+  });
+
+  test('gate ON: reconcile bounds the term check to the alert visit date', async () => {
+    process.env[GATE] = 'true';
+    mockTables = { ...reconcileTables([]), scheduled_services: [{ scheduled_date: '2026-10-23' }] };
+    await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+    expect(mockTermCalls).toContainEqual(['where', 't.term_start', '<=', '2026-10-23']);
   });
 
   test('gate ON but the fee is NOT settled elsewhere -> the fee instruction still stands', async () => {

@@ -466,7 +466,11 @@ async function setupFeeSettledElsewhere(conn, {
     .whereRaw(`(line_items::text ILIKE '%fee%' OR line_items::text ILIKE '%membership%' OR line_items::text ILIKE '%prepay%' OR line_items::text ILIKE '%prepaid%')`);
   if (lock) query = query.forUpdate();
   const rows = await query.select('id', 'status', 'line_items', 'created_at');
+  // A REFUNDED invoice keeps its fee-line evidence (never instruct a re-bill of
+  // money that was collected and deliberately refunded), but a refunded waived
+  // or prepay bundle settles nothing.
   const dead = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void', 'draft']);
+  dead.delete('refunded');
   let paidFeeCents = 0;
   let paidFeeInvoiceId = null;
   for (const row of rows) {
@@ -482,6 +486,13 @@ async function setupFeeSettledElsewhere(conn, {
       if (cents === null) continue;
       const desc = String(li?.description || '');
       const waived = /(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0);
+      if (status === 'refunded') {
+        if (cents > 0 && !waived && settledFeeLineName(li)) {
+          paidFeeCents += cents;
+          paidFeeInvoiceId = paidFeeInvoiceId || row.id;
+        }
+        continue;
+      }
       if (waived && (cents === 0 || status === 'paid')) {
         return { settled: true, reason: 'waived', invoiceId: row.id };
       }
@@ -500,7 +511,7 @@ async function setupFeeSettledElsewhere(conn, {
     return { settled: true, reason: 'paid_fee', invoiceId: paidFeeInvoiceId };
   }
   const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-  const term = await AnnualPrepayRenewals.coveredTermsAsOf(conn, visitDate || null)
+  const term = await AnnualPrepayRenewals.coveredTermsAsOf(conn, visitDate || require('../utils/datetime-et').etDateString(new Date()))
     .where('t.customer_id', customerId)
     .whereNull('t.annual_plan_version') // a termite annual plan never waives the WaveGuard fee
     .first('t.id');
@@ -828,6 +839,7 @@ module.exports = {
   officeParkedSetupFeeSeries,
   findUnmintedSetupFeeObligation,
   setupFeeSettledElsewhere,
+  settledVisitDate,
   parkSetupFeeStampForOffice,
   isPlanApplicationRow,
   SETUP_FEE_OFFICE_BILLING_ALERT,
