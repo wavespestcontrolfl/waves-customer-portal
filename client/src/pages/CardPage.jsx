@@ -20,6 +20,7 @@ import QRCode from 'qrcode';
 import { SOCIAL_ICON_PATHS, APP_STORE_URL, PLAY_STORE_URL } from '../components/BrandFooter';
 import { WAVES_FL_LICENSE_LINE } from '../constants/business';
 import { PublicStateCard } from '../components/brand';
+import { useGlassMotion } from '../glass/glass-motion';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -138,7 +139,7 @@ const GLASS_MATERIAL = {
 
 function ContactPill({ href, label, icon }) {
   return (
-    <a className="wcard-tap" href={href} style={{
+    <a className="wcard-tap" href={href} data-glass-motion="control" style={{
       ...GLASS_MATERIAL,
       display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
       borderRadius: 999, padding: '9px 13px',
@@ -170,6 +171,7 @@ export default function CardPage() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
   const [photoFailed, setPhotoFailed] = useState(false);
+  useGlassMotion();
 
   useEffect(() => {
     let alive = true;
@@ -274,7 +276,7 @@ export default function CardPage() {
         .wcard-tap:focus-visible { outline: 2px solid ${AQUA}; outline-offset: 2px; }
       `}</style>
 
-      <div style={{
+      <div data-glass-motion="card" style={{
         position: 'relative',
         width: 'min(378px, 100%)',
         borderRadius: 32,
@@ -352,6 +354,7 @@ export default function CardPage() {
               aria-label="Share with a friend"
               title="Share"
               data-glass-pill=""
+              data-glass-motion="control"
               style={{ ...GLASS_MATERIAL, width: 44, height: 44, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center', font: 'inherit' }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -365,6 +368,7 @@ export default function CardPage() {
               href={`${API_BASE}/card/${token}/contact.vcf`}
               aria-label="Save contact"
               title="Save contact"
+              data-glass-motion="control"
               style={{ ...GLASS_MATERIAL, width: 44, height: 44, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -411,7 +415,7 @@ export default function CardPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9, alignItems: 'center' }}>
           <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.70)' }}>Get the Waves app</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, width: '100%' }}>
-            <a className="wcard-tap" href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download the Waves app on the App Store"
+            <a className="wcard-tap" href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download the Waves app on the App Store" data-glass-motion="control"
               style={{ ...GLASS_MATERIAL, flex: '1 1 144px', minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 13, padding: '9px 10px' }}>
               <svg width="20" height="24" viewBox="0 0 24 24" aria-hidden="true" style={{ flexShrink: 0 }}><path fill="currentColor" d={APPLE_GLYPH_PATH} /></svg>
               <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.12, textAlign: 'left' }}>
@@ -419,7 +423,7 @@ export default function CardPage() {
                 <span style={{ fontSize: 16, fontWeight: 640, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>App Store</span>
               </span>
             </a>
-            <a className="wcard-tap" href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Get the Waves app on Google Play"
+            <a className="wcard-tap" href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Get the Waves app on Google Play" data-glass-motion="control"
               style={{ ...GLASS_MATERIAL, flex: '1 1 144px', minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9, borderRadius: 13, padding: '9px 10px' }}>
               <svg width="19" height="21" viewBox="0 0 24 24" aria-hidden="true" style={{ flexShrink: 0 }}>
                 <path fill="#00C3FF" d="M4 3 13 12 4 21Z" />
@@ -446,6 +450,7 @@ export default function CardPage() {
               rel="noopener noreferrer"
               aria-label={`Waves on ${s.name}`}
               title={s.name}
+              data-glass-motion="control"
               style={{ ...GLASS_MATERIAL, flexShrink: 0, width: 44, height: 44, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d={s.path} /></svg>
@@ -461,7 +466,7 @@ export default function CardPage() {
               <span style={{ fontSize: 16, fontWeight: 620, color: 'rgba(255,255,255,0.88)' }}>
                 {techFirst ? `Did ${techFirst} take good care of you?` : 'Did we take good care of you?'}
               </span>
-              <div style={{
+              <div data-glass-motion="soft" style={{
                 background: 'rgba(255,255,255,0.09)',
                 border: '1px solid rgba(255,255,255,0.24)',
                 boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.22)',

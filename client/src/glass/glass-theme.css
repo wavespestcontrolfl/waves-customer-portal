@@ -397,14 +397,10 @@ html[data-glass-theme] textarea {
   position: relative;
   z-index: 2;
 }
-html[data-glass-theme] [data-glass].glass-reveal-pending {
-  opacity: 0 !important;
-  transform: translateY(16px) !important;
-}
-html[data-glass-theme] [data-glass].glass-reveal-in {
-  transition: transform 0.6s var(--spring), box-shadow 0.5s var(--spring),
-    opacity 0.6s ease, border-color 0.3s ease !important;
-}
+/* The shared Web Animation owns the entrance only; normal hover/press
+   transitions resume after it settles. Nothing is hidden while waiting. */
+html[data-glass-theme] [data-glass-motion-state],
+[data-glass-motion-state] { transition: none !important; }
 
 /* ---------- mobile: full glass material, pop-out off (owner ruling
    2026-07-18; supersedes the 2026-07-10 solid-card entry) ----------
@@ -434,12 +430,14 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
      out-specifies this block) can't reintroduce a lift on touch — glass
      cards/chips/accents are flow content and never use transforms for
      layout. */
-  html[data-glass-theme] [data-glass="card"]:hover,
-  html[data-glass-theme] [data-glass="card"]:active,
-  html[data-glass-theme] [data-glass="chip"]:hover,
-  html[data-glass-theme] [data-glass="chip"]:active,
-  html[data-glass-theme] [data-glass-accent]:hover,
-  html[data-glass-theme] [data-glass-accent]:active {
+  /* An entering surface pauses in place during a press. Overriding its
+     transform here would move the hit target before pointer-up. */
+  html[data-glass-theme] [data-glass="card"]:not([data-glass-motion-state="card"]):not([data-glass-motion-state="control"]):hover,
+  html[data-glass-theme] [data-glass="card"]:not([data-glass-motion-state="card"]):not([data-glass-motion-state="control"]):active,
+  html[data-glass-theme] [data-glass="chip"]:not([data-glass-motion-state="card"]):not([data-glass-motion-state="control"]):hover,
+  html[data-glass-theme] [data-glass="chip"]:not([data-glass-motion-state="card"]):not([data-glass-motion-state="control"]):active,
+  html[data-glass-theme] [data-glass-accent]:not([data-glass-motion-state="card"]):not([data-glass-motion-state="control"]):hover,
+  html[data-glass-theme] [data-glass-accent]:not([data-glass-motion-state="card"]):not([data-glass-motion-state="control"]):active {
     transform: none !important;
   }
   /* Untagged buttons must NOT get !important: some are POSITIONED with an
@@ -460,10 +458,6 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
   }
   html[data-glass-theme] [data-glass]:hover,
   html[data-glass-theme] [data-glass-accent]:hover {
-    transform: none !important;
-  }
-  html[data-glass-theme] [data-glass].glass-reveal-pending {
-    opacity: 1 !important;
     transform: none !important;
   }
 }
@@ -729,13 +723,6 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   [data-waves-shell-header] {
     display: none !important;
     visibility: hidden !important;
-  }
-  /* Below-fold cards are opacity:0 until the reveal IntersectionObserver
-     fires — nothing scrolls in print, so without this everything below the
-     first viewport prints BLANK (verified via print-to-pdf 2026-07-07). */
-  html[data-glass-theme] [data-glass].glass-reveal-pending {
-    opacity: 1 !important;
-    transform: none !important;
   }
   [data-glass] {
     break-inside: avoid;
