@@ -43,10 +43,13 @@ export function readMistingAvailability(row) {
 }
 
 // `options.mosquitoMisting` for the calculate and save requests. Empty when the
-// toggle is off or the gate is down, so the payload is then byte-identical to
-// one from before this feature.
-export function mistingOption(form, availability) {
-  if (!form?.svcMisting || !availability?.available) return {};
+// toggle is off, so the payload is then byte-identical to one from before this
+// feature. The toggle alone decides: a reopened estimate that carries the system
+// while the gate is down still posts it, and the server refuses it loudly
+// (MOSQUITO_MISTING_GATED) instead of the plan and install vanishing on a
+// regenerate (pre-push P1). The second argument is kept for call sites.
+export function mistingOption(form, _availability) {
+  if (!form?.svcMisting) return {};
   const pairs = [
     ["tier", form.mistingTier],
     ["nozzles", form.mistingNozzles],

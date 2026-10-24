@@ -88,7 +88,9 @@ function jsonResponse(body, status = 200) {
 let fetchMock;
 let mistingRead;
 let calculateResult;
+let editSource;
 beforeEach(() => {
+  editSource = null;
   localStorage.setItem("waves_admin_token", "qa-token");
   vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.spyOn(window, "alert").mockImplementation(() => {});
@@ -99,6 +101,7 @@ beforeEach(() => {
     if (path.includes("/admin/pricing-config/mosquito_misting_pricing")) {
       return Promise.resolve(jsonResponse(mistingRead === undefined ? {} : mistingRead));
     }
+    if (path.endsWith("/edit-source")) return Promise.resolve(jsonResponse(structuredClone(editSource)));
     if (path.endsWith("/estimator/property-lookup")) {
       return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 2000, lotSqFt: 9000, stories: 1 }, errors: [] }));
     }
@@ -189,6 +192,31 @@ describe("what the calculate request carries", () => {
     const body = await generate();
     expect(body.selectedServices).toEqual(["PEST"]);
     expect(JSON.stringify(body)).not.toMatch(/misting/i);
+  });
+
+  it("keeps a reopened estimate's misting system when the gate is off, and still posts it so the server refuses it", async () => {
+    // Pre-push P1: before this, a regenerate under a down gate (or a failed availability read)
+    // silently dropped MOSQUITO_MISTING and its options, so a mixed estimate saved without
+    // its plan and install. Now the toggle stays, a notice says why, and the request carries it.
+    mistingRead = { featureAvailable: false };
+    editSource = {
+      id: "qa-misting-estimate", status: "draft", editable: true, editVersion: "qa-version",
+      customerName: "QA Contact", address: ADDRESS, result: RESULT,
+      inputs: { svcPest: true, svcMisting: true, mistingTier: "smart", mistingNozzles: "24", mistingRefillsPerYear: "4", homeSqFt: "2000", lotSqFt: "9000", stories: "1" },
+      engineRequest: { profile: {}, selectedServices: ["PEST", "MOSQUITO_MISTING"], options: { mosquitoMisting: { tier: "smart", nozzles: "24", refillsPerYear: "4" } } },
+    };
+    render(<MemoryRouter><EstimateToolViewV2 editEstimateId="qa-misting-estimate" /></MemoryRouter>);
+    expect(await toggle()).toBeChecked();
+    expect(screen.getByTestId("misting-unavailable")).toHaveTextContent("not enabled on this server");
+    expect(screen.getByLabelText("Nozzles")).toHaveValue(24);
+    const body = await generate();
+    expect(body.selectedServices).toEqual(["PEST", "MOSQUITO_MISTING"]);
+    expect(body.options.mosquitoMisting).toEqual({ tier: "smart", nozzles: "24", refillsPerYear: "4" });
+    // Unticking it removes it from the request, as the notice says.
+    fireEvent.click(await toggle());
+    const after = await generate();
+    expect(after.selectedServices).toEqual(["PEST"]);
+    expect("mosquitoMisting" in after.options).toBe(false);
   });
 
   it("sends the typed layout unrounded, drops blanks and keeps the refill count", async () => {

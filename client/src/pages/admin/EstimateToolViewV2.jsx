@@ -1784,7 +1784,9 @@ export default function EstimateToolViewV2({
       ...(rodentWaveguardPosture.tierQualifier !== false ? ["svcRodentBait"] : []),
     ];
     // The misting system is a flat plan outside the WaveGuard tiers, so it counts like palm injection.
-    const separateRecurringKeys = ["svcInjection", "svcFoamRecurring", ...(mistingAvailability.available ? ["svcMisting"] : [])];
+    // It counts whenever the toggle is on, gate or not: a reopened estimate that carries it must
+    // not read as "no service selected" while the gate is down (pre-push P1, PR 2b).
+    const separateRecurringKeys = ["svcInjection", "svcFoamRecurring", "svcMisting"];
     // ALL commercial pest-family services now auto-price as recurring lines
     // (lawn, pest, tree/shrub, mosquito, termite-bait, rodent-bait). None collapse
     // to a manual commercial quote.
@@ -3924,7 +3926,10 @@ export default function EstimateToolViewV2({
       if (form.svcInjection) selectedServices.push("PALM_INJECTION");
       if (form.svcMosquito) selectedServices.push("MOSQUITO");
       if (form.svcTermiteBait) selectedServices.push("TERMITE_BAIT");
-      if (form.svcMisting && mistingAvailability.available) selectedServices.push("MOSQUITO_MISTING");
+      // Forwarded whenever the toggle is on, like the area add-ons: a reopened estimate whose
+      // gate is now off, or whose availability read failed, is refused loudly by the server
+      // (400 MOSQUITO_MISTING_GATED) instead of losing its plan and install here (pre-push P1).
+      if (form.svcMisting) selectedServices.push("MOSQUITO_MISTING");
       if (form.svcWdo) selectedServices.push("WDO");
       if (form.svcRodentBait) selectedServices.push("RODENT_BAIT");
       if (form.svcOnetimePest) selectedServices.push("OT_PEST");
@@ -6778,9 +6783,17 @@ export default function EstimateToolViewV2({
                   )}
                 </div>
               )}
-              {mistingAvailability.available && (
+              {/* Hidden until the gate read says yes, except for an estimate that already carries
+                  the system: that one keeps its toggle (and its inputs) so the operator sees it and
+                  removes it on purpose; regenerating with it on is refused by the server. */}
+              {(mistingAvailability.available || form.svcMisting) && (
                 <>
                   <CheckboxV2 k="svcMisting" label="Mosquito Misting System" />
+                  {form.svcMisting && !mistingAvailability.available && (
+                    <div data-testid="misting-unavailable" role="status" className="ml-7 mb-2 text-13 text-amber-800">
+                      The mosquito misting system is not enabled on this server. Untick it to drop it from this estimate; regenerating with it on will be refused.
+                    </div>
+                  )}
                   {form.svcMisting && (
                     <div data-testid="misting-inputs" className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
