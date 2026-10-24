@@ -84,13 +84,17 @@ const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
 // kept until "Got it" the same way, so it isn't lost to the 5-min auto-
 // dismiss timer before the tech has opened the stop.
 const PHOTO_TYPES = new Set(['customer_visit_photos']);
+// A lawn visit's watering text went to no customer because the products clash
+// (lawn-watering-sms.js, GATE_LAWN_WATERING_EVERY_VISIT): the tech waters the
+// product in on site. Kept until "Got it" like the visit cards.
+const WATERING_NOTE_TYPES = new Set(['lawn_watering_tech_note']);
 // Types this component has a card for. Anything else in the feed (e.g. the
 // legacy `new_appointment` from admin-schedule "Notify technician") has no
 // card: it is never shown, so it can never be seen. It keeps the pre-seen
 // behaviour (marked read on the 5-minute clock) so it cannot sit unread
 // and eat the 20-row feed. Only rendered cards wait to be seen.
 const TIMED_RENDERED_TYPES = new Set(['storm_watch_alert']);
-const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
+const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES, ...WATERING_NOTE_TYPES]);
 // Waves Admin look: ink and stone, amber for a warning, red only where the
 // notice is a genuine alert (a cancelled visit, a late arrival check).
 const VISIT_ACCENT = {
@@ -331,6 +335,9 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
           )}
           {PHOTO_TYPES.has(n.type) && (
             <PhotoCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
+          )}
+          {WATERING_NOTE_TYPES.has(n.type) && (
+            <WateringNoteCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
           {n.type === 'storm_watch_alert' && (
             <StormCard
@@ -586,6 +593,27 @@ function OpenVisitsCard({ n, onDismiss }) {
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
         📋 {p.headline || 'Visits from today still open'}
       </div>
+      <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+        {n.message}
+      </div>
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
+    </div>
+  );
+}
+
+// A lawn visit whose watering text could not go out because two products
+// clash (lawn-watering-sms.js). The server composes `message`; the tech waters
+// the product in on site before leaving. Kept until "Got it".
+function WateringNoteCard({ n, onDismiss }) {
+  const p = n.payload || {};
+  return (
+    <div style={cardStyle(COLORS.amber)} data-testid="lawn-watering-tech-note">
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
+        💧 {p.headline || 'Water this in before you leave'}
+      </div>
+      {p.customer_name && (
+        <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>{p.customer_name}</div>
+      )}
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
         {n.message}
       </div>
