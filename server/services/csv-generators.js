@@ -42,7 +42,10 @@ function transactionsToCSV(payments) {
 }
 
 function expensesToCSV(expenses) {
-  const headers = ['Date', 'Schedule C Line', 'Category', 'Vendor', 'Description', 'Amount', 'Payment Method', 'Has Receipt'];
+  // Deductible Amount = what the books claim (a meals partial, a shared
+  // bill's business share); blank = the full amount. Notes carries the
+  // allocation note, so a later rule change never rewrites the history.
+  const headers = ['Date', 'Schedule C Line', 'Category', 'Vendor', 'Description', 'Amount', 'Payment Method', 'Has Receipt', 'Deductible Amount', 'Notes'];
   const lines = [row(headers)];
   for (const e of expenses) {
     lines.push(row([
@@ -54,6 +57,8 @@ function expensesToCSV(expenses) {
       e.amount != null ? parseFloat(e.amount).toFixed(2) : '',
       e.payment_method || '',
       e.has_receipt ? 'Yes' : 'No',
+      e.tax_deductible_amount != null ? parseFloat(e.tax_deductible_amount).toFixed(2) : '',
+      e.notes || '',
     ]));
   }
   return lines.join('\n');

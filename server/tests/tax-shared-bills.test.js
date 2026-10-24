@@ -202,3 +202,18 @@ describe('isOn', () => {
     expect(svc.isOn()).toBe(false);
   });
 });
+
+describe('expenses.csv carries the booked deduction', () => {
+  const csv = require('../services/csv-generators');
+  test('a shared-bill expense exports its stored deductible amount and note, not a recomputation', () => {
+    const out = csv.expensesToCSV([
+      { expense_date: '2026-03-04', irs_line: '25', category_name: 'Utilities', vendor_name: 'PHONE CO', description: 'PHONE CO PAYMENT', amount: '120.00', payment_method: 'ach', has_receipt: false, tax_deductible_amount: '60.00', notes: '[Bank import x] [Shared bill: Phone plan 50%]' },
+      { expense_date: '2026-03-05', amount: '10.00', tax_deductible_amount: null, notes: null },
+    ]).split('\n');
+    expect(out[0]).toMatch(/,Deductible Amount,Notes$/);
+    expect(out[1]).toContain(',120.00,');
+    expect(out[1]).toContain(',60.00,');
+    expect(out[1]).toContain('Shared bill: Phone plan 50%');
+    expect(out[2].endsWith(',,')).toBe(true);
+  });
+});
