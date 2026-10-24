@@ -405,6 +405,16 @@ postgres('neighborhood naming pass', () => {
       expect(await trx('neighborhoods').where({ county: 'Manatee' })).toHaveLength(1);
     });
 
+    test('a caller-made community is reused when the county later names a home with another spelling', async () => {
+      const first = await home({ checked: true });
+      expect(await linkFromCaller(await prop(first.propertyId), 'Manatee', 'St Andrews Preserve')).toBe('linked');
+      const second = await home({ street: '200 Synthetic Way' });
+      const lookup = queue([parcelFor('200 Synthetic Way', { subdivision: "ST. ANDREW'S PRESERVE PH II PB2/2" })]);
+      expect((await runPass(lookup)).county).toEqual({ linked: 1 });
+      expect((await prop(second.propertyId)).neighborhood_id).toBe((await prop(first.propertyId)).neighborhood_id);
+      expect(await trx('neighborhoods').where({ county: 'Manatee' })).toHaveLength(1);
+    });
+
     test('a home with no pin can still be named from a call', async () => {
       const { customerId, propertyId } = await home({ pin: false });
       await callSaying(customerId, 'Chelsea Oaks');

@@ -35,6 +35,7 @@ const { lookupCountyParcelByPoint, lookupSarasotaPlatNames, countyParcelGisDisab
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const {
   countyHint, neighborhoodNameFromSubdivision, resolvePropertyNeighborhood, upsertNeighborhood, withPlatName, sameHouse,
+  communityKey, spokenName,
 } = require('./neighborhood-access');
 
 const COUNTY_BATCH = 20; // homes the county is asked about per tick
@@ -125,7 +126,6 @@ async function countyPass({ lookup, platLookup, nowIso }) {
 // ---- the caller's own words ----------------------------------------------------
 
 const GENERIC_WORDS = /^(?:NONE|NO|NA|N\/A|UNKNOWN|UNSURE|NOT SURE|DONT KNOW|SAME|HOME|HOUSE|NOT IN (?:A )?SUBDIVISION)$/;
-const TRAILING_LABEL = /\s+(?:COMMUNITY|SUBDIVISION|NEIGHBORHOOD|HOA|HOMEOWNERS ASSOCIATION|HOME OWNERS ASSOCIATION)$/;
 // Towns and counties are places, not communities: a gate code filed under one
 // would reach every home in it.
 const PLACE_NAMES = new Set(['BRADENTON', 'PARRISH', 'PALMETTO', 'ELLENTON', 'LAKEWOOD RANCH', 'SARASOTA', 'VENICE', 'NORTH PORT',
@@ -134,11 +134,6 @@ const PLACE_NAMES = new Set(['BRADENTON', 'PARRISH', 'PALMETTO', 'ELLENTON', 'LA
 
 // What the customer said → the community name the directory would hold, or
 // null (a street, a town, "not sure", too long to be a name).
-const spokenName = (words) => String(words || '').toUpperCase().replace(/['’`.]/g, '').replace(/[^A-Z0-9&/\s-]/g, ' ')
-  .replace(/\s+/g, ' ').trim();
-// One key for a community name, however it was written: "St. Andrew's Preserve"
-// and "St Andrews Preserve", "The Islands" and "Islands" are one community.
-const communityKey = (name) => spokenName(name).replace(/^THE\s+/, '').replace(TRAILING_LABEL, '');
 
 function callerCommunityName(words, city) {
   const said = spokenName(words);
@@ -195,11 +190,10 @@ async function linkFromCaller(home, county, name) {
       .forUpdate().first('customer_id', 'address_line1', 'city', 'zip');
     if (!open) return 'already_linked';
     if (['customer_id', 'address_line1', 'city', 'zip'].some((f) => String(open[f] || '') !== String(home[f] || ''))) return 'address_changed';
-    // An existing community in the county under any spelling of the name wins;
-    // only a name the directory does not hold adds a 'customer' neighborhood.
-    const key = communityKey(name);
-    const hood = (await trx('neighborhoods').where({ county }).select('id', 'name')).find((n) => communityKey(n.name) === key)
-      || await upsertNeighborhood(trx, { county, subdivision: name, source: 'customer' });
+    // An existing community in the county under any spelling of the name wins
+    // (upsertNeighborhood matches by community key); only a name the directory
+    // does not hold adds a 'customer' neighborhood.
+    const hood = await upsertNeighborhood(trx, { county, subdivision: name, source: 'customer' });
     if (!hood) return 'no_name';
     // A neighborhood the office switched off stays off: no link.
     const live = await trx('neighborhoods').where({ id: hood.id, active: true }).first('id');

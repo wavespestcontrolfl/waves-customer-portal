@@ -72,16 +72,28 @@ function isKeypadCode(value) {
 // an alias so a later phase maps without another lookup. Returns the alias
 // list and updated_at as they were before this call (null for a new row) so
 // a backfill can undo the alias append exactly.
+// One key for a community name, however it was written: "St. Andrew's Preserve"
+// and "St Andrews Preserve", "The Islands" and "Islands" are one community.
+const TRAILING_LABEL = /\s+(?:COMMUNITY|SUBDIVISION|NEIGHBORHOOD|HOA|HOMEOWNERS ASSOCIATION|HOME OWNERS ASSOCIATION)$/;
+const spokenName = (words) => String(words || '').toUpperCase().replace(/['’`.]/g, '').replace(/[^A-Z0-9&/\s-]/g, ' ')
+  .replace(/\s+/g, ' ').trim();
+const communityKey = (name) => spokenName(name).replace(/^THE\s+/, '').replace(TRAILING_LABEL, '');
+
 async function upsertNeighborhood(conn, { county, subdivision, source = 'county' }) {
   const name = neighborhoodNameFromSubdivision(subdivision);
   if (!name) return null;
-  const key = matchKey(county, name);
   const raw = String(subdivision).trim();
-  // Serialize upserts of one name (a row lock cannot cover a row that does
-  // not exist yet), so the prior values read here are the ones the upsert
+  // Serialize upserts of one community (a row lock cannot cover a row that
+  // does not exist yet), so the prior values read here are the ones the upsert
   // below replaces — two runs creating the same neighborhood would otherwise
-  // both read "no row" and the loser's alias append would go unjournaled.
-  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`neighborhood:${key}`]);
+  // both read "no row" and the loser's alias append would go unjournaled. The
+  // lock and the match use the community key, so a county name and a caller's
+  // spelling of it (either one first) land on one row.
+  const community = communityKey(name);
+  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`neighborhood:${String(county || '').toLowerCase()}|${community}`]);
+  const sameCommunity = (await conn('neighborhoods').whereRaw('county IS NOT DISTINCT FROM ?', [county || null]).select('match_key', 'name'))
+    .find((n) => communityKey(n.name) === community);
+  const key = sameCommunity ? sameCommunity.match_key : matchKey(county, name);
   // updated_at as text keeps Postgres's microseconds (a JS Date drops them),
   // so a rollback restores the exact value.
   const prior = await conn('neighborhoods').where({ match_key: key })
@@ -693,6 +705,8 @@ module.exports = {
   neighborhoodNameFromSubdivision,
   isKeypadCode,
   matchKey,
+  communityKey,
+  spokenName,
   upsertNeighborhood,
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
