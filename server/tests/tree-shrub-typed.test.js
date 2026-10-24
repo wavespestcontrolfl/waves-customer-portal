@@ -87,11 +87,13 @@ describe('tree & shrub schema', () => {
     // slice is a regression against the 2026-07-21 simplification.
     // spray_mix_gallons + hedge_linear_ft_serviced: owner 2026-10-21
     // spray-volume groundwork, same optional + internal shape as bed sqft.
+    // palm_count_large / palm_types_seen / palm_symptoms: owner 2026-10-23,
+    // the same optional + internal shape (nothing required).
     expect(schema.fields.filter((f) => f.detail).map((f) => f.key).sort()).toEqual([
-      'access_difficulty', 'bed_sqft_serviced', 'hedge_linear_ft_serviced', 'palm_count_total',
-      'shrub_density', 'spray_mix_gallons', 'tree_count_total',
+      'access_difficulty', 'bed_sqft_serviced', 'hedge_linear_ft_serviced', 'palm_count_large', 'palm_count_total',
+      'palm_symptoms', 'palm_types_seen', 'shrub_density', 'spray_mix_gallons', 'tree_count_total',
     ]);
-    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'tree_count_total', 'shrub_density', 'access_difficulty', 'spray_mix_gallons', 'hedge_linear_ft_serviced']) {
+    for (const key of ['bed_sqft_serviced', 'palm_count_total', 'palm_count_large', 'palm_types_seen', 'palm_symptoms', 'tree_count_total', 'shrub_density', 'access_difficulty', 'spray_mix_gallons', 'hedge_linear_ft_serviced']) {
       expect({ key, internal: byKey[key].internal, required: byKey[key].required })
         .toEqual({ key, internal: true, required: false });
     }
@@ -388,6 +390,73 @@ describe('validation', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.errors.join(' ')).toMatch(/Inspection only/);
+  });
+});
+
+describe('palm capture fields (owner 2026-10-23)', () => {
+  const schema = findingsSchemaForType('tree_shrub');
+  const byKey = Object.fromEntries(schema.fields.map((f) => [f.key, f]));
+  const PALM_VALUES = {
+    palm_count_total: '9',
+    palm_count_large: '2',
+    palm_types_seen: 'Queen palm, Sabal / cabbage palm',
+    palm_symptoms: 'Frizzle-top (new fronds yellow / small / withered), Browning / bronzing fronds',
+  };
+  const validate = (extra, enforceRequired = true) => validateTypedFindings({
+    type: 'tree_shrub', expectedType: 'tree_shrub', enforceRequired, values: { ...BASE_VALUES, ...extra },
+  });
+
+  test('count and multi_select types, labels per the owner ruling', () => {
+    expect(byKey.palm_count_total.label).toBe('Palms on property (all sizes)');
+    expect(byKey.palm_count_large).toMatchObject({ type: 'count', label: 'Large palms (canopy wider than about 15 ft)' });
+    expect(byKey.palm_types_seen.type).toBe('multi_select');
+    expect(byKey.palm_symptoms.type).toBe('multi_select');
+    expect(byKey.palm_symptoms.options).toEqual([
+      'None seen', 'Frizzle-top (new fronds yellow / small / withered)', 'Yellow / orange spotting on older fronds',
+      'Browning / bronzing fronds', 'Spear leaf collapse',
+    ]);
+    expect(byKey.palm_types_seen.options).toEqual(
+      require('../config/tree-shrub-field-guide.json').palmTypes.rows.map((row) => row.name),
+    );
+  });
+
+  test('multi_select options hold no comma: storage is comma-joined, a comma would shred the chip', () => {
+    for (const key of ['palm_types_seen', 'palm_symptoms']) {
+      for (const option of byKey[key].options) expect({ key, option, comma: option.includes(',') }).toEqual({ key, option, comma: false });
+    }
+  });
+
+  test('nothing is required: a submission with no palm field passes the required-core check', () => {
+    expect(validate({}).ok).toBe(true);
+    expect(REQUIRED_FINDINGS_FIELDS.tree_shrub).toEqual(['plant_groups', 'landscape_condition']);
+    for (const key of ['palm_count_total', 'palm_count_large', 'palm_types_seen', 'palm_symptoms']) {
+      expect(byKey[key].required).toBe(false);
+      expect(byKey[key].requiredUnless).toBeFalsy();
+    }
+  });
+
+  test('all four palm fields validate together and reject off-list or non-numeric values', () => {
+    expect(validate(PALM_VALUES).ok).toBe(true);
+    expect(validate({ palm_count_large: 'many' }).ok).toBe(false);
+    expect(validate({ palm_types_seen: 'Banana palm' }).ok).toBe(false);
+    expect(validate({ palm_symptoms: 'Wilting' }).ok).toBe(false);
+  });
+
+  test('palm fields persist in the snapshot values but never reach customer findings', () => {
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'tree_shrub',
+      values: { ...BASE_VALUES, ...PALM_VALUES },
+      serviceKey: 'tree_shrub_program',
+      serviceLabel: 'Tree & Shrub Care Program',
+      visitSequence: 1,
+      activity: null,
+    });
+    const findingKeys = snapshot.findings.map((f) => f.fieldKey);
+    for (const key of Object.keys(PALM_VALUES)) {
+      expect(findingKeys).not.toContain(key);
+      expect(snapshot.values[key]).toBe(PALM_VALUES[key]);
+    }
+    expect(findingKeys).toEqual(['plant_groups', 'landscape_condition', 'treatments_completed', 'customer_recommendations']);
   });
 });
 

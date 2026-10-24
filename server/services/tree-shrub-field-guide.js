@@ -12,6 +12,8 @@ function treeShrubFieldGuide(visit) {
     products: Object.fromEntries([...new Set(keys)].map(key => [key, { ...reference.products[key] }])),
     equipment: reference.equipment,
     palmChart: visit.fieldGuide.palm ? reference.palmChart : [],
+    // Palm-type table rides with the palm chart: same visits, same purpose.
+    palmTypes: visit.fieldGuide.palm ? reference.palmTypes : null,
   };
 }
 

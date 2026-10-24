@@ -25,6 +25,11 @@ const {
   TERMITE_PERIMETER_METHODS,
 } = require('../../shared/termite-treatment-methods.json');
 
+// Palm names for the T&S "Palm types seen" chips: the rows of the field guide's
+// palm-type table, so the two lists cannot drift. multi_select stores a
+// comma-joined string, so no option may contain a comma.
+const TREE_SHRUB_PALM_TYPE_OPTIONS = require('../config/tree-shrub-field-guide.json').palmTypes.rows.map((row) => row.name);
+
 const WDO_TARGET_OPTIONS = [
   'Subterranean termites',
   'Formosan subterranean termites',
@@ -917,7 +922,20 @@ const PROJECT_TYPES = {
       // per-bed-sqft guess. Optional, internal costing data like bed sqft.
       { key: 'spray_mix_gallons', label: 'Spray mix used (gallons)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 5' },
       { key: 'hedge_linear_ft_serviced', label: 'Shrub / hedge line sprayed (linear ft)', type: 'measurement', section: 'Property measurements', detail: true, internal: true, placeholder: 'e.g. 180' },
-      { key: 'palm_count_total', label: 'Palms on property', type: 'count', section: 'Property measurements', detail: true, internal: true },
+      // Palm capture (owner 2026-10-23, "approve all"): optional + internal +
+      // detail like every field in this section; nothing here is ever
+      // required and none of it reaches the customer report. palm_count_total
+      // stays the key estimate-actuals reads. LARGE matches the admin
+      // estimator's definition (canopy wider than about 15 ft, owner ruling
+      // 2026-09-26). Palm type options are the rows of the field guide's
+      // palm-type table (server/config/tree-shrub-field-guide.json).
+      { key: 'palm_count_total', label: 'Palms on property (all sizes)', type: 'count', section: 'Property measurements', detail: true, internal: true },
+      { key: 'palm_count_large', label: 'Large palms (canopy wider than about 15 ft)', type: 'count', section: 'Property measurements', detail: true, internal: true },
+      { key: 'palm_types_seen', label: 'Palm types seen', type: 'multi_select', section: 'Property measurements', detail: true, internal: true, options: TREE_SHRUB_PALM_TYPE_OPTIONS },
+      { key: 'palm_symptoms', label: 'Palm symptoms seen', type: 'multi_select', section: 'Property measurements', detail: true, internal: true, options: [
+        'None seen', 'Frizzle-top (new fronds yellow / small / withered)', 'Yellow / orange spotting on older fronds',
+        'Browning / bronzing fronds', 'Spear leaf collapse',
+      ] },
       { key: 'tree_count_total', label: 'Trees on property (non-palm)', type: 'count', section: 'Property measurements', detail: true, internal: true },
       { key: 'shrub_density', label: 'Shrub density', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Light', 'Moderate', 'Heavy'] },
       { key: 'access_difficulty', label: 'Access difficulty', type: 'select', section: 'Property measurements', detail: true, internal: true, options: ['Easy', 'Moderate', 'Difficult'] },

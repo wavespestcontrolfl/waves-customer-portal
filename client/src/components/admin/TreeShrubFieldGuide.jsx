@@ -51,6 +51,41 @@ function tankAmountFor(product, gallons) {
   return formatMeasuredRange(product.mix[0] * gallons, product.mix[1] * gallons, 'fl oz', { truckMeasures: true });
 }
 
+const rule = 'border-t border-hairline border-b-0 border-x-0 border-solid border-zinc-200';
+
+function PalmTypes({ palmTypes, labelClass }) {
+  const { columns, rows } = palmTypes;
+  const cells = [['lethalBronzing', columns.lethalBronzing], ['nutrients', columns.nutrients], ['selfCleaning', columns.selfCleaning], ['note', columns.note]];
+  return <section aria-label="Palm types" className={`mt-5 ${rule} pt-4`} data-testid="palm-types">
+    <h3 className={`${labelClass} mb-2`}>{palmTypes.title}</h3>
+    <div className="mb-3 space-y-2"><p>{palmTypes.intro}</p><p className="font-medium">{palmTypes.planNote}</p></div>
+    <table className="w-full border-collapse text-left">
+      <thead className="hidden md:table-header-group">
+        <tr className="text-14 text-ink-tertiary">
+          <th scope="col" className="py-2 pr-3 font-medium">Palm</th>
+          {cells.map(([key, label]) => <th key={key} scope="col" className="py-2 pr-3 font-medium">{label}</th>)}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(row => <tr key={row.key} className={`block md:table-row ${rule} py-3 md:py-0`}>
+          <th scope="row" className="block md:table-cell md:py-3 md:pr-3 md:align-top font-medium">
+            {row.name}{row.scientific && <span className="block font-normal italic text-ink-secondary">{row.scientific}</span>}
+          </th>
+          {cells.map(([key, label]) => <td key={key} className="block md:table-cell md:py-3 md:pr-3 md:align-top">
+            <span className="md:hidden text-ink-secondary">{label}: </span>{row[key]}
+          </td>)}
+        </tr>)}
+      </tbody>
+    </table>
+    <div className="mt-3 space-y-2 text-ink-secondary">
+      <p>{palmTypes.selfCleaningNote}</p>
+      <p>{palmTypes.otherHosts}</p>
+      <span className="block">Sources</span>
+      <ul className="list-disc pl-5">{palmTypes.sources.map(src => <li key={src.url}><a className="underline" href={src.url} target="_blank" rel="noreferrer">{src.label}</a></li>)}</ul>
+    </div>
+  </section>;
+}
+
 export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules = [] }) {
   const [open, setOpen] = useState(null);
   const [tank, setTank] = useState('flowzone');
@@ -96,6 +131,7 @@ export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules
       <dl className="grid grid-cols-4 gap-y-3 text-center">{guide.palmChart.map(row => <div key={row.width}><dt className="text-ink-secondary">{row.width} ft</dt><dd className="font-medium tabular-nums">{row.lb.toFixed(1)} lb</dd></div>)}</dl>
       <p className="mt-3 text-ink-secondary">Canopy width² ÷ 105, rounded down. Weigh each palm’s amount and spread under the canopy. ÷ 105 keeps one application under the 1 lb nitrogen per 1,000 sq ft limit in the Sarasota County fertilizer codes. Do not raise the rate.</p>
     </section>}
+    {guide.palmTypes && <PalmTypes palmTypes={guide.palmTypes} labelClass={labelClass} />}
     {safetyRules.length > 0 && <section aria-label="Program safety rules" className="mt-5 border-t border-hairline border-b-0 border-x-0 border-solid border-zinc-200 pt-4">
       <h3 className={`${labelClass} mb-2`}>Safety</h3>
       <ul className="space-y-1 list-disc pl-5">{safetyRules.map(rule => <li key={rule}>{rule}</li>)}</ul>
