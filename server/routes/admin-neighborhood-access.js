@@ -226,6 +226,10 @@ async function pinTakenElsewhere(trx, neighborhoodId, exceptId) {
   return !!(await q.first('id'));
 }
 const PIN_TAKEN_ERROR = 'Another gate in this neighborhood already has a location; clear it there first';
+const CODE_TAKEN_ERROR = 'That code is already on file for this neighborhood';
+// Which unique index a racing writer hit: the one-pin index
+// (neighborhood_access_pin_uniq) or the live-code one.
+const uniqueViolationMessage = (err) => (err.constraint === 'neighborhood_access_pin_uniq' ? PIN_TAKEN_ERROR : CODE_TAKEN_ERROR);
 
 async function liveCodeTaken(trx, neighborhoodId, code, exceptId) {
   const q = trx('neighborhood_access')
@@ -699,8 +703,8 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
     });
     return res.status(result.status).json(result.body);
   } catch (err) {
-    // The live-code unique index is the backstop for a racing writer.
-    if (err && err.code === '23505') return res.status(409).json({ error: 'That code is already on file for this neighborhood' });
+    // The live-code and one-pin unique indexes are the backstop for a racing writer.
+    if (err && err.code === '23505') return res.status(409).json({ error: uniqueViolationMessage(err) });
     logFailure('add entry', err);
     return res.status(500).json({ error: 'Could not save the entry' });
   }
@@ -769,7 +773,7 @@ router.patch('/entries/:id', async (req, res) => {
     });
     return res.status(result.status).json(result.body);
   } catch (err) {
-    if (err && err.code === '23505') return res.status(409).json({ error: 'That code is already on file for this neighborhood' });
+    if (err && err.code === '23505') return res.status(409).json({ error: uniqueViolationMessage(err) });
     logFailure('update entry', err);
     return res.status(500).json({ error: 'Could not update the entry' });
   }

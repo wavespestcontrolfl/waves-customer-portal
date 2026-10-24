@@ -138,6 +138,12 @@ describe('parseGateLocation', () => {
     ['Lakewood Ranch main gate'],
     ['https://maps.app.goo.gl/AbCdEf'],
     ['https://www.google.com/maps/place/Lakewood+Ranch,+FL'],
+    // A link is read only from a Google host (pre-push audit): the same
+    // query on another site, or a bare path, pins nothing.
+    ['https://example.com/?q=27.4321,-82.4567'],
+    ['https://notgoogle.com/maps/@27.4321,-82.4567,17z'],
+    ['https://evil-google.com/maps?q=27.4321,-82.4567'],
+    ['/maps/@27.4321,-82.4567,17z'],
     ['91, -82.4'], ['27.4, -181'], ['0, 0'], ['27.4'],
   ])('%s → null', (text) => {
     expect(parseGateLocation(text)).toBeNull();

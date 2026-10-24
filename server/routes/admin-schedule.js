@@ -6448,6 +6448,10 @@ router.get('/', async (req, res, next) => {
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
+    // The neighborhood's pinned gate per visit (owner 2026-10-24): the
+    // Directions link routes through it before the house. Only visits with
+    // a pin have a key, so every other row is byte-identical to before.
+    const gateWaypointByVisit = new Map();
     // Visits whose stop is in an active neighborhood, when a visit's assigned
     // technician may add a gate code or mark one wrong
     // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
@@ -6457,6 +6461,10 @@ router.get('/', async (req, res, next) => {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
         const neighborhoodAccess = require('../services/neighborhood-access');
         neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+        for (const [visitId, entries] of neighborhoodGateByVisit) {
+          const waypoint = neighborhoodAccess.gateWaypoint(entries);
+          if (waypoint) gateWaypointByVisit.set(visitId, waypoint);
+        }
         if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
       }
     } catch (err) {
@@ -6635,7 +6643,6 @@ router.get('/', async (req, res, next) => {
         } catch { /* fail toward not-applied — preview still nets the prepaid */ }
       }
 
-      const gateWaypoint = require('../services/neighborhood-access').gateWaypoint(neighborhoodGateByVisit.get(s.id));
       // Compiled by the shared helper (services/nextstop-alerts.js) so the
       // pre-visit brief's deterministic access block and this day feed can
       // never drift — the block moved verbatim, behavior 1:1.
@@ -6934,10 +6941,7 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
-        // The neighborhood's main gate on the map (owner 2026-10-24): the
-        // Directions link routes through it before the house. Absent = the
-        // plain address, as before.
-        ...(gateWaypoint ? { gateWaypoint } : {}),
+        ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,

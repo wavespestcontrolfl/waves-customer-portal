@@ -284,6 +284,11 @@ postgres('admin neighborhood gate-code routes', () => {
     expect((await call('PATCH', `/entries/${back}`, { gate_location: '27.5, -82.6' })).status).toBe(200);
     expect((await call('PATCH', `/entries/${back}`, { action: 'retire' })).status).toBe(200);
     expect((await call('PATCH', `/entries/${main}`, { gate_location: '27.44, -82.46' })).status).toBe(200);
+    // The schema backstop (neighborhood_access_pin_uniq) holds for any writer, not just these routes.
+    await expect(trx('neighborhood_access').insert({
+      neighborhood_id: n, gate_label: 'Side gate', access_type: 'keypad', code: '3333', status: 'active', source: 'office',
+      gate_lat: 27.5, gate_lng: -82.6,
+    })).rejects.toMatchObject({ code: '23505', constraint: 'neighborhood_access_pin_uniq' });
   });
 
   test('add: stores a keypad code without inner spaces, office source, confirmed now; duplicate live code is 409', async () => {

@@ -743,18 +743,30 @@ async function gateActionVisitIds(conn, visits) {
 // looking, not the pin (Codex P2) — so it is the fallback, never preferred.
 // Returns { lat, lng } rounded to six places, or null when no point is found
 // (a shortened maps.app.goo.gl link has none: the office pastes the expanded
-// link or the numbers). Never a place name: nothing here geocodes.
+// link or the numbers). A link is read only from a Google host: a pasted
+// non-Maps URL that happens to carry q=lat,lng must not pin a gate. Never a
+// place name: nothing here geocodes.
 const COORD = '(-?\\d{1,3}(?:\\.\\d+)?)';
-const GATE_LOCATION_PATTERNS = [
-  new RegExp(`^${COORD}\\s*[,/\\s]\\s*${COORD}$`),
+const BARE_PAIR = new RegExp(`^${COORD}\\s*[,/\\s]\\s*${COORD}$`);
+const LINK_PATTERNS = [
   new RegExp(`!3d${COORD}!4d${COORD}`),
   new RegExp(`[?&](?:q|query|ll|destination|center)=${COORD}(?:,|%2C)${COORD}`, 'i'),
   new RegExp(`/@${COORD},${COORD}`),
 ];
+function googleMapsHost(text) {
+  if (!/^https?:\/\//i.test(text)) return false;
+  try {
+    const host = new URL(text).hostname.toLowerCase();
+    return host === 'google.com' || host.endsWith('.google.com');
+  } catch {
+    return false;
+  }
+}
 function parseGateLocation(value) {
   const text = String(value ?? '').trim();
   if (!text) return null;
-  for (const re of GATE_LOCATION_PATTERNS) {
+  const patterns = googleMapsHost(text) ? LINK_PATTERNS : [BARE_PAIR];
+  for (const re of patterns) {
     const m = re.exec(text);
     if (!m) continue;
     const lat = Number(m[1]);
