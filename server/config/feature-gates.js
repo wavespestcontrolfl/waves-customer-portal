@@ -1834,6 +1834,18 @@ const gates = {
   // sends, changes and holds nothing. Off unless exactly 'true'.
   smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true',
 
+  // SMS prompt auto-promote (owner rulings 2026-09-27 and 2026-10-24): the texting drafter's
+  // prompt improves with no human approval step. A pathology proposal becomes ONE candidate
+  // rule block, the sealed exam grades the drafter with it against the current prompt, a
+  // candidate that clears the bar goes live under its own prompt_version tag, and a daily
+  // monitor retires it when live drafts or customer replies get worse. This deliberately
+  // replaces the old "proposals never auto-apply" rule of sms-pathology-ledger.js. Modes:
+  // unset/anything else = off (nothing runs); 'observe' = candidates, exams and decisions are
+  // recorded and NOTHING activates; 'true' = activation and rollback. Exam runs spend real LLM
+  // API calls. Read at call time through smsPromptAutopromoteMode(); this entry is on in both
+  // non-off modes (logGateStatus only).
+  get smsPromptAutopromote() { return smsPromptAutopromoteMode() !== 'off'; },
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
@@ -5970,6 +5982,15 @@ function askWavesEmergencyCheckLive() {
 // keeps today's default of 'live' (existing tests exercise the executor
 // with the gate implicitly on) unless the env var explicitly overrides it —
 // 'shadow' to exercise shadow mode locally, or an explicit false/off kill.
+// GATE_SMS_PROMPT_AUTOPROMOTE read at CALL time: 'true' = candidates, exams, activation and
+// rollback; 'observe' = candidates, exams and recorded decisions only, nothing activates;
+// unset or anything else = off. The canonical reader for sms-prompt-patch.js and the cron.
+function smsPromptAutopromoteMode() {
+  const raw = String(process.env.GATE_SMS_PROMPT_AUTOPROMOTE || '').trim().toLowerCase();
+  if (raw === 'true') return 'true';
+  return raw === 'observe' ? 'observe' : 'off';
+}
+
 function emailTemplateAutomationsMode() {
   const raw = String(process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS || '').trim().toLowerCase();
   if (raw === 'shadow') return 'shadow';
@@ -7069,7 +7090,7 @@ function smsCourtesyAfterTemplateLive() {
   return process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, smsPromptAutopromoteMode, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
 // Exported on its own line (not in the shared list above) so concurrent gate

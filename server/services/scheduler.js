@@ -3721,6 +3721,40 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // SMS prompt auto-promote (GATE_SMS_PROMPT_AUTOPROMOTE, owner 2026-09-27 and
+  // 2026-10-24: the texting AI improves with no human approval step). The gate has
+  // modes: unset = off, 'observe' = candidates, exams and decisions only,
+  // 'true' = activation and rollback. Off returns before any lock is taken.
+  //   - Boot: keep the drafter's snapshot of the active prompt patch fresh.
+  //   - DAILY 6:10AM ET: make a candidate rule from the newest eligible pathology
+  //     proposal, then examine it. Exam runs spend real LLM calls, so a candidate
+  //     exam starts at most once a week (the interval is in the service).
+  //   - DAILY 6:40AM ET: rollback monitor (database reads only), after the 5:10
+  //     exam sweep has had time to finish.
+  // =========================================================================
+  require('./sms-prompt-patch').startPatchRefresh();
+
+  cron.schedule('10 6 * * *', async () => {
+    if (!isEnabled('smsPromptAutopromote')) return;
+    logger.info('Running: SMS prompt auto-promote tick');
+    try {
+      await runExclusive('sms-prompt-autopromote', () => require('./sms-prompt-autopromote').runAutopromoteTick());
+    } catch (err) {
+      logger.error(`SMS prompt auto-promote tick failed (code ${err?.code || err?.name || 'unknown'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  cron.schedule('40 6 * * *', async () => {
+    if (!isEnabled('smsPromptAutopromote')) return;
+    logger.info('Running: SMS prompt rollback monitor');
+    try {
+      await runExclusive('sms-prompt-rollback', () => require('./sms-prompt-autopromote').runRollbackMonitor());
+    } catch (err) {
+      logger.error(`SMS prompt rollback monitor failed (code ${err?.code || err?.name || 'unknown'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:10AM ET — Call incident adjudicator (correction loop for calls,
   // Part B wave 1). After the 03:40 self-audit: each new field disagreement
   // becomes an ai_incidents row, confirmed only when a second model on the
