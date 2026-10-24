@@ -13,10 +13,16 @@
  * schedule, and alerts (admin bell + internal_alert SMS to Adam) the moment a
  * route stops answering — including the failure reason (openai_404 = bad model
  * ID, openai_401/403 = key/access, openai_429 = rate limit, no_key = env var
- * missing). Alerts are edge-triggered: one alert per distinct failure reason,
- * a re-alert if the same failure persists past REALERT_MS, and a recovery
- * notice when the route answers again. State is in-memory — a restart re-runs
- * the boot canary, which re-alerts if the route is still down.
+ * missing, shown in the bell's "Show full text").
+ *
+ * State is the notification row, not process memory (docs/admin-notifications.md
+ * section 4): the FAILING bell is raised through raiseAdminAlert under a stable
+ * dedupe key per route with dedupeOpenOnly, so a failure that persists, or a
+ * restart that re-runs the boot canary, updates the one open row and rings
+ * nothing new. The SMS goes out only when that raise made a fresh row. When the
+ * route answers again the canary clears its own row (closeAdminAlertKeys, "the
+ * emitter owns clearing") with a "recovered" resolution and no new bell; a later
+ * failure is a fresh row and rings again.
  *
  * Canary requests are provider-billed but tiny (a one-word reply, 4x/day).
  */
@@ -31,18 +37,57 @@ const CANARY_ROUTES = [
 ];
 
 const CANARY_PROMPT = 'Health check. Reply with exactly: ok';
-const REALERT_MS = 24 * 60 * 60 * 1000;
 
-// key -> { failingReason: string|null, lastAlertAt: number }
-const state = new Map();
+// Plain words for the bell headline, per route.
+const ROUTE_LABELS = {
+  smsDraftDefault: 'text draft',
+  smsDraftSaveSale: 'save-sale draft',
+};
 
-async function alertAdmin(title, body) {
-  try {
-    const NotificationService = require('./notification-service');
-    await NotificationService.notifyAdmin('system', title, body, { link: '/admin/communications' });
-  } catch (err) {
-    logger.error(`[sms-draft-canary] admin notification failed: ${err.message}`);
-  }
+const alertKey = (key) => `sms-draft-canary:${key}`;
+
+// Raise (or quietly refresh) the one open FAILING bell for this route.
+// Returns true when this call made a fresh bell (a new episode).
+async function raiseFailing({ key, label, reason }) {
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  const dedupeKey = alertKey(key);
+  const result = await raiseAdminAlert('system', {
+    area: 'System',
+    action: `check why the ${ROUTE_LABELS[key] || 'text draft'} model failed`,
+    why: 'Text drafts fall back to the flagship model and cost more until it answers again.',
+    severity: 'needs-you',
+    link: '/admin/communications',
+    subject: { type: 'check', id: dedupeKey },
+    doneWhen: 'model_answers',
+    who: 'person',
+  }, {
+    detail: `${key} (${label}) failed the canary: ${reason}. Drafts are falling back to ${MODELS.FLAGSHIP} (flagship rates) until this clears. `
+      + 'openai_404 = bad model ID, openai_401 or openai_403 = key or access, openai_429 = rate limit, no_key = env var missing.',
+    dedupeKey,
+    // A row a person or the recovery closed never hides a new outage.
+    dedupeOpenOnly: true,
+    // A changed reason rewrites the standing row without ringing again.
+    refreshOnDedupe: true,
+    ringOnRefresh: () => false,
+    metadata: { source: 'sms-draft-canary', route: key, reason, model: label },
+  });
+  // null = the write failed: treat as a fresh episode so Adam still gets the text.
+  return !result || (!result.suppressed && !result.deduped);
+}
+
+// The route answers: close its open bell, if any. Returns rows closed.
+async function closeFailing(key, now = new Date()) {
+  const db = require('../models/db');
+  const episodes = require('./admin-alert-episodes');
+  const dedupeKey = alertKey(key);
+  if (!(await episodes.openAdminAlertKeys(db, dedupeKey)).includes(dedupeKey)) return 0;
+  const at = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+  return Number(await episodes.closeAdminAlertKeys(db, [dedupeKey], 'route_answering', {
+    now, resolution: `Recovered at ${at}: the route answers again`,
+  })) || 0;
+}
+
+async function smsAdam(title, body) {
   try {
     const TwilioService = require('./twilio');
     const phone = process.env.ADAM_PHONE;
@@ -70,33 +115,35 @@ async function probeRoute({ key, route, laneId }) {
     jsonMode: false,
     maxTokens: 16,
   });
-  const prev = state.get(key) || { failingReason: null, lastAlertAt: 0 };
   const label = `${route.provider}/${route.model}`;
 
   if (result.ok && (result.text || '').trim()) {
-    if (prev.failingReason) {
-      logger.info(`[sms-draft-canary] ${key} (${label}) recovered`);
-      await alertAdmin(
-        'SMS draft route recovered',
-        `${key} (${label}) is answering again — drafts are back on the routed model.`
-      );
+    let closed = 0;
+    try {
+      closed = await closeFailing(key);
+    } catch (err) {
+      logger.error(`[sms-draft-canary] ${key} recovery close failed: ${err.message}`);
     }
-    state.set(key, { failingReason: null, lastAlertAt: 0 });
+    if (closed) {
+      logger.info(`[sms-draft-canary] ${key} (${label}) recovered`);
+      await smsAdam('SMS draft route recovered', `${key} (${label}) is answering again — drafts are back on the routed model.`);
+    }
     return { key, ok: true };
   }
 
   const reason = result.ok ? 'empty_response' : (result.reason || 'error');
-  const changed = prev.failingReason !== reason;
-  const stale = Date.now() - prev.lastAlertAt >= REALERT_MS;
   logger.error(`[sms-draft-canary] ${key} (${label}) FAILED: ${reason}`);
-  if (changed || stale) {
-    await alertAdmin(
+  let fresh = true;
+  try {
+    fresh = await raiseFailing({ key, label, reason });
+  } catch (err) {
+    logger.error(`[sms-draft-canary] admin notification failed: ${err.message}`);
+  }
+  if (fresh) {
+    await smsAdam(
       'SMS draft route FAILING',
       `${key} (${label}) failed the canary: ${reason}. Drafts are falling back to ${MODELS.FLAGSHIP} (flagship rates) until this clears.`
     );
-    state.set(key, { failingReason: reason, lastAlertAt: Date.now() });
-  } else {
-    state.set(key, { failingReason: reason, lastAlertAt: prev.lastAlertAt });
   }
   return { key, ok: false, reason };
 }
@@ -121,5 +168,5 @@ async function runSmsDraftCanary() {
 module.exports = {
   runSmsDraftCanary,
   CANARY_ROUTES,
-  _test: { probeRoute, state },
+  _test: { probeRoute, alertKey },
 };
