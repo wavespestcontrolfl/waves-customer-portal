@@ -1,27 +1,28 @@
-/* GATE_LAWN_REPORT_STORY: the lawn report's story order (ServiceReportV1 adds .lawn-story-report only
-   while the payload's lawnLayout key carries story:true). Layout only: glass-theme.css owns the card
-   materials, depth, highlights and gold actions, as it does for every report. */
-.service-report-v1.lawn-story-report .service-report-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-bottom: 24px; }
-.service-report-v1.lawn-story-report .service-status-card { padding: 24px; }
-.service-report-v1.lawn-story-report .smart-status-result { font-size: 20px; line-height: 1.45; font-weight: 600; }
-.service-report-v1.lawn-story-report .service-status-grid { grid-template-columns: minmax(0, 1fr); margin-top: 18px; }
-.service-report-v1.lawn-story-report .service-status-main { display: flex; flex-direction: column-reverse; align-items: flex-start; gap: 12px; }
-.service-report-v1.lawn-story-report .status-badge { padding: 5px 10px; font-size: 14px; }
-.service-report-v1.lawn-story-report .lawn-story-condition { display: flex; flex-direction: column; align-items: flex-start; padding: 24px; border-radius: 12px; gap: 10px; }
-.service-report-v1.lawn-story-report .lawn-story-score { font-size: 52px; font-weight: 700; letter-spacing: -.04em; line-height: 1; color: var(--text); }
-.service-report-v1.lawn-story-report .lawn-story-score span { font-size: 20px; letter-spacing: 0; font-weight: 400; color: var(--muted); margin-left: 6px; }
-.service-report-v1.lawn-story-report .lawn-story-condition p { font-size: 16px; line-height: 1.4; margin: 0; font-weight: 500; }
-.service-report-v1.lawn-story-report .lawn-story-condition a { font-size: 14px; font-weight: 600; margin-top: 4px; text-underline-offset: 3px; }
-.service-report-v1.lawn-story-report .lawn-story-section[data-story-section="ask"] > * { position: static !important; }
-.service-report-v1.lawn-story-report .treatment-story + [data-glass="card"] { margin-top: 24px; }
+/* GATE_LAWN_REPORT_STORY: the lawn report's story order (LawnLayoutBody adds .lawn-story-layout only
+   while the payload's lawnLayout key carries story:true; the status card is one of its sections). Layout
+   only: glass-theme.css owns the card materials, depth, highlights and gold actions, as it does for every
+   report. */
+.service-report-v1 .lawn-story-layout .service-report-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-bottom: 24px; }
+.service-report-v1 .lawn-story-layout .service-status-card { padding: 24px; }
+.service-report-v1 .lawn-story-layout .smart-status-result { font-size: 20px; line-height: 1.45; font-weight: 600; }
+.service-report-v1 .lawn-story-layout .service-status-grid { grid-template-columns: minmax(0, 1fr); margin-top: 18px; }
+.service-report-v1 .lawn-story-layout .service-status-main { display: flex; flex-direction: column-reverse; align-items: flex-start; gap: 12px; }
+.service-report-v1 .lawn-story-layout .status-badge { padding: 5px 10px; font-size: 14px; }
+.service-report-v1 .lawn-story-layout .lawn-story-condition { display: flex; flex-direction: column; align-items: flex-start; padding: 24px; border-radius: 12px; gap: 10px; }
+.service-report-v1 .lawn-story-layout .lawn-story-score { font-size: 52px; font-weight: 700; letter-spacing: -.04em; line-height: 1; color: var(--text); }
+.service-report-v1 .lawn-story-layout .lawn-story-score span { font-size: 20px; letter-spacing: 0; font-weight: 400; color: var(--muted); margin-left: 6px; }
+.service-report-v1 .lawn-story-layout .lawn-story-condition p { font-size: 16px; line-height: 1.4; margin: 0; font-weight: 500; }
+.service-report-v1 .lawn-story-layout .lawn-story-condition a { font-size: 14px; font-weight: 600; margin-top: 4px; text-underline-offset: 3px; }
+.service-report-v1 .lawn-story-layout .lawn-story-section[data-story-section="ask"] > * { position: static !important; }
+.service-report-v1 .lawn-story-layout .treatment-story + [data-glass="card"] { margin-top: 24px; }
 @media (max-width: 600px) {
-  .service-report-v1.lawn-story-report .service-status-card,
-  .service-report-v1.lawn-story-report .lawn-story-condition { padding: 20px; }
-  .service-report-v1.lawn-story-report .lawn-story-score { font-size: 40px; }
-  .service-report-v1.lawn-story-report .smart-status-result { font-size: 18px; }
-  .service-report-v1.lawn-story-report .treatment-story-card { padding: 16px; }
+  .service-report-v1 .lawn-story-layout .service-status-card,
+  .service-report-v1 .lawn-story-layout .lawn-story-condition { padding: 20px; }
+  .service-report-v1 .lawn-story-layout .lawn-story-score { font-size: 40px; }
+  .service-report-v1 .lawn-story-layout .smart-status-result { font-size: 18px; }
+  .service-report-v1 .lawn-story-layout .treatment-story-card { padding: 16px; }
 }
 @media print {
-  .service-report-v1.lawn-story-report .service-report-hero { display: block; }
-  .service-report-v1.lawn-story-report .lawn-story-condition { display: none; }
+  .service-report-v1 .lawn-story-layout .service-report-hero { display: block; }
+  .service-report-v1 .lawn-story-layout .lawn-story-condition { display: none; }
 }

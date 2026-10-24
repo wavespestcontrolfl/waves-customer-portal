@@ -594,7 +594,7 @@ describe('GATE_LAWN_REPORT_STORY (lawnLayout.story): the story order', () => {
     const at = positions(container, markers);
     at.forEach((index, i) => expect(index, markers[i]).toBeGreaterThan(-1));
     expect(at).toEqual([...at].sort((a, b) => a - b));
-    expect(container.querySelector('.service-report-v1')).toHaveClass('lawn-story-report');
+    expect(container.querySelector('.lawn-layout')).toHaveClass('lawn-story-layout');
     // Ask Waves prints once, in its own section, not floating above the report.
     expect(container.querySelectorAll('.waves-ask-card')).toHaveLength(1);
     expect(container.querySelector('[data-story-section="ask"] .waves-ask-card')).not.toBeNull();
@@ -635,7 +635,7 @@ describe('GATE_LAWN_REPORT_STORY (lawnLayout.story): the story order', () => {
   it('without the story key the layout order, the floating Ask Waves and the status card are as before', async () => {
     const { container } = renderReport(clone(spotOn));
     await waitForReport();
-    expect(container.querySelector('.lawn-story-report')).toBeNull();
+    expect(container.querySelector('.lawn-story-layout')).toBeNull();
     expect(container.querySelector('[data-story-section]')).toBeNull();
     expect(container.querySelector('.lawn-story-condition')).toBeNull();
     expect(container.querySelector('details.lawn-layout-products')).not.toBeNull();

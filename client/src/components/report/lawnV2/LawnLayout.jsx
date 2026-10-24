@@ -496,7 +496,7 @@ export function LawnLayoutBody({ data, slots, story = false }) {
   const banner = bannerRepeatsAftercare(data.reportV2?.banner, data.reportV2?.aftercare, nowMs, printing) ? ' lawn-layout-banner' : '';
   return (
     <PrintContext.Provider value={false}>
-      <div className={`lawn-layout${banner}`} style={{ display: 'contents' }}>
+      <div className={`lawn-layout${banner}${story ? ' lawn-story-layout' : ''}`} style={{ display: 'contents' }}>
         <style>{LAYOUT_CSS}</style>
         {story
           ? STORY_LAYOUT_ORDER.map((key) => <div className="lawn-story-section" data-story-section={key} id={`lawn-section-${key}`} key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</div>)

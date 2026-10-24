@@ -6628,8 +6628,6 @@ function visualProofMomentIntro(moments = []) {
 }
 
 function ServiceReportV1({ data, token, mode = 'live' }) {
-  // GATE_LAWN_REPORT_STORY: a live lawn report the lawn layout orders takes the story order (lawnStory.css).
-  const storyLayout = lawnStoryActive(data, mode);
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
   const serviceCoverage = normalizeServiceCoverage(data);
@@ -6637,6 +6635,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
+  // GATE_LAWN_REPORT_STORY: a live lawn report the lawn layout orders takes the story order (lawnStory.css).
+  const storyLayout = lawnStoryActive(data, mode);
   const customerSafeObservationLabels = new Set(
     serviceCompletionChoicesFor(data.serviceLine, 'observations').map(({ label }) => label),
   );
@@ -6861,7 +6861,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     </div>
   );
   return (
-    <div className={`service-report-v1${storyLayout ? ' lawn-story-report' : ''}`}>
+    <div className="service-report-v1">
       <style>{`
         .service-report-v1 {
           --text: ${ESTIMATE_TEXT};
