@@ -1051,6 +1051,22 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(container.querySelector('.lawn-assessment-layout-no-trend')).not.toBeNull();
   });
 
+  it('names the weed score "Weed control" on the lawn metric rows (owner 2026-10-24, one name everywhere)', async () => {
+    const withWeed = {
+      ...legacyLawnReport,
+      lawnAssessment: {
+        ...legacyLawnReport.lawnAssessment,
+        scores: { ...legacyLawnReport.lawnAssessment.scores, weedSuppression: 88 },
+      },
+    };
+    const { container } = renderReport(withWeed);
+    await screen.findByText('Visit Summary');
+
+    const card = container.querySelector('[data-section="lawn-assessment"]');
+    expect(card.textContent).toContain('Weed control');
+    expect(card.textContent).not.toMatch(/Weed Cleanliness|Weed suppression/i);
+  });
+
   it('shows the lawn trend chart once two or more assessments exist', async () => {
     const twoPoint = {
       ...legacyLawnReport,

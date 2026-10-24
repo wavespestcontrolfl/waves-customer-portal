@@ -1909,7 +1909,7 @@ export function LawnTrends({ trends = {}, baselineScore = null, hasNextVisit = f
       // takes the neutral slate used for 'tracking' states
       accent: mowingBand ? bandAccent(lastVal(mowing), mowingBand[0], mowingBand[1]) : COLORS.grayMid,
     },
-    weed && { key: 'weed', title: 'Weed Cleanliness', explanation: 'This score tracks how clear the lawn is of weeds. A rising score means less visible weed coverage.', points: weed, domain: [0, 100], accent: scoreAccent(lastVal(weed)) },
+    weed && { key: 'weed', title: 'Weed control', explanation: 'This score tracks how clear the lawn is of weeds. A rising score means less visible weed coverage.', points: weed, domain: [0, 100], accent: scoreAccent(lastVal(weed)) },
     coverage && { key: 'cov', title: 'Turf Coverage', explanation: 'This score tracks how full and evenly covered the lawn is. A rising score means fewer bare or thin areas.', points: coverage, domain: [0, 100], accent: scoreAccent(lastVal(coverage)) },
     color && { key: 'color', title: 'Color & Vigor', explanation: 'This score tracks the lawn’s color and visible vigor. A drop can reflect seasonal changes or stress; color alone does not identify the cause.', points: color, domain: [0, 100], accent: scoreAccent(lastVal(color)) },
     stress && { key: 'stress', title: 'Stress / Damage', explanation: 'This is a condition score: a rising score means fewer visible stress or damage signs. It does not confirm a disease or insect diagnosis.', points: stress, domain: [0, 100], accent: scoreAccent(lastVal(stress)) },
