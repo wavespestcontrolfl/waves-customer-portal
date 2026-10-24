@@ -1047,7 +1047,7 @@ const TIPS = Object.freeze([
     id: 'rs_give_it_time', group: 'exterior', label: "Give it 10 to 14 days",
     aftercare: true, keywords: ["how long", "days", "still seeing", "patience", "two weeks"], lines: ["pest"], season: 'all',
     services: ["pest_re_service"],
-    copy: "Most of what I put down works over days, not minutes. Insects cross it and carry it back to where they hide, and the activity drops over the next 10 to 14 days. If you still see steady activity after that, let me know.",
+    copy: "Most of what I put down works over days, not minutes. Insects cross it and carry it back to where they hide, and the activity drops over the next couple of weeks. If you still see steady activity after that, let me know.",
   },
   {
     id: 'vr_no_food', group: 'roaches', label: "No food in the car for two weeks",
