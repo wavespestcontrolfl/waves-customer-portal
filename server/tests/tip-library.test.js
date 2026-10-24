@@ -690,7 +690,7 @@ describe('tips with facts (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
       expect(fact).toBeDefined();
       // An expired fact fails here on purpose: refresh the fact (or change
       // the tip) before its words go stale on customers' reports.
-      if (fact.expiresOn) expect(fact.expiresOn >= today).toBe(true);
+      if (fact.expiresOn) expect(fact.expiresOn > today).toBe(true);
       expect(source.label.trim().length).toBeGreaterThan(0);
       expect(source.label.length).toBeLessThanOrEqual(60);
       const url = source.url || fact.sourceUrls[0];
@@ -770,9 +770,10 @@ describe('tips with facts (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
     expect(freezeTechTips({ ids: ['water_gutters'] }, { sourced: true }).tips[0].citations).toHaveLength(1);
   });
 
-  test('a fact past its expiry gives no citation', () => {
-    const [morning] = resolveTipIds(['lawn_water_morning'], { sourced: true, date: '2027-04-02' });
-    expect(morning.citations.map((c) => c.label)).toEqual(['UF/IFAS']);
+  test('a fact gives no citation from its expiresOn day on, as the register reads it', () => {
+    const labels = (date) => resolveTipIds(['lawn_water_morning'], { sourced: true, date })[0].citations.map((c) => c.label);
+    expect(labels('2027-03-31')).toEqual(['UF/IFAS', 'SWFWMD']);
+    expect(labels('2027-04-01')).toEqual(['UF/IFAS']);
   });
 });
 

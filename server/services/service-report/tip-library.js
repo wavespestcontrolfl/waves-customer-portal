@@ -1535,12 +1535,13 @@ function printableCitations(citations) {
 const FACTS_BY_SLUG = new Map(REGISTER_FACTS.map((fact) => [fact.slug, fact]));
 
 // A tip's sources as frozen citations: the named fact must exist and be
-// unexpired on `day` (YYYY-MM-DD, ET), the link defaults to the fact's first
-// page. The lint keeps the registry clean; this is the runtime guard.
+// unexpired on `day` (YYYY-MM-DD, ET; expiresOn is the first day it is not,
+// as the register reads it), the link defaults to the fact's first page.
+// The lint keeps the registry clean; this is the runtime guard.
 function citationsFor(tip, day) {
   return printableCitations((tip.sources || []).flatMap((source) => {
     const fact = FACTS_BY_SLUG.get(source.fact);
-    if (!fact || (fact.expiresOn && fact.expiresOn < day)) return [];
+    if (!fact || (fact.expiresOn && fact.expiresOn <= day)) return [];
     return [{ label: source.label, url: source.url || (fact.sourceUrls || [])[0] }];
   }));
 }
