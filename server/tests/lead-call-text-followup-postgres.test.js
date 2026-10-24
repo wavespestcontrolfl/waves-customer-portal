@@ -85,6 +85,13 @@ jest.setTimeout(30000);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test('two TEXT replies handled at once send one text', async () => {
+    const c = await lead('+19415550111');
+    const results = await Promise.all([reply(c, 'text', NIGHT), reply(c, 'text', NIGHT)]);
+    expect(results.map((r) => r.action).sort()).toEqual(['none', 'text_reply_sent']);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test('a night CALL asks for a time; "10am" books 10:00 tomorrow and confirms it', async () => {
     const c = await lead('+19415550101');
     await expect(reply(c, 'CALL', NIGHT)).resolves.toMatchObject({ action: 'time_asked' });

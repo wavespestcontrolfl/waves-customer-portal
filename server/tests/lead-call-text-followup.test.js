@@ -76,6 +76,13 @@ test('a night ask after 8 PM is for the next day; one after midnight is for that
   expect(_test.targetDateFor(new Date('2026-10-20T23:30:00Z'))).toBe('2026-10-20');
 });
 
+test('a DATE read back as midnight UTC keeps its calendar day', () => {
+  // pg parses a DATE column as local midnight; Railway runs UTC, so this is
+  // what a target_date of Oct 25 looks like there.
+  expect(_test.dateText(new Date('2026-10-25T00:00:00Z'))).toBe('2026-10-25');
+  expect(_test.dateText('2026-10-25')).toBe('2026-10-25');
+});
+
 test('a slot is the ET wall time on the target day', () => {
   expect(_test.slotInstant('2026-10-21', 10 * 60).toISOString()).toBe('2026-10-21T14:00:00.000Z');
   expect(_test.slotInstant('2026-12-01', 10 * 60).toISOString()).toBe('2026-12-01T15:00:00.000Z');

@@ -25,7 +25,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { parseCallTextReply } = require('./sms-service-intent');
-const { etParts, etDateString, addETDays, parseETDateTime, formatETTime } = require('../utils/datetime-et');
+const { etParts, etDateString, addETDays, parseETDateTime, formatETTime, dateOnlyString } = require('../utils/datetime-et');
 
 const ENTRY_POINT = 'lead_call_text_followup';
 const TEXT_REPLY_BODY = 'Great, we can handle it by text! What service(s) are you interested in?';
@@ -119,18 +119,6 @@ async function newestLeadId(customerId) {
   return lead?.id || null;
 }
 
-// Inserts the claim row; a phone that already has an open follow-up
-// (partial unique index) is skipped.
-async function claimRow(row) {
-  try {
-    const [inserted] = await db('lead_callback_requests').insert(row).returning(['id']);
-    return inserted?.id || null;
-  } catch (err) {
-    if (err?.code === '23505') return null;
-    throw err;
-  }
-}
-
 // ── Sending ──────────────────────────────────────────────────────────────
 async function sendFollowup({ customer, phone, body, kind, requestId }) {
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -197,25 +185,35 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
   const { leadTextBlocker } = require('./lead-call-reply-ring');
   const blocker = await leadTextBlocker({ customer, digits, now });
   if (blocker) return { action: 'none', reason: blocker };
-  if (await sentKindRecently({ digits, kind, now })) return { action: 'none', reason: 'sent_today' };
-
-  // A TEXT answer replaces an open night ask: the lead chose text instead.
-  if (kind === 'text_reply') {
-    await db('lead_callback_requests').where({ state: 'asked', kind: 'call_request' })
-      .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
-      .update({ state: 'cancelled', updated_at: now });
-  }
   const leadId = await newestLeadId(customer.id);
-  const requestId = await claimRow({
-    customer_id: customer.id,
-    lead_id: leadId,
-    phone: fromPhone,
-    kind,
-    state: 'asked',
-    request_sms_log_id: smsLogId,
-    target_date: kind === 'call_request' ? targetDateFor(now) : null,
+
+  // The once-a-day check and the claim share one per-phone lock, and the
+  // claim commits before the text goes out: a second handler for the same
+  // phone waits, then finds this row (in flight or sent) and stops.
+  const claim = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${ENTRY_POINT}:${digits}`]);
+    if (await sentKindRecently({ digits, kind, now }, trx)) return { reason: 'sent_today' };
+    const phoneMatch = ["RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits]];
+    // A TEXT answer replaces an open night ask: the lead chose text instead.
+    if (kind === 'text_reply') {
+      await trx('lead_callback_requests').where({ state: 'asked', kind: 'call_request' }).whereRaw(...phoneMatch)
+        .update({ state: 'cancelled', updated_at: now });
+    }
+    const open = await trx('lead_callback_requests').whereIn('state', ['asked', 'scheduled']).whereRaw(...phoneMatch).first('id');
+    if (open) return { reason: 'open_followup' };
+    const [row] = await trx('lead_callback_requests').insert({
+      customer_id: customer.id,
+      lead_id: leadId,
+      phone: fromPhone,
+      kind,
+      state: 'asked',
+      request_sms_log_id: smsLogId,
+      target_date: kind === 'call_request' ? targetDateFor(now) : null,
+    }).returning(['id']);
+    return { requestId: row.id };
   });
-  if (!requestId) return { action: 'none', reason: 'open_followup' };
+  if (!claim.requestId) return { action: 'none', reason: claim.reason };
+  const { requestId } = claim;
 
   if (kind === 'text_reply') {
     // A lead whose intake state was cleared (a repeat form) gets it back, so
@@ -253,8 +251,10 @@ async function bookSlot(request, minutes, now) {
   return null;
 }
 
+// target_date is a DATE: pg hands it back as midnight UTC, which ET would
+// read as the day before. dateOnlyString keeps the calendar day.
 function dateText(value) {
-  return value instanceof Date ? etDateString(value) : String(value || '').slice(0, 10);
+  return dateOnlyString(value) || '';
 }
 
 async function answerTimeAsk({ customer, request, body, smsLogId, now }) {
@@ -333,5 +333,5 @@ module.exports = {
   ENTRY_POINT,
   TEXT_REPLY_BODY,
   NIGHT_CALL_BODY,
-  _test: { targetDateFor, slotInstant, bookSlot },
+  _test: { targetDateFor, slotInstant, bookSlot, dateText },
 };
