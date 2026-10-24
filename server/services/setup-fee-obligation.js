@@ -482,6 +482,12 @@ async function setupFeeSettledElsewhere(conn, {
   dead.delete('refunded');
   let paidFeeCents = 0;
   let paidFeeInvoiceId = null;
+  const paidByInvoice = new Map();
+  const addPaid = (row, cents) => {
+    paidFeeCents += cents;
+    paidFeeInvoiceId = paidFeeInvoiceId || row.id;
+    paidByInvoice.set(String(row.id), (paidByInvoice.get(String(row.id)) || 0) + cents);
+  };
   for (const row of rows) {
     const status = String(row.status || '').toLowerCase();
     if (dead.has(status)) continue;
@@ -496,10 +502,7 @@ async function setupFeeSettledElsewhere(conn, {
       const desc = String(li?.description || '');
       const waived = waveguardFeeLine(li) && /(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0);
       if (status === 'refunded') {
-        if (cents > 0 && !waived && settledFeeLineName(li)) {
-          paidFeeCents += cents;
-          paidFeeInvoiceId = paidFeeInvoiceId || row.id;
-        }
+        if (cents > 0 && !waived && settledFeeLineName(li)) addPaid(row, cents);
         continue;
       }
       if (waived && (cents === 0 || status === 'paid')) {
@@ -512,10 +515,7 @@ async function setupFeeSettledElsewhere(conn, {
         && row.created_at && Date.now() - new Date(row.created_at).getTime() <= SETUP_FEE_SETTLED_PREPAY_WINDOW_MS) {
         return { settled: true, reason: 'annual_prepay', invoiceId: row.id };
       }
-      if (cents > 0 && !waived && settledFeeLineName(li)) {
-        paidFeeCents += cents;
-        paidFeeInvoiceId = paidFeeInvoiceId || row.id;
-      }
+      if (cents > 0 && !waived && settledFeeLineName(li)) addPaid(row, cents);
     }
   }
   if (paidFeeCents > 0 && paidFeeCents >= expectedFeeCents) {
@@ -527,7 +527,22 @@ async function setupFeeSettledElsewhere(conn, {
     .whereNull('t.annual_plan_version') // a termite annual plan never waives the WaveGuard fee
     .first('t.id');
   if (term) return { settled: true, reason: 'annual_prepay_term', termId: term.id };
-  return { settled: false };
+  // Not settled, but fee money found elsewhere still counts toward the fee:
+  // the callers subtract it so only the remainder is instructed.
+  return paidByInvoice.size
+    ? { settled: false, partial: [...paidByInvoice].map(([id, cents]) => ({ id, cents })) }
+    : { settled: false };
+}
+
+// Cents of the elsewhere-partial payments the caller has NOT already counted: per
+// invoice id, only what exceeds the fee cents the caller's own scan took from that
+// same row (sumPositiveSetupFeeCents) — no money is ever counted twice. Gate off:
+// no `partial` is ever produced, so this is 0.
+function partialElsewhereCents(partial, countedRows = []) {
+  if (!Array.isArray(partial) || !partial.length) return 0;
+  const { sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+  const counted = new Map(countedRows.map((r) => [String(r.id), sumPositiveSetupFeeCents(r)]));
+  return partial.reduce((sum, p) => sum + Math.max(0, p.cents - (counted.get(String(p.id)) || 0)), 0);
 }
 
 /**
@@ -696,7 +711,13 @@ async function findUnmintedSetupFeeObligation({
     visitDate: await settledVisitDate(conn, excludeScheduledServiceId),
   });
   if (settledElsewhere.settled) return { owed: false, settledElsewhere };
-  const remainingFeeCents = expectedFeeCents - coveredFeeCents;
+  // Partial fee money paid elsewhere (not already counted by the stamped scan)
+  // reduces the remainder; together with stamped coverage it can settle the fee.
+  const elsewhereCents = partialElsewhereCents(settledElsewhere.partial, stampedRows);
+  if (coveredFeeCents + elsewhereCents >= expectedFeeCents) {
+    return { owed: false, settledElsewhere: { settled: true, reason: 'paid_fee_combined' } };
+  }
+  const remainingFeeCents = expectedFeeCents - coveredFeeCents - elsewhereCents;
   // A CANCELED fee-carrying invoice satisfies only when #3474's
   // canceledSetupFee lane can PROVABLY discover it (Codex P0, pre-push
   // round 14): findFirstApplicationInvoiceForEstimateService joins
@@ -829,6 +850,7 @@ async function findUnmintedSetupFeeObligation({
     // exposed separately for display consumers.
     setupFee: authoritativeFee,
     setupFeeRemainingCents: Math.round(remainingFeeCents),
+    ...(settledElsewhere.partial ? { settledElsewherePartial: settledElsewhere.partial } : {}),
     estimateId: estimate.id,
     estimateSlug: estimate.estimate_slug || null,
     firstVisitAlreadyCompleted: !!priorCompleted,
@@ -850,6 +872,7 @@ module.exports = {
   officeParkedSetupFeeSeries,
   findUnmintedSetupFeeObligation,
   setupFeeSettledElsewhere,
+  partialElsewhereCents,
   settledVisitDate,
   parkSetupFeeStampForOffice,
   isPlanApplicationRow,

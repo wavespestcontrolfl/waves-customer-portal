@@ -200,6 +200,59 @@ describe('the detector behind the alert and the completion hold', () => {
     expect(mockTermCalls.find((c) => c[1] === 't.term_start')[3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
+  describe('partial fee money paid elsewhere reduces the remainder (completion alert + hold)', () => {
+    const PARTIAL = { id: 'inv-part', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 50 }] };
+
+    test('gate ON: $50 paid elsewhere against $99 -> still owed, $49 remains, partial carried for the caller', async () => {
+      process.env[GATE] = 'true';
+      mockTables = obligationTables([PARTIAL]);
+      const r = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
+      expect(r.owed).toBe(true);
+      expect(r.setupFeeRemainingCents).toBe(4900);
+      expect(r.settledElsewherePartial).toEqual([{ id: 'inv-part', cents: 5000 }]);
+    });
+
+    test('gate OFF: byte-identical -> full $99 remains and no partial key', async () => {
+      delete process.env[GATE];
+      mockTables = obligationTables([PARTIAL]);
+      const r = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
+      expect(r.setupFeeRemainingCents).toBe(9900);
+      expect(r).not.toHaveProperty('settledElsewherePartial');
+    });
+
+    test('no double count: the same invoice already counted by the stamped scan is not subtracted twice', async () => {
+      process.env[GATE] = 'true';
+      const stampedPartial = { ...PARTIAL, notes: `accepted estimate #${EST}`, line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 50 }] };
+      mockTables = { ...obligationTables([PARTIAL]), invoices: { stamped: [stampedPartial], customer: [PARTIAL], other: [] } };
+      const r = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
+      expect(r.owed).toBe(true);
+      expect(r.setupFeeRemainingCents).toBe(4900); // 9900 - 5000, not 9900 - 10000
+    });
+
+    test('stamped partial + a DIFFERENT partial elsewhere that together cover the fee -> not owed', async () => {
+      process.env[GATE] = 'true';
+      const stamped = { id: 'inv-stamped', status: 'sent', notes: `accepted estimate #${EST}`, line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 50 }] };
+      const other = { id: 'inv-other', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 49 }] };
+      mockTables = { ...obligationTables([other]), invoices: { stamped: [stamped], customer: [other], other: [] } };
+      const r = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
+      expect(r.owed).toBe(false);
+    });
+
+    test('the completion path subtracts the carried partial at both its sites, deduped by invoice id', () => {
+      const fs = require('fs');
+      const src = fs.readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+      expect(src).toContain('partialElsewhereCents(unmintedSetupFeeObligation?.settledElsewherePartial, termFeeRows)');
+      expect(src).toContain('partialElsewhereCents(unmintedSetupFeeObligation.settledElsewherePartial, [...liveStampedRows');
+      const { partialElsewhereCents } = require('../services/setup-fee-obligation');
+      const partial = [{ id: 'a', cents: 5000 }, { id: 'b', cents: 300 }];
+      const counted = { id: 'a', line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 50 }] };
+      expect(partialElsewhereCents(partial, [counted])).toBe(300);
+      expect(partialElsewhereCents(partial, [{ id: 'a', line_items: [] }])).toBe(5300); // row counted none of it
+      expect(partialElsewhereCents(partial, [])).toBe(5300);
+      expect(partialElsewhereCents(undefined, [])).toBe(0);
+    });
+  });
+
   test('gate off returns before any read', async () => {
     delete process.env[GATE];
     expect(await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900 })).toEqual({ settled: false });
@@ -247,6 +300,35 @@ describe('the reconcile reopen trap: billing the visit must not re-demand a sett
     const text = mockUpdates[0].payload.detail || mockUpdates[0].payload.body;
     expect(text).toContain('Still owed');
     expect(text).toContain('one-time WaveGuard setup fee');
+  });
+
+  test('gate ON: $50 paid elsewhere against $99 -> the reopened instruction names only the $49.00 remainder', async () => {
+    process.env[GATE] = 'true';
+    const partial = { id: 'inv-part', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 50 }] };
+    mockTables = reconcileTables([partial]);
+    await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+    expect(mockUpdates).toHaveLength(1);
+    const text = mockUpdates[0].payload.detail || mockUpdates[0].payload.body;
+    expect(text).toContain('$49.00 remaining');
+    expect(mockUpdates[0].payload.metadata).toBeDefined();
+  });
+
+  test('gate ON: a partial already counted by the stamped scan is not subtracted twice', async () => {
+    process.env[GATE] = 'true';
+    const partial = { id: 'inv-part', status: 'paid', created_at: recent, notes: `accepted estimate #${EST}`, line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 50 }] };
+    mockTables = { ...reconcileTables([partial]), invoices: { stamped: [partial], customer: [partial], other: [APP_INVOICE] } };
+    await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+    const text = mockUpdates[0].payload.detail || mockUpdates[0].payload.body;
+    expect(text).toContain('$49.00 remaining');
+  });
+
+  test('gate OFF: the same partial leaves the full-fee instruction (unchanged)', async () => {
+    delete process.env[GATE];
+    const partial = { id: 'inv-part', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 50 }] };
+    mockTables = reconcileTables([partial]);
+    await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+    const text = mockUpdates[0].payload.detail || mockUpdates[0].payload.body;
+    expect(text).not.toContain('remaining');
   });
 
   test('gate ON: reconcile bounds the term check to the alert visit date', async () => {

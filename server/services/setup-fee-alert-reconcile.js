@@ -19,7 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
-const { setupFeeSettledElsewhere, settledVisitDate } = require('./setup-fee-obligation');
+const { setupFeeSettledElsewhere, partialElsewhereCents, settledVisitDate } = require('./setup-fee-obligation');
 
 // All note-stamped writers use the same case-insensitive linkage and lower-
 // case lock key, including historical stamps with the original loose shape.
@@ -233,12 +233,15 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
               const v = Number(m?.expectedSetupFeeCents);
               return Number.isFinite(v) ? v : 0;
             }));
+            const tElsewhere = await setupFeeSettledElsewhere(trx, { customerId: tCustomer, expectedFeeCents: tExpect, visitDate: await settledVisitDate(trx, tVisitIds[0]), lock: true });
+            // Partial fee money paid on other invoices, once per invoice id.
+            const tCovered = tLiveFeeCents + tRefundedFeeCents + partialElsewhereCents(tElsewhere.partial, tRows);
             const tFeeProven = feeWaivedByTerm
-              || (await setupFeeSettledElsewhere(trx, { customerId: tCustomer, expectedFeeCents: tExpect, visitDate: await settledVisitDate(trx, tVisitIds[0]), lock: true })).settled
+              || tElsewhere.settled
               || (tExpect > 0
-              ? (tLiveFeeCents + tRefundedFeeCents) >= tExpect
+              ? tCovered >= tExpect
               : tRefundedFeeCents > 0);
-            await reconcileTerminalFeeAlerts(tFeeProven, tExpect > 0 ? (tLiveFeeCents + tRefundedFeeCents) : null);
+            await reconcileTerminalFeeAlerts(tFeeProven, tExpect > 0 ? tCovered : null);
             return;
           }
           const {
@@ -364,12 +367,16 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // A covered annual-prepay term WAIVES the fee estate-wide
           // (Codex P0) — the estate alert must never instruct a waived
           // $99 while the term stands.
+          const elsewhere = await setupFeeSettledElsewhere(trx, { customerId: scanCustomerId, expectedFeeCents: expectedFeeCents || 0, visitDate: await settledVisitDate(trx, parkedIds[0] || (Array.isArray(staleMeta?.historicVisitIds) ? staleMeta.historicVisitIds[0] : null)), lock: true });
+          // Partial fee money paid on other invoices, once per invoice id.
+          const coveredFeeCentsAll = liveFeeCents + refundedFeeCents
+            + partialElsewhereCents(elsewhere.partial, [...stampedAll, ...onParkedAll]);
           const feeProven = feeWaivedByTerm
-            || (await setupFeeSettledElsewhere(trx, { customerId: scanCustomerId, expectedFeeCents: expectedFeeCents || 0, visitDate: await settledVisitDate(trx, parkedIds[0] || (Array.isArray(staleMeta?.historicVisitIds) ? staleMeta.historicVisitIds[0] : null)), lock: true })).settled
+            || elsewhere.settled
             || (expectedFeeCents !== null
-              ? (liveFeeCents + refundedFeeCents) >= expectedFeeCents
+              ? coveredFeeCentsAll >= expectedFeeCents
               : (refundedFeeCents > 0 || uniqueLiveRows.some(invoiceHasPositiveSetupFeeLine)));
-          await reconcileTerminalFeeAlerts(feeProven, expectedFeeCents !== null ? (liveFeeCents + refundedFeeCents) : null);
+          await reconcileTerminalFeeAlerts(feeProven, expectedFeeCents !== null ? coveredFeeCentsAll : null);
           const expectedAppCents = (visitId) => {
             const map = staleMeta?.expectedApplicationCentsByVisit;
             const v = map && Number(map[String(visitId)]);
@@ -512,7 +519,7 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           const priorUncovered = Array.isArray(staleMeta?.uncoveredVisitIds)
             ? staleMeta.uncoveredVisitIds.map(String).sort().join(',')
             : null;
-          const coveredFeeCentsNow = expectedFeeCents !== null ? (liveFeeCents + refundedFeeCents) : null;
+          const coveredFeeCentsNow = expectedFeeCents !== null ? coveredFeeCentsAll : null;
           const priorCoveredFeeCents = Number.isFinite(Number(staleMeta?.coveredFeeCents))
             ? Number(staleMeta.coveredFeeCents) : null;
           const feeCoverageChanged = coveredFeeCentsNow !== null && priorCoveredFeeCents !== coveredFeeCentsNow;

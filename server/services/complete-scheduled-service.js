@@ -10887,7 +10887,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           ).values()];
           const liveFeeCentsOnVisit = termFeeRows
             .filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void')
-            .reduce((sum, r) => sum + terminalFeeCents(r), 0);
+            .reduce((sum, r) => sum + terminalFeeCents(r), 0)
+            // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
+            + require('../services/setup-fee-obligation').partialElsewhereCents(unmintedSetupFeeObligation?.settledElsewherePartial, termFeeRows);
           const refundedFeeCentsTerm = termFeeRows
             .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
             .reduce((sum, r) => sum + terminalFeeCents(r), 0);
@@ -11188,7 +11190,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const uniqueLiveNow = [...new Map(
             [...liveStampedRows, ...liveOnVisitRows].map((r) => [String(r.id), r]),
           ).values()];
-          const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
+          const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0)
+            // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
+            + require('../services/setup-fee-obligation').partialElsewhereCents(unmintedSetupFeeObligation.settledElsewherePartial, [...liveStampedRows, ...liveOnVisitRows, ...stampedNowRows, ...onVisitLockedRows]);
           const feeCovered = expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents;
           const feeCoveredBy = feeCovered
             ? (liveStampedRows.find(invoiceHasPositiveSetupFeeLine)
