@@ -67,6 +67,20 @@ describe('planFollowed', () => {
     expect(planFollowed(plan, rowsById())).toBe(true);
   });
 
+  test('grouped members are one physical stop: tapping the second member first still follows the plan (#6652 review P2)', () => {
+    const rows = rowsById({
+      a: stop({ status: 'completed', visit_id: 'visit-1', arrived_at: '2026-09-08T12:01:00Z' }),
+      b: stop({ status: 'completed', visit_id: 'visit-1', arrived_at: '2026-09-08T12:00:00Z' }),
+    });
+    expect(planFollowed(plan, rows)).toBe(true);
+    // The group as a whole after c is still out of order.
+    const late = rowsById({
+      a: stop({ status: 'completed', visit_id: 'visit-1', arrived_at: '2026-09-08T15:00:00Z' }),
+      b: stop({ status: 'completed', visit_id: 'visit-1', arrived_at: '2026-09-08T15:00:00Z' }),
+    });
+    expect(planFollowed(plan, late)).toBe(false);
+  });
+
   test('arrival order out of the plan order -> not followed', () => {
     const rows = rowsById({
       a: stop({ status: 'completed', arrived_at: '2026-09-08T14:00:00Z' }),
@@ -276,7 +290,7 @@ describe('computeOpsScoreboard — bookings_without_staff', () => {
   test('recurring series children are excluded', async () => {
     const rows = { scheduled_services: [base({ recurring_parent_id: 'parent-1' })] };
     const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
-    expect(out.bookingsWithoutStaff).toEqual({ numerator: 0, denominator: 0, share: null, ai: 0, customerSelfServe: 0, staff: 0, aiPendingReview: 0 });
+    expect(out.bookingsWithoutStaff).toEqual({ numerator: 0, denominator: 0, share: null, ai: 0, customerSelfServe: 0, staff: 0, aiPendingReview: 0, aiRejected: 0 });
   });
 
   test('auto-created follow-up visits are excluded', async () => {
@@ -310,7 +324,7 @@ describe('computeOpsScoreboard — bookings_without_staff', () => {
     };
     const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
     expect(out.bookingsWithoutStaff).toEqual({
-      numerator: 4, denominator: 6, share: 4 / 6, ai: 2, customerSelfServe: 2, staff: 2, aiPendingReview: 0,
+      numerator: 4, denominator: 6, share: 4 / 6, ai: 2, customerSelfServe: 2, staff: 2, aiPendingReview: 0, aiRejected: 0,
     });
   });
 
@@ -324,6 +338,18 @@ describe('computeOpsScoreboard — bookings_without_staff', () => {
     };
     const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
     expect(out.bookingsWithoutStaff).toMatchObject({ ai: 1, denominator: 1, aiPendingReview: 2 });
+  });
+
+  test('an AI request the office rejected (cancelled or skipped, never confirmed) is no booking; approved then cancelled still is (#6652 review P2)', async () => {
+    const rows = {
+      scheduled_services: [
+        base({ source_action: 'voice_agent', status: 'cancelled', customer_confirmed: false }),
+        base({ source_action: 'ai_call_outbound_review', status: 'skipped', customer_confirmed: false }),
+        base({ source_action: 'voice_agent', status: 'cancelled', customer_confirmed: true }),
+      ],
+    };
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
+    expect(out.bookingsWithoutStaff).toMatchObject({ ai: 1, denominator: 1, aiPendingReview: 0, aiRejected: 2 });
   });
 
   test('a voice-agent booking a move left confirmed but not customer-confirmed still awaits review (pre-push P1)', async () => {
@@ -353,6 +379,20 @@ describe('computeOpsScoreboard — drive_minutes_per_stop', () => {
     };
     const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
     expect(out.driveMinutesPerStop).toMatchObject({ denominator: 2, completedStops: 2, timedStops: 2, vanDrivingMinutes: 75, vanDrivingMiles: 32.5 });
+    expect(out.driveMinutesPerStop.share).toBeCloseTo(15);
+  });
+
+  test('the rows of one visit group are one stop: its drive is counted once (#6652 review P2)', async () => {
+    const rows = {
+      scheduled_services: [
+        { status: 'completed', scheduled_date: '2026-09-02', visit_id: 'visit-1', en_route_at: '2026-09-02T13:00:00Z', arrived_at: '2026-09-02T13:20:00Z' },
+        { status: 'completed', scheduled_date: '2026-09-02', visit_id: 'visit-1', en_route_at: '2026-09-02T13:00:00Z', arrived_at: '2026-09-02T13:20:00Z' },
+        { status: 'completed', scheduled_date: '2026-09-03', visit_id: null, en_route_at: '2026-09-03T14:00:00Z', arrived_at: '2026-09-03T14:10:00Z' },
+      ],
+      mileage_log: [],
+    };
+    const out = await computeOpsScoreboard(WIN, makeFilteringDb(rows));
+    expect(out.driveMinutesPerStop).toMatchObject({ completedStops: 2, timedStops: 2, denominator: 2 });
     expect(out.driveMinutesPerStop.share).toBeCloseTo(15);
   });
 

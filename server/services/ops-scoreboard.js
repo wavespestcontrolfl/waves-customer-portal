@@ -20,6 +20,7 @@ const {
   VOICE_AGENT_BOOKING_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   isUnreviewedDispatchOwned,
+  DISPATCH_OWNED_PENDING_SOURCE_ACTIONS,
 } = require('./call-booking-source-actions');
 const { selectPlanningSnapshots } = require('./scheduling/route-performance');
 
@@ -102,18 +103,41 @@ function tapDriveMinutes(stop) {
   return minutes > 0 && minutes <= MAX_TAP_DRIVE_MINUTES ? minutes : null;
 }
 
+// The rows of one visit group are one physical stop: the en-route and
+// arrival taps fan out to every member (visit-groups.js), so the drive is
+// counted once, from the group's earliest taps (#6652 review P2). Grouping
+// is retired (#6479), but older visits still carry a visit_id.
+const earliestOf = (a, b) => (!a ? b : !b ? a : (new Date(b) < new Date(a) ? b : a));
+function physicalStops(rows) {
+  const groups = new Map();
+  const stops = [];
+  for (const row of rows) {
+    const group = row.visit_id ? groups.get(row.visit_id) : null;
+    if (group) {
+      group.en_route_at = earliestOf(group.en_route_at, row.en_route_at);
+      group.arrived_at = earliestOf(group.arrived_at, row.arrived_at);
+      continue;
+    }
+    const stop = { en_route_at: row.en_route_at, arrived_at: row.arrived_at };
+    if (row.visit_id) groups.set(row.visit_id, stop);
+    stops.push(stop);
+  }
+  return stops;
+}
+
 async function computeDriveMinutesPerStop({ from, to }, conn) {
-  const [stops, trips] = await Promise.all([
+  const [rows, trips] = await Promise.all([
     conn('scheduled_services')
       .where('status', 'completed')
       .where('scheduled_date', '>=', from)
       .where('scheduled_date', '<=', to)
-      .select('en_route_at', 'arrived_at'),
+      .select('visit_id', 'en_route_at', 'arrived_at'),
     conn('mileage_log')
       .where('trip_date', '>=', from)
       .where('trip_date', '<=', to)
       .select('duration_minutes', 'distance_miles'),
   ]);
+  const stops = physicalStops(rows);
   const timed = stops.map(tapDriveMinutes).filter((minutes) => minutes != null);
   const driveMinutes = timed.reduce((sum, minutes) => sum + minutes, 0);
   return {
@@ -215,6 +239,17 @@ async function computeAiCallShare({ from, to }, conn) {
 // conversion by the data alone (source literally reads 'admin', the same
 // value a staff-created row defaults to), these are counted as STAFF here,
 // not guessed into customer_self_serve. Flagged in `notes`.
+// An AI request the office turned down (cancelled or skipped while still
+// unconfirmed: outbound-review-confirm.js treats exactly these as rejections)
+// never became a booking. It is left out of every bucket and counted as
+// aiRejected; one approved first (customer_confirmed) and cancelled later
+// stays a booking (#6652 review P2).
+function isRejectedAiRequest(row) {
+  return DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(row.source_action)
+    && ['cancelled', 'skipped'].includes(String(row.status || '').toLowerCase())
+    && !row.customer_confirmed;
+}
+
 function classifyBooking(row) {
   if (AI_BOOKING_SOURCE_ACTIONS.has(row.source_action)) return 'ai';
   if (row.self_booking_id != null || row.source === 'reservice_link') return 'customer_self_serve';
@@ -234,8 +269,10 @@ async function computeBookingsWithoutStaff({ from, to }, conn) {
   ).select('source_action', 'self_booking_id', 'source', 'status', 'customer_confirmed');
   const counts = { ai: 0, customer_self_serve: 0, staff: 0 };
   let aiPendingReview = 0;
+  let aiRejected = 0;
   for (const row of rows) {
-    if (isUnreviewedDispatchOwned(row)) aiPendingReview += 1;
+    if (isRejectedAiRequest(row)) aiRejected += 1;
+    else if (isUnreviewedDispatchOwned(row)) aiPendingReview += 1;
     else counts[classifyBooking(row)] += 1;
   }
   const total = counts.ai + counts.customer_self_serve + counts.staff;
@@ -248,6 +285,7 @@ async function computeBookingsWithoutStaff({ from, to }, conn) {
     customerSelfServe: counts.customer_self_serve,
     staff: counts.staff,
     aiPendingReview,
+    aiRejected,
   };
 }
 
@@ -282,17 +320,23 @@ function planFollowed(plan, rowsById) {
     .map((stop) => stop.id)
     .filter((id) => onThisRoute(rowsById.get(id)));
   if (completedIds.length === 0) return null;
-  const timed = completedIds
-    .map((id) => {
-      const row = rowsById.get(id);
-      const at = row.arrived_at || row.check_in_time;
-      return at ? { id, at: new Date(at).getTime() } : null;
-    })
-    .filter(Boolean);
-  if (timed.length < 2) return true;
-  const timedIds = new Set(timed.map((entry) => entry.id));
-  const plannedOrder = completedIds.filter((id) => timedIds.has(id));
-  const actualOrder = [...timed].sort((a, b) => a.at - b.at).map((entry) => entry.id);
+  // One physical stop per visit group, by each row's current visit_id: the
+  // tapped member's arrival fans out to its siblings, so the members are one
+  // stop, placed by their earliest arrival (#6652 review P2). An ungrouped
+  // row is its own stop.
+  const stopKey = (id) => (rowsById.get(id).visit_id ? `visit:${rowsById.get(id).visit_id}` : id);
+  const firstArrival = new Map();
+  for (const id of completedIds) {
+    const row = rowsById.get(id);
+    const at = row.arrived_at || row.check_in_time;
+    if (!at) continue;
+    const key = stopKey(id);
+    const time = new Date(at).getTime();
+    if (!firstArrival.has(key) || time < firstArrival.get(key)) firstArrival.set(key, time);
+  }
+  if (firstArrival.size < 2) return true;
+  const plannedOrder = [...new Set(completedIds.map(stopKey))].filter((key) => firstArrival.has(key));
+  const actualOrder = [...firstArrival.entries()].sort((a, b) => a[1] - b[1]).map(([key]) => key);
   return plannedOrder.join('|') === actualOrder.join('|');
 }
 
@@ -318,7 +362,7 @@ async function computeAiRouteDays({ from, to }, conn) {
   const rows = plannedIds.length
     ? await conn('scheduled_services')
       .whereIn('id', plannedIds)
-      .select('id', 'technician_id', 'scheduled_date', 'status', 'arrived_at', 'check_in_time')
+      .select('id', 'visit_id', 'technician_id', 'scheduled_date', 'status', 'arrived_at', 'check_in_time')
     : [];
   const rowsById = new Map(rows.map((row) => [row.id, row]));
 
