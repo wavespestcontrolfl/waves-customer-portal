@@ -19,10 +19,13 @@
  *     always wins over it (resolvePropertyNeighborhood overwrites a caller link
  *     the county can name) and an office pick is never touched.
  *
- * A county outage is never read as "no name": a lookup that errors leaves the
- * home exactly as it was and out of the batch for an hour; three failures in a
- * row end the pass. Homes the county answered about without a name wait a day.
- * That memory lives in this process, so a restart re-asks once. Nothing is
+ * Where each home got to lives on the row (customer_properties.neighborhood_naming,
+ * see its migration): a home is picked only once its wait has passed, least
+ * recently tried first, in SQL before the batch LIMIT. A run of homes that
+ * cannot be named therefore never holds the head of the queue, across restarts
+ * too. A county lookup that errors waits an hour and is never read as "no name"
+ * (three errors in a row end the pass); a county answer with no name waits a
+ * day, and the caller pass retries a home no sooner than a day. Nothing is
  * sent and no bell rings; logs carry counts only, never an address or a name.
  */
 
@@ -36,18 +39,7 @@ const {
 
 const COUNTY_BATCH = 20; // homes the county is asked about per tick
 const CALLER_BATCH = 50; // homes linked from a call per tick (no network)
-const GIS_FAILURE_COOLDOWN_MS = 60 * 60 * 1000;
-const ANSWERED_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const MAX_GIS_FAILURES_IN_A_ROW = 3;
-
-// propertyId -> earliest time to ask again; countyAnswered = homes the county
-// answered about without naming them (the caller pass may then name them).
-const retryAt = new Map();
-const countyAnswered = new Set();
-function resetNamingState() {
-  retryAt.clear();
-  countyAnswered.clear();
-}
 
 // coalesce: a checked home whose roll gave no subdivision at all is NOT a number.
 const NUMERIC_PLAT_SQL = "coalesce(p.county_subdivision, '') ~ '^[0-9]{1,6}$' AND coalesce(p.county_subdivision, '') !~ '^0+$'";
@@ -63,25 +55,46 @@ const liveHomes = () => db('customer_properties as p')
   .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
   .where((w) => w.whereNull('p.neighborhood_source').orWhereNot('p.neighborhood_source', 'office'));
 
+// The naming state counts only while it was written for this address.
+const ADDRESS_KEY_SQL = "md5(coalesce(p.address_line1, '') || '|' || coalesce(p.zip, ''))";
+const FRESH_SQL = `coalesce(p.neighborhood_naming->>'addr' = ${ADDRESS_KEY_SQL}, false)`;
+const stateTime = (key) => `(CASE WHEN ${FRESH_SQL} THEN (p.neighborhood_naming->>'${key}')::timestamptz END)`;
+// Not waiting: never tried, or the wait since the last try has passed.
+const COUNTY_DUE_SQL = `(${stateTime('county_at')} IS NULL OR ${stateTime('county_at')}
+  <= ?::timestamptz - (CASE WHEN p.neighborhood_naming->>'county_answered' = 'true' THEN interval '24 hours' ELSE interval '1 hour' END))`;
+const CALLER_DUE_SQL = `(${stateTime('caller_at')} IS NULL OR ${stateTime('caller_at')} <= ?::timestamptz - interval '24 hours')`;
+const COUNTY_ANSWERED_SQL = `coalesce(${FRESH_SQL} AND p.neighborhood_naming->>'county_answered' = 'true', false)`;
+
+// Record a try on the row, for the address the try was made at: a home that
+// moved meanwhile is not stamped, and state written for an old address is dropped.
+function stampNaming(home, patch) {
+  return db.raw(
+    `UPDATE customer_properties p SET neighborhood_naming =
+       (CASE WHEN ${FRESH_SQL} THEN p.neighborhood_naming ELSE '{}'::jsonb END)
+       || ?::jsonb || jsonb_build_object('addr', ${ADDRESS_KEY_SQL})
+     WHERE p.id = ? AND p.address_line1 IS NOT DISTINCT FROM ? AND p.zip IS NOT DISTINCT FROM ?`,
+    [JSON.stringify(patch), home.id, home.address_line1, home.zip],
+  );
+}
+
 const HOME_COLUMNS = ['p.id', 'p.customer_id', 'p.address_line1', 'p.city', 'p.zip', 'p.latitude', 'p.longitude',
   'p.neighborhood_source', 'p.neighborhood_checked_at', 'p.county_subdivision'];
 
-async function countyPass({ lookup, platLookup, now }) {
+async function countyPass({ lookup, platLookup, nowIso }) {
   const rows = await liveHomes()
     .whereRaw(`NOT (${NO_PIN_SQL})`)
     .where((w) => w.whereNull('p.neighborhood_id').orWhere('p.neighborhood_source', 'caller'))
     .where((w) => w.whereNull('p.neighborhood_checked_at').orWhereRaw(NUMERIC_PLAT_SQL))
-    // Never-checked homes first, then the plat-number re-checks.
-    .orderByRaw('(p.neighborhood_checked_at IS NULL) DESC, p.id')
-    .limit(COUNTY_BATCH * 10)
+    .whereRaw(COUNTY_DUE_SQL, [nowIso])
+    // Never-checked homes first, then the plat-number re-checks; within each,
+    // the one tried longest ago.
+    .orderByRaw(`(p.neighborhood_checked_at IS NULL) DESC, ${stateTime('county_at')} ASC NULLS FIRST, p.id`)
+    .limit(COUNTY_BATCH)
     .select(HOME_COLUMNS);
   const tally = {};
-  let asked = 0;
   let failuresInARow = 0;
   for (const home of rows) {
-    if (asked >= COUNTY_BATCH || failuresInARow >= MAX_GIS_FAILURES_IN_A_ROW) break;
-    if ((retryAt.get(home.id) || 0) > now) continue;
-    asked += 1;
+    if (failuresInARow >= MAX_GIS_FAILURES_IN_A_ROW) break;
     let parcel;
     try {
       const diag = { errors: [] };
@@ -92,7 +105,7 @@ async function countyPass({ lookup, platLookup, now }) {
     } catch {
       failuresInARow += 1;
       tally.gis_error = (tally.gis_error || 0) + 1;
-      retryAt.set(home.id, now + GIS_FAILURE_COOLDOWN_MS);
+      await stampNaming(home, { county_at: nowIso, county_answered: false });
       continue;
     }
     failuresInARow = 0;
@@ -101,8 +114,9 @@ async function countyPass({ lookup, platLookup, now }) {
       conn: trx, lookup: async () => parcel, onlyUnchecked: !recheck, recheck,
     }));
     tally[status] = (tally[status] || 0) + 1;
-    if (status !== 'linked') retryAt.set(home.id, now + ANSWERED_COOLDOWN_MS);
-    if (['no_name', 'no_parcel', 'situs_mismatch'].includes(status)) countyAnswered.add(home.id);
+    // The county answered without a home to link: it waits a day. A claim lost
+    // to a concurrent writer (already_checked, stale_lookup) is simply seen again.
+    if (['no_name', 'no_parcel', 'situs_mismatch'].includes(status)) await stampNaming(home, { county_at: nowIso, county_answered: true });
   }
   return tally;
 }
@@ -152,12 +166,17 @@ async function communityFromCalls(home) {
   return names.size === 1 ? [...names][0] : null;
 }
 
+// The evidence was matched against `home`, read earlier: under the lock the
+// row must still be that home (same customer, address line, city and ZIP), or
+// an address edit between the reads would attach the OLD address's community
+// to the new one.
 async function linkFromCaller(home, county, name) {
   return db.transaction(async (trx) => {
     const open = await trx('customer_properties').where({ id: home.id, active: true }).whereNull('neighborhood_id')
       .where((w) => w.whereNull('neighborhood_source').orWhereNot('neighborhood_source', 'office'))
-      .forUpdate().first('id');
+      .forUpdate().first('customer_id', 'address_line1', 'city', 'zip');
     if (!open) return 'already_linked';
+    if (['customer_id', 'address_line1', 'city', 'zip'].some((f) => String(open[f] || '') !== String(home[f] || ''))) return 'address_changed';
     const hood = await upsertNeighborhood(trx, { county, subdivision: name, source: 'customer' });
     if (!hood) return 'no_name';
     // A neighborhood the office switched off stays off: no link.
@@ -168,19 +187,19 @@ async function linkFromCaller(home, county, name) {
   });
 }
 
-async function callerPass() {
+async function callerPass({ nowIso }) {
   const hasWords = db('call_log as cl').select(1).whereRaw('cl.customer_id = p.customer_id')
     .whereRaw("btrim(coalesce(cl.ai_extraction_enriched #>> '{property,service_address,subdivision_or_community}', '')) <> ''");
-  const answered = [...countyAnswered];
   // The county could not name it: checked with no plat number to read, no pin
-  // to ask about, or answered without a name earlier in this process.
+  // to ask about, or answered without a name (stored on the row).
   const rows = await liveHomes()
     .whereNull('p.neighborhood_id')
     .whereExists(hasWords)
     .where((w) => w.whereRaw(`p.neighborhood_checked_at IS NOT NULL AND NOT (${NUMERIC_PLAT_SQL})`)
       .orWhereRaw(NO_PIN_SQL)
-      .orWhereIn('p.id', answered))
-    .orderBy('p.id')
+      .orWhereRaw(COUNTY_ANSWERED_SQL))
+    .whereRaw(CALLER_DUE_SQL, [nowIso])
+    .orderByRaw(`${stateTime('caller_at')} ASC NULLS FIRST, p.id`)
     .limit(CALLER_BATCH)
     .select(HOME_COLUMNS);
   const tally = {};
@@ -192,19 +211,21 @@ async function callerPass() {
       status = name ? await linkFromCaller(home, county, name) : 'no_words';
     }
     tally[status] = (tally[status] || 0) + 1;
+    // Anything but a link waits a day, so these homes never hold the batch.
+    if (status !== 'linked') await stampNaming(home, { caller_at: nowIso });
   }
   return tally;
 }
 
 async function runNamingPass({ lookup = lookupCountyParcelByPoint, platLookup = lookupSarasotaPlatNames, now = Date.now() } = {}) {
   if (countyParcelGisDisabled()) return { skipped: 'gis_off' };
-  for (const [id, at] of retryAt) if (at <= now) retryAt.delete(id);
-  const county = await countyPass({ lookup, platLookup, now });
-  const caller = await callerPass();
+  const nowIso = new Date(now).toISOString();
+  const county = await countyPass({ lookup, platLookup, nowIso });
+  const caller = await callerPass({ nowIso });
   if (Object.keys(county).length || Object.keys(caller).length) {
     logger.info(`[neighborhood-naming] pass: ${JSON.stringify({ county, caller })}`);
   }
   return { county, caller };
 }
 
-module.exports = { runNamingPass, callerCommunityName, resetNamingState };
+module.exports = { runNamingPass, callerCommunityName, linkFromCaller };
