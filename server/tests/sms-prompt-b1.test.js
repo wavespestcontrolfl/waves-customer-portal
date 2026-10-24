@@ -368,6 +368,19 @@ describe('generateGroundedDraft wiring (single pass, nothing is sent)', () => {
     expect(onRun.promptVersion).toBe('house_voice_v12_real_answers27_n');
   });
 
+  test('a missed visit with a linked estimate for another service keeps the hand-off: no OPEN TIMES at all', async () => {
+    on();
+    const getAvailableSlots = jest.fn(async () => ({ zone: 'Z', days: [{ date: '2026-06-16', fullDate: 'Tuesday, June 16', slots: [{ startTime24: '09:00' }] }] }));
+    mockDeps({ getAvailableSlots });
+    const result = await require('../services/sms-shadow-drafter').generateGroundedDraft({
+      client: {}, context: { ...baseContext, visitLoops: { missedVisit: MISSED } }, inboundMessage: 'ok about the mosquito quote', intent: { intent: 'GENERAL' },
+      schedulingIntent: true, city: 'Venice', estimateId: 'est-1', voiceProfile: null,
+    });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(result.factsBlock).not.toContain('OPEN TIMES (real');
+    expect(result.factsBlock).toContain('- MISSED VISIT:');
+  });
+
   test('a missed visit with no available times keeps the hand-off facts (no OPEN TIMES section)', async () => {
     on();
     mockDeps({ getAvailableSlots: jest.fn(async () => ({ zone: 'Z', days: [] })) });

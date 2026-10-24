@@ -6035,7 +6035,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // service is fetched for any text while one is listed (missedVisitIdentity), and none available keeps today's hand-off.
   const missedVisit = context?.visitLoops?.missedVisit;
   const missedVisitListed = Boolean(missedVisit) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const missedRebook = missedVisitListed && smsPromptB1Live();
+  // A text linked to an estimate prices the estimate's service, so the missed visit's own times cannot be told apart from it: that draft
+  // keeps today's hand-off (OPEN TIMES withheld for the whole reply).
+  const missedRebook = missedVisitListed && smsPromptB1Live() && !estimateId;
   const needsOpenTimes = missedRebook || (!missedVisitListed && (Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
