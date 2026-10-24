@@ -166,11 +166,27 @@ async function raiseFound(trx, composed, dedupeKey) {
   });
 }
 
+const CLOSE_RESOLUTIONS = {
+  count_zero: 'No codes are waiting',
+  section_off: 'The access codes section is off',
+  category_silenced: 'Gate codes found in messages are silenced in Settings',
+};
+
 async function closeFound(trx, now, reason, dedupeKey) {
   if (!alertEpisodesLive()) return 0;
   return Number(await require('./admin-alert-episodes').closeAdminAlertKeys(trx, [dedupeKey], reason, {
-    now, resolution: reason === 'count_zero' ? 'No codes are waiting' : 'The access codes section is off',
+    now, resolution: CLOSE_RESOLUTIONS[reason],
   })) || 0;
+}
+
+// The owner silenced the category (Settings → Notifications). notifyAdmin
+// reads that override only on a fresh insert, so a refresh or a reopen of the
+// standing row would still ring: a silenced category reads no codes and
+// closes the row instead. Only while the bell policy itself is on, as
+// NotificationService.create reads it (the low-rating review alert's rule).
+async function categorySilenced() {
+  const bellPolicy = require('./notification-bell-policy');
+  return bellPolicy.isBellPolicyEnabled() && !(await bellPolicy.bellAllowed({ category: CATEGORY }));
 }
 
 /**
@@ -187,11 +203,13 @@ async function syncFoundCodesBell({ now = new Date(), conn = db, gateEnabled, se
   const section = sectionOn ?? capture.enabled();
   const readIds = ids || capture.listFoundIds;
   const readList = list || capture.listFound;
+  let stop = section ? null : 'section_off';
+  if (!stop && await categorySilenced()) stop = 'category_silenced';
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-    const waiting = section ? await readIds(trx) : [];
+    const waiting = stop ? [] : await readIds(trx);
     if (!waiting.length) {
-      const closed = await closeFound(trx, now, section ? 'count_zero' : 'section_off', dedupeKey);
+      const closed = await closeFound(trx, now, stop || 'count_zero', dedupeKey);
       return { count: 0, outcome: closed ? 'closed' : 'clear' };
     }
     const listed = await readList(trx, { limit: LIST_LIMIT, offset: 0 });

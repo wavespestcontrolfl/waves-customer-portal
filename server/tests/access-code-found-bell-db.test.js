@@ -54,7 +54,7 @@ maybeDescribe('found-codes bell (live Postgres)', () => {
     ids: async () => items.map((row) => row.id), list: async () => ({ total: items.length, items }),
   });
 
-  test('raise, quiet repeat, quiet leave, a person\'s done, a new code rings, closed at zero, a comeback rings', async () => {
+  test('raise, quiet repeat, quiet leave, a person\'s done, a new code rings, silenced closes, closed at zero, a comeback rings', async () => {
     const a = randomUUID();
     const b = randomUUID();
     const c = randomUUID();
@@ -96,7 +96,23 @@ maybeDescribe('found-codes bell (live Postgres)', () => {
     expect(new Date(row.created_at).getTime()).toBeGreaterThan(before);
     expect(row.metadata.itemKeys).toEqual([b, c].sort());
 
-    // 6. Nothing waits: the row closes itself as done.
+    // 6. The owner silences the category in Settings: a new code does not ring
+    //    the standing row; it closes. Unsilenced, the codes still waiting ring it again.
+    const bellPolicy = require('../services/notification-bell-policy');
+    const silence = jest.spyOn(bellPolicy, 'bellAllowed').mockResolvedValue(false);
+    const d = randomUUID();
+    await expect(run([code(d), code(c, { kind: 'pass', customerId: null, customerName: null }), code(b)])).resolves.toEqual({ count: 0, outcome: 'closed' });
+    row = await standing();
+    expect(row.done_at).not.toBeNull();
+    expect(row.resolution).toBe('Gate codes found in messages are silenced in Settings');
+    expect(row.metadata.itemKeys).toEqual([b, c].sort());
+    silence.mockRestore();
+    await expect(run([code(d), code(c, { kind: 'pass', customerId: null, customerName: null }), code(b)])).resolves.toEqual({ count: 3, outcome: 'raised' });
+    row = await standing();
+    expect([row.read_at, row.done_at]).toEqual([null, null]);
+    expect(row.metadata.itemKeys).toEqual([b, c, d].sort());
+
+    // 7. Nothing waits: the row closes itself as done.
     await expect(run([])).resolves.toEqual({ count: 0, outcome: 'closed' });
     row = await standing();
     expect(row.done_by).toBe('episodes');
@@ -104,7 +120,7 @@ maybeDescribe('found-codes bell (live Postgres)', () => {
     expect(row.metadata.autoCleared).toBe(true);
     await expect(run([])).resolves.toEqual({ count: 0, outcome: 'clear' });
 
-    // 7. A code waits again: a comeback rings, even for a code the row named before.
+    // 8. A code waits again: a comeback rings, even for a code the row named before.
     await expect(run([code(b)])).resolves.toMatchObject({ count: 1 });
     row = await standing();
     expect([row.read_at, row.done_at]).toEqual([null, null]);

@@ -17,11 +17,16 @@ jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n2', deduped: false })),
 }));
 jest.mock('../services/access-code-capture', () => ({ enabled: jest.fn(() => true), listFound: jest.fn(), listFoundIds: jest.fn() }));
+jest.mock('../services/notification-bell-policy', () => ({
+  isBellPolicyEnabled: jest.fn(() => true),
+  bellAllowed: jest.fn(async () => true),
+}));
 
 const gates = require('../config/feature-gates');
 const episodes = require('../services/admin-alert-episodes');
 const NotificationService = require('../services/notification-service');
 const capture = require('../services/access-code-capture');
+const bellPolicy = require('../services/notification-bell-policy');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const Bell = require('../services/access-code-found-bell');
 
@@ -64,6 +69,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   gates.accessCodesFoundBellLive.mockReturnValue(true);
   gates.alertEpisodesLive.mockReturnValue(true);
+  bellPolicy.isBellPolicyEnabled.mockReturnValue(true);
+  bellPolicy.bellAllowed.mockResolvedValue(true);
 });
 
 describe('the copy', () => {
@@ -224,6 +231,27 @@ describe('syncFoundCodesBell', () => {
     expect(ids).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
     expect(episodes.closeAdminAlertKeys.mock.calls[0][2]).toBe('section_off');
+  });
+
+  test('a category silenced in Settings reads no codes and closes the row, so a refresh or a reopen never rings', async () => {
+    bellPolicy.bellAllowed.mockResolvedValue(false);
+    episodes.closeAdminAlertKeys.mockResolvedValueOnce(1);
+    const { trx, ids, list, result } = run([item()]);
+    await expect(result).resolves.toEqual({ count: 0, outcome: 'closed' });
+    expect(bellPolicy.bellAllowed).toHaveBeenCalledWith({ category: 'access_codes' });
+    expect(ids).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(trx, ['access-codes-found'], 'category_silenced', {
+      now: NOW, resolution: 'Gate codes found in messages are silenced in Settings',
+    });
+  });
+
+  test('with the bell policy off a saved silence is not read, as on a fresh insert', async () => {
+    bellPolicy.isBellPolicyEnabled.mockReturnValue(false);
+    bellPolicy.bellAllowed.mockResolvedValue(false);
+    await expect(run([item()]).result).resolves.toMatchObject({ count: 1, outcome: 'raised' });
+    expect(bellPolicy.bellAllowed).not.toHaveBeenCalled();
   });
 
   test('a quiet refresh, a ringing refresh, a plain dedupe and a silenced category each report their outcome', async () => {
