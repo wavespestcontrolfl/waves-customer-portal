@@ -53,11 +53,15 @@ async function serviceAreaSqft({ knex, svc, propertyServiceArea, actor }) {
 
 // The Celsius WG label on file (EPA Reg. No. 432-1507, the EPA-stamped 2021-09-01 version), word for word, the stricter instruction first. Keyed by EPA registration
 // number so a rename of the catalog product changes nothing and no product is matched by its name.
+const CELSIUS_LINES = Object.freeze([
+  Object.freeze({ text: 'Prepare only as much spray mixture as needed for application on the same day.', source: 'Celsius WG label, Mixing Instructions' }),
+  Object.freeze({ text: 'Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.', source: 'Celsius WG label, Precautions, item 3' }),
+]);
+// EPA moved Celsius WG from Bayer (432-1507) to Envu (101563-141) on 2022-12-16. The newest label file EPA holds for 101563-141 is
+// still the 2021-09-01 one quoted above, so the catalog row reads the same lines under either number.
 const LABEL_LINES = Object.freeze({
-  '432-1507': Object.freeze([
-    Object.freeze({ text: 'Prepare only as much spray mixture as needed for application on the same day.', source: 'Celsius WG label, Mixing Instructions' }),
-    Object.freeze({ text: 'Apply spray mixtures of this product within 5 days of mixing to avoid product degradation.', source: 'Celsius WG label, Precautions, item 3' }),
-  ]),
+  '432-1507': CELSIUS_LINES,
+  '101563-141': CELSIUS_LINES,
 });
 
 // ── units ───────────────────────────────────────────────────────────────────
