@@ -93,9 +93,44 @@ describe('verifyCallItems', () => {
       expect(verify(transcript, [item({ quote: "it's pound, three three nine four." })])).toHaveLength(1);
       expect(verify(transcript, [item({ quote: 'Three three nine four. Awesome' })])).toEqual([]);
     });
+    test('the code is judged against the customer\'s whole turn: the bare digits of a "pound" code are refused, even from a cropped quote', () => {
+      // staff reads back the bare digits, but a staff word never satisfies the check
+      expect(verify(transcript, [item({ code: '3394', quote: 'three three nine four' })])).toEqual([]);
+      expect(verify(transcript, [item({ code: '3394', quote: "Hi, yeah, it's pound, three three nine four." })])).toEqual([]);
+      // the complete code, #3394, is kept from the same cropped quote
+      expect(verify(transcript, [item({ code: '#3394', quote: 'three three nine four' })])).toHaveLength(1);
+      expect(verify(transcript, [item({ code: '#3394', quote: 'three three nine four' })])[0].code).toBe('#3394');
+    });
     test('the code without its symbol, or a different code, is refused', () => {
       expect(verify(transcript, [item({ code: '3394', quote: "it's pound, three three nine four." })])).toEqual([]);
       expect(verify(transcript, [item({ code: '#3395', quote: "it's pound, three three nine four." })])).toEqual([]);
+    });
+  });
+
+  describe('who is staff on an outbound call', () => {
+    const TRANSCRIPT = "Agent: Hi, I'm at the gate.\nCaller: Are you from Waves? The gate code is four eight two one.\nAgent: Four eight two one, thanks.";
+    test('a customer who asks "Are you from Waves?" is still the customer', () => {
+      const out = verify(TRANSCRIPT, [item({ code: '4821', quote: 'The gate code is four eight two one.' })]);
+      expect(out).toHaveLength(1);
+      expect(out[0].code).toBe('4821');
+    });
+    test.each([
+      ["Caller: Hello, it's Adam with Waves.\nAgent: Pound, four eight two one."],
+      ['Caller: This is Adam from Waves.\nAgent: Pound, four eight two one.'],
+      ["Caller: Hi, I'm from Waves, at your gate.\nAgent: Pound, four eight two one."],
+      ['Caller: Adam from Waves here.\nAgent: Pound, four eight two one.'],
+      ['Caller: Waves Pest Control, this is Adam.\nAgent: Pound, four eight two one.'],
+    ])('a real self-introduction names the staff turn: %s', (transcript) => {
+      expect(verify(transcript, [item({ code: '#4821', quote: 'Pound, four eight two one.' })])).toHaveLength(1);
+      // and the introducer's own turn is never the source
+      const staffSays = transcript.replace('Pound, four eight two one.', 'Thanks.') + '\nCaller: The gate code is pound four eight two one.';
+      expect(verify(staffSays, [item({ code: '#4821', quote: 'The gate code is pound four eight two one.' })])).toEqual([]);
+    });
+    test('a mention of Waves is not an introduction', () => {
+      for (const line of ['Are you from Waves?', 'Is this with Waves?', 'I called Waves Pest Control yesterday.', 'You are from Waves, right?']) {
+        const transcript = `Agent: Hi, I'm at the gate.\nCaller: ${line} The gate code is four eight two one.`;
+        expect(verify(transcript, [item({ code: '4821', quote: 'The gate code is four eight two one.' })])).toHaveLength(1);
+      }
     });
   });
 

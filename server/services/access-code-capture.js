@@ -529,7 +529,15 @@ const STAFF_LABELS = ['agent', 'staff', 'technician', 'tech', 'waves', 'assistan
 const TURN_LABEL = /^\s*(agent|staff|technician|tech|waves|assistant|caller|customer|speaker\s*\d+)\s*:\s?(.*)$/i;
 // What a technician says to introduce the call: it names the staff turns of an
 // outbound call, whose speaker labels can be swapped.
-const WAVES_SELF = /\b(?:(?:with|from|at|for)\s+waves|waves\s+pest|this\s+is\s+waves)\b/i;
+// Only a self-introduction counts ("it's Adam with Waves", "this is Adam from
+// Waves", "I'm from Waves", "Adam from Waves here", "Waves Pest Control, this
+// is Adam"), never a question or a mention ("Are you from Waves?"). Names are
+// capitalized, so these are case-sensitive on purpose.
+const WAVES_SELF = new RegExp([
+  String.raw`(?:\b[Ii]t['’]?s|\b[Tt]his is|\bI['’]?m|\bI am)\s+(?:[A-Z][\w'’-]*\s+){0,2}(?:[Ww]ith|[Ff]rom)\s+Waves\b`,
+  String.raw`\b[A-Z][a-z]+\s+(?:[Ww]ith|[Ff]rom)\s+Waves(?:\s+Pest\s+Control)?\s+here\b`,
+  String.raw`\bWaves\s+Pest\s+Control[,.]?\s+(?:[Tt]his is|[Ii]t['’]?s|[Yy]ou['’]ve reached)\b`,
+].join('|'));
 const CONFIRM_REPLY = /^(?:yes|yeah|yep|yup|correct|right|exactly|okay|ok|uh[- ]huh|mm[- ]?hmm|that['’]?s (?:right|correct))\W*$/i;
 const ASKS_CONFIRM = /\?\s*$|\b(?:right|correct|yes)\W*$/i;
 // Card, security-code and sign-in codes are never access codes. "card" alone is
@@ -582,11 +590,17 @@ function staffLabelOf(direction, turns) {
 // The code of a call item: in the quote and the call as written or as spoken,
 // not an address, a phone or a short number, and the customer's own statement.
 function callCodeStands(code, quote, quoted, ctx) {
-  const { turns, staff, whole, spokenWhole, refusals } = ctx;
+  const { turns, staff, refusals } = ctx;
   const spokenQuote = normalizeText(spokenNormalize(quote).text);
   if (code.length > MAX_CODE || !MODEL_CODE_SHAPE.test(code)) return false;
-  if (!(codeIsWholeTokenIn(code, quote) || codeIsWholeTokenIn(code, spokenQuote))
-    || !(codeIsWholeTokenIn(code, whole) || codeIsWholeTokenIn(code, spokenWhole))) return false;
+  // The quote shows the code's digits (a quote may be cropped inside the
+  // customer's sentence). The code itself is judged against the COMPLETE
+  // customer turn that holds the quote, spoken symbols kept ("pound, three three
+  // nine four" is #3394, so 3394 alone fails), and never against staff's words.
+  const quoteShows = NUMERIC_CODE.test(code) ? digitsOf(spokenQuote).includes(digitsOf(code))
+    : codeIsWholeTokenIn(code, quote);
+  const inTurn = ({ t }) => codeIsWholeTokenIn(code, t.text) || codeIsWholeTokenIn(code, normalizeText(spokenNormalize(t.text).text));
+  if (!quoteShows || !quoted.some(inTurn)) return false;
   const digits = digitsOf(code);
   if (digits.length >= 10) return false;
   if (refusals.phones.some((phone) => digits.length >= 7 && phone.endsWith(digits))) return false;
@@ -653,7 +667,7 @@ function verifyCallItems(items, call, { properties = [] } = {}) {
   if (looksLikeCardOrder(spoken.runs)) return [];
   const turns = parseTurns(body);
   const ctx = {
-    turns, staff: staffLabelOf(call.direction, turns), whole: normalizeText(body), spokenWhole: normalizeText(spoken.text),
+    turns, staff: staffLabelOf(call.direction, turns), whole: normalizeText(body),
     refusals: digitsToRefuse({ ...call, spoken_text: spoken.text }, properties),
   };
   const seen = new Set();
