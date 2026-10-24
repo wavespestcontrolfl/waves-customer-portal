@@ -144,7 +144,18 @@ function callerCommunityName(words, city) {
   return PLACE_NAMES.has(name.toUpperCase()) || name.toUpperCase() === place ? null : name;
 }
 
-const zip5 = (z) => (/^(\d{5})/.exec(String(z || '').trim()) || [])[1] || null;
+const zip5 = (z) => (/^(\d{5})(?:-?\d{4})?$/.exec(String(z || '').trim()) || [])[1] || null;
+const cityKey = (c) => String(c || '').toUpperCase().replace(/[^A-Z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+
+// A call is about THIS home only when its street and number match AND its
+// locality does: a valid 5-digit ZIP equal to the home's, or (no usable ZIP on
+// the call) the same city. A call with neither, or with a different ZIP or
+// city, is the same house number and street in another town.
+function sameLocality(call, home) {
+  const callZip = zip5(call.zip);
+  if (callZip) return callZip === zip5(home.zip);
+  return Boolean(cityKey(call.city)) && cityKey(call.city) === cityKey(home.city);
+}
 
 // The one community the customer's calls name for THIS address, or null when
 // no call names one or two calls name different ones.
@@ -158,9 +169,10 @@ async function communityFromCalls(home) {
       db.raw("ai_extraction_enriched #>> '{property,service_address,subdivision_or_community}' AS words"),
       db.raw("ai_extraction_enriched #>> '{property,service_address,street_line_1}' AS street"),
       db.raw("ai_extraction_enriched #>> '{property,service_address,postal_code}' AS zip"),
+      db.raw("ai_extraction_enriched #>> '{property,service_address,city}' AS city"),
     );
   const names = new Set(calls
-    .filter((c) => sameHouse(c.street, home.address_line1) && (!zip5(c.zip) || zip5(c.zip) === zip5(home.zip)))
+    .filter((c) => sameHouse(c.street, home.address_line1) && sameLocality(c, home))
     .map((c) => callerCommunityName(c.words, home.city)));
   names.delete(null);
   return names.size === 1 ? [...names][0] : null;

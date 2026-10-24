@@ -46,9 +46,9 @@ postgres('neighborhood naming pass', () => {
     if (code) await trx('property_preferences').insert({ customer_id: customerId, neighborhood_gate_code: code });
     return { customerId, propertyId };
   };
-  const callSaying = (customerId, words, { street = '100 Synthetic Way', zip = '34202', createdAt = new Date() } = {}) => trx('call_log').insert({
+  const callSaying = (customerId, words, { street = '100 Synthetic Way', zip = '34202', city, createdAt = new Date() } = {}) => trx('call_log').insert({
     id: randomUUID(), customer_id: customerId, direction: 'inbound', created_at: createdAt,
-    ai_extraction_enriched: JSON.stringify({ property: { service_address: { street_line_1: street, postal_code: zip, subdivision_or_community: words } } }),
+    ai_extraction_enriched: JSON.stringify({ property: { service_address: { street_line_1: street, postal_code: zip, city, subdivision_or_community: words } } }),
   });
   const neighborhood = async (name, { county = 'Manatee', source = 'county' } = {}) => {
     const [row] = await trx('neighborhoods').insert({ name, county, match_key: `${county.toLowerCase()}|${name.toLowerCase()}`, source }).returning('id');
@@ -332,6 +332,23 @@ postgres('neighborhood naming pass', () => {
       const r = await runNamingPass({ lookup, platLookup: async () => [], now: Date.now() + 2 * 3600e3 });
       expect(r).toEqual({ county: { no_name: 1 }, caller: { linked: 1 } });
       expect(await hoodOf(propertyId)).toMatchObject({ name: 'Cove Gardens', link: 'caller' });
+    });
+
+    // Same house number and street in another town is another home.
+    test.each([
+      ['no ZIP, no city', { zip: null }, 'no_words'],
+      ['a malformed ZIP and no city', { zip: '3420' }, 'no_words'],
+      ['no ZIP and another city', { zip: null, city: 'Sarasota' }, 'no_words'],
+      ['a malformed ZIP and another city', { zip: '3420', city: 'Sarasota' }, 'no_words'],
+      ['another valid ZIP, the same city', { zip: '34233', city: 'Lakewood Ranch' }, 'no_words'],
+      ['no ZIP and the same city', { zip: null, city: 'lakewood  ranch' }, 'linked'],
+      ['a malformed ZIP and the same city', { zip: '3420', city: 'Lakewood Ranch' }, 'linked'],
+      ['the same ZIP+4, another city', { zip: '34202-1234', city: 'Sarasota' }, 'linked'],
+    ])('a call with %s', async (_label, where, outcome) => {
+      const { customerId, propertyId } = await home({ checked: true });
+      await callSaying(customerId, 'Chelsea Oaks', where);
+      expect((await runPass(jest.fn())).caller).toEqual({ [outcome]: 1 });
+      expect((await hoodOf(propertyId)).name).toBe(outcome === 'linked' ? 'Chelsea Oaks' : null);
     });
 
     test('more homes the caller cannot help than a batch never starve a nameable one behind them', async () => {
