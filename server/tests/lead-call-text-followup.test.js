@@ -55,6 +55,8 @@ test.each([
   'whenever',
   'anytime',
   'after 10',
+  'by 10am',
+  'call by 10',
   'before noon',
   'between 10 and 12',
   '10-11',

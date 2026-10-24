@@ -92,6 +92,12 @@ jest.setTimeout(30000);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test('TEXT from a lead waiting on the address puts intake back on the service question', async () => {
+    const c = await lead('+19415550118', { intake: 'awaiting_address' });
+    await reply(c, 'text', NIGHT);
+    expect((await database('customers').where({ id: c.id }).first()).lead_intake_status).toBe('awaiting_service');
+  });
+
   test('a night CALL asks for a time; "10am" books 10:00 tomorrow and confirms it', async () => {
     const c = await lead('+19415550101');
     await expect(reply(c, 'CALL', NIGHT)).resolves.toMatchObject({ action: 'time_asked' });

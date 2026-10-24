@@ -56,9 +56,10 @@ function fullName(customer) {
 
 // ── Time answers ─────────────────────────────────────────────────────────
 // Words around a time that change nothing: "10am works", "around 2 please".
-const FILLER = /\b(?:tomorrow|tmrw|tmr|works?|working|would|be|is|are|good|great|fine|perfect|ok|okay|sure|yes|yeah|yep|please|pls|plz|thanks?|thank you|ty|around|about|at|by|maybe|probably|sounds|that|for|me|best|time|call|any|anytime|o'?clock|ish)\b/g;
-// "after 10", "before noon", "between 10 and 12", "10-11": a range, not a time.
-const RANGE = /\b(?:after|before|between|until|till|til|or|and|from|to|later|earlier|whenever|any ?time)\b|\d\s*-\s*\d/;
+const FILLER = /\b(?:tomorrow|tmrw|tmr|works?|working|would|be|is|are|good|great|fine|perfect|ok|okay|sure|yes|yeah|yep|please|pls|plz|thanks?|thank you|ty|around|about|at|maybe|probably|sounds|that|for|me|best|time|call|any|anytime|o'?clock|ish)\b/g;
+// "by 10", "after 10", "before noon", "between 10 and 12", "10-11": a range or a
+// deadline, not a time.
+const RANGE = /\b(?:by|after|before|between|until|till|til|or|and|from|to|later|earlier|whenever|any ?time)\b|\d\s*-\s*\d/;
 
 /**
  * A single clock time from a short reply. Returns { minutes } (minutes after
@@ -227,9 +228,11 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
   const { requestId } = claim;
 
   if (kind === 'text_reply') {
-    // A lead whose intake state was cleared (a repeat form) gets it back, so
-    // the service answer runs the quote flow like a first reply.
-    await db('customers').where({ id: customer.id }).whereNull('lead_intake_status')
+    // We just asked which service: the intake machine must read the answer as
+    // one. A cleared state (a repeat form) or one waiting on the address goes
+    // back to awaiting_service; a drafted quote is left alone.
+    await db('customers').where({ id: customer.id })
+      .where((q) => q.whereNull('lead_intake_status').orWhere('lead_intake_status', 'awaiting_address'))
       .update({ lead_intake_status: 'awaiting_service', updated_at: now });
   }
   const body = kind === 'text_reply' ? TEXT_REPLY_BODY : NIGHT_CALL_BODY;
