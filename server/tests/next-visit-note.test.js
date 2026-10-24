@@ -150,6 +150,13 @@ describe('storeNextVisitNote', () => {
     }
   });
 
+  test('fallback off: a posted visit that fails the checks takes no note, and no other visit does', async () => {
+    const other = row({ id: '22222222-2222-4222-8222-222222222222', fallback: true });
+    const { k, updates } = fakeTrx([other, row({ customer_id: 'other-customer' })]);
+    expect(await storeNextVisitNote(k, { completed, note: 'Gate code changed', nextVisitId: UUID, fallback: false })).toEqual({ status: 'no_target' });
+    expect(updates).toEqual([]);
+  });
+
   test('no future visit: nothing written, no failure', async () => {
     const { k, updates } = fakeTrx([]);
     expect(await storeNextVisitNote(k, { completed, note: 'x', nextVisitId: UUID })).toEqual({ status: 'no_target' });

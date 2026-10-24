@@ -5,6 +5,7 @@ const { savepointRead, failSoftRead, savepointScope } = require('../utils/savepo
 const { storeNextVisitNote } = require('./next-visit-note');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { sendLawnWateringSms } = require('../services/service-report/lawn-watering-sms');
+const { storeLawnWateringYieldNote } = require('../services/service-report/lawn-watering-yield-note');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -14299,6 +14300,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
         // Same for the watering-instruction freeze (its own key, first writer wins).
         if (gate.wateringFreeze) recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze;
+        // A bait's no-water hold that gave way to a label water-in: one staff note on the next lawn visit (best-effort, never throws).
+        if (gate.wateringFreeze) await storeLawnWateringYieldNote({ svc, instruction: gate.wateringFreeze.wateringInstruction });
         // GATE_LAWN_WATERING_EVERY_VISIT: why no instruction froze, for the watering text's office alert.
         if (gate.wateringNoClaim) wateringNoClaim = gate.wateringNoClaim;
         // And the "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH), keyed by assessment.

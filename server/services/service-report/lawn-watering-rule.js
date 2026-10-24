@@ -7,15 +7,42 @@
 //
 //   { mode: 'hold' | 'water_in' | 'none',
 //     hold_hours, water_in_inches, water_in_by_hours, water_in_same_day,
-//     label_minimum, by_target,
+//     label_minimum, label_best_results, yields_to_label_water_in,
+//     label_window, beside_hold_by_hours, by_target,
 //     source: 'label' | 'owner' | 'default',
 //     label_note, verified_at, verified_by }
 //
 // label_minimum (hold only): the hold the LABEL itself needs under a longer
 // one that is our own rule or a "for best results" line, e.g. { hold_until:
-// 'dry' } under the owner's 24-hour herbicide hold. Only a water-in the label
-// requires the same day (Dylox) may shorten a hold to it
-// (lawn-watering-instruction.js rule E); nothing else reads it.
+// 'dry' } under the owner's 24-hour herbicide hold. Only a water-in whose
+// window the label writes (a same-day rule, or label_window) may shorten a
+// hold to it (lawn-watering-instruction.js rule E); nothing else reads it.
+// label_minimum.advisory (with hold_hours only): those hours are the label's
+// ADVICE (a rainfast figure, "avoid applying when rain is forecast within 4
+// hours", "may wash off"), never a "do not irrigate" direction, so late in
+// the day a same-day water-in the label requires may shorten them (rule E3).
+//
+// Clash keys (owner 2026-10-24: a clash gets a label-checked text, never an
+// office alert; lawn-watering-instruction.js rule E). Each is present only
+// when true or set:
+//   label_window (water_in, short window only): the window is the LABEL's
+//     own text and counts from the application, so a hold never pushes it
+//     later. 'directs' = a label direction ("Irrigate within 24 hours of
+//     application"); 'best_results' = a "for best results" window (T-Storm
+//     2G). Absent = our own or a maker window, which may follow a hold
+//     (rule C). With rain_counts (the label lets rain do it, T-Storm 2G),
+//     label first still writes it as a run: "rain and regular watering
+//     count" over one day reads as nothing to do (the rain sentence of
+//     GATE_LAWN_WATERING_TEXT_FORECAST says when rain will do it).
+//   label_best_results (hold with label_minimum only): the part of the hold
+//     above label_minimum is a label "for best results" line, not our own
+//     rule. A 'best_results' window never shortens it: the hold goes first.
+//   yields_to_label_water_in (hold only): the hold only protects a bait (a
+//     label advisory, Advion Insect Granule), so it gives way entirely to a
+//     water-in the label directs.
+//   beside_hold_by_hours (water_in only): the window when any hold shares the
+//     visit (a humectant's root-zone step, "within 24 hours"); the rule's own
+//     water_in_by_hours applies only when it is alone.
 //
 // by_target: a product whose label gives different directions by target
 // (Acelepryn: water in for grubs, hold for caterpillars). Each entry is a
@@ -41,17 +68,21 @@
 
 const MODES = ['hold', 'water_in', 'none'];
 const SOURCES = ['label', 'owner', 'default'];
+// The clash keys (see the header); one list, checked per mode below.
+const HOLD_ONLY_KEYS = ['label_minimum', 'then_water_in', 'label_best_results', 'yields_to_label_water_in'];
+const WATER_IN_ONLY_KEYS = ['label_window', 'beside_hold_by_hours'];
+const LABEL_WINDOWS = ['directs', 'best_results'];
 const RULE_KEYS = [
   'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours', 'water_in_same_day', 'rain_counts',
-  'label_minimum', 'then_water_in', 'by_target',
+  ...HOLD_ONLY_KEYS, ...WATER_IN_ONLY_KEYS, 'by_target',
   'source', 'label_note', 'verified_at', 'verified_by',
 ];
 // One by_target entry: a rule's own direction fields plus the target words.
 const TARGET_RULE_KEYS = [
   'match', 'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours', 'water_in_same_day', 'rain_counts',
-  'label_minimum', 'then_water_in', 'label_note',
+  ...HOLD_ONLY_KEYS, ...WATER_IN_ONLY_KEYS, 'label_note',
 ];
-const LABEL_MINIMUM_KEYS = ['hold_hours', 'hold_until'];
+const LABEL_MINIMUM_KEYS = ['hold_hours', 'hold_until', 'advisory'];
 const THEN_WATER_IN_KEYS = ['water_in_inches', 'water_in_by_hours'];
 const MAX_TARGET_RULES = 6;
 const MAX_MATCH_WORDS = 12;
@@ -102,11 +133,22 @@ function validateHoldFields(value, errors) {
   // #5389 r2). hold_hours may still accompany it as an optional floor.
   const untilDry = value.hold_until === 'dry';
   if (value.hold_until != null && !untilDry) errors.push("hold_until must be 'dry' when present");
-  const out = untilDry ? { hold_until: 'dry' } : {};
+  const out = { ...(untilDry ? { hold_until: 'dry' } : {}), ...trueFlags(value, ['label_best_results', 'yields_to_label_water_in'], errors) };
   if (untilDry && value.hold_hours == null) return { ...out, hold_hours: null };
   const hours = value.hold_hours == null ? DEFAULT_HOLD_HOURS : positiveNumber(value.hold_hours, MAX_HOURS);
   if (hours == null) errors.push(`hold_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
   return { ...out, hold_hours: hours };
+}
+
+// Flags that are present only when true (the normalized rule carries them only then).
+function trueFlags(value, keys, errors) {
+  const out = {};
+  keys.forEach((key) => {
+    if (value[key] == null) return;
+    if (value[key] !== true) errors.push(`${key} must be true when present`);
+    else out[key] = true;
+  });
+  return out;
 }
 
 function validateWaterInFields(value, errors) {
@@ -134,7 +176,41 @@ function validateWaterInFields(value, errors) {
     water_in_by_hours: byHours,
     ...(value.water_in_same_day === true ? { water_in_same_day: true } : {}),
     ...(value.rain_counts === true ? { rain_counts: true } : {}),
+    ...validateClashWindow(value, byHours, errors),
   };
+}
+
+// label_window and beside_hold_by_hours (see the header). A label window is a
+// short run counted from the application: never a same-day rule (already the
+// label's own, rule E) or a long window (rule D); a rain_counts one is still a
+// run under label first. A beside-hold window is our own or a maker's, so never
+// on a label window, and longer than the rule's own window.
+function validateClashWindow(value, byHours, errors) {
+  const out = {};
+  if (value.label_window != null) {
+    if (!LABEL_WINDOWS.includes(value.label_window)) errors.push(`label_window must be one of ${LABEL_WINDOWS.join(', ')}`);
+    else if (value.water_in_same_day === true || (byHours != null && byHours > LONG_WINDOW_HOURS)) {
+      errors.push(`label_window is for a short window only (no water_in_same_day, at most ${LONG_WINDOW_HOURS} hours)`);
+    } else out.label_window = value.label_window;
+  }
+  if (value.beside_hold_by_hours != null) {
+    const beside = positiveNumber(value.beside_hold_by_hours, LONG_WINDOW_HOURS);
+    if (beside == null) errors.push(`beside_hold_by_hours must be a number greater than 0 and at most ${LONG_WINDOW_HOURS}`);
+    else if (value.label_window != null || value.water_in_same_day === true || value.rain_counts === true) {
+      errors.push('beside_hold_by_hours cannot be set with label_window, water_in_same_day or rain_counts');
+    } else if (byHours != null && beside <= byHours) errors.push('beside_hold_by_hours must be longer than water_in_by_hours');
+    else out.beside_hold_by_hours = beside;
+  }
+  return out;
+}
+
+// A key that belongs to the other mode is an error (never silently dropped):
+// a misplaced clash key would otherwise change nothing without anyone knowing.
+function modeKeyErrors(value, errors, prefix = '') {
+  if (value.mode !== 'hold') HOLD_ONLY_KEYS.filter((key) => value[key] != null).forEach((key) => errors.push(`${prefix}${key} is for a hold only`));
+  if (value.mode !== 'water_in') WATER_IN_ONLY_KEYS.filter((key) => value[key] != null).forEach((key) => errors.push(`${prefix}${key} is for a water-in only`));
+  if (value.mode === 'hold' && value.label_best_results === true && value.label_minimum == null) errors.push(`${prefix}label_best_results needs label_minimum`);
+  if (value.mode === 'hold' && value.yields_to_label_water_in === true && value.label_minimum != null) errors.push(`${prefix}yields_to_label_water_in cannot be set with label_minimum`);
 }
 
 function validateVerifiedAt(value, errors) {
@@ -163,7 +239,21 @@ function validateLabelMinimum(value, hold, errors, field = 'label_minimum') {
   if (hours != null && Number.isFinite(hold?.hold_hours) && hours > hold.hold_hours) {
     errors.push(`${field}.hold_hours cannot be longer than hold_hours`);
   }
-  return { ...(untilDry ? { hold_until: 'dry' } : {}), ...(hours != null ? { hold_hours: hours } : {}) };
+  return {
+    ...(untilDry ? { hold_until: 'dry' } : {}),
+    ...(hours != null ? { hold_hours: hours } : {}),
+    ...advisoryOf(value, hours, errors, field),
+  };
+}
+
+// label_minimum.advisory: true, and only on an hours minimum.
+function advisoryOf(value, hours, errors, field) {
+  if (value.advisory == null) return {};
+  if (value.advisory !== true || hours == null) {
+    errors.push(`${field}.advisory must be true and needs hold_hours`);
+    return {};
+  }
+  return { advisory: true };
 }
 
 // The label's second step after a hold: an amount and a window counted from
@@ -210,8 +300,7 @@ function validateTargetRules(value, errors) {
     Object.keys(entry).filter((key) => !TARGET_RULE_KEYS.includes(key)).forEach((key) => errors.push(`unknown key: ${field}.${key}`));
     if (!MODES.includes(entry.mode)) errors.push(`${field}.mode must be one of ${MODES.join(', ')}`);
     const fields = MODE_FIELDS[entry.mode] ? MODE_FIELDS[entry.mode](entry, errors) : {};
-    if (entry.label_minimum != null && entry.mode !== 'hold') errors.push(`${field}.label_minimum is for a hold only`);
-    if (entry.then_water_in != null && entry.mode !== 'hold') errors.push(`${field}.then_water_in is for a hold only`);
+    modeKeyErrors(entry, errors, `${field}.`);
     const minimum = entry.mode === 'hold' ? validateLabelMinimum(entry.label_minimum, fields, errors, `${field}.label_minimum`) : null;
     const then = entry.mode === 'hold' ? validateThenWaterIn(entry.then_water_in, fields, errors, `${field}.then_water_in`) : null;
     return {
@@ -241,8 +330,8 @@ function validateRule(json) {
   if (!SOURCES.includes(value.source)) errors.push(`source must be one of ${SOURCES.join(', ')}`);
 
   const modeFields = MODE_FIELDS[value.mode] ? MODE_FIELDS[value.mode](value, errors) : {};
-  if (value.label_minimum != null && value.mode !== 'hold') errors.push('label_minimum is for a hold only');
-  if (value.then_water_in != null && value.mode !== 'hold') errors.push('then_water_in is for a hold only');
+  // A target-only rule has no top-level mode, so any of these keys there is misplaced.
+  modeKeyErrors(value, errors);
   const minimum = value.mode === 'hold' ? validateLabelMinimum(value.label_minimum, modeFields, errors) : null;
   const then = value.mode === 'hold' ? validateThenWaterIn(value.then_water_in, modeFields, errors) : null;
   const rule = {

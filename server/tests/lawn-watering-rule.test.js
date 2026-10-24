@@ -356,3 +356,56 @@ describe('target rules, label minimums and second steps', () => {
     expect(rulesForTargets(valid(HEADWAY), ['Gray leaf spot']).map((r) => r.mode)).toEqual(['hold']);
   });
 });
+
+// Owner 2026-10-24: the clash keys the label ladder reads (lawn-watering-instruction.js rule E, Y, H).
+describe('clash keys', () => {
+  const { rulesForTargets } = require('../services/service-report/lawn-watering-rule');
+  const errorsOf = (rule) => validateRule(rule).errors;
+
+  test('each key validates on its own mode and is carried only when set', () => {
+    expect(validateRule({ mode: 'water_in', water_in_by_hours: 24, label_window: 'directs', source: 'label' }).rule.label_window).toBe('directs');
+    expect(validateRule({ mode: 'water_in', water_in_by_hours: 24, label_window: 'best_results', source: 'label' }).rule.label_window).toBe('best_results');
+    expect(validateRule({ mode: 'water_in', water_in_by_hours: 2, beside_hold_by_hours: 24, source: 'owner' }).rule.beside_hold_by_hours).toBe(24);
+    expect(validateRule({ mode: 'hold', hold_hours: 72, yields_to_label_water_in: true, source: 'owner' }).rule.yields_to_label_water_in).toBe(true);
+    const bestResults = validateRule({ mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 4 }, label_best_results: true, source: 'label' });
+    expect(bestResults.valid).toBe(true);
+    expect(bestResults.rule.label_best_results).toBe(true);
+    const plain = validateRule({ mode: 'water_in', water_in_by_hours: 24, source: 'owner' }).rule;
+    ['label_window', 'beside_hold_by_hours', 'label_best_results', 'yields_to_label_water_in'].forEach((key) => expect(plain).not.toHaveProperty(key));
+  });
+
+  test('a misplaced or contradictory key makes the rule invalid, never silently dropped', () => {
+    expect(errorsOf({ mode: 'hold', hold_hours: 24, label_window: 'directs', source: 'label' })).toContain('label_window is for a water-in only');
+    expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, yields_to_label_water_in: true, source: 'owner' })).toContain('yields_to_label_water_in is for a hold only');
+    expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, label_window: 'sometimes', source: 'label' })).toContain('label_window must be one of directs, best_results');
+    // A rain-counting label window (T-Storm 2G) is valid: label first still writes it as a run.
+    expect(validateRule({ mode: 'water_in', water_in_by_hours: 24, rain_counts: true, label_window: 'best_results', source: 'label' }).rule).toMatchObject({ rain_counts: true, label_window: 'best_results' });
+    expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, water_in_same_day: true, label_window: 'directs', source: 'label' })[0]).toMatch(/^label_window is for a short window only/);
+    expect(errorsOf({ mode: 'water_in', water_in_by_hours: 336, label_window: 'directs', source: 'label' })[0]).toMatch(/^label_window is for a short window only/);
+    expect(errorsOf({ mode: 'water_in', water_in_by_hours: 24, beside_hold_by_hours: 12, source: 'owner' })).toContain('beside_hold_by_hours must be longer than water_in_by_hours');
+    expect(errorsOf({ mode: 'water_in', water_in_by_hours: 2, beside_hold_by_hours: 24, label_window: 'directs', source: 'owner' })).toContain('beside_hold_by_hours cannot be set with label_window, water_in_same_day or rain_counts');
+    expect(errorsOf({ mode: 'hold', hold_hours: 24, label_best_results: true, source: 'label' })).toContain('label_best_results needs label_minimum');
+    expect(errorsOf({ mode: 'hold', hold_hours: 24, label_best_results: false, label_minimum: { hold_until: 'dry' }, source: 'label' })).toContain('label_best_results must be true when present');
+    expect(errorsOf({ mode: 'hold', hold_hours: 72, yields_to_label_water_in: true, label_minimum: { hold_until: 'dry' }, source: 'owner' })).toContain('yields_to_label_water_in cannot be set with label_minimum');
+    expect(errorsOf({ mode: 'hold', hold_hours: 24, label_minimum: { hold_until: 'dry', advisory: true }, source: 'owner' })).toContain('label_minimum.advisory must be true and needs hold_hours');
+    expect(errorsOf({ mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 4, advisory: 'yes' }, source: 'owner' })).toContain('label_minimum.advisory must be true and needs hold_hours');
+    expect(validateRule({ mode: 'hold', hold_hours: 24, label_minimum: { hold_hours: 4, advisory: true }, source: 'owner' }).rule.label_minimum).toEqual({ hold_hours: 4, advisory: true });
+    // A target-only rule has no top-level mode, so a clash key there is misplaced.
+    expect(errorsOf({ source: 'label', label_window: 'directs', by_target: [{ match: ['grub'], mode: 'water_in' }] })).toContain('label_window is for a water-in only');
+  });
+
+  test('by_target entries carry the keys, and a picked target rule keeps them', () => {
+    const checked = validateRule({
+      source: 'label',
+      by_target: [
+        { match: ['grub'], mode: 'water_in', water_in_by_hours: 24, label_window: 'directs' },
+        { match: ['caterpillar'], mode: 'hold', hold_hours: 24, label_minimum: { hold_until: 'dry' }, label_best_results: true },
+      ],
+    });
+    expect(checked.valid).toBe(true);
+    expect(rulesForTargets(checked.rule, ['White grubs'], { labelTargets: [] })).toEqual([expect.objectContaining({ mode: 'water_in', label_window: 'directs' })]);
+    expect(rulesForTargets(checked.rule, ['Fall armyworms'], { labelTargets: [] })).toEqual([]);
+    expect(rulesForTargets(checked.rule, ['caterpillars'], { labelTargets: [] })).toEqual([expect.objectContaining({ mode: 'hold', label_best_results: true })]);
+    expect(errorsOf({ source: 'label', by_target: [{ match: ['grub'], mode: 'hold', label_window: 'directs' }] })).toContain('by_target[0].label_window is for a water-in only');
+  });
+});
