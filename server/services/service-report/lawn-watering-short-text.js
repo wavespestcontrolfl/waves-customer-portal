@@ -11,6 +11,13 @@
  * report's own and the two can never disagree. The report, PDF, banner and Ask
  * Waves keep the full lines.
  *
+ * Short, but every detail of the full lines that changes what the customer
+ * does stays: the hold is on lawn watering only, every amount is "about", the
+ * long total says regular watering counts as well as rain, and the rain
+ * sentence says to run the watering when the rain does not come. The
+ * screenshot shape is then 183 characters (two segments, within the purpose's
+ * maxSegments).
+ *
  * Pure: no db, no clock, no gate. Returns null for any shape it does not know
  * (an older record, a missing label); the caller then sends the full lines.
  * Every sentence is GSM-7 (ASCII apostrophe and fractions).
@@ -21,6 +28,7 @@ const { formatInches, _private: { formatWhen } } = require('./lawn-watering-inst
 const DRY_LABEL = 'today’s treatment has dried';
 const NONE_TEXT = 'No change. Keep your usual schedule.';
 const ANY_DAY = 'even on an off day';
+const COUNTS = 'Rain and regular watering count.';
 
 const ascii = (text) => text.replace(/’/g, "'").replace(/½/g, '1/2').replace(/¼/g, '1/4').replace(/¾/g, '3/4');
 const label = (value) => (typeof value === 'string' && value.trim() !== '' ? value : null);
@@ -40,8 +48,8 @@ function holdSentence(instruction, alone) {
   }
   const waitsForDry = typeof instruction.holdUntilPlanLabel === 'string' && instruction.holdUntilPlanLabel !== until;
   return waitsForDry
-    ? `Skip watering until ${until} and the treatment is dry.`
-    : `Skip watering until ${until}.`;
+    ? `Skip lawn watering until ${until} and the treatment is dry.`
+    : `Skip lawn watering until ${until}.`;
 }
 
 // How much to run, from the minutes the instruction was frozen with.
@@ -49,7 +57,7 @@ function runClause(instruction, by) {
   const m = instruction.minutes || {};
   if (instruction.amountOnly === true) {
     const amount = formatInches(instruction.waterInInches);
-    return amount ? `water ${amount} by ${by}` : null;
+    return amount ? `water about ${amount} by ${by}` : null;
   }
   if (posNum(m.measured)) return `water by ${by}, about ${m.measured} min per zone`;
   const spray = posNum(m.spray);
@@ -69,7 +77,7 @@ function laterSentence(instruction) {
   const at = later && Date.parse(later.waterInBy);
   const from = Date.parse(instruction.completedAt);
   if (!amount || !Number.isFinite(at) || !Number.isFinite(from)) return null;
-  return `Get ${amount} total by ${formatWhen(new Date(at), new Date(from))}. Rain counts.`;
+  return `Get about ${amount} total by ${formatWhen(new Date(at), new Date(from))}. ${COUNTS}`;
 }
 
 /**
@@ -94,7 +102,7 @@ function shortWateringText(instruction) {
     if (instruction.longWindow === true) {
       const amount = formatInches(instruction.waterInInches);
       if (!amount) return null;
-      parts.push(`${hasHold ? 'Then get' : 'Get'} about ${amount} of water by ${by}. Rain counts.`);
+      parts.push(`${hasHold ? 'Then get' : 'Get'} about ${amount} of water by ${by}. ${COUNTS}`);
     } else {
       const run = runClause(instruction, by);
       if (!run) return null;
@@ -124,9 +132,9 @@ function shortForecastSentence(instruction, fullLine) {
   if (forecast.afterHold === true) {
     const from = label(instruction.holdUntilLabel);
     if (!from) return null;
-    return ascii(`Rain forecast: about ${rain} between ${from} and ${checkpoint}. If ${amount} falls, skip the run.`);
+    return ascii(`Rain forecast: about ${rain} between ${from} and ${checkpoint}. If ${amount} falls, skip the run. If not, run it.`);
   }
-  return ascii(`Rain forecast: about ${rain} by ${checkpoint}. If ${amount} falls by then, skip the run.`);
+  return ascii(`Rain forecast: about ${rain} by ${checkpoint}. If ${amount} falls by then, skip the run. If not, run it.`);
 }
 
 module.exports = { shortWateringText, shortForecastSentence };
