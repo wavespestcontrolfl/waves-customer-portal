@@ -806,6 +806,133 @@ describe('runDeterministicMatching', () => {
     expect(second.expensesLinked).toBe(1);
   });
 
+  test('an owner rule that replaced the transfer flag (examined, no ignore) is NOT re-flagged on rescan while the ledger gate is on — candidates still refresh; with the gate off the warning returns', async () => {
+    // tax-ledger-rules: an owner Always-Business rule removes the matcher's
+    // ignore flag and keeps the evidence under examined; the next upload or
+    // Plaid rescan must not relabel the owner's expense as a transfer
+    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRows = [{
+      id: 'bt-1', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank',
+      suggestion: { examined: true, rule: { id: 'rule-1', kind: 'expense', source: 'owner', pattern: '\\bcrcardpmt\\b' }, categoryId: 'cat-1', categorySource: 'rule', rulesAt: '2026-08-09T00:00:00.000Z' },
+    }];
+    state.expenses = [{ id: 'exp-1', amount: '500.00', description: 'card payment', vendor_name: 'Capital One', expense_date: '2026-08-08', payment_method: 'ach' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.transferFlagged).toBe(0);
+    expect(summary.expensesLinked).toBe(0); // transfer-shaped rows still never auto-link
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+    expect(state.updates.find(u => sugOf(u) && sugOf(u).ignore)).toBeUndefined();
+    const refreshed = state.updates.find(u => sugOf(u) && sugOf(u).candidates);
+    expect(sugOf(refreshed).candidates).toHaveLength(1); // the manual-link action is kept current
+    expect(sugOf(refreshed).reason).toBeUndefined();
+    // kill switch: with the ledger off the rule's classification is hidden, so the matcher's warning
+    // comes back (the UPDATE then guards on no DECISION only)
+    delete process.env.GATE_TAX_LEDGER;
+    state.updates = [];
+    expect((await runDeterministicMatching()).transferFlagged).toBe(1);
+    const back = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    expect(back.raws).toContainEqual(expect.stringContaining("(suggestion -> 'decision') is null"));
+    expect(back.raws.join(' ')).not.toContain("'examined'");
+    delete process.env.GATE_BANK_IMPORT;
+  });
+
+  test('a transfer-shaped credit the owner decided as Income (examined, no ignore) keeps that reading across a rescan, gate on or off', async () => {
+    delete process.env.GATE_TAX_LEDGER; // an explicit decision holds without the gate
+    state.bankRows = [{
+      id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card',
+      suggestion: { examined: true, income: true, decision: 'income', decidedAt: '2026-08-12T00:00:00.000Z' },
+    }];
+    state.expenses = [{ id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.transferFlagged).toBe(0);
+    expect(state.updates.find(u => sugOf(u) && sugOf(u).ignore)).toBeUndefined();
+    const refreshed = state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates);
+    expect(sugOf(refreshed).refundCandidates).toHaveLength(1); // the refund action stays offered
+  });
+
+  test('an Income decision made on a row that still carried other matcher markers (no examined) is never re-flagged; the flag write guards on no ruling', async () => {
+    state.bankRows = [{
+      id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card',
+      suggestion: { noMatch: true, income: true, decision: 'income', decidedAt: '2026-08-12T00:00:00.000Z' },
+    }];
+    const summary = await runDeterministicMatching();
+    expect(summary.transferFlagged).toBe(0);
+    expect(state.updates.find(u => sugOf(u) && sugOf(u).ignore)).toBeUndefined();
+    // a fresh transfer-shaped row IS flagged, with the UPDATE repeating the no-ruling check
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card', suggestion: null }];
+    state.updates = [];
+    expect((await runDeterministicMatching()).transferFlagged).toBe(1);
+    const flagged = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    expect(flagged.raws).toContainEqual(expect.stringContaining("(suggestion -> 'decision') is null"));
+  });
+
+  test('an Income decision is never read by the matcher and never claimed: the selects and both claim writes guard on it', async () => {
+    // the selects leave decided Income rows out
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'ZELLE FROM CUSTOMER', amount: 120, direction: 'credit', account_type: 'bank', suggestion: { noMatch: true, income: true, decision: 'income' } }];
+    await runDeterministicMatching({ limit: 5 });
+    const selects = state.builders.filter(x => x.table === 'bank_transactions').flatMap(x => x.b.whereRaw.mock.calls.map(c => String(c[0])));
+    expect(selects.filter(r => /decision.*income/.test(r)).length).toBeGreaterThanOrEqual(1);
+    // a decision that lands between the read and the claim: the payout claim CAS repeats the check
+    state.updates = [];
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
+    expect((await runDeterministicMatching()).payoutsLinked).toBe(1);
+    const payoutClaim = state.updates.find(u => u.patch.status === 'matched_payout');
+    expect(payoutClaim.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
+    // and the expense claim CAS
+    state.updates = []; state.payouts = [];
+    state.bankRows = [{ id: 'bt-3', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'bank', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'check' }];
+    expect((await runDeterministicMatching()).expensesLinked).toBe(1);
+    const expenseClaim = state.updates.find(u => u.patch.status === 'matched_expense');
+    expect(expenseClaim.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
+    // and every per-row write of a pass in flight repeats it: a parked candidate list or a transfer
+    // flag must not land on a row the owner decided as Income meanwhile
+    state.updates = [];
+    state.payouts = [];
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '500.00', description: 'card payment', vendor_name: 'Capital One', expense_date: '2026-08-08', payment_method: 'ach' }];
+    await runDeterministicMatching();
+    const parks = state.updates.filter(u => sugOf(u) && (sugOf(u).candidates || sugOf(u).ignore));
+    expect(parks.length).toBeGreaterThan(0);
+    for (const u of parks) expect(u.raws).toContainEqual(expect.stringContaining("'decision', '') <> 'income'"));
+  });
+
+  test('a transfer RULE\'s flag counts while the ledger is on; with it off the matcher writes its own flag and drops the rule\'s keys', async () => {
+    const ruleFlagged = () => [{ id: 'bt-1', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank', suggestion: { ignore: true, reason: 'card payment (seed rule)', rule: { id: 'r-transfer', kind: 'transfer', source: 'seed' }, rulesAt: '2026-08-09T00:00:00.000Z' } }];
+    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
+    state.bankRows = ruleFlagged();
+    expect((await runDeterministicMatching()).transferFlagged).toBe(0);
+    delete process.env.GATE_TAX_LEDGER;
+    state.bankRows = ruleFlagged(); state.updates = [];
+    expect((await runDeterministicMatching()).transferFlagged).toBe(1);
+    const flagged = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    expect(sugOf(flagged).reason).toMatch(/internal transfer/);
+    expect(String(flagged.patch.suggestion.sql)).toContain("- 'rule'");
+    expect(String(flagged.patch.suggestion.sql)).toContain("- 'rulesAt'");
+    // an owner EXPENSE rule's override (category, examined) goes the same way with the ledger off:
+    // nothing a rule wrote may stay visible or drive Create expense through the kill switch
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank', suggestion: { examined: true, rule: { id: 'r-owner', kind: 'expense', source: 'owner' }, categoryId: 'cat-1', categoryName: 'Supplies', irsLine: '22', categorySource: 'rule', rulesAt: 'x' } }];
+    state.updates = [];
+    expect((await runDeterministicMatching()).transferFlagged).toBe(1);
+    const replaced = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    for (const k of ['rule', 'rulesAt', 'examined', 'categoryId', 'categoryName', 'irsLine', 'categorySource']) expect(String(replaced.patch.suggestion.sql)).toContain(`- '${k}'`);
+    // a model's category is not the ledger's: it stays
+    state.bankRows = [{ id: 'bt-3', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank', suggestion: { ignore: true, reason: 'rule', rule: { id: 'r-t', kind: 'transfer', source: 'seed' }, categoryId: 'cat-ai', categorySource: 'ai' } }];
+    state.updates = [];
+    expect((await runDeterministicMatching()).transferFlagged).toBe(1);
+    expect(String(state.updates.find(u => sugOf(u) && sugOf(u).ignore).patch.suggestion.sql)).not.toContain("- 'categoryId'");
+    delete process.env.GATE_BANK_IMPORT;
+  });
+
+  test('a bounded pass serves an examined (owner-overridden) row from the examined pool, not as a fresh row', async () => {
+    state.bankRows = [];
+    await runDeterministicMatching({ limit: 5 });
+    const pools = state.builders.filter(x => x.table === 'bank_transactions').flatMap(x => x.b.whereRaw.mock.calls.map(c => String(c[0])));
+    const examinedPool = pools.filter(r => /jsonb_exists_any\(suggestion/.test(r));
+    expect(examinedPool.length).toBeGreaterThan(0);
+    for (const r of examinedPool) expect(r).toContain("'examined'");
+  });
+
   test('a bank credit the ledger import classified as a merchant refund (refundCredit) never auto-links to a payout — it parks refund candidates instead', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA 5211 REFUND', amount: 58.12, direction: 'credit', account_type: 'bank', account_label: 'ledger-3098', suggestion: { refundCredit: true, reason: 'refund credit from the ledger' } }];
     state.payouts = [{ id: 'po-1', amount: '58.12', arrival_date: '2026-08-11', status: 'paid', destination_last4: '3098' }];

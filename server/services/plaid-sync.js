@@ -26,12 +26,14 @@ const db = require('../models/db');
 const logger = require('./logger');
 const plaid = require('./plaid-client');
 const bankImport = require('./bank-import');
+const taxLedgerRules = require('./tax-ledger-rules');
 const { isInfrastructureError } = require('./vendor-credentials');
 const { etDateString } = require('../utils/datetime-et');
 
 const MAX_SYNC_PAGES = 400;             // 400 × 500 = 200k transactions per run (two years for a small business is a few thousand)
 const MAX_PAGINATION_RESTARTS = 3;
-const MAX_MATCHING_PASSES = 20;           // × 500 rows per hourly run; the next hour continues
+const MATCHING_PASS_ROWS = 500;           // rows one matcher pass examines
+const MAX_MATCHING_PASSES = 20;           // × MATCHING_PASS_ROWS per hourly run; the next hour continues
 const MAX_AMOUNT = 9999999999.99;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;       // numeric(12,2) ceiling, as the CSV parser
 
@@ -624,8 +626,12 @@ async function applyChanges(trx, accountsById, changes) {
   const toInsert = [];
   // a correction that makes a STAGED transaction unstageable (zeroed out,
   // non-USD, malformed) must not leave the old values live — it is handled
-  // like a withdrawal: unmatched rows go, reviewed rows get flagged
+  // like a withdrawal: open rows go, reviewed rows get flagged
   const withdrawnByCorrection = [];
+  // reviewed = linked or ignored, or still open but shelved from the ledger
+  // Inbox (a Later or Income decision): the owner judged the row, so the
+  // bank's change parks on it instead of replacing or deleting it
+  const reviewedRow = (r) => r.status !== 'unmatched' || taxLedgerRules.hasOpenDecision(r.suggestion);
   for (const txn of changes.upserts) {
     const existing = existingById.get(txn.transaction_id);
     const m = mapTransaction(txn, accountsById.get(txn.account_id), { correction: !!existing });
@@ -645,7 +651,7 @@ async function applyChanges(trx, accountsById, changes) {
       if (bankImport.hasUnresolvedBankChange(existing)) await clearParkedChange(trx, [existing.id]);
       continue;
     }
-    if (existing.status === 'unmatched') {
+    if (!reviewedRow(existing)) {
       // the bank's newest values win (superseding any correction parked
       // while the row was reviewed) — by REPLACING the row, never editing
       // its money fields in place; see supersedeUnmatchedRow
@@ -683,12 +689,12 @@ async function applyChanges(trx, accountsById, changes) {
       .whereIn('plaid_transaction_id', removedIds.slice(i, i + 500))
       .forUpdate()
       .select('id', 'status', 'suggestion');
-    const unmatched = locked.filter(r => r.status === 'unmatched').map(r => r.id);
+    const unmatched = locked.filter(r => !reviewedRow(r)).map(r => r.id);
     // a withdrawal the operator already dismissed is not raised again, and a
     // correction parked since it is obsolete (the bank's latest = withdrawn)
     const dismissedGone = (r) => !!(r.suggestion && r.suggestion.plaidDismissed && r.suggestion.plaidDismissed.removed);
-    const reviewed = locked.filter(r => r.status !== 'unmatched' && !dismissedGone(r)).map(r => r.id);
-    const obsolete = locked.filter(r => r.status !== 'unmatched' && dismissedGone(r) && bankImport.hasUnresolvedBankChange(r)).map(r => r.id);
+    const reviewed = locked.filter(r => reviewedRow(r) && !dismissedGone(r)).map(r => r.id);
+    const obsolete = locked.filter(r => reviewedRow(r) && dismissedGone(r) && bankImport.hasUnresolvedBankChange(r)).map(r => r.id);
     if (unmatched.length) counts.deleted += await trx('bank_transactions').whereIn('id', unmatched).del();
     if (obsolete.length) await clearParkedChange(trx, obsolete);
     if (reviewed.length) {
@@ -877,7 +883,8 @@ async function syncItem(itemId, { runMatching = true } = {}) {
   // a correction replaces its row (updated) — fresh values to match too
   if (runMatching && (result.inserted > 0 || result.updated > 0)) {
     try {
-      matching = await bankImport.runDeterministicMatching({ limit: 500 });
+      matching = await bankImport.runDeterministicMatching({ limit: MATCHING_PASS_ROWS });
+      await taxLedgerRules.applyAfterImport(`plaid item ${itemId}`);
     } catch (err) {
       logger.warn(`[plaid-sync] item ${itemId} synced but the matching pass failed: ${err.message}`);
       matchingError = 'transactions synced, but the matching pass failed — use "Run matching" to retry';
@@ -909,8 +916,11 @@ async function syncAllItems() {
       let more = true;
       while (more && matchingPasses < MAX_MATCHING_PASSES) {
         matchingPasses++;
-        more = (await bankImport.runDeterministicMatching({ limit: 500 })).moreRemaining;
+        more = (await bankImport.runDeterministicMatching({ limit: MATCHING_PASS_ROWS })).moreRemaining;
       }
+      // the rule pass gets the budget the matcher just used: every row this
+      // cycle examined gets its pre-fill now, not an hour later
+      await taxLedgerRules.applyAfterImport('hourly sync', { budget: matchingPasses * MATCHING_PASS_ROWS });
     } catch (err) {
       logger.warn(`[plaid-sync] hourly matching pass failed: ${err.message}`);
       matchingError = err.message;

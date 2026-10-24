@@ -3673,6 +3673,17 @@ const gates = {
   // DATA_HYGIENE_VAULT_KEY). Read at call time; kill switch = unset.
   plaidSync: gateEnvValue('GATE_PLAID_SYNC'),
 
+  // Tax ledger rules + inbox (2026-10-23): deterministic payee rules that
+  // pre-fill the Bank Import suggestion (category for an expense, or
+  // personal / transfer / income / review) on every staged bank row, and an
+  // Inbox tab under /admin/tax with one-tap decisions that can also write a
+  // rule. Suggestion-only: no row changes status without the operator, the
+  // expense itself still goes through /bank-import/:id/create-expense, an
+  // Income decision keeps the row listed (nothing counts it as revenue), and
+  // nothing leaves the admin. Nested under GATE_BANK_IMPORT; read at call
+  // time via gateEnvValue so a flip needs no redeploy; dark by default.
+  taxLedger: gateEnvValue('GATE_TAX_LEDGER'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic

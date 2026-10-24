@@ -1829,6 +1829,7 @@ router.get('/export/tax-package', async (req, res, next) => {
 
 const nodeCrypto = require('crypto');
 const bankImport = require('../services/bank-import');
+const taxLedgerRules = require('../services/tax-ledger-rules');
 const { gateEnvValue } = require('../config/feature-gates');
 
 const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
@@ -2227,6 +2228,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
       // serial per-row queries inside this request — the response reports
       // moreRemaining and "Run matching" continues the pass
       matching = await bankImport.runDeterministicMatching({ limit: 500 });
+      await taxLedgerRules.applyAfterImport('upload');
     } catch (err) {
       logger.warn(`[bank-import] upload imported rows but the matching pass failed: ${err.message}`);
       matchingError = 'rows imported, but the matching pass failed — use "Run matching" to retry';
@@ -2294,13 +2296,19 @@ router.get('/bank-import/transactions', async (req, res, next) => {
       q = q.whereRaw("to_char(txn_date, 'YYYY-MM') = ?", [String(month)]);
     }
     const rows = await q.select('*');
-    res.json({ transactions: rows.slice(0, limit), hasMore: rows.length > limit, offset, limit });
+    // with GATE_TAX_LEDGER off, nothing a ledger rule wrote reaches this tab
+    const shown = rows.slice(0, limit).map((r) => (r.suggestion && r.suggestion.rule ? { ...r, suggestion: taxLedgerRules.visibleSuggestion(r.suggestion) } : r));
+    res.json({ transactions: shown, hasMore: rows.length > limit, offset, limit });
   } catch (err) { next(err); }
 });
 
 router.post('/bank-import/match', async (req, res, next) => {
   try {
-    res.json({ success: true, matching: await bankImport.runDeterministicMatching({ limit: 2000 }) });
+    const matching = await bankImport.runDeterministicMatching({ limit: 2000 });
+    // every row this pass examined gets its rule pre-fill now, not at the
+    // next sync: the rule pass follows its cursor through the same budget
+    await taxLedgerRules.applyAfterImport('manual match', { budget: 2000 });
+    res.json({ success: true, matching });
   } catch (err) { next(err); }
 });
 
@@ -2310,6 +2318,38 @@ router.post('/bank-import/match', async (req, res, next) => {
 // LOOKING AT (same principle as /expenses/auto-categorize's scoped ids —
 // a global oldest-first pass can report "20 processed" while changing
 // nothing on screen); without ids it falls back to oldest-first.
+// With the ledger gate off a row the AI pass admits may carry a transfer
+// RULE's flag (the kill switch hides it): the model's category replaces
+// that reading, so the flag and its reason go with the rule's keys. Left
+// behind, the flag would read as the matcher's own and Bank Import would
+// show "internal transfer?" over the new category. The write repeats the
+// case it read: a flag that appeared, or a rule that went, during the
+// model call makes it miss instead.
+// With the gate off, every key the row's rule wrote goes with the rule,
+// its reason included: "personal per ledger rule" must not resurface next
+// to the model's category when the gate comes back on (no rule pass would
+// clear it: the pass only stamps a row no rule matches).
+// A row the owner shelved (decision: later) keeps its examination evidence:
+// an owner rule may have replaced the matcher's flag with 'examined' as the
+// row's only evidence, and the matcher never re-flags a decided row, so
+// dropping it would leave the Inbox refusing the row as unexamined for good
+// once the ledger is on again.
+function aiWriteFlagState(sug, ledgerOn) {
+  const ruleOwned = !ledgerOn && !!(sug && sug.rule);
+  const ruleFlag = ruleOwned && !!sug.ignore && sug.rule.kind === 'transfer';
+  const ruleKeys = sug && sug.decision ? bankImport.LEDGER_RULE_KEYS.filter((k) => k !== 'examined') : bankImport.LEDGER_RULE_KEYS;
+  if (ruleFlag) {
+    return {
+      flagState: "coalesce(suggestion->>'ignore','') = 'true' and (suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null",
+      dropKeys: [...ruleKeys, 'ignore', 'reason'],
+    };
+  }
+  if (ruleOwned) {
+    return { flagState: "coalesce(suggestion->>'ignore','') <> 'true' and (suggestion->'rule') is not null", dropKeys: [...ruleKeys, 'reason'] };
+  }
+  return { flagState: "coalesce(suggestion->>'ignore','') <> 'true'", dropKeys: ruleKeys };
+}
+
 router.post('/bank-import/suggest', async (req, res, next) => {
   try {
     const rawLimit = parseInt(req.body?.limit, 10);
@@ -2317,39 +2357,66 @@ router.post('/bank-import/suggest', async (req, res, next) => {
     const ids = Array.isArray(req.body?.ids)
       ? req.body.ids.filter(x => typeof x === 'string').slice(0, 50)
       : null;
+    // Eligibility reads the suggestion the way the tab sees it: with
+    // GATE_TAX_LEDGER off, a category a ledger rule wrote and a transfer
+    // flag a ledger rule wrote do not count (visibleSuggestion hides them);
+    // the matcher's own flag and an owner decision still do.
+    const ledgerOn = taxLedgerRules.isOn();
+    const noCategory = ledgerOn
+      ? "(suggestion is null or (suggestion->>'categoryId') is null)"
+      : "(suggestion is null or (suggestion->>'categoryId') is null or (suggestion->>'categorySource') = 'rule')";
+    // A debit a personal rule classified is not an expense to categorize
+    // either (an AI category on top of it would read "personal · category");
+    // the owner overrides the rule first. With the gate off that key is
+    // hidden too, so it does not count there.
+    // nor a row a review rule reserved for the owner (card interest, a
+    // dues-or-education split): the model's category would replace the
+    // warning. The write repeats this predicate.
+    const notIgnored = ledgerOn
+      ? "coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true' and coalesce(suggestion->>'review','') <> 'true'"
+      : "(coalesce(suggestion->>'ignore','') <> 'true' or ((suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null))";
     let q = db('bank_transactions')
       .where({ status: 'unmatched', direction: 'debit' })
-      .whereRaw("(suggestion is null or (suggestion->>'categoryId') is null)")
-      .whereRaw("coalesce(suggestion->>'ignore','') <> 'true'")
+      .whereRaw(noCategory)
+      .whereRaw(notIgnored)
       .orderBy('txn_date', 'asc')
       .limit(limit)
       .select('id', 'description', 'amount', 'suggestion');
     if (ids && ids.length) q = q.whereIn('id', ids);
     const rows = await q;
     const results = [];
-    for (const row of rows) {
-      try {
-        const ai = await autoCategorizeExpense(null, row.description, row.amount);
-        if (ai?.categoryId) {
-          // atomic jsonb merge: the matching pass can write transfer flags
-          // or candidates into suggestion DURING the model call — a rebuild
-          // from the pre-call snapshot would erase them (same guard the
-          // expenses auto-categorize path applies to its post-model write)
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-            suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning })]),
-            updated_at: new Date(),
-          });
-          results.push({ id: row.id, category: ai.categoryName, applied: true });
-        } else {
-          results.push({ id: row.id, applied: false, error: 'no matching category' });
-        }
-      } catch (err) {
-        results.push({ id: row.id, applied: false, error: err.message });
-      }
-    }
+    for (const row of rows) results.push(await aiSuggestRow(row, { noCategory, notIgnored, ledgerOn }));
     res.json({ success: true, processed: results.length, results });
   } catch (err) { next(err); }
 });
+
+// One row of the AI pass: the model's category is written with an atomic
+// jsonb merge (the matching pass can write transfer flags or candidates
+// into suggestion DURING the model call; a rebuild from the pre-call
+// snapshot would erase them, the same guard the expenses auto-categorize
+// path applies). The eligibility is repeated at the write: a ledger pass
+// can mark the row personal or a transfer during the model call, and an AI
+// category on top of that would recreate the contradiction.
+async function aiSuggestRow(row, { noCategory, notIgnored, ledgerOn }) {
+  try {
+    const ai = await autoCategorizeExpense(null, row.description, row.amount);
+    if (!ai?.categoryId) return { id: row.id, applied: false, error: 'no matching category' };
+    const { flagState, dropKeys } = aiWriteFlagState(row.suggestion, ledgerOn);
+    const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(noCategory).whereRaw(notIgnored).whereRaw(flagState).update({
+      // provenance moves to the model: a category a ledger rule wrote
+      // before is replaced, and the kill switch no longer owns it. The
+      // rule's own keys go with it (rule, its stamp, personal/review
+      // notes, the override marker): a dormant rule must not resurface
+      // next to the model's category when the gate comes back on
+      suggestion: bankImport.suggestionMerge({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null }, dropKeys),
+      updated_at: new Date(),
+    });
+    if (landed) return { id: row.id, category: ai.categoryName, applied: true };
+    return { id: row.id, applied: false, error: 'the row was classified or settled meanwhile' };
+  } catch (err) {
+    return { id: row.id, applied: false, error: err.message };
+  }
+}
 
 // every manual claim below refuses a Plaid row with an unresolved bank
 // change: it still holds the pre-correction values (bankImport.hasUnresolvedBankChange)
@@ -2363,6 +2430,124 @@ const BANK_CHANGE_BLOCKS_CLAIM = 'the bank changed this transaction after it was
 // transaction with a CAS on status='unmatched' — a double-click, a match
 // landing mid-flight, or a crash between the two statements can never
 // leave an orphan expense feeding the P&L.
+// The ledger Inbox's part of create-expense: only a row the Inbox may decide
+// (the matcher examined it and parked no existing expense or payout to
+// link), checked here and again inside the claim, so a candidate list that
+// appeared after the Inbox loaded still wins over a second expense. "Always"
+// resolves the owner rule up front; it is written in the claim's transaction.
+// The rule takes the category the expense gets: the pick, else the visible
+// suggestion the owner accepted (the Inbox sends no categoryId for an
+// untouched default, so the expense keeps its provenance; the rule still
+// has a category). An untouched default is bound to what the Inbox showed:
+// the request carries expectedCategoryId (the suggested category, or null),
+// checked here and again inside the claim, so a rule pass or an Always
+// decision that changed the suggestion after the page loaded is a 409,
+// never a silently different category (or none) on the expense.
+const SUGGESTION_CHANGED = 'the suggested category changed while you were deciding (a rule pass or an Always decision): reload the Inbox';
+function ledgerCreateExpenseGuard(req, row, categoryId, suggested) {
+  const fromLedger = !!req.body?.fromLedger;
+  if (!fromLedger) return { fromLedger, ownerRule: null };
+  // dark ledger = invisible ledger, this entry point included
+  if (!taxLedgerRules.isOn()) return { error: [404, 'not found'] };
+  const block = taxLedgerRules.inboxBlock(row);
+  if (block) return { error: [409, block] };
+  let expectedCategoryId;
+  if (!req.body?.categoryId) {
+    if (!('expectedCategoryId' in (req.body || {}))) return { error: [400, 'expectedCategoryId (the suggested category shown, or null) is required when no categoryId is picked'] };
+    expectedCategoryId = req.body.expectedCategoryId ? String(req.body.expectedCategoryId) : null;
+    if ((expectedCategoryId || '') !== (suggested || '')) return { error: [409, SUGGESTION_CHANGED] };
+  }
+  const wantsRule = !!(req.body?.always && categoryId);
+  const ownerRule = wantsRule ? taxLedgerRules.ownerRuleFor(row, 'expense', categoryId) : null;
+  if (wantsRule && !ownerRule) return { error: [400, taxLedgerRules.NO_RULE_MESSAGE] };
+  return { fromLedger, ownerRule, expectedCategoryId };
+}
+
+// The category for a staged debit: the operator's pick, else the visible
+// suggestion (a ledger rule's counts only while the ledger gate is on). The
+// verify note is for a category a model (or an unknown source) suggested,
+// never for a deterministic ledger rule's.
+function effectiveCreateExpenseCategory(req, row) {
+  const visible = taxLedgerRules.visibleSuggestion(row.suggestion);
+  const suggested = visible?.categoryId || null;
+  return { visible, suggested, categoryId: req.body?.categoryId || suggested };
+}
+async function resolveCreateExpenseCategory(req, row) {
+  const { visible, suggested, categoryId } = effectiveCreateExpenseCategory(req, row);
+  // the verify note is for a model's category: not a deterministic rule's, and not one the ledger import carried (the owner's own books)
+  const usedAi = !req.body?.categoryId && !!suggested && !['rule', 'ledger'].includes(visible?.categorySource);
+  let deductible = parseFloat(row.amount);
+  if (categoryId) {
+    const cat = await db('expense_categories').where({ id: categoryId }).first('name');
+    if (!cat) return { error: [400, 'unknown categoryId'] };
+    const partial = categoryDeductibleAmount(cat.name, deductible);
+    if (partial !== null) deductible = partial;
+  }
+  return { categoryId, usedAi, deductible };
+}
+
+// Insert + claim in ONE transaction with a CAS on status='unmatched'.
+async function insertExpenseAndClaim({ row, categoryId, usedAi, deductible, txnPeriod, fromLedger, ownerRule, expectedCategoryId }) {
+  return db.transaction(async trx => {
+    const [inserted] = await trx('expenses').insert({
+      category_id: categoryId,
+      description: row.description.slice(0, 300),
+      amount: row.amount,
+      tax_deductible_amount: deductible,
+      expense_date: txnPeriod.date,
+      vendor_name: row.description.slice(0, 200),
+      // debit-card/ACH spend from checking books as 'ach'; card accounts as 'card'
+      payment_method: row.account_type === 'card' ? 'card' : 'ach',
+      tax_year: txnPeriod.tax_year,
+      quarter: txnPeriod.quarter,
+      notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
+    }).returning('*');
+    let claim = trx('bank_transactions')
+      .where({ id: row.id, status: 'unmatched' })
+      .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
+      // an Income decision is never an expense, from any tab
+      .whereRaw("coalesce(suggestion ->> 'decision', '') <> 'income'");
+    // the Inbox's Business action is two requests (decide = preflight, then
+    // this claim). Business is offered on the Later shelf too, so a Later
+    // decision is the one this action replaces (its shelf key goes with
+    // it); any other decision made in between is the newer owner action
+    // and wins, so the claim repeats the check
+    const patch = { status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() };
+    if (fromLedger) {
+      claim = claim.whereRaw(taxLedgerRules.MATCHER_EXAMINED_SQL).whereRaw(taxLedgerRules.NO_LIVE_CANDIDATES_SQL).whereRaw(taxLedgerRules.NOT_DECIDED_OR_LATER_SQL);
+      // an untouched default books the category the Inbox showed, or nothing
+      if (expectedCategoryId !== undefined) claim = claim.whereRaw("coalesce(suggestion ->> 'categoryId', '') = ?", [expectedCategoryId || '']);
+      // the owner's decision supersedes the rule reading the row carried
+      // (and the Later keys): a row reopened later (its expense deleted)
+      // starts clean, so the next rule pass classifies it afresh instead
+      // of skipping a stale stamp. A transfer rule's flag and reason
+      // (ignore + reason, the keys the matcher's own flag uses) go with
+      // the rule, judged on the stored row: a reopened row must never read
+      // as a matcher-flagged transfer the seeds then defer to
+      patch.suggestion = bankImport.suggestionMerge({}, [...taxLedgerRules.LATER_KEYS, ...bankImport.LEDGER_RULE_KEYS, ...bankImport.LEDGER_RULE_CATEGORY_KEYS],
+        { alsoWhen: { sql: "coalesce(suggestion->'rule'->>'kind','') = 'transfer'", keys: ['ignore', 'reason'] } });
+    }
+    const claimed = await claim.update(patch);
+    if (!claimed) {
+      const e = new Error('row was matched by someone else mid-flight');
+      e.code = 'CLAIM_LOST';
+      throw e; // rolls the expense insert back with it
+    }
+    if (ownerRule) await taxLedgerRules.createRule({ ...ownerRule, conn: trx });
+    return inserted;
+  });
+}
+
+// After the commit: the Always rule's payee pass; a failure is logged, never
+// reported as a failed creation.
+async function propagateOwnerRule(ownerRule) {
+  if (!ownerRule) return true;
+  try { return (await taxLedgerRules.applyRulesForPattern(ownerRule.pattern)).complete; } catch (err) {
+    logger.warn(`[tax-ledger] payee pass after create-expense failed: ${err.message}`);
+    return false;
+  }
+}
+
 router.post('/bank-import/:id/create-expense', async (req, res, next) => {
   try {
     const row = await db('bank_transactions').where({ id: req.params.id }).first();
@@ -2370,55 +2555,22 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — refund credits use apply-refund' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
     if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
-
-    const suggested = row.suggestion?.categoryId || null;
-    const categoryId = req.body?.categoryId || suggested;
-    // the AI-verify note is for a model's category: one the ledger import
-    // carried (categorySource 'ledger') is the owner's own books
-    const usedAi = !req.body?.categoryId && !!suggested && row.suggestion?.categorySource !== 'ledger';
-    let deductible = parseFloat(row.amount);
-    if (categoryId) {
-      const cat = await db('expense_categories').where({ id: categoryId }).first('name');
-      if (!cat) return res.status(400).json({ error: 'unknown categoryId' });
-      const partial = categoryDeductibleAmount(cat.name, deductible);
-      if (partial !== null) deductible = partial;
-    }
-    const txnDate = dateCellStr(row.txn_date);
-    const txnPeriod = taxPeriodFor(txnDate);
+    const effective = effectiveCreateExpenseCategory(req, row);
+    const ledger = ledgerCreateExpenseGuard(req, row, effective.categoryId, effective.suggested);
+    if (ledger.error) return res.status(ledger.error[0]).json({ error: ledger.error[1] });
+    const category = await resolveCreateExpenseCategory(req, row);
+    if (category.error) return res.status(category.error[0]).json({ error: category.error[1] });
+    const txnPeriod = taxPeriodFor(dateCellStr(row.txn_date));
     if (!txnPeriod) return res.status(400).json({ error: 'bank row has no usable txn_date' });
-    const { tax_year: txnTaxYear, quarter } = txnPeriod;
     let expense;
     try {
-      expense = await db.transaction(async trx => {
-        const [inserted] = await trx('expenses').insert({
-          category_id: categoryId,
-          description: row.description.slice(0, 300),
-          amount: row.amount,
-          tax_deductible_amount: deductible,
-          expense_date: txnPeriod.date,
-          vendor_name: row.description.slice(0, 200),
-          // debit-card/ACH spend from checking books as 'ach'; card accounts as 'card'
-          payment_method: row.account_type === 'card' ? 'card' : 'ach',
-          tax_year: txnTaxYear,
-          quarter,
-          notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
-        }).returning('*');
-        const claimed = await trx('bank_transactions')
-          .where({ id: row.id, status: 'unmatched' })
-          .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
-          .update({ status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
-        if (!claimed) {
-          const e = new Error('row was matched by someone else mid-flight');
-          e.code = 'CLAIM_LOST';
-          throw e; // rolls the expense insert back with it
-        }
-        return inserted;
-      });
+      expense = await insertExpenseAndClaim({ row, ...category, txnPeriod, ...ledger });
     } catch (err) {
       if (err.code === 'CLAIM_LOST') return res.status(409).json({ error: err.message });
       throw err;
     }
-    res.json({ success: true, expense });
+    const propagated = await propagateOwnerRule(ledger.ownerRule);
+    res.json({ success: true, expense, ruleCreated: !!ledger.ownerRule, propagated });
   } catch (err) { next(err); }
 });
 
@@ -2700,12 +2852,25 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const INCOME_SHELF_IGNORE = 'this receipt is on the ledger Inbox\'s Income shelf: nothing has counted it as revenue yet. Mark it Recorded there once its sale is in the portal, or decide it Personal or Transfer there';
+// the shelf guard only where the Inbox can take the row: a row with live
+// link candidates (a payout or refund the matcher is still asking about)
+// belongs to Bank Import, Ignore included, or nothing could resolve it
+const INBOX_TAKES_ROW_SQL = () => `(${taxLedgerRules.ON_INCOME_SHELF_SQL} and ${taxLedgerRules.NO_LIVE_CANDIDATES_SQL})`;
 router.post('/bank-import/:id/ignore', async (req, res, next) => {
   try {
-    const changed = await db('bank_transactions')
-      .where({ id: req.params.id }).whereIn('status', ['unmatched'])
-      .update({ status: 'ignored', updated_at: new Date() });
-    if (!changed) return res.status(409).json({ error: 'only unmatched rows can be ignored' });
+    // a receipt on the ledger's Income shelf (an Income decision, or an
+    // income rule's pre-fill) is not ignored from here while the ledger is
+    // on: the shelf exists so that nothing leaves it uncounted
+    const ledgerOn = taxLedgerRules.isOn();
+    let q = db('bank_transactions').where({ id: req.params.id }).whereIn('status', ['unmatched']);
+    if (ledgerOn) q = q.whereRaw(`not ${INBOX_TAKES_ROW_SQL()}`);
+    const changed = await q.update({ status: 'ignored', updated_at: new Date() });
+    if (!changed) {
+      const row = ledgerOn ? await db('bank_transactions').where({ id: req.params.id }).first('status', 'suggestion') : null;
+      if (row && row.status === 'unmatched' && String(row.suggestion?.income) === 'true' && !taxLedgerRules.hasLiveCandidates(row)) return res.status(409).json({ error: INCOME_SHELF_IGNORE });
+      return res.status(409).json({ error: 'only unmatched rows can be ignored' });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -2720,12 +2885,24 @@ router.post('/bank-import/:id/unignore', async (req, res, next) => {
     if (row.suggestion?.releasedRefundOf) {
       return res.status(409).json({ error: 'this credit was released after a manual refund reconciliation — it stays accounted for and cannot re-enter review' });
     }
+    // An Inbox Personal or Transfer decision wrote this ignore together with
+    // its decision keys; reopening the row drops them in the same write, or
+    // the row would read as decided (the rule passes skip it) and a Transfer
+    // would still render as an internal transfer. The matcher's own flag
+    // (no decision) stays: it is the matcher's reading, not a decision.
+    const patch = { status: 'unmatched', updated_at: new Date() };
+    // The rule's own keys go too (rule, rulesAt, the override marker): the
+    // reopened row shows no stale rule label and is unstamped, so the next
+    // ordinary rule pass reads it again.
+    if (['personal', 'transfer', 'recorded'].includes(row.suggestion?.decision)) {
+      patch.suggestion = bankImport.suggestionMerge({}, ['decision', 'decidedAt', 'personal', 'income', 'ignore', 'reason', 'rule', 'rulesAt', 'examined']);
+    }
     const changed = await db('bank_transactions')
       .where({ id: req.params.id, status: 'ignored' })
       // the CAS re-checks the released marker — a concurrent Release must
       // not be reopened by a stale unignore
       .whereRaw("suggestion->>'releasedRefundOf' is null")
-      .update({ status: 'unmatched', updated_at: new Date() });
+      .update(patch);
     if (!changed) return res.status(409).json({ error: 'row is not ignored' });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -3032,6 +3209,125 @@ router.get('/bank-import/coverage', async (req, res, next) => {
     const year = /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : String(etParts().year);
     res.json({ year, months: await bankImport.ledgerCoverage(year) });
   } catch (err) { next(err); }
+});
+
+// ── Tax ledger rules + inbox (GATE_TAX_LEDGER, nested under GATE_BANK_IMPORT) ──
+// Suggestion-only payee rules and the Inbox's one-tap decisions; the
+// expense itself is still made by /bank-import/:id/create-expense above.
+// /ledger/status answers {enabled:false} when the ledger gate is off (the
+// bank-import gate above already 404s the whole prefix when IT is off);
+// every other ledger route 404s when dark.
+function taxLedgerOn() { return taxLedgerRules.isOn(); }
+
+router.get('/bank-import/ledger/status', async (req, res, next) => {
+  try {
+    if (!taxLedgerOn()) return res.json({ enabled: false });
+    // like every Bank Import snapshot: an expense deleted while the page is
+    // open leaves its row linked to nothing until this heal reopens it
+    await healBankImportSnapshot();
+    // the seeds are written at runtime: the first status after the flip
+    // must count them, not report "0 rules" until the Rules panel opens
+    await taxLedgerRules.ensureSeedRules();
+    const rules = await db('tax_ledger_rules').where({ enabled: true }).count('* as n').first();
+    const openRows = () => db('bank_transactions').where({ status: 'unmatched' }).whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT);
+    const inbox = await openRows().whereRaw(taxLedgerRules.VIEW_SQL.open).count('* as n').first();
+    const income = await openRows().whereRaw(taxLedgerRules.VIEW_SQL.income).count('* as n').first();
+    // rows the matcher may link to an existing expense or payout: Bank Import decides those
+    const inBankImport = await openRows().whereRaw(taxLedgerRules.VIEW_SQL.bankImport).count('* as n').first();
+    // rows the matcher has not examined yet (next sync): not shown until it has
+    const unexamined = await openRows().whereRaw(taxLedgerRules.VIEW_SQL.unexamined).count('* as n').first();
+    res.json({
+      enabled: true, rules: parseInt(rules?.n, 10) || 0, inbox: parseInt(inbox?.n, 10) || 0, income: parseInt(income?.n, 10) || 0,
+      bankImport: parseInt(inBankImport?.n, 10) || 0, unexamined: parseInt(unexamined?.n, 10) || 0,
+    });
+  } catch (err) { next(err); }
+});
+
+router.use('/bank-import/ledger', (req, res, next) => {
+  if (!taxLedgerOn()) return res.status(404).json({ error: 'not found' });
+  next();
+});
+
+// view=open (to decide) | later | income (receipts outside the processor:
+// not in the P&L until recorded as a sale)
+router.get('/bank-import/ledger/inbox', async (req, res, next) => {
+  try {
+    await healBankImportSnapshot(); // a reopened row (its expense deleted since) is in this list
+    const rawLimit = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(200, Math.max(1, rawLimit)) : 50;
+    const rawOffset = parseInt(req.query.offset, 10);
+    const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+    const view = taxLedgerRules.VIEW_SQL[req.query.view] ? req.query.view : 'open';
+    const base = () => db('bank_transactions').where({ status: 'unmatched' })
+      .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
+      .whereRaw(taxLedgerRules.VIEW_SQL[view]);
+    const total = await base().count('* as n').first();
+    // id tie-breaker makes the order total (statement rows share txn_date +
+    // created_at); the DATE goes out as its calendar text, not a timestamp
+    const rows = await base().orderBy('txn_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc').limit(limit).offset(offset)
+      .select('id', db.raw("to_char(txn_date, 'YYYY-MM-DD') as txn_date"), 'description', 'amount', 'direction', 'account_label', 'account_type', 'suggestion');
+    res.json({ rows, total: parseInt(total?.n, 10) || 0, limit, offset, view });
+  } catch (err) { next(err); }
+});
+
+router.post('/bank-import/ledger/decide', async (req, res, next) => {
+  try {
+    const { id, decision, categoryId, always } = req.body || {};
+    if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id is required' });
+    const out = await taxLedgerRules.decide({ id, decision, categoryId: categoryId || null, always: !!always });
+    res.json(out);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.get('/bank-import/ledger/rules', async (req, res, next) => {
+  try { res.json({ rules: await taxLedgerRules.listRules() }); } catch (err) { next(err); }
+});
+
+router.post('/bank-import/ledger/rules', async (req, res, next) => {
+  try {
+    const { pattern, kind, categoryId, note, priority } = req.body || {};
+    const rule = await taxLedgerRules.createRule({ pattern, kind, categoryId: categoryId || null, note: note || null, priority: priority === undefined ? taxLedgerRules.OWNER_PRIORITY : priority, source: 'owner' });
+    res.status(201).json({ rule });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.post('/bank-import/ledger/rules/apply', async (req, res, next) => {
+  try {
+    const rawLimit = parseInt(req.body?.limit, 10);
+    // after = the cursor a previous answer returned with more:true
+    let after = null;
+    if (req.body?.after != null) {
+      const a = req.body.after;
+      const ok = a && typeof a === 'object' && /^\d{4}-\d{2}-\d{2}/.test(String(a.txn_date || '')) && /^[0-9a-f-]{36}$/i.test(String(a.id || ''));
+      if (!ok) return res.status(400).json({ error: 'after must be the cursor from a previous apply' });
+      after = { txn_date: String(a.txn_date).slice(0, 10), id: String(a.id) };
+    }
+    // the manual pass re-examines every open row (rules may have changed)
+    // one request examines at most 1000 rows (one UPDATE per row); the
+    // client follows the cursor for the rest
+    const out = await taxLedgerRules.applyRules({ limit: Number.isFinite(rawLimit) ? Math.min(rawLimit, 1000) : 1000, force: req.body?.force === undefined ? true : !!req.body.force, after });
+    res.json({ success: true, ...out });
+  } catch (err) {
+    // 429: another pass holds the process-wide slot and the queue is full
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.put('/bank-import/ledger/rules/:id', async (req, res, next) => {
+  try {
+    const rule = await taxLedgerRules.updateRule(req.params.id, req.body || {});
+    res.json({ rule });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 module.exports = router;
