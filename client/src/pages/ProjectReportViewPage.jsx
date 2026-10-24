@@ -9,6 +9,7 @@ import { DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
+import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -301,6 +302,9 @@ const FIELD_LABELS = {
   applicator_attestation: 'Applicator attestation',
   warranty_type: 'Warranty / retreatment bond',
   renewal_due: 'Renewal due by',
+  framing_inspection_date: 'Date of final framing inspection',
+  wood_base_plate_pct: 'Wood base plates, % of all base plates',
+  borate_treatment_date: 'Date of the Bora-Care application',
 };
 
 function humanizeKey(k) {
@@ -384,6 +388,8 @@ export default function ProjectReportViewPage() {
   // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
+  // GATE_REPORT_SHARED_TEMPLATE: the shared customer header and the stacked layout, never on a paper document.
+  const sharedTemplate = !isPaperDocument && sharedReportTemplateActive(data);
   // The applicator is the tech who PERFORMED the linked visit, which can
   // differ from the project's creator (technicianName) — Codex r2 #5032.
   const applicatorLine = applicatorIdLine(data?.applicatorName || data?.technicianName, data?.applicatorFdacsId);
@@ -555,7 +561,7 @@ export default function ProjectReportViewPage() {
   ].map(displayContactLine).filter(Boolean);
 
   return (
-    <div className="project-report-page" style={{
+    <div className={`project-report-page${sharedTemplate ? ' customer-report-template' : ''}`} style={{
       flex: 1,
       background: ESTIMATE_BG,
       fontFamily: FONT_BODY,
@@ -605,33 +611,44 @@ export default function ProjectReportViewPage() {
             documents (owner 2026-07-16); sits tight under the tools card
             like the service report. */}
         {!isPaperDocument && <ProjectAskWaves token={token} />}
-        <div style={{ padding: '8px 0 24px' }}>
-          {/* The kicker carries what the project is FOR (its title) when one
-              is recorded — the bare type alone reads generic; the type still
-              anchors the headline below. Mirrors the estimate's
-              "Your estimate · {service}" kicker. */}
-          <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
-            Project report{reportTitle ? ` · ${reportTitle}` : ''}
-          </div>
-          <h1 style={{
-            fontFamily: FONTS.serif,
-            fontSize: 'clamp(34px, 5vw, 48px)',
-            fontWeight: 500,
-            letterSpacing: '-0.01em',
-            lineHeight: 1.1,
-            color: ESTIMATE_TEXT,
-            margin: 0,
-          }}>
-            {headline}
-          </h1>
-          {heroContactLines.length ? (
-            <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
-              {heroContactLines.map((line) => (
-                <div key={line} style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, fontWeight: 600 }}>{line}</div>
-              ))}
+        {sharedTemplate ? (
+          <CustomerReportHeader
+            eyebrow={`Project report${reportTitle ? ` · ${reportTitle}` : ''}`}
+            title={headline}
+            customerName={data.customerName}
+            customerEmail={data.customerEmail}
+            customerPhone={data.customerPhone}
+            address={heroAddressLine}
+          />
+        ) : (
+          <div style={{ padding: '8px 0 24px' }}>
+            {/* The kicker carries what the project is FOR (its title) when one
+                is recorded — the bare type alone reads generic; the type still
+                anchors the headline below. Mirrors the estimate's
+                "Your estimate · {service}" kicker. */}
+            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
+              Project report{reportTitle ? ` · ${reportTitle}` : ''}
             </div>
-          ) : null}
-        </div>
+            <h1 style={{
+              fontFamily: FONTS.serif,
+              fontSize: 'clamp(34px, 5vw, 48px)',
+              fontWeight: 500,
+              letterSpacing: '-0.01em',
+              lineHeight: 1.1,
+              color: ESTIMATE_TEXT,
+              margin: 0,
+            }}>
+              {headline}
+            </h1>
+            {heroContactLines.length ? (
+              <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
+                {heroContactLines.map((line) => (
+                  <div key={line} style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, fontWeight: 600 }}>{line}</div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        )}
 
         {/* Summary card — no "Report details" block (owner directive
             2026-07-03): the hero already carries the address, the At-a-glance
@@ -846,7 +863,7 @@ function AtAGlance({ rows }) {
       <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 12 }}>
         At a glance
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 0.45fr) 1fr', gap: '8px 12px' }}>
+      <div className="report-template-stack" style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 0.45fr) 1fr', gap: '8px 12px' }}>
         {rows.map(([label, value]) => (
           <div key={label} style={{ display: 'contents' }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT }}>{label}</div>
@@ -1187,6 +1204,31 @@ function finalExteriorLine(f) {
   return parts.join(' · ');
 }
 
+// "Final framing inspection 09/28/2026 · Wood base plates 85% of all base
+// plates · Bora-Care applied 10/15/2026": the Bora-Care facts the warranty
+// prints (owner 10-24 Q6). The share prints only as the server takes it, a
+// plain percent from 0 to 100 (project-types.js woodBasePlatePct).
+function borateRecordLine(f) {
+  const match = /^(\d{1,3}(?:\.\d+)?)\s*%?$/.exec(String(f.wood_base_plate_pct ?? '').trim());
+  const pct = match && Number(match[1]) <= 100 ? `${Number(match[1])}%` : '';
+  return [
+    stickerDate(f.framing_inspection_date) && `Final framing inspection ${stickerDate(f.framing_inspection_date)}`,
+    pct && `Wood base plates ${pct} of all base plates`,
+    stickerDate(f.borate_treatment_date) && `Bora-Care applied ${stickerDate(f.borate_treatment_date)}`,
+  ].filter(Boolean).join(' · ');
+}
+
+// Treatments recorded here that come after the slab-day signature, often
+// by another applicator: the signature never vouches for them.
+function laterTreatmentsNote(f) {
+  const later = [
+    finalExteriorLine(f) && 'final exterior treatment',
+    stickerDate(f.borate_treatment_date) && 'Bora-Care application',
+  ].filter(Boolean);
+  if (!later.length) return '';
+  return `This signature covers the initial treatment only. The ${later.join(' and the ')} ${later.length > 1 ? 'are' : 'is'} recorded separately above.`;
+}
+
 // The certificate's field grid. Under the sticker (detailsOnly) it keeps
 // only what the label has no blank for; the label already prints lot,
 // permit, builder, dates, address, organism, sq ft, gallons, concentration
@@ -1237,6 +1279,7 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ['Applicator', applicatorLine],
     ['Warranty / retreatment bond', f.warranty_type],
     ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
+    ...(borateRecordLine(f) ? [['Bora-Care record', borateRecordLine(f)]] : []),
   ] : [
     ['Treatment address', addressValue],
     ['Lot / Block / Subdivision', lotLine],
@@ -1254,6 +1297,7 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ['Warranty / retreatment bond', warrantyLine],
     // The staff send validates this record on both layouts, so both print it.
     ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
+    ...(borateRecordLine(f) ? [['Bora-Care record', borateRecordLine(f)]] : []),
   ];
   return { fields, applications, multiApplication };
 }
@@ -1399,13 +1443,11 @@ function CertificateSignature({ f, technicianName, projectDateLabel, detailsOnly
             </span>
           </>
         ) : null}
-        {/* The final exterior visit comes later, often by another
-            applicator: this signature never vouches for it. */}
-        {finalExteriorLine(f) ? (
+        {laterTreatmentsNote(f) ? (
           <>
             <br />
             <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
-              This signature covers the initial treatment only. The final exterior treatment is recorded separately above.
+              {laterTreatmentsNote(f)}
             </span>
           </>
         ) : null}
@@ -1572,7 +1614,7 @@ function PhotoGrid({ title, photos, noCard }) {
           {title}
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
+      <div className="report-template-stack" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
         {photos.map(ph => {
           const label = getPhotoLabel(ph);
           const tileStyle = {

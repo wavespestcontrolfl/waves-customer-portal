@@ -375,8 +375,9 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
 
 // The "Issue warranty" button on a pre-treat certificate. Rule
 // 5E-14.105(3): a new-building pre-treat gets a written warranty within 30
-// days; an addition to an existing building (no plan years) gets none. Only
-// a single soil-barrier application matches this warranty's wording.
+// days; an addition to an existing building (no plan years) gets none. The
+// warranty has wording for a soil barrier, Bora-Care alone, or a soil
+// barrier with Bora-Care as its secondary treatment.
 // It reads the certificate as sent (the copy the server issues from); before
 // any send it reads the live findings only to show the button, disabled.
 export function IssueWarrantyAction({ project, findings, allowed, blocked, buttonStyle }) {

@@ -1,10 +1,18 @@
 const crypto = require('crypto');
-const { lawnProtocols } = require('./lawn-program');
+const {
+  bahiaHasNoProgram,
+  isBahiaGrass,
+  lawnProtocols,
+  lawnV13AnyGrassTrack,
+} = require('./lawn-program');
+const { PROGRAM_DETAIL_V13 } = require('./service-report/lawn-program-line');
+const { estimateHasBahiaLawn, estimateLawnGrassValues } = require('./estimate-bahia-review');
 const featureGates = require('../config/feature-gates');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
+const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-1';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
 const V13_PROTOCOL_VERSION = 'lawn-v13';
@@ -182,6 +190,44 @@ function resolveTurf({ estimate = {}, estimateData = {}, input = {} }) {
   };
 }
 
+const squashGrass = (value) => String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+// Bahia by the one lawn-program check (D, Argentine, Pensacola), then the pricing engine's grass
+// codes and names (A, B, C1, C2), then the free-text match.
+function normalizeTurfTypeV13(value) {
+  if (isBahiaGrass(value)) return 'bahia';
+  const { GRASS_TYPE_ALIASES } = require('./pricing-engine/constants');
+  const squashed = squashGrass(value);
+  const coded = squashed && Object.keys(GRASS_TYPE_ALIASES)
+    .find((grass) => (GRASS_TYPE_ALIASES[grass] || []).some((alias) => squashGrass(alias) === squashed));
+  return coded || normalizeTurfType(value);
+}
+
+// GATE_LAWN_OUTLINE_V13: the composer's pick, else the grass the estimate records for its lawn plan,
+// read from the stored shapes the send path's bahia review reads (estimate-bahia-review.js). Never a
+// guess from the rest of the estimate: a scan of the whole estimate read the bermudaSuppression
+// add-on flag as Bermuda on most St. Augustine estimates, and a note can name a grass the lawn does
+// not have. A pest-only estimate's default grassType is not a lawn plan and is not read.
+function resolveTurfV13({ estimateData = {}, input = {} }) {
+  const picked = firstNonEmpty(input.turfType, input.turf_type);
+  const source = picked || firstNonEmpty(...estimateLawnGrassValues(estimateData));
+  // With no composer pick, any bahia record is the bahia lawn the send path parks for review.
+  const recordedBahia = !picked && estimateHasBahiaLawn(estimateData);
+  const turfType = recordedBahia ? 'bahia' : (source ? normalizeTurfTypeV13(source) : 'unknown');
+  return {
+    turfType,
+    label: TURF_LABELS[turfType] || TURF_LABELS.unknown,
+    confidence: turfType === 'unknown' ? 'unknown' : 'inferred',
+    mixed: turfType === 'mixed',
+  };
+}
+
+// v13 files its one program under the three grass keys. A mixed or unknown lawn plans from
+// the shared key, as the plan engine does; bahiagrass has no v13 program and gets none.
+function v13TrackKey(turfType) {
+  return lawnProtocols()?.[turfType] ? turfType : lawnV13AnyGrassTrack(turfType);
+}
+
 function resolveJurisdictionId(address) {
   const a = String(address || '').toLowerCase();
   if (/(sarasota|venice|north port|nokomis|osprey|englewood)/.test(a)) return 'sarasota_county_fl';
@@ -236,8 +282,68 @@ function v13OutlineBullets(visit) {
     .map((label) => `${label} may be relevant when turf condition, weather, label directions, and local rules allow.`);
 }
 
+// GATE_LAWN_OUTLINE_V13 (live only with GATE_LAWN_V13): every section of the outline
+// describes the v13 program. Off = the outline exactly as before.
+function outlineV13Live() {
+  return featureGates.lawnOutlineV13Live?.() === true;
+}
+
+// The same categories, for every line of the month's step: the 12x step and each plan-size
+// variant (the 9x April bag), so a category one plan size uses is never missing. A fertilizer
+// analysis may have one-digit parts (44-0-0); Headway, Advion and the Topchoice add-on are v13 lines too.
+// Each category also names the steps the page draws for it (V13_STEP_LABELS): the pre-emergent
+// with fertilizer bag is a feeding and a weed barrier.
+const V13_FULL_OUTLINE_CATEGORIES = [
+  [/scout visit|inspect/i, 'Lawn inspection', ['inspection']],
+  [/stonewall 0\.43%|dimension 0\.21%/i, 'Pre-emergent weed control with fertilizer', ['feeding', 'barrier']],
+  [/stonewall|dimension/i, 'Pre-emergent weed control', ['barrier']],
+  [/nutra-tech/i, 'Micronutrients', ['micros']],
+  [/(?:^|[^\d.])\d{1,2}-\d{1,2}-\d{1,2}(?!\d)/, 'Fertilizer and nutrition', ['feeding']],
+  [/tetrino|arena|talak|acelepryn|dylox|advion|topchoice/i, 'Insect control', ['insects']],
+  [/artavia|velista|gravex|headway/i, 'Disease control', ['disease']],
+  [/celsius|certainty|blindside|dismiss/i, 'Weed spot treatment', ['weeds']],
+  [/dispatch|surfactant/i, 'Wetting agent', ['dry_spots']],
+];
+
+// The short names the year chart, the month chips and the treatment cards share, one per step.
+const V13_STEP_LABELS = Object.freeze({
+  inspection: 'Inspection',
+  feeding: 'Feeding',
+  barrier: 'Weed barrier',
+  micros: 'Micronutrients',
+  weeds: 'Weed spots',
+  insects: 'Insect control',
+  disease: 'Disease control',
+  dry_spots: 'Dry spots',
+});
+
+function v13StepLines(visit) {
+  const steps = [visit, ...Object.values(visit.cadenceVariants || {})];
+  return steps.flatMap((step) => [...protocolLines(step?.primary), ...protocolLines(step?.secondary)]);
+}
+
+function v13OutlineCategory(line) {
+  return V13_FULL_OUTLINE_CATEGORIES.find(([pattern]) => pattern.test(line)) || null;
+}
+
+function v13FullOutlineBullets(visit) {
+  const labels = v13StepLines(visit).map((line) => v13OutlineCategory(line)?.[1]).filter(Boolean);
+  return [...new Set(labels)]
+    .map((label) => `${label} may be relevant when turf condition, weather, label directions, and local rules allow.`);
+}
+
+// A month's steps for the page: the whole-lawn step (the 12x primary lines), then what may be
+// added as needed (spot lines and a plan-size variant's step), each step once. No visit, none.
+function v13MonthSteps(visit) {
+  const stepsOf = (lines) => [...new Set(lines.flatMap((line) => v13OutlineCategory(line)?.[2] || []))];
+  if (!visit) return { main: [], asNeeded: [] };
+  const main = stepsOf(protocolLines(visit.primary));
+  return { main, asNeeded: stepsOf(v13StepLines(visit)).filter((step) => !main.includes(step)) };
+}
+
 function customerProtocolBullets(visit) {
   if (!visit) return [];
+  if (outlineV13Live()) return v13FullOutlineBullets(visit);
   if (featureGates.lawnV13Live?.() === true) return v13OutlineBullets(visit);
   const lines = [...protocolLines(visit.primary), ...protocolLines(visit.secondary)];
   return lines
@@ -250,6 +356,13 @@ function customerProtocolBullets(visit) {
 // (GATE_LAWN_V13) writes its own, so a flip shows older outlines as updated.
 function protocolVersion() {
   return featureGates.lawnV13Live?.() === true ? V13_PROTOCOL_VERSION : PROTOCOL_VERSION;
+}
+
+// The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13) stamps
+// its own content version, so a flip shows outlines built before it as updated. The
+// Estimates list's stale check reads it, so it reads the gate and the two constants only.
+function contentLibraryVersion() {
+  return outlineV13Live() ? V13_CONTENT_LIBRARY_VERSION : CONTENT_LIBRARY_VERSION;
 }
 
 function protocolVisitForMonth(turfType, month) {
@@ -331,12 +444,13 @@ function estimateViewPath(estimate) {
   return `/estimate/${encodeURIComponent(estimate.token)}`;
 }
 
-function makeSection(key, title, body, bullets = []) {
+function makeSection(key, title, body, bullets = [], visual = null) {
   return {
     key,
     title,
     body,
     bullets: bullets.filter(Boolean),
+    ...(visual ? { visual } : {}),
   };
 }
 
@@ -418,6 +532,92 @@ function buildTreatmentCategories({ turfType, visit, seasonBand }) {
   return base;
 }
 
+// GATE_LAWN_OUTLINE_V13 words. The month's "why now" text is the lawn report's own
+// (service-report/lawn-program-line.js, proven against the v13 recipe there); the year chart and
+// the month chips are drawn from the recipe lines (V13_FULL_OUTLINE_CATEGORIES); these are the rest.
+// Short on purpose (owner 2026-10-24: "pretty wordy ... have visuals"). No product name, rate,
+// tier, visit count, or date.
+const V13_COPY = Object.freeze({
+  title: 'Your Waves Lawn Care Program Overview',
+  programTitle: 'One Program For Your Lawn',
+  programBody: 'Waves runs one lawn program for every grass type we treat. Every product is used within its label for your grass type.',
+  programTiles: Object.freeze([
+    { icon: 'whole_lawn', title: 'One whole-lawn treatment', text: 'At most visits, by hose or spreader' },
+    { icon: 'spots', title: 'Spot treatments where needed', text: 'For the weeds, insects, and disease the lawn shows' },
+    { icon: 'insects', title: 'Chinch bugs counted first', text: 'Before any chinch bug treatment' },
+    { icon: 'prevent', title: 'Disease prevention', text: 'On areas with a known history, such as large patch' },
+  ].map((tile) => Object.freeze(tile))),
+  focusNote: 'Each step depends on turf condition, weather, label directions, and local rules.',
+  yearTitle: 'Your Year At A Glance',
+  yearBody: 'Each visit follows the step for the month it falls in.',
+  limitLabel: 'Local summer fertilizer limits',
+  treatmentsTitle: 'Treatments That May Be Used',
+  treatmentsBody: 'Which ones a visit uses depends on the season, the weather, the label, local rules, and what the lawn shows.',
+  visitSteps: Object.freeze([
+    { icon: 'inspection', title: 'Check', text: 'The whole lawn: color, thinning, weeds, insects, disease, and watering' },
+    { icon: 'decide', title: 'Decide', text: 'What the lawn needs today, by what it shows, the weather, and the label' },
+    { icon: 'treat', title: 'Treat', text: "The month's step, plus spot treatments where needed" },
+    { icon: 'report', title: 'Report', text: 'What was done, with photos and any next steps for you' },
+  ].map((step) => Object.freeze(step))),
+  afterVisitTitle: 'After Each Visit',
+  afterVisitTiles: Object.freeze([
+    { icon: 'report', title: 'A service report', text: 'What was done, the products used with EPA numbers where they apply, photos, and any next steps' },
+    { icon: 'reminders', title: 'Reminders', text: 'Before and after each visit, including when your report is ready' },
+    { icon: 'portal', title: 'Your customer portal', text: 'Reports, invoices, photos, and messages in one place' },
+    { icon: 'arrival', title: 'Arrival record', text: 'GPS on the service vehicle records when the technician arrives' },
+  ].map((tile) => Object.freeze(tile))),
+  unknownTurfBullet: 'The program is the same for every grass type we treat.',
+  mixedTurfBullet: 'Spot treatments follow the product label for the grass in each area.',
+});
+
+// The treatment cards: the steps the year chart draws, in its order, plus the report.
+const V13_TREATMENT_CATEGORIES = Object.freeze([
+  { key: 'inspection', reason: 'Every visit starts here. July visits are inspections with spot treatments only.' },
+  { key: 'feeding', reason: 'Granular fertilizer on a set calendar, outside the local summer limits.' },
+  { key: 'barrier', reason: 'Stops weeds before they sprout, where it fits the lawn (never on new sod or thin turf). It needs about 1/2 inch of rain or irrigation within 14 days; your regular watering counts.' },
+  { key: 'micros', reason: 'Iron and other micronutrients for color without pushing growth, including in summer.' },
+  { key: 'weeds', reason: 'Weeds are treated where they grow, not across the whole lawn.' },
+  { key: 'insects', reason: 'Chinch bugs are counted before treatment; most insect treatments go only where insects are found.' },
+  { key: 'disease', reason: 'Treatment for active disease, plus prevention on areas mapped for large patch or take-all root rot.' },
+  { key: 'dry_spots', reason: 'A wetting agent helps water soak into dry spots.' },
+  { key: 'report', label: 'Your report', reason: 'Shows what was done and any action items for you.' },
+].map((item) => Object.freeze({ ...item, label: item.label || V13_STEP_LABELS[item.key] })));
+
+const FULL_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const stepNames = (steps) => steps.map((step) => V13_STEP_LABELS[step]).join(', ');
+
+// The year chart: every month's steps from the recipe, and the months the local rule limits.
+function v13YearVisual(trackKey, jurisdictionRule) {
+  const months = MONTHS.map((label, index) => ({
+    month: index + 1,
+    label,
+    ...v13MonthSteps(protocolVisitForMonth(trackKey, index + 1)),
+    limited: isRestrictedSeason(jurisdictionRule, index + 1),
+  }));
+  return { type: 'year', months, labels: V13_STEP_LABELS, limitLabel: months.some((m) => m.limited) ? V13_COPY.limitLabel : null };
+}
+
+// Text for a page or reader that does not draw the chart (the composer preview, the stored HTML).
+function v13YearLines(visual) {
+  return visual.months.map((m) => `${FULL_MONTHS[m.month - 1]}: ${stepNames(m.main)}${m.asNeeded.length ? `; as needed: ${stepNames(m.asNeeded)}` : ''}`);
+}
+
+function v13FocusVisual(visit) {
+  const { main, asNeeded } = v13MonthSteps(visit);
+  return {
+    type: 'chips',
+    items: [
+      ...main.map((step) => ({ key: step, label: V13_STEP_LABELS[step], tier: 'main' })),
+      ...asNeeded.map((step) => ({ key: step, label: V13_STEP_LABELS[step], tier: 'as_needed' })),
+    ],
+    note: V13_COPY.focusNote,
+  };
+}
+
+const titledLines = (items) => items.map((item) => `${item.title}: ${item.text}`);
+
+const V13_NO_BAHIA_PROGRAM_ERROR = 'Bahiagrass has no lawn program (Celsius and Blindside are not labeled for bahiagrass); the office reviews each bahia lawn before quoting. Pick the grass the lawn has to send an outline.';
+
 function productNeedlesFromVisit(visit) {
   const text = `${visit?.primary || ''}\n${visit?.secondary || ''}`;
   const names = new Set();
@@ -436,7 +636,7 @@ function productNeedlesFromVisit(visit) {
   return [...names];
 }
 
-async function loadEligibleProductCards(db, { turfType, visit, includeProductCards }) {
+async function loadEligibleProductCards(db, { turfType, visit, includeProductCards, productCardReason }) {
   if (!includeProductCards || !visit || ['unknown', 'mixed'].includes(turfType)) return [];
   const needles = productNeedlesFromVisit(visit);
   if (!needles.length) return [];
@@ -494,7 +694,7 @@ async function loadEligibleProductCards(db, { turfType, visit, includeProductCar
       reentry: row.reentry_summary || row.reentry_text || null,
       labelVerifiedAt: row.label_verified_at || null,
       labelVersion: row.label_version || null,
-      relevanceReason: `${row.name} appears in the ${visit.month} ${TURF_LABELS[turfType]} protocol as a conditional or seasonal option.`,
+      relevanceReason: productCardReason(row.name, visit, turfType),
     });
     if (cards.length >= 8) break;
   }
@@ -527,13 +727,14 @@ function renderOutlineHtml(content) {
   `;
 }
 
-function validateContent(content, { turfType, includeProductCards, jurisdictionRule }) {
+function validateContent(content, { turfType, includeProductCards, jurisdictionRule, noProgram = false }) {
   const text = JSON.stringify(content).toLowerCase();
   const errors = [];
   const warnings = [];
   for (const phrase of BANNED_PHRASES) {
     if (text.includes(phrase)) errors.push(`Banned phrase detected: ${phrase}`);
   }
+  if (noProgram) errors.push(V13_NO_BAHIA_PROGRAM_ERROR);
   if (includeProductCards && ['unknown', 'mixed'].includes(turfType)) {
     errors.push('Product cards cannot be sent until turf type is confirmed for unknown or mixed turf.');
   }
@@ -570,30 +771,33 @@ function hashNullable(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
-async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
-  const estimateData = parseJsonMaybe(estimate.estimate_data || estimate.estimateData) || {};
-  const month = Number(input.month || currentMonthNumber(now));
-  const seasonBand = resolveSeasonBand(month);
-  const modules = await loadApprovedModules(db);
-  const turf = resolveTurf({ estimate, estimateData, input });
-  const jurisdictionId = input.jurisdictionId || resolveJurisdictionId(estimate.address);
-  const jurisdictionRule = await loadFertilizerRule(db, jurisdictionId);
-  const restrictedSeasonActive = isRestrictedSeason(jurisdictionRule, month);
-  const track = protocolTrack(turf.turfType);
-  const visit = protocolVisitForMonth(turf.turfType, month);
-  const includeProductCards = input.includeProductCards === true;
-  const productCards = await loadEligibleProductCards(db, { turfType: turf.turfType, visit, includeProductCards });
-  const seasonText = approvedModuleText(modules, SEASON_MODULE_KEYS[seasonBand]);
-  const turfText = approvedModuleText(modules, TURF_MODULE_KEYS[turf.turfType], approvedModuleText(modules, 'unknown_turf_summary'));
-  const snapshot = estimateSnapshot(estimate, estimateData);
-  const customerName = firstNonEmpty(snapshot.customerName, 'your property');
-  const tier = firstNonEmpty(input.serviceTier, snapshot.tier, estimateData.serviceTier, 'lawn care');
+// The sections both outlines share, word for word.
+function sharedSections({ modules, customerName, jurisdictionRule }) {
+  return {
+    propertySummaryBody: `This outline is based on the current lawn estimate for ${customerName}. Treatment decisions are finalized by turf condition, weather, product labels, and local rules at the time of service.`,
+    ruleAreaBullet: jurisdictionRule?.jurisdiction_name ? `Rule area: ${jurisdictionRule.jurisdiction_name}` : 'Rule area: to be confirmed',
+    ruleSummaryBullet: jurisdictionRule?.public_summary || 'Local fertilizer rules may affect what nutrient products can be used.',
+    // The third safety bullet repeats the approved safety text's own EPA sentence; the v13 outline drops it.
+    safety: (bulletCount = 3) => makeSection(
+      'safety',
+      'Safety And Product Transparency',
+      approvedModuleText(modules, 'safety_and_label_compliance'),
+      [
+        'After a treatment, follow the technician service report and any product-specific instructions.',
+        'As a general precaution, people and pets should stay off treated areas until the application has dried, unless the label or technician instructions require longer.',
+        'Fertilizers, soil amendments, wetting agents, and biostimulants may not have EPA registration numbers because they are not pesticide products.',
+      ].slice(0, bulletCount),
+    ),
+    notIncluded: makeSection('not_included', 'What This Does Not Include', approvedModuleText(modules, 'what_this_does_not_include')),
+  };
+}
 
+function legacySections({ modules, shared, snapshot, tier, turf, turfText, month, seasonText, seasonBand, visit, restrictedSeasonActive }) {
   const sections = [
     makeSection(
       'property_summary',
       'Property Summary',
-      `This outline is based on the current lawn estimate for ${customerName}. Treatment decisions are finalized by turf condition, weather, product labels, and local rules at the time of service.`,
+      shared.propertySummaryBody,
       [
         `Service area: ${addressSummary(snapshot.address)}`,
         `Service tier: ${tier}`,
@@ -624,21 +828,12 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       'Local Fertilizer-Rule Note',
       approvedModuleText(modules, 'local_fertilizer_rules'),
       [
-        jurisdictionRule?.jurisdiction_name ? `Rule area: ${jurisdictionRule.jurisdiction_name}` : 'Rule area: to be confirmed',
+        shared.ruleAreaBullet,
         restrictedSeasonActive ? 'Restricted-season logic is active for this month.' : 'Restricted-season logic is not active for this month.',
-        jurisdictionRule?.public_summary || 'Local fertilizer rules may affect what nutrient products can be used.',
+        shared.ruleSummaryBullet,
       ],
     ),
-    makeSection(
-      'safety',
-      'Safety And Product Transparency',
-      approvedModuleText(modules, 'safety_and_label_compliance'),
-      [
-        'After a treatment, follow the technician service report and any product-specific instructions.',
-        'As a general precaution, people and pets should stay off treated areas until the application has dried, unless the label or technician instructions require longer.',
-        'Fertilizers, soil amendments, wetting agents, and biostimulants may not have EPA registration numbers because they are not pesticide products.',
-      ],
-    ),
+    shared.safety(),
     makeSection(
       'post_service_reports',
       'Post-Service Reports',
@@ -663,7 +858,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
         'GPS-tracked service history for accountability and service review',
       ],
     ),
-    makeSection('not_included', 'What This Does Not Include', approvedModuleText(modules, 'what_this_does_not_include')),
+    shared.notIncluded,
   ];
 
   if (turf.turfType === 'unknown') {
@@ -683,16 +878,149 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       ['Admin confirmation is required before product-specific details are shown.'],
     ));
   }
+  return sections;
+}
+
+// GATE_LAWN_OUTLINE_V13: the one v13 program, drawn where a picture says it faster (owner 2026-10-24):
+// tiles for the program, chips for the month, a year chart, treatment cards that double as its key,
+// and the visit as four steps. Each drawn section keeps text bullets for readers that draw none.
+function v13Sections({ modules, shared, snapshot, turf, month, visit, trackKey, jurisdictionRule }) {
+  const year = v13YearVisual(trackKey, jurisdictionRule);
+  const sections = [
+    makeSection(
+      'property_summary',
+      'Property Summary',
+      shared.propertySummaryBody,
+      [
+        `Service area: ${addressSummary(snapshot.address)}`,
+        turf.turfType === 'unknown' ? 'Turf type: To be confirmed at the first visit' : `Turf type: ${turf.label}`,
+      ],
+    ),
+    makeSection('lawn_program', V13_COPY.programTitle, V13_COPY.programBody, titledLines(V13_COPY.programTiles), { type: 'tiles', items: V13_COPY.programTiles }),
+    makeSection('season_focus', `${MONTHS[month - 1]} Service Focus`, PROGRAM_DETAIL_V13[month]?.whyNow || '', visit ? v13FullOutlineBullets(visit) : [], v13FocusVisual(visit)),
+    makeSection('program_year', V13_COPY.yearTitle, V13_COPY.yearBody, v13YearLines(year), year),
+    makeSection(
+      'treatment_categories',
+      V13_COPY.treatmentsTitle,
+      V13_COPY.treatmentsBody,
+      V13_TREATMENT_CATEGORIES.map((item) => `${item.label}: ${item.reason}`),
+      { type: 'categories', items: V13_TREATMENT_CATEGORIES.map((item) => ({ key: item.key, label: item.label, text: item.reason })) },
+    ),
+    makeSection('typical_visit', 'What A Typical Visit Includes', '', titledLines(V13_COPY.visitSteps), { type: 'steps', items: V13_COPY.visitSteps }),
+    makeSection('local_rules', 'Local Fertilizer-Rule Note', approvedModuleText(modules, 'local_fertilizer_rules'), [shared.ruleAreaBullet, shared.ruleSummaryBullet]),
+    shared.safety(2),
+    makeSection('after_visit', V13_COPY.afterVisitTitle, '', titledLines(V13_COPY.afterVisitTiles), { type: 'tiles', items: V13_COPY.afterVisitTiles }),
+    shared.notIncluded,
+  ];
+
+  if (turf.turfType === 'unknown') {
+    sections.splice(2, 0, makeSection(
+      'grass_to_confirm',
+      'Grass Type To Be Confirmed',
+      approvedModuleText(modules, 'unknown_turf_summary'),
+      [V13_COPY.unknownTurfBullet],
+    ));
+  }
+
+  if (turf.turfType === 'mixed') {
+    sections.splice(2, 0, makeSection(
+      'mixed_turf_caution',
+      'Mixed Turf Requires Confirmation',
+      approvedModuleText(modules, 'mixed_turf_summary'),
+      [V13_COPY.mixedTurfBullet],
+    ));
+  }
+  return sections;
+}
+
+// The two outlines, chosen once per build: the gate-off outline exactly as before, and the v13
+// one (GATE_LAWN_OUTLINE_V13).
+const OUTLINES = Object.freeze({
+  legacy: Object.freeze({
+    contentLibraryVersion: CONTENT_LIBRARY_VERSION,
+    resolveTurf,
+    trackKey: (turfType) => turfType,
+    sections: legacySections,
+    title: (turf) => `Your Waves Lawn Care Program Overview for ${turf.label}`,
+    propertyTurfType: (turf) => turf.label,
+    treatmentCategories: ({ turf, visit, seasonBand }) => buildTreatmentCategories({ turfType: turf.turfType, visit, seasonBand }),
+    productCardReason: (name, visit, turfType) => `${name} appears in the ${visit.month} ${TURF_LABELS[turfType]} protocol as a conditional or seasonal option.`,
+    noProgram: () => false,
+    regenerationTurfType: (packet, snapshot) => packet?.turf_type || snapshot.turfType || null,
+  }),
+  v13: Object.freeze({
+    contentLibraryVersion: V13_CONTENT_LIBRARY_VERSION,
+    resolveTurf: resolveTurfV13,
+    trackKey: v13TrackKey,
+    sections: v13Sections,
+    title: () => V13_COPY.title,
+    propertyTurfType: (turf) => (turf.turfType === 'unknown' ? null : turf.label),
+    treatmentCategories: () => V13_TREATMENT_CATEGORIES.map((item) => ({ ...item })),
+    productCardReason: (name, visit) => `${name} appears in the ${visit.month} lawn program as a conditional or seasonal option.`,
+    noProgram: (turf) => bahiaHasNoProgram(turf.turfType),
+    // Only the staff's own pick: the packet's turf_type may be a grass the old outline guessed.
+    regenerationTurfType: (_packet, snapshot) => snapshot.turfType || null,
+  }),
+});
+
+function outlineVariant() {
+  return outlineV13Live() ? OUTLINES.v13 : OUTLINES.legacy;
+}
+
+// The grass a regenerated outline starts from. The v13 outline keeps only a grass staff picked (the
+// packet's input snapshot) and otherwise re-reads the estimate, so a grass an older outline guessed
+// (the bermudaSuppression flag read as Bermuda) is never carried forward as a pick.
+function regenerationTurfType(packet) {
+  return outlineVariant().regenerationTurfType(packet, packet?.input_snapshot_json || {});
+}
+
+async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
+  const variant = outlineVariant();
+  const estimateData = parseJsonMaybe(estimate.estimate_data || estimate.estimateData) || {};
+  const month = Number(input.month || currentMonthNumber(now));
+  const seasonBand = resolveSeasonBand(month);
+  const modules = await loadApprovedModules(db);
+  const turf = variant.resolveTurf({ estimate, estimateData, input });
+  const jurisdictionId = input.jurisdictionId || resolveJurisdictionId(estimate.address);
+  const jurisdictionRule = await loadFertilizerRule(db, jurisdictionId);
+  const restrictedSeasonActive = isRestrictedSeason(jurisdictionRule, month);
+  const ruleJurisdictionId = jurisdictionRule?.jurisdiction_id || jurisdictionId;
+  const trackKey = variant.trackKey(turf.turfType);
+  const track = protocolTrack(trackKey);
+  const visit = protocolVisitForMonth(trackKey, month);
+  const includeProductCards = input.includeProductCards === true;
+  const productCards = await loadEligibleProductCards(db, { turfType: turf.turfType, visit, includeProductCards, productCardReason: variant.productCardReason });
+  const seasonText = approvedModuleText(modules, SEASON_MODULE_KEYS[seasonBand]);
+  const turfText = approvedModuleText(modules, TURF_MODULE_KEYS[turf.turfType], approvedModuleText(modules, 'unknown_turf_summary'));
+  const snapshot = estimateSnapshot(estimate, estimateData);
+  const customerName = firstNonEmpty(snapshot.customerName, 'your property');
+  const tier = firstNonEmpty(input.serviceTier, snapshot.tier, estimateData.serviceTier, 'lawn care');
+
+  const sections = variant.sections({
+    modules,
+    shared: sharedSections({ modules, customerName, jurisdictionRule }),
+    snapshot,
+    tier,
+    turf,
+    turfText,
+    month,
+    seasonText,
+    seasonBand,
+    visit,
+    restrictedSeasonActive,
+    trackKey,
+    jurisdictionRule,
+  });
 
   const content = {
-    title: `Your Waves Lawn Care Program Overview for ${turf.label}`,
+    title: variant.title(turf),
     intro: 'Based on your estimate, this outline explains how Waves approaches your lawn care program, what we assess each visit, why treatments change by season, and how your service is documented.',
     generatedAt: now.toISOString(),
     detailLevel: input.detailLevel || 'standard',
     property: {
       customerName: snapshot.customerName,
       addressSummary: addressSummary(snapshot.address),
-      turfType: turf.label,
+      turfType: variant.propertyTurfType(turf),
       serviceTier: tier,
     },
     turf: {
@@ -709,14 +1037,14 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       restrictedSeasonActive,
     },
     localRule: {
-      jurisdictionId: jurisdictionRule?.jurisdiction_id || jurisdictionId,
+      jurisdictionId: ruleJurisdictionId,
       jurisdictionName: jurisdictionRule?.jurisdiction_name || null,
       version: jurisdictionRule?.version || null,
       summary: jurisdictionRule?.public_summary || null,
       restrictedSeasonActive,
     },
     sections,
-    treatmentCategories: buildTreatmentCategories({ turfType: turf.turfType, visit, seasonBand }),
+    treatmentCategories: variant.treatmentCategories({ turf, visit, seasonBand }),
     productCards,
     cta: {
       label: snapshot.token ? 'View Estimate' : 'Request Callback',
@@ -724,7 +1052,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
     },
   };
 
-  const validation = validateContent(content, { turfType: turf.turfType, includeProductCards, jurisdictionRule });
+  const validation = validateContent(content, { turfType: turf.turfType, includeProductCards, jurisdictionRule, noProgram: variant.noProgram(turf) });
 
   return {
     estimateData,
@@ -743,7 +1071,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       turfLabel: turf.label,
       seasonBand,
       month,
-      jurisdictionId: jurisdictionRule?.jurisdiction_id || jurisdictionId,
+      jurisdictionId: ruleJurisdictionId,
       restrictedSeasonActive,
       productCardCount: productCards.length,
       validationStatus: validation.status,
@@ -758,7 +1086,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       visit,
       jurisdictionRule,
       templateVersion: TEMPLATE_VERSION,
-      contentLibraryVersion: CONTENT_LIBRARY_VERSION,
+      contentLibraryVersion: variant.contentLibraryVersion,
       productRegistryVersion: PRODUCT_REGISTRY_VERSION,
       protocolVersion: protocolVersion(),
     },
@@ -769,6 +1097,7 @@ module.exports = {
   BANNED_PHRASES,
   CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
+  contentLibraryVersion,
   protocolVersion,
   TEMPLATE_VERSION,
   buildOutline,
@@ -779,6 +1108,7 @@ module.exports = {
   hashNullable,
   hashToken,
   normalizeTurfType,
+  regenerationTurfType,
   renderOutlineHtml,
   resolveJurisdictionId,
   resolveSeasonBand,

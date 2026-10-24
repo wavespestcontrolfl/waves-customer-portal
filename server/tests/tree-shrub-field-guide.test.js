@@ -431,8 +431,34 @@ describe('palm-type table (owner 2026-10-23; every fact from UF/IFAS)', () => {
   test('lethal bronzing column matches the UF PP163 host table', () => {
     const hosts = ['sabal', 'queen', 'christmas', 'pygmy', 'canary', 'date', 'bismarck', 'coconut', 'pindo', 'chinese-fan'];
     for (const key of hosts) expect({ key, lb: byKey[key].lethalBronzing }).toEqual({ key, lb: 'yes' });
-    // Not on UF's 21-species list today.
-    for (const key of ['royal', 'foxtail', 'washingtonia', 'areca']) expect({ key, lb: byKey[key].lethalBronzing }).toEqual({ key, lb: 'not listed' });
+    // Not on UF's 21-species list today, and the note never reads as immune (Codex
+    // memo review 2026-10-24): "not currently listed as a confirmed host".
+    for (const key of ['royal', 'foxtail', 'washingtonia', 'areca']) {
+      expect({ key, lb: byKey[key].lethalBronzing }).toEqual({ key, lb: 'not listed' });
+      expect(byKey[key].note).toMatch(/^Not currently listed as a confirmed host \(UF\)\. /);
+    }
+    expect(JSON.stringify(palmTypes)).not.toMatch(/Not a UF host/);
+  });
+
+  test('a host or a symptom calls for an assessment, never an automatic offer of the preventive', () => {
+    expect(palmTypes.intro).toMatch(/which palms to assess for the lethal bronzing preventive/);
+    expect(palmTypes.intro).toMatch(/Neither one alone is a reason to recommend the preventive/);
+    expect(byKey.other.note).toMatch(/before you assess it for the preventive/);
+    expect(JSON.stringify(palmTypes)).not.toMatch(/\boffer/i);
+  });
+
+  test('feeding goes through the soil first: nutrient injections only for a chronic deficiency (UF EP261)', () => {
+    expect(palmTypes.feedingNote).toMatch(/feeding through the soil first/);
+    expect(palmTypes.feedingNote).toMatch(/except for a chronic deficiency that soil feeding did not correct/);
+    expect(palmTypes.feedingNote).toMatch(/permanent scar/);
+    expect(palmTypes.sources.map(src => src.url)).toContain('https://edis.ifas.ufl.edu/publication/EP261');
+  });
+
+  test('one counting rule: a clump or a multi-trunk palm is one palm, sized by the whole clump', () => {
+    expect(palmTypes.countNote).toMatch(/one palm for each planting spot/);
+    expect(palmTypes.countNote).toMatch(/A clump or a multi-trunk palm .* counts as one palm, whatever the number of trunks/);
+    expect(palmTypes.countNote).toMatch(/canopy of the whole clump/);
+    expect(palmTypes.countNote).toMatch(/Palms planted apart count one each/);
   });
 
   test('says palm type changes neither the plan price nor the fertilizer, and cites UF sources', () => {

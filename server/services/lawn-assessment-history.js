@@ -209,7 +209,22 @@ async function applicableReset({ customerId, propertyId, throughVisitDate, throu
   return null;
 }
 
-async function propertyHistory({ customerId, scope, throughVisitDate, reset, current, pinned = false, rows }, knex = defaultDb()) {
+// Score scale (GATE_LAWN_SCORE_SCALE_V2, owner 2026-10-24, lawn scoring review):
+// NULL is scale 1. Scores on two scales are not comparable, so a history holds
+// one scale only: `scoreScale` when the caller names it (a visit about to be
+// read compares with rows on the scale its read uses), else the current visit's,
+// else the newest row's. A scale change therefore starts the history fresh, like
+// a baseline reset: the since-last lines, trend chart, before/after, baseline,
+// property score, portal card and Last visit box all compare within it. A
+// history with no scale-2 row is returned unchanged.
+const scoreScaleOf = (row) => (Number(row?.score_scale) === 2 ? 2 : 1);
+function sameScoreScale(rows, current, scoreScale) {
+  const named = scoreScale === 1 || scoreScale === 2 ? scoreScale : null;
+  const reference = named ?? (current ? scoreScaleOf(current) : (rows.length ? scoreScaleOf(rows[rows.length - 1]) : null));
+  return reference == null ? rows : rows.filter((row) => scoreScaleOf(row) === reference);
+}
+
+async function propertyHistory({ customerId, scope, throughVisitDate, reset, current, pinned = false, rows, scoreScale }, knex = defaultDb()) {
   const candidates = rows || await assessmentQuery(customerId, knex);
   const eligible = candidates.filter((row) => {
     const visit = resolveVisit(row);
@@ -219,7 +234,7 @@ async function propertyHistory({ customerId, scope, throughVisitDate, reset, cur
       && (!reset?.afterConfirmedOrder || visit.visitDate > reset.boundary
         || (row.history_confirmed_order || row.history_created_order || '') > reset.afterConfirmedOrder);
   });
-  let history = installedRows(eligible, { current, pinned });
+  let history = sameScoreScale(installedRows(eligible, { current, pinned }), current, scoreScale);
   if (current) {
     const index = history.findIndex((row) => row.visit_identity === resolveVisit(current).identity);
     if (index >= 0) history = history.slice(0, index + 1);
@@ -289,10 +304,10 @@ async function historyForReport(service, { assessment, pinned = false } = {}, kn
 
 /** A visit being assessed has no installed current row yet. Its prior context
  * uses the same property/reset scope and excludes every attempt of this visit. */
-async function historyBeforeVisit({ customerId, scheduledService, throughVisitDate }, knex = defaultDb()) {
+async function historyBeforeVisit({ customerId, scheduledService, throughVisitDate, scoreScale }, knex = defaultDb()) {
   const scope = await scopeForAssessment(visitEvidence(customerId, scheduledService), knex);
   const reset = await applicableReset({ customerId, propertyId: scope.propertyId, throughVisitDate }, knex);
-  const rows = (await propertyHistory({ customerId, scope, throughVisitDate, reset }, knex))
+  const rows = (await propertyHistory({ customerId, scope, throughVisitDate, reset, scoreScale }, knex))
     .filter((row) => row.visit_identity !== `visit:${scheduledService?.id}` && row.visit_date < throughVisitDate);
   return { scope, reset, rows, previous: rows[rows.length - 1] || null, baseline: rows[0] || null };
 }
@@ -307,7 +322,7 @@ async function latestForCustomer(customerId, { limit, propertyId } = {}, knex = 
 }
 
 module.exports = {
-  RESOLVER_VERSION, assessmentQuery, resolveVisit, visitEligibility, isEligible,
+  RESOLVER_VERSION, scoreScaleOf, sameScoreScale, assessmentQuery, resolveVisit, visitEligibility, isEligible,
   scopeForAssessment, visitEvidence, installedOrder, installedRows, installedForVisit,
   eligibleVisitIds, restrictVisitHistory, applicableReset, propertyHistory, historyForAssessment, historyForReport, historyBeforeVisit,
   latestForCustomer, progress, historyIdentity,

@@ -1,6 +1,23 @@
 import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { CalendarDays, ClipboardCheck, FileText, MapPin, ShieldCheck, Sprout } from "lucide-react";
+import {
+  Bell,
+  Bug,
+  CalendarDays,
+  ClipboardCheck,
+  Clover,
+  Droplets,
+  FileText,
+  Leaf,
+  MapPin,
+  Microscope,
+  Search,
+  ShieldCheck,
+  Smartphone,
+  SprayCan,
+  Sprout,
+  Target,
+} from "lucide-react";
 import DocumentActionBar from "../components/DocumentActionBar";
 import { useGlassSurface } from "../glass/glass-engine";
 import { PublicStateCard } from "../components/brand";
@@ -40,12 +57,191 @@ function ErrorState({ kind, message, onRetry }) {
   );
 }
 
+// The step and tile icon keys a v13 outline section draws with (server/services/lawn-service-outline.js,
+// GATE_LAWN_OUTLINE_V13). An unknown key draws no icon; its text still shows.
+const VISUAL_ICONS = {
+  inspection: Search,
+  feeding: Sprout,
+  barrier: ShieldCheck,
+  micros: Leaf,
+  weeds: Clover,
+  insects: Bug,
+  disease: Microscope,
+  dry_spots: Droplets,
+  report: FileText,
+  whole_lawn: SprayCan,
+  spots: Target,
+  prevent: ShieldCheck,
+  decide: ClipboardCheck,
+  treat: SprayCan,
+  reminders: Bell,
+  portal: Smartphone,
+  arrival: MapPin,
+};
+
+function VisualIcon({ name, size = 18, className = "" }) {
+  const Icon = VISUAL_ICONS[name];
+  return Icon ? <Icon size={size} strokeWidth={1.75} aria-hidden="true" className={className} /> : null;
+}
+
+function IconBadge({ name, size = 18 }) {
+  return (
+    <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-waves-blue-light text-waves-blue-deeper">
+      <VisualIcon name={name} size={size} />
+    </span>
+  );
+}
+
+function TilesVisual({ items = [] }) {
+  return (
+    <ul className="mt-4 grid gap-3 sm:grid-cols-2">
+      {items.map((tile) => (
+        <li key={tile.title} data-glass="soft" className="flex gap-3 rounded-md border border-zinc-200 bg-surface-page p-4">
+          <IconBadge name={tile.icon} size={20} />
+          <span>
+            <span className="block text-base font-semibold text-waves-blue-deeper">{tile.title}</span>
+            <span className="mt-1 block text-base leading-6 text-slate-600">{tile.text}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ChipRow({ heading, items, tone }) {
+  if (!items.length) return null;
+  const chipClass = tone === "main"
+    ? "bg-waves-blue-light font-semibold text-waves-blue-deeper"
+    : "border border-zinc-300 bg-white font-medium text-slate-700";
+  return (
+    <div>
+      <p className="text-sm font-semibold uppercase tracking-wide text-zinc-500">{heading}</p>
+      <ul className="mt-2 flex flex-wrap gap-2">
+        {items.map((chip) => (
+          <li key={chip.key} className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm ${chipClass}`}>
+            <VisualIcon name={chip.key} size={16} />
+            {chip.label}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ChipsVisual({ items = [], note }) {
+  return (
+    <div className="mt-4 space-y-4">
+      <ChipRow heading="This month's step" items={items.filter((chip) => chip.tier === "main")} tone="main" />
+      <ChipRow heading="As needed" items={items.filter((chip) => chip.tier !== "main")} tone="as_needed" />
+      {note && <p className="text-sm leading-6 text-slate-500">{note}</p>}
+    </div>
+  );
+}
+
+function YearVisual({ months = [], labels = {}, limitLabel }) {
+  // The key lists the steps the chart uses, in the treatment cards' order.
+  const usedSteps = new Set(months.flatMap((m) => [...m.main, ...m.asNeeded]));
+  const used = Object.keys(labels).filter((step) => usedSteps.has(step));
+  return (
+    <div className="mt-4">
+      <ol className="grid list-none grid-cols-2 gap-2 pl-0 sm:grid-cols-3 md:grid-cols-4">
+        {months.map((m) => (
+          <li
+            key={m.month}
+            data-limited={m.limited ? "true" : undefined}
+            className={`rounded-md border p-3 ${m.limited ? "border-waves-gold/40 bg-waves-gold-light" : "border-zinc-200 bg-white"}`}
+          >
+            <p className="text-sm font-bold uppercase tracking-wide text-waves-blue-deeper">{m.label}</p>
+            <ul className="mt-2 space-y-1">
+              {m.main.map((step) => (
+                <li key={step} className="flex items-center gap-2 text-sm font-semibold text-waves-blue-deeper">
+                  <VisualIcon name={step} size={16} />
+                  {labels[step] || step}
+                </li>
+              ))}
+            </ul>
+            {m.asNeeded.length > 0 && (
+              <p className="mt-2 flex flex-wrap items-center gap-1.5 text-sm text-slate-500">
+                <span>As needed</span>
+                {m.asNeeded.map((step) => (
+                  <span key={step} title={labels[step] || step} className="inline-flex">
+                    <VisualIcon name={step} size={16} />
+                    <span className="sr-only">{labels[step] || step}</span>
+                  </span>
+                ))}
+              </p>
+            )}
+          </li>
+        ))}
+      </ol>
+      <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-sm text-slate-600">
+        {used.map((step) => (
+          <li key={step} className="inline-flex items-center gap-1.5">
+            <VisualIcon name={step} size={16} className="text-waves-blue-deeper" />
+            {labels[step] || step}
+          </li>
+        ))}
+        {limitLabel && (
+          <li className="inline-flex items-center gap-1.5">
+            <span aria-hidden="true" className="h-4 w-4 rounded-sm border border-waves-gold bg-waves-gold-light" />
+            {limitLabel}
+          </li>
+        )}
+      </ul>
+    </div>
+  );
+}
+
+function StepsVisual({ items = [] }) {
+  return (
+    <ol className="mt-4 grid list-none gap-3 pl-0 sm:grid-cols-2">
+      {items.map((step, index) => (
+        <li key={step.title} data-glass="soft" className="rounded-md border border-zinc-200 bg-surface-page p-4">
+          <div className="flex items-center gap-2 text-waves-blue-deeper">
+            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-waves-blue-deeper text-sm font-bold text-white">{index + 1}</span>
+            <VisualIcon name={step.icon} size={18} />
+            <span className="text-base font-semibold">{step.title}</span>
+          </div>
+          <p className="mt-2 text-base leading-6 text-slate-600">{step.text}</p>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function CategoriesVisual({ items = [] }) {
+  return (
+    <ul className="mt-4 grid gap-3 sm:grid-cols-2">
+      {items.map((item) => (
+        <li key={item.key} className="flex gap-3 rounded-md border border-zinc-200 bg-white p-4">
+          <IconBadge name={item.key} />
+          <span>
+            <span className="block text-base font-semibold text-waves-blue-deeper">{item.label}</span>
+            <span className="mt-1 block text-base leading-6 text-slate-600">{item.text}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+const SECTION_VISUALS = {
+  tiles: TilesVisual,
+  chips: ChipsVisual,
+  year: YearVisual,
+  steps: StepsVisual,
+  categories: CategoriesVisual,
+};
+
 function Section({ section }) {
+  // A v13 outline section may carry a drawing; its bullets are the text for readers that draw none.
+  const Visual = SECTION_VISUALS[section.visual?.type];
   return (
     <section className="border-b border-zinc-200 py-6 last:border-b-0">
       <h2 className="text-xl font-semibold text-waves-blue-deeper">{section.title}</h2>
-      <p className="mt-2 text-base leading-7 text-slate-600">{section.body}</p>
-      {Array.isArray(section.bullets) && section.bullets.length > 0 && (
+      {(section.body || !Visual) && <p className="mt-2 text-base leading-7 text-slate-600">{section.body}</p>}
+      {Visual && <Visual {...section.visual} />}
+      {!Visual && Array.isArray(section.bullets) && section.bullets.length > 0 && (
         <ul className="mt-4 grid gap-2 text-sm leading-6 text-slate-600 md:grid-cols-2">
           {section.bullets.map((bullet, index) => (
             <li key={`${section.key}-${index}`} data-glass="soft" className="flex gap-2 rounded-md border border-zinc-200 bg-surface-page p-3">

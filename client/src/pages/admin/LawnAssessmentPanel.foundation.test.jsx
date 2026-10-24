@@ -137,6 +137,67 @@ it("keeps the photo analysis, score adjustment, and confirmation payload intact"
   });
 });
 
+it("score scale 2: a Condition the AI left blank is filled here and posted; an AI-rated one is not", async () => {
+  class FixtureFileReader {
+    readAsDataURL() {
+      this.onload({ target: { result: "data:image/jpeg;base64,cGhvdG8=" } });
+    }
+  }
+  class FixtureImage {
+    set src(_value) {
+      this.width = 800;
+      this.height = 600;
+      this.onload();
+    }
+  }
+  vi.stubGlobal("FileReader", FixtureFileReader);
+  vi.stubGlobal("Image", FixtureImage);
+  const run = async (aiCondition) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, options = {}) => {
+        if (url.endsWith("/admin/lawn-assessment/customers")) return response({ customers: [customer] });
+        if (url.endsWith("/admin/lawn-assessment/assess")) {
+          return response({
+            assessment: { id: "assessment-2", score_scale: 2 },
+            adjustedScores: {
+              turf_density: 82, weed_suppression: 78, color_health: 85,
+              fungus_control: 95, thatch_level: 60, stress_damage: aiCondition,
+            },
+            observations: "Synthetic lawn observations",
+            season: "wet",
+            isBaseline: false,
+            divergenceFlags: [],
+          });
+        }
+        if (url.endsWith("/admin/lawn-assessment/confirm")) return response({ assessment: { id: "assessment-2", confirmed: true } });
+        throw new Error(`Unexpected request: ${options.method || "GET"} ${url}`);
+      }),
+    );
+    const view = render(<LawnAssessmentPanel embedded />);
+    fireEvent.click(await screen.findByText("Test Customer"));
+    fireEvent.change(view.container.querySelector('input[type="file"]'), {
+      target: { files: [new File(["photo"], "lawn.jpg", { type: "image/jpeg" })] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Analyze 1 Photo with AI" }));
+    expect(await screen.findByText(/AI Scorecard/)).toBeInTheDocument();
+    expect(screen.getByText("Condition")).toBeInTheDocument();
+    if (aiCondition == null) fireEvent.change(screen.getByLabelText("Enter Condition"), { target: { value: "82" } });
+    else expect(screen.queryByLabelText("Enter Condition")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Scores" }));
+    let body;
+    await waitFor(() => {
+      const confirmCall = fetch.mock.calls.find(([url]) => String(url).endsWith("/admin/lawn-assessment/confirm"));
+      expect(confirmCall).toBeTruthy();
+      body = JSON.parse(confirmCall[1].body);
+    });
+    cleanup();
+    return body.adjustedScores;
+  };
+  expect(await run(null)).toMatchObject({ stress_damage: 82, thatch_level: 60 });
+  expect(await run(85)).not.toHaveProperty("stress_damage");
+});
+
 it("uses comfortable shared controls for turf profile editing and preserves save data", async () => {
   vi.stubGlobal(
     "fetch",

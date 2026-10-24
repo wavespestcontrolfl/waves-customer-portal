@@ -953,6 +953,57 @@ async function lookupCountyParcelAttributesById(county, parcelId, options = {}) 
   }
 }
 
+// The roll's lots at one house number on one street: every parcel whose situs
+// starts with the number and holds the street word ("104 %SAMPLE%"), parsed
+// as a point lookup's parcel (county set, no geometry). For the neighborhood
+// naming when a stored pin sits on another lot (GATE_NEIGHBORHOOD_ADDRESS_LOOKUP);
+// the caller proves which lot is the home. One LIKE and no AND/OR (Manatee's
+// WAF rejects both, live 10-02); the number is digits only and the word
+// [A-Z0-9] only, so no quoting is reachable. Resolves to [] for no lot, or for
+// a page-capped answer (the home's lot could be past the cap), and THROWS when
+// the county cannot answer, so a caller never reads an outage as "no lot".
+const ADDRESS_LOTS_PAGE = 200;
+async function lookupCountyParcelsByAddress(county, { houseNumber, streetWord }, options) {
+  if (isDisabled()) throw new Error('county parcel GIS disabled');
+  const layer = COUNTY_LAYERS[county];
+  const number = String(houseNumber);
+  const word = String(streetWord || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!layer || !/^\d{1,7}$/.test(number) || word.length < 2) return [];
+  const [field] = SITUS_QUERY_FIELDS[county];
+
+  const params = new URLSearchParams({
+    f: 'json',
+    where: `UPPER(${field}) LIKE '${number} %${word}%'`,
+    outFields: layer.outFields.join(','),
+    returnGeometry: 'false',
+    resultRecordCount: String(ADDRESS_LOTS_PAGE),
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMsFor(options));
+  const t0 = Date.now();
+  try {
+    const resp = await fetch(`${layer.url}?${params.toString()}`, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`${county} address GIS ${resp.status}`);
+    // An answer that is not an ArcGIS object throws here too: an outage.
+    const data = await resp.json();
+    if (data.error) throw new Error(`${county} address GIS error: ${data.error.message || data.error.code}`);
+    const truncated = Boolean(data.exceededTransferLimit);
+    const lots = truncated ? [] : (data.features || [])
+      .map((f) => ({ ...layer.parse(ciAttr(f.attributes)), county }))
+      .filter((lot) => lot.parcelId);
+    // County + counts only — no address values in logs (PII rule).
+    logger.info('[county-parcel-gis] address lots query', { county, lots: lots.length, truncated, elapsedMs: Date.now() - t0 });
+    return lots;
+  } catch (err) {
+    logger.warn('[county-parcel-gis] address lots query failed', {
+      county, aborted: err.name === 'AbortError', error: err.message, elapsedMs: Date.now() - t0,
+    });
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // All situs strings on the county roll whose address contains the given
 // street text ("TOBERMORY" → every parcel on Tobermory Way, including
 // multi-situs paired-villa rows). Returns { situs, zips, truncated } — zips
@@ -1238,6 +1289,7 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision, lotSqft 
 module.exports = {
   lookupCountyParcelByPoint,
   lookupSarasotaPlatNames,
+  lookupCountyParcelsByAddress,
   // The kill switch, so the neighborhood pass can tell "GIS off" from a miss.
   countyParcelGisDisabled: isDisabled,
   unitParcelFromAggregate,

@@ -28,7 +28,7 @@ postgres('SMS compliance history identity and delivery evidence', () => {
       CREATE TEMP TABLE sms_log (id uuid, direction text, from_phone text, to_phone text, status text, message_type text, metadata jsonb);
       CREATE TEMP TABLE conversations (id uuid PRIMARY KEY, contact_phone text);
       CREATE TEMP TABLE messages (id uuid, conversation_id uuid, channel text, direction text, delivery_status text, message_type text, twilio_sid text, metadata jsonb);
-      CREATE TEMP TABLE messaging_suppression (id uuid, phone text, active boolean);
+      CREATE TEMP TABLE messaging_suppression (phone text PRIMARY KEY, active boolean);
     `);
   });
   afterAll(async () => { await mockPg?.rollback(); await database?.destroy(); });
@@ -57,7 +57,7 @@ postgres('SMS compliance history identity and delivery evidence', () => {
     expect(await hasOutboundHistory(known)).toBe(true);
     expect(await hasOutboundHistory(stranger)).toBe(false);
     await mockPg('messages').del();
-    await mockPg('messaging_suppression').insert({ id: randomUUID(), phone: known, active: true });
+    await mockPg('messaging_suppression').insert({ phone: known, active: true });
     expect(await hasOutboundHistory(known)).toBe(true);
     expect(await hasOutboundHistory(stranger)).toBe(false);
   });
@@ -88,7 +88,7 @@ postgres('SMS compliance history identity and delivery evidence', () => {
     await legacy('+19415550199');
     await unified('+19415550199');
     expect(await hasOutboundHistory('+19415550199')).toBe(false);
-    await mockPg('messaging_suppression').insert({ id: randomUUID(), phone: '+19415550199', active: true });
+    await mockPg('messaging_suppression').insert({ phone: '+19415550199', active: true });
     expect(await hasOutboundHistory('+19415550199')).toBe(true);
   });
 

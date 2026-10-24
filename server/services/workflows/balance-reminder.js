@@ -760,42 +760,53 @@ class BalanceReminder {
     return result.deliveredNow.length > 0;
   }
 
-  async latePaymentCheck() {
-    // Retired (dunning unification, owner ruling 2026-09-27) — but ONLY
-    // together with GATE_DUNNING_LADDER_90: the Day 60/90 steps that
-    // replace this account-level 7/14/30/60/90 check exist only under the
-    // ladder gate (Codex P2), so retiring latePaymentCheck while the ladder
-    // gate is unset would drop every 60/90-day reminder with nothing
-    // replacing it. dailyCheck() has its own, separate coupling above.
-    if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
-      // An invoice with no follow-up sequence also needs an owner: the
-      // late-payment checker while it runs, or orphan adoption once it
-      // retires (Codex #5294 r1 P1). Otherwise this stays the fallback.
-      const InvoiceFollowUps = require('../invoice-followups');
-      const sequencelessOwned = !InvoiceFollowUps.latePaymentCheckerRetiredLive()
-        || InvoiceFollowUps.adoptOrphanInvoicesLive();
-      // Legacy `unpaid`-status invoices are covered by neither the checker
-      // nor adoption (both read sent/viewed/overdue), so while any exists
-      // this stays the owner (Codex #5294 r2 P1; prod had none 2026-09-28).
-      // An unreadable count keeps it running.
-      let legacyUnpaidOpen = true;
-      try {
-        legacyUnpaidOpen = !!(await db('invoices').where({ status: 'unpaid' }).first('id'));
-      } catch (err) {
-        logger.warn(`[balance-reminders] legacy unpaid-invoice check failed, latePaymentCheck keeps running: ${err.message}`);
-      }
-      if (legacyUnpaidOpen) {
-        logger.warn('[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: legacy unpaid-status invoices still need it');
-      } else if (process.env.GATE_DUNNING_LADDER_90 === 'true' && sequencelessOwned) {
-        logger.info('[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js (or orphan adoption) own these');
-        return;
-      }
-      if (!legacyUnpaidOpen) {
-        logger.warn(process.env.GATE_DUNNING_LADDER_90 === 'true'
-          ? '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live'
-          : '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
-      }
+  // Whether latePaymentCheck() is retired right now: the one decision it and
+  // the quiet-invoice list (quiet-overdue-invoices.js, which must not call an
+  // invoice quiet while this account-level check can still remind about it)
+  // both read. `log: false` reads it without this check's own log lines.
+  //
+  // Retired (dunning unification, owner ruling 2026-09-27) — but ONLY
+  // together with GATE_DUNNING_LADDER_90: the Day 60/90 steps that
+  // replace this account-level 7/14/30/60/90 check exist only under the
+  // ladder gate (Codex P2), so retiring latePaymentCheck while the ladder
+  // gate is unset would drop every 60/90-day reminder with nothing
+  // replacing it. dailyCheck() has its own, separate coupling above.
+  async latePaymentCheckRetired({ log = true } = {}) {
+    if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF !== 'true') return false;
+    // An invoice with no follow-up sequence also needs an owner: the
+    // late-payment checker while it runs, or orphan adoption once it
+    // retires (Codex #5294 r1 P1). Otherwise this stays the fallback.
+    const InvoiceFollowUps = require('../invoice-followups');
+    const sequencelessOwned = !InvoiceFollowUps.latePaymentCheckerRetiredLive()
+      || InvoiceFollowUps.adoptOrphanInvoicesLive();
+    // Legacy `unpaid`-status invoices are covered by neither the checker
+    // nor adoption (both read sent/viewed/overdue), so while any exists
+    // this stays the owner (Codex #5294 r2 P1; prod had none 2026-09-28).
+    // An unreadable count keeps it running.
+    let legacyUnpaidOpen = true;
+    try {
+      legacyUnpaidOpen = !!(await db('invoices').where({ status: 'unpaid' }).first('id'));
+    } catch (err) {
+      if (log) logger.warn(`[balance-reminders] legacy unpaid-invoice check failed, latePaymentCheck keeps running: ${err.message}`);
     }
+    if (legacyUnpaidOpen) {
+      if (log) logger.warn('[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: legacy unpaid-status invoices still need it');
+      return false;
+    }
+    if (process.env.GATE_DUNNING_LADDER_90 === 'true' && sequencelessOwned) {
+      if (log) logger.info('[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js (or orphan adoption) own these');
+      return true;
+    }
+    if (log) {
+      logger.warn(process.env.GATE_DUNNING_LADDER_90 === 'true'
+        ? '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live'
+        : '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
+    }
+    return false;
+  }
+
+  async latePaymentCheck() {
+    if (await this.latePaymentCheckRetired()) return;
     const customers = await db("customers")
       .where({ active: true })
       .whereNull("deleted_at")

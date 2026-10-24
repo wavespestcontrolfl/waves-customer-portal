@@ -491,8 +491,8 @@ describe('Step 3 keeps a spoken-number match suggest-only', () => {
   });
 
   test('a deliberate customer-less result is not a customer_creation_failed, and the lead path stays unclaimed-only', () => {
-    expect(src).toMatch(/const customerExpected = [^\n]*&& !spokenNumberSuggested\);/);
-    expect(src).toContain('unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested)');
+    expect(src).toMatch(/const customerExpected = [^\n]*&& !spokenNumberSuggested && !familyCardHold\);/);
+    expect(src).toContain('unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested || familyCardHold)');
   });
 
   test('no bespoke card type is left behind', () => {

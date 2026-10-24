@@ -93,7 +93,9 @@ const atLeast = (level, minimum) => level !== null && SEVERITY_RANK[level] >= SE
  *     WORST level across photos counts, the same worst-stressor rule the photo merge uses for
  *     worst_fungal_activity (a trouble-spot photo must survive).
  * Weed coverage is the confirmed score column (the technician may have edited it): 100 minus the
- * stored weed suppression, else the run's raw coverage. Drought stress is the composite's own
+ * stored weed suppression, else the run's raw coverage. A score-scale-2 row (GATE_LAWN_SCORE_SCALE_V2,
+ * owner 2026-10-24) has no coverage: its weed score is a 0-100 rating, so it carries `weedControl`
+ * (the confirmed rating) and `weedCoverage` is null. Drought stress is the composite's own
  * field, else the same severities. A level the model could not determine ('unknown') is no signal.
  * `assessment` is the lawn_assessments row, `run` its lawn_assessment_runs row or null. Pure.
  */
@@ -102,7 +104,9 @@ function signalsFromAssessment(assessment, run = null) {
   const severities = parseJson(run?.severities);
   const worstRead = worstReader(assessment);
   return {
-    weedCoverage: weedCoverageOf(assessment, composite, parseJson(run?.scores_raw)),
+    ...(Number(assessment?.score_scale) === 2
+      ? { weedCoverage: null, weedControl: numberOrNull(assessment?.weed_suppression) ?? numberOrNull(composite?.weed_suppression) }
+      : { weedCoverage: weedCoverageOf(assessment, composite, parseJson(run?.scores_raw)) }),
     fungus: levelOf(severities?.fungal_activity?.level) ?? worstRead('fungal_activity'),
     insect: levelOf(severities?.insect_damage?.level) ?? worstRead('insect_damage'),
     drought: levelOf(composite?.drought_stress) ?? levelOf(severities?.drought_stress?.level) ?? worstRead('drought_stress'),
@@ -519,10 +523,11 @@ function buildCards({ signals, month, offers = {}, weeds = null, troubleAreas = 
 // One rule per card kind: the input is { s: signals, month, offers, weeds, troubleAreas }; the answer
 // is the card or null.
 function weedsCard({ s, weeds }) {
-  if (!weeds || s.weedCoverage === null || s.weedCoverage === undefined || s.weedCoverage < WEED_MIN_PERCENT) return null;
+  const finding = weedFinding(s);
+  if (!weeds || !finding) return null;
   return cardFor('weeds', {
     title: 'Weed spots',
-    finding: `Photos show weeds on about ${Math.round(s.weedCoverage)}% of the lawn.`,
+    finding,
     detail: weeds.names.join(', '),
     note: weeds.note,
     productIds: weeds.productIds,
@@ -531,6 +536,17 @@ function weedsCard({ s, weeds }) {
     actionLabel: 'Add weed spots',
     ...(weeds.byPlace ? { byPlace: weeds.byPlace } : {}),
   });
+}
+
+// The weed card's finding, or null when weeds are below the card's line. Scale 1: the weed share
+// of the lawn, from WEED_MIN_PERCENT. Scale 2 (`weedControl`, a 0-100 rating where 90 is "a few
+// scattered weeds"): the same line, 100 minus WEED_MIN_PERCENT or lower, named as the rating.
+function weedFinding(s) {
+  if (s.weedControl !== null && s.weedControl !== undefined) {
+    return s.weedControl <= 100 - WEED_MIN_PERCENT ? `Weed control scored ${Math.round(s.weedControl)} today.` : null;
+  }
+  if (s.weedCoverage === null || s.weedCoverage === undefined || s.weedCoverage < WEED_MIN_PERCENT) return null;
+  return `Photos show weeds on about ${Math.round(s.weedCoverage)}% of the lawn.`;
 }
 
 function fungusCard({ s, offers, troubleAreas }) {

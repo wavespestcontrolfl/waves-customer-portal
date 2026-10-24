@@ -58,7 +58,7 @@ function PalmTypes({ palmTypes, labelClass }) {
   const cells = [['lethalBronzing', columns.lethalBronzing], ['nutrients', columns.nutrients], ['selfCleaning', columns.selfCleaning], ['note', columns.note]];
   return <section aria-label="Palm types" className={`mt-5 ${rule} pt-4`} data-testid="palm-types">
     <h3 className={`${labelClass} mb-2`}>{palmTypes.title}</h3>
-    <div className="mb-3 space-y-2"><p>{palmTypes.intro}</p><p className="font-medium">{palmTypes.planNote}</p></div>
+    <div className="mb-3 space-y-2"><p>{palmTypes.intro}</p><p className="font-medium">{palmTypes.planNote}</p><p>{palmTypes.countNote}</p><p>{palmTypes.feedingNote}</p></div>
     <table className="w-full border-collapse text-left">
       <thead className="hidden md:table-header-group">
         <tr className="text-14 text-ink-tertiary">
