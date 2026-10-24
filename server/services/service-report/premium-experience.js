@@ -5,6 +5,7 @@ const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { resolveLabel } = require('../pest-pressure/label');
 const { DEFAULT_CONFIG } = require('../pest-pressure/config');
 const { detectServiceLine } = require('./service-line-configs');
+const { buildRainOutlookLine } = require('./pest-rain-outlook');
 
 // Legacy service_records rows can have a null service_line while
 // service_type still identifies a lawn visit — defaulting them to 'pest'
@@ -620,7 +621,7 @@ function formatWeatherFacts(conditions = {}) {
   ].filter(Boolean).join(' · ');
 }
 
-function buildWeatherCallContext({ record } = {}) {
+function buildWeatherCallContext({ record, applications = [] } = {}) {
   const conditions = {
     ...parseJsonObject(record?.conditions),
     ...parseJsonObject(record?.weather_data),
@@ -630,12 +631,17 @@ function buildWeatherCallContext({ record } = {}) {
   const rain = Number(conditions.rain_24h_in);
   let headline = 'Weather call';
   let body = 'Conditions were documented at application time for this service record.';
+  // A body that only says the weather was written down. The rain outlook
+  // takes its place (owner page 2026-10-24: it "replaces 'Wind noted… noted
+  // with today's record'"); a body that states a fact keeps it in front.
+  let recordOnlyBody = true;
   if (Number.isFinite(rain) && rain > 0.25) {
     // Facts only — this context sees recorded weather, not treatment
     // decisions, so it must not claim the technician changed products or
     // timing because of the rain (codex P2 #3038).
     headline = 'Recent rainfall noted.';
     body = 'Measurable rain fell in the 24 hours before this visit and is part of today’s service record.';
+    recordOnlyBody = false;
   } else if (Number.isFinite(wind) && wind > 15) {
     // Facts only — this context sees recorded weather, not treatment
     // decisions, so it must not claim adjustments were made (same rule as
@@ -651,10 +657,20 @@ function buildWeatherCallContext({ record } = {}) {
     // reports it sits beside a WEEKLY rain figure — bare "low rainfall"
     // would contradict a wet week (codex P2 #3093 r7).
     body = 'Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
+    recordOnlyBody = false;
   }
+  // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour outlook, when it has something
+  // supported to say, takes the place of a record-only body or follows a
+  // factual one; null leaves today's card. The headline stays: it reads the
+  // visit's weather, and the page's icon reads it.
+  const rainOutlookLine = buildRainOutlookLine({
+    outlook: parseJsonObject(record?.structured_notes).rainOutlook,
+    serviceLine: resolveServiceLine(record),
+    applications,
+  });
   return {
     headline,
-    body,
+    body: rainOutlookLine ? (recordOnlyBody ? rainOutlookLine : `${body} ${rainOutlookLine}`) : body,
     factsLine: formatWeatherFacts(conditions),
     sourceLabel: cleanText(conditions.source),
     sourceKeys: ['condition'],
@@ -737,7 +753,7 @@ async function buildPremiumExperienceContext({
     findings: rows.findings,
     applications: rows.applications,
   });
-  const weatherCall = buildWeatherCallContext({ record });
+  const weatherCall = buildWeatherCallContext({ record, applications: rows.applications });
   const pressureReceipt = buildPressureReceiptContext({
     pressureTrend: dynamicContext.pressureTrend,
     visitRows: rows.visitRows,
@@ -779,6 +795,7 @@ module.exports = {
       zoneIds: parseJsonArray(app.zoneIds || app.zone_ids).map(String),
       area: cleanText(app.area || app.application_area),
       targets: (Array.isArray(app.targets) ? app.targets : parseJsonArray(app.targets)).map(normalizeKey).filter(Boolean),
+      activeIngredient: cleanText(app.activeIngredient || app.active_ingredient),
     }));
     const normalizedZones = zones.map((zone) => ({
       id: String(zone.id),
@@ -816,7 +833,7 @@ module.exports = {
         findings: normalizedFindings,
         applications: normalizedApplications,
       }),
-      weatherCall: buildWeatherCallContext({ record }),
+      weatherCall: buildWeatherCallContext({ record, applications: normalizedApplications }),
       pressureReceipt: buildPressureReceiptContext({
         pressureTrend: dynamicContext.pressureTrend,
         visitRows,
