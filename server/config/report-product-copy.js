@@ -29,7 +29,9 @@
  * label itself, so it survives any catalog display-name spelling), read off
  * the applied product's own `epa_reg_number` (report-data.js's
  * `attachApprovedReportProductFacts` already resolves this from the catalog
- * join). Products with no EPA registration (the LESCO surfactant is not a
+ * join). A registration that moved to a new holder keeps its old number and
+ * lists the new one in `movedEpaRegs`: rows applied before the catalog took
+ * the new number carry the old one. Products with no EPA registration (the LESCO surfactant is not a
  * pesticide) match by normalized name only. Every entry ALSO carries an
  * explicit name-alias list as a fallback: a hand-entered service_products
  * row with no product_id never joined the catalog, so it carries no
@@ -195,6 +197,10 @@ const REPORT_PRODUCT_COPY = [
   },
   {
     epaReg: '432-772',
+    // The registration moved to Envu as 101563-6 (2022-12-16); the catalog
+    // carries the new number since 2026-10-24, so rows applied from now on
+    // record it, while older rows keep 432-772.
+    movedEpaRegs: ['101563-6'],
     names: ['delta dust'],
     howItWorks: 'A dust that does not clump or absorb moisture, puffed into wall voids, weep holes and outlets, where pests travel and hide. It keeps working there for months.',
     // 66 distinct pests — registrant specimen label (AgrEvo -> Bayer ->
@@ -227,8 +233,9 @@ const REPORT_PRODUCT_COPY = [
 const BY_EPA_REG = new Map();
 const BY_NAME = new Map();
 for (const entry of REPORT_PRODUCT_COPY) {
-  const reg = normalizeEpaReg(entry.epaReg);
-  if (reg && !BY_EPA_REG.has(reg)) BY_EPA_REG.set(reg, entry);
+  for (const reg of [entry.epaReg, ...(entry.movedEpaRegs || [])].map(normalizeEpaReg)) {
+    if (reg && !BY_EPA_REG.has(reg)) BY_EPA_REG.set(reg, entry);
+  }
   for (const name of entry.names) {
     const key = normalizeProductName(name);
     if (key && !BY_NAME.has(key)) BY_NAME.set(key, entry);
