@@ -22,7 +22,7 @@ const MODELS = require('../../../config/models');
 const REFRESH_AGENT_CONFIG = {
   name: 'waves-content-refresher',
   description: 'Brief-driven refresher for decaying or under-performing existing pages — preserves slug + URL identity',
-  model: MODELS.FLAGSHIP,
+  model: MODELS.CONTENT,
   system: `You are the Waves Pest Control content refresher.
 
 ${HUMAN_PROSE_RULES}

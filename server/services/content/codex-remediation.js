@@ -620,7 +620,7 @@ async function generateFix(markdown, findings, deps = {}, frontmatterFailure = n
   try {
     res = await call({
       laneId: 'codex_remediation',
-      model: MODELS.FLAGSHIP,
+      model: MODELS.CONTENT,
       system: FIX_SYSTEM,
       text: buildFixUserMessage(markdown, findings, frontmatterFailure),
       jsonMode: false,

@@ -83,6 +83,10 @@ const SELECTORS = [
   // the same thinking floor deep.js does and reads past thinking blocks and
   // refusals, so the Opus 5.5 default and the models like it are pickable.
   { key: 'NEWSLETTER', env: 'MODEL_NEWSLETTER', description: 'Newsletter writer + event curation scoring (owner ruling 2026-09-27: Opus 5.5, effort max)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  // deep: true — same rationale as NEWSLETTER above: the websiteContent policy
+  // and the codex remediation fix both go through llm/call.js, and the
+  // content Managed Agents take the model only at registration.
+  { key: 'CONTENT', env: 'MODEL_CONTENT', description: 'Website content writers: blog drafts, Codex content fixes, content agents (owner 2026-10-24: Opus 5.5)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   // lock: the picker's discovery/probing (model-discovery.js) speaks only
   // Anthropic / OpenAI / Gemini text+vision, and Jev is a decision-only model
   // with one pinned catalog version, so the row is read-only here: moving it
@@ -185,6 +189,7 @@ const POLICY_SELECTOR = {
   imageScreen: { primary: 'OPENAI_IMAGE_SCREEN', fallback: 'VISION' },
   voiceJudge: { primary: 'VOICE_JUDGE', fallback: 'OPENAI_REPORT_WRITER' },
   newsletterWriter: { primary: 'NEWSLETTER', fallback: 'OPENAI_BALANCED' },
+  websiteContent: { primary: 'CONTENT', fallback: 'OPENAI_BALANCED' },
 };
 
 // ── Lane refs ─────────────────────────────────────────────────────────
@@ -514,7 +519,7 @@ const LANES = [
   L('review_reply', 'GBP review replies', 'review-reply/drafter.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   L('email_reply', 'Email reply drafting', 'email/email-actions.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   L('invoice_summary', 'Invoice AI summary', 'invoice-ai-summary.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
-  L('blog_draft', 'Blog post drafts', 'content/blog-writer.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
+  L('blog_draft', 'Blog post drafts', 'content/blog-writer.js', 'voice', P('websiteContent', 'primary'), P('websiteContent', 'fallback')),
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max; the admin Compose UI overrides effort to high per-call so an interactive draft cannot hang the request' }),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
@@ -576,7 +581,7 @@ const LANES = [
   L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('ROUTINE'), null, { inbound: true }),
   L('call_commitments', 'Call commitments from transcript', 'call-commitments.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
   L('day_agreement', 'Day-only agreement judge (shadow)', 'day-agreement-shadow.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback'), { inbound: true }),
-  L('codex_remediation', 'Content finding auto-fix', 'content/codex-remediation.js', 'reason', T('FLAGSHIP')),
+  L('codex_remediation', 'Content finding auto-fix', 'content/codex-remediation.js', 'reason', T('CONTENT')),
   L('portal_assistant', 'Customer portal assistant', 'ai-assistant/assistant.js', 'reason', T('FLAGSHIP')),
   L('signup_worker', 'Backlink signup worker', 'backlink-agent/signup-worker.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('form_filler', 'Backlink browser form filler (vision)', 'seo/browser-form-filler.js', 'reason', E('MODEL_SIGNUP_FILLER', T('FLAGSHIP'))),
@@ -604,8 +609,8 @@ const LANES = [
   // ── Managed agents (Anthropic only) ──
   L('agent_bi', 'Weekly BI briefing agent', 'bi-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
   L('agent_lead', 'Lead response agent', 'lead-response-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
-  L('agent_content', 'Content, blog writer, refresh agents', 'content/content-agent-config.js, content/agents/writer-agent-config.js, content/agents/refresh-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
-  L('agent_meta', 'Meta rewriter agent', 'content/agents/meta-rewriter-config.js', 'agents', T('WORKHORSE'), null, { lock: AGENT_LOCK }),
+  L('agent_content', 'Content, blog writer, refresh agents', 'content/content-agent-config.js, content/agents/writer-agent-config.js, content/agents/refresh-agent-config.js', 'agents', T('CONTENT'), null, { lock: AGENT_LOCK }),
+  L('agent_meta', 'Meta rewriter agent', 'content/agents/meta-rewriter-config.js', 'agents', T('CONTENT'), null, { lock: AGENT_LOCK }),
   L('agent_backlink', 'Backlink strategy agent', 'seo/backlink-strategy-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
   L('agent_assistant', 'Customer assistant (managed)', 'ai-assistant/managed-agent-config.js', 'agents', T('FLAGSHIP'), null, { lock: AGENT_LOCK }),
 
