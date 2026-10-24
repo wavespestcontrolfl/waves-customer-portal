@@ -199,13 +199,29 @@ export function daysSinceTreatment(initialDate, issueDate) {
   return Math.round((Date.UTC(b.y, b.m - 1, b.d) - Date.UTC(a.y, a.m - 1, a.d)) / 86400000);
 }
 
+// The latest usable FDACS-13692 notice signed on or before the treatment date
+// and the contract basis date (Rule 5E-14.105(1)); the server picks the same
+// one. `notices` is the consumer-notices list (signedOn MM/DD/YYYY, newest
+// first). Without a real basis date yet, only the treatment date limits it.
+export function consumerNoticeOnFile(notices, initialDate, basisDate) {
+  const limits = [parseUsDate(initialDate), parseUsDate(basisDate)].filter(Boolean).map(dateKey);
+  if (!limits.length) return null;
+  const limit = Math.min(...limits);
+  return (notices || []).find((notice) => {
+    const day = notice.usable && parseUsDate(notice.signedOn);
+    return day && dateKey(day) <= limit;
+  }) || null;
+}
+
 // What blocks Create in the issue dialog: every office field filled, both
 // dates real and on or before treatment, and a plan with a treatment date.
-export function warrantyIssueReadiness(base, office) {
+// With a notice on file the typed FDACS-13692 date is not asked for.
+export function warrantyIssueReadiness(base, office, { noticeOnFile = false } = {}) {
   const initial = base.treatment.initial_date;
   const basisProblem = text(office.basisDate) ? basisDateProblem(office.basisDate, initial) : '';
-  const noticeProblem = text(office.noticeDate) ? basisDateProblem(office.noticeDate, initial) : '';
-  const filled = Object.values(office).every((v) => text(v));
+  const noticeProblem = !noticeOnFile && text(office.noticeDate) ? basisDateProblem(office.noticeDate, initial) : '';
+  const required = noticeOnFile ? Object.fromEntries(Object.entries(office).filter(([field]) => field !== 'noticeDate')) : office;
+  const filled = Object.values(required).every((v) => text(v));
   return {
     basisProblem,
     noticeProblem,
