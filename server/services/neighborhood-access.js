@@ -241,7 +241,7 @@ async function resolvePropertyNeighborhood(property, { conn = db, lookup = looku
     if (!claiming) return q;
     const open = q.where((w) => w.whereNull('neighborhood_id').orWhere('neighborhood_source', 'caller'));
     return recheck
-      ? open.whereNotNull('neighborhood_checked_at').where('county_subdivision', property.county_subdivision)
+      ? open.whereNotNull('neighborhood_checked_at').whereRaw('county_subdivision IS NOT DISTINCT FROM ?', [property.county_subdivision ?? null])
       : open.whereNull('neighborhood_checked_at');
   };
   const notOffice = (q) => q.where((w) => w.whereNull('neighborhood_source').orWhereNot('neighborhood_source', 'office'));

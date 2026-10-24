@@ -85,10 +85,12 @@ async function countyPass({ lookup, platLookup, nowIso }) {
   const rows = await liveHomes()
     .whereRaw(`NOT (${NO_PIN_SQL})`)
     .where((w) => w.whereNull('p.neighborhood_id').orWhere('p.neighborhood_source', 'caller'))
-    .where((w) => w.whereNull('p.neighborhood_checked_at').orWhereRaw(NUMERIC_PLAT_SQL))
+    // Never checked, a bare plat number to read, or a caller link the county
+    // may yet confirm or correct (asked again once a day).
+    .where((w) => w.whereNull('p.neighborhood_checked_at').orWhereRaw(NUMERIC_PLAT_SQL).orWhere('p.neighborhood_source', 'caller'))
     .whereRaw(COUNTY_DUE_SQL, [nowIso])
-    // Never-checked homes first, then the plat-number re-checks; within each,
-    // the one tried longest ago.
+    // Never-checked homes first, then the re-checks; within each, the one
+    // tried longest ago.
     .orderByRaw(`(p.neighborhood_checked_at IS NULL) DESC, ${stateTime('county_at')} ASC NULLS FIRST, p.id`)
     .limit(COUNTY_BATCH)
     .select(HOME_COLUMNS);

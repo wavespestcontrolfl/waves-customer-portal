@@ -410,9 +410,25 @@ postgres('neighborhood naming pass', () => {
       expect(await linkFromCaller(await prop(first.propertyId), 'Manatee', 'St Andrews Preserve')).toBe('linked');
       const second = await home({ street: '200 Synthetic Way' });
       const lookup = queue([parcelFor('200 Synthetic Way', { subdivision: "ST. ANDREW'S PRESERVE PH II PB2/2" })]);
-      expect((await runPass(lookup)).county).toEqual({ linked: 1 });
+      // The never-checked home is asked first; the caller-linked one is re-asked too (no parcel in the stub).
+      expect((await runPass(lookup)).county).toEqual({ linked: 1, no_parcel: 1 });
       expect((await prop(second.propertyId)).neighborhood_id).toBe((await prop(first.propertyId)).neighborhood_id);
       expect(await trx('neighborhoods').where({ county: 'Manatee' })).toHaveLength(1);
+    });
+
+    test('no county name, then a caller link, then the county names the home: the county link replaces it', async () => {
+      const { customerId, propertyId } = await home();
+      const t0 = Date.now();
+      const none = queue([parcelFor('100 Synthetic Way', { subdivision: 'NOT IN SUBDIVISION 0/0' })]);
+      expect((await runNamingPass({ lookup: none, platLookup: async () => [], now: t0 })).county).toEqual({ no_name: 1 });
+      await callSaying(customerId, 'Chelsea Oaks');
+      expect((await runNamingPass({ lookup: jest.fn(), platLookup: async () => [], now: t0 + 15 * 60e3 })).caller).toEqual({ linked: 1 });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Chelsea Oaks', link: 'caller' });
+      // A day later the county is asked again and now names it.
+      const named = queue([parcelFor('100 Synthetic Way', { subdivision: 'HERON POINTE PH I PB1/1' })]);
+      const later = await runNamingPass({ lookup: named, platLookup: async () => [], now: t0 + 25 * 3600e3 });
+      expect(later.county).toEqual({ linked: 1 });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Heron Pointe', link: 'county' });
     });
 
     test('a home with no pin can still be named from a call', async () => {
