@@ -4,7 +4,7 @@
 // of guessing by the calendar.
 
 const {
-  getSeason, dormancyPressure, seasonAwareAdjustment, dormancyLikely,
+  getSeason, dormancyPressure, seasonAwareAdjustment, visitSeasonAdjust, dormancyLikely,
   crossSeasonNote, crossSeasonNoteFromSeasons,
 } = require('../services/service-report/lawn-seasonality');
 const { applySeasonalAdjustment } = require('../services/lawn-assessment');
@@ -92,6 +92,43 @@ describe('lawn-seasonality', () => {
     test('from season strings', () => {
       expect(crossSeasonNoteFromSeasons('peak', 'dormant')).toMatch(/seasonal/i);
       expect(crossSeasonNoteFromSeasons('peak', 'peak')).toBeNull();
+    });
+  });
+
+  describe('visitSeasonAdjust — GATE_LAWN_NO_SEASON_BOOST', () => {
+    const SCORES = { turf_density: 70, color_health: 64, weed_suppression: 80 };
+    const base = { calendarAdjust: applySeasonalAdjustment };
+
+    test('off: the weather read, else the calendar, exactly as before', () => {
+      expect(visitSeasonAdjust({ ...base, month: 11 })(SCORES)).toEqual(applySeasonalAdjustment(SCORES, 11));
+      expect(visitSeasonAdjust({ ...base, month: 1, noBoost: false })(SCORES)).toEqual(applySeasonalAdjustment(SCORES, 1));
+      expect(visitSeasonAdjust({ ...base, month: 1, recentMinTempF: 45 })(SCORES)).toEqual(seasonAwareAdjustment(SCORES, { month: 1, recentMinTempF: 45 }));
+      expect(visitSeasonAdjust({ ...base, month: 1 })(SCORES).turf_density).toBeGreaterThan(70);
+    });
+
+    test('on: identity in a cool month, with or without a weather read', () => {
+      for (const month of [11, 1]) {
+        expect(visitSeasonAdjust({ ...base, month, noBoost: true })(SCORES)).toEqual(SCORES);
+        expect(visitSeasonAdjust({ ...base, month, recentMinTempF: 45, noBoost: true })(SCORES)).toEqual(SCORES);
+      }
+      const input = { ...SCORES };
+      expect(visitSeasonAdjust({ ...base, month: 1, noBoost: true })(input)).not.toBe(input);
+      expect(visitSeasonAdjust({ ...base, month: 1, noBoost: true })(null)).toBeNull();
+    });
+
+    test('the gate reader is strict and read at call time', () => {
+      const { lawnNoSeasonBoostLive } = require('../config/feature-gates');
+      const prior = process.env.GATE_LAWN_NO_SEASON_BOOST;
+      try {
+        delete process.env.GATE_LAWN_NO_SEASON_BOOST;
+        expect(lawnNoSeasonBoostLive()).toBe(false);
+        process.env.GATE_LAWN_NO_SEASON_BOOST = '1';
+        expect(lawnNoSeasonBoostLive()).toBe(false);
+        process.env.GATE_LAWN_NO_SEASON_BOOST = 'true';
+        expect(lawnNoSeasonBoostLive()).toBe(true);
+      } finally {
+        if (prior === undefined) delete process.env.GATE_LAWN_NO_SEASON_BOOST; else process.env.GATE_LAWN_NO_SEASON_BOOST = prior;
+      }
     });
   });
 });
