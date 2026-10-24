@@ -106,7 +106,9 @@ const BANK_LINK_GRACE_DAYS = 2;
 // Rows one hourly pass reads (Zelle credits in the 14-day window): a bound,
 // not a budget — a quiet business sees a handful.
 const BANK_SCAN_LIMIT = 500;
-const BANK_CHANGED_ERROR = 'The bank changed or withdrew this transaction after it was read — check the bank account before applying it';
+const BANK_CHANGED_ERROR = 'The bank changed or withdrew this transaction, or Bank Import set it aside, after it was read — check the bank account before applying it';
+// No bank change pending (plaidModified / plaidRemoved) or dismissed (plaidDismissed) on bank_transactions as bt.
+const BANK_CHANGE_NONE_SQL = "bt.suggestion->'plaidModified' IS NULL AND bt.suggestion->'plaidRemoved' IS NULL AND bt.suggestion->'plaidDismissed' IS NULL";
 
 // Same parser as the feature-gates registry entry (call-time, so unsetting
 // the Railway var is a live kill switch). Prod: explicit 'true' only.
@@ -772,18 +774,32 @@ function amountCentsOf(amount) {
   return cents > 0 ? cents : null;
 }
 
-// The bank row as a notice reads it: posting day, cents, still a credit,
-// the payer the bank's wording names, and no withdrawal or correction
-// waiting on the operator.
-const BANK_EVIDENCE_COLUMNS = ['amount', 'direction', 'description', 'original_description', 'suggestion'];
+// The bank row as a notice reads it: posting day, cents, the payer the
+// bank's wording names, and whether it still stands as a customer payment —
+// a credit still open in Bank Import (`unmatched`: not ignored as personal,
+// not linked as something else) with no bank change pending or dismissed (a
+// dismissal keeps the row's old values while the bank reports otherwise).
+const BANK_EVIDENCE_COLUMNS = ['amount', 'direction', 'status', 'description', 'original_description', 'suggestion'];
 function bankEvidenceOf(row) {
   const { hasUnresolvedBankChange } = require('./bank-import');
   return {
     day: String(row.txn_date || '').slice(0, 10),
     cents: amountCentsOf(row.amount),
     payer: parseZelleBankPayer(bankZelleText(row)),
-    settled: row.direction === 'credit' && !hasUnresolvedBankChange(row),
+    // what the bank reports: a credit, no change pending or dismissed
+    reported: row.direction === 'credit' && !hasUnresolvedBankChange(row) && !row.suggestion?.plaidDismissed,
+    open: row.status === 'unmatched',
   };
+}
+
+// The bank still reports exactly the credit the notice recorded (cents,
+// posting day, payer). Bank Import's own filing of the row (its status) is
+// not part of it: that matters before settling, not after.
+function bankReportsNotice(row, notice) {
+  if (!row) return false;
+  const now = bankEvidenceOf(row);
+  return now.reported && now.cents === notice.amount_cents && (now.payer || null) === (notice.payer_name || null)
+    && etDayStartMs(now.day) === new Date(notice.received_at).getTime();
 }
 
 // The bank still lists the credit exactly as the notice recorded it. Once a
@@ -797,10 +813,7 @@ async function bankEvidenceHolds(conn, notice, { lock = false } = {}) {
   const q = conn('bank_transactions').where({ plaid_transaction_id: notice.plaid_transaction_id });
   if (lock) q.forShare();
   const row = await q.first(conn.raw('txn_date::text as txn_date'), ...BANK_EVIDENCE_COLUMNS);
-  if (!row) return false;
-  const now = bankEvidenceOf(row);
-  return now.settled && now.cents === notice.amount_cents && (now.payer || null) === (notice.payer_name || null)
-    && etDayStartMs(now.day) === new Date(notice.received_at).getTime();
+  return bankReportsNotice(row, notice) && bankEvidenceOf(row).open;
 }
 
 const etDayStartMs = (day) => parseETDateTime(`${day}T00:00`).getTime();
@@ -820,10 +833,10 @@ function bankRowsToDecide(nowMs) {
     .where('bt.source', 'plaid')
     .where('bt.direction', 'credit')
     .where('bt.account_type', 'bank')
-    .whereNot('bt.status', 'ignored')
-    // A withdrawal or correction waiting on the operator (bankEvidenceHolds):
-    // the row still shows the old values.
-    .whereRaw("bt.suggestion->'plaidModified' IS NULL AND bt.suggestion->'plaidRemoved' IS NULL")
+    // Still open in Bank Import, with no bank change pending or dismissed
+    // (bankEvidenceOf): such a row still shows values the bank no longer reports.
+    .where('bt.status', 'unmatched')
+    .whereRaw(BANK_CHANGE_NONE_SQL)
     .whereNotNull('bt.plaid_transaction_id')
     .where((q) => q.where('bt.original_description', 'ilike', '%zelle%').orWhere('bt.description', 'ilike', '%zelle%'))
     .where('bt.txn_date', '>=', floor)
@@ -849,7 +862,7 @@ async function claimBankNotice(row, { payerName, amountCents }) {
       .first(trx.raw('txn_date::text as txn_date'), ...BANK_EVIDENCE_COLUMNS);
     const read = bankEvidenceOf({ ...row, direction: 'credit', suggestion: null });
     const now = current && bankEvidenceOf(current);
-    if (!now || !now.settled || now.day !== read.day || now.cents !== read.cents || now.payer !== read.payer) return null;
+    if (!now || !now.reported || !now.open || now.day !== read.day || now.cents !== read.cents || now.payer !== read.payer) return null;
     const [notice] = await trx('inbound_payment_notices')
       .insert({
       plaid_transaction_id: row.plaid_transaction_id,
@@ -871,18 +884,24 @@ async function claimBankNotice(row, { payerName, amountCents }) {
   });
 }
 
-// A recorded bank-feed payment whose transaction the bank changed or
-// withdrew afterwards: plaid-sync parked the change on the row (it backs a
-// notice) while the invoice still says paid. One alert per notice (the
-// dedupe key holds it to one ring); a person checks the invoice.
+// A recorded bank-feed payment the bank no longer reports as recorded: a
+// change parked or dismissed on its row (plaid-sync holds notice-backed rows),
+// a correction accepted in Bank Import, or the row gone. The invoice still
+// says paid. One alert per notice (its dedupe key holds it to one ring); a
+// person checks the invoice. Payments recorded in the last 180 days.
+const CHANGED_SETTLEMENT_WINDOW_DAYS = 180;
 async function alertChangedSettlements() {
+  const since = new Date(Date.now() - CHANGED_SETTLEMENT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const rows = await db('inbound_payment_notices as n')
-    .join('bank_transactions as bt', 'bt.plaid_transaction_id', 'n.plaid_transaction_id')
+    .leftJoin('bank_transactions as bt', 'bt.plaid_transaction_id', 'n.plaid_transaction_id')
+    .whereNotNull('n.plaid_transaction_id')
     .whereIn('n.status', ['auto_applied', 'applied'])
-    .whereRaw("(bt.suggestion->'plaidModified' IS NOT NULL OR bt.suggestion->'plaidRemoved' IS NOT NULL)")
-    .select('n.id', 'n.source', 'n.payer_name', 'n.amount_cents', 'n.matched_invoice_id');
-  for (const notice of rows) await raise(bankChangedAlert(notice), notice.id);
-  return rows.length;
+    .where('n.applied_at', '>', since)
+    .select('n.id', 'n.source', 'n.payer_name', 'n.amount_cents', 'n.received_at', 'n.matched_invoice_id', 'bt.id as bank_row_id',
+      db.raw('bt.txn_date::text as txn_date'), 'bt.amount', 'bt.direction', 'bt.description', 'bt.original_description', 'bt.suggestion');
+  const changed = rows.filter((r) => !bankReportsNotice(r.bank_row_id ? r : null, r));
+  for (const notice of changed) await raise(bankChangedAlert(notice), notice.id);
+  return changed.length;
 }
 
 async function decideBankRow(row, nowMs) {

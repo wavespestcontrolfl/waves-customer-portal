@@ -107,6 +107,7 @@ postgres('Zelle payments from the bank feed against migrated PostgreSQL', () => 
     await bankRow(bank, { original_description: 'Mobile Deposit', description: 'Mobile Deposit' }); // not Zelle
     await bankRow(bank, { status: 'matched_payout', suggestion: JSON.stringify({ plaidRemoved: true }) }); // the bank withdrew it
     await bankRow(bank, { suggestion: JSON.stringify({ plaidModified: { amount: 17 } }) }); // a correction waiting on the operator
+    await bankRow(bank, { suggestion: JSON.stringify({ plaidDismissed: { removed: true } }) }); // a withdrawal the operator dismissed
     const noticed = await bankRow(bank);
     await trx('inbound_payment_notices').insert({
       plaid_transaction_id: noticed.plaid_transaction_id, source: reconciler.BANK_SOURCE, amount_cents: 17329, received_at: new Date(), status: 'ignored',
@@ -171,6 +172,10 @@ postgres('Zelle payments from the bank feed against migrated PostgreSQL', () => 
     expect(await reconciler.bankEvidenceHolds(trx, { ...notice, payer_name: 'Sam Roe' })).toBe(false);
     expect(await reconciler.bankEvidenceHolds(trx, { ...notice, received_at: new Date(todayStartET().getTime() - 24 * HOUR) })).toBe(false);
     expect(await reconciler.bankEvidenceHolds(trx, { ...notice, plaid_transaction_id: `ptx-${randomUUID()}` })).toBe(false);
+    await trx('bank_transactions').where({ id: row.id }).update({ status: 'ignored' });
+    expect(await reconciler.bankEvidenceHolds(trx, notice)).toBe(false);
+    await trx('bank_transactions').where({ id: row.id }).update({ status: 'unmatched', suggestion: JSON.stringify({ plaidDismissed: { removed: true } }) });
+    expect(await reconciler.bankEvidenceHolds(trx, notice)).toBe(false);
     await trx('bank_transactions').where({ id: row.id }).update({ suggestion: JSON.stringify({ plaidRemoved: true }) });
     expect(await reconciler.bankEvidenceHolds(trx, notice)).toBe(false);
     expect(await reconciler.bankEvidenceHolds(trx, { plaid_transaction_id: null, amount_cents: 100 })).toBe(true); // an email notice has no bank row
@@ -219,6 +224,12 @@ postgres('Zelle payments from the bank feed against migrated PostgreSQL', () => 
     expect(await plaidSync._private.applyChanges(trx, new Map([[bank, account]]), { upserts: [], removedIds: [row.plaid_transaction_id] }))
       .toMatchObject({ deleted: 0, flagged: 1 });
     expect(await trx('bank_transactions').where({ id: row.id }).first('id')).toBeTruthy();
+
+    // Filing the row in Bank Import is not a bank change; a correction accepted there is.
+    await trx('bank_transactions').where({ id: row.id }).update({ suggestion: null, status: 'ignored' });
+    expect(await reconciler._private.alertChangedSettlements()).toBe(0);
+    await trx('bank_transactions').where({ id: row.id }).update({ amount: '17.29', status: 'unmatched' });
+    expect(await reconciler._private.alertChangedSettlements()).toBe(1);
   });
 
   test('one notice per Plaid transaction, and every notice has exactly one source', async () => {

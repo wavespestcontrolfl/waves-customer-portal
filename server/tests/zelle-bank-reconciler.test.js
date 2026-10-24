@@ -79,7 +79,7 @@ const bankRow = (over = {}) => ({
   ...over,
 });
 // The bank row as stored, matching bankRow(): what the claim and the fence read.
-const STORED = { txn_date: '2026-10-24', amount: '117.00', direction: 'credit', description: 'Zelle', original_description: 'Zelle money received from PAT DOE', suggestion: null };
+const STORED = { txn_date: '2026-10-24', amount: '117.00', direction: 'credit', status: 'unmatched', description: 'Zelle', original_description: 'Zelle money received from PAT DOE', suggestion: null };
 const openRow = (over = {}) => ({
   id: 'inv-1', invoice_number: 'WPC-2026-0600', status: 'sent', customer_id: 'cust-1', total: '117.00', credit_applied: 0,
   service_date: '2026-10-20', created_at: new Date('2026-10-20T12:00:00Z'), customer_first_name: 'Pat', customer_last_name: 'Doe', ...over,
@@ -91,7 +91,7 @@ function builder(table) {
   const t = tables[table] || (tables[table] = { firsts: [], returning: [], selects: [], calls: [] });
   const b = {};
   const chain = (name) => { b[name] = jest.fn((...args) => { t.calls.push([name, ...args]); if (name === 'where' && args[0] && typeof args[0] === 'object') b.whereArg = args[0]; return b; }); };
-  ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereRaw', 'whereNotExists', 'orWhere', 'join', 'orderBy', 'limit', 'onConflict', 'ignore', 'insert'].forEach(chain);
+  ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereRaw', 'whereNotExists', 'orWhere', 'join', 'leftJoin', 'orderBy', 'limit', 'onConflict', 'ignore', 'insert'].forEach(chain);
   b.forUpdate = jest.fn(() => { t.calls.push(['forUpdate']); b.locked = true; return b; });
   b.forShare = jest.fn(() => { t.calls.push(['forShare']); return b; });
   b.first = jest.fn(async (...args) => {
@@ -112,7 +112,7 @@ const BANK = 'bank_transactions as bt';
 const NOTICES = 'inbound_payment_notices';
 const AS_FED = Symbol('as fed');
 let fed;
-const asStored = (txnId) => (fed.has(txnId) ? { ...fed.get(txnId), direction: 'credit', suggestion: null } : null);
+const asStored = (txnId) => (fed.has(txnId) ? { ...fed.get(txnId), direction: 'credit', status: 'unmatched', suggestion: null } : null);
 const feed = (...rows) => { for (const r of rows) fed.set(r.plaid_transaction_id, r); tables[BANK].selects.push(rows); };
 // The claim insert's RETURNING row: what the database would hand back.
 const claimed = (over = {}) => {
@@ -212,8 +212,8 @@ describe('the scan', () => {
     expect(calls).toContainEqual(['where', 'bt.source', 'plaid']);
     expect(calls).toContainEqual(['where', 'bt.direction', 'credit']);
     expect(calls).toContainEqual(['where', 'bt.account_type', 'bank']);
-    expect(calls).toContainEqual(['whereNot', 'bt.status', 'ignored']);
-    expect(calls).toContainEqual(['whereRaw', "bt.suggestion->'plaidModified' IS NULL AND bt.suggestion->'plaidRemoved' IS NULL"]);
+    expect(calls).toContainEqual(['where', 'bt.status', 'unmatched']);
+    expect(calls).toContainEqual(['whereRaw', "bt.suggestion->'plaidModified' IS NULL AND bt.suggestion->'plaidRemoved' IS NULL AND bt.suggestion->'plaidDismissed' IS NULL"]);
     expect(calls).toContainEqual(['where', 'bt.txn_date', '>=', '2026-10-10']);
     expect(calls).toContainEqual(['whereRaw', expect.stringContaining('pa.created_at'), [2]]);
     expect(calls.some(([m]) => m === 'whereNotExists')).toBe(true);
@@ -357,6 +357,9 @@ describe('the bank must still list the credit as it was read', () => {
     ['moved to another posting day', { ...STORED, txn_date: '2026-10-23' }],
     ['withdrawn on a frozen row', { ...STORED, suggestion: { plaidRemoved: true } }],
     ['a correction waiting on the operator', { ...STORED, suggestion: { plaidModified: { amount: 17 } } }],
+    ['a withdrawal the operator dismissed (old values kept)', { ...STORED, suggestion: { plaidDismissed: { removed: true } } }],
+    ['ignored as personal in Bank Import', { ...STORED, status: 'ignored' }],
+    ['linked as something else in Bank Import', { ...STORED, status: 'matched_expense' }],
     ['gone', null],
   ])('%s ⇒ the fence refuses before anything is recorded, and the notice parks apply_failed', async (_label, bankNow) => {
     feed(bankRow());
@@ -426,18 +429,27 @@ describe('the claim and money already recorded', () => {
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
-  test('a recorded payment whose bank row now carries a change raises one check alert per notice — even with the gate off', async () => {
+  test('a recorded payment the bank no longer reports as recorded raises one check alert per notice — even with the gate off', async () => {
     process.env.GATE_ZELLE_BANK_RECONCILE = 'false';
+    const settled = (id, bankRow) => ({ id, source: BANK_SOURCE, payer_name: 'Pat Doe', amount_cents: 11700, received_at: TODAY_START_ET, matched_invoice_id: `inv-${id}`,
+      ...(bankRow ? { bank_row_id: `bt-${id}`, ...bankRow } : { bank_row_id: null }) });
     tables['inbound_payment_notices as n'] = { firsts: [], returning: [], selects: [[
-      { id: 'notice-9', source: BANK_SOURCE, payer_name: 'Pat Doe', amount_cents: 11700, matched_invoice_id: 'inv-9' },
+      settled('same', STORED), // still reported as recorded
+      settled('filed', { ...STORED, status: 'ignored' }), // Bank Import's filing is not a bank change
+      settled('gone', null),
+      settled('pending', { ...STORED, suggestion: { plaidModified: { amount: 17 } } }),
+      settled('dismissed', { ...STORED, suggestion: { plaidDismissed: { removed: true } } }),
+      settled('accepted', { ...STORED, amount: '17.00' }), // a correction accepted in Bank Import
     ]], calls: [] };
     expect(await reconcileZelleBankFeed({ now: NOW })).toEqual({ skipped: 'gate_off' });
     const calls = tables['inbound_payment_notices as n'].calls;
-    expect(calls).toContainEqual(['join', 'bank_transactions as bt', 'bt.plaid_transaction_id', 'n.plaid_transaction_id']);
+    expect(calls).toContainEqual(['leftJoin', 'bank_transactions as bt', 'bt.plaid_transaction_id', 'n.plaid_transaction_id']);
     expect(calls).toContainEqual(['whereIn', 'n.status', ['auto_applied', 'applied']]);
+    const keys = NotificationService.notifyAdmin.mock.calls.map(([, , , opts]) => opts.dedupeKey);
+    expect(keys).toEqual(['gone', 'pending', 'dismissed', 'accepted'].map((id) => `zelle-notice:${id}:bank-changed`));
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — check the bank change on Pat Doe's $117.00 Zelle",
       'The bank changed or withdrew this Zelle after the portal recorded it on the invoice.',
-      expect.objectContaining({ dedupeKey: 'zelle-notice:notice-9:bank-changed', bellDefault: true, link: '/admin/invoices?invoice=inv-9' }));
+      expect.objectContaining({ dedupeKey: 'zelle-notice:gone:bank-changed', bellDefault: true, link: '/admin/invoices?invoice=inv-gone' }));
   });
 });
 

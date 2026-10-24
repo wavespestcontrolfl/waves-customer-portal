@@ -156,7 +156,7 @@ describe('POST /payment-notices/:id/apply', () => {
 
   // received_at = the posting day's ET midnight, as the reconciler claims it.
   const bankParked = (over = {}) => parked({ email_id: null, plaid_transaction_id: 'ptx-1', source: 'plaid_zelle', memo: null, received_at: new Date('2026-10-24T04:00:00Z'), ...over });
-  const STILL_LISTED = { txn_date: '2026-10-24', amount: '117.00', direction: 'credit', description: 'Zelle', original_description: 'Zelle money received from PAT DOE', suggestion: null };
+  const STILL_LISTED = { txn_date: '2026-10-24', amount: '117.00', direction: 'credit', status: 'unmatched', description: 'Zelle', original_description: 'Zelle money received from PAT DOE', suggestion: null };
 
   test('a bank-feed notice settles the same way, stamps no email and closes its review alert', async () => {
     tables.inbound_payment_notices = { firsts: [bankParked()], selects: [], updates: [], calls: [] };
@@ -198,6 +198,8 @@ describe('POST /payment-notices/:id/apply', () => {
     ['corrected to another amount under the same Plaid id', { ...STILL_LISTED, amount: '17.00' }],
     ['now a debit', { ...STILL_LISTED, direction: 'debit' }],
     ['naming another payer', { ...STILL_LISTED, original_description: 'Zelle money received from SAM ROE' }],
+    ['a withdrawal the operator dismissed (old values kept)', { ...STILL_LISTED, suggestion: { plaidDismissed: { removed: true } } }],
+    ['ignored as personal in Bank Import', { ...STILL_LISTED, status: 'ignored' }],
     ['moved to another posting day', { ...STILL_LISTED, txn_date: '2026-10-23' }],
   ])('a bank-feed notice the bank no longer lists as read is refused before any claim: %s', async (_label, bankRow) => {
     tables.inbound_payment_notices = { firsts: [bankParked()], selects: [], updates: [], calls: [] };
