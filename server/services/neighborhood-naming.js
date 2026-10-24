@@ -99,8 +99,9 @@ async function countyPass({ lookup, platLookup, nowIso }) {
     try {
       const diag = { errors: [] };
       parcel = await lookup(Number(home.latitude), Number(home.longitude), { county: countyHint(home.zip), diag });
-      // A null parcel with a recorded error is an outage, not a miss.
-      if (diag.errors.length) throw new Error('county GIS error');
+      // A null parcel with a recorded error is an outage, not a miss. A parcel
+      // found after an earlier county's error (a county-line ZIP) is an answer.
+      if (diag.errors.length && !parcel) throw new Error('county GIS error');
       if (parcel) parcel = await withPlatName(parcel, platLookup);
     } catch {
       failuresInARow += 1;

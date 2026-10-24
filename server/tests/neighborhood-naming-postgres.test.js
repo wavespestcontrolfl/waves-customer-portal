@@ -173,6 +173,13 @@ postgres('neighborhood naming pass', () => {
       expect(later.county.gis_error).toBe(3);
     });
 
+    test('a parcel found after an earlier county\'s error (a county-line ZIP) is an answer, not an outage', async () => {
+      const { propertyId } = await home();
+      const lookup = jest.fn(async (_lat, _lng, opts) => { opts.diag.errors.push({ error: 'first county down' }); return parcelFor('100 Synthetic Way'); });
+      expect((await runPass(lookup)).county).toEqual({ linked: 1 });
+      expect(await hoodOf(propertyId)).toMatchObject({ name: 'Heron Pointe', link: 'county' });
+    });
+
     test('a plat layer failure is an outage too: the home is not stamped checked', async () => {
       const { propertyId } = await home({ street: '10 Sample Cove', zip: '34233' });
       const lookup = queue([{ county: 'Sarasota', subdivision: '3491', situsAddress: '10 SAMPLE COVE', situsZip: '34233' }]);
