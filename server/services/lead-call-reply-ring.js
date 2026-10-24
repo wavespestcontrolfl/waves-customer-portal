@@ -77,10 +77,15 @@ async function ringBlocker({ customer, digits, now }, conn) {
     .first('id');
   if (priorRing) return 'rang_today';
 
+  // The web-form auto-bridge (lead-webhook.js) stores Adam's cell in
+  // to_phone and the lead in metadata.leadPhone, so both are read.
   const recentCall = await conn('call_log')
     .where({ direction: 'outbound' })
     .where('created_at', '>=', new Date(now.getTime() - RECENT_CALL_WINDOW_MS))
-    .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+    .where(function toThisPhone() {
+      this.whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+        .orWhereRaw("RIGHT(regexp_replace(COALESCE(metadata->>'leadPhone', ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
+    })
     .first('id');
   if (recentCall) return 'call_in_progress';
 
@@ -106,7 +111,7 @@ const MISSED_BELL_RETRY_DELAYS_MS = [0, 2000, 10000];
 
 // One "Missed call request" bell per ring (docs/admin-notifications.md).
 // Returns true once the bell is settled; false after every try failed.
-async function raiseMissedBell({ customerId, name, firstName, leadId, callLogId }, delaysMs = MISSED_BELL_RETRY_DELAYS_MS) {
+async function raiseMissedBell({ customerId, name, firstName, leadId, callLogId, attemptKey = callLogId }, delaysMs = MISSED_BELL_RETRY_DELAYS_MS) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const { fitAction } = require('./admin-alert-names');
   const spec = {
@@ -127,7 +132,7 @@ async function raiseMissedBell({ customerId, name, firstName, leadId, callLogId 
     try {
       const result = await raiseAdminAlert('lead', spec, {
         bell: true,
-        dedupeKey: `lead-call-reply-missed:${callLogId || customerId}`,
+        dedupeKey: `lead-call-reply-missed:${attemptKey}`,
         metadata: { leadId, customerId, callLogId },
       });
       if (bellSettled(result)) return true;
@@ -190,7 +195,11 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
         // An ambiguous create may still be ringing: its status callback
         // decides. A definite failure never rings, so the bell goes now.
         logger.error(`[lead-call-reply-ring] ring failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
-        return { rang: false, reason: 'ring_failed', missed: err?.bridgeAmbiguous ? null : { customerId: customer.id, name, firstName, leadId, callLogId: null } };
+        return { rang: false, reason: 'ring_failed', missed: err?.bridgeAmbiguous ? null : {
+            // One bell per CALL text: retries of this alert share the key,
+            // a later request gets its own.
+            customerId: customer.id, name, firstName, leadId, callLogId: null, attemptKey: `sms:${smsLogId || `${customer.id}:${now.getTime()}`}`,
+          } };
       }
     });
     // Raised after the lock is released: the bell's retries can take seconds.

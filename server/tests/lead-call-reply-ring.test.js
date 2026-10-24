@@ -25,6 +25,11 @@ function mockQuery(table) {
   const q = { filters: [] };
   for (const m of ['where', 'whereNull', 'orderBy']) q[m] = (...args) => { q.filters.push(args); return q; };
   q.whereRaw = (sql) => { q.filters.push([sql]); return q; };
+  q.orWhereRaw = (sql) => { q.filters.push([sql]); return q; };
+  q.where = (...args) => {
+    if (typeof args[0] === 'function') { args[0].call(q); return q; }
+    q.filters.push(args); return q;
+  };
   q.first = async () => {
     if (table === 'sms_log') return mockState.leadText;
     if (table === 'leads') return mockState.lead;
@@ -124,7 +129,7 @@ test('a definite ring failure raises the missed bell at once', async () => {
   expect(opts).toMatchObject({
     bell: true,
     link: '/admin/leads?lead=lead-1',
-    dedupeKey: 'lead-call-reply-missed:cust-1',
+    dedupeKey: 'lead-call-reply-missed:sms:in-1',
     metadata: { area: 'Leads', severity: 'needs-you', subject: { type: 'lead', id: 'lead-1' }, doneWhen: 'lead_contacted', who: 'person' },
   });
 });
@@ -134,6 +139,18 @@ test('an ambiguous ring failure leaves the miss to the status callback', async (
   const out = await ring();
   expect(out).toEqual({ rang: false, reason: 'ring_failed' });
   expect(mockBell).not.toHaveBeenCalled();
+});
+
+test('the recent-call guard also finds a web-form auto-bridge by its leadPhone', async () => {
+  const seen = [];
+  const conn = (table) => {
+    const q = mockQuery(table);
+    const raw = q.orWhereRaw;
+    q.orWhereRaw = (sql) => { seen.push(sql); return raw(sql); };
+    return q;
+  };
+  await _test.ringBlocker({ customer: LEAD, digits: '9415550100', now: AFTERNOON }, conn);
+  expect(seen.some((sql) => sql.includes("metadata->>'leadPhone'"))).toBe(true);
 });
 
 test('a failed lead text never counts', async () => {
