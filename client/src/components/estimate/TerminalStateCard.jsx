@@ -1,6 +1,7 @@
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME } from '../../constants/business';
 import { estimateCard, estimateInnerBox } from './cardStyles';
+import { NextSteps } from '../../pages/estimateDocumentNextSteps';
 import { W } from './tokens';
 
 /**
@@ -23,7 +24,7 @@ const callCtaStyle = {
   borderRadius: 12, fontWeight: 600, fontSize: 15,
 };
 
-export default function TerminalStateCard({ state, customerFirstName, address, quoteReason, isProposal = false, proposalPdfEmailed = false, appointmentLabel = null, appointmentServiceType = null }) {
+export default function TerminalStateCard({ state, customerFirstName, address, quoteReason, isProposal = false, authoredProposal = false, cta = null, proposalPdfEmailed = false, appointmentLabel = null, appointmentServiceType = null }) {
   const who = customerFirstName || 'there';
   // A commercial risk-type hold is an internal classification step (the account
   // manager sets the business type that drives the service cadence), NOT a
@@ -91,7 +92,7 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
 
   if (state === 'quote_required') {
     return (
-      <div style={{ ...estimateCard(), borderTop: '4px solid #F97316' }}>
+      <div {...(isProposal && authoredProposal ? { 'data-glass': 'card', 'data-testid': 'proposal-next-steps' } : {})} style={{ ...estimateCard(), borderTop: '4px solid #F97316' }}>
         <div style={{ fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
           {isProposal
             // The proposal card renders directly under the hero, which already
@@ -104,7 +105,12 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
             : 'This treatment needs an inspection.'}
         </div>
         <div style={{ fontSize: 15, color: W.textBody, lineHeight: 1.5 }}>
-          {isProposal ? (
+          {isProposal && authoredProposal ? (
+            // An authored proposal on the page carries the SAME next-step wording
+            // as the browser PDF (estimateDocumentNextSteps), so web and PDF agree:
+            // online signing when the server offers it, else account-manager follow-up.
+            <NextSteps cta={{ ...(cta || {}), terminalState: 'quote_required' }} authoredProposal onPage />
+          ) : isProposal ? (
             <>
               Hi {who} — {proposalPdfEmailed
                 ? 'your formal proposal is attached as a PDF to the email we sent.'

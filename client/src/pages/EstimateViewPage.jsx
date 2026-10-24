@@ -1209,7 +1209,7 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
   );
 }
 
-export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring', chips, preview = false }) {
+export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring', chips, preview = false, glassCard = false }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
@@ -1260,7 +1260,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token, preview]);
 
   return (
-    <section id={ASK_SECTION_ID} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
+    <section id={ASK_SECTION_ID} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
       <div>
         <div style={{
           fontSize: 14,
@@ -9716,6 +9716,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             address={estimate.address}
             quoteReason={quoteRequiredReason}
             isProposal
+            // An authored proposal on the page uses the browser PDF's own
+            // next-step wording (online signing offered or not), not the
+            // legacy "no online checkout" copy.
+            authoredProposal={authoredProposalOnPage}
+            cta={cta}
             proposalPdfEmailed={proposalPdfEmailed}
           />
         ) : null}
@@ -9734,7 +9739,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
             cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
         <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} />
-        <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+        {/* Residential Waves AI property card (HOME sq ft / POOL-LANAI / COMPLEXITY):
+            not for an authored commercial proposal — the PDF document drops
+            `intelligence` for it the same way. */}
+        {authoredProposalOnPage ? null : (
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
+        )}
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
             preview={readOnlyPreview}
@@ -9743,6 +9753,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             selectedFrequency={selectedFrequency}
             serviceMode={serviceMode}
             chips={askChips}
+            glassCard={authoredProposalOnPage}
           />
         ) : null}
         {isCommercialProposal ? null : (
@@ -9755,8 +9766,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             proposalPdfEmailed={proposalPdfEmailed}
           />
         )}
-        <AppShowcaseCard />
-        <CustomerReviews />
+        {/* The Waves app pitch ("the whole household") and the neighbor / pool-cage
+            reviews are residential: hidden on an authored commercial proposal. */}
+        {authoredProposalOnPage ? null : (
+          <>
+            <AppShowcaseCard />
+            <CustomerReviews />
+          </>
+        )}
       </Page>
     );
   }

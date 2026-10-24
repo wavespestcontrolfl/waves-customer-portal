@@ -94,7 +94,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
   const grandTotalLabel = Number(totals.annualRecurring) > 0 ? 'First-year total' : 'Total';
 
   return (
-    <div style={estimateCard()}>
+    <div data-glass="card" data-testid="proposal-detail-card" style={estimateCard()}>
       <div style={{ fontSize: 22, lineHeight: 1.35, fontWeight: 600, color: W.navy, marginBottom: 4 }}>
         {proposal.title || 'Commercial Service Proposal'}
       </div>
@@ -294,7 +294,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
       ) : null}
 
       {inclusions ? (
-        <div style={estimateInnerBox({ marginTop: 16, padding: '16px 16px' })}>
+        <div data-glass="soft" style={estimateInnerBox({ marginTop: 16, padding: '16px 16px' })}>
           <div style={{ fontSize: 14, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
             What your commercial pest service includes
           </div>
