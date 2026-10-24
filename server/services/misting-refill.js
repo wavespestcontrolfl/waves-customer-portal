@@ -25,7 +25,7 @@ const {
   MISTING_REFILL_CATALOG_KEY, MISTING_SERVICE_CATALOG_KEY, isMistingSelection, mistingProposalIdentity,
 } = require('../utils/mosquito-misting-system');
 const { MOSQUITO_MISTING } = require('./pricing-engine/constants');
-const { mistingRefillPriceFor } = require('./pricing-engine/mosquito-misting-config');
+const { mistingRefillPriceFor, mistingPricingRowApplied } = require('./pricing-engine/mosquito-misting-config');
 const { storedMistingRows, proposalIsAuthoritative } = require('./estimate-result-container');
 const { estimateDataCarriesMosquitoMisting } = require('./pricing-engine/v1-legacy-mapper');
 
@@ -49,7 +49,7 @@ const REFUSALS = {
   MISTING_REFILL_WRONG_PARENT: [400, 'A misting refill can only be added to a Mosquito Misting Service Plan visit.'],
   MISTING_REFILL_UNPRICED: [409, 'This misting refill cannot be priced: no accepted misting estimate was found for this customer and property. Accept the misting estimate first, then add the refill.'],
   MISTING_REFILL_SOLUTION_UNREADABLE: [409, 'This misting refill cannot be priced: the accepted misting estimate does not say which refill solution was sold. Re-send the estimate or ask the office to fix it.'],
-  MISTING_REFILL_PRICE_UNAVAILABLE: [409, 'This misting refill cannot be priced: the live misting price table has no price for the refill solution that was sold.'],
+  MISTING_REFILL_PRICE_UNAVAILABLE: [409, 'This misting refill cannot be priced: the live misting price table (Pricing Logic, Mosquito) is missing or has no price for the refill solution that was sold.'],
   MISTING_REFILL_LOOKUP_FAILED: [503, 'The accepted misting estimate could not be read, so the refill was not priced. Try again in a moment.'],
   MISTING_REFILL_PRICING_STALE: [503, 'The live misting prices could not be refreshed, so the refill was not priced. Try again in a moment.'],
 };
@@ -208,6 +208,9 @@ async function resolveRefillAttachment({
   if (!found) return refusal('MISTING_REFILL_UNPRICED');
   if (!found.solution) return refusal('MISTING_REFILL_SOLUTION_UNREADABLE', { estimateId: found.id });
   if (!(await pricingIsFresh())) return refusal('MISTING_REFILL_PRICING_STALE', { estimateId: found.id });
+  // The sync reports success even when the misting row is missing or refused and the in-code defaults stand: a billed price must be
+  // the row's.
+  if (!mistingPricingRowApplied()) return refusal('MISTING_REFILL_PRICE_UNAVAILABLE', { solution: found.solution, estimateId: found.id });
   const unitPrice = mistingRefillPriceFor(found.solution);
   if (unitPrice == null) return refusal('MISTING_REFILL_PRICE_UNAVAILABLE', { solution: found.solution, estimateId: found.id });
   const solutionLabel = MOSQUITO_MISTING.refills[found.solution].label;

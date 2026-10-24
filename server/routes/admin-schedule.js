@@ -12,6 +12,7 @@ const logger = require('../services/logger');
 const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
 const mistingRefill = require('../services/misting-refill');
+const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG_KEY: MISTING_REFILL_KEY } = require('../utils/mosquito-misting-system');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
@@ -2067,6 +2068,23 @@ async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons, addre
   await require('../services/area-addon-limits').assertMovedVisitLimitsOpen(trx, {
     visitId, scheduledDate: updates.scheduled_date, propertyId: addressPlan ? addressPlan.propertyId : null, serviceKeys: keys, force: Boolean(addressPlan) || added.length > 0, staff: true,
   });
+}
+
+// An Update Details save that CHANGES the visit's service (misting PR 2c): the refill is an add-on of a Mosquito Misting Service Plan visit
+// and never the visit itself, so the service the save leaves the visit with is judged here even when no add-on line is posted. The
+// resolver judges the posted lines; this covers the primary-service change (to the refill) and a host change that leaves a refill row the
+// request did not repost. A save that keeps the service is never judged here, so an older visit stays editable.
+async function assertRefillPlacementOnEdit(database, id, { updates, addonsPosted }) {
+  if (!mistingRefill.refillLive() || !updates || updates.service_key_snapshot === undefined) return;
+  const row = (await database('scheduled_services').where({ id }).first('service_key_snapshot')) || {};
+  const next = updates.service_key_snapshot || null;
+  if ((row.service_key_snapshot || null) === next) return;
+  if (mistingRefill.isRefillKey(next)) {
+    throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({ parentServiceKey: next }, database));
+  }
+  if (addonsPosted || next === MISTING_SERVICE_KEY) return;
+  const kept = await database('scheduled_service_addons').where({ scheduled_service_id: id, service_key_snapshot: MISTING_REFILL_KEY }).first('id');
+  if (kept) throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({ parentServiceKey: next }, database));
 }
 
 // A misting refill is priced for one house (the accepted misting estimate's property). The price was set before the save's row lock,
@@ -12805,6 +12823,7 @@ async function computeUpdateDetailsFinancialPlan({
   } = await resolveReServiceConversion({
     db, id, updates, serviceId, serviceType, postedServiceKey, primaryLinePrice, estimatedPrice, addons,
   });
+    await assertRefillPlacementOnEdit(db, id, { updates, addonsPosted: Array.isArray(addons) });
     if (Array.isArray(addons)) {
       const {
         cols, normalizedAddons, existingAddonDiscountRows, isNewAddonDiscount,
@@ -28694,6 +28713,7 @@ router._test = {
   ONE_TIME_ADDON_SERVICE_KEYS,
   normalizeUpdateDetailsAddons,
   assertRefillPropertyCurrent,
+  assertRefillPlacementOnEdit,
   isOneTimeOnlyAddonKey,
   negativePricePosted,
   discountChangeWithoutPricePosted,

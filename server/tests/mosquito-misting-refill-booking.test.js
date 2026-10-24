@@ -36,6 +36,7 @@ const saved = process.env.GATE_MOSQUITO_MISTING;
 beforeEach(() => {
   process.env.GATE_MOSQUITO_MISTING = 'true';
   jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
+  config.applyMosquitoMistingPricingConfig(config.defaultMosquitoMistingPricingData());
 });
 afterEach(() => {
   jest.restoreAllMocks();
@@ -400,6 +401,56 @@ describe('Update Details that moves the visit to another house prices the refill
     expect(src).toContain('await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons });');
     expect(src).toContain('presetEligibilityCheck, propertyId,\n      });');
     expect(src).toContain("propertyId: typeof req.body.propertyId === 'string' ? req.body.propertyId : undefined,");
+  });
+});
+
+describe('Update Details that changes the visit\'s own service (placement rules apply to a partial request too)', () => {
+  const { assertRefillPlacementOnEdit } = router._test;
+  const VISIT = 'visit-1';
+  const world = (storedKey = PLAN.service_key, addons = []) => fakeDb({
+    __columns: { scheduled_services: ['id', 'service_key_snapshot'] },
+    scheduled_services: [{ id: VISIT, service_key_snapshot: storedKey }],
+    scheduled_service_addons: addons,
+  });
+  const keptRefill = { id: 'row-1', scheduled_service_id: VISIT, service_key_snapshot: 'mosquito_misting_refill' };
+  const run = (db, updates, addonsPosted) => assertRefillPlacementOnEdit(db, VISIT, { updates, addonsPosted });
+
+  test('changing the visit\'s service TO the refill is refused even with no add-on line posted', async () => {
+    await expect(run(world(), { service_key_snapshot: 'mosquito_misting_refill' }, false)).rejects.toMatchObject({ status: 400, code: 'MISTING_REFILL_ADDON_ONLY' });
+    await expect(run(world(), { service_key_snapshot: 'mosquito_misting_refill' }, true)).rejects.toMatchObject({ code: 'MISTING_REFILL_ADDON_ONLY' });
+  });
+
+  test('moving the host to another service while a refill row stays (add-ons not reposted) is refused', async () => {
+    await expect(run(world(PLAN.service_key, [keptRefill]), { service_key_snapshot: 'pest_control' }, false))
+      .rejects.toMatchObject({ status: 400, code: 'MISTING_REFILL_WRONG_PARENT' });
+    await expect(run(world(PLAN.service_key, [keptRefill]), { service_key_snapshot: null }, false)).rejects.toMatchObject({ code: 'MISTING_REFILL_WRONG_PARENT' });
+  });
+
+  test('with the add-ons reposted the add-on resolver judges them instead; no refill row, or the plan service kept, is allowed', async () => {
+    await expect(run(world(PLAN.service_key, [keptRefill]), { service_key_snapshot: 'pest_control' }, true)).resolves.toBeUndefined();
+    await expect(run(world(PLAN.service_key, []), { service_key_snapshot: 'pest_control' }, false)).resolves.toBeUndefined();
+    await expect(run(world('pest_control', [keptRefill]), { service_key_snapshot: PLAN.service_key }, false)).resolves.toBeUndefined();
+  });
+
+  test('a save that keeps the service is never judged: an older visit stays editable', async () => {
+    await expect(run(world('mosquito_misting_refill', []), { service_key_snapshot: 'mosquito_misting_refill' }, false)).resolves.toBeUndefined();
+    await expect(run(world(PLAN.service_key, [keptRefill]), {}, false)).resolves.toBeUndefined();
+    await expect(run(world(PLAN.service_key, [keptRefill]), undefined, false)).resolves.toBeUndefined();
+  });
+
+  test('gate off: no read, no refusal', async () => {
+    process.env.GATE_MOSQUITO_MISTING = 'false';
+    const reads = [];
+    const tables = { scheduled_services: [{ id: VISIT, service_key_snapshot: PLAN.service_key }], scheduled_service_addons: [keptRefill] };
+    await expect(assertRefillPlacementOnEdit(fakeDb(tables, reads), VISIT, { updates: { service_key_snapshot: 'mosquito_misting_refill' }, addonsPosted: false })).resolves.toBeUndefined();
+    expect(reads).toEqual([]);
+  });
+
+  test('the planner (save and preview) runs the placement check right after the service is resolved', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(src).toContain('await assertRefillPlacementOnEdit(db, id, { updates, addonsPosted: Array.isArray(addons) });');
   });
 });
 

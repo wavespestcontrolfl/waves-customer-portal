@@ -26,6 +26,8 @@ beforeEach(() => {
   // The live table was synced a moment ago; the staleness cases below override these.
   jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
   jest.spyOn(pricingEngine, 'syncConstantsFromDB').mockResolvedValue(true);
+  // The misting row was applied by the sync (a refill price must be the row's, not the in-code default).
+  config.applyMosquitoMistingPricingConfig(config.defaultMosquitoMistingPricingData());
 });
 afterEach(() => {
   jest.restoreAllMocks();
@@ -144,6 +146,36 @@ describe('the live table is fresh when the price is read', () => {
 
   test('a stale-pricing refusal on an existing line is not a keep-stored case: the edit retries instead of billing an old price', () => {
     expect(refill.KEEP_STORED_ON.has('MISTING_REFILL_PRICING_STALE')).toBe(false);
+  });
+});
+
+describe('the price must come from the applied pricing row, not the in-code default', () => {
+  test('no row, or a refused row, left the defaults standing: the refill is not priced', async () => {
+    config.applyMosquitoMistingPricingConfig(undefined);
+    expect(config.mistingPricingRowApplied()).toBe(false);
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE', status: 409, solution: 'natural' });
+    const bad = config.defaultMosquitoMistingPricingData();
+    bad.refills.natural.price = -5;
+    expect(config.applyMosquitoMistingPricingConfig(bad)).toMatchObject({ applied: false });
+    expect(config.mistingPricingRowApplied()).toBe(false);
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE' });
+  });
+
+  test('a valid row applies and prices; the next sync that finds no row withdraws it again', async () => {
+    expect(config.mistingPricingRowApplied()).toBe(true);
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: true, unitPrice: 219 });
+    config.applyMosquitoMistingPricingConfig(null);
+    expect(config.mistingPricingRowApplied()).toBe(false);
+    expect(await attach(db([estimate()]))).toMatchObject({ ok: false, code: 'MISTING_REFILL_PRICE_UNAVAILABLE' });
+  });
+
+  test('the sync wires the row result in: syncMosquitoMistingPricingConfig is the apply', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    config.syncMosquitoMistingPricingConfig(config.defaultMosquitoMistingPricingData());
+    expect(config.mistingPricingRowApplied()).toBe(true);
+    config.syncMosquitoMistingPricingConfig({ plan: 'not an object' });
+    expect(config.mistingPricingRowApplied()).toBe(false);
+    warn.mockRestore();
   });
 });
 

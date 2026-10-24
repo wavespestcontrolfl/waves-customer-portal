@@ -124,7 +124,15 @@ function rebaseMosquitoMisting(target = MOSQUITO_MISTING) {
  * The sync's one call: rebase onto the defaults, then apply the row when it is valid. Returns { applied, error? }.
  * `row` undefined (no row) applies nothing and is not an error.
  */
+// Whether the LAST apply took a valid pricing_config row (true) or left the in-code defaults standing (no row, or one refused). The sync
+// keeps the defaults without failing, which is right for a quote on a fresh environment; a billed refill price must come from the row.
+let lastApplied = false;
+function mistingPricingRowApplied() {
+  return lastApplied;
+}
+
 function applyMosquitoMistingPricingConfig(row, target = MOSQUITO_MISTING) {
+  lastApplied = false;
   rebaseMosquitoMisting(target);
   if (row === undefined || row === null) return { applied: false };
   const verdict = normalizeMosquitoMistingPricingConfig(row, { strict: false });
@@ -139,6 +147,7 @@ function applyMosquitoMistingPricingConfig(row, target = MOSQUITO_MISTING) {
       for (const field of fields) if (member[field] !== undefined) target[group][key][field] = member[field];
     }
   }
+  lastApplied = true;
   return { applied: true };
 }
 
@@ -173,4 +182,5 @@ module.exports = {
   syncMosquitoMistingPricingConfig,
   rebaseMosquitoMisting,
   mistingRefillPriceFor,
+  mistingPricingRowApplied,
 };
