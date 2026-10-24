@@ -9,7 +9,9 @@
  * Event-driven, unlike the one-hour SLA pager (followup-sla-watcher.js),
  * which fires on a timer once a promise's own deadline passes — this one
  * fires the moment the number calls again, whether or not that deadline has
- * passed yet. The two never double up on the same event: this bell's own
+ * passed yet. The one exception is a promise whose stated time is the
+ * earliest the work can happen (a floor, e.g. a visit set for a later day):
+ * before that time nothing is owed, so it never rings (notActionableYet). The two never double up on the same event: this bell's own
  * dedupe key family ('promise_chaser:<id>:<ET day>') is never the pager's
  * rolling 'call_commitment_overdue' post, and its copy always says WHEN the
  * caller called, never that a deadline was missed.
@@ -153,6 +155,22 @@ function describePromise(row) {
 // "nothing is owed" either — only a verified null retires a stale bell.
 const FIND_FAILED = Symbol('find_failed');
 
+// A stated time that is NOT a deadline (due_type 'floor', or untyped) is the
+// earliest moment the promised work can happen — the SLA pager's own
+// evidenceFrom / slotDueAt contract. When that moment is still ahead of the
+// callback, nothing is owed yet: "come out on the 25th between 12 and 2"
+// is a time already given, so a call on the 23rd is not chasing a missing
+// time to come out (10-23 audit: a roach visit promised and booked for the
+// 25th rang "we still owe a time to come out"). A 'deadline' due_at ("call
+// you back by Friday") keeps ringing early, as designed: the work is owed
+// now, the deadline only bounds it.
+function notActionableYet(row, callAt) {
+  if (!row.due_at || row.due_type === 'deadline') return false;
+  const stated = new Date(row.due_at).getTime();
+  const at = new Date(callAt).getTime();
+  return Number.isFinite(stated) && Number.isFinite(at) && stated > at;
+}
+
 async function findPromiseToRing(call, now) {
   // Every open Waves promise (callback / quote / time to come out) made on
   // an EARLIER call for this same contact number — direction-agnostic
@@ -183,7 +201,8 @@ async function findPromiseToRing(call, now) {
     // that later promise would wrongly read as "the reason this earlier
     // caller is chasing us".
     && new Date(r.call_started_at).getTime() < new Date(call.created_at).getTime()
-    && (!r.customer_id || String(r.customer_id) === String(call.customer_id || '')));
+    && (!r.customer_id || String(r.customer_id) === String(call.customer_id || ''))
+    && !notActionableYet(r, call.created_at));
   if (!rows.length) return null;
 
   // Scope to calls that ended UNBOOKED (the rule's own trigger) — a call

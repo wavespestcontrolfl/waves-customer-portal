@@ -862,6 +862,20 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
 // and every mirror of those buckets must scope to the same domain.
 const HUB_DOMAIN = 'wavespestcontrol.com';
 
+// Hub routes the Astro site serves from a dedicated src/pages file
+// (EXPLICIT_ROUTES in src/pages/[...slug].astro). The catch-all content
+// route skips these slugs, so a same-slug content file never renders:
+// /pest-control-calculator/ still has src/content/services/
+// pest-control-calculator.md, which the registry resolves as editable, and
+// a refresh there would edit a file the live page ignores. Keep in step
+// with the Astro list.
+const HUB_DEDICATED_ROUTES = new Set([
+  'blog', 'faqs', 'contact', 'about-us', 'careers', 'service-areas', 'referral',
+  'referrer', 'marketing', 'newsletter', 'pest-library', 'videos',
+  'pest-control-deals', 'pest-control-calculator', 'pest-control-reviews',
+  'waveguard-memberships',
+]);
+
 // Canonical ROUTE IDENTITY of a page URL — registrable domain (www
 // stripped) + query/hash-free path with the trailing slash trimmed,
 // mirroring refresh-audit's hostRegistrableSql/canonPathSql: GSC reports
@@ -874,6 +888,13 @@ function routeIdentity(url) {
   const host = str.replace(/^[a-z]+:\/\//i, '').split('/')[0].split(':')[0].replace(/^www\./i, '').toLowerCase();
   const path = str.split('#')[0].split('?')[0].replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/\/+$/, '');
   return `${host}::${path}`;
+}
+
+// A route identity on the hub host whose one path segment is a dedicated
+// route (see HUB_DEDICATED_ROUTES).
+function isHubDedicatedRoute(id) {
+  const [host, path = ''] = String(id || '').split('::');
+  return host === HUB_DOMAIN && HUB_DEDICATED_ROUTES.has(path.replace(/^\//, '').toLowerCase());
 }
 
 function citabilityBackfillLaneOpen() {
@@ -3460,7 +3481,8 @@ class GscOpportunityMiner {
    * sitemap emits nothing — reading a live target as missing would draft
    * a duplicate article. A live target must also be an editable Astro
    * content file (bounded probe, see _aeoRefreshTargetEditable); a tool
-   * page is skipped rather than answered with a competing article.
+   * page is skipped rather than answered with a competing article, and so
+   * is a dedicated hub route even when a same-slug content file exists.
    * Knobs: AEO_GAP_MIN_DAYS (shared with aeo_gap),
    * AEO_QUESTION_GAP_MIN_ENGINES (3), AEO_QUESTION_GAP_MAX_PER_RUN (2; 0
    * disables), AEO_QUESTION_GAP_COOLDOWN_DAYS (28: a page edited that
@@ -3533,10 +3555,11 @@ class GscOpportunityMiner {
     // ones held back only by the cap or a temporary fence — but NOT one this
     // lane can never act on: a missing target (its older pending refresh
     // row, same key, would otherwise stay claimable for a page that is
-    // gone) or a live target confirmed non-editable (cached verdict, this
-    // run's probes included). Those rows retire.
+    // gone) or a live target confirmed non-editable (a dedicated hub route,
+    // or a cached verdict, this run's probes included). Those rows retire.
     const nonEditable = GscOpportunityMiner._nonEditablePages;
     qualifying.opps = opps.filter((o) => aeoQuestionGapRoutable(o)
+      && !isHubDedicatedRoute(routeIdentity(o.page_url))
       && !(nonEditable.get(routeIdentity(o.page_url)) > Date.now()));
     // Unmet gaps this lane does not write — reported so the benchmark,
     // target or seed lanes can pick them up.
@@ -3547,11 +3570,15 @@ class GscOpportunityMiner {
     return out;
   }
 
-  // 'editable' | 'not_editable' (confirmed, cached) | 'unknown' (probe
-  // budget spent or a transient failure — retried next mine).
+  // 'editable' | 'not_editable' (a dedicated hub route, or confirmed and
+  // cached) | 'unknown' (probe budget spent or a transient failure —
+  // retried next mine).
   async _aeoRefreshTargetEditable(pageUrl, probe) {
     const cache = GscOpportunityMiner._nonEditablePages;
     const id = routeIdentity(pageUrl);
+    // Whatever the loader would find, the live page never renders it: no
+    // probe spent.
+    if (isHubDedicatedRoute(id)) return 'not_editable';
     if (cache.get(id) > Date.now()) return 'not_editable';
     if (probe.remaining <= 0) return 'unknown';
     probe.remaining -= 1;

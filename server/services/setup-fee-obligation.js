@@ -416,6 +416,131 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
   return { parentId, amount: owedAmount, alertId: alert?.id || null };
 }
 
+// ONE "is this customer's setup fee already settled somewhere else?" predicate
+// (GATE_SETUP_FEE_SETTLED_ANYWHERE). The unminted-setup-fee alert, the
+// completion hold it drives (both via findUnmintedSetupFeeObligation) and the
+// alert reconcile (setup-fee-alert-reconcile.js) all ask it, so they can never
+// disagree. The note-based checks above only see invoices that cite
+// "accepted estimate #<id>"; a fee collected on an ordinary invoice (cash on a
+// visit invoice, a waived $0 line, an annual prepay bundle) carries no such
+// stamp and used to read as "never billed". Settled means, for this customer:
+//   - a PAID invoice line that is the setup / membership fee
+//     (">= expectedFeeCents" summed, same cents-exact rule as the stamped
+//     scan), or
+//   - a live invoice with an explicit waived setup-fee line ("waived" in the
+//     description, or a $0 setup-fee line); a waived line riding a positive
+//     amount (the prepay bundle) needs the invoice PAID, or
+//   - a covered annual-prepay term on the visit's date, or a PAID annual-prepay
+//     invoice from the last 13 months.
+// Gate off returns { settled: false } before any read. Pass `lock: true` inside
+// a transaction to read the invoices FOR UPDATE (the reconcile does).
+const SETUP_FEE_SETTLED_PREPAY_WINDOW_MS = 400 * 24 * 60 * 60 * 1000;
+
+// Other services' own one-time fees (the rodent "Bait Station Setup — one-time
+// setup fee", a termite install) are not the WaveGuard fee and never settle it.
+const NON_WAVEGUARD_FEE_RE = /\b(?:bait|rodent|station|termite|install)/i;
+
+function waveguardFeeLine(li) {
+  return !NON_WAVEGUARD_FEE_RE.test(String(li?.description || '')) && !NON_WAVEGUARD_FEE_RE.test(String(li?.category || ''));
+}
+
+function settledFeeLineName(li) {
+  const desc = String(li?.description || '').trim();
+  const cat = String(li?.category || '').trim();
+  if (!waveguardFeeLine(li)) return false;
+  return /(?:setup|membership) fee/i.test(desc)
+    || /^waveguard membership$/i.test(desc)
+    || /^waveguard membership$/i.test(cat);
+}
+
+function settledLineCents(li) {
+  const qty = li?.quantity != null ? Number(li.quantity) : 1;
+  const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+  return Number.isFinite(amt) ? Math.round(amt * 100) : null;
+}
+
+async function settledVisitDate(conn, visitId) {
+  if (!visitId || !require('../config/feature-gates').setupFeeSettledAnywhereLive()) return null;
+  const row = await conn('scheduled_services').where({ id: visitId }).first('scheduled_date');
+  return row?.scheduled_date ? require('./estimate-first-application-invoice').dateOnly(row.scheduled_date) : null;
+}
+
+function invoiceLineItems(row) {
+  if (Array.isArray(row.line_items)) return row.line_items;
+  try {
+    const items = JSON.parse(row.line_items);
+    return Array.isArray(items) ? items : [];
+  } catch { return []; }
+}
+
+// What one invoice line proves about the WaveGuard fee: { kind: 'waived' },
+// { kind: 'annual_prepay' }, { kind: 'paid', cents } or null. A REFUNDED invoice
+// keeps its fee-line evidence (never instruct a re-bill of money that was
+// collected and deliberately refunded), but a refunded waived or prepay bundle
+// settles nothing; a waived line riding a positive amount needs the invoice PAID.
+function feeLineEvidence(li, status, createdAt) {
+  const cents = settledLineCents(li);
+  if (cents === null || !waveguardFeeLine(li)) return null;
+  const desc = String(li?.description || '');
+  if (/(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0)) {
+    return status !== 'refunded' && (cents === 0 || status === 'paid') ? { kind: 'waived' } : null;
+  }
+  if (cents <= 0) return null;
+  const recent = createdAt && Date.now() - new Date(createdAt).getTime() <= SETUP_FEE_SETTLED_PREPAY_WINDOW_MS;
+  if (status === 'paid' && recent && /annual prepay/i.test(String(li?.category || ''))) return { kind: 'annual_prepay' };
+  return ['paid', 'refunded'].includes(status) && settledFeeLineName(li) ? { kind: 'paid', cents } : null;
+}
+
+async function setupFeeSettledElsewhere(conn, {
+  customerId, expectedFeeCents = 0, visitDate, lock,
+} = {}) {
+  if (!require('../config/feature-gates').setupFeeSettledAnywhereLive()) return { settled: false };
+  if (!customerId) return { settled: false };
+  let query = conn('invoices')
+    .where({ customer_id: customerId })
+    .whereRaw(`(line_items::text ILIKE '%fee%' OR line_items::text ILIKE '%membership%' OR line_items::text ILIKE '%prepay%' OR line_items::text ILIKE '%prepaid%')`);
+  if (lock) query = query.forUpdate();
+  const rows = await query.select('id', 'status', 'line_items', 'created_at');
+  const dead = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void', 'draft']);
+  dead.delete('refunded');
+  const paidByInvoice = new Map();
+  for (const row of rows) {
+    const status = String(row.status || '').toLowerCase();
+    if (dead.has(status)) continue;
+    for (const li of invoiceLineItems(row)) {
+      const evidence = feeLineEvidence(li, status, row.created_at);
+      if (evidence && evidence.kind !== 'paid') return { settled: true, reason: evidence.kind, invoiceId: row.id };
+      if (evidence) paidByInvoice.set(String(row.id), (paidByInvoice.get(String(row.id)) || 0) + evidence.cents);
+    }
+  }
+  const paidFeeCents = [...paidByInvoice.values()].reduce((a, b) => a + b, 0);
+  if (paidFeeCents > 0 && paidFeeCents >= expectedFeeCents) {
+    return { settled: true, reason: 'paid_fee', invoiceId: [...paidByInvoice.keys()][0] };
+  }
+  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+  const term = await AnnualPrepayRenewals.coveredTermsAsOf(conn, visitDate || require('../utils/datetime-et').etDateString(new Date()))
+    .where('t.customer_id', customerId)
+    .whereNull('t.annual_plan_version') // a termite annual plan never waives the WaveGuard fee
+    .first('t.id');
+  if (term) return { settled: true, reason: 'annual_prepay_term', termId: term.id };
+  // Not settled, but fee money found elsewhere still counts toward the fee:
+  // the callers subtract it so only the remainder is instructed.
+  return paidByInvoice.size
+    ? { settled: false, partial: [...paidByInvoice].map(([id, cents]) => ({ id, cents })) }
+    : { settled: false };
+}
+
+// Cents of the elsewhere-partial payments the caller has NOT already counted: per
+// invoice id, only what exceeds the fee cents the caller's own scan took from that
+// same row (sumPositiveSetupFeeCents) — no money is ever counted twice. Gate off:
+// no `partial` is ever produced, so this is 0.
+function partialElsewhereCents(partial, countedRows = []) {
+  if (!Array.isArray(partial) || !partial.length) return 0;
+  const { sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+  const counted = new Map(countedRows.map((r) => [String(r.id), sumPositiveSetupFeeCents(r)]));
+  return partial.reduce((sum, p) => sum + Math.max(0, p.cents - (counted.get(String(p.id)) || 0)), 0);
+}
+
 /**
  * @param {object} params
  * @param {string} params.sourceEstimateId  the visit's source_estimate_id
@@ -574,7 +699,21 @@ async function findUnmintedSetupFeeObligation({
     .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
   const coveredFeeCents = liveStampedFeeCents + refundedFeeCents;
   if (coveredFeeCents >= expectedFeeCents) return { owed: false };
-  const remainingFeeCents = expectedFeeCents - coveredFeeCents;
+  // GATE_SETUP_FEE_SETTLED_ANYWHERE: the fee was paid, waived or prepaid on an
+  // invoice that never cited this estimate (the stamped scan above cannot see it).
+  const settledElsewhere = await setupFeeSettledElsewhere(conn, {
+    customerId: estimate.customer_id,
+    expectedFeeCents,
+    visitDate: await settledVisitDate(conn, excludeScheduledServiceId),
+  });
+  if (settledElsewhere.settled) return { owed: false, settledElsewhere };
+  // Partial fee money paid elsewhere (not already counted by the stamped scan)
+  // reduces the remainder; together with stamped coverage it can settle the fee.
+  const elsewhereCents = partialElsewhereCents(settledElsewhere.partial, stampedRows);
+  if (coveredFeeCents + elsewhereCents >= expectedFeeCents) {
+    return { owed: false, settledElsewhere: { settled: true, reason: 'paid_fee_combined' } };
+  }
+  const remainingFeeCents = expectedFeeCents - coveredFeeCents - elsewhereCents;
   // A CANCELED fee-carrying invoice satisfies only when #3474's
   // canceledSetupFee lane can PROVABLY discover it (Codex P0, pre-push
   // round 14): findFirstApplicationInvoiceForEstimateService joins
@@ -707,6 +846,7 @@ async function findUnmintedSetupFeeObligation({
     // exposed separately for display consumers.
     setupFee: authoritativeFee,
     setupFeeRemainingCents: Math.round(remainingFeeCents),
+    ...(settledElsewhere.partial ? { settledElsewherePartial: settledElsewhere.partial } : {}),
     estimateId: estimate.id,
     estimateSlug: estimate.estimate_slug || null,
     firstVisitAlreadyCompleted: !!priorCompleted,
@@ -727,6 +867,9 @@ module.exports = {
   estimateSetupSeries,
   officeParkedSetupFeeSeries,
   findUnmintedSetupFeeObligation,
+  setupFeeSettledElsewhere,
+  partialElsewhereCents,
+  settledVisitDate,
   parkSetupFeeStampForOffice,
   isPlanApplicationRow,
   SETUP_FEE_OFFICE_BILLING_ALERT,

@@ -125,7 +125,7 @@ function buildVisualDiagnosisCategories({ scores = {}, overwateringSignal = fals
   return [
     mk('coverage', 'Turf Coverage', coverage),
     mk('color_vigor', 'Color & Vigor', color),
-    mk('weed_pressure', 'Weed Pressure', weed),
+    mk('weed_pressure', 'Weed control', weed),
     mk('water_moisture_stress', 'Water / Coverage', water, {
       evidence: [
         overwateringSignal ? 'over-watering signs in photos' : null,

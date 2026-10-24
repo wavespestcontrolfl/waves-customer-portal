@@ -3567,13 +3567,13 @@ describe('aeo_question_gap bucket', () => {
     test('recovery live set: confirmed non-editable targets drop out; cap- and fence-skipped candidates stay', async () => {
       process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
       process.env.AEO_QUESTION_GAP_MAX_PER_RUN = '1';
-      const questions = [q('Q31'), q('Q36'), q('Q26'), q('Q21')]; // calculator, termite cost, termite bond, one-time plan
+      const questions = [q('Q15'), q('Q36'), q('Q26'), q('Q21')]; // pest identifier, termite cost, termite bond, one-time plan
       const miner = stubbed(synthetic(questions), questions.map((x) => `${HUB}${x.target_path}`));
-      const calc = routeIdentity(`${HUB}${q('Q31').target_path}`);
+      const tool = routeIdentity(`${HUB}${q('Q15').target_path}`);
       // Confirmed non-editable by an earlier probe (cached verdict) — even
       // though this run's cap stops before probing it again.
-      GscOpportunityMiner._nonEditablePages.set(calc, Date.now() + 60_000);
-      miner._aeoRefreshTargetEditable.mockImplementation(async (url) => (routeIdentity(url) === calc ? 'not_editable' : 'editable'));
+      GscOpportunityMiner._nonEditablePages.set(tool, Date.now() + 60_000);
+      miner._aeoRefreshTargetEditable.mockImplementation(async (url) => (routeIdentity(url) === tool ? 'not_editable' : 'editable'));
       // Q21's page is fenced by another bucket's in-flight edit (temporary).
       miner._aeoQuestionPageFence.mockResolvedValue(new Map([[routeIdentity(`${HUB}${q('Q21').target_path}`), new Set(['decay_refresh::x'])]]));
       const qualifying = { opps: null };
@@ -3581,9 +3581,9 @@ describe('aeo_question_gap bucket', () => {
         const out = await miner.mineAeoQuestionGaps('2026-08-30', { qualifying });
         expect(out).toHaveLength(1); // cap
         const live = qualifying.opps.map((o) => o.signal_metadata.benchmark_id).sort();
-        expect(live).toEqual(['Q21', 'Q26', 'Q36']); // Q31 confirmed non-editable → retires
+        expect(live).toEqual(['Q21', 'Q26', 'Q36']); // Q15 confirmed non-editable → retires
       } finally {
-        GscOpportunityMiner._nonEditablePages.delete(calc);
+        GscOpportunityMiner._nonEditablePages.delete(tool);
       }
     });
 
@@ -3623,7 +3623,7 @@ describe('aeo_question_gap bucket', () => {
       const miner = new GscOpportunityMiner();
       const publisher = require('../services/content-astro/astro-publisher');
       const load = jest.spyOn(publisher, 'loadExistingPageBody').mockResolvedValue(null);
-      const url = `${HUB}/pest-control-calculator/`;
+      const url = `${HUB}/pest-identifier/ghost-ant/`;
       GscOpportunityMiner._nonEditablePages.delete(routeIdentity(url));
       const probe = { remaining: 1 };
       expect(await miner._aeoRefreshTargetEditable(url, probe)).toBe('not_editable');
@@ -3636,6 +3636,36 @@ describe('aeo_question_gap bucket', () => {
       expect(await miner._aeoRefreshTargetEditable(`${HUB}/termite/other/`, { remaining: 1 })).toBe('unknown'); // transient: not cached
       expect(GscOpportunityMiner._nonEditablePages.has(routeIdentity(`${HUB}/termite/other/`))).toBe(false);
       GscOpportunityMiner._nonEditablePages.delete(routeIdentity(url));
+    });
+
+    test('a dedicated hub route is not editable even when a same-slug content file loads', async () => {
+      const miner = new GscOpportunityMiner();
+      const publisher = require('../services/content-astro/astro-publisher');
+      // Production 10-24: the registry resolves /pest-control-calculator/ to
+      // src/content/services/pest-control-calculator.md, which the live page
+      // (src/pages/pest-control-calculator.astro) never renders.
+      const load = jest.spyOn(publisher, 'loadExistingPageBody').mockResolvedValue({ body: 'x' });
+      const probe = { remaining: 1 };
+      expect(await miner._aeoRefreshTargetEditable(`${HUB}/pest-control-calculator/`, probe)).toBe('not_editable');
+      expect(await miner._aeoRefreshTargetEditable('https://wavespestcontrol.com/Pest-Control-Deals', probe)).toBe('not_editable');
+      expect(load).not.toHaveBeenCalled();
+      expect(probe.remaining).toBe(1); // no probe spent
+      // A nested path under a dedicated slug, or another host, is not the dedicated page.
+      expect(await miner._aeoRefreshTargetEditable(`${HUB}/blog/termite-bond-guide/`, { remaining: 1 })).toBe('editable');
+      expect(await miner._aeoRefreshTargetEditable('https://www.example.com/pest-control-calculator/', { remaining: 1 })).toBe('editable');
+    });
+
+    test('a dedicated hub route target is never emitted and leaves the live set, though its content file loads', async () => {
+      process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+      const questions = [q('Q31'), q('Q36'), q('Q26')]; // calculator, termite cost, termite bond
+      const miner = stubbed(synthetic(questions), questions.map((x) => `${HUB}${x.target_path}`));
+      miner._aeoRefreshTargetEditable.mockRestore(); // the real check
+      const publisher = require('../services/content-astro/astro-publisher');
+      jest.spyOn(publisher, 'loadExistingPageBody').mockResolvedValue({ body: 'x' });
+      const qualifying = { opps: null };
+      const out = await miner.mineAeoQuestionGaps('2026-08-30', { qualifying });
+      expect(out.map((o) => o.signal_metadata.benchmark_id).sort()).toEqual(['Q26', 'Q36']);
+      expect(qualifying.opps.map((o) => o.signal_metadata.benchmark_id).sort()).toEqual(['Q26', 'Q36']);
     });
 
     test('an unreadable sitemap emits nothing (a live target must never read as missing)', async () => {

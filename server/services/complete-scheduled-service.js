@@ -10882,17 +10882,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
               .forUpdate()
               .select('id', 'status', 'line_items', 'notes')
             : [];
+          // GATE_SETUP_FEE_SETTLED_ANYWHERE: re-read the customer-wide settlement HERE, locked
+          // on this transaction, instead of trusting the earlier unlocked lookup (gate off: no read).
+          const SetupFeeObligationNow = require('../services/setup-fee-obligation');
+          const settledNowTerm = unmintedSetupFeeObligation
+            ? await SetupFeeObligationNow.setupFeeSettledElsewhere(trx, {
+              customerId: svc.customer_id, expectedFeeCents: termExpectedFeeCents,
+              visitDate: await SetupFeeObligationNow.settledVisitDate(trx, svc.id), lock: true,
+            })
+            : { settled: false };
           const termFeeRows = [...new Map(
             [...onVisitLockedRows, ...stampedFeeRowsNow].map((r) => [String(r.id), r]),
           ).values()];
           const liveFeeCentsOnVisit = termFeeRows
             .filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void')
-            .reduce((sum, r) => sum + terminalFeeCents(r), 0);
+            .reduce((sum, r) => sum + terminalFeeCents(r), 0)
+            // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
+            + require('../services/setup-fee-obligation').partialElsewhereCents(settledNowTerm.partial, termFeeRows);
           const refundedFeeCentsTerm = termFeeRows
             .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
             .reduce((sum, r) => sum + terminalFeeCents(r), 0);
-          const terminalFeeCovered = termExpectedFeeCents > 0
-            && (liveFeeCentsOnVisit + refundedFeeCentsTerm) >= termExpectedFeeCents;
+          const terminalFeeCovered = settledNowTerm.settled || (termExpectedFeeCents > 0
+            && (liveFeeCentsOnVisit + refundedFeeCentsTerm) >= termExpectedFeeCents);
           const termFeeEstimateRef = unmintedSetupFeeObligation
             ? (unmintedSetupFeeObligation.estimateSlug || unmintedSetupFeeObligation.estimateId)
             : null;
@@ -11133,6 +11144,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             return true;
           }
+          // GATE_SETUP_FEE_SETTLED_ANYWHERE: fresh, locked customer-wide re-read under the mint
+          // locks. The fee may have been paid or waived on an unrelated invoice since the
+          // unlocked lookup; its settled result and partial cents replace the carried ones.
+          const SetupFeeObligationFresh = require('../services/setup-fee-obligation');
+          const settledNow = await SetupFeeObligationFresh.setupFeeSettledElsewhere(trx, {
+            customerId: svc.customer_id,
+            expectedFeeCents: Math.round(Number(unmintedSetupFeeObligation.setupFee || 0) * 100),
+            visitDate: await SetupFeeObligationFresh.settledVisitDate(trx, svc.id),
+            lock: true,
+          });
+          // A fee settled in the race window is treated as COVERED below, never as a reason to
+          // drop the alert: the hold already suppressed this visit's application mint, so the
+          // application-coverage checks must still run (an application-only alert stands).
+          const feeSettledNow = settledNow.settled === true;
           const stampedNowRows = await trx('invoices')
             .where({ customer_id: svc.customer_id })
             .where('notes', 'ilike', `%accepted estimate #${unmintedSetupFeeObligation.estimateId}%`)
@@ -11188,11 +11213,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const uniqueLiveNow = [...new Map(
             [...liveStampedRows, ...liveOnVisitRows].map((r) => [String(r.id), r]),
           ).values()];
-          const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
-          const feeCovered = expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents;
+          const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0)
+            // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
+            + require('../services/setup-fee-obligation').partialElsewhereCents(settledNow.partial, [...liveStampedRows, ...liveOnVisitRows, ...stampedNowRows, ...onVisitLockedRows]);
+          const feeCovered = feeSettledNow || (expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents);
           const feeCoveredBy = feeCovered
             ? (liveStampedRows.find(invoiceHasPositiveSetupFeeLine)
-              || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine) || uniqueLiveNow[0] || null)
+              || liveOnVisitRows.find(invoiceHasPositiveSetupFeeLine)
+              || (feeSettledNow
+                ? { id: settledNow.invoiceId || settledNow.termId || 'another invoice', invoice_number: null, status: 'settled elsewhere' }
+                : uniqueLiveNow[0])
+              || null)
             : null;
           // Only the durable base-application identity counts on every
           // row (Codex P0, round 18), and stamped first-application
