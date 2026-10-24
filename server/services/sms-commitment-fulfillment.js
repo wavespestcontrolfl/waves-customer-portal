@@ -15,7 +15,7 @@ const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callCont
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
 const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require('./email/email-strip');
-const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp, smsFollowupWitnessFixLive } = require('../config/feature-gates');
 
 const LIMIT = 50;
 // email_reply reads this many raw candidates before resolving them to the
@@ -299,7 +299,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         conn.raw("sms_log.metadata->>'property_id' as linked_property_id")),
     call: conn('call_log').where({ customer_id: customerId, direction: 'outbound' })
       .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-      .modify(toPeer)
+      // GATE_SMS_FOLLOWUP_WITNESS_FIX: a call back reaches the customer on ANY
+      // of their phones (primary, alternate, service contact). The query is
+      // already scoped to the customer's own call rows, so the texting number
+      // is not required. Off = the call must go to the number that texted.
+      .modify(smsFollowupWitnessFixLive() ? (q) => q : toPeer)
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
       // Who placed the call and whether it reached the customer (personCallBack).
       .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', ...callContactSelects(conn)),
@@ -761,6 +765,11 @@ function scopedToProperty(record, commitment) {
   // property — an office invoice, autopay, a staff-recorded payment (owner
   // ruling 2026-09-27: count it unless it is clearly for another property).
   if (record.type === 'payment') return !propertyId || !witnessProperty || witnessProperty === propertyId;
+  // GATE_SMS_FOLLOWUP_WITNESS_FIX: a request that names no property (the
+  // customer has two or more) is answered by any estimate sent to that
+  // customer after it; the evidence query is customer-scoped and the model
+  // still judges whether the estimate covers the requested service.
+  if (!propertyId && record.type === 'estimate' && smsFollowupWitnessFixLive()) return true;
   return !!propertyId && witnessProperty === propertyId;
 }
 

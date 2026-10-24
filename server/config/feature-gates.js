@@ -5564,6 +5564,13 @@ function publicLlmSharedCapLive() {
   return process.env.GATE_PUBLIC_LLM_SHARED_CAP === 'true';
 }
 
+// GATE_SMS_FOLLOWUP_WITNESS_FIX read at CALL time (so a flip needs no redeploy); strict 'true', dark in every environment.
+// On: a staff call to ANY of the customer's phones answers a text follow-up, an estimate sent to a customer whose
+// follow-up names no property answers it, and Done on the bell also settles the follow-up. Off = today's behavior.
+function smsFollowupWitnessFixLive() {
+  return process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -7615,3 +7622,5 @@ module.exports.commercialProposalSignLive = commercialProposalSignLive;
 module.exports.taxSharedBillsLive = taxSharedBillsLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.
 module.exports.publicLlmSharedCapLive = publicLlmSharedCapLive;
+// GATE_SMS_FOLLOWUP_WITNESS_FIX reader, on its own line so gate PRs never conflict.
+module.exports.smsFollowupWitnessFixLive = smsFollowupWitnessFixLive;
