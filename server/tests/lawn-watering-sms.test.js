@@ -716,7 +716,7 @@ describe('GATE_LAWN_WATERING_SHORT_TEXT', () => {
     expect(off.vars.watering_lines).toMatch(/^Skip your turf watering until today's treatment has dried\./);
     const on = lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt, shortText: true }));
     expect(on.templateKey).toBe('lawn_watering_instruction_short');
-    expect(on.vars.watering_lines).toMatch(/^Let the treatment dry first\. Then water 1\/4 inch by .+, even on an off day\.$/);
+    expect(on.vars.watering_lines).toMatch(/^Let the treatment dry first\. Then water about 1\/4 inch by .+, even on an off day\.$/);
   });
 
   test('plan: an unknown shape sends the full lines', () => {
@@ -727,7 +727,7 @@ describe('GATE_LAWN_WATERING_SHORT_TEXT', () => {
   test('plan: the forecast sentence goes short too', () => {
     const instruction = { ...fresh(), forecast: { inches: 0.4, checkpointLabel: 'Sat 1 PM' } };
     const plan = lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt, shortText: true, forecastLine: 'About 0.4 inch of rain is forecast by Sat 1 PM. Long.' }));
-    expect(plan.vars.watering_lines).toMatch(/Rain forecast: about 0\.4 inch by Sat 1 PM\. If 1\/4 inch falls by then, skip the run\.$/);
+    expect(plan.vars.watering_lines).toMatch(/Rain forecast: about 0\.4 inch by Sat 1 PM\. If 1\/4 inch falls by then, skip the run\. If not, run it\.$/);
   });
 
   function harness(templates) {
@@ -755,7 +755,7 @@ describe('GATE_LAWN_WATERING_SHORT_TEXT', () => {
     const h = harness(TEMPLATES);
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
     const sent = h.sendCustomerMessage.mock.calls[0][0];
-    expect(sent.body).toMatch(/^Lawn watering: Let the treatment dry first\. Then water 1\/4 inch by /);
+    expect(sent.body).toMatch(/^Lawn watering: Let the treatment dry first\. Then water about 1\/4 inch by /);
     expect(sent.body.length).toBeLessThanOrEqual(160);
     expect(sent.purpose).toBe('lawn_watering_instruction');
     expect(sent.metadata.original_message_type).toBe('lawn_watering_instruction');
