@@ -1030,6 +1030,9 @@ export default function DispatchPageV2({
     customerId: pickOf(row, 'customerId', 'customer_id') || null,
     fullAddress: typeof row.address === "string" ? row.address : "",
     customerPhone: pickOf(row, 'customerPhone', 'customer_phone') || "",
+    // The neighborhood's pinned gate, when the day feed carries one: the
+    // directions link routes through it before the house.
+    gateWaypoint: row.gateWaypoint || null,
     // When the technician checked in (the Time on-site clock), by the full
     // form's own rule: the on-site status-log entry, else checkInTime.
     onSiteAt: onSiteTimeOf(row) || null,

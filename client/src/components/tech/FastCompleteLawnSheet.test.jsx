@@ -1952,7 +1952,7 @@ describe('header and customer block, as on the full form\'s Complete service pag
     await openSheet({ props: { service: { ...SERVICE, customerId: 'cust-1', fullAddress: '123 Main St, Bradenton, FL 34205', customerPhone: '+19415550100' } } });
     expect(screen.getByRole('link', { name: 'Pat Jones' }).getAttribute('href')).toBe('/admin/customers?customerId=cust-1');
     const maps = screen.getByRole('link', { name: '123 Main St, Bradenton, FL 34205' });
-    expect(maps.getAttribute('href')).toBe('https://www.google.com/maps/dir/?api=1&destination=123%20Main%20St%2C%20Bradenton%2C%20FL%2034205');
+    expect(maps.getAttribute('href')).toBe('https://www.google.com/maps/dir/?api=1&destination=123%20Main%20St%2C%20Bradenton%2C%20FL%2034205&travelmode=driving');
     expect(maps.getAttribute('target')).toBe('_blank');
     // The phone is the Waves call bridge, not a tel: link (owner 2026-10-06).
     expect(screen.queryByRole('link', { name: '+19415550100' })).toBeNull();

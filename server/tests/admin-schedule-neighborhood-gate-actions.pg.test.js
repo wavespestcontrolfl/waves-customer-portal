@@ -103,6 +103,20 @@ describeOrSkip('neighborhood gate actions on GET /api/admin/schedule', () => {
     const row = await feedRow();
     expect(row).not.toHaveProperty('neighborhoodGateActions');
     expect(gateAlerts(row)).toEqual([{ type: 'gate', text: 'Gate: 4242 (neighborhood)' }]);
+    // No pin on the gate: the row carries no waypoint (the plain address link).
+    expect(row).not.toHaveProperty('gateWaypoint');
+  });
+
+  test("the neighborhood's pinned gate reaches the row as gateWaypoint, numbers only; off with the directory", async () => {
+    await db('neighborhood_access').where({ id: entryId }).update({ gate_lat: 27.4321, gate_lng: -82.4567 });
+    try {
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+      expect((await feedRow()).gateWaypoint).toEqual({ lat: 27.4321, lng: -82.4567 });
+      delete process.env.GATE_NEIGHBORHOOD_ACCESS;
+      expect(await feedRow()).not.toHaveProperty('gateWaypoint');
+    } finally {
+      await db('neighborhood_access').where({ id: entryId }).update({ gate_lat: null, gate_lng: null });
+    }
   });
 
   test('the actions gate alone does nothing while the directory is off', async () => {

@@ -15,6 +15,12 @@
  *                                     other live codes there then need confirming)
  * PATCH  /entries/:id               — edit an entry (a new value counts as confirmed),
  *                                     or { action: 'confirm' | 'retire' }
+ *                                     Both take gate_location (a Google Maps link or
+ *                                     "lat, lng"; null clears): where the gate is, so
+ *                                     a visit's Directions link routes through it
+ *                                     (owner 2026-10-24). One pinned live entry per
+ *                                     neighborhood (a second is 409). Read back as
+ *                                     gateLocation.
  * POST   /visits/:visitId/entries   — from a visit: add a keypad code to that
  *                                     visit's neighborhood ({ code, gateLabel? })
  * POST   /visits/:visitId/entries/:entryId/wrong — from a visit: report a
@@ -37,7 +43,9 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { neighborhoodAccessLive, neighborhoodTechActionsLive } = require('../config/feature-gates');
-const { isKeypadCode, lockCommunity, matchKey, visitNeighborhoodIds } = require('../services/neighborhood-access');
+const {
+  isKeypadCode, lockCommunity, matchKey, visitNeighborhoodIds, parseGateLocation,
+} = require('../services/neighborhood-access');
 const { isTechnicianRequest, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 
@@ -62,6 +70,8 @@ const COUNTIES = ['Manatee', 'Sarasota', 'Charlotte'];
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
 const KEYPAD_CODE_ERROR = 'A keypad code is 3 to 8 digits, with an optional leading or trailing # or *';
+const MAX_GATE_LOCATION = 2048;
+const GATE_LOCATION_ERROR = 'Paste a Google Maps link that shows the gate\'s coordinates, or type them as lat, lng';
 
 function logFailure(what, err) {
   logger.error(`[admin-neighborhood-access] ${what} failed (${(err && (err.code || err.name)) || 'error'})`);
@@ -92,7 +102,15 @@ function serializeEntry(row, { cutoff, conflicted, staffNames }) {
     addedBy: row.source_technician_id ? (staffNames.get(row.source_technician_id) || 'Staff') : null,
     markedWrongAt: row.flagged_wrong_at ? new Date(row.flagged_wrong_at).toISOString() : null,
     markedWrongBy: row.flagged_wrong_at ? (staffNames.get(row.flagged_wrong_by) || 'Staff') : null,
+    // Where the gate is (owner 2026-10-24): a visit's Directions link routes
+    // through it before the house. null = not set.
+    gateLocation: gateLocationOf(row),
   };
+}
+
+function gateLocationOf(row) {
+  if (row.gate_lat == null || row.gate_lng == null) return null;
+  return { lat: Number(row.gate_lat), lng: Number(row.gate_lng) };
 }
 
 function positiveInt(value, fallback, max) {
@@ -118,8 +136,24 @@ function mergeFields(input, current) {
   return { merged };
 }
 
+// The gate's map point, when the request carries one: `gate_location` is a
+// pasted Google Maps link or "lat, lng" (parseGateLocation), or null to clear.
+// Returns { value: {} } when the field is absent (an edit keeps the stored
+// point), { error }, or { value: { gate_lat, gate_lng } }.
+function gateLocationFields(input) {
+  if (!Object.prototype.hasOwnProperty.call(input, 'gate_location')) return { value: {} };
+  const raw = input.gate_location;
+  if (raw === null || (typeof raw === 'string' && !raw.trim())) return { value: { gate_lat: null, gate_lng: null } };
+  if (typeof raw !== 'string') return { error: 'gate_location must be text' };
+  if (raw.length > MAX_GATE_LOCATION) return { error: `gate_location is limited to ${MAX_GATE_LOCATION} characters` };
+  const point = parseGateLocation(raw);
+  if (!point) return { error: GATE_LOCATION_ERROR };
+  return { value: { gate_lat: point.lat, gate_lng: point.lng } };
+}
+
 // Merge the requested fields over the current entry and validate the result.
-// Returns { error } or { value: { gate_label, access_type, code, instructions } }.
+// Returns { error } or { value: { gate_label, access_type, code, instructions } }
+// (plus gate_lat and gate_lng when the request carries gate_location).
 function validateEntry(body, current) {
   const input = body && typeof body === 'object' ? body : {};
   const overlay = mergeFields(input, current);
@@ -129,13 +163,14 @@ function validateEntry(body, current) {
 
   const label = String(merged.gate_label || '').trim();
   if (!label) return { error: 'gate_label is required' };
-  if (label.length > MAX_LABEL) return { error: `gate_label is limited to ${MAX_LABEL} characters` };
   if (!ACCESS_TYPES.includes(merged.access_type)) return { error: 'access_type is not valid' };
 
   const rawCode = merged.code ? String(merged.code).trim() : '';
-  if (rawCode.length > MAX_CODE) return { error: `code is limited to ${MAX_CODE} characters` };
   const instructions = merged.instructions ? String(merged.instructions).trim() : '';
-  if (instructions.length > MAX_INSTRUCTIONS) return { error: `instructions are limited to ${MAX_INSTRUCTIONS} characters` };
+  const tooLong = [
+    ['gate_label is', label, MAX_LABEL], ['code is', rawCode, MAX_CODE], ['instructions are', instructions, MAX_INSTRUCTIONS],
+  ].find(([, value, max]) => value.length > max);
+  if (tooLong) return { error: `${tooLong[0]} limited to ${tooLong[2]} characters` };
 
   let code = null;
   if (merged.access_type === 'keypad') {
@@ -150,12 +185,15 @@ function validateEntry(body, current) {
   // A keypad entry is its code alone (as the filer stores it): instructions
   // left over from an entry switched to keypad are cleared, never kept
   // beside the code where the keypad form cannot show or edit them.
+  const location = gateLocationFields(input);
+  if (location.error) return { error: location.error };
   return {
     value: {
       gate_label: label,
       access_type: merged.access_type,
       code,
       instructions: merged.access_type === 'keypad' ? null : (instructions || null),
+      ...location.value,
     },
   };
 }
@@ -172,6 +210,26 @@ async function demoteOtherActiveCodes(trx, neighborhoodId, exceptId) {
     .whereNot('id', exceptId)
     .update({ status: 'needs_confirm', updated_at: trx.fn.now() });
 }
+
+// One pinned gate per neighborhood (pre-push audit P1, 2026-10-24): the
+// waypoint is "the pinned gate", so a second pin on another live entry would
+// make the route pick one by sort order and could send a visit through the
+// resident gate this exists to avoid. The office clears the first pin before
+// setting another. Callers hold the neighborhood row lock, so two offices
+// pinning two gates at once still end with one.
+async function pinTakenElsewhere(trx, neighborhoodId, exceptId) {
+  const q = trx('neighborhood_access')
+    .where({ neighborhood_id: neighborhoodId })
+    .whereNot('status', 'retired')
+    .whereNotNull('gate_lat');
+  if (exceptId) q.whereNot('id', exceptId);
+  return !!(await q.first('id'));
+}
+const PIN_TAKEN_ERROR = 'Another gate in this neighborhood already has a location; clear it there first';
+const CODE_TAKEN_ERROR = 'That code is already on file for this neighborhood';
+// Which unique index a racing writer hit: the one-pin index
+// (neighborhood_access_pin_uniq) or the live-code one.
+const uniqueViolationMessage = (err) => (err.constraint === 'neighborhood_access_pin_uniq' ? PIN_TAKEN_ERROR : CODE_TAKEN_ERROR);
 
 async function liveCodeTaken(trx, neighborhoodId, code, exceptId) {
   const q = trx('neighborhood_access')
@@ -626,6 +684,9 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
       if (entry.code && await liveCodeTaken(trx, neighborhoodId, entry.code)) {
         return { status: 409, body: { error: 'That code is already on file for this neighborhood' } };
       }
+      if (entry.gate_lat != null && await pinTakenElsewhere(trx, neighborhoodId)) {
+        return { status: 409, body: { error: PIN_TAKEN_ERROR } };
+      }
       const [ins] = await trx('neighborhood_access').insert({
         neighborhood_id: neighborhoodId,
         ...entry,
@@ -642,8 +703,8 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
     });
     return res.status(result.status).json(result.body);
   } catch (err) {
-    // The live-code unique index is the backstop for a racing writer.
-    if (err && err.code === '23505') return res.status(409).json({ error: 'That code is already on file for this neighborhood' });
+    // The live-code and one-pin unique indexes are the backstop for a racing writer.
+    if (err && err.code === '23505') return res.status(409).json({ error: uniqueViolationMessage(err) });
     logFailure('add entry', err);
     return res.status(500).json({ error: 'Could not save the entry' });
   }
@@ -689,8 +750,13 @@ router.patch('/entries/:id', async (req, res) => {
       if (next.code && await liveCodeTaken(trx, row.neighborhood_id, next.code, id)) {
         return { status: 409, body: { error: 'That code is already on file for this neighborhood' } };
       }
+      if (next.gate_lat != null && await pinTakenElsewhere(trx, row.neighborhood_id, id)) {
+        return { status: 409, body: { error: PIN_TAKEN_ERROR } };
+      }
       // The office changing the value vouches for it: the entry is confirmed.
       // A label-only edit keeps its status and confirmation date.
+      // The gate's map point is not the value: moving the pin never confirms
+      // a code.
       const valueChanged = next.access_type !== row.access_type
         || (next.code || null) !== (row.code || null)
         || (next.instructions || null) !== (row.instructions || null);
@@ -707,7 +773,7 @@ router.patch('/entries/:id', async (req, res) => {
     });
     return res.status(result.status).json(result.body);
   } catch (err) {
-    if (err && err.code === '23505') return res.status(409).json({ error: 'That code is already on file for this neighborhood' });
+    if (err && err.code === '23505') return res.status(409).json({ error: uniqueViolationMessage(err) });
     logFailure('update entry', err);
     return res.status(500).json({ error: 'Could not update the entry' });
   }
