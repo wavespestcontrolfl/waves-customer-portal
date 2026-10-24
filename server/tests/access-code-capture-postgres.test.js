@@ -2811,4 +2811,513 @@ postgres('access codes section', () => {
     });
   });
 
+  describe('emails', () => {
+    const SENDER = 'pat.sample@example.invalid';
+    const AUTH = 'mx.google.com; dkim=pass header.d=example.invalid header.s=s1; spf=pass smtp.mailfrom=example.invalid';
+    const BODY = 'Hi, the gate code is #4821. Thanks, Pat';
+    const QUOTE = 'the gate code is #4821';
+    const OLD_EMAILS = { gate: process.env.GATE_ACCESS_CODES_EMAILS, since: process.env.GATE_ACCESS_CODES_EMAILS_SINCE };
+    beforeEach(() => {
+      process.env.GATE_ACCESS_CODES_EMAILS = 'true';
+      process.env.GATE_ACCESS_CODES_EMAILS_SINCE = SINCE;
+    });
+    afterEach(() => {
+      for (const [key, value] of [['GATE_ACCESS_CODES_EMAILS', OLD_EMAILS.gate], ['GATE_ACCESS_CODES_EMAILS_SINCE', OLD_EMAILS.since]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    });
+    // The Gmail sync links an email to the customer whose email is the sender; a customer gets the sender's address here.
+    const owner = async (address = SENDER, opts = {}) => {
+      const c = await customer(opts);
+      await trx('customers').where({ id: c.id }).update({ email: address });
+      return c;
+    };
+    // An email as the Gmail sync stores it. The row's store time is old, so the 15-minute settle wait is over.
+    const mail = async (body, { customerId = null, from = SENDER, at = '2040-03-10T15:00:00Z', stored = '2026-01-01T00:00:00Z', subject = 'Gate code',
+      thread = randomUUID(), labels = ['INBOX'], classification = null, html = null, auth = AUTH, unsubscribe = null } = {}) => {
+      const id = randomUUID();
+      await trx('emails').insert({
+        id, gmail_id: id, gmail_thread_id: thread, from_address: from, to_address: 'contact@wavespestcontrol.com', cc_address: '', bcc_address: '',
+        subject, body_text: body, body_html: html, label_ids: JSON.stringify(labels), received_at: new Date(at), created_at: new Date(stored),
+        classification, list_unsubscribe: unsubscribe, authentication_results: auth, customer_id: customerId,
+      });
+      return id;
+    };
+    const emailItem = (extra = {}) => ({ kind: 'neighborhood_gate', code: '#4821', instructions: null, life: 'standing', quote: QUOTE, ...extra });
+    const sweepEmails = (readEmail, read = stub([])) => access.runAccessCodeNet({ now: NOW, conn: trx, read, readEmail });
+    const emailReceipts = (id) => trx('data_hygiene_source_extractions').where({ source_id: id, source_type: 'email', extractor_version: access.EMAIL_VERSION });
+    const emailRows = (extra = {}) => trx('customer_access_codes').where({ source_type: 'email', ...extra }).orderBy('created_at');
+    // receipts made in one test transaction share a clock, so a later read of other words is dated later by hand
+    const newerReceipts = (id) => trx('data_hygiene_source_extractions').where({ source_id: id, source_type: 'email', status: 'no_fields' })
+      .update({ last_attempted_at: trx.raw("now() + interval '1 minute'") });
+
+    describe('gates', () => {
+      test('off, not exactly true, or with no activation time, an email is never read; the texts still are', async () => {
+        const c = await owner();
+        await mail(BODY, { customerId: c.id });
+        const readEmail = stub([emailItem()]);
+        process.env.GATE_ACCESS_CODES_EMAILS = 'false';
+        expect(await sweepEmails(readEmail)).not.toHaveProperty('emails');
+        for (const value of ['1', 'on', 'TRUE']) {
+          process.env.GATE_ACCESS_CODES_EMAILS = value;
+          expect(await sweepEmails(readEmail)).not.toHaveProperty('emails');
+        }
+        process.env.GATE_ACCESS_CODES_EMAILS = 'true';
+        delete process.env.GATE_ACCESS_CODES_EMAILS_SINCE;
+        expect(await sweepEmails(readEmail)).not.toHaveProperty('emails');
+        process.env.GATE_ACCESS_CODES_EMAILS_SINCE = 'yesterday';
+        expect(await sweepEmails(readEmail)).not.toHaveProperty('emails');
+        expect(readEmail).not.toHaveBeenCalled();
+        expect(await emailRows()).toEqual([]);
+      });
+
+      test('the section gate off stops the emails too', async () => {
+        const c = await owner();
+        await mail(BODY, { customerId: c.id });
+        process.env.GATE_ACCESS_CODES_SECTION = 'false';
+        const readEmail = stub([emailItem()]);
+        expect(await sweepEmails(readEmail)).toEqual({ skipped: 'gate_off', movedRetired: 0 });
+        expect(readEmail).not.toHaveBeenCalled();
+      });
+
+      test('emails before the activation time, or more than 30 days before the sweep, are never read', async () => {
+        const c = await owner();
+        await mail(BODY, { customerId: c.id, at: '2039-12-31T23:00:00Z' });
+        await mail(BODY, { customerId: c.id, at: '2040-02-05T12:00:00Z' });
+        const readEmail = stub([emailItem()]);
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { scanned: 0, read: 0 } });
+        expect(readEmail).not.toHaveBeenCalled();
+      });
+
+      test('emails run when the texts have no activation time', async () => {
+        delete process.env.GATE_ACCESS_CODES_SECTION_SINCE;
+        const c = await owner();
+        await mail(BODY, { customerId: c.id });
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ skipped: 'activation_time_required', emails: { read: 1, found: 1 } });
+      });
+
+      test('an email stored in the last 15 minutes waits for the classifier and the bid desk', async () => {
+        const c = await owner();
+        const id = await mail(BODY, { customerId: c.id, stored: new Date().toISOString() });
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { scanned: 0 } });
+        await trx('emails').where({ id }).update({ created_at: new Date('2026-01-01T00:00:00Z') });
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { scanned: 1, found: 1 } });
+      });
+    });
+
+    describe('a gate code in a customer email', () => {
+      test('is filed found for the email\'s customer with an email receipt, once', async () => {
+        const c = await owner();
+        const id = await mail(BODY, { customerId: c.id });
+        const readEmail = stub([emailItem()]);
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { scanned: 1, read: 1, found: 1, failed: 0 } });
+        const [row, ...rest] = await emailRows();
+        expect(rest).toEqual([]);
+        expect(row).toMatchObject({
+          customer_id: c.id, property_id: c.propertyIds[0], kind: 'neighborhood_gate', code: '#4821', life: 'standing', status: 'found',
+          source_type: 'email', source_id: id, source_quote: QUOTE, sender_phone: null, sender_email: null,
+        });
+        expect(new Date(row.source_at)).toEqual(new Date('2040-03-10T15:00:00Z'));
+        expect((await emailReceipts(id))[0]).toMatchObject({ status: 'ok', proposal_count: 1 });
+        // the receipt stops a second read
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { scanned: 0 } });
+        expect(readEmail).toHaveBeenCalledTimes(1);
+        // the model saw the new words only
+        expect(readEmail.mock.calls[0][0].message.message_body).toBe(BODY);
+      });
+
+      test('the office sees it as an email row and accepts it like any other', async () => {
+        const c = await owner();
+        const id = await mail(BODY, { customerId: c.id });
+        await sweepEmails(stub([emailItem()]));
+        const listed = (await access.listFound(trx)).items.filter((r) => r.sourceId === id);
+        expect(listed).toEqual([expect.objectContaining({ sourceType: 'email', senderEmail: null, customerId: c.id })]);
+        const accepted = await access.accept(trx, listed[0].id, { adminUserId: ADMIN_ID });
+        expect(accepted).toMatchObject({ ok: true, profileField: 'neighborhood_gate_code' });
+        expect((await trx('property_preferences').where({ customer_id: c.id }).first()).neighborhood_gate_code).toBe('#4821');
+      });
+
+      test('an HTML-only email is read from its converted text', async () => {
+        const c = await owner();
+        await mail('', { customerId: c.id, html: '<div>Hi, the gate code is #4821. Thanks, Pat</div>' });
+        const readEmail = stub([emailItem()]);
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { read: 1, found: 1 } });
+        expect(readEmail.mock.calls[0][0].message.message_body).toContain('the gate code is #4821');
+      });
+
+      test('mail that is not a customer\'s is not read', async () => {
+        await owner();
+        const readEmail = stub([emailItem()]);
+        await mail(BODY, { from: 'contact@wavespestcontrol.com' });
+        await mail(BODY, { from: 'no-reply@example.invalid' });
+        await mail(BODY, { classification: 'marketing_newsletter' });
+        await mail(BODY, { unsubscribe: '<mailto:u@example.invalid>' });
+        await mail(BODY, { labels: ['SENT'] });
+        await mail(BODY, { labels: ['INBOX', 'SPAM'] });
+        await mail(BODY, { auth: null });
+        const out = await sweepEmails(readEmail);
+        expect(out).toMatchObject({ emails: { scanned: 7, read: 0, skipped: 7 } });
+        expect(readEmail).not.toHaveBeenCalled();
+        expect(await emailRows()).toEqual([]);
+      });
+
+      test('mail the bid desk filed is not read', async () => {
+        const id = await mail(BODY);
+        const [bid] = await trx('bid_opportunities').insert({ source: 'email_subject', status: 'new' }).returning('id');
+        await trx('bid_opportunity_emails').insert({ bid_id: bid.id || bid, email_id: id, kind: 'message', received_at: new Date('2040-03-10T15:00:00Z') });
+        const readEmail = stub([emailItem()]);
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { scanned: 1, read: 0, skipped: 1 } });
+        expect(readEmail).not.toHaveBeenCalled();
+      });
+
+      test('an email with no way in named is not sent to the model', async () => {
+        const c = await owner();
+        const id = await mail('Can you come on Tuesday instead? Thanks', { customerId: c.id });
+        const readEmail = stub([emailItem()]);
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { scanned: 1, read: 0, skipped: 1 } });
+        expect(readEmail).not.toHaveBeenCalled();
+        expect((await emailReceipts(id))[0]).toMatchObject({ status: 'no_fields' });
+      });
+    });
+
+    describe('the new words only', () => {
+      test('a code that only the quoted history holds, and text we sent, are never filed', async () => {
+        const c = await owner();
+        const quoted = `Sounds good, see you Tuesday.\n\nOn Tue, Mar 9, 2040 at 3:21 PM, Pat Sample <${SENDER}> wrote:\n> the gate code is #4821`;
+        const id = await mail(quoted, { customerId: c.id });
+        const readEmail = stub([emailItem()]);
+        // the keyword net sees only "Sounds good, see you Tuesday." and the model is never asked
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { scanned: 1, read: 0, skipped: 1 } });
+        expect(readEmail).not.toHaveBeenCalled();
+        // a model that quotes the history anyway is refused by the verifier
+        await mail(`The gate is open today.\n\n> ${BODY}`, { customerId: c.id });
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { read: 1, found: 0 } });
+        expect(await emailRows()).toEqual([]);
+        expect((await emailReceipts(id))[0].status).toBe('no_fields');
+      });
+
+      test('a reply that repeats our own sent words with no quote marker is not the customer\'s statement', async () => {
+        const c = await owner();
+        const thread = randomUUID();
+        await mail('Hi Pat, the gate code on file is #1111. Is that still right?', { from: 'contact@wavespestcontrol.com', labels: ['SENT'], thread, at: '2040-03-10T14:00:00Z' });
+        // an Outlook-style reply: our message is pasted below with no ">" and no "On ... wrote:"
+        const id = await mail('Yes, the gate code on file is #1111. Is that still right?', { customerId: c.id, thread });
+        const out = await sweepEmails(stub([emailItem({ code: '#1111', quote: 'the gate code on file is #1111' })]));
+        expect(out).toMatchObject({ emails: { read: 1, found: 0, failed: 0 } });
+        expect(await emailRows()).toEqual([]);
+        expect((await emailReceipts(id))[0]).toMatchObject({ status: 'no_fields' });
+        // the customer's own new statement in the same thread is kept
+        await mail(BODY, { customerId: c.id, thread, at: '2040-03-10T16:00:00Z' });
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { found: 1 } });
+      });
+
+      test('a phone number in the signature is not filed as a code', async () => {
+        const c = await owner();
+        await mail('The gate is open.\n\nPat Sample\nCell: (941) 555-0123', { customerId: c.id });
+        expect(await sweepEmails(stub([emailItem({ code: '555-0123', quote: 'Cell: (941) 555-0123' })]))).toMatchObject({ emails: { read: 1, found: 0 } });
+        expect(await emailRows()).toEqual([]);
+      });
+    });
+
+    describe('whose code it is', () => {
+      test('an email with no customer of its own is matched by the sender address, in any letter case, when exactly one live customer has it', async () => {
+        const c = await owner();
+        const id = await mail(BODY, { from: 'Pat.Sample@Example.INVALID' });
+        await sweepEmails(stub([emailItem()]));
+        expect(await emailRows({ source_id: id })).toEqual([expect.objectContaining({ customer_id: c.id, sender_phone: null, sender_email: null })]);
+      });
+
+      test('a deleted customer\'s address is nobody\'s: the one live customer with it is the owner', async () => {
+        const gone = await owner();
+        await trx('customers').where({ id: gone.id }).update({ deleted_at: new Date() });
+        const live = await owner('PAT.SAMPLE@example.invalid');
+        const id = await mail(BODY);
+        await sweepEmails(stub([emailItem()]));
+        expect((await emailRows({ source_id: id })).map((r) => r.customer_id)).toEqual([live.id]);
+      });
+
+      test('an email from an address no customer has is filed unlinked under that address, lower case', async () => {
+        const id = await mail(BODY, { from: 'Stranger@Example.invalid' });
+        await sweepEmails(stub([emailItem()]));
+        expect(await emailRows({ source_id: id })).toEqual([expect.objectContaining({
+          customer_id: null, sender_phone: null, sender_email: 'stranger@example.invalid', status: 'found', code: '#4821',
+        })]);
+        const [listed] = (await access.listFound(trx)).items.filter((r) => r.sourceId === id);
+        expect(listed).toMatchObject({ senderEmail: 'stranger@example.invalid', senderPhone: null, sourceType: 'email', customerId: null });
+        // a second pass of the same email files nothing twice
+        await trx('data_hygiene_source_extractions').where({ source_id: id }).delete();
+        await sweepEmails(stub([emailItem()]));
+        expect(await emailRows({ source_id: id })).toHaveLength(1);
+      });
+
+      test('an unlinked email names its home: the suggested customer is the one live home the address in the email matches', async () => {
+        const c = await customer({ house: '4455', zip: '34202' });
+        const id = await mail('I live at 4455 Example Lane, Lakewood Ranch, FL 34202. Hi, the gate code is #4821. Thanks', { from: 'stranger@example.invalid' });
+        await sweepEmails(stub([emailItem()]));
+        const [row] = await emailRows({ source_id: id });
+        expect(row).toMatchObject({ customer_id: null, suggested_customer_id: c.id, property_id: c.propertyIds[0] });
+      });
+
+      test('an unlinked email row is linked by the office, then accepted; the link clears the sender address', async () => {
+        const c = await owner('someone.else@example.invalid');
+        const id = await mail(BODY, { from: 'stranger@example.invalid' });
+        await sweepEmails(stub([emailItem()]));
+        const [row] = await emailRows({ source_id: id });
+        expect(await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: false, code: 'link_required' });
+        expect(await access.link(trx, row.id, { customerId: c.id, adminUserId: ADMIN_ID })).toMatchObject({ ok: true });
+        expect(await trx('customer_access_codes').where({ id: row.id }).first()).toMatchObject({ customer_id: c.id, sender_email: null, sender_phone: null });
+        expect(await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true });
+        expect((await trx('property_preferences').where({ customer_id: c.id }).first()).neighborhood_gate_code).toBe('#4821');
+      });
+
+      test('the table holds an unlinked email row only with a sender address or phone, and never two of one email and value', async () => {
+        const c = await owner('someone.else@example.invalid');
+        const id = await mail(BODY, { from: 'stranger@example.invalid' });
+        await sweepEmails(stub([emailItem()]));
+        const [row] = await emailRows({ source_id: id });
+        await expect(trx.transaction(async (t) => t('customer_access_codes').where({ id: row.id }).update({ sender_email: null }))).rejects.toMatchObject({ code: '23514' });
+        const { id: _ignored, created_at: _c, updated_at: _u, ...copy } = row;
+        await expect(trx.transaction(async (t) => t('customer_access_codes').insert(copy))).rejects.toMatchObject({ code: '23505' });
+        expect(c.id).toBeTruthy();
+      });
+
+      test('an email that gets its own customer after an unlinked filing refuses the link and files for that customer', async () => {
+        await owner('someone.else@example.invalid');
+        const other = await owner('third@example.invalid');
+        const id = await mail(BODY, { from: 'stranger@example.invalid' });
+        await sweepEmails(stub([emailItem()]));
+        const [row] = await emailRows({ source_id: id });
+        await trx('emails').where({ id }).update({ customer_id: other.id });
+        expect(await access.link(trx, row.id, { customerId: other.id })).toMatchObject({ ok: false, code: 'source_moved' });
+        expect((await access.listFound(trx)).items.filter((r) => r.sourceId === id)).toEqual([]);
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { found: 1 } });
+        expect((await emailRows({ source_id: id, customer_id: other.id }))).toHaveLength(1);
+        expect(await emailRows({ source_id: id, customer_id: null })).toEqual([]);
+      });
+
+      test('a customer who is gone leaves the email unread', async () => {
+        const c = await owner();
+        const id = await mail(BODY, { customerId: c.id });
+        await trx('customers').where({ id: c.id }).update({ deleted_at: new Date() });
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { scanned: 0 } });
+        expect(await emailReceipts(id)).toEqual([]);
+      });
+
+      test('an active code from an email that now belongs to another customer is retired by the sweep', async () => {
+        const c = await owner();
+        const other = await owner('third@example.invalid');
+        const id = await mail(BODY, { customerId: c.id });
+        await sweepEmails(stub([emailItem()]));
+        const [row] = await emailRows({ source_id: id });
+        expect((await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        await trx('emails').where({ id }).update({ customer_id: other.id });
+        expect(await sweepEmails(stub([]))).toMatchObject({ movedRetired: 1 });
+        expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('retired');
+        expect((await trx('property_preferences').where({ customer_id: c.id }).first()).neighborhood_gate_code).toBeNull();
+      });
+
+      test('a sender address that now belongs to another customer moves a found row at once and the next pass files it for the new owner', async () => {
+        const a = await owner();
+        const id = await mail(BODY);
+        await sweepEmails(stub([emailItem()]));
+        expect((await emailRows({ source_id: id, status: 'found' })).map((r) => r.customer_id)).toEqual([a.id]);
+        await trx('customers').where({ id: a.id }).update({ email: 'moved.away@example.invalid' });
+        const b = await owner();
+        expect((await access.listForCustomer(trx, a.id)).found).toEqual([]);
+        expect((await access.listFound(trx)).items.filter((r) => r.sourceId === id && r.customerId === a.id)).toEqual([]);
+        await sweepEmails(stub([emailItem()]));
+        expect((await emailRows({ source_id: id, status: 'found' })).map((r) => r.customer_id)).toEqual([b.id]);
+        // the address is nobody's now: filed unlinked under the sender address
+        await trx('customers').where({ id: b.id }).update({ email: 'moved.again@example.invalid' });
+        await sweepEmails(stub([emailItem()]));
+        expect(await emailRows({ source_id: id, status: 'found' })).toEqual([expect.objectContaining({ customer_id: null, sender_email: SENDER })]);
+      });
+
+      test('an accepted code whose address is nobody\'s now is retired, and the office\'s own link on an unlinked row stays', async () => {
+        const phoneOwner = await owner();
+        const linkedTo = await owner('someone.else@example.invalid');
+        const bySender = await mail(BODY);
+        const byOffice = await mail(BODY, { from: 'stranger@example.invalid' });
+        await sweepEmails(stub([emailItem()]));
+        const [senderRow] = await emailRows({ source_id: bySender });
+        const [officeRow] = await emailRows({ source_id: byOffice });
+        expect(senderRow.customer_id).toBe(phoneOwner.id);
+        expect(await access.link(trx, officeRow.id, { customerId: linkedTo.id })).toMatchObject({ ok: true });
+        expect((await access.accept(trx, senderRow.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        expect((await access.accept(trx, officeRow.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        await trx('customers').where({ id: phoneOwner.id }).update({ email: 'moved.away@example.invalid' });
+        expect(await sweepEmails(stub([]))).toMatchObject({ movedRetired: 1 });
+        expect((await trx('customer_access_codes').where({ id: senderRow.id }).first()).status).toBe('retired');
+        expect((await trx('customer_access_codes').where({ id: officeRow.id }).first()).status).toBe('active');
+      });
+    });
+
+    describe('accepting a code from an email', () => {
+      test('an email corrected, reclassified or marked spam after the sweep cannot be accepted from a stale page', async () => {
+        const c = await owner();
+        const id = await mail(BODY, { customerId: c.id });
+        await sweepEmails(stub([emailItem()]));
+        const [row] = await emailRows({ source_id: id });
+        await trx('emails').where({ id }).update({ body_text: 'Hello, wrong number.' });
+        expect(await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: false, code: 'source_changed' });
+        await trx('emails').where({ id }).update({ body_text: BODY });
+        // the words are back, but a spam label makes the email one the sweep would not read
+        await trx('emails').where({ id }).update({ label_ids: JSON.stringify(['INBOX', 'SPAM']) });
+        expect(await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: false, code: 'source_changed' });
+      });
+
+      test('a numeric code that becomes the customer\'s house number after the read is refused at accept', async () => {
+        const c = await owner(SENDER, { house: '7000' });
+        const id = await mail(BODY);
+        await sweepEmails(stub([emailItem()]));
+        const [row] = await emailRows({ source_id: id });
+        await trx('customer_properties').where({ id: c.propertyIds[0] }).update({ address_line1: '4821 Example Lane' });
+        expect(await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: false, code: 'code_is_address' });
+      });
+    });
+
+    describe('every field that decides eligibility is in the receipt, and the write rechecks it', () => {
+      test('the JavaScript and SQL receipt hashes agree for every shape of email, and each field moves the hash', async () => {
+        const c = await owner();
+        const [bid] = await trx('bid_opportunities').insert({ source: 'email_subject', status: 'new' }).returning('id');
+        const ids = [
+          await mail(BODY, { customerId: c.id }),
+          await mail(BODY),
+          await mail(BODY, { from: 'Stranger@Example.INVALID', classification: 'customer_request', labels: ['INBOX', 'UNREAD', 'SPAM'] }),
+          await mail('', { html: '<p>Zoë says “gate”, ünïcode ✓ \u0001 : colons</p>', unsubscribe: '<mailto:u@example.invalid>' }),
+          await mail(BODY, { labels: ['SENT', 'DRAFT', 'TRASH'], auth: null, subject: null }),
+          await mail('The gate code is 12:34: ok', { subject: 'Re: Out of office', auth: '' }),
+        ];
+        await trx('bid_opportunity_emails').insert({ bid_id: bid.id || bid, email_id: ids[1], kind: 'message', received_at: new Date('2040-03-10T15:00:00Z') });
+        await trx('emails').where({ id: ids[5] }).update({ label_ids: null });
+        for (const id of ids) {
+          const row = await trx('emails as e').where('e.id', id).first(...emailSelectFor(trx));
+          const { rows: [sql] } = await trx.raw(`SELECT ${access.EMAIL_HASH_SQL} AS hash FROM emails e WHERE e.id = ?`, [id]);
+          expect(access.emailSourceHash(row, await access.emailOwnerId(trx, row))).toBe(sql.hash);
+        }
+        const base = await trx('emails as e').where('e.id', ids[0]).first(...emailSelectFor(trx));
+        const hash = (patch) => access.emailSourceHash({ ...base, ...patch }, base.customer_id);
+        for (const patch of [{ from_address: 'other@example.invalid' }, { subject: 'Other' }, { classification: 'vendor' }, { label_ids: ['SPAM'] },
+          { label_ids: ['SENT'] }, { list_unsubscribe: '<mailto:u@example.invalid>' }, { bid_filed: true }, { authentication_results: 'x' },
+          { body_text: `${base.body_text} ` }, { body_html: '<p>x</p>' }]) {
+          expect(hash(patch)).not.toBe(hash({}));
+        }
+        expect(access.emailSourceHash(base, 'someone-else')).not.toBe(hash({}));
+      });
+      const emailSelectFor = (conn) => ['id', 'customer_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at', 'classification', 'label_ids',
+        'list_unsubscribe', 'authentication_results', 'gmail_thread_id'].map((c) => `e.${c}`).concat([conn.raw('EXISTS (SELECT 1 FROM bid_opportunity_emails l WHERE l.email_id = e.id) AS bid_filed')]);
+
+      test.each([
+        ['marked spam', { labels: ['INBOX', 'SPAM'] }],
+        ['moved to the bin', { labels: ['TRASH'] }],
+        ['reclassified as a vendor email', { classification: 'vendor' }],
+        ['reclassified as a newsletter', { classification: 'marketing_newsletter' }],
+        ['found to be a list mailing', { unsubscribe: '<mailto:u@example.invalid>' }],
+        ['sent from our own address', { from: 'contact@wavespestcontrol.com' }],
+      ])('an email %s after the read removes what it filed, and back again files it again', async (_name, patch) => {
+        const c = await owner();
+        const id = await mail(BODY, { customerId: c.id });
+        await sweepEmails(stub([emailItem()]));
+        expect(await emailRows({ status: 'found' })).toHaveLength(1);
+        const undo = { label_ids: JSON.stringify(['INBOX']), classification: null, list_unsubscribe: null, from_address: SENDER };
+        await trx('emails').where({ id }).update({
+          ...(patch.labels ? { label_ids: JSON.stringify(patch.labels) } : {}), ...('classification' in patch ? { classification: patch.classification } : {}),
+          ...(patch.unsubscribe ? { list_unsubscribe: patch.unsubscribe } : {}), ...(patch.from ? { from_address: patch.from } : {}),
+        });
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { scanned: 1, read: 0, skipped: 1 } });
+        expect(await emailRows({ status: 'found' })).toEqual([]);
+        expect((await emailReceipts(id)).map((r) => r.status)).toContain('no_fields');
+        await newerReceipts(id);
+        await trx('emails').where({ id }).update(undo);
+        expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { read: 1, found: 1 } });
+        expect(await emailRows({ status: 'found' })).toHaveLength(1);
+      });
+
+      test.each([
+        ['marked spam', { label_ids: JSON.stringify(['INBOX', 'SPAM']) }],
+        ['reclassified as a vendor email', { classification: 'vendor' }],
+        ['edited', { body_text: 'Hello, wrong number about the gate.' }],
+        ['relinked to another customer', 'relink'],
+      ])('an email %s during the model read is not filed', async (_name, patch) => {
+        const c = await owner();
+        const other = await owner('third@example.invalid');
+        const id = await mail(BODY, { customerId: c.id });
+        const readEmail = jest.fn(async () => {
+          await trx('emails').where({ id }).update(patch === 'relink' ? { customer_id: other.id } : patch);
+          return { items: [emailItem()] };
+        });
+        const out = await sweepEmails(readEmail);
+        expect(out).toMatchObject({ emails: { read: 1, found: 0, failed: 0 } });
+        expect(await emailRows({ customer_id: c.id })).toEqual([]);
+        expect((await emailReceipts(id)).filter((r) => r.status === 'ok')).toEqual([]);
+        if (patch === 'relink') {
+          // the next pass reads the email for its new owner
+          expect(await sweepEmails(stub([emailItem()]))).toMatchObject({ emails: { found: 1 } });
+          expect((await emailRows()).map((r) => r.customer_id)).toEqual([other.id]);
+        }
+      });
+    });
+
+    describe('failure', () => {
+      test('a failed email read never blocks the texts or the calls, and is surfaced like a failed text', async () => {
+        const c = await owner();
+        await text(c.id, 'The gate code is #4821');
+        const id = await mail(BODY, { customerId: c.id });
+        const readEmail = jest.fn(async () => { throw Object.assign(new Error(`provider said ${BODY}`), { code: 'ECONN' }); });
+        const read = stub([gateItem()]);
+        await expect(sweepEmails(readEmail, read)).rejects.toMatchObject({
+          code: 'ACCESS_NET_FAILURES', tally: { found: 1, failed: 0, emails: { read: 1, found: 0, failed: 1 } },
+        });
+        expect(read).toHaveBeenCalledTimes(1);
+        expect((await rows(c.id)).filter((r) => r.source_type === 'sms')).toHaveLength(1);
+        expect((await emailReceipts(id))[0]).toMatchObject({ status: 'failed', attempt_count: 1 });
+        // nothing readable is logged: ids and error codes only
+        const logged = JSON.stringify([...logger.warn.mock.calls, ...logger.error.mock.calls]);
+        expect(logged).toContain(id);
+        for (const secret of ['4821', 'gate', 'Pat', SENDER, 'provider said']) expect(logged.replaceAll(id, '')).not.toContain(secret);
+        // retried up to the cap, then left alone
+        await expect(sweepEmails(readEmail)).rejects.toMatchObject({ tally: { emails: { scanned: 1, failed: 1 } } });
+        await expect(sweepEmails(readEmail)).rejects.toMatchObject({ tally: { emails: { scanned: 1, failed: 1 } } });
+        expect((await emailReceipts(id))[0].status).toBe('failed_max_retries');
+        expect(await sweepEmails(readEmail)).toMatchObject({ emails: { scanned: 0 } });
+      });
+
+      test('a failed emails query is a failed emails pass, not a lost text or call', async () => {
+        const c = await owner();
+        await text(c.id, 'The gate code is #4821');
+        const guarded = new Proxy(trx, {
+          apply: (target, thisArg, args) => {
+            if (args[0] === 'emails as e') throw Object.assign(new Error('boom'), { code: 'XX000' });
+            return target(...args);
+          },
+          get: (target, key) => (typeof target[key] === 'function' ? target[key].bind(target) : target[key]),
+        });
+        await expect(access.runAccessCodeNet({ now: NOW, conn: guarded, read: stub([gateItem()]), readEmail: stub([]) }))
+          .rejects.toMatchObject({ code: 'ACCESS_NET_FAILURES', tally: { found: 1, emails: { failed: 1 } } });
+        expect((await rows(c.id)).filter((r) => r.source_type === 'sms')).toHaveLength(1);
+      });
+
+      test('the calls and emails passes are independent: a failed calls pass does not stop the emails', async () => {
+        process.env.GATE_ACCESS_CODES_CALLS = 'true';
+        process.env.GATE_ACCESS_CODES_CALLS_SINCE = SINCE;
+        try {
+          const c = await owner();
+          await mail(BODY, { customerId: c.id });
+          const guarded = new Proxy(trx, {
+            apply: (target, thisArg, args) => {
+              if (args[0] === 'call_log as c') throw Object.assign(new Error('boom'), { code: 'XX000' });
+              return target(...args);
+            },
+            get: (target, key) => (typeof target[key] === 'function' ? target[key].bind(target) : target[key]),
+          });
+          await expect(access.runAccessCodeNet({ now: NOW, conn: guarded, read: stub([]), readCall: stub([]), readEmail: stub([emailItem()]) }))
+            .rejects.toMatchObject({ tally: { calls: { failed: 1 }, emails: { found: 1, failed: 0 } } });
+        } finally {
+          delete process.env.GATE_ACCESS_CODES_CALLS;
+          delete process.env.GATE_ACCESS_CODES_CALLS_SINCE;
+        }
+      });
+    });
+  });
+
 });
