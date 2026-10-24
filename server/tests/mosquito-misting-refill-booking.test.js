@@ -133,6 +133,18 @@ describe('a new booking (buildAppointmentPricing, behind POST / and POST /previe
       .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDON_ONLY' });
   });
 
+  test('a multi-property customer with no house chosen: the booking\'s linked estimate names it (POST / and POST /preview)', async () => {
+    const OTHER = 'prop-other';
+    const tablesTwo = baseTables({
+      estimates: [accepted('natural'), accepted('premium', { id: 'est-other', property_id: OTHER, accepted_at: '2026-10-05T00:00:00Z' })],
+      customer_properties: [{ id: HOUSE, customer_id: CUSTOMER.id, active: true }, { id: OTHER, customer_id: CUSTOMER.id, active: true }],
+    });
+    const linked = await price({ refillContext: { propertyId: null, sourceEstimateId: 'est-other', isRecurring: false } }, tablesTwo);
+    expect(linked.addonLines[0].price).toBe(319);
+    // nothing names the house: the customer has two, so the refill is not priced for a guess
+    await expect(price({ refillContext: { propertyId: null, sourceEstimateId: null, isRecurring: false } }, tablesTwo)).rejects.toMatchObject({ code: 'MISTING_REFILL_UNPRICED' });
+  });
+
   test('IB and other callers with no refill context still go through the resolver (customer-scoped, sole property)', async () => {
     const out = await price({ refillContext: undefined });
     expect(out.addonLines[0].price).toBe(219);
@@ -322,13 +334,25 @@ describe('Update Details that moves the visit to another house prices the refill
     await expect(normalize({ propertyId: OTHER }, tables({ estimates: [accepted('natural')] }))).rejects.toMatchObject({ code: 'MISTING_REFILL_UNPRICED' });
   });
 
-  test('only a refill priced now carries the tag; other lines and kept-stored refills do not', async () => {
+  test('every refill line (priced now or kept as stored) carries the tag; other lines do not', async () => {
     const out = await normalize({}, tables());
     expect(Object.keys(out.normalizedAddons[0])).toContain('refillPricedForProperty');
     const pest = await normalizeUpdateDetailsAddons({
       db: fakeDb(tables()), id: VISIT, addons: [{ serviceId: PEST.id, name: 'Pest Control', basePrice: 40 }], updates: {}, isRecurring: false, serviceType: PLAN.name, scheduledDate: '2026-11-03',
     });
     expect(Object.keys(pest.normalizedAddons[0])).not.toContain('refillPricedForProperty');
+  });
+
+  test('a refill the visit already carries is kept at its stored price only while the visit stays at its house', async () => {
+    const stored = { id: 'row-1', scheduled_service_id: VISIT, service_id: REFILL_ID, service_name: 'Mosquito Misting System Refill - Natural (botanical)', service_key_snapshot: 'mosquito_misting_refill', base_price: 219, estimated_price: 219 };
+    const noEstimates = tables({ estimates: [], scheduled_service_addons: [stored] });
+    const line = { id: 'row-1', serviceId: REFILL_ID, name: REFILL.name, basePrice: 219 };
+    const run = (extra) => normalizeUpdateDetailsAddons({ db: fakeDb(noEstimates), id: VISIT, addons: [line], updates: {}, isRecurring: false, serviceType: PLAN.name, scheduledDate: '2026-11-03', ...extra });
+    // stays put (no destination posted, or the same house posted): kept, and tagged so the row-lock check covers it
+    expect((await run({})).normalizedAddons[0]).toMatchObject({ price: 219, refillPricedForProperty: HOUSE });
+    expect((await run({ propertyId: HOUSE })).normalizedAddons[0]).toMatchObject({ price: 219, refillPricedForProperty: HOUSE });
+    // moves to a house with no accepted misting estimate: refused, the old house's price is not carried over
+    await expect(run({ propertyId: OTHER })).rejects.toMatchObject({ status: 409, code: 'MISTING_REFILL_UNPRICED' });
   });
 
   describe('assertRefillPropertyCurrent: the price is re-checked against the house under the save\'s row lock', () => {

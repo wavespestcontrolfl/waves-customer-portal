@@ -12296,6 +12296,7 @@ async function loadRefillVisit(database, id, cols, updates, destinationPropertyI
     customer_id: row.customer_id || null,
     // The house the visit will be at once this save lands: the posted destination when the save moves it, else where it is.
     property_id: (destinationPropertyId !== undefined ? destinationPropertyId : row.property_id) || null,
+    stored_property_id: row.property_id || null,
     source_estimate_id: row.source_estimate_id || null,
     parentServiceKey: parentServiceKey || null,
   };
@@ -12474,7 +12475,9 @@ async function normalizeUpdateDetailsAddons({
             refillLine = attach;
             gross = attach.unitPrice;
             serviceName = attach.lineName;
-          } else if (prior && mistingRefill.isRefillKey(prior.service_key_snapshot) && mistingRefill.KEEP_STORED_ON.has(attach.code)) {
+          } else if (prior && mistingRefill.isRefillKey(prior.service_key_snapshot) && mistingRefill.KEEP_STORED_ON.has(attach.code)
+            && String(refillVisit.property_id || '') === String(refillVisit.stored_property_id || '')) {
+            // Only while the visit stays at the house the stored price was set for: a move to a house that cannot be priced refuses.
             gross = toMoney(prior.base_price ?? prior.estimated_price);
             serviceName = String(prior.service_name || serviceName).trim();
             refillLine = { keptStored: true };
@@ -12602,7 +12605,7 @@ async function normalizeUpdateDetailsAddons({
           discount: lineDiscount,
           legacyGrossUnknown,
           // The house this refill was priced for, re-checked under the save's row lock (assertRefillPropertyCurrent).
-          ...(refillLine && refillLine.ok ? { refillPricedForProperty: refillVisit.property_id } : {}),
+          ...(refillLine ? { refillPricedForProperty: refillVisit.property_id } : {}),
         });
       }
 

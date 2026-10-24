@@ -148,6 +148,13 @@ describe('which estimate decides: accepted, this customer, this property', () =>
     expect(await attach(db([estimate()], two), { propertyId: HOUSE })).toMatchObject({ ok: true });
   });
 
+  test('no customer is unpriced without a read', async () => {
+    const reads = [];
+    const database = (table) => { reads.push(table); return db([estimate()])(table); };
+    expect(await attach(database, { customerId: undefined })).toMatchObject({ ok: false, code: 'MISTING_REFILL_UNPRICED' });
+    expect(reads).toEqual([]);
+  });
+
   test('a failed read refuses with a retryable 503 and prices nothing', async () => {
     expect(await attach(fakeDb({ estimates: [estimate()], customer_properties: [] }, { failEstimates: true })))
       .toMatchObject({ ok: false, code: 'MISTING_REFILL_LOOKUP_FAILED', status: 503 });
@@ -177,6 +184,37 @@ describe('which solution: stamped rows first, then engine inputs, never a guess'
 
   test('estimate_data stored as JSON text reads the same', async () => {
     expect(await attach(db([estimate({ estimate_data: JSON.stringify(mistingData('premium')) })]))).toMatchObject({ ok: true, solution: 'premium' });
+  });
+});
+
+describe('the house comes from the booking\'s linked estimate when none is named', () => {
+  const two = { customer_properties: [{ id: HOUSE, customer_id: CUSTOMER, active: true }, { id: OTHER_HOUSE, customer_id: CUSTOMER, active: true }] };
+  const other = (over = {}) => estimate({ id: 'est-other', property_id: OTHER_HOUSE, estimate_data: mistingData('premium'), ...over });
+
+  test('a multi-property customer with no property chosen: the linked misting estimate\'s own house decides', async () => {
+    const out = await attach(db([estimate(), other()], two), { propertyId: null, sourceEstimateId: 'est-other' });
+    expect(out).toMatchObject({ ok: true, estimateId: 'est-other', solution: 'premium' });
+  });
+
+  test('a linked estimate that is not a misting one still names the house: the misting estimate of THAT house is found', async () => {
+    const pest = estimate({ id: 'est-pest', property_id: OTHER_HOUSE, accepted_at: '2026-10-28T00:00:00Z', estimate_data: pestData() });
+    const out = await attach(db([estimate(), other({ accepted_at: '2026-10-02T00:00:00Z' }), pest], two), { propertyId: null, sourceEstimateId: 'est-pest' });
+    expect(out).toMatchObject({ ok: true, estimateId: 'est-other', solution: 'premium' });
+  });
+
+  test('an explicit property wins over the linked estimate\'s', async () => {
+    const out = await attach(db([estimate(), other()], two), { propertyId: HOUSE, sourceEstimateId: 'est-other' });
+    expect(out).toMatchObject({ ok: true, estimateId: 'est-1', solution: 'natural' });
+  });
+
+  test('another customer\'s estimate names no house for this customer: a multi-property customer stays unpriced', async () => {
+    const foreign = other({ id: 'est-foreign', customer_id: 'cust-2' });
+    expect(await attach(db([estimate(), other(), foreign], two), { propertyId: null, sourceEstimateId: 'est-foreign' }))
+      .toMatchObject({ ok: false, code: 'MISTING_REFILL_UNPRICED' });
+  });
+
+  test('no property, no linked estimate, several properties: unpriced (staff choose the house)', async () => {
+    expect(await attach(db([estimate(), other()], two), { propertyId: null })).toMatchObject({ ok: false, code: 'MISTING_REFILL_UNPRICED' });
   });
 });
 

@@ -136,15 +136,18 @@ const sameProperty = (row, propertyId, soleId) => (row.property_id
 
 const ESTIMATE_COLUMNS = ['id', 'customer_id', 'property_id', 'status', 'accepted_at', 'estimate_data', 'pricing_authority'];
 
+// The house a refill is for: the one named, else the one the booking's linked estimate belongs to (the booking is stamped with it),
+// else the customer's sole active property. `own` is the linked estimate row, trusted only when it is this customer's.
+const effectiveHouse = ({ propertyId, own, customerId, soleId }) => propertyId
+  || (own && String(own.customer_id || '') === String(customerId || '') && own.property_id)
+  || soleId || null;
+
 // The accepted misting estimate that decides the refill solution, or null. Throws only on a failed read.
-async function findAcceptedMistingEstimate({ customerId, propertyId, soleId, sourceEstimateId }, database) {
-  if (sourceEstimateId) {
-    const own = await database('estimates').where({ id: sourceEstimateId }).first(...ESTIMATE_COLUMNS);
-    if (own && own.status === 'accepted' && String(own.customer_id || '') === String(customerId || '')
-      && sameProperty(own, propertyId, soleId)) {
-      const read = readEstimateMisting(own);
-      if (read.carries) return { id: own.id, ...read };
-    }
+async function findAcceptedMistingEstimate({ customerId, propertyId, soleId, own }, database) {
+  if (own && own.status === 'accepted' && String(own.customer_id || '') === String(customerId || '')
+    && sameProperty(own, propertyId, soleId)) {
+    const read = readEstimateMisting(own);
+    if (read.carries) return { id: own.id, ...read };
   }
   for (let offset = 0; offset < SCAN_CAP; offset += SCAN_PAGE) {
     const page = await database('estimates')
@@ -176,11 +179,13 @@ async function resolveRefillAttachment({
   if (isRecurring) return refusal('MISTING_REFILL_ON_SERIES');
   if (isRefillKey(parentServiceKey)) return refusal('MISTING_REFILL_ADDON_ONLY');
   if (parentServiceKey !== MISTING_SERVICE_CATALOG_KEY) return refusal('MISTING_REFILL_WRONG_PARENT');
+  if (!customerId) return refusal('MISTING_REFILL_UNPRICED');
   let found;
   try {
     const soleId = await readSoleActivePropertyId(customerId, database);
+    const own = sourceEstimateId ? await database('estimates').where({ id: sourceEstimateId }).first(...ESTIMATE_COLUMNS) : null;
     found = await findAcceptedMistingEstimate({
-      customerId, propertyId: propertyId || soleId, soleId, sourceEstimateId,
+      customerId, propertyId: effectiveHouse({ propertyId, own, customerId, soleId }), soleId, own,
     }, database);
   } catch (err) {
     logger.warn(`[misting-refill] accepted estimate lookup failed for customer ${customerId}: ${err.message}`);
