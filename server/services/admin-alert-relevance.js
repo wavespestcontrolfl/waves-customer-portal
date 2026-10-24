@@ -87,11 +87,8 @@ const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 const SUGGESTION_KEY_PREFIX = 'call-last-name-suggestion:';
 // The dedupeKey prefix of the repeat-form alert (lead-webhook.js
 // ringRepeatFormAlert). Repeated, not imported (a route module); a test pins
-// the two together. Contact is a call a person placed from the admin dialer
-// (admin-communications.js: click-to-call, callback), never an automatic
-// bridge ring to the owner's cell, or a staff text that reached the customer.
+// the two together.
 const REPEAT_FORM_PREFIX = 'lead-repeat-form:';
-const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback'];
 
 const RETIRED_BY = 'alert-relevance';
 const PAGE_SIZE = 200;
@@ -254,21 +251,20 @@ async function loadSubjects(rows, conn = db) {
       .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
     data.consents = new Map(recorded.map((r) => [String(r.customer_id), r.latest_created_at]));
   }
-  // The repeat-form alerts' customers: the latest call a person placed to
-  // each and the latest staff text that reached each (deliveredTexts, the
-  // one definition of a text that reached the other side). Their quotes and
-  // bookings load below with the leads' customers, with or without a lead row.
+  // The repeat-form alerts' customers: the latest staff text that reached
+  // each (deliveredTexts, the one definition of a text that reached the other
+  // side). Never a call row: a dialer bridge writes it before Twilio dials,
+  // and the customer leg is recorded only for callback attempts, so it does
+  // not prove the lead was reached. Their quotes and bookings load below
+  // with the leads' customers, with or without a lead row.
   const contactCustomerIds = [...new Set(rows.map((row) => repeatFormCustomerId(parseMeta(row.metadata))).filter(Boolean))];
   if (contactCustomerIds.length) {
     const { deliveredTexts } = require('./messaging/auto-text-holds');
     const { HUMAN_REPLY_TYPES } = require('./sms-suggest-mode');
-    const calls = await conn('call_log').whereIn('customer_id', contactCustomerIds)
-      .where({ direction: 'outbound' }).whereIn('source', STAFF_CALL_SOURCES)
-      .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
     const texts = await deliveredTexts(conn).whereIn('customer_id', contactCustomerIds)
       .where({ direction: 'outbound' }).whereIn('message_type', HUMAN_REPLY_TYPES)
       .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
-    keepLatestPerCustomer(data.contacts, [...calls, ...texts], 'latest_created_at');
+    keepLatestPerCustomer(data.contacts, texts, 'latest_created_at');
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
@@ -320,7 +316,7 @@ function subjectFor(row, data, todayET) {
     // An estimate was handed off to the bell's customer after the bell
     // (loaded for add-a-service portal chat bells only).
     chatQuoted: data.chatQuoted.has(String(row.id)),
-    // The latest staff call or text to the bell's customer (loaded for
+    // The latest staff text that reached the bell's customer (loaded for
     // repeat-form alerts only).
     leadContactedAt: repeatCustomer ? data.contacts.get(repeatCustomer) : null,
   };
@@ -393,10 +389,12 @@ function newLeadMovedOn(s) {
 }
 
 // The repeat-form alert asks the office to call a lead who sent the quote
-// form again (GATE_LEAD_REPEAT_FORM). Only timestamped facts from after it
-// rang count: a staff call or text to the customer, the lead deleted, a quote
-// sent, a live visit booked. Never the new-lead bell's handled shortcut: a
-// lead marked handled before this form is the lead coming back.
+// form again (GATE_LEAD_REPEAT_FORM). Only timestamped facts from after its
+// latest form count: a staff text that reached the customer, a quote sent, a
+// live visit booked, the lead deleted. A call alone is a person's to mark done
+// (no call row proves the customer leg was reached). Never the new-lead
+// bell's handled shortcut: a lead marked handled before this form is the
+// lead coming back.
 function repeatFormSettled(s) {
   if (!s.bellAt) return null;
   const after = (at) => !!at && new Date(at).getTime() > s.bellAt.getTime();

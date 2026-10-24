@@ -587,39 +587,33 @@ describe('class rules', () => {
     expect((await reasonFor(leadNote())).cls).toBe('new_lead');
   });
 
-  // The fake answers both contact reads (call_log, and sms_log through
-  // deliveredTexts) with whatever rows it holds; the delivered-text SQL is
-  // auto-text-holds.js's own.
-  test('repeat-form alert (codex #6625 P2): closed once a person called or texted the lead after it rang, or by the new-lead evidence; a bridge ring or an automated text never counts', async () => {
+  // The fake answers the contact read (sms_log through deliveredTexts) with
+  // whatever rows it holds; the delivered-text SQL is auto-text-holds.js's own.
+  test('repeat-form alert (codex #6625 P2s): closed once a staff text reached the lead after its latest form, or by work on the lead; a call row, an automated text or another customer\'s text never counts', async () => {
     const repeat = () => note({
       category: 'lead', link: `/admin/leads?lead=${LEAD}`,
       metadata: { dedupeKey: `lead-repeat-form:${CUST}`, customerId: CUST, leadId: LEAD, source: 'lead_repeat_form' },
     });
     mockTables.leads = [lead()];
     expect(await reasonFor(repeat())).toEqual({ cls: 'lead_repeat_form', reason: null });
-    // A call a person placed after the alert; one from before it never counts.
-    mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'admin-click', latest_created_at: AFTER_BELL }];
-    expect((await reasonFor(repeat())).reason).toBe('Lead was contacted');
-    mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'admin-callback', latest_created_at: BEFORE_BELL }];
-    expect((await reasonFor(repeat())).reason).toBeNull();
-    // A later form re-rings the alert and moves its time to that form
-    // (bumpOnRefresh): a call from before that form never closes it.
-    mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'admin-click', latest_created_at: AFTER_BELL }];
-    expect((await reasonFor({ ...repeat(), created_at: new Date('2026-09-27T16:00:00Z') })).reason).toBeNull();
-    // An automatic bridge ring to the owner's cell is not contact.
-    mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'lead-webhook-auto-bridge', latest_created_at: AFTER_BELL }];
-    expect((await reasonFor(repeat())).reason).toBeNull();
-    // A staff text after the alert; an automated text, or another customer's, never counts.
-    mockTables.call_log = [];
+    // A staff text after the alert closes it; one from before its latest form
+    // never does (a later form re-rings the row and moves its time).
     mockTables.sms_log = [{ customer_id: CUST, direction: 'outbound', message_type: 'manual', latest_created_at: AFTER_BELL }];
     expect((await reasonFor(repeat())).reason).toBe('Lead was contacted');
+    expect((await reasonFor({ ...repeat(), created_at: new Date('2026-09-27T16:00:00Z') })).reason).toBeNull();
+    // An automated text, or another customer's staff text, never counts.
     mockTables.sms_log = [
       { customer_id: CUST, direction: 'outbound', message_type: 'auto_reply', latest_created_at: AFTER_BELL },
       { customer_id: uid(99), direction: 'outbound', message_type: 'manual', latest_created_at: AFTER_BELL },
     ];
     expect((await reasonFor(repeat())).reason).toBeNull();
-    // Work on the lead after the alert closes it too.
+    // A dialer call row is not contact, even one staff bridged after the alert:
+    // it is written before Twilio dials and does not prove the lead answered.
     mockTables.sms_log = [];
+    mockTables.call_log = [{ customer_id: CUST, direction: 'outbound', source: 'admin-click', bridged_at: AFTER_BELL, created_at: AFTER_BELL }];
+    expect((await reasonFor(repeat())).reason).toBeNull();
+    mockTables.call_log = [];
+    // Work on the lead after the alert closes it too.
     mockTables.leads = [lead({ estimate_id: EST })];
     mockTables.estimates = [{ id: EST, customer_id: CUST, sent_at: AFTER_BELL }];
     expect((await reasonFor(repeat())).reason).toBe('Estimate was sent');
