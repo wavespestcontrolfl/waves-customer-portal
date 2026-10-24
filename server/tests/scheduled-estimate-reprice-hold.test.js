@@ -128,6 +128,16 @@ describe('scheduled-estimate cron vs the clarify re-price hold', () => {
     expect(parkedUpdate('est-expired-bid').payload.last_send_error).toMatch(/validity date has passed/);
   });
 
+  test.each(['PALM_COUNT_REQUIRED', 'PALM_COUNT_MISMATCH'])('a %s refusal (satellite palm count) parks a legacy schedule without retrying', async (code) => {
+    const tick = scheduledEstimateTick();
+    db.__state.claimRows = [{ id: 'est-palms', send_method: 'email', scheduled_send_attempts: 1 }];
+    sendEstimateNow.mockRejectedValue(Object.assign(new Error('Grouped estimate sib-1 still prices a palm count from the satellite image that no admin count matches.'), { statusCode: 409, code }));
+    await tick();
+    expect(sendEstimateNow).toHaveBeenCalledTimes(1);
+    expect(parkedUpdate('est-palms').payload).toEqual(expect.objectContaining({ status: 'send_failed', scheduled_at: null }));
+    expect(parkedUpdate('est-palms').payload.last_send_error).toMatch(/satellite image/);
+  });
+
   test('a reviewed scheduled attempt stops after any throw, including post-provider bookkeeping failure', async () => {
     const tick = scheduledEstimateTick();
     const scheduledAt = new Date();
