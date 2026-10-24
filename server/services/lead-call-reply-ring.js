@@ -20,6 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { parseCallTextReply } = require('./sms-service-intent');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const SOURCE = 'lead-call-reply-ring';
 const ADAM_CELL = process.env.ADAM_PHONE || '+19415993489';
@@ -67,6 +68,7 @@ async function ringBlocker({ customer, digits, now }, conn) {
     .whereRaw("COALESCE(twilio_sid, '') ~ '^(SM|MM)'")
     // A text Twilio reported failed never reached the phone.
     .whereRaw("COALESCE(status, '') NOT IN ('failed', 'undelivered', 'canceled')")
+    .modify(excludeUnresolvedSendReservations)
     .first('id');
   if (!leadText) return 'no_lead_text';
 

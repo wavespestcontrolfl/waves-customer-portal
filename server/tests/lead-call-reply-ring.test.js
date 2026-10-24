@@ -25,6 +25,7 @@ function mockQuery(table) {
   const q = { filters: [] };
   for (const m of ['where', 'whereNull', 'orderBy']) q[m] = (...args) => { q.filters.push(args); return q; };
   q.whereRaw = (sql) => { q.filters.push([sql]); return q; };
+  q.modify = (fn) => { fn(q); return q; };
   q.orWhereRaw = (sql) => { q.filters.push([sql]); return q; };
   q.where = (...args) => {
     if (typeof args[0] === 'function') { args[0].call(q); return q; }
