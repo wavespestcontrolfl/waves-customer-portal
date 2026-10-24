@@ -368,8 +368,10 @@ async function matchStatedAddressAccounts({ call, extracted, v2CanonicalExtracti
     || (cityKey(statedAddress.city) !== '' && cityKey(statedAddress.city) === cityKey(c.city));
   const rows = await conn('customers')
     .modify(whereLiveCustomer)
-    .whereRaw('address_line1 ~ ?', [`(^|,\\s*)${house}([^0-9]|$)`])
-    .orderBy('created_at', 'asc').orderBy('id', 'asc').limit(200)
+    // Digit-bounded anywhere in the line: a legacy unit-first line ("Apt 4B 100 Example Loop") carries the house number
+    // after the unit. sameHouseNumberStreet below is the precise judge.
+    .whereRaw('address_line1 ~ ?', [`(^|[^0-9])${house}([^0-9]|$)`])
+    .orderBy('created_at', 'asc').orderBy('id', 'asc').limit(500)
     .select('id', 'first_name', 'last_name', 'city', 'address_line1', 'address_line2', 'zip');
   const found = rows.filter((r) => String(r.id) !== own && String(r.id) !== String(call.customer_id || '')
     && statedAddressCorroborates(statedAddress, r) && placeAgrees(r));

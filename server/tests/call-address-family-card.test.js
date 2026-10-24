@@ -227,6 +227,15 @@ const SKIP = !process.env.DATABASE_URL;
       expect(await matchStatedAddressAccounts(input(await call(), { extracted: { first_name: 'Dana', is_voicemail: true } }))).toBeNull();
     });
 
+    test('a legacy unit-first line on file ("Apt 4B 100 Example Loop", with or without a comma) still matches', async () => {
+      const comma = await customer({ address_line1: 'Apt 4B, 100 Example Loop' });
+      const plain = await customer({ first_name: 'Rosa', address_line1: 'Apt 4B 100 Example Loop' });
+      const out = await matchStatedAddressAccounts(input(await call(), { statedAddress: { street_line_1: '100 Example Loop', street_line_2: 'Apt 4B', city: 'Parrish', postal_code: '34219' } }));
+      expect(out.candidates.map((c) => c.id)).toContain(String(comma));
+      // Whatever sameHouseNumberStreet cannot read as one house is left out, never guessed.
+      expect(out.candidates.map((c) => c.id).every((id) => [String(comma), String(plain)].includes(id))).toBe(true);
+    });
+
     test('the role comes from the call\'s relationship; one outside the Attach list files as other', async () => {
       await customer();
       const spouse = await matchStatedAddressAccounts(input(await call(), { v2CanonicalExtraction: { caller: { relationship_to_property: 'spouse_partner' } } }));
