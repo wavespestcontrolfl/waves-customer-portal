@@ -737,17 +737,19 @@ async function gateActionVisitIds(conn, visits) {
 // ---- gate location (owner 2026-10-24) ---------------------------------------
 // Where a gate is on the map, as the office pastes it on the Gate codes page:
 // "27.4, -82.5" (also with a space or a slash), or a Google Maps link that
-// carries the point (…/@lat,lng,17z…, ?q=lat,lng, ?query=lat,lng, ?ll=lat,lng,
-// destination=lat,lng, or the !3dlat!4dlng pair in a place link). Returns
-// { lat, lng } rounded to six places, or null when no point is found (a
-// shortened maps.app.goo.gl link has none: the office pastes the expanded
+// carries the point: the !3dlat!4dlng pair of a place link, ?q= / ?query= /
+// ?ll= / destination=lat,lng, and last the …/@lat,lng,17z… viewport centre,
+// which a place link also carries but which is only where the map was
+// looking, not the pin (Codex P2) — so it is the fallback, never preferred.
+// Returns { lat, lng } rounded to six places, or null when no point is found
+// (a shortened maps.app.goo.gl link has none: the office pastes the expanded
 // link or the numbers). Never a place name: nothing here geocodes.
 const COORD = '(-?\\d{1,3}(?:\\.\\d+)?)';
 const GATE_LOCATION_PATTERNS = [
   new RegExp(`^${COORD}\\s*[,/\\s]\\s*${COORD}$`),
-  new RegExp(`/@${COORD},${COORD}`),
-  new RegExp(`[?&](?:q|query|ll|destination|center)=${COORD}(?:,|%2C)${COORD}`, 'i'),
   new RegExp(`!3d${COORD}!4d${COORD}`),
+  new RegExp(`[?&](?:q|query|ll|destination|center)=${COORD}(?:,|%2C)${COORD}`, 'i'),
+  new RegExp(`/@${COORD},${COORD}`),
 ];
 function parseGateLocation(value) {
   const text = String(value ?? '').trim();

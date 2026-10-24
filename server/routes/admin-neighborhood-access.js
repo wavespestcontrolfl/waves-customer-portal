@@ -138,10 +138,10 @@ function mergeFields(input, current) {
 
 // The gate's map point, when the request carries one: `gate_location` is a
 // pasted Google Maps link or "lat, lng" (parseGateLocation), or null to clear.
-// Returns { skip: true } when the field is absent (an edit keeps the stored
+// Returns { value: {} } when the field is absent (an edit keeps the stored
 // point), { error }, or { value: { gate_lat, gate_lng } }.
 function gateLocationFields(input) {
-  if (!Object.prototype.hasOwnProperty.call(input, 'gate_location')) return { skip: true };
+  if (!Object.prototype.hasOwnProperty.call(input, 'gate_location')) return { value: {} };
   const raw = input.gate_location;
   if (raw === null || (typeof raw === 'string' && !raw.trim())) return { value: { gate_lat: null, gate_lng: null } };
   if (typeof raw !== 'string') return { error: 'gate_location must be text' };
@@ -163,13 +163,14 @@ function validateEntry(body, current) {
 
   const label = String(merged.gate_label || '').trim();
   if (!label) return { error: 'gate_label is required' };
-  if (label.length > MAX_LABEL) return { error: `gate_label is limited to ${MAX_LABEL} characters` };
   if (!ACCESS_TYPES.includes(merged.access_type)) return { error: 'access_type is not valid' };
 
   const rawCode = merged.code ? String(merged.code).trim() : '';
-  if (rawCode.length > MAX_CODE) return { error: `code is limited to ${MAX_CODE} characters` };
   const instructions = merged.instructions ? String(merged.instructions).trim() : '';
-  if (instructions.length > MAX_INSTRUCTIONS) return { error: `instructions are limited to ${MAX_INSTRUCTIONS} characters` };
+  const tooLong = [
+    ['gate_label is', label, MAX_LABEL], ['code is', rawCode, MAX_CODE], ['instructions are', instructions, MAX_INSTRUCTIONS],
+  ].find(([, value, max]) => value.length > max);
+  if (tooLong) return { error: `${tooLong[0]} limited to ${tooLong[2]} characters` };
 
   let code = null;
   if (merged.access_type === 'keypad') {
@@ -192,7 +193,7 @@ function validateEntry(body, current) {
       access_type: merged.access_type,
       code,
       instructions: merged.access_type === 'keypad' ? null : (instructions || null),
-      ...(location.skip ? {} : location.value),
+      ...location.value,
     },
   };
 }

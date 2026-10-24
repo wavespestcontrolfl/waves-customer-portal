@@ -123,6 +123,8 @@ describe('parseGateLocation', () => {
     ['https://www.google.com/maps/search/?api=1&query=27.4321%2C-82.4567', { lat: 27.4321, lng: -82.4567 }],
     ['https://maps.google.com/?ll=27.4321,-82.4567&z=17', { lat: 27.4321, lng: -82.4567 }],
     ['https://www.google.com/maps/place/Gate/data=!4m5!3m4!1s0x0:0x0!8m2!3d27.4321!4d-82.4567', { lat: 27.4321, lng: -82.4567 }],
+    // A place link carries both the viewport centre (/@) and the pin (!3d!4d): the pin wins.
+    ['https://www.google.com/maps/place/Main+Gate/@27.43,-82.45,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d27.4321!4d-82.4567', { lat: 27.4321, lng: -82.4567 }],
   ])('%s → point', (text, point) => {
     expect(parseGateLocation(text)).toEqual(point);
   });
