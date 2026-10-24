@@ -33,6 +33,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { lookupCountyParcelByPoint, lookupSarasotaPlatNames, countyParcelGisDisabled } = require('./property-lookup/county-parcel-gis');
 const { CUSTOMER_STAGES } = require('./customer-stages');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const {
   countyHint, neighborhoodNameFromSubdivision, resolvePropertyNeighborhood, upsertNeighborhood, withPlatName, sameHouse,
   communityKey, spokenName,
@@ -206,7 +207,7 @@ async function linkFromCaller(home, county, name) {
 }
 
 async function callerPass({ nowIso }) {
-  const hasWords = db('call_log as cl').select(1).whereRaw('cl.customer_id = p.customer_id')
+  const hasWords = whereNotSandboxCall(db('call_log as cl'), 'cl.source').select(1).whereRaw('cl.customer_id = p.customer_id')
     .whereRaw("btrim(coalesce(cl.ai_extraction_enriched #>> '{property,service_address,subdivision_or_community}', '')) <> ''");
   // The county could not name it: checked with no plat number to read, no pin
   // to ask about, or answered without a name (stored on the row).
