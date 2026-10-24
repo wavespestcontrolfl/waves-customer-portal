@@ -170,6 +170,19 @@ describe('groupInvoiceLinesByProperty (documents)', () => {
     expect(groups.map((g) => g.subtotal)).toEqual([149, 134.1]);
   });
 
+  test('one property frozen at two addresses (re-frozen after an address change) is two groups and two email labels', () => {
+    const before = { ...addr(PALM), address_line1: '1842 Palm Harbor Dr (old)' };
+    const lines = [
+      { ...service('a', PALM), property_address: before }, { ...discount('a-d', 'a'), property_id: PALM, property_address: before },
+      { ...service('b', PALM), property_address: addr(PALM) },
+    ];
+    const groups = groupInvoiceLinesByProperty(lines);
+    expect(groups.map((g) => g.label)).toEqual(['1842 Palm Harbor Dr (old), Bradenton, FL 34209', '1842 Palm Harbor Dr, Bradenton, FL 34209']);
+    expect(groups[0].discounts).toHaveLength(1);
+    expect(groups.map((g) => g.lines.map((l) => l.client_id))).toEqual([['a'], ['b']]);
+    expect(invoicePropertyLabels(lines)).toEqual(['1842 Palm Harbor Dr (old), Bradenton, FL 34209', '1842 Palm Harbor Dr, Bradenton, FL 34209']);
+  });
+
   test('flat invoices answer null: no lines, one property, or any line without a property', () => {
     expect(groupInvoiceLinesByProperty([])).toBeNull();
     expect(groupInvoiceLinesByProperty(null)).toBeNull();

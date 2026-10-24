@@ -73,6 +73,13 @@ function propertyAddressLabel(address) {
   return [street, propertyCityStateZip(address)].filter(Boolean).join(', ');
 }
 
+/** The frozen address label on a line ('' when it has none). */
+function lineAddressLabel(line) {
+  return line.property_address && typeof line.property_address === 'object'
+    ? propertyAddressLabel(line.property_address)
+    : '';
+}
+
 /**
  * Groups for a multi-property invoice, in first-appearance order, or null
  * when the invoice should render as a flat list: no service lines, a service
@@ -90,17 +97,22 @@ function groupInvoiceLinesByProperty(lineItems) {
   const services = items.filter((item) => !isDiscountLine(item));
   if (!services.length || services.some((item) => !clean(item.property_id))) return null;
 
+  // A group is one property AT one frozen address: a line frozen before the
+  // property's address changed and a line frozen after it are distinct
+  // groups, so no service is ever attributed to an address it was not
+  // performed at.
   const groups = [];
-  const byProperty = new Map();
+  const byKey = new Map();
+  const groupKey = (line) => `${clean(line.property_id)}|${lineAddressLabel(line)}`;
   for (const line of services) {
-    const key = clean(line.property_id);
-    let group = byProperty.get(key);
+    const key = groupKey(line);
+    let group = byKey.get(key);
     if (!group) {
       const address = line.property_address && typeof line.property_address === 'object'
         ? propertyAddressSnapshot(line.property_address)
         : null;
       group = {
-        property_id: key,
+        property_id: clean(line.property_id),
         address,
         label: propertyAddressLabel(address) || 'Service property',
         lines: [],
@@ -108,7 +120,7 @@ function groupInvoiceLinesByProperty(lineItems) {
         subtotal: 0,
         clientIds: new Set(),
       };
-      byProperty.set(key, group);
+      byKey.set(key, group);
       groups.push(group);
     }
     group.lines.push(line);
@@ -118,12 +130,14 @@ function groupInvoiceLinesByProperty(lineItems) {
 
   // Every line-item discount must land in a group, or the per-property
   // subtotals would not reconcile to the total: a discount whose parent line
-  // cannot be found (by discount_for, else by the property stamped on it)
-  // keeps the whole invoice flat, where the totals block carries it.
+  // cannot be found (by discount_for, else by the property and address
+  // stamped on it) keeps the whole invoice flat, where the totals block
+  // carries it.
   for (const item of items) {
     if (!isDiscountLine(item) || !item.discount_for) continue;
     const parent = groups.find((group) => group.clientIds.has(String(item.discount_for)))
-      || (clean(item.property_id) ? byProperty.get(clean(item.property_id)) : null);
+      || (clean(item.property_id) ? byKey.get(groupKey(item)) : null)
+      || (clean(item.property_id) ? groups.find((group) => group.property_id === clean(item.property_id)) : null);
     if (!parent) return null;
     parent.discounts.push(item);
   }
@@ -147,17 +161,15 @@ function groupInvoiceLinesByProperty(lineItems) {
 function invoicePropertyLabels(lineItems) {
   const services = parseLineItems(lineItems).filter((item) => !isDiscountLine(item));
   if (!services.length || services.some((item) => !clean(item.property_id))) return [];
-  const labels = new Map();
+  // Distinct by frozen ADDRESS, so a property re-frozen after an address change
+  // names both addresses rather than hiding the newer one.
+  const labels = [];
   for (const line of services) {
-    const key = clean(line.property_id);
-    if (labels.has(key)) continue;
-    const label = line.property_address && typeof line.property_address === 'object'
-      ? propertyAddressLabel(line.property_address)
-      : '';
+    const label = lineAddressLabel(line);
     if (!label) return [];
-    labels.set(key, label);
+    if (!labels.includes(label)) labels.push(label);
   }
-  return [...labels.values()];
+  return labels;
 }
 
 module.exports = {
