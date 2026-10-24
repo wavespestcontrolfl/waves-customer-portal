@@ -903,6 +903,31 @@ describe('classifyLane guardrails', () => {
       expect(out.reasons.join(' ')).toMatch(/lot-driven service on a unit\/suite scope/);
     });
   });
+
+  test('a trusted lookup turf estimate does not unpark a cleared-lot unit lawn quote', () => {
+    withGate('true', () => {
+      // The lookup's turf read covers the master parcel, not the unit: it must
+      // not reach the engine as an estimatedTurfSf basis, which
+      // turfAreaFullyMeasured would count as a measurement of the unit.
+      const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
+      const { generateEstimate } = require('../services/pricing-engine');
+      const intent = { ...baseArgs.intent, services: { lawn: { track: 'st_augustine', tier: 'enhanced', lawnFreq: 9 } } };
+      const propertyFacts = {
+        ...baseArgs.propertyFacts,
+        lot: { value: null, source: 'not_applicable:common_master_parcel', confidence: 'high' },
+      };
+      const engineInput = buildEngineInput({
+        intent,
+        propertyFacts,
+        context: {},
+        lookupEnriched: { estimatedTurfSf: 4200, turfSource: 'vision', aiConfidence: 88 },
+      });
+      const out = classifyLane({
+        ...baseArgs, intent, propertyFacts, engineInput, engineResult: generateEstimate(engineInput),
+      });
+      expect(out.reasons.join(' ')).toMatch(/lot-driven service on a unit\/suite scope/);
+    });
+  });
 });
 
 describe('buildEngineInput property-type fallback', () => {
