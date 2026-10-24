@@ -286,6 +286,30 @@ describe("what the result shows", () => {
     expect(screen.queryByText("Recurring Membership")).not.toBeInTheDocument();
   });
 
+  it("keeps the line price override closed until opened, then sends the typed amount on regenerate", async () => {
+    await generateMisting(MISTING_PRICED);
+    // One button on a regular estimate, not a second copy of every line.
+    expect(screen.queryByLabelText("Override ($)")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));
+    fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "5200" } });
+    fireEvent.change(screen.getByLabelText("Reason (internal)"), { target: { value: "longer run" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply overrides & regenerate" }));
+    await waitFor(() => expect(calculateBodies()).toHaveLength(2));
+    expect(calculateBodies()[1].options.linePriceOverrides).toEqual({
+      mosquito_misting_installation: { price: 5200, reason: "longer run" },
+    });
+  });
+
+  it("refuses an invalid override amount in place, keeping the estimate and sending nothing", async () => {
+    await generateMisting(MISTING_PRICED);
+    fireEvent.click(screen.getByRole("button", { name: "Override a line price" }));
+    fireEvent.change(screen.getByLabelText("Override ($)"), { target: { value: "-5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply overrides & regenerate" }));
+    expect(screen.getByText(/must be a positive dollar amount/)).toHaveAttribute("role", "alert");
+    expect(screen.getByTestId("misting-plan")).toBeInTheDocument();
+    expect(calculateBodies()).toHaveLength(1);
+  });
+
   it("names the reason when the plan priced on a fallback, so the rep corrects the input", async () => {
     const plan = await generateMisting(MISTING_FALLBACK);
     expect(plan).toHaveTextContent("The nozzle count must be a whole number in range");
