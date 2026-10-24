@@ -298,6 +298,25 @@ describe('suggestReportBlogPost', () => {
     expect(JSON.parse(values.find((v) => typeof v === 'string' && v.includes('operator_pinned')))).toMatchObject({ source: 'tech_blog_search', operator_pinned: true, suggested_by: 'tech-1', scheduled_service_id: 'svc-1' });
   });
 
+  test('a dry run (the tip seeder) asks every check and writes nothing: would_queue, or what the queue already holds (owner 2026-10-24)', async () => {
+    const fresh = queueKnex();
+    expect(await suggestReportBlogPost(fresh, { phrase: 'standing water', tipId: 'water_gutters', dryRun: true })).toEqual({ status: 'would_queue' });
+    expect(queueWrites(fresh)).toEqual([]);
+    expect(fresh.transaction).not.toHaveBeenCalled();
+    expect(await suggestReportBlogPost(queueKnex({ held: { id: 'mined-row' } }), { phrase: 'standing water', dryRun: true })).toEqual({ status: 'already_queued' });
+    expect(await suggestReportBlogPost(queueKnex({ standing: { status: 'skipped' } }), { phrase: 'standing water', dryRun: true })).toEqual({ status: 'declined' });
+    expect(await suggestReportBlogPost(queueKnex({ standing: { status: 'expired' } }), { phrase: 'standing water', dryRun: true })).toEqual({ status: 'would_queue' });
+    // The same refusals as a write: a word no live post uses.
+    expect(await suggestReportBlogPost(queueKnex(), { phrase: 'ants for john', dryRun: true })).toEqual({ error: 'not_a_topic' });
+  });
+
+  test('a seeded topic\'s row names its tip', async () => {
+    const knex = queueKnex();
+    expect(await suggestReportBlogPost(knex, { phrase: 'standing water', tipId: 'water_gutters' })).toEqual({ status: 'queued' });
+    const [[, , values]] = queueWrites(knex);
+    expect(JSON.parse(values.find((v) => typeof v === 'string' && v.includes('operator_pinned')))).toMatchObject({ source: 'tech_blog_search', tech_tip_id: 'water_gutters', suggested_by: null });
+  });
+
   test('a suggestion held already (not expired) answers already_queued', async () => {
     const knex = queueKnex({ inserted: false, standing: { status: 'pending' } });
     expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'tech-1' })).toEqual({ status: 'already_queued' });
