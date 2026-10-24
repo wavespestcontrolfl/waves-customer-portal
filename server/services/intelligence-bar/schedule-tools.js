@@ -141,7 +141,7 @@ const SCHEDULE_TOOLS = [
     name: 'find_available_slots',
     description: `Find the best time slots to insert a new job based on tech calendars and drive-time detour cost. Returns a ranked list — the top slot adds the LEAST extra driving. Use when the operator says "when can we fit in the Smith job?" or "find me a time for a Bradenton pest control next week" or "what's the best slot for a customer at 123 Oak St?".
 Use for: "find time for", "when can we schedule", "best slot for", "fit in a new job".
-Each slot carries day_label (e.g. "Wed Oct 28"): quote it as given, never work out a weekday yourself. The result's "searched" block is the dates, visit length and technicians the search really used. "days" lists every searched day with its stop count and, when that day has no slot, the reason — when no slot fits, give the operator that per-day reason and the nearest slots from a wider range instead of only asking a question back.`,
+Each slot carries day_label (e.g. "Wed Oct 28"): quote it as given, never work out a weekday yourself. The result's "searched" block is the dates, visit length and technicians the search really used. "days" lists every searched day with its booked stops and, when that day has no slot, a no_slot_reason — when no slot fits, give the operator each day's no_slot_reason and booked stops as stated (never a cause the result does not give) and the nearest slots from a wider range instead of only asking a question back.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -2298,6 +2298,7 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
   // failed read keeps the slots and drops them rather than failing the search.
   let techs = [];
   let stopRows = [];
+  let countsRead = false;
   try {
     let techQuery = applyAssignable(db('technicians'));
     if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
@@ -2309,6 +2310,7 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
         .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
         .select('scheduled_date', 'technician_id', 'window_start', 'window_end');
     }
+    countsRead = true;
   } catch (err) {
     logger.warn(`[intelligence-bar:schedule] slot-search day counts failed: ${err.message}`);
   }
@@ -2328,14 +2330,19 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
   const days = searchedDates.map((date) => {
     const day = byDay.get(date) || { stops: 0, first_start: null, last_end: null };
     const feasible = slotCount.get(date) || 0;
-    const row = { date, day_label: slotDayLabel(date), stops_booked: day.stops,
+    // A failed count read is unknown, never zero bookings.
+    const row = { date, day_label: slotDayLabel(date), stops_booked: countsRead ? day.stops : null,
       first_start: day.first_start, last_end: day.last_end, feasible_slots: feasible };
     if (!feasible) {
+      // Only the engine's own rejection counts are a reason; without them
+      // (the legacy path keeps none) the row says so instead of inventing one.
       const rejections = rejectionsByDate[date];
-      row.no_slot_reason = rejections && Object.keys(rejections).length
-        ? `No ${durationMinutes}-minute visit fits: ${Object.entries(rejections).map(([why, n]) => `${why} x${n}`).join(', ')}`
-        : `No ${durationMinutes}-minute visit fits between the ${day.stops} booked stops (${day.first_start || '—'} to ${day.last_end || '—'}) and the drive between them`;
-      if (rejections) row.rejections = rejections;
+      if (rejections && Object.keys(rejections).length) {
+        row.no_slot_reason = `No ${durationMinutes}-minute visit fits: ${Object.entries(rejections).map(([why, n]) => `${why} x${n}`).join(', ')}`;
+        row.rejections = rejections;
+      } else {
+        row.no_slot_reason = `No ${durationMinutes}-minute visit fits; the search gave no rejection reason for this day. Report the booked stops above as facts, not as the proven cause.`;
+      }
     }
     return row;
   });

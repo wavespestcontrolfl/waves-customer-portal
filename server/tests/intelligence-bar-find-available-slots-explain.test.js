@@ -88,7 +88,7 @@ test('a day with no slot says why, from the engine reasons or the booked stops',
   const out = await search({ date_from: '2026-10-24', date_to: '2026-10-28' });
   const [sat, wed] = out.days;
   expect(sat).toMatchObject({ stops_booked: 2, first_start: '08:00', last_end: '17:00', feasible_slots: 0 });
-  expect(sat.no_slot_reason).toContain('2 booked stops (08:00 to 17:00)');
+  expect(sat.no_slot_reason).toContain('gave no rejection reason');
   expect(wed).toMatchObject({ feasible_slots: 2 });
   expect(wed.no_slot_reason).toBeUndefined();
 
@@ -111,5 +111,5 @@ test('a failed day-count read keeps the labeled slots', async () => {
   });
   const out = await search({});
   expect(out.slots[0].day_label).toBe('Wed Oct 28');
-  expect(out.days[0].stops_booked).toBe(0);
+  expect(out.days[0].stops_booked).toBeNull();
 });
