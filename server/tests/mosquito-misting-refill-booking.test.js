@@ -310,9 +310,10 @@ describe('Update Details (item 5): the same resolver on a visit edit', () => {
   });
 });
 
-describe('Update Details that moves the visit to another house prices the refill for the destination', () => {
+describe('Update Details that moves the visit to another house never carries a refill with it', () => {
   const VISIT = 'visit-1';
   const OTHER = 'prop-other';
+  const MOVED = 'visit-2';
   const tables = (over = {}) => ({
     ...baseTables({
       estimates: [accepted('natural'), accepted('premium', { id: 'est-other', property_id: OTHER, accepted_at: '2026-10-05T00:00:00Z' })],
@@ -328,16 +329,18 @@ describe('Update Details that moves the visit to another house prices the refill
     serviceType: PLAN.name, scheduledDate: '2026-11-03', ...extra,
   });
 
-  test('no move: priced for the house the visit is at', async () => {
+  test('no move: priced for the house the visit is at, and tagged with it', async () => {
     expect((await normalize()).normalizedAddons[0]).toMatchObject({ price: 219, refillPricedForProperty: HOUSE });
   });
 
-  test('a move in the same save: priced for the destination, and tagged with it', async () => {
-    expect((await normalize({ propertyId: OTHER })).normalizedAddons[0]).toMatchObject({ price: 319, refillPricedForProperty: OTHER });
+  test('posting the house the visit is already at is not a move', async () => {
+    expect((await normalize({ propertyId: HOUSE })).normalizedAddons[0]).toMatchObject({ price: 219, refillPricedForProperty: HOUSE });
   });
 
-  test('a destination with no accepted misting estimate refuses instead of keeping the old house\'s price', async () => {
-    await expect(normalize({ propertyId: OTHER }, tables({ estimates: [accepted('natural')] }))).rejects.toMatchObject({ code: 'MISTING_REFILL_UNPRICED' });
+  test('a refill line in a save that moves the address is refused, with the reason and the way out (no price is set for either house)', async () => {
+    await expect(normalize({ propertyId: OTHER })).rejects.toMatchObject({
+      status: 409, code: 'MISTING_REFILL_ADDRESS_MOVE', message: expect.stringMatching(/Remove the refill .* change the address, then add the refill again/),
+    });
   });
 
   test('every refill line (priced now or kept as stored) carries the tag; other lines do not', async () => {
@@ -349,48 +352,88 @@ describe('Update Details that moves the visit to another house prices the refill
     expect(Object.keys(pest.normalizedAddons[0])).not.toContain('refillPricedForProperty');
   });
 
-  test('a refill the visit already carries is kept at its stored price only while the visit stays at its house', async () => {
+  test('a refill the visit already carries is kept at its stored price when it cannot be priced now, but a move refuses it', async () => {
     const stored = { id: 'row-1', scheduled_service_id: VISIT, service_id: REFILL_ID, service_name: 'Mosquito Misting System Refill - Natural (botanical)', service_key_snapshot: 'mosquito_misting_refill', base_price: 219, estimated_price: 219 };
     const noEstimates = tables({ estimates: [], scheduled_service_addons: [stored] });
     const line = { id: 'row-1', serviceId: REFILL_ID, name: REFILL.name, basePrice: 219 };
     const run = (extra) => normalizeUpdateDetailsAddons({ db: fakeDb(noEstimates), id: VISIT, addons: [line], updates: {}, isRecurring: false, serviceType: PLAN.name, scheduledDate: '2026-11-03', ...extra });
-    // stays put (no destination posted, or the same house posted): kept, and tagged so the row-lock check covers it
     expect((await run({})).normalizedAddons[0]).toMatchObject({ price: 219, refillPricedForProperty: HOUSE });
     expect((await run({ propertyId: HOUSE })).normalizedAddons[0]).toMatchObject({ price: 219, refillPricedForProperty: HOUSE });
-    // moves to a house with no accepted misting estimate: refused, the old house's price is not carried over
-    await expect(run({ propertyId: OTHER })).rejects.toMatchObject({ status: 409, code: 'MISTING_REFILL_UNPRICED' });
+    await expect(run({ propertyId: OTHER })).rejects.toMatchObject({ status: 409, code: 'MISTING_REFILL_ADDRESS_MOVE' });
   });
 
-  describe('assertRefillPropertyCurrent: the price is re-checked against the house under the save\'s row lock', () => {
+  test('gate off: a move with the line is not judged', async () => {
+    process.env.GATE_MOSQUITO_MISTING = 'false';
+    expect((await normalize({ propertyId: OTHER })).normalizedAddons[0]).toMatchObject({ price: 129 });
+  });
+
+  describe('assertRefillPropertyCurrent under the save\'s row lock', () => {
     const { assertRefillPropertyCurrent } = router._test;
-    const trxFor = (propertyId) => { const reads = []; const trx = (table) => { reads.push(table); return { where: () => ({ first: async () => ({ property_id: propertyId }) }) }; }; trx.reads = reads; return trx; };
-    const line = (property) => ({ serviceKey: 'mosquito_misting_refill', refillPricedForProperty: property });
+    // A scripted transaction: the visit row and the add-on rows it may read.
+    const trxFor = ({ propertyId = HOUSE, addons = [] } = {}) => {
+      const reads = [];
+      const trx = (table) => {
+        reads.push(table);
+        let rows = table === 'scheduled_service_addons' ? addons : [{ id: VISIT, property_id: propertyId }];
+        const q = {
+          where(cond) { if (cond && typeof cond === 'object') rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+          whereIn(col, values) { rows = rows.filter((r) => values.includes(r[col])); return q; },
+          first: async () => rows[0],
+        };
+        return q;
+      };
+      trx.reads = reads;
+      return trx;
+    };
+    const priced = (property) => ({ serviceKey: 'mosquito_misting_refill', refillPricedForProperty: property });
+    const stored = (visit) => ({ id: `row-${visit}`, scheduled_service_id: visit, service_key_snapshot: 'mosquito_misting_refill' });
 
-    test('the locked row\'s house matches what the refill was priced for: allowed', async () => {
-      await expect(assertRefillPropertyCurrent(trxFor(HOUSE), VISIT, { addressPlan: null, replaceAddons: [line(HOUSE)] })).resolves.toBeUndefined();
-    });
-
-    test('another editor moved the visit in between: retryable 409, nothing saved at the old house\'s price', async () => {
-      await expect(assertRefillPropertyCurrent(trxFor(OTHER), VISIT, { addressPlan: null, replaceAddons: [line(HOUSE)] }))
+    test('no address change: the locked row\'s house must be the one each refill line was priced for', async () => {
+      await expect(assertRefillPropertyCurrent(trxFor(), VISIT, { addressPlan: null, replaceAddons: [priced(HOUSE)] })).resolves.toBeUndefined();
+      await expect(assertRefillPropertyCurrent(trxFor({ propertyId: OTHER }), VISIT, { addressPlan: null, replaceAddons: [priced(HOUSE)] }))
         .rejects.toMatchObject({ status: 409, code: 'VISIT_CHANGED_RETRY' });
+      await expect(assertRefillPropertyCurrent(trxFor({ propertyId: null }), VISIT, { addressPlan: null, replaceAddons: [priced(null)] })).resolves.toBeUndefined();
     });
 
-    test('this save\'s own move decides the house: priced for the destination is allowed, priced for the old house is not', async () => {
-      const plan = { propertyId: OTHER };
-      await expect(assertRefillPropertyCurrent(trxFor(HOUSE), VISIT, { addressPlan: plan, replaceAddons: [line(OTHER)] })).resolves.toBeUndefined();
-      await expect(assertRefillPropertyCurrent(trxFor(HOUSE), VISIT, { addressPlan: plan, replaceAddons: [line(HOUSE)] }))
-        .rejects.toMatchObject({ code: 'VISIT_CHANGED_RETRY' });
-    });
-
-    test('no priced refill line: no read at all', async () => {
-      const trx = trxFor(HOUSE);
+    test('no priced refill line and no address change: no read at all', async () => {
+      const trx = trxFor();
       await assertRefillPropertyCurrent(trx, VISIT, { addressPlan: null, replaceAddons: [{ serviceKey: 'pest_control' }, null] });
       await assertRefillPropertyCurrent(trx, VISIT, { addressPlan: null, replaceAddons: undefined });
       expect(trx.reads).toEqual([]);
     });
 
-    test('a visit with no property and a refill priced with none agree', async () => {
-      await expect(assertRefillPropertyCurrent(trxFor(null), VISIT, { addressPlan: null, replaceAddons: [line(null)] })).resolves.toBeUndefined();
+    test('an address change with a refill posted on the edited visit is refused', async () => {
+      await expect(assertRefillPropertyCurrent(trxFor(), VISIT, { addressPlan: { propertyId: OTHER, rows: [{ id: VISIT }] }, replaceAddons: [priced(HOUSE)] }))
+        .rejects.toMatchObject({ status: 409, code: 'MISTING_REFILL_ADDRESS_MOVE' });
+    });
+
+    test('a property-only request (no add-ons posted) is refused when the edited visit stores a refill', async () => {
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: { propertyId: OTHER, rows: [{ id: VISIT }] }, replaceAddons: undefined }))
+        .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
+    });
+
+    test('a series address move is refused when ANY occurrence it moves stores a refill, even though the edited visit has none', async () => {
+      const plan = { propertyId: OTHER, rows: [{ id: VISIT }, { id: MOVED }] };
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(MOVED)] }), VISIT, { addressPlan: plan, replaceAddons: [] }))
+        .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(MOVED)] }), VISIT, { addressPlan: plan, replaceAddons: undefined }))
+        .rejects.toMatchObject({ code: 'MISTING_REFILL_ADDRESS_MOVE' });
+    });
+
+    test('the edited visit\'s own stored refill does not count when this save replaces its add-ons without one', async () => {
+      const plan = { propertyId: OTHER, rows: [{ id: VISIT }] };
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: plan, replaceAddons: [] })).resolves.toBeUndefined();
+    });
+
+    test('an address change with no refill anywhere, or a refill on a visit the plan does not move, is allowed', async () => {
+      const plan = { propertyId: OTHER, rows: [{ id: VISIT }, { id: MOVED }] };
+      await expect(assertRefillPropertyCurrent(trxFor(), VISIT, { addressPlan: plan, replaceAddons: [{ serviceKey: 'pest_control' }] })).resolves.toBeUndefined();
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored('elsewhere')] }), VISIT, { addressPlan: plan, replaceAddons: undefined })).resolves.toBeUndefined();
+    });
+
+    test('gate off: an address change is not judged', async () => {
+      process.env.GATE_MOSQUITO_MISTING = 'false';
+      await expect(assertRefillPropertyCurrent(trxFor({ addons: [stored(VISIT)] }), VISIT, { addressPlan: { propertyId: OTHER, rows: [{ id: VISIT }] }, replaceAddons: undefined })).resolves.toBeUndefined();
     });
   });
 
@@ -401,6 +444,42 @@ describe('Update Details that moves the visit to another house prices the refill
     expect(src).toContain('await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons });');
     expect(src).toContain('presetEligibilityCheck, propertyId,\n      });');
     expect(src).toContain("propertyId: typeof req.body.propertyId === 'string' ? req.body.propertyId : undefined,");
+  });
+});
+
+describe('a service change that reaches later occurrences leaves no refill on a non-plan visit', () => {
+  const { assertNoStrandedRefill } = router._test;
+  const conn = (rows) => (table) => {
+    let found = table === 'scheduled_service_addons' ? rows : [];
+    const q = {
+      whereIn(col, values) { found = found.filter((r) => values.includes(r[col])); return q; },
+      where(cond) { found = found.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+      first: async () => found[0],
+    };
+    return q;
+  };
+  const refillOn = (visit) => ({ id: `r-${visit}`, scheduled_service_id: visit, service_key_snapshot: 'mosquito_misting_refill' });
+
+  test('a later occurrence that carries a refill blocks a change to another service (and an unknown one)', async () => {
+    await expect(assertNoStrandedRefill(conn([refillOn('later-2')]), [{ id: 'later-1' }, { id: 'later-2' }], 'pest_control'))
+      .rejects.toMatchObject({ status: 409, code: 'MISTING_REFILL_WRONG_PARENT' });
+    await expect(assertNoStrandedRefill(conn([refillOn('later-2')]), [{ id: 'later-2' }], undefined)).rejects.toMatchObject({ code: 'MISTING_REFILL_WRONG_PARENT' });
+    await expect(assertNoStrandedRefill(conn([refillOn('later-2')]), [{ id: 'later-2' }], null)).rejects.toMatchObject({ code: 'MISTING_REFILL_WRONG_PARENT' });
+  });
+
+  test('allowed: no refill on the targets, a change that stays on the plan service, no targets, or the gate off', async () => {
+    await expect(assertNoStrandedRefill(conn([refillOn('elsewhere')]), [{ id: 'later-1' }], 'pest_control')).resolves.toBeUndefined();
+    await expect(assertNoStrandedRefill(conn([refillOn('later-1')]), [{ id: 'later-1' }], 'mosquito_misting_service')).resolves.toBeUndefined();
+    await expect(assertNoStrandedRefill(conn([refillOn('later-1')]), [], 'pest_control')).resolves.toBeUndefined();
+    process.env.GATE_MOSQUITO_MISTING = 'false';
+    await expect(assertNoStrandedRefill(conn([refillOn('later-1')]), [{ id: 'later-1' }], 'pest_control')).resolves.toBeUndefined();
+  });
+
+  test('the following-visits guard runs it on the locked targets, only for a service change', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(src).toContain('if (serviceChanged) await assertNoStrandedRefill(conn, targets, proposedFields ? proposedFields.service_key_snapshot : undefined);');
   });
 });
 

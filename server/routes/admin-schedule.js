@@ -2087,19 +2087,52 @@ async function assertRefillPlacementOnEdit(database, id, { updates, addonsPosted
   if (kept) throw mistingRefill.refusalError(await mistingRefill.resolveRefillAttachment({ parentServiceKey: next }, database));
 }
 
-// A misting refill is priced for one house (the accepted misting estimate's property). The price was set before the save's row lock,
-// so a move to another house in the same save, or another editor's move landing in between, must not keep a price set for the old
-// house: under the lock, the house the visit will be at (the posted destination, else the locked row's own) must be the one each
-// priced refill line was resolved for. A mismatch is the same retryable refusal every concurrent-edit conflict on this route uses.
+// A misting refill is priced for one house (the accepted misting estimate's property) and is never carried to another. Under the save's
+// row lock, with the visit's address plan in hand:
+//  - a save that MOVES the address (any visit the plan moves, the edited one included) cannot carry a refill: not one posted on the
+//    edited visit, not one stored on the edited visit (when its add-ons are not replaced) or on another occurrence the plan moves. The
+//    price was set for the old house; remove the refill, move the address, add it again;
+//  - a save that stays put must still be at the house each refill line was priced for, so another editor's move landing after the
+//    price was set is a retryable conflict, not a stale price.
 async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceAddons }) {
-  const priced = (Array.isArray(replaceAddons) ? replaceAddons : []).filter((line) => line && line.refillPricedForProperty !== undefined);
+  const lines = Array.isArray(replaceAddons) ? replaceAddons.filter(Boolean) : null;
+  if (addressPlan) {
+    const moved = [String(visitId), ...(addressPlan.rows || []).map((row) => String(row.id))];
+    const stored = lines ? moved.filter((id) => id !== String(visitId)) : moved;
+    const postedRefill = !!lines && lines.some((line) => mistingRefill.isRefillKey(line.serviceKey));
+    const storedRefill = stored.length > 0
+      && !!(await trx('scheduled_service_addons').whereIn('scheduled_service_id', [...new Set(stored)]).where({ service_key_snapshot: MISTING_REFILL_KEY }).first('id'));
+    if ((postedRefill || storedRefill) && mistingRefill.refillLive()) {
+      throw Object.assign(
+        httpError(409, 'A misting refill is priced for the house it was set up for. Remove the refill (Edit visit, Add-ons), change the address, then add the refill again.'),
+        { code: 'MISTING_REFILL_ADDRESS_MOVE' },
+      );
+    }
+    return;
+  }
+  const priced = (lines || []).filter((line) => line.refillPricedForProperty !== undefined);
   if (!priced.length) return;
   const row = await trx('scheduled_services').where({ id: visitId }).first('property_id');
-  const house = String((addressPlan ? addressPlan.propertyId : row && row.property_id) || '');
+  const house = String((row && row.property_id) || '');
   if (priced.some((line) => String(line.refillPricedForProperty || '') !== house)) {
     throw Object.assign(
       httpError(409, 'This visit moved to a different address while you were editing, so the misting refill price is out of date. Reload and save again.'),
       { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+}
+
+// A service change that reaches later occurrences ('following'/series scope) must not leave a refill on a visit that stops being a misting
+// plan visit. `nextKey` is the catalog key the propagation writes (undefined when it is not known: judged as a change away from the plan).
+async function assertNoStrandedRefill(conn, targets, nextKey) {
+  if (!mistingRefill.refillLive() || nextKey === MISTING_SERVICE_KEY) return;
+  const ids = (targets || []).map((row) => row && row.id).filter(Boolean);
+  if (!ids.length) return;
+  const hit = await conn('scheduled_service_addons').whereIn('scheduled_service_id', ids).where({ service_key_snapshot: MISTING_REFILL_KEY }).first('id');
+  if (hit) {
+    throw Object.assign(
+      httpError(409, 'A later visit in this plan carries a misting refill, which only goes on a Mosquito Misting Service Plan visit. Remove that refill first, or apply the change to this appointment only.'),
+      { code: 'MISTING_REFILL_WRONG_PARENT' },
     );
   }
 }
@@ -5007,6 +5040,7 @@ async function lockAndGuardFollowingSiblings(conn, {
       { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
     );
   }
+  if (serviceChanged) await assertNoStrandedRefill(conn, targets, proposedFields ? proposedFields.service_key_snapshot : undefined);
   if (priceChanged || serviceChanged) {
     const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
     for (const id of targets.map((row) => String(row.id)).sort()) {
@@ -12312,9 +12346,9 @@ async function loadRefillVisit(database, id, cols, updates, destinationPropertyI
   }
   return {
     customer_id: row.customer_id || null,
-    // The house the visit will be at once this save lands: the posted destination when the save moves it, else where it is.
-    property_id: (destinationPropertyId !== undefined ? destinationPropertyId : row.property_id) || null,
-    stored_property_id: row.property_id || null,
+    // Where the visit is. A posted destination that differs is a MOVE, and a move never carries a refill (see the caller).
+    property_id: row.property_id || null,
+    moving: destinationPropertyId !== undefined && String(destinationPropertyId || '') !== String(row.property_id || ''),
     source_estimate_id: row.source_estimate_id || null,
     parentServiceKey: parentServiceKey || null,
   };
@@ -12481,6 +12515,12 @@ async function normalizeUpdateDetailsAddons({
         let refillLine = null;
         if (mistingRefill.refillLive() && mistingRefill.isRefillKey(catalogService?.service_key)) {
           if (!refillVisit) refillVisit = await loadRefillVisit(db, id, cols, updates, propertyId);
+          if (refillVisit.moving) {
+            throw Object.assign(
+              httpError(409, 'A misting refill is priced for the house it was set up for. Remove the refill (Edit visit, Add-ons), change the address, then add the refill again.'),
+              { code: 'MISTING_REFILL_ADDRESS_MOVE' },
+            );
+          }
           const prior = a.id ? existingAddonDiscountById.get(a.id) : null;
           const attach = await mistingRefill.resolveRefillAttachment({
             customerId: refillVisit.customer_id,
@@ -12493,9 +12533,7 @@ async function normalizeUpdateDetailsAddons({
             refillLine = attach;
             gross = attach.unitPrice;
             serviceName = attach.lineName;
-          } else if (prior && mistingRefill.isRefillKey(prior.service_key_snapshot) && mistingRefill.KEEP_STORED_ON.has(attach.code)
-            && String(refillVisit.property_id || '') === String(refillVisit.stored_property_id || '')) {
-            // Only while the visit stays at the house the stored price was set for: a move to a house that cannot be priced refuses.
+          } else if (prior && mistingRefill.isRefillKey(prior.service_key_snapshot) && mistingRefill.KEEP_STORED_ON.has(attach.code)) {
             gross = toMoney(prior.base_price ?? prior.estimated_price);
             serviceName = String(prior.service_name || serviceName).trim();
             refillLine = { keptStored: true };
@@ -28714,6 +28752,7 @@ router._test = {
   normalizeUpdateDetailsAddons,
   assertRefillPropertyCurrent,
   assertRefillPlacementOnEdit,
+  assertNoStrandedRefill,
   isOneTimeOnlyAddonKey,
   negativePricePosted,
   discountChangeWithoutPricePosted,
