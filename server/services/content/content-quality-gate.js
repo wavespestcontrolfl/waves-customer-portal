@@ -182,6 +182,12 @@ const PAGE_TYPE_CHECKS = {
     // them. As a 6-pt soft miss, a hubless draft scores 51 >= 42 and
     // auto-publishes — the exact A1 first-batch failure shape.
     { name: 'hub_link_present', weight: 6, isHard: true, evaluate: checkHubLinkPresent },
+    // Tip seeder topics (tips with facts, owner 2026-10-24, decision 2): the
+    // general post for a town-titled pairing must come back general. A title
+    // naming one town fails hard, so the row gets its one feedback redraft,
+    // then skips, never a town post the tip cannot use. Every other brief
+    // answers ok.
+    { name: 'general_title', weight: 0, isHard: true, evaluate: checkGeneralTitle },
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
@@ -1282,6 +1288,27 @@ function checkHubLinkPresent(draft, brief) {
   return { ok: false, reason: 'no_hub_link_found' };
 }
 
+// The page's headline as the writer emits it in the body: a Markdown "# …",
+// a setext "…" over "===", or an HTML <h1>, as visible text.
+function bodyH1s(body) {
+  const text = String(body || '');
+  const atx = text.split(/\r?\n/).filter((line) => /^ {0,3}#\s+\S/.test(line))
+    .map((line) => line.replace(/^ {0,3}#\s+/, '').replace(/\s+#+\s*$/, ''));
+  const setext = [...text.matchAll(/^ {0,3}(\S[^\n]*)\r?\n {0,3}=+[ \t]*$/gm)].map((match) => match[1]);
+  const html = [...text.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map((match) => match[1].replace(/<[^>]+>/g, ' '));
+  return [...atx, ...setext, ...html].map((heading) => visibleInlineText(heading));
+}
+
+function checkGeneralTitle(draft, brief) {
+  if (brief?.gsc_signal?.general_title !== true) return { ok: true, reason: 'not_general_title_brief' };
+  const { isTownTitled } = require('../service-report/report-blog-post');
+  const fm = draft.frontmatter || {};
+  // The headline lives in the body too: the writer's emit_draft carries
+  // Markdown there (local Codex P2 / pre-push P1 on 7c071663c3).
+  const titles = [draft.title, fm.title, draft.metaTitle, fm.metaTitle, draft.h1, fm.h1, ...bodyH1s(draft.body)];
+  return titles.some((title) => isTownTitled(title)) ? { ok: false, reason: 'title_names_a_town' } : { ok: true };
+}
+
 function checkTwoPlusCityMentions(draft, brief) {
   const body = String(draft.body || '').toLowerCase();
   // A spoke/operator brief targets ONE city — verify the post actually localizes
@@ -2350,6 +2377,7 @@ module.exports._internals = {
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
   checkCitabilityBackfillGapsCleared,
+  checkGeneralTitle,
   countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,

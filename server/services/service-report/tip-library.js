@@ -66,7 +66,10 @@
  * (owner 2026-10-24, decisions 2 and 6): behind the same gate the office
  * form fills an empty blog slot with it when the tip is picked, if the post
  * is live on the hub and not titled for one town (report-blog-post
- * tipBlogPosts). Only a post that covers the tip's subject is named.
+ * tipBlogPosts). Only a post that covers the tip's subject is named. A tip
+ * whose subject no such post covers may carry `blog: { topic }` instead: the
+ * phrase a new post would be written from, queued by an operator's hand-pick
+ * (tech-tip-blog-seeder, decision 3).
  *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
@@ -263,6 +266,7 @@ const TIPS = Object.freeze([
   {
     id: 'moisture_ac_drip', group: 'moisture', label: 'A/C condensate line',
     pests: ['Ants', 'Roaches'], keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest'], season: 'all',
+    blog: { topic: 'ac drain line and ants' },
     sources: [{ fact: 'fact-tip-moisture-ac-drip', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
     sourcedCopy: "Where the A/C condensate line drips, the soil against the slab never dries, and ants and roaches follow that moisture to the foundation. UF/IFAS gives the same advice for termites: point condensate lines away from the house. A short extension into the bed lets that strip dry out.",
     copy: "Your A/C condensate line runs all summer, and where it drips the soil against the slab never dries. Ants and roaches follow that moisture gradient straight to the foundation. If the line ends at the wall, a short extension that carries it a couple of feet into the bed makes that strip dry again.",
@@ -275,6 +279,7 @@ const TIPS = Object.freeze([
   {
     id: 'moisture_bath_fan', group: 'moisture', label: 'Bath fan until the mirror clears',
     pests: ['Roaches'], keywords: ['bathroom', 'humidity', 'fan', 'roach'], lines: ['pest'], season: 'all',
+    blog: { topic: 'bathroom humidity and pests' },
     copy: "Humidity trapped in a closed bathroom keeps the baseboards and cabinet kicks damp. German roaches need that humidity more than they need food, so run the fan after every shower until the mirror clears — that drops the room below what they can live on.",
   },
   {
@@ -314,6 +319,7 @@ const TIPS = Object.freeze([
   {
     id: 'ext_shrub_clearance', group: 'exterior', label: "A hand's width off the wall",
     namesWork: true, keywords: ['shrubs', 'hedge', 'trim', 'branches', 'wall'], lines: ['pest', 'tree_shrub'], season: 'all',
+    blog: { topic: 'shrubs touching the house and pests' },
     sources: [{ fact: 'fact-tip-limbs-highway-roof-rats', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1397' }],
     sourcedCopy: "Branches touching the house are a bridge over the treated band along the foundation. UF/IFAS calls limbs that touch the house a highway for rodents, and ants and roaches use it too, so the treatment never touches them. Trim to a hand's width of daylight between plant and wall.",
     copy: "Branches touching the house are a bridge over the treated band along the foundation — ants and roaches walk the branch, not the ground, and the treatment never touches them. Trim to a hand's width of daylight between plant and wall and the bridge is closed.",
@@ -321,6 +327,7 @@ const TIPS = Object.freeze([
   {
     id: 'ext_mulch_gap', group: 'exterior', label: 'Pull mulch back from the slab',
     keywords: ['mulch', 'foundation', 'slab', 'termite', 'bed'], lines: ['pest', 'termite'], season: 'all',
+    blog: { topic: 'mulch against the foundation and termites' },
     sources: [{ fact: 'fact-tip-ext-mulch-gap', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN651' }],
     sourcedCopy: "Mulch piled against the block holds moisture and hides the base of the wall. UF/IFAS advises keeping about a 6-inch inspection space there and a mulch layer under 2 inches thick within a foot of the foundation, so termites lose a covered route up the wall.",
     copy: "Mulch piled against the block holds moisture and hides the base of the wall where I need to see. Pull it back a few inches and keep it below the top of the slab — that strip dries out, and termites lose a covered route up the wall.",
@@ -338,6 +345,7 @@ const TIPS = Object.freeze([
   {
     id: 'ext_palm_roof', group: 'exterior', label: 'Palm fronds off the roof',
     pests: ['Ants', 'Roaches'], keywords: ['palm', 'fronds', 'roof', 'rats', 'branches'], lines: ['rodent', 'pest', 'tree_shrub'], season: 'all',
+    blog: { topic: 'palm fronds touching the roof and rats' },
     sources: [{ fact: 'fact-tip-limbs-highway-roof-rats', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1397' }],
     sourcedCopy: "Fronds and branches touching the roofline are a highway, UF/IFAS says, and a roof rat can jump about three feet straight up and more than four feet across. Several feet of clearance is exclusion without a single trap, and ants and roaches lose the same route into the soffit.",
     copy: "Fronds and branches touching the roofline are a highway. Roof rats climb better than they burrow, and ants and roaches use the same route into the soffit. A few feet of clearance is exclusion without a single trap.",
@@ -376,6 +384,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_gutters', group: 'water', label: 'Keep gutters draining',
     keywords: ['gutters', 'downspout', 'roof', 'storm'], lines: ['mosquito', 'pest'], season: 'wet',
+    blog: { topic: 'clogged gutters and mosquitoes' },
     sources: [{ fact: 'fact-tip-water-gutters', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1045' }],
     sourcedCopy: "A clogged gutter holds water for days after a storm, a nursery right above the entry, and cleaning out eaves and gutters is the first item on UF/IFAS's mosquito control list for homeowners. Downspouts should carry water a few feet from the foundation, not dump it at the slab.",
     copy: "A clogged gutter holds water for days after a storm — a nursery right above the entry. Downspouts should carry water a few feet from the foundation, not dump it at the slab.",
@@ -383,6 +392,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_lanai_drains', group: 'water', label: 'Flush lanai and patio drains',
     keywords: ['drain', 'lanai', 'patio', 'catch basin'], lines: ['mosquito'], season: 'wet',
+    blog: { topic: 'mosquitoes breeding in patio drains' },
     sources: [{ fact: 'fact-tip-water-lanai-drains', label: 'CDC', url: 'https://www.cdc.gov/mosquitoes/about/life-cycle-of-culex-mosquitoes.html' }],
     sourcedCopy: "Floor drains and catch basins on the lanai hold a few inches of still water between rains. The CDC says a Culex mosquito lays a raft of 100 to 300 eggs on still water like that, and an egg becomes an adult in 7 to 10 days. A bucket of water down each one weekly flushes the larvae before then.",
     copy: "Floor drains and catch basins on the lanai hold a few inches of still water between rains. A bucket of water down each one weekly flushes the larvae before they mature.",
@@ -390,6 +400,7 @@ const TIPS = Object.freeze([
   {
     id: 'water_floor_mats', group: 'water', label: 'Flip floor mats after rain',
     pests: ['Roaches', 'Earwigs'], keywords: ['mat', 'door mat', 'rug', 'rubber', 'lanai', 'water'], lines: ['mosquito', 'pest'], season: 'wet',
+    blog: { topic: 'standing water under outdoor mats' },
     copy: "Rubber-backed door mats and lanai floor mats hold a surprising amount of water underneath — enough for mosquitos to breed in, and a cool damp shelter for roaches and earwigs right at the threshold. After a rain, flip them or hang them on the rail until they're dry.",
   },
 
@@ -397,6 +408,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_pet_bowls', group: 'kitchen', label: 'Pet bowls up overnight',
     pests: ['Ants'], keywords: ['pet', 'dog', 'cat', 'bowl', 'food', 'ants'], lines: ['pest'], season: 'all',
+    blog: { topic: 'pet food bowls and ants' },
     sources: [{ fact: 'fact-tip-interior-pet-bowls', label: 'EPA', url: 'https://www.epa.gov/safepestcontrol/dos-and-donts-pest-control' }],
     sourcedCopy: "A bowl left down is an open food and water source all night, and it's the most common thing I trace an ant trail back to. The EPA's pest-control advice says not to leave pet food and water out overnight. Up at bedtime, down at breakfast.",
     copy: "A bowl left down is an open food and water source all night, and it's the most common thing I trace an ant trail back to. Up at bedtime, down at breakfast.",
@@ -404,6 +416,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_trash_night', group: 'kitchen', label: 'Kitchen trash out at night',
     pests: ['Ants', 'Roaches'], keywords: ['trash', 'garbage', 'can', 'roach'], lines: ['pest'], season: 'all',
+    blog: { topic: 'kitchen trash and cockroaches' },
     copy: "Roaches and ants forage overnight. An empty can gives them nothing on the shift they're actually working — the difference shows in a week.",
   },
   {
@@ -417,6 +430,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_range_grease', group: 'kitchen', label: 'Degrease behind the range',
     pests: ['Roaches'], keywords: ['stove', 'range', 'grease', 'oven', 'german roach'], lines: ['pest'], season: 'all',
+    blog: { topic: 'grease behind the stove and cockroaches' },
     sources: [{ fact: 'fact-tip-german-cockroach-sanitation', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1190' }],
     sourcedCopy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own, which is why UF/IFAS puts sanitation beside treatment in its German cockroach program. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
     copy: "The grease film behind and under a range is a calorie source that can sustain a German roach population on its own. Once a season, pull the range and degrease the wall, the floor, and the sides of the cabinets.",
@@ -424,6 +438,7 @@ const TIPS = Object.freeze([
   {
     id: 'interior_cardboard', group: 'kitchen', label: 'Cardboard boxes to plastic bins',
     pests: ['Roaches', 'Silverfish'], keywords: ['cardboard', 'boxes', 'garage', 'closet', 'storage'], lines: ['pest'], season: 'all',
+    blog: { topic: 'cardboard boxes and cockroaches' },
     copy: "Corrugated cardboard is roach harborage — they feed on the glue and lay egg cases in the flutes. Boxes in the garage and closets do better as plastic bins with lids, and a move-in is when it matters most.",
   },
 
@@ -450,6 +465,7 @@ const TIPS = Object.freeze([
   {
     id: 'seal_soffit_vents', group: 'sealing', label: 'Check soffit and gable vents',
     keywords: ['soffit', 'gable', 'attic', 'vent', 'screen', 'rats'], lines: ['rodent'], season: 'all',
+    blog: { topic: 'roof rats getting in through attic vents' },
     copy: "Roof rats come in through soffit gaps and torn gable-vent screens far more often than through the ground floor. Quarter-inch hardware cloth over the vent keeps the airflow and closes the route.",
   },
 
@@ -457,11 +473,13 @@ const TIPS = Object.freeze([
   {
     id: 'rodent_bird_feeders', group: 'rodent', label: 'Move bird feeders off the house',
     keywords: ['bird', 'feeder', 'seed', 'rats'], lines: ['rodent'], season: 'all',
+    blog: { topic: 'bird feeders and rats' },
     copy: "Spilled seed under a feeder is the most reliable rat and mouse food source in a yard. Move the feeder well away from the house, add a catch tray, and sweep under it — or take it down for a few weeks while we work.",
   },
   {
     id: 'rodent_fallen_fruit', group: 'rodent', label: 'Pick up fallen fruit',
     keywords: ['fruit', 'citrus', 'mango', 'avocado', 'rats'], lines: ['rodent'], season: 'all',
+    blog: { topic: 'fallen fruit and roof rats' },
     copy: "Fallen citrus, mango, and avocado are a roof rat's favorite food, and a tree in season will hold a population by itself. Picking up drops every couple of days takes that food away.",
   },
   {
@@ -474,6 +492,7 @@ const TIPS = Object.freeze([
   {
     id: 'termite_wood_soil', group: 'termite', label: 'Break wood-to-soil contact',
     keywords: ['fence', 'post', 'deck', 'trellis', 'soil', 'termite'], lines: ['termite'], season: 'all',
+    blog: { topic: 'wood touching soil and termites' },
     sources: [{ fact: 'fact-tip-termite-wood-soil', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
     sourcedCopy: "Fence posts, deck supports and trellises sitting in soil are a subterranean termite's easiest route into wood, and removing wood-to-ground contact is the first step UF/IFAS lists for keeping them out. A concrete or metal footing breaks that contact.",
     copy: "Fence posts, deck supports, and trellises in direct contact with soil are a subterranean termite's easiest route into wood. Where you can, a concrete or metal footing breaks that contact and puts the wood back where I can inspect it.",
@@ -481,6 +500,7 @@ const TIPS = Object.freeze([
   {
     id: 'termite_slab_edge', group: 'termite', label: 'Keep the slab edge visible',
     keywords: ['slab', 'grade', 'soil', 'stucco', 'mud tube'], lines: ['termite'], season: 'all',
+    blog: { topic: 'termite mud tubes on the slab edge' },
     sources: [{ fact: 'fact-tip-termite-slab-edge', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1277' }],
     sourcedCopy: "Soil or mulch above the slab covers the inspection gap and lets termites tube into the wall unseen. UF/IFAS calls for at least 6 inches between the soil or mulch line and the bottom of the siding. A visible slab edge is your early warning: a mud tube there is easy to spot.",
     copy: "Soil or mulch above the top of the slab covers the inspection gap and lets termites tube straight into the wall unseen. Keeping a few inches of slab edge visible all the way around is your early warning — a mud tube there is easy to spot.",
@@ -880,6 +900,7 @@ const TIPS = Object.freeze([
     id: 'flea_shady_spots', group: 'fleas', label: "Open up where pets rest outside",
     pests: ['Fleas'], keywords: ["yard", "shade", "deck", "fence", "dog run"], lines: ["pest"], season: 'all',
     services: ["flea_tick"],
+    blog: { topic: 'fleas in shady spots where pets rest' },
     sources: [{ fact: 'fact-tip-flea-shady-spots', label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN137' }],
     sourcedCopy: "Outside, fleas develop in shady, sheltered spots where pets lie down. UF/IFAS puts the larvae where they're protected from rain, irrigation and sun, at humidity of at least 75% and 70 to 90 degrees. Keeping those spots raked and open to the sun takes that away.",
     copy: "Outside, fleas develop in the shady, sheltered spots where pets lie down: under decks, along fences, beneath shrubs. Keeping those spots raked and open to the sun makes them a poor place for fleas to grow.",

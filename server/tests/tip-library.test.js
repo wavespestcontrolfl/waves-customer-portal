@@ -882,14 +882,15 @@ describe('the picker shows the sources and names the post (GATE_TECH_TIP_SOURCES
   });
 
   test('a named post is a hub path on a line that carries posts, and never one the review found titled for a town (decision 2)', () => {
-    const named = TIPS.filter((tip) => tip.blog);
+    const named = TIPS.filter((tip) => tip.blog?.path);
     expect(named.length).toBeGreaterThan(0);
-    for (const tip of named) {
-      expect(Object.keys(tip.blog)).toEqual(['path']);
-      expect(tip.blog.path).toMatch(/^\/[a-z0-9-]+\/[a-z0-9-]+\/$/);
+    for (const tip of TIPS.filter((t) => t.blog)) {
+      expect(Object.keys(tip.blog).every((key) => ['path', 'topic'].includes(key))).toBe(true);
+      expect(Boolean(tip.blog.path || tip.blog.topic)).toBe(true);
       // tree, shrub & palm reports carry no post (NO_POST_LINES)
       expect(tip.lines.some((line) => line !== 'tree_shrub')).toBe(true);
     }
+    for (const tip of named) expect(tip.blog.path).toMatch(/^\/[a-z0-9-]+\/[a-z0-9-]+\/$/);
     // The six posts titled for one town (2026-10-24), and the porch-light post
     // that still says warm bulbs draw fewer insects (held until the blog is
     // corrected), are named by no tip.
@@ -900,6 +901,31 @@ describe('the picker shows the sources and names the post (GATE_TECH_TIP_SOURCES
       '/pest-control/why-spiders-come-back-after-treatment/',
     ];
     expect(named.filter((tip) => NEVER.includes(tip.blog.path)).map((tip) => tip.id)).toEqual([]);
+  });
+});
+
+describe('a topic for the post a tip lacks (tech-tip-blog-seeder, owner 2026-10-24, decisions 2 and 3)', () => {
+  const { phraseProblem, normalizePhrase } = require('../services/service-report/report-blog-suggestion');
+  test('every topic is one the blog queue takes as written: plain, lower case, a topic and not a place or person', () => {
+    const topics = TIPS.filter((tip) => tip.blog?.topic);
+    expect(topics.length).toBeGreaterThan(0);
+    for (const tip of topics) {
+      expect(tip.blog.topic).toBe(normalizePhrase(tip.blog.topic));
+      expect([tip.id, phraseProblem(tip.blog.topic)]).toEqual([tip.id, null]);
+    }
+  });
+
+  test('the pairings dropped for a town-titled or off-subject post carry a topic instead (decision 2)', () => {
+    const DROPPED = [
+      'ext_shrub_clearance', 'ext_palm_roof', 'seal_soffit_vents', 'rodent_bird_feeders', 'rodent_fallen_fruit',
+      'ext_mulch_gap', 'termite_slab_edge', 'water_lanai_drains', 'interior_pet_bowls', 'interior_trash_night',
+      'flea_shady_spots', 'moisture_bath_fan', 'interior_range_grease', 'interior_cardboard', 'water_gutters',
+      'water_floor_mats', 'moisture_ac_drip', 'termite_wood_soil',
+    ];
+    for (const id of DROPPED) {
+      const tip = TIPS.find((t) => t.id === id);
+      expect([id, Boolean(tip?.blog?.topic), Boolean(tip?.blog?.path)]).toEqual([id, true, false]);
+    }
   });
 });
 
