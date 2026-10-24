@@ -121,4 +121,28 @@ postgres('rodent trapping visits against migrated PostgreSQL', () => {
       await trx.rollback();
     }
   }, 30000);
+
+  test('an exclusion-and-trapping setup plus one trap check is two visits', async () => {
+    const trx = await database.transaction();
+    try {
+      const exclusion = await catalogId(trx, 'rodent_exclusion');
+      const check = await catalogId(trx, 'rodent_trapping_followup');
+      const customerId = await customer(trx);
+      const setupId = randomUUID();
+      const checkId = randomUUID();
+      await trx('scheduled_services').insert([
+        { id: setupId, customer_id: customerId, service_id: exclusion, service_type: 'Synthetic visit', scheduled_date: '2099-03-01', status: 'completed' },
+        { id: checkId, customer_id: customerId, service_id: check, service_type: 'Synthetic visit', scheduled_date: '2099-03-08', status: 'completed' },
+      ]);
+
+      const out = await recentTrappingVisits(trx, customerId, { date: '2099-03-15', premiseMatcher: () => true });
+
+      expect(out.visits).toEqual([
+        { id: setupId, date: '2099-03-01', serviceKey: 'rodent_exclusion' },
+        { id: checkId, date: '2099-03-08', serviceKey: 'rodent_trapping_followup' },
+      ]);
+    } finally {
+      await trx.rollback();
+    }
+  }, 30000);
 });

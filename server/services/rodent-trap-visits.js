@@ -12,13 +12,16 @@
 const { etDateString } = require('../utils/datetime-et');
 
 // Every catalog row that is a visit of a trapping job: the setup visit
-// (plain, or packaged with exclusion and/or sanitation), the included trap
-// check, and the paid extra check.
+// (plain, packaged with exclusion and/or sanitation, or the "Rodent
+// Exclusion & Trapping Service" row, which places the traps), the included
+// trap check, and the paid extra check. The same set as review-request's
+// RODENT_TRAPPING_SERIES_KEYS.
 const TRAPPING_VISIT_KEYS = [
   'rodent_trapping',
   'rodent_trapping_exclusion',
   'rodent_trapping_sanitation',
   'rodent_trapping_exclusion_sanitation',
+  'rodent_exclusion',
   'rodent_trapping_followup',
   'rodent_trap_check_additional',
 ];
