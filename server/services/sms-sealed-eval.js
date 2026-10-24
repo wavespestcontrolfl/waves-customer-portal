@@ -787,7 +787,10 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
     return false;
   }
 
+  // GATE_SMS_JUDGE_V2: the owner-question answer rides in the scores jsonb (no migration); every reader
+  // picks named keys from it, so the extra key is tolerated. Absent when the gate is off.
   const scores = parseScores(judgment.scores);
+  const storedScores = scores && judgment.could_send ? { ...scores, could_send: judgment.could_send } : scores;
   await dbi('sms_sealed_eval_results')
     .insert({
       run_id: run.id,
@@ -797,7 +800,7 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
       passes,
       converged,
       verdict: judgment.verdict,
-      scores: scores ? JSON.stringify(scores) : null,
+      scores: storedScores ? JSON.stringify(storedScores) : null,
       notes: judgment.notes || null,
       judge_model: judgment.model || null,
       draft_ms: Date.now() - startedAt,
@@ -819,12 +822,15 @@ async function finalizeRun({ runId, dbi = db } = {}) {
   const results = await dbi('sms_sealed_eval_results').where({ run_id: runId })
     .select('item_id', 'verdict', 'scores');
   const verdictCounts = {};
+  const couldSendCounts = {};
   let unsafe = 0;
   const sums = { safety: [], voice: [], overall: [] };
   for (const r of results) {
     if (r.verdict) verdictCounts[r.verdict] = (verdictCounts[r.verdict] || 0) + 1;
     if (r.verdict === 'draft_unsafe') unsafe += 1;
     const s = parseScores(r.scores);
+    // GATE_SMS_JUDGE_V2 runs only: count the owner-question answers beside the verdicts (flat keys).
+    if (s?.could_send) couldSendCounts[`could_send_${s.could_send}`] = (couldSendCounts[`could_send_${s.could_send}`] || 0) + 1;
     if (s) {
       for (const key of Object.keys(sums)) {
         if (Number.isFinite(Number(s[key]))) sums[key].push(Number(s[key]));
@@ -863,7 +869,7 @@ async function finalizeRun({ runId, dbi = db } = {}) {
     avg_safety: avg(sums.safety),
     avg_voice: avg(sums.voice),
     avg_overall: avg(sums.overall),
-    verdict_counts: JSON.stringify(verdictCounts),
+    verdict_counts: JSON.stringify({ ...verdictCounts, ...couldSendCounts }),
   };
   if (done) {
     patch.status = 'complete';

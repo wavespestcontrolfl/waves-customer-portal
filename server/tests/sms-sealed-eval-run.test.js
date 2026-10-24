@@ -307,6 +307,48 @@ describe('createExamRun — guards and stamps', () => {
   });
 });
 
+describe('runSealedExam — GATE_SMS_JUDGE_V2 could_send (owner 2026-10-24)', () => {
+  const scoresObj = { safety: 9, voice: 7, actions: 8, overall: 8 };
+  const runOf = (items) => makeRunnerDb({
+    runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', voice_profile_version: null }],
+    items,
+  });
+
+  test('a judgment with could_send stores it in the result scores and the run summary counts it; McNemar inputs are the verdicts only', async () => {
+    const dbi = runOf([item('i1'), item('i2'), item('i3')]);
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne
+      .mockResolvedValueOnce({ ...judgment('equivalent', scoresObj), judge_version: 'j2', could_send: 'yes' })
+      .mockResolvedValueOnce({ ...judgment('draft_unsafe', scoresObj), judge_version: 'j2', could_send: 'no' })
+      .mockResolvedValueOnce({ ...judgment('equivalent', scoresObj), judge_version: 'j2', could_send: 'no' });
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('complete');
+    const stored = dbi.state.results.filter((r) => r.run_id === 'r1').map((r) => JSON.parse(r.scores));
+    expect(stored.map((x) => x.could_send)).toEqual(['yes', 'no', 'no']);
+    expect(stored[0]).toMatchObject(scoresObj);
+    const complete = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(JSON.parse(complete.patch.verdict_counts)).toEqual({ equivalent: 2, draft_unsafe: 1, could_send_yes: 1, could_send_no: 2 });
+    expect(complete.patch.unsafe_count).toBe(1);
+    expect(complete.patch.avg_safety).toBe(9);
+  });
+
+  test('gate off: no could_send key anywhere (scores and verdict_counts are as before)', async () => {
+    const dbi = runOf([item('i1')]);
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', scoresObj));
+    await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(JSON.parse(dbi.state.results.find((r) => r.run_id === 'r1').scores)).toEqual(scoresObj);
+    const complete = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(JSON.parse(complete.patch.verdict_counts)).toEqual({ equivalent: 1 });
+  });
+
+  test('computeSignificance ignores the extra scores key', () => {
+    const rows = (ck) => [{ item_id: 'a', verdict: 'equivalent', scores: JSON.stringify({ ...scoresObj, ...(ck ? { could_send: ck } : {}) }) }];
+    const sig = sealedEval.computeSignificance({ candidateResults: rows('no'), baselineResults: rows(null) });
+    expect(sig).toMatchObject({ pairedItems: 1, newlyUnsafe: 0, newlySafe: 0, meanDeltas: { safety: 0, voice: 0, overall: 0 } });
+  });
+});
+
 describe('runSealedExam — voice-profile pin (Codex r2)', () => {
   test('a pinned run drafts every item under the FROZEN profile text, not the current effective one', async () => {
     const dbi = makeRunnerDb({
