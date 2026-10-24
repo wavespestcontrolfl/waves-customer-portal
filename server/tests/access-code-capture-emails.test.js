@@ -122,6 +122,18 @@ describe('the customer\'s new words only', () => {
 });
 
 describe('an HTML email built to stall the link scan', () => {
+  test.each(['<blockquote ', '<style ', '<!-- '])('a 200 KB body of unclosed %s openers converts once, in bounded time', (opener) => {
+    const row = email({ body_text: '', body_html: opener.repeat(Math.floor(200000 / opener.length)) });
+    const started = Date.now();
+    emailAsMessage(row, null);
+    emailAsMessage(row, null);
+    emailEligible(row);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+  test('Outlook styles before <body> do not crowd out the words', () => {
+    const html = `<html><head><style>${'.x{color:red}'.repeat(3000)}</style></head><body><p>Gate code is #4821.</p></body></html>`;
+    expect(emailAsMessage(email({ body_text: '', body_html: html }), null).message_body).toBe('Gate code is #4821.');
+  });
   test('many unclosed links convert in bounded time, under and over the size cap', () => {
     for (const n of [2700, 6400]) {
       const started = Date.now();

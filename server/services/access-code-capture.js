@@ -1262,20 +1262,27 @@ const EMAIL_SEP = '\u0001';
 // "Open pass". Here each http(s) href the visible text does not already show is
 // kept in the text as "Open pass (https://...)"; mailto:, tel: and other
 // schemes add nothing.
-// The link words are capped and a very large HTML body keeps the shared
-// conversion only, so many unclosed <a> tags cannot make this scan quadratic.
+// A sender controls the HTML, and the shared converter's cost grows with the
+// square of crafted input (many unclosed <style>, <blockquote> or comment
+// openers). So only MAX_EMAIL_HTML characters from <body> are converted (the
+// customer's new words come first; Outlook puts its styles before <body>), the
+// link words are capped, and each row is converted once.
 const ANCHOR = /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]{0,500}?)<\/a>/gi;
-const MAX_ANCHOR_HTML = 100000;
+const MAX_EMAIL_HTML = 20000;
+const emailTexts = new WeakMap();
 function emailText(row) {
   if (String(row?.body_text || '').trim()) return String(row.body_text);
+  if (emailTexts.has(row)) return emailTexts.get(row);
   const raw = String(row?.body_html || '');
-  if (raw.length > MAX_ANCHOR_HTML) return emailPlainText({ body_text: '', body_html: raw });
-  const html = raw.replace(ANCHOR, (whole, dq, sq, bare, inner) => {
+  const body = Math.max(raw.search(/<body\b/i), 0);
+  const html = raw.slice(body, body + MAX_EMAIL_HTML).replace(ANCHOR, (whole, dq, sq, bare, inner) => {
     const href = String(dq ?? sq ?? bare ?? '').replace(/&amp;/gi, '&').trim();
     const shown = inner.replace(/<[^>]+>/g, '').replace(/&amp;/gi, '&');
     return /^https?:\/\/[^\s<>"']+$/i.test(href) && !shown.includes(href) ? `${inner} (${href}) ` : whole;
   });
-  return emailPlainText({ body_text: '', body_html: html });
+  const text = emailPlainText({ body_text: '', body_html: html });
+  emailTexts.set(row, text);
+  return text;
 }
 
 const emailAddressOf = (row) => String(row.from_address || '').trim().toLowerCase();
@@ -1342,13 +1349,15 @@ function emailEligible(row) {
   const sender = emailAddressOf(row);
   const domain = domainFromAddress(sender);
   return [
-    sender !== '', !!row.received_at, emailText(row).trim() !== '',
-    !emailLabelsOf(row).some((label) => EMAIL_EXCLUDED_LABELS.includes(label)),
-    !isInternalEmailRecipient(sender), !isOperationalDomain(domain), !domainMatches(domain, OWN_EMAIL_DOMAINS),
-    !isAutomatedSender(sender), !BOUNCE_SENDER.test(sender), !AUTO_REPLY_SUBJECT.test(String(row.subject || '')),
-    !EMAIL_BULK_CLASSES.has(row.classification), String(row.list_unsubscribe || '').trim() === '', !row.bid_filed,
-    hasAlignedAuth(row.authentication_results, domain, { strict: true }),
-  ].every(Boolean);
+    () => sender !== '' && !!row.received_at,
+    () => !emailLabelsOf(row).some((label) => EMAIL_EXCLUDED_LABELS.includes(label)),
+    () => !isInternalEmailRecipient(sender) && !isOperationalDomain(domain) && !domainMatches(domain, OWN_EMAIL_DOMAINS),
+    () => !isAutomatedSender(sender) && !BOUNCE_SENDER.test(sender) && !AUTO_REPLY_SUBJECT.test(String(row.subject || '')),
+    () => !EMAIL_BULK_CLASSES.has(row.classification) && String(row.list_unsubscribe || '').trim() === '' && !row.bid_filed,
+    () => hasAlignedAuth(row.authentication_results, domain, { strict: true }),
+    // the words last: only mail that passed every cheap check is converted
+    () => emailText(row).trim() !== '',
+  ].every((check) => check());
 }
 
 // Deterministic checks on what the model returned for an email; pure. The text
