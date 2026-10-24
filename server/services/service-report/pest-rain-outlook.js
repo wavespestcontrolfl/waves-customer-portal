@@ -87,13 +87,15 @@ function pestRainOutlookGateOn() {
 
 // The frozen summary from a forecast result. Open-Meteo stamps an hour's rain
 // at the END of that hour (application-conditions.js sliceForecast), so a rain
-// hour STARTS one hour before its stamp. The window total counts only hours
-// wholly after completion. The first rain hour also looks at the hour that
-// holds the completion: rain in it starts at the completion, so the card reads
-// it as rain inside the drying time and never as dry weather.
-// precipitationInTotal is null when any needed hour is missing, and the hour
-// that holds the completion is outside that total, so its reading must be
-// there too. Either one missing is complete false, and the card says nothing.
+// hour STARTS one hour before its stamp. The capture asks for whole hours, from
+// the start of the hour that holds the completion to the end of the hour that
+// holds the window's end, so the total counts both partial hours. The first
+// rain hour is the first one that ends after the completion: rain in the hour
+// that holds the completion starts at the completion, so the card reads it as
+// rain inside the drying time and never as dry weather. precipitationInTotal
+// is null when any hour is missing, and the reading for the hour that holds
+// the completion must be there too: either one missing is complete false, and
+// the card says nothing.
 function buildRainOutlookSummary(forecast, completedAt) {
   if (!forecast || forecast.status !== 'ok') return null;
   const completedMs = completedAt.getTime();
@@ -127,11 +129,15 @@ async function capturePestRainOutlook({ svc, now = new Date() } = {}) {
   try {
     if (!pestRainOutlookGateOn() || detectServiceLine(svc?.service_type) !== 'pest') return null;
     const { fetchPropertyForecast } = require('./application-conditions');
+    // Whole hours (sliceForecast totals whole hours only): a shower in the
+    // partial hour at either end of the 48 hours is then in the total.
+    const nowMs = now.getTime();
     const forecast = await fetchPropertyForecast({
       latitude: svc.customer_latitude,
       longitude: svc.customer_longitude,
-      from: now,
-      to: new Date(now.getTime() + RAIN_OUTLOOK_WINDOW_HOURS * HOUR_MS),
+      from: new Date(Math.floor(nowMs / HOUR_MS) * HOUR_MS),
+      to: new Date(Math.ceil((nowMs + RAIN_OUTLOOK_WINDOW_HOURS * HOUR_MS) / HOUR_MS) * HOUR_MS),
+      now,
       timeoutMs: RAIN_OUTLOOK_FORECAST_TIMEOUT_MS,
     });
     return buildRainOutlookSummary(forecast, now);

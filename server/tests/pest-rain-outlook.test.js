@@ -429,6 +429,12 @@ describe('capturePestRainOutlook', () => {
     expect(new Date(args.from).toISOString()).toBe(COMPLETED);
     expect(new Date(args.to).toISOString()).toBe(at(48));
     expect(summary).toMatchObject({ v: 1, completedAt: COMPLETED, totalIn: 0.4, firstRainAt: at(5), complete: true });
+    // Off the hour, the window grows to whole hours at both ends.
+    fetchPropertyForecast.mockClear();
+    await capturePestRainOutlook({ svc, now: new Date(Date.parse(COMPLETED) + 30 * 60000) });
+    const halfArgs = fetchPropertyForecast.mock.calls[0][0];
+    expect(new Date(halfArgs.from).toISOString()).toBe(COMPLETED);
+    expect(new Date(halfArgs.to).toISOString()).toBe(at(49));
   });
 
   test('non-pest lines make no forecast call', async () => {
