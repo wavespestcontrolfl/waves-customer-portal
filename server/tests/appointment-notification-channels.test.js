@@ -373,13 +373,15 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
     ...extra,
   });
   const ids = { customerId: 'c1', scheduledServiceId: 'ss1' };
-  // scheduled_services stub: first() resolves the given row (the completed-visit lookup).
-  const visitsDb = (completedRow, { fail = false } = {}) => {
+  // scheduled_services stub: first() resolves the given row (the completed-visit lookup);
+  // customers stub: first() resolves `longStandingRow` (the member_since lookup).
+  const visitsDb = (completedRow, { fail = false, longStandingRow = null } = {}) => {
     db.mockImplementation((table) => {
       const q = chain();
       if (table === 'scheduled_services') {
         q.first = jest.fn(async () => { if (fail) throw new Error('db down'); return completedRow; });
       }
+      if (table === 'customers') q.first = jest.fn(async () => longStandingRow);
       return q;
     });
   };
@@ -441,6 +443,17 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
     expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
   });
 
+  test('a customer since more than 90 days ago with no completed visit (imported history) stays sms', async () => {
+    visitsDb(null, { longStandingRow: { id: 'c1' } });
+    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
+    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
+    // The DATE column is compared in SQL to the ET calendar day 90 days back.
+    const customersQuery = db.mock.results[db.mock.calls.findIndex(([table]) => table === 'customers')].value;
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    expect(customersQuery.where).toHaveBeenCalledWith({ id: 'c1' });
+    expect(customersQuery.where).toHaveBeenCalledWith('member_since', '<', etDateString(addETDays(new Date(), -90)));
+  });
+
   test('a stored email / both / push channel is returned untouched, with no lookups', async () => {
     await expect(resolveConfirmationChannel(prefsOf({ confirmationChannel: 'email' }), ids)).resolves.toBe('email');
     await expect(resolveConfirmationChannel(prefsOf({ confirmationChannel: 'both' }), ids)).resolves.toBe('both');
@@ -487,7 +500,8 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
     test('new client on the default channel: the text AND the email both go out (existing both path)', async () => {
       setDbQueues({
         notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
-        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+        // Owner resolution, then the member_since read (a customer since less than 90 days, or never).
+        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true }), firstChain(undefined)],
         scheduled_services: [firstChain(undefined)], // no completed visit
         appointment_reminders: [firstChain(null), firstChain(null)], // move-hold checks: notice entry + email handoff
       });
@@ -541,17 +555,19 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
     // difference proves the send-window hold and the held email leg read the
     // promoted channel, without driving the real SMS send.
     const { isWithinSendWindowET } = require('../services/messaging/send-window');
-    function tableAwareDb({ completedRow }) {
+    function tableAwareDb({ completedRow, longStandingRow = null }) {
       db.mockImplementation((table) => {
         const q = {};
-        ['where', 'whereIn', 'whereRaw', 'whereNotNull', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+        ['whereIn', 'whereRaw', 'whereNotNull', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+        // The member_since read (where('member_since', '<', day)) answers on its own.
+        q.where = jest.fn((col) => { if (col === 'member_since') q.memberSince = true; return q; });
         q.update = jest.fn(async () => 1);
         const rows = {
           notification_prefs: { appointment_confirmation_channel: 'sms' },
           customers: { id: 'c1', account_id: 'acct-1', is_primary_profile: true, first_name: 'Sample' },
           scheduled_services: completedRow,
         };
-        q.first = jest.fn(async () => rows[table] ?? null);
+        q.first = jest.fn(async () => (q.memberSince ? longStandingRow : rows[table] ?? null));
         return q;
       });
     }
@@ -577,6 +593,12 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
 
     test('existing client after hours: the whole confirmation waits, no email', async () => {
       tableAwareDb({ completedRow: { id: 'done-1' } });
+      await expect(run()).resolves.toBe(false);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+    });
+
+    test('a customer since more than 90 days ago after hours: the whole confirmation waits, no email', async () => {
+      tableAwareDb({ completedRow: null, longStandingRow: { id: 'c1' } });
       await expect(run()).resolves.toBe(false);
       expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
     });

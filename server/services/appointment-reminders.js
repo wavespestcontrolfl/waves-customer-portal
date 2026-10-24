@@ -310,11 +310,16 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
 //   - portal-wide email off, or the confirmation toggle off: 'sms';
 //   - gate off: 'sms';
 //   - new client = no scheduled_services row with status 'completed' for this
-//     customer, read at send time; a customer with one keeps SMS-led;
+//     customer, AND member_since (the became-a-customer date) unset or within
+//     NEW_CLIENT_DAYS, both read at send time. Either test failing keeps
+//     SMS-led: the April 2026 import brought ~500 active customers whose
+//     visits predate the portal, so they have no completed row but an old
+//     member_since;
 //   - usable email = the SAME recipient resolution the confirmation email
 //     itself uses (AppointmentEmail resolveRecipients), so a promotion is
 //     only made when the email leg has somewhere to go;
 //   - any thrown lookup: 'sms' with a warn log.
+const NEW_CLIENT_DAYS = 90;
 async function resolveConfirmationChannel(prefs, { customerId, scheduledServiceId = null } = {}) {
   const ch = apptChannel(prefs?.confirmationChannel);
   if (ch !== 'sms') return ch;
@@ -329,6 +334,12 @@ async function resolveConfirmationChannel(prefs, { customerId, scheduledServiceI
       .where({ customer_id: customerId, status: 'completed' })
       .first('id');
     if (completed) return 'sms';
+    // A DATE column compared in SQL to an ET date string (no JS Date round-trip).
+    const longStanding = await db('customers')
+      .where({ id: customerId })
+      .where('member_since', '<', etDateString(addETDays(new Date(), -NEW_CLIENT_DAYS)))
+      .first('id');
+    if (longStanding) return 'sms';
     const emailCustomer = await AppointmentEmail._private.loadCustomer(customerId);
     if (!emailCustomer) return 'sms';
     const recipients = await AppointmentEmail._private.resolveRecipients(emailCustomer, {
