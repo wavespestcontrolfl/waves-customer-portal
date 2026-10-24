@@ -608,6 +608,25 @@ function assertSatellitePalmCountTyped(estimate, { confirmedPalmCount, palmCount
   throw err;
 }
 
+// The receipt a scheduled row's own schedule recorded (the manual send attempt
+// reviewed for its current scheduled_at), or null.
+function scheduledSendReceipt(row) {
+  if (!row?.scheduled_at) return null;
+  const scheduledAt = new Date(row.scheduled_at).toISOString();
+  const attempts = parseEstimateData(row.estimate_data)?.manualSendAttempts;
+  return (Array.isArray(attempts) ? attempts : []).findLast((entry) => entry.scheduleReview?.scheduledAt === scheduledAt) || null;
+}
+
+// The palm options for a row the send pipeline already claimed or scheduled.
+// A count the request carried, or the row's own schedule recorded, is checked
+// again on the row; only a row with no count (scheduled before this check)
+// clears by status, like the review acknowledgment (pre-push audit P1).
+function palmCountGateFor(row, carriedCount) {
+  const cleared = ['scheduled', 'sending'].includes(String(row.status || ''));
+  const confirmedPalmCount = carriedCount ?? (cleared ? scheduledSendReceipt(row)?.scheduleReview?.confirmedPalmCount : null);
+  return { confirmedPalmCount, palmCountCleared: cleared && confirmedPalmCount == null };
+}
+
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ...palmCountGate } = {}) {
   assertBidSendDate(estimate);
   if (estimate.archived_at) {
@@ -2236,11 +2255,11 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       // itself scheduled (it cleared its own request-time gate then); an
       // unacknowledged yellow draft aborts the whole group send.
       // The typed satellite palm count is per estimate too: the anchor's count
-      // says nothing about a sibling's palms.
-      const siblingCleared = ['scheduled', 'sending'].includes(String(sibling.status || ''));
+      // says nothing about a sibling's palms, and a scheduled sibling is held
+      // to the count its own schedule recorded.
       assertEstimateSendable(sibling, {
-        engineReviewAcknowledged: siblingCleared,
-        palmCountCleared: siblingCleared,
+        engineReviewAcknowledged: ['scheduled', 'sending'].includes(String(sibling.status || '')),
+        ...palmCountGateFor(sibling),
       });
       // A sibling under a clarify re-price hold is not publishable either
       // — the anchor's verdict never inspects sibling markers (codex r1 P1
@@ -2470,9 +2489,8 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // reviewed offer/template from its scheduled receipt into the same delivery
   // claim used for immediate sends; no second scheduler or transport.
   if (options.callerPreClaimed && estimate.scheduled_at) {
-    const scheduledAt = new Date(estimate.scheduled_at).toISOString();
     const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
-    const scheduled = (Array.isArray(attempts) ? attempts : []).findLast((entry) => entry.scheduleReview?.scheduledAt === scheduledAt);
+    const scheduled = scheduledSendReceipt(estimate);
     const acknowledged = scheduled?.scheduleReview?.acknowledgedUncertainAttemptKeys || [];
     if ((Array.isArray(attempts) ? attempts : []).some((entry) => entry.startedAt && !entry.result && !acknowledged.includes(entry.key))) throw Object.assign(new Error('An earlier send has an uncertain outcome. Staff must review it before this schedule runs.'), { code: 'SEND_OUTCOME_UNCERTAIN', statusCode: 409 });
     if (scheduled) {
@@ -2672,15 +2690,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // A row in 'scheduled'/'sending' already cleared the request-time gate
   // (the operator acknowledged the engine review when scheduling/clicking) —
   // the cron leg must not bounce it at execution time.
-  const clearedAtRequest = ['scheduled', 'sending'].includes(String(estimate.status || ''));
-  const engineReviewAcknowledgedResolved = options.engineReviewAcknowledged === true || clearedAtRequest;
-  // The typed satellite palm count follows the same request-time rule, except
-  // that a count the request carried (or the schedule recorded) is checked
-  // again on the row being sent.
+  const engineReviewAcknowledgedResolved = options.engineReviewAcknowledged === true
+    || ['scheduled', 'sending'].includes(String(estimate.status || ''));
   const sendGateOptions = {
     engineReviewAcknowledged: engineReviewAcknowledgedResolved,
-    confirmedPalmCount: options.confirmedPalmCount,
-    palmCountCleared: clearedAtRequest && options.confirmedPalmCount == null,
+    ...palmCountGateFor(estimate, options.confirmedPalmCount),
   };
   assertEstimateSendable(estimate, sendGateOptions);
 

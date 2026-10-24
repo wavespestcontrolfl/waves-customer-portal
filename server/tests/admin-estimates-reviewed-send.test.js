@@ -769,6 +769,30 @@ describe('group publication navigation', () => {
     expect(sibling.status).toBe('draft');
   });
 
+  test('a scheduled sibling is held to the palm count its own schedule recorded (pre-push audit P1)', async () => {
+    const gates = require('../config/feature-gates');
+    const { sibling } = prepareGroup();
+    const scheduledAt = new Date('2099-01-03T15:00:00.000Z');
+    Object.assign(sibling, {
+      status: 'scheduled', scheduled_at: scheduledAt,
+      estimate_data: {
+        ...sibling.estimate_data,
+        // Scheduled after its admin typed 14; a revision then re-priced it at 9.
+        engineResult: { lineItems: [{ service: 'tree_shrub', palmCount: 9, palmCountFromLookup: true }] },
+        manualSendAttempts: [{ key: 'sibling-schedule', binding: '[]', channels: {}, scheduleReview: { scheduledAt: scheduledAt.toISOString(), confirmedPalmCount: 14 } }],
+      },
+    });
+    gates.satellitePalmCountTypedLive.mockReturnValue(true);
+    try {
+      await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
+        .rejects.toMatchObject({ code: 'PALM_COUNT_MISMATCH', message: expect.stringContaining('Grouped property') });
+    } finally {
+      gates.satellitePalmCountTypedLive.mockReturnValue(false);
+    }
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sibling.status).toBe('scheduled');
+  });
+
   function failReconciliation() {
     db.mockImplementation((table) => {
       const builder = groupDatabase(table);
