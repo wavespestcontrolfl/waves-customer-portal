@@ -204,13 +204,14 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
   // phone waits, then finds this row (in flight or sent) and stops.
   const claim = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${ENTRY_POINT}:${digits}`]);
-    if (await sentKindRecently({ digits, kind, now }, trx)) return { reason: 'sent_today' };
     const phoneMatch = ["RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits]];
     // A TEXT answer replaces an open night ask: the lead chose text instead.
+    // Closed even when no new text goes out, so their next reply reaches intake.
     if (kind === 'text_reply') {
       await trx('lead_callback_requests').where({ state: 'asked', kind: 'call_request' }).whereRaw(...phoneMatch)
         .update({ state: 'cancelled', updated_at: now });
     }
+    if (await sentKindRecently({ digits, kind, now }, trx)) return { reason: 'sent_today' };
     const open = await trx('lead_callback_requests').whereIn('state', ['asked', 'scheduled']).whereRaw(...phoneMatch).first('id');
     if (open) return { reason: 'open_followup' };
     const [row] = await trx('lead_callback_requests').insert({

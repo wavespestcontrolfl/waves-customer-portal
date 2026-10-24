@@ -98,6 +98,15 @@ jest.setTimeout(30000);
     expect((await database('customers').where({ id: c.id }).first()).lead_intake_status).toBe('awaiting_service');
   });
 
+  test('TEXT, then a night CALL, then TEXT again: the time ask closes though no second text goes', async () => {
+    const c = await lead('+19415550119');
+    await reply(c, 'text', NIGHT);
+    await reply(c, 'call', NIGHT);
+    await expect(reply(c, 'text', NIGHT)).resolves.toMatchObject({ reason: 'sent_today' });
+    expect(await database('lead_callback_requests').where({ customer_id: c.id, kind: 'call_request' }).first('state')).toEqual({ state: 'cancelled' });
+    expect(sentBodies()).toEqual([TEXT_REPLY_BODY, NIGHT_CALL_BODY]);
+  });
+
   test('a night CALL asks for a time; "10am" books 10:00 tomorrow and confirms it', async () => {
     const c = await lead('+19415550101');
     await expect(reply(c, 'CALL', NIGHT)).resolves.toMatchObject({ action: 'time_asked' });
