@@ -124,6 +124,31 @@ describe('CreateAppointmentModal address-first best times', () => {
     expect(screen.queryAllByTestId('availability-hour')).toEqual([]);
   });
 
+  it('shows no per-technician rows for the typed hour until a customer exists, so none is pinned before a service is known', async () => {
+    // Auto mode prices the typed hour on every technician's route
+    // (compareTechs) and offers a "Use" row for each, which pins that technician.
+    const base = fetcher.getMockImplementation();
+    fetcher.mockImplementation(async (url, options) => {
+      const res = await base(url, options);
+      if (!String(url).includes('/find-time')) return res;
+      const data = await res.json();
+      return { ...res, json: async () => ({ ...data, pickedByTech: [{ start: '13:00', fits: true, detour_minutes: 9, drive_in_minutes: 6, technician: { id: 'tech-9', name: 'Example Tech' } }] }) };
+    });
+    renderModal({ addressFirstTimes: true });
+    pickAddress();
+    await screen.findAllByTestId('availability-hour');
+    expect(findTimeBodies().at(-1).compareTechs).toBe(true);
+    expect(screen.queryByRole('region', { name: 'Technicians free at this hour' })).toBeNull();
+    // Add customer creates and selects the customer: the rows come back.
+    const block = screen.getByRole('button', { name: 'Add customer' }).parentElement;
+    const [first, last, phone] = Array.from(block.querySelectorAll('input'));
+    fireEvent.change(first, { target: { value: 'Pat' } });
+    fireEvent.change(last, { target: { value: 'Example' } });
+    fireEvent.change(phone, { target: { value: '9415550100' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add customer' }));
+    expect(await screen.findByRole('region', { name: 'Technicians free at this hour' })).toBeTruthy();
+  });
+
   it('gate off: a picked address with no customer searches nothing', async () => {
     renderModal();
     pickAddress();

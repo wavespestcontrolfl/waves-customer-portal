@@ -5545,7 +5545,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <HourTechCompare
             // A partly committed booking is locked to retry or close: the
             // remaining groups must keep the technician already chosen.
-            rows={partialCommitLocked ? [] : pickedByTech}
+            // Address-only: no rows, since each one pins its technician and
+            // no service is known yet (see adoptChipTechnician).
+            rows={partialCommitLocked || addressOnlyTimes ? [] : pickedByTech}
             onPick={(row) => {
               // The drive was priced on this technician's route: picking
               // the row books them, as the hint chips do.
