@@ -447,14 +447,16 @@ async function retireIncompatibleItems({ dbi, overflow, markers, forbidden, dryR
 // Only once the compatible items could carry an exam of their own (the auto-run minimum): below that the
 // pool is left as it is and the shortfall stays visible. Rows stay (active=false, never deleted);
 // restoreCompatibleItems brings them back when the contract matches again. Returns the count retired.
-async function rotateIncompatibleItems({ dbi, markers, forbidden, dryRun = false }) {
+function rotationOverflow(active, compatible) {
+  const incompatible = active - compatible;
+  return compatible < AUTO_EXAM_MIN_ITEMS || incompatible <= compatible ? 0 : incompatible - compatible;
+}
+async function rotateIncompatibleItems({ dbi, markers, forbidden }) {
   const compat = compatibleWhereRaw(markers, forbidden);
   const [{ count: active }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
   const [{ count: compatible }] = await dbi('sms_sealed_eval_items').where('active', true)
     .whereRaw(compat.sql, compat.bindings).count('* as count');
-  const incompatible = Number(active) - Number(compatible);
-  if (Number(compatible) < AUTO_EXAM_MIN_ITEMS || incompatible <= Number(compatible)) return 0;
-  return retireIncompatibleItems({ dbi, overflow: incompatible - Number(compatible), markers, forbidden, dryRun });
+  return retireIncompatibleItems({ dbi, overflow: rotationOverflow(Number(active), Number(compatible)), markers, forbidden });
 }
 
 // Restore (active=true) up to `remaining` RETIRED items the current fact
@@ -546,7 +548,10 @@ async function sealEvalItems({
     // the auto-exam spend cap). Prune here too, so the two steps need not
     // be atomic to converge.
     const trimmed = await retireIncompatibleItems({ dbi, overflow: activeAfterRestore - target, markers, forbidden, dryRun });
-    const rotated = await rotateIncompatibleItems({ dbi, markers, forbidden, dryRun });
+    // a dry run changed nothing, so the rotation is planned on the counts the real pass would have left
+    const rotated = dryRun
+      ? rotationOverflow(activeAfterRestore - trimmed, Number(compatibleCount) + reactivated)
+      : await rotateIncompatibleItems({ dbi, markers, forbidden });
     const retired = trimmed + rotated;
     return { sealed: 0, retired, reactivated, activeCount: activeAfterRestore - retired, ms: Date.now() - startedAt, ...(dryRun ? { dryRun } : {}) };
   }
@@ -621,7 +626,9 @@ async function sealEvalItems({
 
   if (!picked.length) {
     logger.info('[sealed-eval] seal: no new eligible candidates');
-    const retired = await rotateIncompatibleItems({ dbi, markers, forbidden, dryRun });
+    const retired = dryRun
+      ? rotationOverflow(activeAfterRestore, Number(compatibleCount) + reactivated)
+      : await rotateIncompatibleItems({ dbi, markers, forbidden });
     return {
       sealed: 0, retired, reactivated, activeCount: activeAfterRestore - retired, ms: Date.now() - startedAt, ...(dryRun ? { dryRun, candidates: candidates.length, skippedRetiredTopic } : {}),
     };
@@ -646,8 +653,7 @@ async function sealEvalItems({
     const trimmed = await retireIncompatibleItems({ dbi, overflow: activeAfterRestore + rows.length - target, markers, forbidden, dryRun });
     // what rotateIncompatibleItems would retire once the new rows are in (its rule, on the planned counts)
     const compatibleAfter = Number(compatibleCount) + reactivated + rows.length;
-    const incompatibleAfter = activeAfterRestore + rows.length - trimmed - compatibleAfter;
-    const rotated = compatibleAfter >= AUTO_EXAM_MIN_ITEMS && incompatibleAfter > compatibleAfter ? incompatibleAfter - compatibleAfter : 0;
+    const rotated = rotationOverflow(activeAfterRestore + rows.length - trimmed, compatibleAfter);
     // never printed with bodies: the plan is counts by intent and by day
     const byIntentCount = {};
     for (const c of picked) byIntentCount[c.intent || 'GENERAL'] = (byIntentCount[c.intent || 'GENERAL'] || 0) + 1;

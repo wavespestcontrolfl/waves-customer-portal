@@ -61,6 +61,11 @@ jest.setTimeout(180000);
 
   // ---- facts blocks as the drafter writes them ----
   const currentBlock = () => drafter.buildFactsBlock(ctx, { now: new Date('2026-10-20T15:00:00Z') });
+  // a block with a confirmed missed visit: three of these satisfy the exam's missed-visit minimum
+  const missedBlock = () => drafter.buildFactsBlock(
+    { ...ctx, visitLoops: { missedVisit: { logId: 'rl-1', type: 'Pest Control', date: '2026-10-18', windowStart: '09:00:00', windowDisplay: '9-11am' } } },
+    { now: new Date('2026-10-20T15:00:00Z') },
+  );
   // the block an earlier identity drafted: the same day-of facts, the earlier static company section
   const priorRenderBlock = () => {
     const now = currentBlock();
@@ -190,6 +195,39 @@ jest.setTimeout(180000);
     expect(JSON.stringify(plan)).not.toMatch(/when is my next visit/);
     const real = await sealedEval.sealEvalItems({ target: 100, dbi: database });
     expect(real).toMatchObject({ sealed: plan.sealed, rebased: plan.rebased, retired: plan.retired, activeCount: plan.activeCount });
+  });
+
+  // a dry run plans every branch on the counts the real pass would leave, never on a database it did not change
+  const parity = async (opts) => {
+    const before = await items();
+    const plan = await sealedEval.sealEvalItems({ ...opts, dbi: database, dryRun: true });
+    expect(await items()).toEqual(before);
+    const real = await sealedEval.sealEvalItems({ ...opts, dbi: database });
+    expect(plan).toMatchObject({ sealed: real.sealed, retired: real.retired, activeCount: real.activeCount });
+    expect(plan.reactivated || 0).toBe(real.reactivated || 0);
+    return real;
+  };
+
+  test('dry run and real pass agree when the pool is over target and nothing is sealed', async () => {
+    for (let i = 0; i < 12; i += 1) await addSealed({ facts: i < 3 ? missedBlock() : currentBlock(), sealedDaysAgo: 5 + i });
+    for (let i = 0; i < 8; i += 1) await addSealed({ facts: prePortalBlock(), sealedDaysAgo: 31 + i });
+    const real = await parity({ target: 12 });
+    expect(real).toMatchObject({ sealed: 0, retired: 8, activeCount: 12 });
+  });
+
+  test('dry run and real pass agree when no candidate is left but the pool must rotate', async () => {
+    for (let i = 0; i < 12; i += 1) await addSealed({ facts: currentBlock(), sealedDaysAgo: 5 + i });
+    for (let i = 0; i < 16; i += 1) await addSealed({ facts: prePortalBlock(), sealedDaysAgo: 31 + i });
+    const real = await parity({ target: 100 });
+    expect(real).toMatchObject({ sealed: 0, retired: 4, activeCount: 24 });
+  });
+
+  test('dry run and real pass agree when retired compatible items come back', async () => {
+    for (let i = 0; i < 10; i += 1) await addSealed({ facts: currentBlock(), sealedDaysAgo: 5 + i });
+    for (let i = 0; i < 5; i += 1) await addSealed({ facts: currentBlock(), sealedDaysAgo: 20 + i, active: false });
+    for (let i = 0; i < 17; i += 1) await addSealed({ facts: prePortalBlock(), sealedDaysAgo: 31 + i });
+    const real = await parity({ target: 100 });
+    expect(real).toMatchObject({ reactivated: 5, retired: 2, activeCount: 30 });
   });
 
   test('the minimum age can be lowered for one pass', async () => {
