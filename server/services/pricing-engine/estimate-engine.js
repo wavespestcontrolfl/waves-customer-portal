@@ -139,6 +139,140 @@ function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+// ── Per-line operator price override ───────────────────────
+// Owner ask 2026-10-09: a per-estimate dollar override for ANY priced
+// one-time / specialty line (the carpenter-ant case: engine said $240, the
+// job is worth $400). Mirrors the pest_initial_roach `priceOverride`
+// contract: the typed amount replaces the engine price BEFORE the discount
+// passes, the engine number stays on the line (`enginePrice` / `engineTotal`)
+// for the audit trail, and a present-but-invalid entry is surfaced as a
+// warning instead of silently falling back. Recurring (annual) lines,
+// retainer programs (trap_only_retainer: billed yearly, so not a one-time
+// job), quote-required lines and pest_initial_roach (which has its own
+// override input) are never touched here.
+const LINE_PRICE_OVERRIDE_REASON_MAX = 300;
+
+function normalizeLinePriceOverrides(raw) {
+  const out = new Map();
+  const put = (service, entry) => {
+    const key = String(service || '').trim();
+    if (!key) return;
+    const value = entry && typeof entry === 'object' ? entry.price : entry;
+    const reason = entry && typeof entry === 'object' && typeof entry.reason === 'string'
+      ? entry.reason.trim().slice(0, LINE_PRICE_OVERRIDE_REASON_MAX)
+      : '';
+    out.set(key, { value, reason });
+  };
+  if (Array.isArray(raw)) {
+    raw.forEach((entry) => entry && typeof entry === 'object' && put(entry.service, entry));
+  } else if (raw && typeof raw === 'object') {
+    Object.entries(raw).forEach(([service, entry]) => put(service, entry));
+  }
+  return out;
+}
+
+// An override is keyed by service, so it must name exactly one line: a key
+// several lines share (every area add-on is `area_addon`) would reprice the
+// siblings too. Area add-ons stay out even alone: the add-on table prices
+// them and a booked visit re-checks the sold add-on price.
+function linePriceOverrideEligible(item, serviceLineCounts) {
+  if (!item || typeof item !== 'object') return false;
+  if (item.annual || item.quoteRequired || item.requiresCustomQuote) return false;
+  if (item.retainerBilling || item.trapOnlyRetainerBilling) return false;
+  if (item.service === 'area_addon' || serviceLineCounts.get(item.service) > 1) return false;
+  if (item.service === 'pest_initial_roach' || item.priceOverridden === true) return false;
+  return (Number(item.price) > 0) || (Number(item.total) > 0);
+}
+
+// A detail the pricer built from its own amounts ("$225 initial + $125
+// follow-up", "+ $75 inspect", "One-time $99 setup") would contradict the
+// typed price on the customer estimate, so an overridden line drops those
+// figures and keeps the words. A rate for extra work the override does not
+// cover ("Additional trap checks are $95 each") stays. `(?![\d,.])` makes the
+// rate check see the whole number, never a backtracked prefix of it.
+const OVERRIDDEN_LINE_PRICE_FIGURE = /\$\s?\d[\d,]*(?:\.\d+)?(?![\d,.])(?!\s*(?:each\b|per\b|\/))\s?/g;
+
+function withoutPriceFigures(text) {
+  if (typeof text !== 'string') return text;
+  const out = text.replace(OVERRIDDEN_LINE_PRICE_FIGURE, '').replace(/\s{2,}/g, ' ').trim();
+  if (out === text) return text;
+  return out ? out.charAt(0).toUpperCase() + out.slice(1) : out;
+}
+
+// What a validated override does to its line: the typed amount replaces the
+// engine number (kept as enginePrice / engineTotal for the audit trail) and
+// the engine's dollar figures leave the detail text.
+function overrideLinePrice(item, price, reason) {
+  if (Number(item.price) > 0) {
+    item.enginePrice = item.price;
+    item.price = price;
+  }
+  if (Number(item.total) > 0) {
+    item.engineTotal = item.total;
+    item.total = price;
+  }
+  if (typeof item.detail === 'string') item.detail = withoutPriceFigures(item.detail);
+  if (typeof item.invoiceDescription === 'string') item.invoiceDescription = withoutPriceFigures(item.invoiceDescription);
+  if (item.display && typeof item.display.detail === 'string') {
+    item.display = { ...item.display, detail: withoutPriceFigures(item.display.detail) };
+  }
+  // The typed amount IS the line price the customer sees: the automatic
+  // one-time perk (WaveGuard / recurring-customer 15%) is not re-applied
+  // on top of it, whether the pricer baked that perk into `price` itself
+  // or step 5 would have applied it by service key. Routing the line
+  // through the "handled by pricer" branch with a zero rate makes
+  // before/after read as the override on every consumer. An estimate-
+  // level manual discount (step 6) still applies — the operator sets both
+  // deliberately.
+  item.discountHandledByPricingFunction = true;
+  item.subtotalBeforeRecurringCustomerDiscount = price;
+  item.recurringCustomerDiscountAmount = 0;
+  item.recurringCustomerDiscountRate = 0;
+  item.priceOverridden = true;
+  item.priceOverrideReason = reason || null;
+}
+
+function applyLinePriceOverrides(lineItems, raw, addRoutingWarning) {
+  // The builder offers an override only on a line stamped here: the legacy
+  // mapper also synthesizes one-time rows from nested engine fields (the
+  // misting installation, for one) whose keys no engine line carries.
+  const serviceLineCounts = new Map();
+  for (const item of lineItems) serviceLineCounts.set(item?.service, (serviceLineCounts.get(item?.service) || 0) + 1);
+  for (const item of lineItems) {
+    if (linePriceOverrideEligible(item, serviceLineCounts)) item.priceOverridable = true;
+  }
+  const overrides = normalizeLinePriceOverrides(raw);
+  if (overrides.size === 0) return;
+  const matched = new Set();
+  for (const item of lineItems) {
+    if (!overrides.has(item?.service)) continue;
+    matched.add(item.service);
+    if (item.priceOverridable !== true) {
+      addRoutingWarning(`Price override for ${item.service} ignored — only a priced one-time or specialty line with its own service key can be overridden.`);
+      continue;
+    }
+    const { value, reason } = overrides.get(item.service);
+    const provided = value !== undefined && value !== null && String(value).trim() !== '';
+    if (!provided) continue;
+    const n = Number(value);
+    const rounded = Number.isFinite(n) ? roundMoney(n) : NaN;
+    const valid = Number.isFinite(n) && n > 0 && rounded >= 0.01;
+    if (!valid) {
+      item.warnings = uniqueStrings([
+        ...(Array.isArray(item.warnings) ? item.warnings : []),
+        `Ignoring invalid price override for ${item.service} — the engine price applies. Enter a positive dollar amount to override.`,
+      ]);
+      continue;
+    }
+    overrideLinePrice(item, rounded, reason);
+  }
+  overrides.forEach((_entry, service) => {
+    if (!matched.has(service)) {
+      addRoutingWarning(`Price override for ${service} ignored — no priced line with that service key on this estimate.`);
+    }
+  });
+}
+
 function buildPalmCountError(resolution) {
   const err = new Error('Palm count is required for palm injection pricing.');
   err.name = 'PricingError';
@@ -2139,6 +2273,9 @@ function generateEstimate(input) {
   // needs scheduling evidence and is not supported yet.
   assertAreaAddOnHostVisit(areaAddOns, lineItems);
 
+  assertFinitePriceFields(lineItems);
+
+  applyLinePriceOverrides(lineItems, input.linePriceOverrides, addRoutingWarning);
   assertFinitePriceFields(lineItems);
 
   // ── 4. Determine WaveGuard tier ────────────────────────────
