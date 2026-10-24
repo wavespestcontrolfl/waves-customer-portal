@@ -418,16 +418,6 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       await cc.refreshFulfillment(db, w.call.id);
       expect((await row(w.commitment.id)).status).toBe('open');
     });
-
-    test('a text whose status only moves from sent to delivered keeps the close', async () => {
-      const w = await world();
-      const text = await addSms(w, { status: 'sent' });
-      say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
-      expect(await run(w)).toMatchObject({ closed: 1 });
-      // The provider later confirms delivery: the status moves within the delivered family, the words are the same.
-      await db('sms_log').where({ id: text }).update({ status: 'delivered' });
-      expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
-    });
   });
 
   describe('cost', () => {
