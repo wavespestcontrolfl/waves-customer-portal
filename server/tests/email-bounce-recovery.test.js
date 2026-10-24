@@ -117,6 +117,10 @@ describe('decideRecoveryAction', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, averageCopy: false, min: 'high' }))
       .toEqual({ action: 'send', status: 'resent' });
   });
+  test('skips a reschedule or cancellation notice (its stored copy may no longer be true)', () => {
+    expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, moveNoticeCopy: true, min: 'high' }))
+      .toEqual({ action: 'skip', status: 'move_notice_not_replayed' });
+  });
   test('skips when the bounced address is no longer on file', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, addressOnFile: false, min: 'high' }))
       .toEqual({ action: 'skip', status: 'address_no_longer_on_file' });
@@ -317,6 +321,22 @@ describe('attemptRecovery codex-fix behaviors', () => {
       .toMatchObject({ status: 'monthly_average_not_replayed', corrected_email: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.stringContaining('Suggested correction: jane@gmail.com'),
       expect.objectContaining({ metadata: expect.objectContaining({ status: 'monthly_average_not_replayed' }) }));
+  });
+
+  test('a bounced cancellation notice is not re-sent from its old copy; staff get the suggested address', async () => {
+    const mockDb = orderedDb({
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+    });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(
+      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'appointment.cancelled', suppression_group_key_snapshot: 'transactional_required', categories: ['appointment', 'appointment_cancelled', 'appointment_move_notice'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(res).toEqual({ skipped: 'move_notice_not_replayed' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.stringContaining('reschedule and cancellation notices are not re-sent from their old copy'),
+      expect.objectContaining({ metadata: expect.objectContaining({ status: 'move_notice_not_replayed' }) }));
   });
 
   test.each(['billing_late_payment_30_day', 'invoice.followup_14_day', 'payment.microdeposit_verification', 'billing.previsit_balance'])(

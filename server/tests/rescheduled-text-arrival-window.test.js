@@ -25,7 +25,8 @@ test('both senders pass {window}', () => {
   const path = require('path');
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
   expect(read('routes/admin-schedule.js')).toMatch(/renderRequiredSmsTemplate\('appointment_rescheduled',[\s\S]{0,500}window: spokenArrivalWindow\(start\)/);
-  expect(read('services/appointment-reminders.js')).toMatch(/renderRequiredTemplate\('appointment_rescheduled',[\s\S]{0,700}formatArrivalWindow\(newApptTime\)/);
+  // handleReschedule's {window} comes from the one helper its email version also uses (GATE_MOVE_NOTICE_EMAIL).
+  expect(read('services/appointment-reminders.js')).toMatch(/renderRequiredTemplate\('appointment_rescheduled',[\s\S]{0,700}window: rescheduleWindowPhrase\(resolved, newApptTime\)/);
 });
 
 test('adds window to the variables list once', () => {
@@ -71,8 +72,19 @@ test('an office-edited base row keeps its wording but still gains window in its 
 });
 
 test('a windowless reschedule says the reminders\' unknown-window phrase, not a made-up 8-10 AM', () => {
+  const { UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+  const { rescheduleWindowPhrase } = require('../services/appointment-reminders')._test;
+  // 13:00Z on Oct 2 2026 = 9:00 AM Eastern.
+  expect(rescheduleWindowPhrase({ windowless: true }, new Date('2026-10-02T13:00:00.000Z'))).toBe(UNKNOWN_ARRIVAL_WINDOW);
+  expect(rescheduleWindowPhrase({ windowless: false }, new Date('2026-10-02T13:00:00.000Z'))).toBe(spokenArrivalWindow('09:00'));
+  expect(rescheduleWindowPhrase(null, new Date('2026-10-02T13:00:00.000Z'))).toBe(spokenArrivalWindow('09:00'));
+  // The text and its email version both take the phrase from that helper; the email also learns the window is unknown.
+  const { rescheduleEmailWindow } = require('../services/appointment-reminders')._test;
+  expect(rescheduleEmailWindow({ windowless: true }, new Date('2026-10-02T13:00:00.000Z'))).toEqual({ arrivalWindow: UNKNOWN_ARRIVAL_WINDOW, windowUnknown: true });
+  expect(rescheduleEmailWindow({ windowless: false }, new Date('2026-10-02T13:00:00.000Z'))).toEqual({ arrivalWindow: spokenArrivalWindow('09:00'), windowUnknown: false });
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
-  expect(src).toMatch(/window: resolved\?\.windowless\s*\?\s*require\('\.\.\/utils\/sms-time-format'\)\.UNKNOWN_ARRIVAL_WINDOW\s*:\s*formatArrivalWindow\(newApptTime\)/);
+  expect(src).toMatch(/window: rescheduleWindowPhrase\(resolved, newApptTime\)/);
+  expect(src).toMatch(/\.\.\.rescheduleEmailWindow\(resolved, newApptTime\)/);
   expect(render(after, { ...vars, window: require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW }))
     .toContain("is now Thursday, October 2, at a time we'll confirm.");
 });

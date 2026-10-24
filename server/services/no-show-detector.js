@@ -65,12 +65,14 @@ const DELIVERED_SMS_STATUSES = ['sent', 'delivered', 'read'];
 // The appointment email event types that quote an arrival window — the same
 // list the interaction read filters on, and the first segment of the
 // idempotency key appointment-email.js builds for each of them. Only the
-// three that actually have a sender: there is no appointment.rescheduled
-// producer, and listing it would widen what counts as promise evidence (and
-// the supporting index) for a workflow that does not exist (codex P2 round
-// 13).
+// ones that actually have a sender (codex P2 round 13). appointment.rescheduled
+// has one since GATE_MOVE_NOTICE_EMAIL: the email version of a reschedule text
+// that reached nobody, which may be the only notice of the new window. Its key
+// keeps the slot in the same third segment (`na` for a windowless visit, whose
+// interaction row records no rendered_slot_ms, so its promise is unknown), and
+// 20261025040000 puts it back in the supporting index.
 const APPOINTMENT_EMAIL_EVENTS = ['appointment.confirmation', 'appointment.reminder_72h',
-  'appointment.reminder_24h'];
+  'appointment.reminder_24h', 'appointment.rescheduled'];
 const instant = (value) => value == null ? NaN : new Date(value).getTime();
 // Stamps that prove the tech reached the stop, in the order job-status.js
 // writes them. Any one of them clears the card.
@@ -427,6 +429,9 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // Read straight from it, holding the same delivered-status bar, and let
     // latestPromises dedupe against the interaction-derived copy when both
     // exist (same visit, same window, same send time).
+    // A reschedule email that spoke for a grouped stop marks its key `:stop`
+    // in segment 5 (appointment-reminders.js moveNoticeEmailKey), the same
+    // stop-wide identity its attempt row carries as notificationEventKey.
     () => conn('email_messages')
       .whereIn(conn.raw("split_part(idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
       .whereIn(conn.raw("split_part(idempotency_key, ':', 2)"), visitIds)
@@ -434,7 +439,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereIn('status', DELIVERED_EMAIL_STATUSES)
       .whereNotNull('sent_at').where('sent_at', '<=', now)
       .select('id', 'sent_at', conn.raw("split_part(idempotency_key, ':', 2) as visit_id"),
-        conn.raw("split_part(idempotency_key, ':', 3) as slot_ms")),
+        conn.raw("split_part(idempotency_key, ':', 3) as slot_ms"),
+        conn.raw("split_part(idempotency_key, ':', 5) = 'stop' as stop_wide")),
     // The GROUPED reminder's key has a different shape:
     // `appointment.reminder_<kind>:visit:<service_visits id>:<effect>:<date>`
     // (appointment-reminders.js's visitReminderEmailKey, keyed by the visit
@@ -681,7 +687,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         source: 'email', source_id: r.id }));
   })();
   const directEmailFallbacks = directEmails.map((r) => ({ visit_id: r.visit_id,
-    start_at: new Date(Number(r.slot_ms)).toISOString(), communicated_at: r.sent_at,
+    start_at: new Date(Number(r.slot_ms)).toISOString(), grouped: r.stop_wide === true, communicated_at: r.sent_at,
     source: 'email', source_id: r.id }));
   return [
     ...noticeEvents,

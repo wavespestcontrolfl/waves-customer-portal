@@ -826,16 +826,18 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     expect(await ledgerMetadata(resolved.ledgerId)).toMatchObject({ delivered: true, resolved: true });
   });
 
-  test('the claim query skips a follow-up carrying the monthly average; an unmarked row is claimed as before', async () => {
+  test('the claim query skips a follow-up carrying the monthly average and a move notice; an unmarked row is claimed as before', async () => {
     const marked = scheduled(randomUUID(), { categories: JSON.stringify(['email_template', 'estimate_followup', 'estimate_followup_monthly_average']) });
+    const moveNotice = scheduled(randomUUID(), { categories: JSON.stringify(['appointment', 'appointment_cancelled', 'appointment_move_notice']) });
     const plain = scheduled(randomUUID(), { categories: JSON.stringify(['email_template', 'estimate_followup']) });
     const noCategories = scheduled(randomUUID(), { categories: null });
-    await mockDatabase('email_messages').insert([marked, plain, noCategories]);
+    await mockDatabase('email_messages').insert([marked, moveNotice, plain, noCategories]);
 
     const claimed = (await retry.claimDueRetries(50)).map((m) => m.id);
 
     expect(claimed).toEqual(expect.arrayContaining([plain.id, noCategories.id]));
     expect(claimed).not.toContain(marked.id);
+    expect(claimed).not.toContain(moveNotice.id);
     expect(await rowOf(marked.id)).toMatchObject({ status: 'failed', provider_retry_count: 0 });
     expect((await rowOf(marked.id)).provider_retry_next_at).toBeInstanceOf(Date); // untouched: nothing claimed it
   });
