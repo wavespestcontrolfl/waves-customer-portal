@@ -57,6 +57,18 @@ function seasonAwareAdjustment(scores, { month, recentMinTempF } = {}) {
   };
 }
 
+// The adjuster the lawn assessment route hands to the score writers. Weather-driven when a
+// recent min temp is known, else the caller's calendar adjuster (applySeasonalAdjustment).
+// noBoost (GATE_LAWN_NO_SEASON_BOOST, owner 2026-10-24) makes it the identity: the model's
+// turf_density and color_health are stored as derived; the prompt already asks for color
+// "for the season". Off = the boost exactly.
+function visitSeasonAdjust({ month, recentMinTempF, calendarAdjust, noBoost = false } = {}) {
+  if (noBoost) return (scores) => (scores ? { ...scores } : null);
+  return (scores) => (Number.isFinite(recentMinTempF)
+    ? seasonAwareAdjustment(scores, { month, recentMinTempF })
+    : calendarAdjust(scores, month));
+}
+
 // A low color score reads as SEASONAL (not stress) when there's real dormancy pressure,
 // the color is genuinely down, and nothing else is flagging a stress problem.
 function dormancyLikely({ colorHealth, stressDamage, month, recentMinTempF } = {}) {
@@ -128,6 +140,7 @@ module.exports = {
   seasonOfDate,
   dormancyPressure,
   seasonAwareAdjustment,
+  visitSeasonAdjust,
   dormancyLikely,
   crossSeasonNote,
   crossSeasonNoteFromSeasons,

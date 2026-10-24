@@ -32,6 +32,7 @@ const { verifyTurnstileToken } = require('../utils/turnstile');
 const { consumeSharedDailyCap, DAILY_LIMIT_MESSAGE, PHOTO_ASSESSMENT_CAP } = require('../middleware/public-llm-shared-cap');
 const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { setPublicPrivacyHeaders, sanitizePricingSnapshot } = require('../utils/public-report-egress');
+const { reportTemplatePayload } = require('../services/service-report/report-template');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
 const { sanitizeAttribution, isPlausibleAnalyzeBody } = require('./public-lawn-assessment');
 const { etDateString } = require('../utils/datetime-et');
@@ -487,7 +488,8 @@ router.get('/:token', readLimiter, async (req, res, next) => {
         .update({ report_first_viewed_at: db.fn.now() })
         .catch((err) => logger.warn(`[public-pest-identifier] view stamp failed: ${err.message}`));
     }
-    return res.json({ success: true, report: buildPublicPestReport(row) });
+    // GATE_REPORT_SHARED_TEMPLATE: the shared customer header and the stacked layout. Absent = byte-identical payload.
+    return res.json({ success: true, report: buildPublicPestReport(row), ...reportTemplatePayload() });
   } catch (err) {
     return next(err);
   }

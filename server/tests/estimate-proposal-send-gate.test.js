@@ -220,6 +220,66 @@ describe('assertEstimateSendable estimator-engine review gate', () => {
   });
 });
 
+describe('assertEstimateSendable satellite palm count gate (GATE_SATELLITE_PALM_COUNT_TYPED)', () => {
+  // A stored AI draft whose T&S line priced the satellite palm count
+  // (follow-up B to #6562, owner 2026-10-24).
+  const satelliteDraft = (extra = {}, line = {}) => ({
+    status: 'draft',
+    token: 'tok-palm-test',
+    monthly_total: 64,
+    sent_at: null,
+    estimate_data: {
+      estimatorEngine: { lane: 'yellow', laneReasons: ['tree & shrub palm count (14) came from the satellite image'] },
+      engineResult: { lineItems: [{ service: 'tree_shrub', palmCount: 14, palmCountFromLookup: true, ...line }] },
+    },
+    ...extra,
+  });
+  const refusal = (row, options) => { try { assertEstimateSendable(row, options); return null; } catch (err) { return err; } };
+  const ack = { engineReviewAcknowledged: true };
+  afterEach(() => { delete process.env.GATE_SATELLITE_PALM_COUNT_TYPED; });
+
+  it('gate off: acknowledging the review still sends, as before', () => {
+    expect(refusal(satelliteDraft(), ack)).toBeNull();
+  });
+
+  it('gate on: the acknowledgment alone is refused until the admin types a whole-number count', () => {
+    process.env.GATE_SATELLITE_PALM_COUNT_TYPED = 'true';
+    const err = refusal(satelliteDraft(), ack);
+    expect(err).toMatchObject({ statusCode: 409, code: 'PALM_COUNT_REQUIRED' });
+    expect(err.message).toMatch(/priced 14 palms from the satellite image/);
+    expect(err.message).toMatch(/aerial photo/);
+    for (const confirmedPalmCount of ['14', 14.5, -14, null]) {
+      expect(refusal(satelliteDraft(), { ...ack, confirmedPalmCount })?.code).toBe('PALM_COUNT_REQUIRED');
+    }
+  });
+
+  it('gate on: the priced count sends; another count is refused and names both numbers', () => {
+    process.env.GATE_SATELLITE_PALM_COUNT_TYPED = 'true';
+    expect(refusal(satelliteDraft(), { ...ack, confirmedPalmCount: 14 })).toBeNull();
+    const err = refusal(satelliteDraft(), { ...ack, confirmedPalmCount: 6 });
+    expect(err).toMatchObject({ statusCode: 409, code: 'PALM_COUNT_MISMATCH' });
+    expect(err.message).toBe('You counted 6 palms, but this quote priced 14. Rebuild the quote with 6 palms in the estimate builder, then send it.');
+    expect(refusal(satelliteDraft(), { ...ack, confirmedPalmCount: 1 }).message).toMatch(/^You counted 1 palm, /);
+  });
+
+  it('gate on: the review still comes first, and a green draft priced from the satellite asks too', () => {
+    process.env.GATE_SATELLITE_PALM_COUNT_TYPED = 'true';
+    expect(refusal(satelliteDraft())?.code).toBe('ENGINE_REVIEW_REQUIRED');
+    const green = satelliteDraft();
+    green.estimate_data.estimatorEngine = { lane: 'green', laneReasons: [] };
+    expect(refusal(green)?.code).toBe('PALM_COUNT_REQUIRED');
+    expect(refusal(green, { confirmedPalmCount: 14 })).toBeNull();
+  });
+
+  it('gate on: nothing is asked of a sent row, a row cleared at request time, or a caller-stated or zero count', () => {
+    process.env.GATE_SATELLITE_PALM_COUNT_TYPED = 'true';
+    expect(refusal(satelliteDraft({ status: 'sent', sent_at: '2026-10-24T12:00:00Z' }))).toBeNull();
+    expect(refusal(satelliteDraft(), { ...ack, palmCountCleared: true })).toBeNull();
+    expect(refusal(satelliteDraft({}, { palmCountFromLookup: undefined }), ack)).toBeNull();
+    expect(refusal(satelliteDraft({}, { palmCount: 0 }), ack)).toBeNull();
+  });
+});
+
 describe('assertEstimateSendable commercial risk-type gate', () => {
   // A commercial pest/rodent estimate must have its business type classified
   // before it can be sent — the risk type drives the service cadence.

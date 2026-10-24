@@ -4,6 +4,7 @@ import { COLORS, FONTS } from '../theme-brand';
 import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
+import CustomerReportHeader from '../components/report/CustomerReportHeader';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
@@ -35,9 +36,9 @@ const SAFETY_LABELS = [
   ['structural_threat', 'Can damage structures'],
 ];
 
-function Page({ children }) {
+function Page({ children, template = false }) {
   return (
-    <div className="pest-report-page" style={{ flex: 1, background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
+    <div className={`pest-report-page${template ? ' customer-report-template' : ''}`} style={{ flex: 1, background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
       {/* Liquid glass — same scoped reset as the lawn report so the non-glass
           render stays pixel-identical and printing yields the paper document. */}
       <style>{`
@@ -86,7 +87,7 @@ function PricingCard({ pricing }) {
       <SectionTitle>{pricing.service_label || 'Your plan'}</SectionTitle>
       <div style={{ display: 'grid', gap: 10 }}>
         {tiers.map((tier, i) => (
-          <div key={`${tier.label}-${i}`} style={estimateInnerBox({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', ...(tier.recommended ? { border: `1px solid ${COLORS.glassNavy}` } : {}) })}>
+          <div key={`${tier.label}-${i}`} className="report-template-price" style={estimateInnerBox({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', ...(tier.recommended ? { border: `1px solid ${COLORS.glassNavy}` } : {}) })}>
             <div>
               <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT }}>
                 {/* "Recommended", not "Most popular": the pest-identifier
@@ -161,6 +162,8 @@ function tierPerApplication(tier = {}) {
 export default function PestReportViewPage() {
   const { token } = useParams();
   const [report, setReport] = useState(null);
+  // GATE_REPORT_SHARED_TEMPLATE: the server sends reportTemplate:true beside the report while the gate is on.
+  const [sharedTemplate, setSharedTemplate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -179,6 +182,7 @@ export default function PestReportViewPage() {
       if (!res.ok) throw new Error(`pest report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
+      setSharedTemplate(body.reportTemplate === true);
     } catch {
       setLoadError(true);
     } finally {
@@ -218,16 +222,30 @@ export default function PestReportViewPage() {
   const greeting = report.first_name ? `${report.first_name}, here` : 'Here';
   const safetyFlags = SAFETY_LABELS.filter(([key]) => report.safety && report.safety[key]);
   const recommendation = report.recommendation;
+  // GATE_REPORT_SHARED_TEMPLATE: the heading prints once, as the shared customer header above the
+  // first card or as the page's own eyebrow and title inside it.
+  const title = `${greeting}'s what we identified`;
+  const heading = sharedTemplate
+    ? { above: <CustomerReportHeader eyebrow="Your pest report" title={title} customerName={report.first_name} address={report.city} />, inCard: null }
+    : {
+      above: null,
+      inCard: (
+        <>
+          {/* Eyebrow → h1 → headline (owner 2026-09-04: no status chips on customer pages). */}
+          <div data-gt="eyebrow" style={DOC_EYEBROW}>Your pest report</div>
+          <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
+            {title}
+          </h1>
+        </>
+      ),
+    };
 
   return (
-    <Page>
+    <Page template={sharedTemplate}>
+      {heading.above}
       {/* Hero */}
       <SectionCard>
-        {/* Eyebrow → h1 → headline (owner 2026-09-04: no status chips on customer pages). */}
-        <div data-gt="eyebrow" style={DOC_EYEBROW}>Your pest report</div>
-        <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
-          {greeting}&apos;s what we identified
-        </h1>
+        {heading.inCard}
         <p style={{ margin: 0, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 20, lineHeight: 1.3, color: TEXT }}>
           {/* Generic labels arrive lowercase ("an ant species") and read as a
               sentence; named labels ("Ghost Ants", "Likely Ghost Ants") stand

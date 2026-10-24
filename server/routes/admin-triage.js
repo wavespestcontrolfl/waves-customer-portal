@@ -601,6 +601,7 @@ router.get('/', async (req, res) => {
     // The second-contact "Save to notes" action: the server's own rule decides
     // which cards qualify, so the screen holds no second copy of it.
     stampSaveContactNote(items);
+    stampFamilyCardActions(items, req.techRole === 'admin');
 
     res.json({ items, counts });
   } catch (err) {
@@ -1887,6 +1888,147 @@ router.post('/:id/save-contact-note', async (req, res) => {
   }
 });
 
+// GATE_CALL_ADDRESS_FAMILY_CARD: the two actions on a family_account_candidates card. The server decides which
+// cards offer them (open, to an admin, gate on), so the screen holds no second copy of the rule.
+// Attach as contact: only the stated_address_on_account basis (it alone carries the caller's name, number and role).
+// New customer: every basis that holds the pass back from creating the customer, i.e. all but the callback voicemail one.
+function parseCardPayload(row) {
+  return typeof row.payload === 'string' ? (() => { try { return JSON.parse(row.payload); } catch { return null; } })() : row.payload;
+}
+const cardOffersAttach = (p) => p?.match_basis === 'stated_address_on_account' && Boolean(p.caller_first_name && p.contact_phone);
+function stampFamilyCardActions(items, isAdmin = false) {
+  if (!isAdmin || !require('../config/feature-gates').callAddressFamilyCardLive()) return;
+  for (const item of items.filter((i) => i.reason_code === 'family_account_candidates' && OPEN_STATES.includes(i.status))) {
+    const payload = parseCardPayload(item);
+    item.can_new_customer = payload?.match_basis !== 'callback_spoken_number';
+    item.can_attach_contact = cardOffersAttach(payload);
+  }
+}
+
+const httpError = (status, message, code) => Object.assign(new Error(message), { status, code });
+const must = (ok, status, message, code) => { if (!ok) throw httpError(status, message, code); };
+
+// What the Attach slot write can answer instead of filing the caller: [status, message].
+const ATTACH_REFUSALS = {
+  skipped_slots_full: [409, 'All three contact slots on this account are full. Free one on the customer, then try again. Nothing was changed.'],
+  skipped_phone_belongs_to_other_customer: [409, 'That number belongs to another customer. Nothing was changed.'],
+  skipped_slot_race: [409, 'The account changed while saving. Reload the card and try again.'],
+  skipped_no_customer: [409, 'That customer was not found.'],
+};
+
+// Loads the open family_account_candidates card both actions act on, with its parsed payload and call, or throws the
+// refusal. The same checks for both actions: gate, admin, a UUID, an open card, the version the screen showed, a call
+// no pass is working.
+async function loadFamilyCardForAction(req) {
+  must(require('../config/feature-gates').callAddressFamilyCardLive(), 404, 'Not found');
+  must(req.techRole === 'admin', 403, 'Admin access required');
+  must(UUID_RE.test(req.params.id), 400, 'Invalid card id');
+  const item = await db('triage_items').where({ id: req.params.id }).first();
+  must(item, 404, 'Triage item not found');
+  must(OPEN_STATES.includes(item.status), 409, `Item already ${item.status}`);
+  must(item.reason_code === 'family_account_candidates' && item.call_log_id, 400, 'Not an account-match card');
+  must(req.body?.expected_updated_at && new Date(req.body.expected_updated_at).getTime() === new Date(item.updated_at).getTime(),
+    409, 'Card changed since it was displayed — reload and review the latest', 'STALE_CARD_VERSION');
+  const call = await db('call_log').where({ id: item.call_log_id }).first('id', 'customer_id', 'twilio_call_sid', 'direction', 'from_phone', 'to_phone', 'call_summary', 'processing_status');
+  must(call, 404, 'Call not found');
+  must(call.processing_status !== 'processing', 409, 'A pass is still working this call. Try again once it finishes.', 'already_processing');
+  return { item, payload: parseCardPayload(item) || {}, call };
+}
+
+// One route shell for both actions: the shared card load, and one answer for every refusal the checks throw.
+const familyCardRoute = (name, run) => async (req, res) => {
+  try {
+    const card = await loadFamilyCardForAction(req);
+    return await run(req, res, card);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    logger.error(`[admin-triage] ${name} failed: ${err.code || err.name || 'error'}`);
+    return res.status(500).json({ error: `Failed to ${name}` });
+  }
+};
+
+// POST /api/admin/triage/:id/attach-contact   { customer_id, role?, expected_updated_at }
+// Attach as contact (GATE_CALL_ADDRESS_FAMILY_CARD, stated_address_on_account cards): files the caller (name, number,
+// role from the card) in the FIRST FREE service-contact slot of the chosen listed account and relinks the call to that
+// account by the shared call relink (services/call-customer-relink), then resolves the card. The slot is written by the
+// pipeline's one slot writer (persistCallSecondaryContact, operatorAttach): never overwrites a slot (all three full = 409,
+// nothing changes), keeps the account's consent stamp and holds the new number out of every text until that person's own
+// YES (recipient-optin), and never sends or starts an opt-in. Admin only.
+// IDENTITY vs TEXTING (owner 2026-10-24): tapping Attach is the office's confirmation that this person belongs to the
+// account, so their NEXT call links to it (that is how the duplicate stops). The confirmation is recorded on the slot
+// (service_preferences.office_confirmed_slot_phones: who and when) and the call-identity reader keys on it; texting
+// consent stays separate and unset.
+// ONE transaction: the slot write, the relink and the version-checked card transition commit together or not at all.
+// LOCK ORDER as save-contact-note: customers row, then the call advisory lock, then the call_log row.
+router.post('/:id/attach-contact', familyCardRoute('attach the contact', async (req, res, { item, payload, call }) => {
+  const customerId = String(req.body.customer_id || '');
+  const { ATTACH_ROLES } = require('../services/call-family-name-link');
+  const role = String(req.body.role || payload.caller_role || 'other').trim().toLowerCase();
+  must(cardOffersAttach(payload), 400, 'This card carries no caller to attach');
+  must([].concat(payload.customer_ids).map(String).includes(customerId), 400, 'Pick one of the accounts listed on the card');
+  must(ATTACH_ROLES.includes(role), 400, 'Unknown role');
+  must(!call.customer_id || String(call.customer_id) === customerId, 409, 'This call is already linked to another customer — unlink it first');
+  let slot;
+  let result;
+  await db.transaction(async (trx) => {
+    const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
+    must(customer, 409, 'That customer is no longer live — reload the card');
+    result = await transitionCore({
+      id: item.id, nextStatus: 'resolved', note: 'caller attached as a contact; call linked', assignedTo: req.technicianId,
+      expectedUpdatedAt: req.body.expected_updated_at, conn: trx, requireVersion: true,
+      beforeTransition: async (t) => {
+        const liveCall = await t('call_log').where({ id: call.id }).forUpdate().first('customer_id', 'processing_status');
+        must(liveCall && liveCall.processing_status !== 'processing' && [null, customerId].includes(liveCall.customer_id && String(liveCall.customer_id)),
+          409, 'The call changed while saving — reload the card and try again');
+      },
+      // Under the locks and after the version check: a loser of a race (another admin, a refresh, New customer) files
+      // nothing, and a refusal below rolls the whole attach back.
+      afterTransition: async (t) => {
+        slot = await require('../services/call-recording-processor').persistCallSecondaryContact(customerId, {
+          first_name: payload.caller_first_name, last_name: payload.caller_last_name || null, phone: payload.contact_phone, role,
+        }, { operatorAttach: true, keepConsentStamp: true, officeConfirmedBy: req.technicianId || 'admin', conn: t });
+        const [status, message] = /^(written|skipped_phone_on_record)/.test(slot) ? [200] : ATTACH_REFUSALS[slot] || [400, 'The caller could not be filed as a contact'];
+        must(status === 200, status, message, slot);
+        const override = { customer_id: customerId, previous_customer_id: call.customer_id || null, by: req.technicianId || null, at: new Date().toISOString() };
+        const moved = await require('../services/call-customer-relink').relinkCallCustomerTx(t, call, customerId, override);
+        must(moved && !moved.notFound, 409, 'The call could not be linked — reload the card and try again');
+      },
+    });
+  });
+  if (result.outcome !== 'ok') return sendTransitionResult(res, result, item.id, 'resolved');
+  const after = await require('../services/call-customer-relink').afterCallRelink(call, customerId);
+  // Ids only: the contact's name and number stay out of logs.
+  logger.info(`[admin-triage] attach-contact card=${item.id} customer=${customerId} call=${call.id} slot=${slot}`);
+  return res.json({ ok: true, id: item.id, status: 'resolved', slot: slot === 'written' ? 'filed' : 'already_on_account', warnings: after.warnings });
+}));
+
+// POST /api/admin/triage/:id/new-customer   { expected_updated_at }
+// New customer (GATE_CALL_ADDRESS_FAMILY_CARD): the office says the caller is not the account's household. The card is
+// closed by a person (resolution_source human, which a reprocess never refiles over) and the call is reprocessed the
+// way the Reprocess button does, so the pass creates the customer the old way. The answer says whether the pass ran and
+// whether it left the call with a customer (a skipped or failed pass, or a pass with nothing to create one from, leaves
+// the card closed and the office to reprocess or add the customer). Admin only; only on a call with no customer.
+router.post('/:id/new-customer', familyCardRoute('start the new customer', async (req, res, { item, payload, call }) => {
+  must(payload.match_basis !== 'callback_spoken_number', 400, 'This card does not hold a new customer');
+  must(!call.customer_id, 409, 'This call already has a customer');
+  must(call.twilio_call_sid, 409, 'This call has no recording to reprocess');
+  const result = await transitionCore({
+    id: item.id, nextStatus: 'resolved', note: 'new customer chosen; call reprocessed', assignedTo: req.technicianId,
+    expectedUpdatedAt: req.body.expected_updated_at, requireVersion: true,
+  });
+  if (result.outcome !== 'ok') return sendTransitionResult(res, result, item.id, 'resolved');
+  const out = await require('../services/call-recording-processor').processRecording(call.twilio_call_sid, { force: true, operator: true })
+    .catch((procErr) => {
+      logger.warn(`[admin-triage] new-customer reprocess failed for card ${item.id}: ${procErr.code || procErr.name || 'error'}`);
+      return { success: false, error: 'failed' };
+    });
+  // A pass that skipped or failed (a blocked claim, a rejected transcription, a failed extraction) created nobody.
+  const started = !out.skipped && out.success !== false;
+  const created = Boolean((await db('call_log').where({ id: call.id }).first('customer_id'))?.customer_id);
+  logger.info(`[admin-triage] new-customer card=${item.id} call=${call.id} started=${started} customer=${created}`);
+  return res.json({ ok: true, id: item.id, status: 'resolved', reprocess: { started, customer_created: created, reason: started ? null : [out.reason, out.error, 'not_completed'].find(Boolean) } });
+}));
+
 // Is the customer's LIVE address one of the two premises the reviewer
 // compared (the office adopted the caller's number, or the on-file line
 // was retyped)? Street line, unit (explicit or embedded) and locality all
@@ -2846,4 +2988,4 @@ module.exports.transitionCore = transitionCore;
 module.exports.__private = {
   heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
   clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL,
-  stampSaveContactNote };
+  stampSaveContactNote, stampFamilyCardActions };

@@ -48,6 +48,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { smsJudgeV2Live } = require('../config/feature-gates');
 const { GRATITUDE_INTENT } = require('./sms-gratitude');
 
 const LADDER = ['shadow', 'suggest', 'auto_send'];
@@ -309,6 +310,9 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
     this.whereNotNull('j.intent').whereRaw("md.prompt_version NOT LIKE '%backfill'");
     this.whereRaw("COALESCE(md.intended_actions::jsonb->>'voice_profile_version', '__none__') = ?", [pinValue]);
     if (cohort) this.whereIn('md.prompt_version', cohort);
+    // GATE_SMS_JUDGE_V2: the stricter judge is a different ruler. While the gate is on, only rows it graded
+    // ('j2') count as backstop evidence; old-judge rows (NULL) must not mix in. Off = unchanged.
+    if (smsJudgeV2Live()) this.where('j.judge_version', 'j2');
   };
 
   const [totals, recent, backfill, priorVersion] = await Promise.all([

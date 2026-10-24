@@ -621,13 +621,18 @@ const AgronomicWiki = {
 
       // 3. Find the pre-assessment — last confirmed assessment BEFORE the
       // treatment, bounded so an unrelated assessment from a prior program
-      // year can't produce a bogus delta.
-      const preAssessment = await db('lawn_assessments')
+      // year can't produce a bogus delta. Score scale (GATE_LAWN_SCORE_SCALE_V2):
+      // only a row on the post-assessment's own scale compares; with none, the
+      // outcome keeps its comparison fields unset. The key is absent until the
+      // score_scale migration has run, and then nothing is filtered.
+      const preQuery = db('lawn_assessments')
         .where({ customer_id: customerId, confirmed_by_tech: true })
         .where('service_date', '<', treatmentDate)
-        .where('service_date', '>=', daysFrom(treatmentDate, -PRE_ASSESSMENT_MAX_AGE_DAYS))
-        .orderBy('service_date', 'desc')
-        .first();
+        .where('service_date', '>=', daysFrom(treatmentDate, -PRE_ASSESSMENT_MAX_AGE_DAYS));
+      if (Object.prototype.hasOwnProperty.call(postAssessment, 'score_scale')) {
+        preQuery.whereRaw('COALESCE(score_scale, 1) = ?', [Number(postAssessment.score_scale) === 2 ? 2 : 1]);
+      }
+      const preAssessment = await preQuery.orderBy('service_date', 'desc').first();
 
       // 4. Gather products applied
       let productsApplied = [];

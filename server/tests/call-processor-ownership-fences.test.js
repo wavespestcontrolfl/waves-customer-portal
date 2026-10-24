@@ -120,7 +120,7 @@ describe('processRecording call_log writes are ownership-fenced', () => {
     expect(body).toContain('if (customerId && extracted.first_name && phone && !customerLinkOverride) {');
     // …and a customer-less result under an explicit unlink is intentional,
     // never customer_creation_failed.
-    expect(body).toContain("!v2NonCustomerCallNature && !explicitUnlink && !spokenNumberSuggested);");
+    expect(body).toContain("!v2NonCustomerCallNature && !explicitUnlink && !spokenNumberSuggested && !familyCardHold);");
   });
 
   test('the customer timeline entry is exactly-once per call in Postgres, not by a check-then-insert', () => {

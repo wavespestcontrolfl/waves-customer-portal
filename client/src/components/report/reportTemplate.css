@@ -1,0 +1,74 @@
+/* Shared customer-report layout. Glass materials remain owned by glass-theme.css.
+   WDO and pre-treatment documents never opt into customer-report-template. */
+.customer-report-template {
+  --gt-h1-size: 28px;
+  --gt-h1-line: 1.2;
+  --gt-h2-size: 20px;
+  --gt-h2-line: 1.3;
+}
+.customer-report-template .report-header { padding: 8px 0 24px; min-width: 0; }
+.customer-report-template .report-header .report-header-eyebrow {
+  display: block;
+  margin: 0 0 8px;
+  color: var(--text-muted, #3F4A65);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.customer-report-template .report-header .report-header-title { margin: 0; }
+.customer-report-template .report-header .report-header-contact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  margin-top: 4px;
+}
+.customer-report-template .report-header-contact .service-meta-address {
+  margin: 0;
+  color: var(--text-muted, #3F4A65);
+  font-size: 16px;
+  line-height: 1.5;
+  font-weight: 600;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+.customer-report-template .service-report-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 0; }
+.customer-report-template .service-report-hero > .report-header { padding-bottom: 0; }
+.customer-report-template .service-report-hero .service-status-card { margin: 0 !important; }
+.customer-report-template .report-action-bar .report-action-buttons,
+.customer-report-template .doc-action-bar-buttons {
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-flow: row;
+  grid-auto-columns: auto;
+  gap: 8px;
+  margin-top: 0;
+}
+.customer-report-template .report-action-label-full { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
+.customer-report-template .report-action-label-short { display: none; }
+.customer-report-template :is(.service-status-grid, .readiness-facts, .supporting-detail-grid, .executive-status-grid, .sr-grid-3, .sr-advisory, .sr-band, .sr-row, .receipt-grid, .one-thing-detail, .lawn-score-grid, .lawn-program-facts, .lawn-assessment-layout, .lawn-photo-strip, .pressure-trend-layout, .reentry-target-grid, .readiness-target-grid, .referral-share-row, .review-request-card, .defense-status-grid, .reservice-rows, .treatment-overlay-key, .where-row, .service-coverage-summary) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.customer-report-template .service-coverage-card-grid.has-map { grid-template-columns: minmax(0, 1fr); grid-template-areas: "map" "list"; }
+.customer-report-template .service-coverage-summary { flex-direction: column; align-items: stretch; }
+.customer-report-template .review-request-card { justify-items: stretch; text-align: left; }
+.customer-report-template .review-request-card .review-cta { width: 100%; }
+.customer-report-template :is(.service-status-main, .premium-section-header, .readiness-card-header, .coverage-section-header, .coverage-summary-row, .treatment-map-header) { flex-direction: column; align-items: flex-start; }
+.customer-report-template :is(.report-template-stack, .guarantee-strip-grid) { grid-template-columns: minmax(0, 1fr) !important; }
+.customer-report-template .report-template-column { flex-direction: column; align-items: flex-start !important; }
+.customer-report-template .report-template-facts > strong { text-align: left !important; margin-bottom: 8px; }
+.customer-report-template .report-template-photos img { height: auto !important; aspect-ratio: 16 / 9; }
+.customer-report-template .report-template-price { flex-direction: column; align-items: flex-start !important; }
+.customer-report-template .report-template-price > div { text-align: left !important; }
+.customer-report-template .plan-visit-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+/* A row turned into a column keeps each item at its own height: a horizontal flex-basis (the visit label's
+   1 1 200px, the lawn hero's 1 1 220px text column) would otherwise become a vertical allocation. */
+.customer-report-template :is(.plan-visit-row, .report-template-column, .report-template-price, .service-status-main, .premium-section-header, .readiness-card-header, .coverage-section-header, .coverage-summary-row, .treatment-map-header, .service-coverage-summary) > * { flex-basis: auto !important; }
+html[data-glass-theme] .customer-report-template .waves-ask-card[data-report-ask-slim],
+html[data-glass-theme] .customer-report-template .waves-ask-form { grid-template-columns: minmax(0, 1fr) !important; }
+html[data-glass-theme] .customer-report-template :is(button, a)[data-glass-accent] { min-height: 48px !important; }
+html[data-glass-theme] .customer-report-template .report-header .report-header-eyebrow { display: block !important; }
+html[data-glass-theme] .customer-report-template p { font-size: 16px; line-height: 1.5; }
+@media (max-width: 600px) {
+  .customer-report-template .report-header { padding-bottom: 20px; }
+}

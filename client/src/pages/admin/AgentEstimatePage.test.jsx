@@ -9,7 +9,7 @@ vi.mock('../../utils/admin-fetch', () => ({
 }));
 
 import { adminFetch } from '../../utils/admin-fetch';
-import { CustomerAccountPanel, LearningPanel } from './AgentEstimatePage';
+import { CustomerAccountPanel, LearningPanel, answerSendGate } from './AgentEstimatePage';
 
 afterEach(() => {
   cleanup();
@@ -110,5 +110,36 @@ describe('LearningPanel memory review', () => {
       body: JSON.stringify({ status: 'rejected' }),
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('send gates answered once (answerSendGate)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const gateError = (code, message) => Object.assign(new Error(message), { code });
+
+  it('asks the review acknowledgment, then the typed satellite palm count, and rethrows anything else', () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const prompt = vi.fn(() => ' 12 ');
+    vi.stubGlobal('prompt', prompt);
+    const palms = gateError('PALM_COUNT_REQUIRED', 'This quote priced 14 palms from the satellite image.');
+    let answers = answerSendGate(gateError('ENGINE_REVIEW_REQUIRED', 'flagged'), {});
+    expect(answers).toEqual({ acknowledgeEngineReview: true });
+    answers = answerSendGate(palms, answers);
+    expect(answers).toEqual({ acknowledgeEngineReview: true, confirmedPalmCount: 12 });
+    expect(prompt.mock.calls[0][0]).toMatch(/a clump or a multi-trunk palm is one palm/);
+    // Each gate is asked once; a repeat or a mismatch goes back to the caller.
+    expect(() => answerSendGate(palms, answers)).toThrow(palms);
+    const mismatch = gateError('PALM_COUNT_MISMATCH', 'You counted 12 palms, but this quote priced 14.');
+    expect(() => answerSendGate(mismatch, answers)).toThrow(mismatch);
+  });
+
+  it('a cancelled review or a blank or non-number palm answer cancels the send', () => {
+    vi.stubGlobal('confirm', vi.fn(() => false));
+    expect(() => answerSendGate(gateError('ENGINE_REVIEW_REQUIRED', 'flagged'), {})).toThrow(/review the flagged reasons/);
+    const palms = gateError('PALM_COUNT_REQUIRED', 'priced 14 palms');
+    for (const reply of ['twelve', '', null]) {
+      vi.stubGlobal('prompt', vi.fn(() => reply));
+      expect(() => answerSendGate(palms, {})).toThrow(/type the palm count/);
+    }
   });
 });

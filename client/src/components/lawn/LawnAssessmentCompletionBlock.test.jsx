@@ -47,6 +47,39 @@ describe('LawnAssessmentCompletionBlock', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it('score scale 2: a blank Condition on a pending row stays blank on reload, never the worst-of-fungus/thatch guess', async () => {
+    const lookup = (score_scale) => vi.fn(async () => ({
+      assessment: { id: 'la-2', confirmed_by_tech: false, score_scale, turf_density: 82, weed_suppression: 78, color_health: 85, fungus_control: 95, thatch_level: 60, stress_damage: null },
+    }));
+    render(<LawnAssessmentCompletionBlock service={{ id: 'svc-1', customerId: 'cust-1' }} request={lookup(2)} />);
+    expect((await screen.findByLabelText('Condition score')).value).toBe('');
+    cleanup();
+    // Scale 1 keeps the seed that matches the server's confirm fallback.
+    render(<LawnAssessmentCompletionBlock service={{ id: 'svc-1', customerId: 'cust-1' }} request={lookup(null)} />);
+    expect((await screen.findByLabelText('Condition score')).value).toBe('60');
+  });
+
+  it('score scale 2: Analyze replaces the Last visit row with the one on its own read\'s scale', async () => {
+    class FixtureFileReader { readAsDataURL() { this.result = 'data:image/jpeg;base64,cGhvdG8='; this.onload({ target: { result: this.result } }); } }
+    class FixtureImage { set src(_v) { this.width = 800; this.height = 600; this.onload(); } }
+    vi.stubGlobal('FileReader', FixtureFileReader);
+    vi.stubGlobal('Image', FixtureImage);
+    const ref = React.createRef();
+    const onProgress = vi.fn();
+    const request = vi.fn(async (path) => (path.endsWith('/assess')
+      ? { success: true, assessment: { id: 'la-3', score_scale: 2 }, adjustedScores: { turf_density: 82, weed_suppression: 78, color_health: 85, stress_damage: 90 }, lastVisit: null }
+      : { assessment: null, lastVisit: { date: '2026-09-20', overall: 74, scores: { turf_density: 70, weed_suppression: 96, color_health: 78, stress_damage: 60 } } }));
+    mount({ ref, compact: true, onProgress, request });
+    expect(await screen.findByLabelText('Last visit scores')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Add turf photos'), { target: { files: [new File(['x'], 'a.jpg', { type: 'image/jpeg' })] } });
+    await waitFor(() => expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ photos: 1, canAnalyze: true })));
+    await act(async () => { await ref.current.analyze(); });
+    await waitFor(() => expect(request.mock.calls.some(([path]) => path.endsWith('/assess'))).toBe(true));
+    await waitFor(() => expect(screen.getByLabelText('Last visit scores').textContent).toContain('No earlier visit to compare'));
+    expect(screen.queryByTestId('lawn-last-visit-overall')).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
   it('shows no last-visit row when the lookup leaves it out (read failed)', async () => {
     mount();
     await screen.findByLabelText('Add turf photos');
