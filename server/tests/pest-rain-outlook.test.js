@@ -325,11 +325,18 @@ describe('buildRainOutlookLine', () => {
     expect(buildRainOutlookLine()).toBeNull();
   });
 
-  test('every other card headline stays, with the text after its own body', () => {
-    const windy = { ...CONDITIONS, wind_mph: 16 };
-    const c = card(record(outlook(), { conditions: JSON.stringify(windy) }), [FIPRONIL]);
-    expect(c.headline).toBe('Wind was elevated.');
-    expect(c.body).toBe(`Elevated wind was recorded at application time and noted with today’s service record. When we finished, the forecast showed rain on Sunday morning. ${FIPRONIL_LINE}`);
+  test('every headline stays; a record-only body gives way to the outlook, a factual one keeps it in front', () => {
+    const rain = `When we finished, the forecast showed rain on Sunday morning. ${FIPRONIL_LINE}`;
+    const at = (conditions) => card(record(outlook(), { conditions: JSON.stringify(conditions) }), [FIPRONIL]);
+    expect(at({ ...CONDITIONS, wind_mph: 16 })).toMatchObject({ headline: 'Wind was elevated.', body: rain });
+    expect(at({ ...CONDITIONS, wind_mph: 11 })).toMatchObject({ headline: 'Wind noted during service.', body: rain });
+    // The default card: 0.1 to 0.25 in of rain in the 24 hours before, light wind.
+    expect(at({ ...CONDITIONS, rain_24h_in: 0.2, wind_mph: 5 })).toMatchObject({ headline: 'Weather call', body: rain });
+    expect(at({ ...CONDITIONS, rain_24h_in: 0.3 })).toMatchObject({
+      headline: 'Recent rainfall noted.',
+      body: `Measurable rain fell in the 24 hours before this visit and is part of today’s service record. ${rain}`,
+    });
+    expect(at(CONDITIONS)).toMatchObject({ headline: 'Good treatment window.', body: withLine(rain) });
   });
 });
 

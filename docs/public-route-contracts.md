@@ -422,9 +422,11 @@ Pest rain outlook (owner 2026-10-24, `GATE_PEST_RAIN_OUTLOOK` — dark, off
 unless exactly `'true'`, read at call time; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
 (`/api/reports/:token/data` and the PDF) the existing `weatherCall.body` (inside
-`premiumExperience` and the `pestReportV2.weatherCall` copy) may end with the
+`premiumExperience` and the `pestReportV2.weatherCall` copy) may carry the
 frozen rain outlook while the gate is on: one fixed sentence for dry weather
-ahead, or a fixed rain sentence plus one fixed sentence on dried spray.
+ahead, or a fixed rain sentence plus one fixed sentence on dried spray. It
+replaces a record-only body (the two wind bodies and the default one) and
+follows a factual body (good treatment window, recent rainfall).
 `headline`, `factsLine`, `sourceLabel` and `sourceKeys` are unchanged (the
 report page picks its weather icon from the headline, which still reads the
 visit's own weather). The frozen summary itself,
