@@ -14,7 +14,7 @@ import BidChecklistPanel from "./BidChecklistPanel";
 
 const STATUS_LABEL = { new: "New", bid: "Bid", no_bid: "No bid", submitted: "Submitted", won: "Won", lost: "Lost" };
 const SOURCE_LABEL = {
-  buildingconnected: "BuildingConnected", procore: "Procore", gov_email: "Government / portal", email_subject: "Email subject", manual: "Marked by hand", sam_gov: "SAM.gov",
+  buildingconnected: "BuildingConnected", procore: "Procore", gov_email: "Government / portal", email_subject: "Email subject", manual: "Marked by hand", sam_gov: "SAM.gov", bluebook: "Blue Book",
 };
 // A SAM.gov bid links to its public notice; only an https sam.gov address is rendered as a link.
 function isSamLink(value) {
