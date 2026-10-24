@@ -84,6 +84,11 @@ describe('brief composition', () => {
     const compose = (opportunity) => builder._composeBrief({ opportunity, signals, decision, existingBriefVersions: 0 }).gsc_signal;
     expect(compose(suggestion())).toMatchObject({ bucket: 'operator_intercept', intercept: false, suggested: true, suggested_at: SUGGESTED_AT.toISOString() });
     expect(compose(intercept())).not.toHaveProperty('suggested');
+    // A tip seeder topic carries its general-title rule to the writer and the gate.
+    const seeded = { id: 'opp-t', ...suggestionRow('clogged gutters and mosquitoes', { tipId: 'water_gutters', generalTitle: true, now: SUGGESTED_AT }) };
+    expect(compose(seeded)).toMatchObject({ suggested: true, general_title: true, title_rule: expect.stringMatching(/no town or city in the title/) });
+    expect(compose(suggestion())).not.toHaveProperty('general_title');
+    expect(compose({ ...intercept(), signal_metadata: { operator_pinned: true, general_title: true } })).not.toHaveProperty('general_title');
   });
 });
 

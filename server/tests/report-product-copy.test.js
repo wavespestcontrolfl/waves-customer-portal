@@ -114,6 +114,13 @@ describe('findReportProductCopyEntry / reportProductCopyFor — matching', () =>
     expect(findReportProductCopyEntry({ epaReg: null, name: 'Demand' })).toBeNull();
   });
 
+  it('a moved registration matches under both numbers: Delta Dust 432-772 and its Envu number 101563-6', () => {
+    const old = findReportProductCopyEntry({ epaReg: '432-772', name: 'Delta Dust' });
+    expect(old).toBeTruthy();
+    expect(findReportProductCopyEntry({ epaReg: '101563-6', name: 'Delta Dust' })).toBe(old);
+    expect(reportProductCopyFor({ epaReg: '101563-6', name: 'Delta Dust' }).how_it_works).toMatch(/does not clump or absorb moisture/);
+  });
+
   it('a present but UNRECOGNIZED EPA reg is authoritative — never falls back to a name alias for a different product (codex P1 2026-09-28)', () => {
     // Talstar XTRA's real EPA reg (279-3206) is not in the config; "Taurus
     // SC" IS an alias, but for a DIFFERENT product's entry. Before the fix

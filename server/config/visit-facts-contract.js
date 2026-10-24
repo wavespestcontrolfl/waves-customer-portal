@@ -1184,6 +1184,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   invoiceAlreadySent: 'Billing bookkeeping flag, not a customer report fact.',
   completionSmsRecapMode: 'Completion-text claim marker (Fast Complete fixed re-service text, frozen at record insert): the one-text dedupe that pest-recap.js and recap-delivery.js honor; not a customer report fact.',
   traceJudged: 'Fast Complete report-flow bookkeeping (GATE_FAST_COMPLETE_REPORT): the saved trace the record was judged against (its updated_at, or null for none), frozen at completion so report-data shows that trace only (treatment-zone-maps.js traceJudgedAllows) — it can only withhold the separately stored treatment_zone_maps trace, never adds a claim.',
+  rainOutlook: 'Frozen 48-hour forecast summary captured at a pest completion (GATE_PEST_RAIN_OUTLOOK, dark; pest-rain-outlook.js): the forecast as it stood when the visit ended, kept apart from `conditions` because that column is copied into the FDACS application ledger. premium-experience.js reads it only to add one fixed forecast sentence to the Weather call card (dry weather ahead, or rain ahead plus a fixed sentence on dried spray); the summary itself is never in a public payload and adds no claim of its own.',
   backfill: 'Backfill-completion audit marker (quiet/backdated closeout posture).',
   backfillMintRequired: 'Backfill invoice-mint bookkeeping (required-mint posture frozen at commit).',
   backfillMintAmountCents: 'Backfill invoice-mint bookkeeping (frozen amount).',
