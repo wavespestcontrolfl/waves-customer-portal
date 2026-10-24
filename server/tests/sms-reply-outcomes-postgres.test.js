@@ -173,6 +173,12 @@ postgres('reply outcome signals', () => {
       await text('Liked “We can do that for a fair price”', { at: after(3), type: 'sms_reaction' });
       return id;
     })();
+    const likedQuestion = await (async () => {
+      phone = `+1${ten.slice(0, 6)}${Number(ten.slice(6)) + 503}`;
+      const id = await askAndReply();
+      await text('Liked “Does Tuesday work for you?”', { at: after(3), type: 'inbound' });
+      return id;
+    })();
     const notFirst = await (async () => {
       phone = `+1${ten.slice(0, 6)}${Number(ten.slice(6)) + 502}`;
       const id = await askAndReply();
@@ -184,6 +190,7 @@ postgres('reply outcome signals', () => {
     expect(await rowFor(thanks)).toMatchObject({ positive_close: true, confused: false, silent: false });
     expect(await rowFor(thumbs)).toMatchObject({ positive_close: true });
     expect(await rowFor(liked)).toMatchObject({ positive_close: true, silent: false });
+    expect(await rowFor(likedQuestion)).toMatchObject({ positive_close: true, silent: false });
     expect(await rowFor(notFirst)).toMatchObject({ positive_close: false });
   });
 

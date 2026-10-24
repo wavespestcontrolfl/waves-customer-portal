@@ -60,6 +60,11 @@ describe('classifyFollowUps', () => {
     expect(classify([row('Liked “See you Tuesday”', 3, 'sms_reaction')]).positive_close).toBe(true);
     expect(classify([row('Removed a like from “See you Tuesday”', 3, 'sms_reaction')]).positive_close).toBe(false);
   });
+  test('a tapback the webhook stored as an ordinary inbound row (a reaction to a question) still counts', () => {
+    expect(classify([row('Liked “Does Tuesday work for you?”', 3)])).toMatchObject({ positive_close: true, confused: false, silent: false });
+    expect(classify([row('Questioned “Does Tuesday work for you?”', 3)])).toMatchObject({ positive_close: false, confused: false, silent: false });
+    expect(classify([row('Removed a like from “Does Tuesday work for you?”', 3)]).positive_close).toBe(false);
+  });
   test('help and opt-in rows are not follow-ups', () => {
     // readFollowUps leaves them out; a stray row of another type is ignored here too
     expect(classify([row('HELP', 5, 'help_request')]).silent).toBe(true);

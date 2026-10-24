@@ -38,7 +38,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { detectSmsOptCommand } = require('./messaging/opt-out-detector');
-const { isCourtesyOnly, isAffirmativeSmsReaction } = require('./sms-intent');
+const { isCourtesyOnly, isSmsReaction, isAffirmativeSmsReaction } = require('./sms-intent');
 
 const CONFUSION_WINDOW_MINUTES = 30;
 const CALL_WINDOW_MINUTES = 60;
@@ -211,10 +211,14 @@ async function readCallBack({ dbh, reply, phone }) {
   return Boolean(await whereSamePhone(query, 'from_phone', phone).first('id'));
 }
 
+// A tapback ("Liked “…”"): the webhook stores one on a conversational question as an ordinary
+// 'inbound' row, and only a quiet one as 'sms_reaction', so the body decides, not the type.
+const isReactionRow = (row) => (row.message_type || 'inbound') === REACTION_TYPE || isSmsReaction(row.message_body);
+
 // The first text or tapback after the reply is a thanks / ok / thumbs-up / like, inside the window.
 function isPositiveClose(first, windowEnd) {
   if (!first || new Date(first.created_at).getTime() > windowEnd) return false;
-  if ((first.message_type || 'inbound') !== REACTION_TYPE) return isCourtesyOnly(first.message_body, { awaitingAnswer: false });
+  if (!isReactionRow(first)) return isCourtesyOnly(first.message_body, { awaitingAnswer: false });
   return isAffirmativeSmsReaction(first.message_body) && !/^\s*removed\b/i.test(first.message_body || '');
 }
 
@@ -234,8 +238,9 @@ function classifyFollowUps({ replyAt, followUps, answeredBody, calledBack }) {
       optedOut = true;
       continue;
     }
-    const isText = TEXT_TYPES.includes(type);
-    if (!isText && type !== REACTION_TYPE) continue;
+    const reaction = isReactionRow(row);
+    const isText = TEXT_TYPES.includes(type) && !reaction;
+    if (!isText && !reaction) continue;
     if (!first) first = row;
     if (isText && at <= confusionEnd && !confused) {
       const why = confusionReason(row.message_body, answeredBody);
