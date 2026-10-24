@@ -50,8 +50,11 @@ const ADJUVANT_NAME_RE = /surfactant|adjuvant|spreader|sticker/i;
 // pest line's method fallback can still record it as perimeter_spray.
 const DUST_NAME_RE = /\bdust\b/i;
 const SOLUBLE_RE = /\b(?:dinotefuran|imidacloprid|thiamethoxam|clothianidin|acetamiprid)\b/;
-const FIPRONIL_RE = /\bfipronil\b/;
-const PYRETHROID_RE = /\b(?:bifenthrin|cypermethrin|lambda cyhalothrin|deltamethrin|cyfluthrin|permethrin|esfenvalerate)\b/;
+const FIPRONIL_ACTIVES = new Set(['fipronil']);
+const PYRETHROID_ACTIVES = new Set([
+  'bifenthrin', 'cypermethrin', 'alpha cypermethrin', 'zeta cypermethrin', 'lambda cyhalothrin', 'gamma cyhalothrin',
+  'deltamethrin', 'cyfluthrin', 'beta cyfluthrin', 'permethrin', 'esfenvalerate',
+]);
 
 // The controlled area chips (shared/treatment-area-scopes.json). A row whose
 // recorded area names only inside places is not an outside spray, whatever its
@@ -130,16 +133,29 @@ async function capturePestRainOutlook({ svc, now = new Date() } = {}) {
   }
 }
 
-function normalizedIngredient(value) {
-  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+// The actives of an ingredient string, one per part of a mixed product
+// ("Nylar (pyriproxyfen) + Permethrin + Tetramethrin"), strengths dropped.
+function activeParts(ingredient) {
+  return String(ingredient || '').toLowerCase()
+    .split(/\+|,|;|&|\/|\band\b|\bwith\b/)
+    .map((part) => part.replace(/\d+(?:\.\d+)?\s*%?/g, ' ').replace(/[^a-z]+/g, ' ').trim())
+    .filter(Boolean);
 }
 
+// Every active is classed on its own, and each part must be exactly one known
+// active: one soluble active makes the product soluble, and one co-active the
+// copy has no evidence for (a synergist, a growth regulator, a knockdown
+// pyrethrin) makes it unknown, so it supports no line.
 function sprayClass(ingredient) {
-  const text = normalizedIngredient(ingredient);
-  if (SOLUBLE_RE.test(text)) return 'soluble';
-  if (FIPRONIL_RE.test(text)) return 'fipronil';
-  if (PYRETHROID_RE.test(text)) return 'pyrethroid';
-  return 'unknown';
+  const parts = activeParts(ingredient);
+  if (!parts.length) return 'unknown';
+  if (parts.some((part) => SOLUBLE_RE.test(part))) return 'soluble';
+  const classes = parts.map((part) => {
+    if (FIPRONIL_ACTIVES.has(part)) return 'fipronil';
+    return PYRETHROID_ACTIVES.has(part) ? 'pyrethroid' : 'unknown';
+  });
+  if (classes.includes('unknown')) return 'unknown';
+  return classes.includes('fipronil') ? 'fipronil' : 'pyrethroid';
 }
 
 // The one sentence the visit's outside sprays support, or null. No outside

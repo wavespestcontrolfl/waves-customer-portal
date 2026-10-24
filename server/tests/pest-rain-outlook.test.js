@@ -118,6 +118,15 @@ describe('Weather call card with the frozen rain outlook', () => {
     expect(card(record(outlook()), [app(ai)]).body).toContain(PYRETHROID_LINE);
   });
 
+  test('a mixed product counts only when every active is fipronil or a listed pyrethroid', () => {
+    unchanged(record(outlook()), [app('Nylar (pyriproxyfen) + Permethrin + Tetramethrin')]);
+    unchanged(record(outlook()), [app('Esfenvalerate + Prallethrin + Piperonyl butoxide')]);
+    unchanged(record(outlook()), [app('Pyriproxyfen 1.3% + Novaluron 1.3%')]);
+    unchanged(record(outlook()), [BIFENTHRIN, app('Fipronil SC')]);
+    expect(card(record(outlook()), [app('Bifenthrin 7.9% and Zeta-cypermethrin')]).body).toContain(PYRETHROID_LINE);
+    expect(card(record(outlook()), [app('Fipronil + Bifenthrin')]).body).toContain(FIPRONIL_LINE);
+  });
+
   test('fipronil with a pyrethroid: the fipronil line', () => {
     expect(card(record(outlook()), [BIFENTHRIN, FIPRONIL]).body).toContain(FIPRONIL_LINE);
   });
