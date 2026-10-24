@@ -11,9 +11,10 @@ const mockState = { calls: [], booked: [], customers: [], open: [], updates: [],
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
-    const ctx = { table, ids: null, probe: false };
+    const ctx = { table, ids: null, callIds: null, probe: false };
     const rows = () => {
-      if (table === 'call_log') return mockState.calls;
+      // The close pass reads only the calls its open bells name (whereIn id).
+      if (table === 'call_log') return ctx.callIds ? mockState.calls.filter((c) => ctx.callIds.includes(c.id)) : mockState.calls;
       if (table === 'scheduled_services') return mockState.booked;
       if (table === 'customers') return mockState.customers;
       if (table === 'notifications') return ctx.probe ? mockState.open : [];
@@ -24,7 +25,11 @@ jest.mock('../models/db', () => {
       whereRaw: () => b,
       whereNotNull: () => b,
       whereNull: () => { ctx.probe = true; return b; },
-      whereIn: (col, ids) => { if (table === 'notifications' && col === 'id') ctx.ids = ids; return b; },
+      whereIn: (col, ids) => {
+        if (table === 'notifications' && col === 'id') ctx.ids = ids;
+        if (table === 'call_log' && col === 'id') ctx.callIds = ids;
+        return b;
+      },
       groupByRaw: () => b,
       orderBy: () => b,
       select: () => b,
@@ -86,7 +91,7 @@ const bell = (id, minute, over = {}) => ({
   id, title: "Schedule — book Sam Sample's Waves Assessment", created_at: `2026-10-20T15:${minute}:00Z`,
   mismatch_visit_id: null, mismatch_date: null, mismatch_time: null, ...over,
 });
-const classify = (rows, open = [bell('n1', '10')], opts = {}) => classifyOpenBookingMiss(call(opts.call), opts.slot || SLOT, rows, open, { now: opts.now || NOW, namesakes: opts.namesakes });
+const classify = (rows, open = [bell('n1', '10')], opts = {}) => classifyOpenBookingMiss(call(opts.call), opts.slot || SLOT, rows, open, { now: opts.now || NOW, namesakes: opts.namesakes || new Map() });
 
 describe('classifyOpenBookingMiss', () => {
   test('booked: the visit on the agreed slot closes every bell, naming the visit', () => {
@@ -94,7 +99,7 @@ describe('classifyOpenBookingMiss', () => {
     expect(plan.verdict).toBe('booked');
     expect(plan.closes).toEqual([{ ids: ['n2', 'n1'], resolution: 'Visit booked for Wed Nov 4 at 4:00 PM' }]);
     expect(plan.keep).toBeNull();
-    expect(plan.raise).toBeNull();
+    expect(plan.ring).toBeNull();
   });
 
   test('booked: a visit booked from the call and later cancelled still counts (provenance rule unchanged)', () => {
@@ -127,9 +132,8 @@ describe('classifyOpenBookingMiss', () => {
     const plan = classify([visit({ id: 'visit-9', sched_date: '2026-10-28' })]);
     expect(plan.verdict).toBe('booked_other_day');
     expect(plan.mismatch).toEqual({ visit_id: 'visit-9', date: '2026-10-28', time: '16:00' });
-    // A wrong-day booking is a new episode: raise a fresh bell, then close the old one.
-    expect(plan.raise).toEqual(plan.mismatch);
-    expect(plan.replaces).toBe('n1');
+    // A wrong-day booking is a new episode: ring a fresh bell (keyed by the bell it replaces), then close the old one.
+    expect(plan.ring).toEqual({ mismatch: plan.mismatch, dedupeKey: `call-booking-miss-date:${CALL_ID}:n1:visit-9:2026-10-28:16:00` });
     expect(plan.closes).toEqual([{ ids: ['n1'], resolution: 'Replaced by a date check' }]);
     expect(plan.keep).toBeNull();
   });
@@ -143,15 +147,15 @@ describe('classifyOpenBookingMiss', () => {
   test('booked_other_day: raises once for a changed visit, and is a no-op once the newest bell shows it', () => {
     const rows = [visit({ id: 'visit-9', sched_date: '2026-10-28' })];
     const first = classify(rows, [bell('n1', '10'), bell('n2', '20')]);
-    expect(first.raise).toEqual({ visit_id: 'visit-9', date: '2026-10-28', time: '16:00' });
+    expect(first.ring.mismatch).toEqual({ visit_id: 'visit-9', date: '2026-10-28', time: '16:00' });
     expect(first.closes).toEqual([{ ids: ['n2', 'n1'], resolution: 'Replaced by a date check' }]);
     const stamped = { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' };
     const same = classify(rows, [bell('n1', '10'), bell('n2', '20', stamped)]);
-    expect(same.raise).toBeNull();
+    expect(same.ring).toBeNull();
     expect(same.keep).toBe('n2');
     expect(same.closes).toEqual([{ ids: ['n1'], resolution: 'Replaced by a newer alert for this call' }]);
     // The office moved the visit to another time: a new date check.
-    expect(classify([visit({ id: 'visit-9', sched_date: '2026-10-28', window_start: '10:00:00' })], [bell('n2', '20', stamped)]).raise).toMatchObject({ time: '10:00' });
+    expect(classify([visit({ id: 'visit-9', sched_date: '2026-10-28', window_start: '10:00:00' })], [bell('n2', '20', stamped)]).ring.mismatch).toMatchObject({ time: '10:00' });
   });
 
   test('the date check is answered by the booked visit moving to the agreed slot', () => {
@@ -170,9 +174,7 @@ describe('classifyOpenBookingMiss', () => {
       for (const rows of [[visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })], []]) {
         const plan = classify(rows, [bell('n1', '10'), check()]);
         expect(plan.verdict).toBe('still_missed');
-        expect(plan.rebook).toBe(true);
-        expect(plan.replaces).toBe('d1');
-        expect(plan.raise).toBeNull();
+        expect(plan.ring).toEqual({ mismatch: null, dedupeKey: `call-booking-miss-rebook:${CALL_ID}:d1` });
         expect(plan.closes).toEqual([{ ids: ['d1', 'n1'], resolution: 'The booked visit is gone; replaced by a new alert to book it' }]);
       }
     });
@@ -180,8 +182,7 @@ describe('classifyOpenBookingMiss', () => {
     test('its visit moved beyond the match window is still followed: a new date check, not "book it"', () => {
       const plan = classify([visit({ id: 'visit-9', sched_date: '2026-12-02' })], [check()]);
       expect(plan.verdict).toBe('booked_other_day');
-      expect(plan.raise).toEqual({ visit_id: 'visit-9', date: '2026-12-02', time: '16:00' });
-      expect(plan.rebook).toBe(false);
+      expect(plan.ring.mismatch).toEqual({ visit_id: 'visit-9', date: '2026-12-02', time: '16:00' });
     });
 
     test('its visit completed on the wrong day closes the bell, even beyond the match window', () => {
@@ -192,7 +193,7 @@ describe('classifyOpenBookingMiss', () => {
 
     test('a plain "book it" bell with nothing booked stays as it is (no rebook)', () => {
       const plan = classify([], [bell('n1', '10')]);
-      expect(plan).toMatchObject({ verdict: 'still_missed', rebook: false, keep: 'n1', closes: [] });
+      expect(plan).toMatchObject({ verdict: 'still_missed', ring: null, keep: 'n1', closes: [] });
     });
   });
 
@@ -238,13 +239,13 @@ describe('classifyOpenBookingMiss', () => {
 
   test('with no open bells it is a verdict only (the ring path)', () => {
     const plan = classify([visit({ sched_date: '2026-10-28' })], []);
-    expect(plan).toMatchObject({ verdict: 'booked_other_day', closes: [], keep: null, raise: null });
+    expect(plan).toMatchObject({ verdict: 'booked_other_day', closes: [], keep: null, ring: null });
   });
 });
 
 describe('close pass', () => {
   const NotificationService = require('../services/notification-service');
-  const { closeResolvedBookingMissBells } = require('../services/call-booking-miss-watchdog');
+  const { planOpenBookingMissBells } = require('../services/call-booking-miss-watchdog');
   const stamp = { confirmed_date_et: '2026-11-04', confirmed_time_et: '16:00' };
   const wrongWeek = () => [visit({ id: 'visit-9', sched_date: '2026-10-28' })];
   const DATE_KEY = `call-booking-miss-date:${CALL_ID}:n2:visit-9:2026-10-28:16:00`;
@@ -420,18 +421,16 @@ describe('close pass', () => {
     expect(logger.warn.mock.calls.some(([msg]) => /failed to close/.test(msg))).toBe(true);
   });
 
-  describe('dry run', () => {
+  describe('dry run (the plan on its own)', () => {
     test('reads everything, writes nothing, and returns one plan per call', async () => {
       mockState.open = [open('n1', '10'), open('n2', '20')];
       mockState.booked = wrongWeek();
-      const result = await closeResolvedBookingMissBells({ now: NOW, dryRun: true });
-      expect(result).toEqual({
-        closed: 0, rewritten: 0, raised: 0,
-        plans: [{
-          callId: CALL_ID, verdict: 'booked_other_day', closeIds: ['n2', 'n1'], keepId: null,
-          mismatch: { visit_id: 'visit-9', date: '2026-10-28', time: '16:00' }, wouldRaise: true,
-        }],
-      });
+      const plans = await planOpenBookingMissBells({ now: NOW });
+      const mismatch = { visit_id: 'visit-9', date: '2026-10-28', time: '16:00' };
+      expect(plans.map(({ call: c, plan }) => ({ callId: c.id, ...plan }))).toEqual([{
+        callId: CALL_ID, verdict: 'booked_other_day', row: expect.objectContaining({ id: 'visit-9' }), mismatch, keep: null,
+        ring: { mismatch, dedupeKey: DATE_KEY }, closes: [{ ids: ['n2', 'n1'], resolution: 'Replaced by a date check' }],
+      }]);
       expect(mockState.updates).toEqual([]);
       expect(mockState.inserts).toEqual([]);
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -441,10 +440,10 @@ describe('close pass', () => {
       mockState.calls = [call(), call({ id: 'call-close-2', customer_id: 'cust-2', twilio_call_sid: 'CAsynthetic701' })];
       mockState.open = [open('n1', '10'), open('n2', '20'), { ...open('n3', '30'), call_log_id: 'call-close-2' }];
       mockState.booked = [visit({ sched_date: '2026-11-04' })];
-      const result = await closeResolvedBookingMissBells({ now: NOW, dryRun: true });
-      const byCall = Object.fromEntries(result.plans.map((p) => [p.callId, p]));
-      expect(byCall[CALL_ID]).toMatchObject({ verdict: 'booked', closeIds: ['n2', 'n1'], wouldRaise: false });
-      expect(byCall['call-close-2']).toMatchObject({ verdict: 'still_missed', closeIds: [], keepId: 'n3', wouldRaise: false });
+      const plans = await planOpenBookingMissBells({ now: NOW });
+      const byCall = Object.fromEntries(plans.map(({ call: c, plan }) => [c.id, plan]));
+      expect(byCall[CALL_ID]).toMatchObject({ verdict: 'booked', closes: [{ ids: ['n2', 'n1'] }], ring: null });
+      expect(byCall['call-close-2']).toMatchObject({ verdict: 'still_missed', closes: [], keep: 'n3', ring: null });
       expect(mockState.updates).toEqual([]);
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     });
