@@ -2674,7 +2674,10 @@ instruction (`state` hold, water_in or hold_then_water_in, never none) as one
 separate customer text right after the lawn completion text, rendered from the
 `lawn_watering_instruction` SMS template with the instruction's `lines` joined
 by single spaces, at most once per visit
-(`structured_notes.lawnWateringSmsStatus`).
+(`structured_notes.lawnWateringSmsStatus`). `GATE_LAWN_WATERING_SHORT_TEXT` (dark)
+adds no public payload field either: the same text is sent as short steps built
+from the frozen instruction's fields under the `lawn_watering_instruction_short`
+template; the payload, `lines`, banner and PDF are unchanged.
 `GATE_LAWN_WATERING_FORECAST` (dark; also requires `GATE_LAWN_WATERING_RULE`; gate
 off leaves the payload unchanged, key for key) adds two LIVE-VIEW-ONLY optional keys
 to `reportV2.banner` of a plain `water_in` banner (never `hold`, `hold_then_water_in`
