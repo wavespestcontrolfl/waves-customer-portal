@@ -25,6 +25,7 @@
 const { isSiteUrl, SITE_HOST } = require('../link-library');
 const { detectServiceLine } = require('./service-line-configs');
 const { CITY_COUNTY } = require('../../config/address-county');
+const { CITY_TO_LOCATION, REVIEW_CITY_EXTRAS } = require('../../config/locations');
 const logger = require('../logger');
 
 const MAX_RESULTS = 8;
@@ -350,11 +351,12 @@ async function liveBlogPostsByPath(knex, paths) {
 // "Sarasota Mosquito Prevention Guide", "Manatee County fertilizer rules"):
 // never filled in from a tip, and never the general post the tip seeder asks
 // for, since the customer may live elsewhere (owner 2026-10-24, decision 2).
-// A service-area town anywhere in the title counts, whole-county or
-// straddling, and so does a county by name. A town that is also an ordinary
-// word ("palmetto bugs", an osprey, laurel wilt, the Myakka River) counts
-// only as a place: "in <town>", "near <town>" or "<town>, FL".
-const TOWN_NAMES = [...Object.keys(CITY_COUNTY), 'lakewood ranch', 'longboat key', 'englewood', 'sarasota'];
+// A served town anywhere in the title counts: every locality the offices
+// serve (locations.js, south Hillsborough and the neighborhoods included)
+// and every whole-county city, and so does a county by name. A town that is
+// also an ordinary word ("palmetto bugs", an osprey, laurel wilt, the Myakka
+// River) counts only as a place: "in <town>", "near <town>" or "<town>, FL".
+const TOWN_NAMES = [...new Set([...Object.keys(CITY_COUNTY), ...Object.keys(CITY_TO_LOCATION), ...Object.keys(REVIEW_CITY_EXTRAS)])];
 const WORD_TOWNS = new Set(['palmetto', 'osprey', 'laurel', 'myakka']);
 const alternation = (names) => names.map((town) => town.replace(/\s+/g, '\\s+')).join('|');
 const PLAIN_TOWN_RE = new RegExp(`\\b(?:${alternation(TOWN_NAMES.filter((town) => !WORD_TOWNS.has(town)))})\\b`, 'i');

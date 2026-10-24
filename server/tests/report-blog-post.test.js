@@ -1029,6 +1029,8 @@ describe('the post a tip fills in (tips with facts, GATE_TECH_TIP_SOURCES, owner
       'Get Rid Of Fleas In Lakewood Ranch, FL', 'Ghost Ants in Sarasota: Identification and Next Steps', 'Termites in Venice, FL', 'North Port, Florida lawn guide',
       'Sarasota Mosquito Prevention Guide', 'Why Bradenton Gutters Breed Mosquitoes', 'Port Charlotte Termite Season', 'Sarasota County fertilizer rules',
       'Manatee County Watering Days', 'Pest Control in Palmetto, FL', 'Termites near Osprey', 'Myakka City Fire Ants',
+      // every served locality, not only the whole-county cities (local Codex P2 on 849035c271)
+      'Clogged Gutters and Mosquitoes in University Park', 'Ruskin Fire Ant Season', 'Cortez Termite Swarms', 'Apollo Beach Mosquito Guide', 'Lakewood Ranch Lawn Care', 'Fruitville Roof Rats',
     ]) expect([title, isTownTitled(title)]).toEqual([title, true]);
     for (const title of [
       'Palmetto Bugs vs. Cockroaches', 'Osprey Nests and Your Roof', 'Laurel Wilt in Avocado Trees', 'Myakka River Mosquitoes After Rain',
