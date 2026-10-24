@@ -285,6 +285,34 @@ async function ringLeadBell(leadId, extracted) {
   });
 }
 
+// A written lead whose bell is not raised yet carries status created_unrung /
+// updated_unrung, with `attempts` restarted at 0 to count bell tries. Raising
+// it is safe to repeat (the bell's dedupe key), so a failure or a process exit
+// leaves the row for the next sweep, up to MAX_ATTEMPTS tries (then
+// bell_failed; the lead itself stands).
+const RUNG = { created_unrung: 'lead_created', updated_unrung: 'lead_updated' };
+async function ringOwed(row) {
+  const extracted = typeof row.extracted === 'string' ? JSON.parse(row.extracted) : (row.extracted || {});
+  try {
+    await ringLeadBell(row.lead_id, extracted);
+    await finish(row.id, { status: RUNG[row.status], error: null });
+    return RUNG[row.status];
+  } catch (err) {
+    const code = String(err.code || err.name || 'error').slice(0, 60);
+    logger.warn(`[sms-lead-extraction] bell for lead ${row.lead_id} failed (${code})`);
+    const tries = Number(row.attempts || 0) + 1;
+    await finish(row.id, { attempts: tries, error: `bell_${code}`.slice(0, 200), ...(tries >= MAX_ATTEMPTS ? { status: 'bell_failed' } : {}) })
+      .catch(() => {});
+    return tries >= MAX_ATTEMPTS ? 'bell_failed' : row.status;
+  }
+}
+
+async function ringOwedBells(limit) {
+  const rows = await db('sms_lead_extractions').whereIn('status', Object.keys(RUNG)).orderBy('updated_at').limit(limit);
+  for (const row of rows) await ringOwed(row);
+  return rows.length;
+}
+
 async function processCandidate(candidate) {
   const id = await claim(candidate);
   if (!id) return { status: 'claimed_elsewhere' };
@@ -318,14 +346,19 @@ async function processCandidate(candidate) {
       channel: 'sms',
       messageSid: candidate.twilio_sid || null,
     });
+    if (out?.notOwned) {
+      const status = out.notOwned === 'customer' ? 'known_customer' : 'existing_lead';
+      await finish(id, { status, kind, confidence });
+      return { status };
+    }
     if (!out?.leadId) {
       await finish(id, { status: 'failed', kind, confidence, error: 'lead_write_returned_no_lead' });
       return { status: 'failed' };
     }
-    const status = out.created ? 'lead_created' : 'lead_updated';
-    await finish(id, { status, kind, confidence, lead_id: out.leadId, extracted: JSON.stringify(extracted) });
-    await ringLeadBell(out.leadId, extracted)
-      .catch((err) => logger.warn(`[sms-lead-extraction] bell failed for lead ${out.leadId} (${err.code || err.name || 'error'})`));
+    // The lead is written; the bell is owed until it is raised (ringOwed).
+    const owed = out.created ? 'created_unrung' : 'updated_unrung';
+    await finish(id, { status: owed, attempts: 0, kind, confidence, lead_id: out.leadId, extracted: JSON.stringify(extracted) });
+    const status = await ringOwed({ id, status: owed, attempts: 0, lead_id: out.leadId, extracted });
     logger.info(`[sms-lead-extraction] ${status} ${out.leadId} for ${maskPhone(candidate.from_phone)}`);
     return { status, leadId: out.leadId };
   } catch (err) {
@@ -341,6 +374,8 @@ async function processCandidate(candidate) {
 async function sweepSmsLeadCandidates({ limit = DEFAULT_LIMIT, now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('smsLeadExtraction')) return { skipped: 'gate_off' };
+  // Bells a crash or a failed raise left owed go first.
+  await ringOwedBells(limit);
   const candidates = await findCandidates({ limit, now });
   const counts = {};
   for (const c of candidates) {
@@ -353,5 +388,5 @@ async function sweepSmsLeadCandidates({ limit = DEFAULT_LIMIT, now = new Date() 
 
 module.exports = {
   sweepSmsLeadCandidates,
-  _test: { readThread, findCandidates, processCandidate, knownState, threadText, spamScreened, isLead, toExtracted, claim, EXTRACTION_SCHEMA, QUIET_MINUTES, MIN_CONFIDENCE },
+  _test: { readThread, ringOwedBells, findCandidates, processCandidate, knownState, threadText, spamScreened, isLead, toExtracted, claim, EXTRACTION_SCHEMA, QUIET_MINUTES, MIN_CONFIDENCE },
 };

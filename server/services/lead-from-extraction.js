@@ -601,6 +601,9 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   let customerId = null;
   let leadId = null;
   let created = false;
+  // Text reader only: the number turned out to belong to someone between the
+  // reader's check and this write ('customer' or 'lead'). Nothing is written.
+  let notOwned = null;
 
   // ⭐ IDENTITY CAN BE HANDED IN, AND WHEN IT IS, IT WINS. The voice relay knows
   // WHO is on the call from the ANI cross-check against the signature-verified
@@ -667,6 +670,10 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     }
   }
 
+  // The text reader only writes for a number nobody owns (sms-lead-extraction.js
+  // knownState); a customer that appeared since is the office's, not a lead.
+  if (viaSms && customerId) return { leadId: null, customerId, created: false, notOwned: 'customer' };
+
   // Non-routing language hint on the matched customer — applied even if the lead
   // is skipped below. Best-effort; only fills when empty so a prior preference
   // is never clobbered. (Routing never reads this column.)
@@ -701,6 +708,24 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // beats a lost capture.
   let existingLead = null;
   const resolveExistingLead = async (q) => {
+    // The text reader fills only a lead it made (marked on its insert below).
+    // Any other lead on the number, in any phone format, is someone else's (a
+    // form, a call, staff, maybe made while the model was reading): merging
+    // would stamp it as the reader's, and the name rule below would mint a
+    // duplicate beside it. Write nothing.
+    if (viaSms) {
+      const key = phoneDigits(phone).slice(-10);
+      const onNumber = key.length === 10
+        ? await q('leads').whereNull('deleted_at')
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
+          .select('extracted_data')
+        : [];
+      if (onNumber.some((row) => parseJsonObject(row.extracted_data).source !== captureSource)) {
+        notOwned = 'lead';
+        existingLead = null;
+        return;
+      }
+    }
     existingLead = phone
       ? await q('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
       : null;
@@ -758,7 +783,6 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     logger.info(`[voice-agent-lead] Existing lead name conflicts on ${maskPhone(phone)}; creating a separate lead`);
     existingLead = null;
   }
-
     if (existingLead) {
       leadId = existingLead.id;
     } else {
@@ -1012,7 +1036,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       .catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
   }
 
-  return { leadId, customerId, created };
+  return { leadId, customerId, created, ...(notOwned ? { notOwned } : {}) };
 }
 
 /**

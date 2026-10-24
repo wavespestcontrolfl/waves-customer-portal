@@ -175,6 +175,52 @@ postgres('text-thread lead reader', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  test('a lead or customer made while the model was reading is left alone', async () => {
+    await text('Quote for rats please', { minutesAgo: 10 });
+    const webLeadId = randomUUID();
+    dispatchWithFallback.mockImplementationOnce(async () => {
+      await trx('leads').insert({ id: webLeadId, phone: TEXTER, first_name: 'Web', last_name: 'Form', first_contact_channel: 'form', status: 'new' });
+      return { ok: true, json: answer({ first_name: 'Sam', email: 'sam@example.invalid' }) };
+    });
+    expect((await sweep()).counts).toEqual({ existing_lead: 1 });
+    const [lead] = await leads();
+    expect(lead).toMatchObject({ id: webLeadId, first_name: 'Web', email: null });
+    expect(lead.extracted_data).toBeNull();
+
+    const other = '+19415550199';
+    await text('Need spider spray', { minutesAgo: 10, from: other });
+    dispatchWithFallback.mockImplementationOnce(async () => {
+      await trx('customers').insert({ id: randomUUID(), first_name: 'New', last_name: 'Customer', phone: other, email: `${randomUUID()}@example.invalid` });
+      return { ok: true, json: answer() };
+    });
+    expect((await sweep()).counts).toEqual({ known_customer: 1 });
+    expect(await trx('leads').where({ phone: other })).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a bell that fails is owed and retried by the next sweep, up to 3 tries', async () => {
+    await text('Quote for ants please', { minutesAgo: 10 });
+    modelSays(answer());
+    NotificationService.notifyAdmin.mockRejectedValueOnce(Object.assign(new Error('down'), { code: 'ECONNRESET' }));
+    expect((await sweep()).counts).toEqual({ created_unrung: 1 });
+    expect((await runs())[0]).toMatchObject({ status: 'created_unrung', attempts: 1 });
+
+    await sweep();
+    expect((await runs())[0]).toMatchObject({ status: 'lead_created', error: null });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(2);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+
+    const other = '+19415550166';
+    await text('Quote for fleas please', { minutesAgo: 10, from: other });
+    modelSays(answer());
+    NotificationService.notifyAdmin.mockRejectedValue(new Error('down'));
+    for (let i = 0; i < 4; i += 1) await sweep();
+    const [run] = await trx('sms_lead_extractions').where({ phone_last10: '9415550166' });
+    expect(run).toMatchObject({ status: 'bell_failed', attempts: 3 });
+    expect(await trx('leads').where({ phone: other })).toHaveLength(1);
+    NotificationService.notifyAdmin.mockReset();
+  });
+
   test('a pitch, an out-of-scope service and a low-confidence read make no lead', async () => {
     const senders = ['+19415550191', '+19415550192', '+19415550193'];
     for (const from of senders) await text('Hello there', { minutesAgo: 10, from });
