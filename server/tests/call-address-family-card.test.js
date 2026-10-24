@@ -361,6 +361,8 @@ const SKIP = !process.env.DATABASE_URL;
       const out = await post(`${card.id}/new-customer`, { expected_updated_at: card.updated_at });
       expect(out.status).toBe(200);
       expect(out.body.reprocess.started).toBe(true);
+      // The mocked pass created nobody, and the answer says so.
+      expect(out.body.reprocess.customer_created).toBe(false);
       expect(spy).toHaveBeenCalledWith(expect.stringMatching(/^CA/), { force: true, operator: true });
       spy.mockRestore();
       const [done] = await cardsFor(callLogId);

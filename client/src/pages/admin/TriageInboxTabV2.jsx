@@ -1114,8 +1114,8 @@ export default function TriageInboxTabV2({ isAdmin }) {
         load(mode, status);
         // New customer closes the card first, then reprocesses the call: say so when the reprocess did not run, or
         // nobody knows the customer was not created.
-        if (res?.reprocess && res.reprocess.started === false) {
-          setError("The card is closed, but the call was not reprocessed, so no customer was created. Reprocess the call from its recording to create the customer.");
+        if (res?.reprocess && (res.reprocess.started === false || res.reprocess.customer_created === false)) {
+          setError("The card is closed, but no customer was created: the call was not reprocessed, or the pass found nothing to create one from. Reprocess the call from its recording, or add the customer by hand.");
         }
       })
       .catch((err) => {

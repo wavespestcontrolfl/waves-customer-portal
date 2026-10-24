@@ -711,7 +711,14 @@ describe('family card actions on the page', () => {
     render(<TriageInboxTabV2 isAdmin />);
     await screen.findByText('Family Card');
     fireEvent.click(screen.getByRole('button', { name: 'New customer' }));
-    expect(await screen.findByText(/call was not reprocessed, so no customer was created/)).toBeInTheDocument();
+    expect(await screen.findByText(/no customer was created: the call was not reprocessed, or the pass found nothing/)).toBeInTheDocument();
+  });
+  it('says so too when the pass ran but created no customer', async () => {
+    listWith({ ok: true, reprocess: { started: true, customer_created: false } });
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Family Card');
+    fireEvent.click(screen.getByRole('button', { name: 'New customer' }));
+    expect(await screen.findByText(/no customer was created: the call was not reprocessed, or the pass found nothing/)).toBeInTheDocument();
   });
 });
 

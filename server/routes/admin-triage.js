@@ -2034,6 +2034,8 @@ router.post('/:id/new-customer', async (req, res) => {
       // A pass that skipped or failed (a blocked claim, a rejected transcription, a failed extraction) created nobody.
       const ran = !out?.skipped && out?.success !== false;
       reprocess = { started: ran, reason: ran ? null : (out?.reason || out?.error || 'not_completed') };
+      // A pass that ran can still create nobody (no usable first name, a non-customer call nature): say so too.
+      if (ran) reprocess.customer_created = !!(await db('call_log').where({ id: call.id }).first('customer_id'))?.customer_id;
     } catch (procErr) {
       reprocess = { started: false, reason: 'failed' };
       logger.warn(`[admin-triage] new-customer reprocess failed for card ${item.id}: ${procErr.code || procErr.name || 'error'}`);
