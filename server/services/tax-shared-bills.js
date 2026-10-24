@@ -82,6 +82,21 @@ function shareOf(amountDeductible, pct) {
   return Math.min(Math.max(share, 0), cents) / 100;
 }
 
+// The expense note records the share the books claimed, in one fixed shape
+// this module writes and reads back (later passes apply on top of it). The
+// label loses brackets so it can never close or fake the marker.
+function sharedNote(bill) {
+  const label = String(bill.label || '').replace(/[[\]]/g, '').trim();
+  return ` [Shared bill: ${label} ${Number(bill.business_pct)}%]`;
+}
+const BOOKED_SHARE = /\[Shared bill: [^\]]* (\d{1,3}(?:\.\d{1,2})?)%\]/g;
+function bookedSharePct(notes) {
+  const all = [...String(notes || '').matchAll(BOOKED_SHARE)];
+  if (!all.length) return null;
+  const pct = Number(all[all.length - 1][1]);
+  return Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null;
+}
+
 function homeOfficeDeduction({ sq_ft: sqFt, months } = {}) {
   const sq = Math.min(Math.max(Number(sqFt) || 0, 0), HOME_OFFICE_MAX_SQ_FT);
   const m = Math.min(Math.max(Number(months) || 0, 0), 12);
@@ -244,7 +259,7 @@ async function deleteHomeOffice(year) {
 }
 
 module.exports = {
-  isOn, normalize, patternMatches, matchBill, shareOf, homeOfficeDeduction,
+  isOn, normalize, patternMatches, matchBill, shareOf, sharedNote, bookedSharePct, homeOfficeDeduction,
   listBills, loadEnabledBills, createBill, updateBill, deleteBill,
   getHomeOffice, upsertHomeOffice, deleteHomeOffice,
   PATTERN_MIN, PATTERN_MAX, HOME_OFFICE_RATE, HOME_OFFICE_MAX_SQ_FT,

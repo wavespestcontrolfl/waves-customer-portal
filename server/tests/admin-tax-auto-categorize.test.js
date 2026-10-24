@@ -201,6 +201,23 @@ describe('auto-categorize partial deductions', () => {
     expect(state.updates[0].update.tax_deductible_amount).toBe(40);
   });
 
+  test('a shared bill keeps its booked business share: the meals partial applies on top of it', async () => {
+    state.rows = [{ id: 'e1', vendor_name: 'Cafe', description: 'Client lunch', amount: 100, notes: '[Bank import x] [Shared bill: Dining 60%]' }];
+    autoCategorizeExpense.mockResolvedValue({ categoryId: 'cat-meals', categoryName: 'Meals & Entertainment' });
+
+    await post(AUTO, {});
+    // 50% meals of $100 = $50, then the booked 60% share = $30 (never the bare $50)
+    expect(state.updates[0].update.tax_deductible_amount).toBe(30);
+  });
+
+  test('a shared bill on a full-deduction category keeps its booked deductible untouched', async () => {
+    state.rows = [{ id: 'e1', vendor_name: 'Phone Co', description: 'PHONE CO PAYMENT', amount: 120, notes: '[Bank import x] [Shared bill: Phone plan 50%]' }];
+    autoCategorizeExpense.mockResolvedValue({ categoryId: 'cat-supplies', categoryName: 'Supplies' });
+
+    await post(AUTO, {});
+    expect(state.updates[0].update).not.toHaveProperty('tax_deductible_amount');
+  });
+
   test('a model-supplied 50% on a full-deduction category is ignored', async () => {
     state.rows = [{ id: 'e1', vendor_name: 'Chem Co', description: 'Talstar', amount: 210 }];
     autoCategorizeExpense.mockResolvedValue({

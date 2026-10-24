@@ -217,3 +217,15 @@ describe('expenses.csv carries the booked deduction', () => {
     expect(out[2].endsWith(',,')).toBe(true);
   });
 });
+
+describe('the booked-share note', () => {
+  const svc = require('../services/tax-shared-bills');
+  test('round-trips the percent, strips brackets from the label, and reads the last marker', () => {
+    const note = svc.sharedNote({ label: 'Phone [x] plan', business_pct: '50.00' });
+    expect(note).toBe(' [Shared bill: Phone x plan 50%]');
+    expect(svc.bookedSharePct(`[Bank import a]${note}`)).toBe(50);
+    expect(svc.bookedSharePct('[Shared bill: A 60%] [Shared bill: B 12.5%]')).toBe(12.5);
+    expect(svc.bookedSharePct('[Bank import a] [AI-categorized — verify]')).toBeNull();
+    expect(svc.bookedSharePct(null)).toBeNull();
+  });
+});

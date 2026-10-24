@@ -1199,7 +1199,7 @@ router.post('/expenses/auto-categorize', async (req, res, next) => {
     const uncategorized = await scoped()
       .orderBy('expense_date', 'asc')
       .limit(limit)
-      .select('id', 'vendor_name', 'description', 'amount');
+      .select('id', 'vendor_name', 'description', 'amount', 'notes');
     // Canonical category names for the server-owned partial-deduction
     // policy — resolved from the row the AI matched, never from its echoed
     // categoryName string.
@@ -1226,7 +1226,13 @@ router.post('/expenses/auto-categorize', async (req, res, next) => {
           // deductiblePercent — a 50%-limited meal must land at 50% even
           // when the model omits the field or claims 100.
           const partial = categoryDeductibleAmount(categoryNames.get(String(ai.categoryId)), exp.amount);
-          if (partial !== null) {
+          // a shared bill's business share was booked with the expense and is
+          // recorded in its note: the category partial applies on top of it,
+          // never in place of it (the share outlives a later rule change)
+          const bookedPct = sharedBills.bookedSharePct(exp.notes);
+          if (bookedPct !== null) {
+            if (partial !== null) update.tax_deductible_amount = sharedBills.shareOf(partial, bookedPct);
+          } else if (partial !== null) {
             update.tax_deductible_amount = partial;
           }
           // Re-assert still-uncategorized: the model calls run serially, so an
@@ -2505,7 +2511,7 @@ async function resolveCreateExpenseCategory(req, row) {
   if (!bill) return { categoryId: finalCategoryId, usedAi, deductible };
   return {
     categoryId: finalCategoryId, usedAi, deductible: sharedBills.shareOf(deductible, bill.business_pct),
-    noteSuffix: ` [Shared bill: ${bill.label} ${bill.business_pct}%]`,
+    noteSuffix: sharedBills.sharedNote(bill),
   };
 }
 

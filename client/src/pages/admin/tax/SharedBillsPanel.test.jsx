@@ -123,3 +123,19 @@ it('keeps the newer year when an older year answers late, and blocks Save until 
   expect(screen.getByLabelText('Square feet')).toHaveValue('250');
   expect(screen.getByRole('button', { name: 'Save home office' })).not.toBeDisabled();
 });
+
+it('offers Try again after a failed home office load, and the retry unlocks Save', async () => {
+  const base = fetch.getMockImplementation();
+  let fail = true;
+  fetch.mockImplementation(async (url, opts = {}) => {
+    if (String(url).includes('/home-office/') && !opts.method && fail) return json({ error: 'server down' }, false);
+    return base(url, opts);
+  });
+  render(<SharedBillsPanel />);
+  const retry = await screen.findByRole('button', { name: 'Try again' });
+  expect(screen.getByRole('button', { name: 'Save home office' })).toBeDisabled();
+  fail = false;
+  fireEvent.click(retry);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save home office' })).not.toBeDisabled());
+  expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+});

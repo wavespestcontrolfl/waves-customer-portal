@@ -310,6 +310,7 @@ function HomeOfficeBox() {
           <div className="flex flex-wrap items-center gap-2">
             <Button type="submit" variant="primary" disabled={busy || loading}>Save home office</Button>
             {saved && <Button variant="secondary" disabled={busy || loading} onClick={remove}>Remove {year}</Button>}
+            {loading && error && <Button variant="secondary" onClick={load}>Try again</Button>}
           </div>
         </form>
         {notice && <div className="text-sm text-ink-secondary">{notice}</div>}
