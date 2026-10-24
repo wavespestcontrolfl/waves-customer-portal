@@ -121,6 +121,16 @@ describe('the customer\'s new words only', () => {
   });
 });
 
+describe('an HTML email built to stall the link scan', () => {
+  test('many unclosed links convert in bounded time, under and over the size cap', () => {
+    for (const n of [2700, 6400]) {
+      const started = Date.now();
+      emailAsMessage(email({ body_text: '', body_html: `<p>${'<a href="https://example.invalid/p">x '.repeat(n)}` }), null);
+      expect(Date.now() - started).toBeLessThan(1000);
+    }
+  });
+});
+
 describe('an HTML-only email keeps the links behind its words', () => {
   const PASS = 'https://example.invalid/pass/token?a=1&b=2';
   const html = (inner) => emailAsMessage(email({ body_text: '', body_html: `<div>Your visitor pass: ${inner}</div>` }), null).message_body;

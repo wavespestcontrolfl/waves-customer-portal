@@ -1262,10 +1262,15 @@ const EMAIL_SEP = '\u0001';
 // "Open pass". Here each http(s) href the visible text does not already show is
 // kept in the text as "Open pass (https://...)"; mailto:, tel: and other
 // schemes add nothing.
-const ANCHOR = /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi;
+// The link words are capped and a very large HTML body keeps the shared
+// conversion only, so many unclosed <a> tags cannot make this scan quadratic.
+const ANCHOR = /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]{0,500}?)<\/a>/gi;
+const MAX_ANCHOR_HTML = 100000;
 function emailText(row) {
   if (String(row?.body_text || '').trim()) return String(row.body_text);
-  const html = String(row?.body_html || '').replace(ANCHOR, (whole, dq, sq, bare, inner) => {
+  const raw = String(row?.body_html || '');
+  if (raw.length > MAX_ANCHOR_HTML) return emailPlainText({ body_text: '', body_html: raw });
+  const html = raw.replace(ANCHOR, (whole, dq, sq, bare, inner) => {
     const href = String(dq ?? sq ?? bare ?? '').replace(/&amp;/gi, '&').trim();
     const shown = inner.replace(/<[^>]+>/g, '').replace(/&amp;/gi, '&');
     return /^https?:\/\/[^\s<>"']+$/i.test(href) && !shown.includes(href) ? `${inner} (${href}) ` : whole;
