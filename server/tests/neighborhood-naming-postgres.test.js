@@ -386,6 +386,18 @@ postgres('neighborhood naming pass', () => {
       expect(await linkFromCaller(snapshot, 'Manatee', 'Chelsea Oaks')).toBe('linked');
     });
 
+    test.each([
+      ["St. Andrew's Preserve", 'St Andrews Preserve'],
+      ['The Islands', 'Islands'],
+    ])('a caller name matches the county community %s however it is written', async (countyName, said) => {
+      const [hood] = await trx('neighborhoods').insert({ name: countyName, county: 'Manatee', match_key: `manatee|${countyName.toLowerCase()}`, subdivision_names: JSON.stringify([countyName.toUpperCase()]), source: 'county' }).returning('id');
+      const { propertyId } = await home({ checked: true });
+      const snapshot = await prop(propertyId);
+      expect(await linkFromCaller(snapshot, 'Manatee', said)).toBe('linked');
+      expect((await prop(propertyId)).neighborhood_id).toBe(hood.id);
+      expect(await trx('neighborhoods').where({ county: 'Manatee' })).toHaveLength(1);
+    });
+
     test('a home with no pin can still be named from a call', async () => {
       const { customerId, propertyId } = await home({ pin: false });
       await callSaying(customerId, 'Chelsea Oaks');

@@ -133,10 +133,15 @@ const PLACE_NAMES = new Set(['BRADENTON', 'PARRISH', 'PALMETTO', 'ELLENTON', 'LA
 
 // What the customer said → the community name the directory would hold, or
 // null (a street, a town, "not sure", too long to be a name).
+const spokenName = (words) => String(words || '').toUpperCase().replace(/['’`.]/g, '').replace(/[^A-Z0-9&/\s-]/g, ' ')
+  .replace(/\s+/g, ' ').trim();
+// One key for a community name, however it was written: "St. Andrew's Preserve"
+// and "St Andrews Preserve", "The Islands" and "Islands" are one community.
+const communityKey = (name) => spokenName(name).replace(/^THE\s+/, '').replace(TRAILING_LABEL, '');
+
 function callerCommunityName(words, city) {
-  const said = String(words || '').toUpperCase().replace(/['’`.]/g, '').replace(/[^A-Z0-9&/\s-]/g, ' ')
-    .replace(/\s+/g, ' ').trim();
-  const s = said.replace(/^THE\s+/, '').replace(TRAILING_LABEL, '');
+  const said = spokenName(words);
+  const s = communityKey(said);
   if (s.length < 3 || s.length > 60 || s.split(' ').length > 8 || /^\d/.test(s) || GENERIC_WORDS.test(said)) return null;
   const name = neighborhoodNameFromSubdivision(s);
   if (!name) return null;
@@ -189,7 +194,11 @@ async function linkFromCaller(home, county, name) {
       .forUpdate().first('customer_id', 'address_line1', 'city', 'zip');
     if (!open) return 'already_linked';
     if (['customer_id', 'address_line1', 'city', 'zip'].some((f) => String(open[f] || '') !== String(home[f] || ''))) return 'address_changed';
-    const hood = await upsertNeighborhood(trx, { county, subdivision: name, source: 'customer' });
+    // An existing community in the county under any spelling of the name wins;
+    // only a name the directory does not hold adds a 'customer' neighborhood.
+    const key = communityKey(name);
+    const hood = (await trx('neighborhoods').where({ county }).select('id', 'name')).find((n) => communityKey(n.name) === key)
+      || await upsertNeighborhood(trx, { county, subdivision: name, source: 'customer' });
     if (!hood) return 'no_name';
     // A neighborhood the office switched off stays off: no link.
     const live = await trx('neighborhoods').where({ id: hood.id, active: true }).first('id');
