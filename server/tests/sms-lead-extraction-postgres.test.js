@@ -268,6 +268,19 @@ postgres('text-thread lead reader', () => {
     expect(await leads()).toHaveLength(0);
   });
 
+  test('an international number is not read, and never shares a US number\'s thread', async () => {
+    // Same last 10 digits as TEXTER, different country.
+    await text('Hello, quote please', { minutesAgo: 10, from: '+449415550177' });
+    expect((await sweep()).candidates).toBe(0);
+
+    await text('Sam Example, 100 Sample Ct', { minutesAgo: 10 });
+    modelSays(answer());
+    await sweep();
+    const prompt = dispatchWithFallback.mock.calls[0][1].text;
+    expect(prompt).toContain('Sam Example');
+    expect(prompt).not.toContain('Hello, quote please');
+  });
+
   test('texts to the tech line are not candidates', async () => {
     await text('Running late to the next stop', { minutesAgo: 10, metadata: { source: 'tech_line' } });
     expect((await sweep()).candidates).toBe(0);

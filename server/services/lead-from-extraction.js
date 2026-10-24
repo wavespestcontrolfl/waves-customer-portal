@@ -718,10 +718,13 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     // would stamp it as the reader's, and the name rule below would mint a
     // duplicate beside it. Write nothing.
     if (viaSms) {
-      const key = phoneDigits(phone).slice(-10);
-      const onNumber = key.length === 10
+      // US/Canada digits with or without the leading 1 (the reader only
+      // handles +1 numbers); never a bare last-10 match across countries.
+      const digits = phoneDigits(phone);
+      const key = /^1?\d{10}$/.test(digits) ? digits.slice(-10) : '';
+      const onNumber = key
         ? await q('leads').whereNull('deleted_at')
-          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
+          .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)", [key, `1${key}`])
           .orderBy('created_at', 'desc')
         : [];
       if (onNumber.some((row) => parseJsonObject(row.extracted_data).source !== captureSource)) {

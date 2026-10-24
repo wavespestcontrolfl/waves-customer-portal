@@ -105,11 +105,11 @@ async function findCandidates({ limit = DEFAULT_LIMIT, now = new Date() } = {}) 
          AND created_at >= ?
          AND COALESCE(message_body, '') <> ''
          AND COALESCE(metadata->>'source', '') <> ALL(?::text[])
+         AND regexp_replace(from_phone, '[^0-9]', '', 'g') ~ '^1{0,1}[0-9]{10}$'
        ORDER BY RIGHT(regexp_replace(from_phone, '[^0-9]', '', 'g'), 10), created_at DESC
     )
     SELECT latest.* FROM latest
      WHERE latest.created_at <= ?
-       AND LENGTH(latest.phone_last10) = 10
        AND NOT EXISTS (
          SELECT 1 FROM sms_lead_extractions x
           WHERE x.phone_last10 = latest.phone_last10
@@ -155,7 +155,12 @@ async function finish(id, fields) {
   await db('sms_lead_extractions').where({ id }).update({ ...fields, updated_at: new Date() });
 }
 
-const PHONE_SQL = "RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?";
+// US/Canada numbers only (the candidate query drops the rest): the full
+// digits with or without the leading 1, never "same last 10 digits", which
+// would put a +44 sender and a +1 contact in one thread (Codex security P2).
+const nanpSql = (col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (?, ?)`;
+const nanpKeys = (phone10) => [phone10, `1${phone10}`];
+const PHONE_SQL = nanpSql('phone');
 
 // Who already owns this number. A customer is matched on every identity phone
 // column (known-caller-phone.js, the call pipeline's set). A lead this reader
@@ -164,7 +169,7 @@ const PHONE_SQL = "RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'),
 async function knownState(phone, phone10) {
   const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
   if (await knownCallerPhoneExists(db, phone)) return { status: 'known_customer' };
-  const leads = await db('leads').whereNull('deleted_at').whereRaw(PHONE_SQL, [phone10]).select('id', 'extracted_data');
+  const leads = await db('leads').whereNull('deleted_at').whereRaw(PHONE_SQL, nanpKeys(phone10)).select('id', 'extracted_data');
   if (!leads.length) return { status: null };
   const source = (row) => {
     const data = typeof row.extracted_data === 'string' ? (() => { try { return JSON.parse(row.extracted_data); } catch { return null; } })() : row.extracted_data;
@@ -177,8 +182,8 @@ async function knownState(phone, phone10) {
 async function loadThread(phone10, throughAt) {
   const from = new Date(new Date(throughAt).getTime() - THREAD_LOOKBACK_HOURS * 3_600_000);
   const rows = await db('sms_log')
-    .where((q) => q.whereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone10])
-      .orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone10]))
+    .where((q) => q.whereRaw(nanpSql('from_phone'), nanpKeys(phone10))
+      .orWhereRaw(nanpSql('to_phone'), nanpKeys(phone10)))
     .where('created_at', '>=', from)
     .where('created_at', '<=', throughAt)
     .whereRaw("COALESCE(message_body, '') <> ''")
