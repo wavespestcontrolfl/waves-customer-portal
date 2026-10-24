@@ -24,7 +24,7 @@ let tables;
 
 function chain(rows) {
   const q = {};
-  for (const m of ['where', 'whereILike', 'whereIn', 'whereNotIn', 'whereBetween', 'select', 'orderBy']) q[m] = () => q;
+  for (const m of ['where', 'whereILike', 'whereIn', 'whereNotIn', 'whereBetween', 'select', 'orderBy', 'groupBy']) q[m] = () => q;
   q.first = async () => rows[0];
   q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return q;
@@ -39,14 +39,17 @@ beforeEach(() => {
       { id: 's2', service_key: 'pest_control', name: 'General Pest Control', short_name: 'Pest', default_duration_minutes: 60 },
       { id: 's3', service_key: 'lawn_fert', name: 'Lawn Fertilization', short_name: null, default_duration_minutes: 30 },
       { id: 's4', service_key: 'lawn_weed', name: 'Lawn Weed Control', short_name: null, default_duration_minutes: 30 },
+      { id: 's5', service_key: 'lawn_care_monthly', name: 'Lawn Care Monthly', short_name: 'Lawn Care', default_duration_minutes: 45 },
+      { id: 's6', service_key: 'lawn_care_one_time', name: 'Lawn Care One-Time', short_name: 'Lawn Care', default_duration_minutes: 75 },
     ],
+    // The per-day aggregate the count query returns (holds already filtered in SQL).
     scheduled_services: [
-      { scheduled_date: '2026-10-24', technician_id: TECH.id, window_start: '08:00:00', window_end: '10:00:00' },
-      { scheduled_date: '2026-10-24', technician_id: TECH.id, window_start: '15:00:00', window_end: '17:00:00' },
-      { scheduled_date: '2026-10-28', technician_id: TECH.id, window_start: '10:00:00', window_end: '11:00:00' },
+      { scheduled_date: '2026-10-24', stops: 2, first_start: '08:00', last_end: '17:00' },
+      { scheduled_date: '2026-10-28', stops: 1, first_start: '10:00', last_end: '11:00' },
     ],
   };
   db.mockReset().mockImplementation((table) => chain(tables[table] || []));
+  db.raw = jest.fn((sql) => sql);
   findAvailableSlots.mockReset().mockResolvedValue({
     slots: [
       { rank: 1, date: '2026-10-28', start_time: '08:28', detour_minutes: 42 },
@@ -75,7 +78,11 @@ test('a named service takes its catalog length over a model-guessed one', async 
 test('an ambiguous service refuses with the choices instead of guessing a length', async () => {
   const out = await search({ service_name: 'lawn' });
   expect(out).toMatchObject({ code: 'service_ambiguous' });
-  expect(out.choices.map((c) => c.name)).toEqual(['Lawn Fertilization', 'Lawn Weed Control']);
+  expect(out.choices.map((c) => c.name)).toEqual(['Lawn Fertilization', 'Lawn Weed Control', 'Lawn Care Monthly', 'Lawn Care One-Time']);
+  // A short name several services share is ambiguous too, not the first row.
+  const shared = await search({ service_name: 'Lawn Care' });
+  expect(shared).toMatchObject({ code: 'service_ambiguous' });
+  expect(shared.choices.map((c) => c.duration_minutes)).toEqual([45, 75]);
   expect(findAvailableSlots).not.toHaveBeenCalled();
 });
 

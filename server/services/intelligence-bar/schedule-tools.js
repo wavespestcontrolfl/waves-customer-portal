@@ -2270,7 +2270,7 @@ async function resolveSlotService(serviceName) {
   const exact = rows.filter((row) => [row.name, row.short_name, row.service_key].some((v) => keyOf(v) === wanted));
   const partial = exact.length ? exact : rows.filter((row) => [row.name, row.short_name, row.service_key]
     .some((v) => keyOf(v) && (keyOf(v).includes(wanted) || wanted.includes(keyOf(v)))));
-  if (partial.length === 1 || exact.length) {
+  if (partial.length === 1) {
     const row = partial[0];
     return { name: row.name, service_key: row.service_key, duration_minutes: serviceDurationMinutes(row, 60) };
   }
@@ -2294,56 +2294,41 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
   const slots = allSlots.slice(0, topN).map((slot, i) => ({ ...slot, rank: i + 1, day_label: slotDayLabel(slot.date) }));
   const searchedDates = result.searched_dates || [];
   const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+  const { dateOnlyString } = require('../../utils/datetime-et');
   // The technician names and per-day stop counts only explain the answer: a
-  // failed read keeps the slots and drops them rather than failing the search.
+  // failed read keeps the slots and leaves them unknown (null), never zero.
   let techs = [];
-  let stopRows = [];
-  let countsRead = false;
+  let byDay = null;
   try {
     let techQuery = applyAssignable(db('technicians'));
     if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
     techs = await techQuery.select('technicians.id', 'technicians.name');
-    if (searchedDates.length && techs.length) {
-      stopRows = await db('scheduled_services')
-        .whereBetween('scheduled_date', [dateFrom, dateTo])
-        .whereIn('technician_id', techs.map((tech) => tech.id))
-        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-        .select('scheduled_date', 'technician_id', 'window_start', 'window_end');
-    }
-    countsRead = true;
+    // Same occupancy rule as the engine: an expired slot hold is not a stop.
+    const dayRows = await db('scheduled_services')
+      .whereBetween('scheduled_date', [dateFrom, dateTo])
+      .whereIn('technician_id', techs.map((tech) => tech.id))
+      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+      .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
+      .groupBy('scheduled_date')
+      .select('scheduled_date', db.raw('count(*)::int as stops'),
+        db.raw('left(min(window_start)::text, 5) as first_start'), db.raw('left(max(window_end)::text, 5) as last_end'));
+    byDay = new Map(dayRows.map((row) => [dateOnlyString(row.scheduled_date), row]));
   } catch (err) {
     logger.warn(`[intelligence-bar:schedule] slot-search day counts failed: ${err.message}`);
   }
-  const { dateOnlyString } = require('../../utils/datetime-et');
-  const byDay = new Map();
-  for (const row of stopRows) {
-    const date = dateOnlyString(row.scheduled_date);
-    const day = byDay.get(date) || { stops: 0, first_start: null, last_end: null };
-    day.stops += 1;
-    const start = row.window_start ? String(row.window_start).slice(0, 5) : null;
-    const end = row.window_end ? String(row.window_end).slice(0, 5) : null;
-    if (start && (!day.first_start || start < day.first_start)) day.first_start = start;
-    if (end && (!day.last_end || end > day.last_end)) day.last_end = end;
-    byDay.set(date, day);
-  }
   const rejectionsByDate = result.rejections_by_date || {};
   const days = searchedDates.map((date) => {
-    const day = byDay.get(date) || { stops: 0, first_start: null, last_end: null };
+    const day = byDay?.get(date);
     const feasible = slotCount.get(date) || 0;
-    // A failed count read is unknown, never zero bookings.
-    const row = { date, day_label: slotDayLabel(date), stops_booked: countsRead ? day.stops : null,
-      first_start: day.first_start, last_end: day.last_end, feasible_slots: feasible };
-    if (!feasible) {
-      // Only the engine's own rejection counts are a reason; without them
-      // (the legacy path keeps none) the row says so instead of inventing one.
-      const rejections = rejectionsByDate[date];
-      if (rejections && Object.keys(rejections).length) {
-        row.no_slot_reason = `No ${durationMinutes}-minute visit fits: ${Object.entries(rejections).map(([why, n]) => `${why} x${n}`).join(', ')}`;
-        row.rejections = rejections;
-      } else {
-        row.no_slot_reason = `No ${durationMinutes}-minute visit fits; the search gave no rejection reason for this day. Report the booked stops above as facts, not as the proven cause.`;
-      }
-    }
+    const row = { date, day_label: slotDayLabel(date), stops_booked: byDay ? Number(day?.stops || 0) : null,
+      first_start: day?.first_start || null, last_end: day?.last_end || null, feasible_slots: feasible };
+    if (feasible) return row;
+    // Only the engine's own rejection counts are a reason; without them (the
+    // legacy path keeps none) the row says so instead of inventing one.
+    const rejections = Object.entries(rejectionsByDate[date] || {});
+    row.no_slot_reason = rejections.length
+      ? `No ${durationMinutes}-minute visit fits: ${rejections.map(([why, n]) => `${why} x${n}`).join(', ')}`
+      : `No ${durationMinutes}-minute visit fits; the search gave no rejection reason for this day. Report the booked stops above as facts, not as the proven cause.`;
     return row;
   });
   return {
