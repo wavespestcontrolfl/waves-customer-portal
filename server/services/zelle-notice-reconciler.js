@@ -786,8 +786,11 @@ function bankEvidenceOf(row) {
     day: String(row.txn_date || '').slice(0, 10),
     cents: amountCentsOf(row.amount),
     payer: parseZelleBankPayer(bankZelleText(row)),
-    // what the bank reports: a credit, no change pending or dismissed
-    reported: row.direction === 'credit' && !hasUnresolvedBankChange(row) && !row.suggestion?.plaidDismissed,
+    // what the bank reports: a Zelle payment credit (an accepted correction
+    // to "Zelle money returned…" keeps cents, day and an unnamed payer), no
+    // change pending or dismissed
+    reported: row.direction === 'credit' && isZelleBankCredit(row)
+      && !hasUnresolvedBankChange(row) && !row.suggestion?.plaidDismissed,
     open: row.status === 'unmatched',
   };
 }

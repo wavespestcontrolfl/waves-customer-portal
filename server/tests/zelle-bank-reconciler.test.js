@@ -61,7 +61,7 @@ const NotificationService = require('../services/notification-service');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const { parseZelleBankPayer, isZelleBankCredit, bankZelleText } = require('../services/zelle-notice');
 const {
-  reconcileZelleBankFeed, isZelleBankReconcileEnabled, amountCentsOf, RECORDED_BY, BANK_SOURCE, _private,
+  reconcileZelleBankFeed, isZelleBankReconcileEnabled, amountCentsOf, RECORDED_BY, BANK_SOURCE, bankEvidenceHolds, _private,
 } = require('../services/zelle-notice-reconciler');
 
 // 2026-10-24 14:00 ET. Rows below are dated relative to it.
@@ -416,6 +416,20 @@ describe('the bank must still list the credit as it was read', () => {
     expect(await settlementFence(lostClaim.conn, { id: 'inv-1' })).toBe(false);
     expect(lostClaim.seen).toHaveLength(1); // a lost claim never reads the bank row
   });
+
+  test('a correction to a returned transfer is no longer payment evidence, even for a notice with no payer named', async () => {
+    const notice = { plaid_transaction_id: 'ptx-1', amount_cents: 11700, payer_name: null, received_at: TODAY_START_ET };
+    const conn = (row) => {
+      const c = () => { const b = { where: () => b, forShare: () => b, first: async () => row }; return b; };
+      c.raw = (sql) => sql;
+      return c;
+    };
+    const unnamed = { ...STORED, description: 'Zelle', original_description: 'Zelle' }; // parked: payer unreadable
+    expect(await bankEvidenceHolds(conn(unnamed), notice)).toBe(true);
+    // accepted in Bank Import: no flag left; cents, day and the unnamed payer still match
+    const returned = { ...unnamed, original_description: 'Zelle money returned to you' };
+    expect(await bankEvidenceHolds(conn(returned), notice)).toBe(false);
+  });
 });
 
 describe('the claim and money already recorded', () => {
@@ -440,13 +454,15 @@ describe('the claim and money already recorded', () => {
       settled('pending', { ...STORED, suggestion: { plaidModified: { amount: 17 } } }),
       settled('dismissed', { ...STORED, suggestion: { plaidDismissed: { removed: true } } }),
       settled('accepted', { ...STORED, amount: '17.00' }), // a correction accepted in Bank Import
+      // an unnamed payer's credit corrected to a returned transfer keeps cents, day and payer
+      { ...settled('returned', { ...STORED, description: 'Zelle', original_description: 'Zelle money returned to you' }), payer_name: null },
     ]], calls: [] };
     expect(await reconcileZelleBankFeed({ now: NOW })).toEqual({ skipped: 'gate_off' });
     const calls = tables['inbound_payment_notices as n'].calls;
     expect(calls).toContainEqual(['leftJoin', 'bank_transactions as bt', 'bt.plaid_transaction_id', 'n.plaid_transaction_id']);
     expect(calls).toContainEqual(['whereIn', 'n.status', ['auto_applied', 'applied']]);
     const keys = NotificationService.notifyAdmin.mock.calls.map(([, , , opts]) => opts.dedupeKey);
-    expect(keys).toEqual(['gone', 'pending', 'dismissed', 'accepted'].map((id) => `zelle-notice:${id}:bank-changed`));
+    expect(keys).toEqual(['gone', 'pending', 'dismissed', 'accepted', 'returned'].map((id) => `zelle-notice:${id}:bank-changed`));
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — check the bank change on Pat Doe's $117.00 Zelle",
       'The bank changed or withdrew this Zelle after the portal recorded it on the invoice.',
       expect.objectContaining({ dedupeKey: 'zelle-notice:gone:bank-changed', bellDefault: true, link: '/admin/invoices?invoice=inv-gone' }));
