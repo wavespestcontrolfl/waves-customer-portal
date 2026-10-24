@@ -829,7 +829,9 @@ const rowKey = (r) => `${r.kind}:${r.value_hash}:${normalizeText(r.instructions)
 async function reconcileSource(trx, message, items) {
   const latest = new Map(items.map((item) => [rowKey(item), item]));
   const q = trx('customer_access_codes').where({ source_type: sourceTypeOf(message), source_id: message.id, status: 'found' });
-  if (message.customer_id) q.where((w) => w.where('customer_id', message.customer_id).orWhereNull('customer_id'));
+  // A call's rows answer to the call's owner, whoever it was when they were
+  // filed (a remapped phone moves them); a text's only to its own customer or none.
+  if (message.customer_id && message.source_kind !== 'call') q.where((w) => w.where('customer_id', message.customer_id).orWhereNull('customer_id'));
   const waiting = await q.forUpdate().select('id', 'customer_id', 'linked_at', 'kind', 'value_hash', 'instructions', 'life', 'source_quote');
   const stale = [];
   for (const row of waiting) {
@@ -837,7 +839,10 @@ async function reconcileSource(trx, message, items) {
     // A row of the wrong owner goes: an unlinked row once the text has a
     // customer, and a customer's row (not one the office linked) once the
     // text has lost its customer. What the text still states is filed again.
-    const wrongOwner = message.customer_id ? !row.customer_id : (row.customer_id && !row.linked_at);
+    // A call's row goes unless it is the call's owner's or the office's link.
+    const wrongOwner = message.source_kind === 'call'
+      ? (row.customer_id || null) !== (message.customer_id || null) && !(row.linked_at && !message.call_customer_id)
+      : (message.customer_id ? !row.customer_id : (row.customer_id && !row.linked_at));
     if (!item || wrongOwner) { stale.push(row.id); continue; }
     if (item.life !== row.life || item.quote !== row.source_quote) {
       await trx('customer_access_codes').where({ id: row.id })
@@ -852,8 +857,8 @@ async function reconcileSource(trx, message, items) {
 // version filed) first proves, under locks, that the gate and its activation
 // time still hold, the customer row is locked in the office writers' order,
 // and the text still belongs to that customer with the words this pass read.
-async function sourceStillCurrent(trx, message, receipt) {
-  if (message.source_kind === 'call') return callStillCurrent(trx, message, receipt);
+async function sourceStillCurrent(trx, message, receipt, opts) {
+  if (message.source_kind === 'call') return callStillCurrent(trx, message, receipt, opts);
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
   if (!enabled() || !since || new Date(message.created_at) < since) return false;
   // A text with no customer has none to lock: the text row itself is the lock.
@@ -867,7 +872,7 @@ async function sourceStillCurrent(trx, message, receipt) {
 // read failed for good): clear what an older version filed and receipt it.
 async function closeSource(conn, message, receipt, status, extra = {}) {
   await conn.transaction(async (trx) => {
-    const current = await sourceStillCurrent(trx, message, receipt);
+    const current = await sourceStillCurrent(trx, message, receipt, { clearing: true });
     if (current) await reconcileSource(trx, message, []);
     // A stale snapshot leaves no receipt, so the next pass reads the text again.
     if (current || status !== 'no_fields') await recordExtractionAttempt({ ...receipt, trx, status, ...extra });
@@ -1100,13 +1105,38 @@ const CALL_COLUMNS = ['id', 'customer_id', 'direction', 'from_phone', 'to_phone'
   'processing_status', 'source', 'created_at'];
 const TRANSCRIPTION_REJECTED_PREFIX = '[Recording had no usable speech';
 
-// A call's receipt covers what decides whether and how it is read, as a text's
-// does: the call's own customer, direction, both numbers, a spam verdict and the
-// words. A re-transcription, a relink or a spam verdict reads the call again.
-const callSourceHash = (call) => hashExtractionSource([call.call_customer_id, call.raw_direction, call.from_phone, call.to_phone,
-  call.spam ? 'spam' : '', call.message_body].map((v) => v || '').join(':'));
-const CALL_HASH_SQL = "encode(sha256(convert_to(concat_ws(':', coalesce(c.customer_id::text, ''), coalesce(c.direction, ''), "
+// ONE ownership resolver for a call (JS: callOwnerId, SQL: callOwnerSql, kept
+// identical): the call's own customer, else the one live customer whose phone
+// is the far-end number (outbound: to_phone, inbound: from_phone), else nobody.
+// Reads, accept, link, retirement, the sweep and the receipt hash all use it, so
+// a phone that now belongs to someone else (or to nobody) moves the call's rows.
+const callOwnerSql = (x) => {
+  const key = `right(regexp_replace(coalesce(CASE WHEN lower(coalesce(${x}.direction, '')) LIKE 'outbound%' THEN ${x}.to_phone ELSE ${x}.from_phone END, ''), '[^0-9]', '', 'g'), 10)`;
+  return `COALESCE(${x}.customer_id, (SELECT CASE WHEN count(*) = 1 THEN min(k.id::text) END FROM customers k WHERE k.deleted_at IS NULL `
+    + `AND length(${key}) = 10 AND right(regexp_replace(coalesce(k.phone, ''), '[^0-9]', '', 'g'), 10) = ${key})::uuid)`;
+};
+async function callOwnerId(conn, row) {
+  if (row.customer_id) return row.customer_id;
+  const key = tail10(isOutboundDirection(row.direction) ? row.to_phone : row.from_phone);
+  if (key.length !== 10) return null;
+  const matches = await conn('customers').whereNull('deleted_at')
+    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key]).limit(2).pluck('id');
+  return matches.length === 1 ? matches[0] : null;
+}
+// A filed row answers to the call's owner now; an explicit office link (the
+// call has no customer of its own) is the office's decision and stays.
+const callRowOwned = (call, ownerId, row) => (ownerId || null) === (row.customer_id || null) || (!!row.linked_at && !call.customer_id);
+
+// A call's receipt covers everything that decides whether and how it is read, as
+// a text's does: its owner (above), direction, both numbers, a spam verdict, the
+// transcript's status, the sandbox flag and the words. A re-transcription, a
+// relink, a phone remap, a spam verdict or a status change reads the call again.
+// callSourceHash and CALL_HASH_SQL must agree byte for byte.
+const callSourceHash = (call) => hashExtractionSource([call.owner_id, call.raw_direction, call.from_phone, call.to_phone,
+  call.spam ? 'spam' : '', call.transcription_status, call.sandbox ? 'sandbox' : '', call.message_body].map((v) => v || '').join(':'));
+const CALL_HASH_SQL = `encode(sha256(convert_to(concat_ws(':', coalesce((${callOwnerSql('c')})::text, ''), coalesce(c.direction, ''), `
   + "coalesce(c.from_phone, ''), coalesce(c.to_phone, ''), CASE WHEN c.processing_status = 'spam' THEN 'spam' ELSE '' END, "
+  + "coalesce(c.transcription_status, ''), CASE WHEN coalesce(c.source, '') = 'voice_relay_sandbox' THEN 'sandbox' ELSE '' END, "
   + "coalesce(c.transcription, '')), 'UTF8')), 'hex')";
 
 const e164 = (v) => {
@@ -1116,14 +1146,15 @@ const e164 = (v) => {
 const isOurNumber = (v) => !!numbers.findByNumber(e164(v));
 
 // The call as the message-like row the shared writers read. `customerId` is the
-// customer the row will belong to (the call's own, else the one customer of the
-// far-end phone, else null: filed unlinked). The call's own customer stays in
-// call_customer_id for the receipt.
-function callAsMessage(row, customerId) {
+// customer the row will belong to (the call's owner, if live, else null: filed
+// unlinked). The owner as callOwnerId reads it (live or not) is in owner_id for
+// the receipt; it defaults to the call's own customer.
+function callAsMessage(row, customerId, ownerId = row.customer_id) {
   const outbound = isOutboundDirection(row.direction);
   const body = String(row.transcription || '');
   return {
-    source_kind: 'call', id: row.id, customer_id: customerId || null, call_customer_id: row.customer_id || null,
+    source_kind: 'call', id: row.id, customer_id: customerId || null, owner_id: ownerId || null, call_customer_id: row.customer_id || null,
+    transcription_status: row.transcription_status, sandbox: row.source === VOICE_RELAY_SANDBOX_SOURCE,
     direction: outbound ? 'outbound' : 'inbound', raw_direction: row.direction, from_phone: row.from_phone, to_phone: row.to_phone,
     far_phone: String((outbound ? row.to_phone : row.from_phone) || '').trim(), message_body: body,
     spoken_text: spokenNormalize(body).text, created_at: row.created_at, spam: row.processing_status === 'spam',
@@ -1145,30 +1176,29 @@ function callEligible(row) {
     && isOurNumber(ours) && digitsOf(far) !== '' && !isOurNumber(far);
 }
 
-// The customer a call belongs to: its own (false when that customer is gone),
-// else the one live customer with the far-end phone, else null.
-async function resolveCallCustomer(conn, row) {
-  if (row.customer_id) {
-    const live = await conn('customers').where({ id: row.customer_id }).whereNull('deleted_at').first('id');
-    return live ? live.id : false;
-  }
-  const key = tail10(isOutboundDirection(row.direction) ? row.to_phone : row.from_phone);
-  if (key.length !== 10) return null;
-  const matches = await conn('customers').whereNull('deleted_at')
-    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key]).limit(2).pluck('id');
-  return matches.length === 1 ? matches[0] : null;
+// The live customer the call's rows belong to: callOwnerId's, or false when
+// that customer is gone.
+async function resolveCallCustomer(conn, row, ownerId) {
+  const owner = ownerId === undefined ? await callOwnerId(conn, row) : ownerId;
+  if (!owner || !row.customer_id) return owner;
+  const live = await conn('customers').where({ id: owner }).whereNull('deleted_at').first('id');
+  return live ? live.id : false;
 }
 
 // The sweep's proof, under locks, that the gates and the call's activation time
-// still hold and the call still belongs to the same customer with the same words.
-async function callStillCurrent(trx, message, receipt) {
+// still hold, the call still has the same owner, status and words, and (for a
+// write) is still a call worth reading. Clearing what an older read filed
+// (`clearing`) is also right for a call that is no longer eligible.
+async function callStillCurrent(trx, message, receipt, { clearing = false } = {}) {
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_CALLS_SINCE');
   if (!callsEnabled() || !since || new Date(message.created_at) < since) return false;
   if (message.customer_id && !(await lockCustomer(trx, message.customer_id))) return false;
   const live = await trx('call_log').where({ id: message.id }).forUpdate().first(...CALL_COLUMNS);
   if (!live) return false;
-  const customerId = await resolveCallCustomer(trx, live);
-  return (customerId || null) === (message.customer_id || null) && callSourceHash(callAsMessage(live, customerId)) === receipt.source_hash;
+  const ownerId = await callOwnerId(trx, live);
+  const customerId = await resolveCallCustomer(trx, live, ownerId);
+  return (customerId || null) === (message.customer_id || null) && (clearing || callEligible(live))
+    && callSourceHash(callAsMessage(live, customerId, ownerId)) === receipt.source_hash;
 }
 
 // At an office accept the call must still say what the row quotes (the sweep
@@ -1176,11 +1206,11 @@ async function callStillCurrent(trx, message, receipt) {
 async function callStillSupports(trx, row) {
   const source = await trx('call_log').where({ id: row.source_id }).forUpdate().first(...CALL_COLUMNS);
   if (!source) return true;
-  if (source.customer_id && source.customer_id !== row.customer_id) return false;
-  if (!callEligible(source)) return false;
+  const ownerId = await callOwnerId(trx, source);
+  if (!callRowOwned(source, ownerId, row) || !callEligible(source)) return false;
   const read = await trx('data_hygiene_source_extractions')
     .where({ source_type: 'call_log', source_id: row.source_id, extractor_version: CALL_VERSION, status: 'ok' })
-    .where('source_hash', callSourceHash(callAsMessage(source, null)))
+    .where('source_hash', callSourceHash(callAsMessage(source, null, ownerId)))
     .whereNotExists(function laterRead() {
       this.select(1).from('data_hygiene_source_extractions as y')
         .whereRaw('y.source_id = data_hygiene_source_extractions.source_id AND y.source_type = data_hygiene_source_extractions.source_type')
@@ -1232,11 +1262,13 @@ async function runCallsPass({ now, conn, read, since }) {
   for (const row of candidates) {
     if (!callsEnabled()) break;
     let message = callAsMessage(row, row.customer_id);
-    const receipt = { source_type: 'call_log', source_id: row.id, extractor_version: CALL_VERSION, source_hash: callSourceHash(message) };
+    let receipt = { source_type: 'call_log', source_id: row.id, extractor_version: CALL_VERSION, source_hash: callSourceHash(message) };
     try {
-      const customerId = await resolveCallCustomer(conn, row);
+      const ownerId = await callOwnerId(conn, row);
+      const customerId = await resolveCallCustomer(conn, row, ownerId);
       if (customerId === false) { tally.skipped += 1; continue; }
-      message = callAsMessage(row, customerId);
+      message = callAsMessage(row, customerId, ownerId);
+      receipt = { ...receipt, source_hash: callSourceHash(message) };
       if (!callEligible(row) || isInternalTestCustomerId(customerId) || message.message_body.length > MAX_TRANSCRIPT
         || !callFlagsAccess(message.message_body)) {
         // A call corrected out of reach (spam, emptied, no way in named) drops what it filed.
@@ -1255,7 +1287,7 @@ async function runCallsPass({ now, conn, read, since }) {
         const receiptRow = await recordExtractionAttempt({ ...receipt, trx: conn, status: 'failed', error_message: 'access_net_failed' });
         if (receiptRow?.status === 'failed_max_retries') {
           await conn.transaction(async (trx) => {
-            if (await sourceStillCurrent(trx, message, receipt)) await reconcileSource(trx, message, []);
+            if (await sourceStillCurrent(trx, message, receipt, { clearing: true })) await reconcileSource(trx, message, []);
           });
         }
       } catch { /* the next tick retries the same row */ }
@@ -1492,8 +1524,8 @@ const ownsSource = (source, row) => (source.customer_id
   : !row.customer_id || !!row.linked_at);
 async function sourceStillOwned(trx, row) {
   if (row.source_type === 'call' && row.source_id) {
-    const call = await trx('call_log').where({ id: row.source_id }).first('customer_id');
-    return !call || !call.customer_id || call.customer_id === row.customer_id;
+    const call = await trx('call_log').where({ id: row.source_id }).first('customer_id', 'direction', 'from_phone', 'to_phone');
+    return !call || callRowOwned(call, await callOwnerId(trx, call), row);
   }
   if (row.source_type !== 'sms' || !row.source_id) return true;
   const source = await trx('sms_log').where({ id: row.source_id }).first('customer_id');
@@ -1533,9 +1565,9 @@ async function sourceStillSupports(trx, row) {
 // A row's text belongs to the row's customer, or (an office link) the text
 // has no customer and the office linked the row. A text that lost its
 // customer after the row was filed is no longer that customer's evidence.
-// A call's customer may be unset (its row is then the far-end phone's customer,
-// or the office's link): a call that has a customer of its own owns only that
-// customer's rows. (The call is read by its id, which is what the sandbox-call
+// A call's rows belong to its owner now (callOwnerSql: its own customer, else
+// the one customer of the far-end phone), unless the office linked the row to a
+// customer itself while the call has none. (The call is read by its id, which is what the sandbox-call
 // reader guard looks for.)
 const OWNED_SOURCE_SQL = `(a.source_id IS NULL OR (
   (a.source_type <> 'sms' OR NOT EXISTS (
@@ -1544,7 +1576,8 @@ const OWNED_SOURCE_SQL = `(a.source_id IS NULL OR (
       AND NOT (src.customer_id IS NULL AND a.linked_at IS NOT NULL)))
   AND (a.source_type <> 'call' OR NOT EXISTS (
     SELECT 1 FROM call_log src WHERE src.id IN (a.source_id)
-      AND src.customer_id IS NOT NULL AND src.customer_id IS DISTINCT FROM a.customer_id))))`;
+      AND ${callOwnerSql('src')} IS DISTINCT FROM a.customer_id
+      AND NOT (a.linked_at IS NOT NULL AND src.customer_id IS NULL)))))`;
 
 async function listForCustomer(conn, customerId) {
   const rows = await conn('customer_access_codes as a')
@@ -2041,8 +2074,8 @@ async function link(conn, id, { customerId, adminUserId = null } = {}) {
         if (owner && owner.customer_id) return fail(409, 'source_moved');
       }
       if (row.source_type === 'call' && row.source_id) {
-        const call = await trx('call_log').where({ id: row.source_id }).first('customer_id');
-        if (call && call.customer_id) return fail(409, 'source_moved');
+        const call = await trx('call_log').where({ id: row.source_id }).first('customer_id', 'direction', 'from_phone', 'to_phone');
+        if (call && await callOwnerId(trx, call)) return fail(409, 'source_moved');
       }
       if (await codeIsAddress(trx, customerId, row.code)) return fail(409, 'code_is_address');
       const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
@@ -2201,6 +2234,9 @@ module.exports = {
   verifyCallItems,
   spokenNormalize,
   callAsMessage,
+  callSourceHash,
+  callOwnerId,
+  CALL_HASH_SQL,
   CALL_VERSION,
   callsEnabled,
   suggestCustomer,

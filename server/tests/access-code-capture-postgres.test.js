@@ -2602,6 +2602,143 @@ postgres('access codes section', () => {
       });
     });
 
+    describe('the call\'s owner is one rule: its own customer, else the far-end phone\'s', () => {
+      test('a link cleared and the phone now another customer\'s: the old account\'s active code retires with its profile copy, and the new owner gets it', async () => {
+        const a = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: a.id });
+        await sweepCalls(stub([callItem()]));
+        const [row] = await callRows({ source_id: callId });
+        expect((await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        expect((await trx('property_preferences').where({ customer_id: a.id }).first()).neighborhood_gate_code).toBe('#3394');
+        // the office clears the wrong link; the far-end phone is another customer's now
+        await trx('call_log').where({ id: callId }).update({ customer_id: null });
+        await trx('customers').where({ id: a.id }).update({ phone: '+19415550100' });
+        const b = await owner(FAR);
+        // the old row is not the old account's from this moment, before any sweep
+        expect((await access.listForCustomer(trx, a.id)).active).toEqual([]);
+        expect(await sweepCalls(stub([callItem()]))).toMatchObject({ movedRetired: 1, calls: { read: 1, found: 1 } });
+        expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('retired');
+        expect((await trx('property_preferences').where({ customer_id: a.id }).first()).neighborhood_gate_code).toBeNull();
+        expect((await callRows({ customer_id: b.id, status: 'found' }))).toHaveLength(1);
+      });
+
+      test('a found row follows the same rule: hidden at once, then moved to the new owner, or to nobody', async () => {
+        const a = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: a.id });
+        await sweepCalls(stub([callItem()]));
+        await trx('call_log').where({ id: callId }).update({ customer_id: null });
+        await trx('customers').where({ id: a.id }).update({ phone: '+19415550100' });
+        const b = await owner(FAR);
+        expect((await access.listForCustomer(trx, a.id)).found).toEqual([]);
+        expect((await access.listFound(trx)).items.filter((r) => r.sourceId === callId)).toEqual([]);
+        await sweepCalls(stub([callItem()]));
+        expect((await callRows({ source_id: callId, status: 'found' })).map((r) => r.customer_id)).toEqual([b.id]);
+        // the phone now belongs to nobody: the row is filed unlinked under the far-end phone
+        await trx('customers').where({ id: b.id }).update({ phone: '+19415550101' });
+        await sweepCalls(stub([callItem()]));
+        expect((await callRows({ source_id: callId, status: 'found' }))).toEqual([expect.objectContaining({ customer_id: null, sender_phone: FAR })]);
+      });
+
+      test('a phone that now belongs to nobody retires an active code that came by the phone, but not one the office linked', async () => {
+        const phoneOwner = await owner();
+        const linkedTo = await owner('+19415550155');
+        const byPhone = await phoneCall(BOBBY);
+        const stranger = '+19415550166';
+        const byOffice = await phoneCall(BOBBY, { far: stranger });
+        await sweepCalls(stub([callItem()]));
+        const [phoneRow] = await callRows({ source_id: byPhone });
+        const [officeRow] = await callRows({ source_id: byOffice });
+        expect(phoneRow.customer_id).toBe(phoneOwner.id);
+        expect(await access.link(trx, officeRow.id, { customerId: linkedTo.id })).toMatchObject({ ok: true });
+        expect((await access.accept(trx, phoneRow.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        expect((await access.accept(trx, officeRow.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        await trx('customers').where({ id: phoneOwner.id }).update({ phone: '+19415550100' });
+        expect(await sweepCalls(stub([]))).toMatchObject({ movedRetired: 1 });
+        expect((await trx('customer_access_codes').where({ id: phoneRow.id }).first()).status).toBe('retired');
+        expect((await trx('customer_access_codes').where({ id: officeRow.id }).first()).status).toBe('active');
+      });
+    });
+
+    describe('every field that decides eligibility is in the receipt, and the write rechecks it', () => {
+      test('the JavaScript and SQL receipt hashes agree for every shape of call', async () => {
+        const c = await owner();
+        const other = await owner('+19415550133');
+        const ids = [
+          await phoneCall(BOBBY, { customerId: c.id }),
+          await phoneCall(BOBBY),
+          await phoneCall(BOBBY, { far: '+19415550166', direction: 'inbound' }),
+          await phoneCall(BOBBY, { customerId: other.id, processing: 'spam' }),
+          await phoneCall(BOBBY, { transcriptionStatus: 'pending' }),
+          await phoneCall(`Caller: Zoë says “pound”, ünïcode ✓\nAgent: ok`, { transcriptionStatus: null }),
+        ];
+        await trx('call_log').where({ id: ids[1] }).update({ source: 'voice_relay_sandbox' });
+        for (const id of ids) {
+          const row = await trx('call_log').where({ id }).first();
+          const { rows: [sql] } = await trx.raw(`SELECT ${access.CALL_HASH_SQL} AS hash FROM call_log c WHERE c.id = ?`, [id]);
+          const ownerId = await access.callOwnerId(trx, row);
+          expect(access.callSourceHash(access.callAsMessage(row, null, ownerId))).toBe(sql.hash);
+        }
+        // and each field moves the hash
+        const base = await trx('call_log').where({ id: ids[0] }).first();
+        const hash = (patch) => access.callSourceHash(access.callAsMessage({ ...base, ...patch }, null, base.customer_id));
+        for (const patch of [{ transcription_status: 'rejected' }, { processing_status: 'spam' }, { source: 'voice_relay_sandbox' },
+          { to_phone: '+19415550999' }, { from_phone: '+19415550999' }, { direction: 'inbound' }, { transcription: `${base.transcription} ` }]) {
+          expect(hash(patch)).not.toBe(hash({}));
+        }
+      });
+
+      test('a transcript rejected, or a call marked pending, after the read removes what it filed', async () => {
+        const c = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        await sweepCalls(stub([callItem()]));
+        expect(await callRows({ status: 'found' })).toHaveLength(1);
+        await trx('call_log').where({ id: callId }).update({ transcription_status: 'rejected' });
+        expect(await sweepCalls(stub([callItem()]))).toMatchObject({ calls: { scanned: 1, read: 0, skipped: 1 } });
+        expect(await callRows({ status: 'found' })).toEqual([]);
+        expect((await callReceipts(callId)).map((r) => r.status)).toContain('no_fields');
+        // back to completed: read again, filed again (receipts made in one test transaction share a clock, so the newer one is dated later)
+        await trx('data_hygiene_source_extractions').where({ source_id: callId, status: 'no_fields' }).update({ last_attempted_at: trx.raw("now() + interval '1 minute'") });
+        await trx('call_log').where({ id: callId }).update({ transcription_status: 'completed' });
+        await sweepCalls(stub([callItem()]));
+        expect(await callRows({ status: 'found' })).toHaveLength(1);
+        await trx('call_log').where({ id: callId }).update({ transcription_status: 'pending' });
+        await sweepCalls(stub([callItem()]));
+        expect(await callRows({ status: 'found' })).toEqual([]);
+      });
+
+      test.each([
+        ['transcript rejected', { transcription_status: 'rejected' }],
+        ['marked spam', { processing_status: 'spam' }],
+        ['made a sandbox call', { source: 'voice_relay_sandbox' }],
+        ['moved off a Waves line', { from_phone: '+19415550999' }],
+      ])('a call %s during the model read is not filed', async (_name, patch) => {
+        const c = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        const readCall = jest.fn(async () => {
+          await trx('call_log').where({ id: callId }).update(patch);
+          return { items: [callItem()] };
+        });
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { read: 1, found: 0, failed: 0 } });
+        expect(await callRows()).toEqual([]);
+        expect((await callReceipts(callId)).filter((r) => r.status === 'ok')).toEqual([]);
+      });
+
+      test('the call\'s owner changing during the model read is not filed for the old owner', async () => {
+        const a = await owner();
+        const callId = await phoneCall(BOBBY);
+        const b = await owner('+19415550133');
+        const readCall = jest.fn(async () => {
+          await trx('call_log').where({ id: callId }).update({ customer_id: b.id });
+          return { items: [callItem()] };
+        });
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { read: 1, found: 0 } });
+        expect(await callRows({ customer_id: a.id })).toEqual([]);
+        // the next pass reads the call for its new owner
+        expect(await sweepCalls(stub([callItem()]))).toMatchObject({ calls: { found: 1 } });
+        expect((await callRows()).map((r) => r.customer_id)).toEqual([b.id]);
+      });
+    });
+
     describe('failure', () => {
       test('a failed call read never blocks the texts, and is surfaced like a failed text', async () => {
         const c = await owner();
