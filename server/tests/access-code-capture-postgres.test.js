@@ -3216,6 +3216,19 @@ postgres('access codes section', () => {
       });
       const emailSelectFor = (conn) => ['id', 'customer_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at', 'classification', 'label_ids',
         'list_unsubscribe', 'authentication_results', 'gmail_thread_id'].map((c) => `e.${c}`).concat([conn.raw('EXISTS (SELECT 1 FROM bid_opportunity_emails l WHERE l.email_id = e.id) AS bid_filed')]);
+      test('a sender address on two customers: the sync\'s prelinked customer is not trusted: the code is filed unlinked under the address', async () => {
+        const a = await owner(SENDER, { house: '7000' });
+        await owner(SENDER, { house: '7100' });
+        const id = await mail(BODY, { customerId: a.id });
+        const row = await trx('emails as e').where('e.id', id).first(...emailSelectFor(trx));
+        expect(await access.emailOwnerId(trx, row)).toBeNull();
+        const { rows: [sql] } = await trx.raw(`SELECT ${access.EMAIL_HASH_SQL} AS hash FROM emails e WHERE e.id = ?`, [id]);
+        expect(access.emailSourceHash(row, null)).toBe(sql.hash);
+        await sweepEmails(stub([emailItem()]));
+        const rows = await emailRows({ source_id: id });
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ customer_id: null, sender_email: SENDER, status: 'found' });
+      });
 
       test.each([
         ['marked spam', { labels: ['INBOX', 'SPAM'] }],

@@ -1312,19 +1312,23 @@ const emailSelect = (conn) => [...EMAIL_COLUMNS.map((column) => `e.${column}`),
   conn.raw('EXISTS (SELECT 1 FROM bid_opportunity_emails l WHERE l.email_id = e.id) AS bid_filed')];
 
 // ONE ownership resolver for an email (JS: emailOwnerId, SQL: emailOwnerSql, kept
-// identical): the email's own customer (the Gmail sync's match on the sender
-// address), else the one live customer whose address is the sender, else
-// nobody. The sync matches customers.email only, and so does this.
+// identical). A sender address on two or more live customers names nobody: the
+// Gmail sync's emails.customer_id picked one of them at random (.first()), so
+// the row is filed unlinked and the office picks the customer. Otherwise the
+// email's own customer (the sync's match, or an office relink), else the one
+// live customer whose address is the sender, else nobody. customers.email only,
+// as the sync matches.
 const emailSenderSql = (x) => `lower(btrim(coalesce(${x}.from_address, '')))`;
-const emailOwnerSql = (x) => `COALESCE(${x}.customer_id, (SELECT CASE WHEN count(*) = 1 THEN min(k.id::text) END FROM customers k WHERE k.deleted_at IS NULL `
-  + `AND ${emailSenderSql(x)} <> '' AND lower(btrim(coalesce(k.email, ''))) = ${emailSenderSql(x)})::uuid)`;
+const senderCustomersSql = (x, pick) => `(SELECT ${pick} FROM customers k WHERE k.deleted_at IS NULL `
+  + `AND ${emailSenderSql(x)} <> '' AND lower(btrim(coalesce(k.email, ''))) = ${emailSenderSql(x)})`;
+const emailOwnerSql = (x) => `(CASE WHEN ${senderCustomersSql(x, 'count(*)')} > 1 THEN NULL `
+  + `ELSE COALESCE(${x}.customer_id, ${senderCustomersSql(x, 'CASE WHEN count(*) = 1 THEN min(k.id::text) END')}::uuid) END)`;
 async function emailOwnerId(conn, row) {
-  if (row.customer_id) return row.customer_id;
   const sender = emailAddressOf(row);
-  if (!sender) return null;
-  const matches = await conn('customers').whereNull('deleted_at')
-    .whereRaw("lower(btrim(coalesce(email, ''))) = ?", [sender]).limit(2).pluck('id');
-  return matches.length === 1 ? matches[0] : null;
+  const matches = sender ? await conn('customers').whereNull('deleted_at')
+    .whereRaw("lower(btrim(coalesce(email, ''))) = ?", [sender]).limit(2).pluck('id') : [];
+  if (matches.length > 1) return null;
+  return row.customer_id || matches[0] || null;
 }
 
 // An email's receipt covers everything that decides whether and how it is read:
