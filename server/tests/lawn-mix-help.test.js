@@ -83,6 +83,15 @@ describe('entryFor', () => {
     expect(help.entryFor(staged, { name: 'Celsius WG' })).not.toHaveProperty('labelLines');
   });
 
+  test('Celsius under its Envu number (EPA moved 432-1507 to 101563-141) reads the same label lines', () => {
+    const staged = { ratePer1000: 0.085, rateUnit: 'oz', carrierGalPer1000: 1 };
+    const bayer = help.entryFor(staged, { name: 'Celsius WG', epa_reg_number: '432-1507' });
+    const envu = help.entryFor(staged, { name: 'Celsius WG', epa_reg_number: '101563-141' });
+    expect(envu.labelLines).toHaveLength(2);
+    expect(envu.labelLines).toEqual(bayer.labelLines);
+    expect(help.entryFor(staged, { name: 'Celsius WG', epa_reg_number: ' 101563-141 ' }).labelLines).toEqual(bayer.labelLines);
+  });
+
   test('the surfactant entry has a concentration and no carrier of its own', () => {
     expect(help.entryFor({ ratePer1000: null, rateUnit: 'label_rate', carrierGalPer1000: 1, concentration: '0.25% v/v' }, { name: 'NIS' }))
       .toMatchObject({ carrierGalPer1000: null, per1000: null, concentration: '0.25% v/v', note: null });
