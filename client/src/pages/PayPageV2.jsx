@@ -2824,7 +2824,7 @@ export default function PayPageV2() {
               {propertyGroups ? (
                 <DetailBlock label="Service addresses">
                   {propertyGroups.map((group) => (
-                    <div key={group.property_id}>{group.label}</div>
+                    <div key={`${group.property_id}|${group.label}`}>{group.label}</div>
                   ))}
                 </DetailBlock>
               ) : payer && (

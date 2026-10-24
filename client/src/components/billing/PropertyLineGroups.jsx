@@ -25,7 +25,7 @@ export default function PropertyLineGroups({ groups, fmtCurrency }) {
   return (
     <>
       {groups.map((group, groupIdx) => (
-        <React.Fragment key={group.property_id || groupIdx}>
+        <React.Fragment key={`${group.property_id || groupIdx}|${group.label}`}>
           <div
             data-testid="property-group-heading"
             style={{
