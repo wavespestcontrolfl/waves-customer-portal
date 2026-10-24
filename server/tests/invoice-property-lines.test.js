@@ -60,6 +60,25 @@ describe('attachInvoiceLineProperties (write path)', () => {
       .rejects.toMatchObject({ statusCode: 400, code: 'invalid_line_property' });
   });
 
+  test('an edit keeps the frozen snapshot of an unchanged property without reading it; only a changed property is looked up', async () => {
+    const frozen = { address_line1: '1842 Palm Harbor Dr (as invoiced)', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+    const existing = [{ ...service('a', PALM), property_address: frozen }, { ...service('b', PALM), property_address: frozen }];
+    const reads = [];
+    const conn = (table) => { reads.push(table); return fakeConn()(table); };
+    // Line a keeps PALM (frozen snapshot retained, even though the live row differs);
+    // line b moves to BAY (looked up and frozen now).
+    const items = await attachInvoiceLineProperties(conn, CUSTOMER, [service('a', PALM), service('b', BAY), discount('a-d', 'a')], { existingLineItems: existing });
+    expect(items[0].property_address).toEqual(frozen);
+    expect(items[1].property_address).toMatchObject({ address_line1: '410 Bayshore Rd' });
+    expect(items[2]).toMatchObject({ property_id: PALM, property_address: frozen });
+    expect(reads).toEqual(['customer_properties']);
+
+    // Nothing changed → no read at all, so a property edited or removed since never blocks the edit.
+    const neverCalled = () => { throw new Error('no property read expected'); };
+    const same = await attachInvoiceLineProperties(neverCalled, CUSTOMER, existing.map((l) => ({ ...l, property_address: undefined })), { existingLineItems: existing });
+    expect(same.map((l) => l.property_address)).toEqual([frozen, frozen]);
+  });
+
   test('lines without a property pass through unchanged and shed a stale snapshot; no DB read', async () => {
     const neverCalled = () => { throw new Error('no property read expected'); };
     const items = await attachInvoiceLineProperties(neverCalled, CUSTOMER, [

@@ -3070,12 +3070,14 @@ async function calculateUpdateFinancials({
     err.code = "DISCOUNT_STACKING_GATE_DIVERGED";
     throw err;
   }
-  // Multi-property invoices: re-check and re-freeze each line's property link
-  // against the invoice's customer on every line-item edit (400 otherwise).
+  // Multi-property invoices: a line whose property is unchanged keeps the
+  // address frozen at creation; a new or changed property is checked against
+  // the invoice's customer and frozen now (400 otherwise).
   const items = await require("./invoice-property-lines").attachInvoiceLineProperties(
     db,
     invoice?.customer_id || customer?.id || null,
     normalizeInvoiceLineItems(lineItems),
+    { existingLineItems: parseInvoiceLineItems(invoice?.line_items) },
   );
   const subtotal =
     Math.round(

@@ -29,19 +29,44 @@ function cleanPropertyId(value) {
   return id ? id : null;
 }
 
+/** The frozen snapshot a stored line already carries, when it names this same property. */
+function storedSnapshotFor(item, existingByClientId) {
+  const stored = item.client_id ? existingByClientId.get(String(item.client_id)) : null;
+  if (!stored || cleanPropertyId(stored.property_id) !== cleanPropertyId(item.property_id)) return null;
+  const snapshot = stored.property_address;
+  return snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) && snapshot.address_line1
+    ? propertyAddressSnapshot(snapshot)
+    : null;
+}
+
 /**
  * Validates and snapshots the property links on `items` (already normalized
  * line items). Returns a new array; throws a 400 when a property is not the
  * customer's. Lines that name no property lose any stale `property_address`.
+ *
+ * `existingLineItems` (an edit): a line whose property is unchanged keeps the
+ * snapshot it was written with — the document stays historical, and a property
+ * that was since edited or removed never blocks the edit. Only a new or
+ * changed property is looked up.
  */
-async function attachInvoiceLineProperties(conn, customerId, items = []) {
+async function attachInvoiceLineProperties(conn, customerId, items = [], { existingLineItems = [] } = {}) {
+  const existingByClientId = new Map(
+    (Array.isArray(existingLineItems) ? existingLineItems : [])
+      .filter((line) => line && line.client_id && !isDiscountLine(line))
+      .map((line) => [String(line.client_id), line]),
+  );
   const services = items.filter((item) => !isDiscountLine(item));
-  const wanted = [...new Set(services.map((item) => cleanPropertyId(item.property_id)).filter(Boolean))];
+  const snapshots = new Map();
+  for (const item of services) {
+    const kept = storedSnapshotFor(item, existingByClientId);
+    if (kept) snapshots.set(cleanPropertyId(item.property_id), kept);
+  }
+  const wanted = [...new Set(services.map((item) => cleanPropertyId(item.property_id)).filter(Boolean))]
+    .filter((id) => !snapshots.has(id));
   if (wanted.some((id) => !UUID_RE.test(id))) {
     throw linePropertyError('A line item names an invalid property.');
   }
 
-  const snapshots = new Map();
   if (wanted.length) {
     if (!customerId) throw linePropertyError('A line item names a property but the invoice has no customer.');
     const rows = await conn('customer_properties')
