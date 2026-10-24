@@ -151,6 +151,7 @@ const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../s
 const { stripFixedReentryTiming, sanitizeProductTargets, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
 const { reportCleanup1020PdfSignature } = require('../services/service-report/report-cleanup-1020');
+const { reportTemplatePayload } = require('../services/service-report/report-template');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -1132,6 +1133,8 @@ router.get('/project/:token/data', async (req, res, next) => {
         status: upcomingAppointment.status,
       } : null,
       photos: photosWithUrls,
+      // GATE_REPORT_SHARED_TEMPLATE: this page has only the live web view. Absent = byte-identical payload.
+      ...reportTemplatePayload(),
     });
   } catch (err) { next(err); }
 });
@@ -2601,6 +2604,9 @@ router.get('/:token/data', async (req, res, next) => {
       // so the print pipeline stays byte-identical.
       if (mode === 'live') {
         v1Data.glassDefault = true;
+        // GATE_REPORT_SHARED_TEMPLATE: the shared customer header and the stacked layout, live web view
+        // only. Absent = byte-identical payload.
+        Object.assign(v1Data, reportTemplatePayload());
       }
       return res.json(v1Data);
     }
@@ -2630,6 +2636,8 @@ router.get('/:token/data', async (req, res, next) => {
       dryTimes: service.dry_time_data,
       irrigation: service.irrigation_recommendation,
       pdfUrl: `/api/reports/${req.params.token}`,
+      // GATE_REPORT_SHARED_TEMPLATE: live web view only. Absent = byte-identical payload.
+      ...(mode === 'live' ? reportTemplatePayload() : {}),
     });
   } catch (err) {
     // A pin this report cannot legitimately show FAILS the request — never a

@@ -33,10 +33,22 @@ const REPORT = {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('LawnReportViewPage', () => {
+  it('shared template on (reportTemplate beside report): the template class and the shared header with the first name and city', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report: REPORT, reportTemplate: true }) })));
+    const { container } = renderAt();
+    expect(await screen.findByRole('heading', { level: 1, name: /Here's what we saw at your Venice lawn/i })).toBeInTheDocument();
+    expect(container.querySelector('.lawn-report-page')).toHaveClass('customer-report-template');
+    expect([...container.querySelectorAll('.report-header-contact > div')].map(line => line.textContent)).toEqual(['Dana', 'Venice']);
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+  });
+
   it('renders the prospect report from the public payload', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report: REPORT }) })));
-    renderAt();
+    const { container } = renderAt();
     expect(await screen.findByText(/Here's what we saw at your Venice lawn/i)).toBeInTheDocument();
+    // Shared template off (no key): the page keeps its own header.
+    expect(container.querySelector('.lawn-report-page')).not.toHaveClass('customer-report-template');
+    expect(container.querySelector('.report-header')).toBeNull();
     expect(screen.getByText(REPORT.summary)).toBeInTheDocument();
     // The server's overall assessment survives the chip removal as text.
     expect(screen.getByText('Overall: Keep an eye on it')).toBeInTheDocument();

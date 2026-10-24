@@ -59,6 +59,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
+import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
 import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -477,13 +478,11 @@ export function visitTimeLabel(data = {}) {
   return arrived || exited || '';
 }
 
-// Mirrors the estimate hero's phone display: 10-digit US numbers get the
-// (xxx) xxx-xxxx treatment, anything else renders as stored.
-function formatCustomerPhone(phone) {
-  const raw = String(phone || '').replace(/\D/g, '');
-  const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
-  if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
-  return String(phone || '').trim();
+// The greeting's first name. ALL-CAPS records (older customer rows) title-case for display, same rule
+// as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16).
+function greetingFirstName(data) {
+  const raw = reportGreetingFirstName(data) || 'there';
+  return raw.length > 1 && raw === raw.toUpperCase() ? raw[0] + raw.slice(1).toLowerCase() : raw;
 }
 
 // "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
@@ -2780,12 +2779,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
   const readinessBadge = readinessStatusBadge(data.dynamicContext?.reentry, mode, nowMs);
   const smartStatus = smartStatusSummary(data, mode, nowMs);
-  // ALL-CAPS records (older customer rows) title-case for display, same rule
-  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
-  const rawFirstName = reportGreetingFirstName(data) || 'there';
-  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
-    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
-    : rawFirstName;
+  const firstName = greetingFirstName(data);
   const serviceLabel = serviceDisplayName(data);
   // "Quarterly Pest Control Service" → "Quarterly Pest Control" so the
   // headline never reads "... Service service is complete".
@@ -2802,41 +2796,20 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
 
   return (
     <section className="service-report-hero" id="service-status">
-      <div className="service-report-hero-copy">
-        <div className="section-eyebrow">Service report{serviceLabel ? ` \u00B7 ${serviceLabel}` : ''}</div>
-        <h1 className="sr-title">Hi {firstName}, {headline}</h1>
-        {(() => {
-          // Mirrors the estimate header's contact block: each of name / email /
-          // phone / address on its own line, rendered mixed-case ("Chris Whitney",
-          // not "CHRIS WHITNEY" — owner 2026-07-09). Records stored ALL-CAPS
-          // (common on older customer rows) are title-cased for display only.
-          const displayContactLine = (raw) => {
-            const s = String(raw || '').trim();
-            if (!s || s !== s.toUpperCase()) return s;
-            if (s.includes('@')) return s.toLowerCase();
-            return s.toLowerCase()
-              .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
-              .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
-          };
-          // GATE_LAWN_REPORT_STAGE1_FIXES (the server sets lawnStage1Fixes on a lawn report only): the report link can be
-          // shared, so the web hero keeps the name and the service address and leaves out the email and phone. The PDF
-          // prints its own contact block.
-          const hideContact = data.lawnStage1Fixes === true;
-          const contactLines = [
-            data.customerName,
-            hideContact ? null : data.customerEmail,
-            hideContact ? null : formatCustomerPhone(data.customerPhone),
-            data.serviceAddress,
-          ].map(displayContactLine).filter(Boolean);
-          return contactLines.length ? (
-            <div className="service-meta-contact">
-              {contactLines.map((line, index) => (
-                <div key={`${index}-${line}`} className="service-meta-address">{line}</div>
-              ))}
-            </div>
-          ) : null;
-        })()}
-      </div>
+      {/* GATE_LAWN_REPORT_STAGE1_FIXES (the server sets lawnStage1Fixes on a lawn report only): the report link can be
+          shared, so the web hero keeps the name and the service address and leaves out the email and phone. The PDF
+          prints its own contact block. Outside the shared template the header keeps the classes and text it had
+          before: no style reads the report-header-* names outside .customer-report-template. */}
+      <CustomerReportHeader
+        className="service-report-hero-copy"
+        eyebrow={`Service report${serviceLabel ? ` \u00B7 ${serviceLabel}` : ''}`}
+        title={`Hi ${firstName}, ${headline}`}
+        customerName={data.customerName}
+        customerEmail={data.customerEmail}
+        customerPhone={data.customerPhone}
+        address={data.serviceAddress}
+        hideContact={data.lawnStage1Fixes === true}
+      />
       <div data-glass="card" className="service-status-card">
         <div className="service-status-main">
           <div>
@@ -3747,6 +3720,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
           list exposed to assistive tech; each tile is a <div> group wrapper
           (valid dl content per the HTML spec). */}
       <dl
+        className="report-template-stack"
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
@@ -6408,19 +6382,17 @@ function NotFoundState() {
 }
 
 function LegacyReport({ data, token, glass = false }) {
+  // GATE_REPORT_SHARED_TEMPLATE: a live older report takes the shared customer header and the
+  // stacked layout. The older payload carries the customer's name and city, not a street address.
+  const sharedTemplate = glass && sharedReportTemplateActive(data);
   const pdfUrl = `${API_BASE}/reports/${token}`;
-  // ALL-CAPS records (older customer rows) title-case for display, same rule
-  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
-  const rawFirstName = reportGreetingFirstName(data) || 'there';
-  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
-    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
-    : rawFirstName;
+  const firstName = greetingFirstName(data);
   // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
   // sticky header replaces this page-local top bar — rendering both stacked
   // two headers (codex P2, PR #2439). Kept for any standalone render.
   const { inShell } = useWavesShell();
   return (
-    <div style={{ flex: 1, background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, color: glass ? '#04395E' : ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
+    <div className={sharedTemplate ? 'customer-report-template' : undefined} style={{ flex: 1, background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, color: glass ? '#04395E' : ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
       {!inShell ? (
       <header style={{ background: '#fff', borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
@@ -6441,15 +6413,24 @@ function LegacyReport({ data, token, glass = false }) {
       ) : null}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
       <CustomerColumn>
-        <div style={{ padding: '8px 0 24px' }}>
-          <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
-            Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
+        {sharedTemplate ? (
+          <CustomerReportHeader
+            eyebrow={`Service report${data.serviceType ? ` · ${data.serviceType}` : ''}`}
+            title={`Hi ${firstName}, here's your service report!`}
+            customerName={data.customerName}
+            address={data.cityState}
+          />
+        ) : (
+          <div style={{ padding: '8px 0 24px' }}>
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
+              Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
+            </div>
+            <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
+              Hi {firstName}, here's your service report!
+            </h1>
+            {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
           </div>
-          <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
-            Hi {firstName}, here's your service report!
-          </h1>
-          {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
-        </div>
+        )}
         <section data-glass={glass ? 'card' : undefined} style={{ background: glass ? undefined : '#fff', borderRadius: 16, padding: 24, border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}` }}>
           <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
@@ -6537,6 +6518,9 @@ function visualProofMomentIntro(moments = []) {
 }
 
 function ServiceReportV1({ data, token, mode = 'live' }) {
+  // GATE_REPORT_SHARED_TEMPLATE: the live web view takes the shared customer header and the stacked
+  // layout (reportTemplate.css). The PDF document and the static render never do.
+  const sharedTemplate = mode === 'live' && sharedReportTemplateActive(data);
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
   const serviceCoverage = normalizeServiceCoverage(data);
@@ -6768,7 +6752,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     </div>
   );
   return (
-    <div className="service-report-v1">
+    <div className={`service-report-v1${sharedTemplate ? ' customer-report-template' : ''}`}>
       <style>{`
         .service-report-v1 {
           --text: ${ESTIMATE_TEXT};

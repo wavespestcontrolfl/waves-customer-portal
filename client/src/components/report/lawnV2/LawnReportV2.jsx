@@ -262,7 +262,7 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
   const nextVisitText = nextVisitSentence(nextVisit);
   return (
     <Card style={{ background: TAN }}>
-      <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
+      <div className="report-template-column" style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ flex: 'none' }}>
           <ScoreRing value={overallScore} status={status} size={116} />
         </div>
@@ -368,7 +368,7 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
   return (
     <div data-testid="lawn-lead-region">
       <Card style={{ background: TAN, ...(style || {}) }}>
-        <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="report-template-column" style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
           <div style={{ flex: 'none' }}>
             <ScoreRing value={snapshot.overallScore} status={status} size={116} />
           </div>
@@ -536,7 +536,7 @@ function SliderArrow({ dir, onClick, disabled }) {
 // here writes words about a photo. Tap a photo to open it full size.
 function LawnPhotoSetGrid({ set, print }) {
   return (
-    <div data-testid="lawn-photo-set" style={{ display: 'grid', gridTemplateColumns: set.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>
+    <div className="lawn-photo-set-grid report-template-stack report-template-photos" data-testid="lawn-photo-set" style={{ display: 'grid', gridTemplateColumns: set.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>
       {set.map((p, i) => {
         const img = (
           <img
@@ -1256,7 +1256,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
   return (
     <Card>
       <CardTitle>Water This Week</CardTitle>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
+      <div className="lawn-fact-list report-template-stack report-template-facts" style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
         {hasRain ? <><span style={{ color: MUTED }}>Rain</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(rain)}</strong></> : null}
         {hasIrr && irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
         {/* "Not on file" keys off !irrOnFile alone — the no-schedule payload
@@ -1479,7 +1479,7 @@ export function MowingHeightGauge({ mowing = {} }) {
       <CardTitle>Mowing Height</CardTitle>
       {hasGauge ? (
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 16 }}>
+          <div className="lawn-fact-list report-template-stack report-template-facts" style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 16 }}>
             <span style={{ color: MUTED }}>Measured</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(measured)}</strong>
             <span style={{ color: MUTED }}>Ideal range</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(lo)}–{inchLabel(hi)}</strong>
           </div>
@@ -1698,7 +1698,7 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
       <CardTitle sub={print ? 'The first and latest look at the same lawn.' : 'Drag the slider to compare the first and latest look at the same lawn.'}>Your progress</CardTitle>
 
       {print ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div className="report-template-stack report-template-photos" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           {[['First visit', before], ['Now', after]].map(([lbl, f], i) => (
             <figure key={i} style={{ margin: 0, position: 'relative' }}>
               <img src={f.url} alt={lbl} style={{ width: '100%', height: 180, objectFit: 'cover', borderRadius: 10, border: `1px solid ${BORDER}`, display: 'block' }} />

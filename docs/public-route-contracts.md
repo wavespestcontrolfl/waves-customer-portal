@@ -2881,6 +2881,17 @@ Mowing Height table (`HEIGHT_BAND_BY_GRASS`, `turf-height.js`) for the lawn's gr
 own reading, else the turf profile); null for a grass the table does not list. The live web page
 orders and trims the lawn report from the key (a lead is also needed); the PDF document, static
 and SMS renders ignore it, so the lawn PDF signature carries no part for this gate.
+`GATE_REPORT_SHARED_TEMPLATE` (dark, strict `true`, read at call time; gate off leaves every
+payload below byte-identical) adds one optional top-level key, `reportTemplate: true`, to the
+LIVE web payloads of the regular customer reports (`server/services/service-report/report-template.js`):
+`/api/reports/:token/data` in `live` mode only (a `service_report_v1` record and an older record;
+the `pdf`, `static` and `sms_preview` modes, the PDF and every cached PDF key never carry it),
+`/api/reports/project/:token/data` (the page has only the live view), the lawn-diagnostic and
+pest-identifier report GETs (beside `report`, see below), and the staff-only
+`/api/admin/report-preview/:scheduledServiceId/data`. No new route, token, privacy or
+rate-limit surface; nothing about the customer is added or removed. The page prints the pest
+report's customer header and one stacked layout from the key; WDO inspection and pre-treatment
+certificate pages ignore it (the page decides from the report type).
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
@@ -4161,6 +4172,9 @@ success/autoExtended/expiresAt/smsSent/emailSent — no PII),
 diagnostics, strictly whitelisted customer-safe payload — no internal
 scores, raw AI, product names, label constraints, reconciliation/QA
 internals, or tech notes — generic 404 for missing/draft/expired/malformed.
+`GATE_REPORT_SHARED_TEMPLATE` (dark; off leaves the payload unchanged) adds
+top-level `reportTemplate: true` beside `report` and `glassDefault`; `report`
+itself never changes.
 `GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
 for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
 "Based on N photos." from a count of the diagnostic's stored photos (capped at
@@ -4285,7 +4299,9 @@ payload via buildPublicPestReport, generic 404, plus a set-once
 `report_first_viewed_at` funnel stamp. Deliberately NOT behind
 GATE_PEST_IDENTIFIER: sent reports are owner-initiated communications
 (admin manual send works pre-launch), and an invalid token 404s exactly
-like the dark surface — only analyze/claim are gated.)
+like the dark surface — only analyze/claim are gated. `GATE_REPORT_SHARED_TEMPLATE`
+(dark; off leaves the payload unchanged) adds top-level `reportTemplate: true`
+beside `report`; `report` itself never changes.)
 `/api/public/pest-forecast` (+ `/pest-forecast/locations`, `/pest-forecast/nearest`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
 pest-pressure model keyed only on a curated city slug / FL ZIP plus
