@@ -114,9 +114,11 @@ function contactPrefPatchFromBody(updates = {}) {
 
 // The appointment EMAIL's event types (appointment-email.js sendTemplate) →
 // the purpose column they belong to. Cancellation / no-show carry no
-// per-purpose opt-out, for the holder or a contact.
+// per-purpose opt-out, for the holder or a contact. A reschedule follows the
+// confirmation choice, as its text and push do (CONTACT_PUSH_COLUMN).
 const EMAIL_EVENT_COLUMN = {
   'appointment.confirmation': 'appointment_confirmation',
+  'appointment.rescheduled': 'appointment_confirmation',
   'appointment.reminder_72h': 'service_reminder_72h',
   'appointment.reminder_24h': 'service_reminder_24h',
   'appointment.en_route': 'tech_en_route',

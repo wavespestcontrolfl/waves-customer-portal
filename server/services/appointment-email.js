@@ -12,6 +12,8 @@
  *   appointment.reminder_72h
  *   appointment.reminder_24h
  *   appointment.en_route
+ *   appointment.rescheduled, appointment.cancelled (seeded by
+ *   20261025030000_seed_move_notice_email_templates.js; GATE_MOVE_NOTICE_EMAIL)
  *
  * All four are required transactional notices (suppression group
  * transactional_required) so appointment info reaches the customer even if they
@@ -318,7 +320,7 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
   return require('./visit-groups').appointmentSendHeld(scheduledServiceId, renderedSlotMs);
 }
 
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null, stillCurrent }) {
   // Street-level address hold (owner ruling 2026-10-01): no email about a visit that is a live
   // unconfirmed hold until the office confirms. Same predicate as the SMS send step; fails closed.
   const holdVisitId = scheduledServiceId || moveHoldServiceId;
@@ -416,6 +418,10 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         onQueued: async () => {
           if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
           if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
+          // A move notice's own freshness (GATE_MOVE_NOTICE_EMAIL), as of the
+          // handoff: a visit cancelled after its reschedule notice, or restored
+          // after its cancellation notice, makes the email stale. Fails closed.
+          if (stillCurrent && !(await stillCurrent().catch(() => false))) { abortedBy = 'stale_notice'; return false; }
           if (recipient.holder) return true;
           // The slots are re-read as of NOW (codex r27 P2): a contact the
           // holder removed since the recipients resolved is held too.
@@ -704,8 +710,64 @@ async function sendAppointmentNoShowEmail({
   });
 }
 
+// The email version of a reschedule or cancellation text that reached nobody
+// (GATE_MOVE_NOTICE_EMAIL; the caller is appointment-reminders.js
+// deliverMoveNoticeEmail). Same words as the texts. `stillCurrent` is the
+// caller's freshness check, re-run at the dispatch boundary; the reschedule
+// email also quotes a slot, so the shared move-hold guard checks that slot.
+async function sendAppointmentRescheduledEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, arrivalWindow, idempotencyKey, stillCurrent } = {}) {
+  const apptTime = toDate(appointmentTime);
+  if (!apptTime) return { ok: false, reason: 'no_appointment_time' };
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
+  return sendTemplate({
+    customerId,
+    scheduledServiceId,
+    templateKey: 'appointment.rescheduled',
+    eventType: 'appointment.rescheduled',
+    payload: {
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
+      service_type: clean(serviceLabel) || 'service',
+      appointment_day: formatETDay(apptTime),
+      appointment_date: formatETDate(apptTime),
+      arrival_window: clean(arrivalWindow),
+    },
+    idempotencyKey,
+    categories: ['appointment_rescheduled'],
+    triggerEventId: `appointment.rescheduled:${scheduledServiceId}`,
+    metadata: { scheduled_service_id: scheduledServiceId },
+    moveHoldServiceId: scheduledServiceId,
+    renderedSlotMs: apptTime.getTime(),
+    stillCurrent,
+  });
+}
+
+async function sendAppointmentCancelledEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, idempotencyKey, stillCurrent } = {}) {
+  const apptTime = toDate(appointmentTime);
+  if (!apptTime) return { ok: false, reason: 'no_appointment_time' };
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
+  return sendTemplate({
+    customerId,
+    scheduledServiceId,
+    templateKey: 'appointment.cancelled',
+    eventType: 'appointment.cancelled',
+    payload: {
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
+      service_type: clean(serviceLabel) || 'service',
+      appointment_day: formatETDay(apptTime),
+      appointment_date: formatETDate(apptTime),
+    },
+    idempotencyKey,
+    categories: ['appointment_cancelled'],
+    triggerEventId: `appointment.cancelled:${scheduledServiceId}`,
+    metadata: { scheduled_service_id: scheduledServiceId },
+    stillCurrent,
+  });
+}
+
 module.exports = {
   sendAppointmentConfirmationEmail,
+  sendAppointmentRescheduledEmail,
+  sendAppointmentCancelledEmail,
   sendAppointmentReminderEmail,
   sendAppointmentNoShowEmail,
   sendTechEnRouteEmail,

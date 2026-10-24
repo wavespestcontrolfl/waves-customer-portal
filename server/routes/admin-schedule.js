@@ -1401,6 +1401,18 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
 // supersedes every member's own promise from copy about one service — without
 // it, each sibling kept its pre-move window and could raise a false alert
 // against it (codex P1, PR #4403 round 26).
+// The operator's line for a reschedule text that reached nobody. The email
+// version goes first (GATE_MOVE_NOTICE_EMAIL): an email that went out is said
+// plainly, so staff do not chase a customer who was told.
+async function rescheduleTextNotSentError(noticeOutcome, emailArgs) {
+  if (await require('../services/appointment-reminders').deliverMoveNoticeEmail(emailArgs)) {
+    return 'The text could not be delivered, so the customer got the reschedule notice by email.';
+  }
+  return noticeOutcome.retryable === true
+    ? 'customer was not notified: notification preferences could not be read — send the reschedule notice again'
+    : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+}
+
 async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, options = {}) {
   const { expectedPhone, stopWide } = noticeOptions(options, dateStr, startHHMM);
   // Shared belt for every notice path (update-details, bulk reschedule, IB
@@ -1422,6 +1434,8 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
   const AppointmentReminders = require('../services/appointment-reminders');
   const { captureReminderGuards, rearmRescheduleReminderWindows } = require('./admin-dispatch');
   const noticeTime = `${dateStr}T${start}`;
+  // This notice's own stamp: the key of its email version (deliverMoveNoticeEmail).
+  const noticeAt = new Date();
   // Snapshot the just-synced reminder state BEFORE the send — the failure
   // re-arm and the success mark below both guard on it so neither can stomp
   // a newer reschedule that lands during a slow send.
@@ -1491,6 +1505,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           const at = parseETDateTime(`${dateStr}T${start || '08:00'}`);
           return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
         })(),
+        move_notice_at: noticeAt.toISOString(),
       }, {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
@@ -1518,9 +1533,10 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         },
       });
       if (!sent) {
-        error = noticeOutcome.retryable === true
-          ? 'customer was not notified: notification preferences could not be read — send the reschedule notice again'
-          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+        error = await rescheduleTextNotSentError(noticeOutcome, {
+          kind: 'rescheduled', customerId: customer.id, scheduledServiceId: serviceId, apptTime, serviceLabel,
+          arrivalWindow: spokenArrivalWindow(start), noticeAt, sendOutcome: noticeOutcome,
+        });
       }
     }
   } catch (e) {
