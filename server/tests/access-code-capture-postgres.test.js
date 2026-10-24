@@ -2332,4 +2332,318 @@ postgres('access codes section', () => {
     });
   });
 
+  describe('calls', () => {
+    const FAR = '+19415550177';
+    const BOBBY = "Agent: Hey, Bobby, it's Adam with Waves. I'm at your gate.\nCaller: Hi, yeah, it's pound, three three nine four.\nAgent: Three three nine four. Awesome";
+    const BOBBY_QUOTE = "Hi, yeah, it's pound, three three nine four.";
+    const OLD_CALLS = { gate: process.env.GATE_ACCESS_CODES_CALLS, since: process.env.GATE_ACCESS_CODES_CALLS_SINCE };
+    beforeEach(() => {
+      process.env.GATE_ACCESS_CODES_CALLS = 'true';
+      process.env.GATE_ACCESS_CODES_CALLS_SINCE = SINCE;
+    });
+    afterEach(() => {
+      for (const [key, value] of [['GATE_ACCESS_CODES_CALLS', OLD_CALLS.gate], ['GATE_ACCESS_CODES_CALLS_SINCE', OLD_CALLS.since]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    });
+    // The customer helper gives every customer one shared phone; a call is matched by phone, so each gets its own.
+    const owner = async (phone = FAR, opts = {}) => {
+      const c = await customer(opts);
+      await trx('customers').where({ id: c.id }).update({ phone });
+      return c;
+    };
+    const phoneCall = async (transcription, { customerId = null, direction = 'outbound', at = '2040-03-10T15:00:00Z', far = FAR, ours = OUR_NUMBER,
+      processing = 'extraction_failed', transcriptionStatus = 'completed' } = {}) => {
+      const id = randomUUID();
+      await trx('call_log').insert({
+        id, customer_id: customerId, direction, from_phone: direction === 'inbound' ? far : ours, to_phone: direction === 'inbound' ? ours : far,
+        transcription, transcription_status: transcriptionStatus, processing_status: processing, created_at: new Date(at),
+      });
+      return id;
+    };
+    const callItem = (extra = {}) => ({ kind: 'neighborhood_gate', code: '#3394', instructions: null, life: 'standing', quote: BOBBY_QUOTE, ...extra });
+    const sweepCalls = (readCall, read = stub([])) => access.runAccessCodeNet({ now: NOW, conn: trx, read, readCall });
+    const callReceipts = (id) => trx('data_hygiene_source_extractions').where({ source_id: id, source_type: 'call_log', extractor_version: access.CALL_VERSION });
+    const callRows = (extra = {}) => trx('customer_access_codes').where({ source_type: 'call', ...extra }).orderBy('created_at');
+
+    describe('gates', () => {
+      test('off, or with no activation time, a call is never read; the texts still are', async () => {
+        const c = await owner();
+        await phoneCall(BOBBY, { customerId: c.id });
+        const readCall = stub([callItem()]);
+        process.env.GATE_ACCESS_CODES_CALLS = 'false';
+        expect(await sweepCalls(readCall)).not.toHaveProperty('calls');
+        process.env.GATE_ACCESS_CODES_CALLS = 'true';
+        delete process.env.GATE_ACCESS_CODES_CALLS_SINCE;
+        expect(await sweepCalls(readCall)).not.toHaveProperty('calls');
+        process.env.GATE_ACCESS_CODES_CALLS_SINCE = 'yesterday';
+        expect(await sweepCalls(readCall)).not.toHaveProperty('calls');
+        expect(readCall).not.toHaveBeenCalled();
+        expect(await callRows()).toEqual([]);
+      });
+      test('the section gate off stops the calls too', async () => {
+        const c = await owner();
+        await phoneCall(BOBBY, { customerId: c.id });
+        process.env.GATE_ACCESS_CODES_SECTION = 'false';
+        const readCall = stub([callItem()]);
+        expect(await sweepCalls(readCall)).toEqual({ skipped: 'gate_off', movedRetired: 0 });
+        expect(readCall).not.toHaveBeenCalled();
+      });
+      test('calls before the activation time are never read', async () => {
+        const c = await owner();
+        await phoneCall(BOBBY, { customerId: c.id, at: '2039-12-31T23:00:00Z' });
+        const readCall = stub([callItem()]);
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { scanned: 0, read: 0 } });
+        expect(readCall).not.toHaveBeenCalled();
+      });
+      test('calls run when the texts have no activation time', async () => {
+        delete process.env.GATE_ACCESS_CODES_SECTION_SINCE;
+        const c = await owner();
+        await phoneCall(BOBBY, { customerId: c.id });
+        const out = await sweepCalls(stub([callItem()]));
+        expect(out).toMatchObject({ skipped: 'activation_time_required', calls: { read: 1, found: 1 } });
+      });
+    });
+
+    describe('the owner case: a gate code given on an outbound call', () => {
+      test('the code is filed found for the call\'s customer with a call receipt, once', async () => {
+        const c = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        const readCall = stub([callItem()]);
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { scanned: 1, read: 1, found: 1, failed: 0 } });
+        const [row, ...rest] = await callRows();
+        expect(rest).toEqual([]);
+        expect(row).toMatchObject({
+          customer_id: c.id, property_id: c.propertyIds[0], kind: 'neighborhood_gate', code: '#3394', life: 'standing', status: 'found',
+          source_type: 'call', source_id: callId, source_quote: BOBBY_QUOTE,
+        });
+        expect((await callReceipts(callId))[0]).toMatchObject({ status: 'ok', proposal_count: 1 });
+        // read once per extractor version: no second read, and the text receipts are untouched
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { scanned: 0, read: 0 } });
+        expect(readCall).toHaveBeenCalledTimes(1);
+        // and it is on the office's list, with the call as its source
+        const list = await access.listFound(trx);
+        expect(list.items.find((r) => r.sourceId === callId)).toMatchObject({ sourceType: 'call', code: '#3394', customerName: 'Sample Owner' });
+      });
+
+      test('the model got a call context; a read that returns a read-back or a bare code files nothing', async () => {
+        const c = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        const readCall = stub([callItem({ quote: 'Three three nine four. Awesome' }), callItem({ code: '3394' })]);
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { read: 1, found: 0 } });
+        expect(readCall.mock.calls[0][0].message).toMatchObject({ source_kind: 'call', direction: 'outbound', id: callId, customer_id: c.id });
+        expect((await callReceipts(callId))[0].status).toBe('no_fields');
+        expect(await callRows()).toEqual([]);
+      });
+
+      test('a corrected transcript is read again for its new words', async () => {
+        const c = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        const readCall = stub([callItem()]);
+        await sweepCalls(readCall);
+        await trx('call_log').where({ id: callId }).update({ transcription: BOBBY.replace('three three nine four', 'three three nine five') });
+        const second = stub([callItem({ code: '#3395', quote: "Hi, yeah, it's pound, three three nine five." })]);
+        expect(await sweepCalls(second)).toMatchObject({ calls: { scanned: 1, read: 1 } });
+        // the old code is no longer supported by the call: it left the review list, the new one is there
+        expect((await callRows({ status: 'found' })).map((r) => r.code)).toEqual(['#3395']);
+      });
+    });
+
+    describe('which calls are read', () => {
+      test('inbound calls and voicemails, whatever their status, but not spam or unfinished transcripts', async () => {
+        const c = await owner();
+        const inbound = await phoneCall("Caller: Hi, the gate code is star five five one two.", { customerId: c.id, direction: 'inbound', processing: 'processed' });
+        const voicemail = await phoneCall('Hi, it is Sample Owner. The gate code is star five five one two.', { customerId: c.id, direction: 'inbound', processing: 'voicemail' });
+        const spam = await phoneCall('The gate code is five five one two.', { customerId: c.id, direction: 'inbound', processing: 'spam' });
+        const pending = await phoneCall('The gate code is five five one two.', { customerId: c.id, direction: 'inbound', transcriptionStatus: 'pending' });
+        const empty = await phoneCall('   ', { customerId: c.id, direction: 'inbound' });
+        const nothing = await phoneCall(null, { customerId: c.id, direction: 'inbound' });
+        const readCall = jest.fn(async () => ({ items: [] }));
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { scanned: 2, read: 2 } });
+        expect(readCall.mock.calls.map(([context]) => context.message.id).sort()).toEqual([inbound, voicemail].sort());
+        for (const id of [spam, pending, empty, nothing]) expect(await callReceipts(id)).toEqual([]);
+      });
+
+      test('a call whose transcript names no way in is receipted without a read', async () => {
+        const c = await owner();
+        const id = await phoneCall('Agent: Thanks for calling.\nCaller: Can you come Tuesday at four?', { customerId: c.id, direction: 'inbound' });
+        const readCall = stub([callItem()]);
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { scanned: 1, read: 0, skipped: 1 } });
+        expect(readCall).not.toHaveBeenCalled();
+        expect((await callReceipts(id))[0].status).toBe('no_fields');
+      });
+
+      test('a call with our own Waves number as the far end, a sandbox call and an unknown line are not read', async () => {
+        const c = await owner();
+        await phoneCall(BOBBY, { customerId: c.id, far: numbers.locations.sarasota.number });
+        const sandbox = await phoneCall(BOBBY, { customerId: c.id });
+        await trx('call_log').where({ id: sandbox }).update({ source: 'voice_relay_sandbox' });
+        await phoneCall(BOBBY, { customerId: c.id, ours: '+19415550999' });
+        const readCall = stub([callItem()]);
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { read: 0, skipped: 2 } });
+        expect(readCall).not.toHaveBeenCalled();
+        expect(await callRows()).toEqual([]);
+      });
+
+      test('the calls batch is its own: ten calls a pass, oldest first', async () => {
+        const c = await owner();
+        const ids = [];
+        for (let i = 0; i < 12; i += 1) ids.push(await phoneCall(BOBBY, { customerId: c.id, at: `2040-03-10T14:${String(10 + i)}:00Z` }));
+        const readCall = jest.fn(async () => ({ items: [] }));
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { scanned: 10, read: 10 } });
+        expect(readCall.mock.calls[0][0].message.id).toBe(ids[0]);
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { scanned: 2, read: 2 } });
+      });
+    });
+
+    describe('whose code it is', () => {
+      test('a call with no customer is matched by the far-end phone when exactly one live customer has it', async () => {
+        const c = await owner();
+        const callId = await phoneCall(BOBBY);
+        await sweepCalls(stub([callItem()]));
+        expect(await callRows({ source_id: callId })).toEqual([expect.objectContaining({ customer_id: c.id, sender_phone: null })]);
+      });
+
+      test('an inbound call is matched by the caller\'s phone, an outbound call by the number dialled', async () => {
+        const c = await owner();
+        const inbound = await phoneCall('Caller: The gate code is pound three three nine four.', { direction: 'inbound' });
+        await sweepCalls(stub([callItem({ quote: 'The gate code is pound three three nine four.' })]));
+        expect((await callRows({ source_id: inbound }))[0].customer_id).toBe(c.id);
+      });
+
+      test('two customers on one phone, or none, file the code unlinked under the far-end phone', async () => {
+        await owner();
+        await owner();
+        const shared = await phoneCall(BOBBY);
+        const stranger = await phoneCall(BOBBY, { far: '+19415550166' });
+        await sweepCalls(stub([callItem()]));
+        expect((await callRows({ source_id: shared }))[0]).toMatchObject({ customer_id: null, sender_phone: FAR, status: 'found' });
+        expect((await callRows({ source_id: stranger }))[0]).toMatchObject({ customer_id: null, sender_phone: '+19415550166', status: 'found' });
+        // never one of our numbers as the sender
+        expect((await callRows()).map((r) => r.sender_phone)).not.toContain(OUR_NUMBER);
+      });
+
+      test('an unlinked call row is linked by the office, then accepted like any other', async () => {
+        const c = await owner('+19415550155');
+        const callId = await phoneCall(BOBBY);
+        await sweepCalls(stub([callItem()]));
+        const [row] = await callRows({ source_id: callId });
+        expect(row.customer_id).toBeNull();
+        expect(await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: false, code: 'link_required' });
+        expect(await access.link(trx, row.id, { customerId: c.id, adminUserId: ADMIN_ID })).toMatchObject({ ok: true });
+        const accepted = await access.accept(trx, row.id, { adminUserId: ADMIN_ID });
+        expect(accepted).toMatchObject({ ok: true, profileField: 'neighborhood_gate_code' });
+        expect((await trx('property_preferences').where({ customer_id: c.id }).first()).neighborhood_gate_code).toBe('#3394');
+      });
+
+      test('a call that gets its own customer after an unlinked filing refuses the link and files for that customer', async () => {
+        await owner('+19415550155');
+        const other = await owner('+19415550133');
+        const callId = await phoneCall(BOBBY);
+        await sweepCalls(stub([callItem()]));
+        const [row] = await callRows({ source_id: callId });
+        await trx('call_log').where({ id: callId }).update({ customer_id: other.id });
+        expect(await access.link(trx, row.id, { customerId: other.id })).toMatchObject({ ok: false, code: 'source_moved' });
+        // the rows of a moved call leave the list; the next pass files them for the call's customer
+        expect((await access.listFound(trx)).items.filter((r) => r.sourceId === callId)).toEqual([]);
+        expect(await sweepCalls(stub([callItem()]))).toMatchObject({ calls: { found: 1 } });
+        expect((await callRows({ source_id: callId, customer_id: other.id }))).toHaveLength(1);
+      });
+
+      test('an active code from a call that now belongs to another customer is retired by the sweep', async () => {
+        const c = await owner();
+        const other = await owner('+19415550133');
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        await sweepCalls(stub([callItem()]));
+        const [row] = await callRows({ source_id: callId });
+        expect((await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        await trx('call_log').where({ id: callId }).update({ customer_id: other.id });
+        expect(await sweepCalls(stub([]))).toMatchObject({ movedRetired: 1 });
+        expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('retired');
+      });
+    });
+
+    describe('accepting a code from a call', () => {
+      test('a call corrected after the sweep cannot be accepted from a stale page', async () => {
+        const c = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        await sweepCalls(stub([callItem()]));
+        const [row] = await callRows({ source_id: callId });
+        await trx('call_log').where({ id: callId }).update({ transcription: 'Agent: Hello.\nCaller: Wrong number.' });
+        expect(await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: false, code: 'source_changed' });
+        // a spam verdict on the call, same
+        await trx('call_log').where({ id: callId }).update({ transcription: BOBBY });
+        await sweepCalls(stub([callItem()]));
+        await trx('call_log').where({ id: callId }).update({ processing_status: 'spam' });
+        expect(await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: false, code: 'source_changed' });
+      });
+
+      test('a call marked spam later drops what it filed', async () => {
+        const c = await owner();
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        await sweepCalls(stub([callItem()]));
+        expect(await callRows({ status: 'found' })).toHaveLength(1);
+        await trx('call_log').where({ id: callId }).update({ processing_status: 'spam' });
+        expect(await sweepCalls(stub([callItem()]))).toMatchObject({ calls: { scanned: 1, read: 0, skipped: 1 } });
+        expect(await callRows({ status: 'found' })).toEqual([]);
+      });
+
+      test('a standing gate code from a call during a live visit is standing and reaches the visit read after accept', async () => {
+        const c = await owner();
+        const visitId = await visit(c.id, day(0));
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        // the model says "visit"; the call has no temporary words, so the code is standing
+        await sweepCalls(stub([callItem({ life: 'visit' })]));
+        const [row] = await callRows({ source_id: callId });
+        expect(row).toMatchObject({ life: 'standing', scheduled_service_id: null });
+        expect((await access.accept(trx, row.id, { adminUserId: ADMIN_ID })).ok).toBe(true);
+        const read = await access.listForVisit(trx, { headers: {} }, visitId);
+        expect(read.codes.map((r) => r.code)).toContain('#3394');
+      });
+    });
+
+    describe('failure', () => {
+      test('a failed call read never blocks the texts, and is surfaced like a failed text', async () => {
+        const c = await owner();
+        await text(c.id, 'The gate code is #4821');
+        const callId = await phoneCall(BOBBY, { customerId: c.id });
+        const readCall = jest.fn(async () => { throw Object.assign(new Error(`provider said ${BOBBY}`), { code: 'ECONN' }); });
+        const read = stub([gateItem()]);
+        await expect(sweepCalls(readCall, read)).rejects.toMatchObject({
+          code: 'ACCESS_NET_FAILURES', tally: { found: 1, failed: 0, calls: { read: 1, found: 0, failed: 1 } },
+        });
+        // the text was read and filed before the call pass
+        expect(read).toHaveBeenCalledTimes(1);
+        expect((await rows(c.id)).filter((r) => r.source_type === 'sms')).toHaveLength(1);
+        expect((await callReceipts(callId))[0]).toMatchObject({ status: 'failed', attempt_count: 1 });
+        // nothing readable is logged: ids and error codes only
+        const logged = JSON.stringify([...logger.warn.mock.calls, ...logger.error.mock.calls]);
+        expect(logged).toContain(callId);
+        expect(logged).not.toContain('3394');
+        expect(logged).not.toContain('gate');
+        expect(logged).not.toContain('Bobby');
+        // retried up to the cap, then left alone
+        await expect(sweepCalls(readCall)).rejects.toMatchObject({ tally: { calls: { scanned: 1, failed: 1 } } });
+        await expect(sweepCalls(readCall)).rejects.toMatchObject({ tally: { calls: { scanned: 1, failed: 1 } } });
+        expect((await callReceipts(callId))[0].status).toBe('failed_max_retries');
+        expect(await sweepCalls(readCall)).toMatchObject({ calls: { scanned: 0 } });
+      });
+
+      test('a failed calls query is a failed calls pass, not a lost text', async () => {
+        const c = await owner();
+        await text(c.id, 'The gate code is #4821');
+        const guarded = new Proxy(trx, {
+          apply: (target, thisArg, args) => {
+            if (args[0] === 'call_log as c') throw Object.assign(new Error('boom'), { code: 'XX000' });
+            return target(...args);
+          },
+          get: (target, key) => (typeof target[key] === 'function' ? target[key].bind(target) : target[key]),
+        });
+        await expect(access.runAccessCodeNet({ now: NOW, conn: guarded, read: stub([gateItem()]), readCall: stub([]) }))
+          .rejects.toMatchObject({ code: 'ACCESS_NET_FAILURES', tally: { found: 1, calls: { failed: 1 } } });
+        expect((await rows(c.id)).filter((r) => r.source_type === 'sms')).toHaveLength(1);
+      });
+    });
+  });
+
 });
