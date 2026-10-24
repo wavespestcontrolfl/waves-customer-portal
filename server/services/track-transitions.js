@@ -1003,9 +1003,73 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
   return outcome;
 }
 
+// ---- Late GPS arrival (gps-arrival-detector, GATE_GPS_ARRIVAL_LATE_SAMPLES) ----
+// Bouncie can deliver a truck location long after it was taken. The detector
+// then passes opts.lateArrival = { at, enRouteAt, scheduledDate }: `at` is the
+// past instant the truck was at the property; enRouteAt + scheduledDate are
+// the visit attempt it validated (the technician rides expectTechnicianId).
+// It also passes suppressArrivalSms: "has arrived" long after the fact is wrong.
+
+// Why a late arrival cannot land on this freshly loaded row, or null. It must
+// be the exact attempt the detector validated (a reschedule or a restart since
+// is another attempt), an ungrouped row (a grouped stop's siblings would be
+// left behind: visit groups are retired and their fan-out has no late
+// arrival), carry no earlier day's stamps (a late sample never repairs a stale
+// attempt), and have a past instant. Checked on every load, before any write;
+// the flip's CAS then pins the row to this snapshot.
+function lateArrivalRefusal(svc, opts) {
+  const late = opts.lateArrival;
+  if (!late) return null;
+  const at = finiteDate(late.at);
+  if (!at || at.getTime() > Date.now()) return 'late_arrival_time_invalid';
+  if (svc.visit_id) return 'late_arrival_grouped_stop';
+  const expected = finiteDate(late.enRouteAt);
+  const actual = finiteDate(svc.en_route_at);
+  const sameAttempt = expected && actual && expected.getTime() === actual.getTime()
+    && scheduledDayOf(svc) === scheduledDayOf({ scheduled_date: late.scheduledDate });
+  if (!sameAttempt) return 'attempt_changed';
+  return classifyLifecycleEvidence(svc).hasStaleLifecycle ? 'stale_attempt' : null;
+}
+
+// The instant the arrival is stamped with: now, or a late arrival's own time,
+// so arrived_at / actual_start_time / check_in_time give the real time on site.
+function onSiteInstant(opts, now) {
+  return opts.lateArrival ? finiteDate(opts.lateArrival.at) : now;
+}
+
+// A late arrival is handled the moment it is marked: the flip stamps the
+// arrival guard, so no later signal on this attempt (a manual start, a
+// geofence ENTER) texts "has arrived" after the fact.
+function lateArrivalGuard(opts, now) {
+  return opts.lateArrival ? { arrival_sms_sent_at: now } : {};
+}
+
+// The tech board row of the arriving technician: on_site on this visit. A late
+// arrival must not repoint a technician who has moved on, so its write is ONE
+// conditional update that lands only while this visit is still their job.
+async function syncTechOnSite(row, opts, label) {
+  if (!row.technician_id) return;
+  try {
+    await setTechJobStatus({
+      tech_id: row.technician_id,
+      status: 'on_site',
+      current_job_id: row.id,
+      ...(opts.lateArrival ? { ifCurrentJobId: row.id } : {}),
+    });
+  } catch (err) {
+    logger.error(`[track-transitions] tech_status on_site ${label} failed: ${err.message}`);
+  }
+}
+
 /**
  * Phase 1 stub. Phase 2 wires this into geofence dwell detection.
  * Safe to call manually; just flips state when called from en_route.
+ *
+ * opts.lateArrival (GPS sample delivered late, see above): the arrival is
+ * stamped with the sample's time, the arrival guard is stamped handled in the
+ * flip, and the tech board flips only while this visit is still the
+ * technician's current job. A row that is not the validated attempt is
+ * refused (lateArrivalRefusal) before any write.
  */
 async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
@@ -1023,6 +1087,8 @@ async function markOnProperty(serviceId, opts = {}) {
   }
 
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  const lateRefusal = lateArrivalRefusal(svc, opts);
+  if (lateRefusal) return { ok: false, reason: lateRefusal };
   // A technician's own start passes expectTechnicianId: a reassignment that
   // committed after their timer insert must not let the former technician
   // advance the visit or text the customer an arrival naming them (codex
@@ -1140,24 +1206,14 @@ async function markOnProperty(serviceId, opts = {}) {
     } catch (err) {
       logger.error(`[track-transitions] sync on_site status failed: ${err.message}`);
     }
-    if (svc.technician_id) {
-      try {
-        await setTechJobStatus({
-          tech_id: svc.technician_id,
-          status: 'on_site',
-          current_job_id: svc.id,
-        });
-      } catch (err) {
-        logger.error(`[track-transitions] tech_status on_site idempotent sync failed: ${err.message}`);
-      }
-    }
+    await syncTechOnSite(svc, opts, 'idempotent sync');
     emitCustomerTrackRefresh(svc, 'on_property', svc.arrived_at || lifecycleUpdates.arrived_at || new Date());
     arrivalRow = svc;
     claimArrivedAt = svc.arrived_at || lifecycleUpdates.arrived_at || null;
     result = { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   } else {
     const now = new Date();
-    const onSiteUpdates = buildOnSiteLifecycleUpdates(svc, now);
+    const onSiteUpdates = buildOnSiteLifecycleUpdates(svc, onSiteInstant(opts, now));
     // The flip is bound to the observed status/date and full lifecycle
     // snapshot: a reschedule committing after the read can reset the row
     // onto a NEW date with track_state='scheduled', and an id+state match
@@ -1174,6 +1230,7 @@ async function markOnProperty(serviceId, opts = {}) {
         .update({
           track_state: 'on_property',
           ...onSiteUpdates,
+          ...lateArrivalGuard(opts, now),
           updated_at: now,
         });
     });
@@ -1200,43 +1257,22 @@ async function markOnProperty(serviceId, opts = {}) {
       if (opts.expectTechnicianId && String(fresh.technician_id || '') !== String(opts.expectTechnicianId)) {
         return { ok: false, reason: 'technician_changed' };
       }
-      if (fresh?.technician_id && fresh.track_state === 'on_property') {
-        try {
-          await setTechJobStatus({
-            tech_id: fresh.technician_id,
-            status: 'on_site',
-            current_job_id: fresh.id,
-          });
-        } catch (err) {
-          logger.error(`[track-transitions] tech_status on_site race sync failed: ${err.message}`);
-        }
-      }
-      if (fresh?.track_state === 'on_property') {
-        arrivalRow = fresh;
-        claimArrivedAt = fresh.arrived_at || null;
-      }
-      result = { ok: true, state: fresh?.track_state || 'on_property', arrivedAt: fresh?.arrived_at || null };
+      // fresh is on_property here (the miss above returned otherwise).
+      await syncTechOnSite(fresh, opts, 'race sync');
+      arrivalRow = fresh;
+      claimArrivedAt = fresh.arrived_at || null;
+      result = { ok: true, state: 'on_property', arrivedAt: fresh.arrived_at || null };
     } else {
       try {
         await syncOperationalStatus(svc, 'on_site');
       } catch (err) {
         logger.error(`[track-transitions] sync on_site status failed: ${err.message}`);
       }
-      if (svc.technician_id) {
-        try {
-          await setTechJobStatus({
-            tech_id: svc.technician_id,
-            status: 'on_site',
-            current_job_id: svc.id,
-          });
-        } catch (err) {
-          logger.error(`[track-transitions] tech_status on_site sync failed: ${err.message}`);
-        }
-      }
+      await syncTechOnSite(svc, opts, 'sync');
       emitCustomerTrackRefresh(svc, 'on_property', now);
       arrivalRow = svc;
       claimArrivedAt = svc.arrived_at || onSiteUpdates.arrived_at || null;
-      result = { ok: true, state: 'on_property', arrivedAt: now };
+      result = { ok: true, state: 'on_property', arrivedAt: onSiteInstant(opts, now) };
     }
   }
 

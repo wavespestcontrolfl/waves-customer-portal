@@ -40,6 +40,70 @@ describe('tech_status GPS freshness writes', () => {
     expect(sql).not.toContain('INSERT INTO tech_status (tech_id, status, current_job_id, updated_at, location_updated_at)');
   });
 
+  describe('setTechJobStatus ifCurrentJobId (GPS arrival from a late-delivered sample)', () => {
+    // clearAllMocks keeps implementations: drop the table stub for the later tests.
+    afterEach(() => db.mockReset());
+
+    function techStatusTable(rows) {
+      const table = {
+        where: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        returning: jest.fn().mockResolvedValue(rows),
+      };
+      db.mockImplementation((name) => {
+        if (name !== 'tech_status') throw new Error(`Unexpected table ${name}`);
+        return table;
+      });
+      return table;
+    }
+
+    test('without it the write is the same upsert as before, broadcast included', async () => {
+      const io = { to: jest.fn(() => ({ emit: jest.fn() })) };
+      require('../sockets').getIo.mockReturnValue(io);
+      db.raw = jest.fn().mockResolvedValue({ rows: [{ tech_id: 'tech-1', status: 'on_site', current_job_id: 'job-1' }] });
+
+      const row = await techStatus.setTechJobStatus({ tech_id: 'tech-1', status: 'on_site', current_job_id: 'job-1' });
+
+      const [sql, bindings] = db.raw.mock.calls[0];
+      expect(sql).toMatch(/INSERT INTO tech_status \(tech_id, status, current_job_id, updated_at\)/);
+      expect(sql).toMatch(/ON CONFLICT \(tech_id\) DO UPDATE SET/);
+      expect(bindings).toEqual(['tech-1', 'on_site', 'job-1']);
+      expect(db).not.toHaveBeenCalled();
+      expect(row).toMatchObject({ tech_id: 'tech-1', current_job_id: 'job-1' });
+      expect(io.to).toHaveBeenCalledWith(techStatus.ROOM);
+    });
+
+    test('is ONE update bound to the tech still being on that job, never an insert', async () => {
+      const io = { to: jest.fn(() => ({ emit: jest.fn() })) };
+      require('../sockets').getIo.mockReturnValue(io);
+      db.raw = jest.fn();
+      const table = techStatusTable([{ tech_id: 'tech-1', status: 'on_site', current_job_id: 'job-1' }]);
+
+      const row = await techStatus.setTechJobStatus({
+        tech_id: 'tech-1', status: 'on_site', current_job_id: 'job-1', ifCurrentJobId: 'job-1',
+      });
+
+      expect(table.where).toHaveBeenCalledWith({ tech_id: 'tech-1', current_job_id: 'job-1' });
+      expect(table.update).toHaveBeenCalledWith({ status: 'on_site', current_job_id: 'job-1', updated_at: 'NOW()' });
+      expect(db.raw).not.toHaveBeenCalled();
+      expect(row).toMatchObject({ tech_id: 'tech-1', current_job_id: 'job-1' });
+      expect(io.to).toHaveBeenCalledWith(techStatus.ROOM);
+    });
+
+    test('a tech who moved to another job is left alone: nothing changes, nothing is broadcast', async () => {
+      const io = { to: jest.fn(() => ({ emit: jest.fn() })) };
+      require('../sockets').getIo.mockReturnValue(io);
+      techStatusTable([]);
+
+      const row = await techStatus.setTechJobStatus({
+        tech_id: 'tech-1', status: 'on_site', current_job_id: 'job-old', ifCurrentJobId: 'job-old',
+      });
+
+      expect(row).toBeNull();
+      expect(io.to).not.toHaveBeenCalled();
+    });
+  });
+
   test('upsertTechStatus refreshes location_updated_at only when coordinates are supplied', async () => {
     const insert = jest.fn().mockReturnThis();
     const onConflict = jest.fn().mockReturnThis();

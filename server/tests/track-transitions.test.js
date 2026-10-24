@@ -318,6 +318,147 @@ describe('track-transitions lifecycle side effects', () => {
     expect(sendTechArrived).not.toHaveBeenCalled();
   });
 
+  describe('markOnProperty late arrival (GPS sample delivered late, GATE_GPS_ARRIVAL_LATE_SAMPLES)', () => {
+    const at = new Date(Date.now() - 40 * 60 * 1000);
+    const enRouteAt = new Date(Date.now() - 60 * 60 * 1000);
+    // A past schedule day keeps these rows clear of the future-date guard and of
+    // the stale-attempt rule (en_route_at is on or after the scheduled day).
+    const lateSvc = (id, overrides = {}) => ({
+      id,
+      customer_id: 'cust-late',
+      technician_id: 'tech-late',
+      status: 'en_route',
+      track_state: 'en_route',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+      scheduled_date: '2026-10-01',
+      en_route_at: enRouteAt,
+      visit_id: null,
+      ...overrides,
+    });
+    const lateOpts = (overrides = {}) => ({
+      actingTechId: 'tech-late',
+      expectTechnicianId: 'tech-late',
+      suppressArrivalSms: true,
+      lateArrival: { at, enRouteAt, scheduledDate: '2026-10-01', ...overrides },
+    });
+
+    test('stamps the sample time, marks the arrival handled in the same write and sends no text', async () => {
+      const update = query(1);
+      db
+        .mockReturnValueOnce(query(lateSvc('job-l1')))
+        .mockReturnValueOnce(update);
+
+      const result = await trackTransitions.markOnProperty('job-l1', lateOpts());
+
+      expect(result).toMatchObject({ ok: true, state: 'on_property', arrivedAt: at });
+      expect(update.update.mock.calls[0][0]).toMatchObject({
+        track_state: 'on_property',
+        arrived_at: at,
+        actual_start_time: at,
+        check_in_time: at,
+        // handled: a later manual start or geofence ENTER cannot text either
+        arrival_sms_sent_at: expect.any(Date),
+      });
+      expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-l1', fromStatus: 'en_route', toStatus: 'on_site' }));
+      expect(sendTechArrived).not.toHaveBeenCalled();
+    });
+
+    test('flips the tech board with ONE conditional write bound to this visit', async () => {
+      db
+        .mockReturnValueOnce(query(lateSvc('job-l2')))
+        .mockReturnValueOnce(query(1));
+
+      await trackTransitions.markOnProperty('job-l2', lateOpts());
+
+      expect(setTechJobStatus).toHaveBeenCalledTimes(1);
+      expect(setTechJobStatus).toHaveBeenCalledWith({
+        tech_id: 'tech-late',
+        status: 'on_site',
+        current_job_id: 'job-l2',
+        ifCurrentJobId: 'job-l2',
+      });
+    });
+
+    test('a technician who moved on is left alone: the conditional write changes nothing, the arrival stands', async () => {
+      setTechJobStatus.mockResolvedValueOnce(null);
+      db
+        .mockReturnValueOnce(query(lateSvc('job-l3')))
+        .mockReturnValueOnce(query(1));
+
+      const result = await trackTransitions.markOnProperty('job-l3', lateOpts());
+
+      expect(result).toMatchObject({ ok: true, state: 'on_property' });
+      expect(setTechJobStatus.mock.calls[0][0]).toHaveProperty('ifCurrentJobId', 'job-l3');
+    });
+
+    test('the flip is pinned to the validated attempt: its en_route_at and the technician', async () => {
+      const update = query(1);
+      db
+        .mockReturnValueOnce(query(lateSvc('job-l4')))
+        .mockReturnValueOnce(update);
+
+      await trackTransitions.markOnProperty('job-l4', lateOpts());
+
+      expect(update.where).toHaveBeenCalledWith('technician_id', 'tech-late');
+      expect(update.whereRaw).toHaveBeenCalledWith(expect.stringContaining('date_trunc'), ['en_route_at', enRouteAt]);
+      expect(update.whereNull).toHaveBeenCalledWith('arrived_at');
+    });
+
+    test.each([
+      ['restarted since the lookup (a new en_route_at)', { en_route_at: new Date(Date.now() - 5 * 60 * 1000) }, {}, 'attempt_changed'],
+      ['rescheduled to another day since the lookup', { scheduled_date: '2026-10-02' }, {}, 'attempt_changed'],
+      ['rewound to scheduled (en_route_at cleared)', { en_route_at: null, track_state: 'scheduled' }, {}, 'attempt_changed'],
+      ['a grouped stop', { visit_id: 'visit-9' }, {}, 'late_arrival_grouped_stop'],
+      ['an arrival instant in the future', {}, { at: new Date(Date.now() + 60 * 60 * 1000) }, 'late_arrival_time_invalid'],
+      ['an unreadable arrival instant', {}, { at: 'not a time' }, 'late_arrival_time_invalid'],
+      // en route the day BEFORE its scheduled day: a stale attempt a late sample never repairs
+      ['a stale attempt', { en_route_at: new Date('2026-09-30T15:00:00Z') }, { enRouteAt: new Date('2026-09-30T15:00:00Z') }, 'stale_attempt'],
+    ])('refuses %s before any write', async (_label, rowOverrides, lateOverrides, reason) => {
+      db.mockReturnValueOnce(query(lateSvc('job-lr', rowOverrides)));
+
+      const result = await trackTransitions.markOnProperty('job-lr', lateOpts(lateOverrides));
+
+      expect(result).toEqual({ ok: false, reason });
+      expect(db).toHaveBeenCalledTimes(1);
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(setTechJobStatus).not.toHaveBeenCalled();
+      expect(transitionJobStatus).not.toHaveBeenCalled();
+    });
+
+    test('a late arrival that loses the flip to another signal keeps the board write conditional and texts nothing', async () => {
+      const svc = lateSvc('job-l5');
+      db
+        .mockReturnValueOnce(query(svc))
+        .mockReturnValueOnce(query(0))
+        .mockReturnValueOnce(query({ ...svc, track_state: 'on_property', status: 'on_site', arrived_at: new Date() }));
+
+      const result = await trackTransitions.markOnProperty('job-l5', lateOpts());
+
+      expect(result).toMatchObject({ ok: true, state: 'on_property' });
+      expect(setTechJobStatus).toHaveBeenCalledWith(expect.objectContaining({ ifCurrentJobId: 'job-l5' }));
+      expect(sendTechArrived).not.toHaveBeenCalled();
+    });
+
+    test('without lateArrival an arrival is unchanged: stamped now, guard left to the sender, plain board write', async () => {
+      const before = Date.now();
+      const update = query(1);
+      // no en_route_at: a late arrival would be refused, an ordinary one is not fenced
+      db
+        .mockReturnValueOnce(query(lateSvc('job-live', { en_route_at: null })))
+        .mockReturnValueOnce(update);
+
+      const result = await trackTransitions.markOnProperty('job-live', { suppressArrivalSms: true });
+
+      expect(result).toMatchObject({ ok: true, state: 'on_property' });
+      const payload = update.update.mock.calls[0][0];
+      expect(payload).not.toHaveProperty('arrival_sms_sent_at');
+      expect(payload.arrived_at.getTime()).toBeGreaterThanOrEqual(before);
+      expect(result.arrivedAt.getTime()).toBeGreaterThanOrEqual(before);
+      expect(setTechJobStatus.mock.calls[0][0]).toStrictEqual({ tech_id: 'tech-late', status: 'on_site', current_job_id: 'job-live' });
+    });
+  });
+
   test('markOnProperty race-loser still sends the arrival SMS when the flip-winner suppressed it', async () => {
     // A geofence drive-past wins the scheduled->on_property flip with
     // suppressArrivalSms, leaving the guard NULL. A real (non-suppressed)
