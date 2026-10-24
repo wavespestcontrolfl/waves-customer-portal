@@ -921,13 +921,6 @@ function CommercialProposalEditor() {
 
   const downloadPdf = async () => {
     setError(null);
-    // Open the tab synchronously, tied to the click — Safari/iOS and popup
-    // blockers block a window.open issued after the async save/fetch below.
-    const win = window.open('', '_blank');
-    if (win) {
-      win.opener = null;
-      try { win.document.write('Generating proposal PDF…'); } catch { /* about:blank write can throw in some browsers */ }
-    }
     setDownloading(true);
     try {
       // The PDF renders server-side from persisted estimate_data, so save the
@@ -935,7 +928,7 @@ function CommercialProposalEditor() {
       // what's on screen then).
       if (!locked) {
         const saved = await save();
-        if (!saved) { if (win) win.close(); return; }
+        if (!saved) return;
       }
       // The shared adminFetch always parses the body as JSON, which corrupts
       // PDF bytes — raw fetch (same auth header) and read as a blob.
@@ -944,12 +937,20 @@ function CommercialProposalEditor() {
       });
       if (!r.ok) throw new Error(`Could not generate PDF (${r.status})`);
       const blob = await r.blob();
+      // Save a real file (no blank blob tab, no dead link after a minute): a
+      // temporary anchor with a download name, like the bid-form export. The
+      // name is the number the estimate page prints, else a short id.
+      const slug = String(estimate?.estimateSlug || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+      const shortId = String(estimateId || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
       const url = URL.createObjectURL(blob);
-      if (win) win.location = url;
-      else window.open(url, '_blank', 'noopener,noreferrer');
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Waves-Proposal-${slug || shortId || 'copy'}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
     } catch (e) {
-      if (win) win.close();
       setError(e.message);
     } finally {
       setDownloading(false);

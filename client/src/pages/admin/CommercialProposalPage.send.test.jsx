@@ -75,6 +75,49 @@ it('rejects the generated bid when prices change while its response body is down
   expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
 });
 
+it('Download PDF saves a named file from an anchor click and opens no window', async () => {
+  saved.estimate.estimateSlug = 'EST-2026-0001';
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+  const revoke = vi.fn();
+  vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:synthetic-proposal', revokeObjectURL: revoke });
+  const clicked = [];
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click() { clicked.push({ download: this.download, href: this.href }); });
+  fireEvent.click(screen.getByRole('button', { name: /Download PDF/ }));
+  await waitFor(() => expect(clicked).toHaveLength(1));
+  expect(clicked[0]).toEqual({ download: 'Waves-Proposal-EST-2026-0001.pdf', href: 'blob:synthetic-proposal' });
+  expect(open).not.toHaveBeenCalled();
+  // the save-before-download step ran first, then the PDF fetch with the staff token
+  const order = calls.map((call) => (call.method === 'PUT' ? 'save' : call.url.endsWith('/proposal.pdf') ? 'pdf' : null)).filter(Boolean);
+  expect(order).toEqual(['save', 'pdf']);
+  expect(calls.find((call) => call.url.endsWith('/proposal.pdf')).headers.Authorization).toBe('Bearer synthetic-token');
+  expect(document.querySelector('a[download]')).toBeNull();
+});
+
+it('Download PDF falls back to a short id when the estimate has no number, and shows a failed download', async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:synthetic', revokeObjectURL: () => {} });
+  const clicked = [];
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click() { clicked.push(this.download); });
+  fireEvent.click(screen.getByRole('button', { name: /Download PDF/ }));
+  await waitFor(() => expect(clicked).toEqual(['Waves-Proposal-syntheti.pdf']));
+});
+
+it('Download PDF shows the error and saves nothing when the PDF request fails', async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  const base = globalThis.fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => (String(url).endsWith('/proposal.pdf')
+    ? { ok: false, status: 503, json: async () => ({}), blob: async () => new Blob([]) }
+    : base(url, options))));
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  fireEvent.click(screen.getByRole('button', { name: /Download PDF/ }));
+  expect(await screen.findByText('Could not generate PDF (503)')).toBeInTheDocument();
+  expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
+});
+
 it('hides bid controls while disabled and omits fields that an older editor cannot edit', async () => {
   saved.bidToolsEnabled = false;
   mount(); await screen.findByDisplayValue('Synthetic proposal');

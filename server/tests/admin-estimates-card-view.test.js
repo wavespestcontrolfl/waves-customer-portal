@@ -528,6 +528,53 @@ describe('GET /admin/estimates/:id/proposal.pdf billing context', () => {
     expect(mockRenderDocPdf).toHaveBeenCalledTimes(1);
   });
 
+  test.each([
+    ['draft', { status: 'draft' }],
+    ['scheduled', { status: 'scheduled' }],
+  ])('a %s proposal downloads the browser document the email will attach, via the staff-preview pin', async (_name, over) => {
+    mockRenderDocPdf.mockResolvedValueOnce(Buffer.from('%PDF-synthetic'));
+    tableDb({ estimates: [], single: { estimates: base('e-draft', { ...over, estimate_slug: 'EST-2026-0001' }) } });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/e-draft/proposal.pdf`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('application/pdf');
+      expect(res.headers.get('content-disposition')).toBe('attachment; filename="Waves-Proposal-EST-2026-0001.pdf"');
+      expect(Buffer.from(await res.arrayBuffer()).toString()).toBe('%PDF-synthetic');
+    });
+    expect(mockRenderDocPdf).toHaveBeenCalledTimes(1);
+    expect(mockRenderDocPdf).toHaveBeenCalledWith(expect.objectContaining({ id: 'e-draft' }), { staffPreview: true });
+    expect(mockGeneratePdf).not.toHaveBeenCalled();
+  });
+
+  test('a draft without an estimate number downloads under a short id', async () => {
+    mockRenderDocPdf.mockResolvedValueOnce(Buffer.from('%PDF-synthetic'));
+    tableDb({ estimates: [], single: { estimates: base('abcd1234-ffff', { status: 'draft' }) } });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/abcd1234-ffff/proposal.pdf`);
+      expect(res.headers.get('content-disposition')).toBe('attachment; filename="Waves-Proposal-abcd1234.pdf"');
+    });
+  });
+
+  test('a draft whose browser render fails falls back to pdfkit on the live lane', async () => {
+    // default mockRenderDocPdf rejects ("no browser in tests")
+    tableDb({ estimates: [], single: { estimates: base('e-draft', { status: 'draft' }) } });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-draft/proposal.pdf`)).status).toBe(200);
+    });
+    expect(mockRenderDocPdf).toHaveBeenCalledTimes(1);
+    expect(mockGeneratePdf).toHaveBeenCalledTimes(1);
+    expect(billing().resolveProposalBillingContext).toHaveBeenCalledTimes(1);
+  });
+
+  test('an archived draft is never sent to the browser renderer', async () => {
+    tableDb({ estimates: [], single: { estimates: base('e-draft', { status: 'draft', archived_at: '2026-10-01T00:00:00Z' }) } });
+    await withServer(async (baseUrl) => {
+      expect((await fetch(`${baseUrl}/estimates/e-draft/proposal.pdf`)).status).toBe(200);
+    });
+    expect(mockRenderDocPdf).not.toHaveBeenCalled();
+    expect(mockGeneratePdf).toHaveBeenCalledTimes(1);
+  });
+
   test('a quote the public page serves keeps the live lane (the customer\'s copy)', async () => {
     mockView.customerViewable = new Set(['e-live']);
     tableDb({ estimates: [], single: { estimates: base('e-live') } });
