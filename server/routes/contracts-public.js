@@ -15,6 +15,10 @@ const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 // a second literal here) keeps the two in lockstep.
 const { ANNUAL_TEMPLATE_KEY: ANNUAL_TERMITE_TEMPLATE_KEY } = require('../services/termite-annual-activation');
 
+// The commercial proposal agreement's template key (a literal, so this route
+// does not load the service for every other contract).
+const COMMERCIAL_AGREEMENT_TEMPLATE_KEY = 'service_agreement.commercial_pest';
+
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -368,6 +372,18 @@ router.post('/:token/sign', async (req, res, next) => {
         },
       ).catch((notifyErr) => {
         logger.warn(`[contracts-public] countersign bell failed for contract ${signedContract.id}: ${notifyErr.message}`);
+      });
+    }
+
+    // Commercial proposal agreement (GATE_COMMERCIAL_PROPOSAL_SIGN): after the
+    // commit, tell the office the signature is in so they mark the estimate won
+    // and schedule the first visit. The estimate is not touched. Inert for every
+    // other contract: the service reads the estimate marker only an agreement it
+    // issued carries, so a signature collected before a kill still reaches the
+    // office. Never throws out of this route (the service catches and logs).
+    if (signedContract?.id && signedContract.documentTemplateKey === COMMERCIAL_AGREEMENT_TEMPLATE_KEY) {
+      void require('../services/commercial-proposal-agreement').handleAgreementSigned({ contractId: signedContract.id }).catch((err) => {
+        logger.warn(`[contracts-public] commercial agreement signed hook errored for contract ${signedContract.id}: ${err.message}`);
       });
     }
 

@@ -12,6 +12,7 @@ jest.mock('../config/feature-gates', () => ({
   gates: {},
   payAfterFirstVisitLive: () => false,
   pafSetupFeeLive: () => false,
+  commercialProposalSignLive: () => false,
 }));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   getCachedLookup: jest.fn().mockResolvedValue(null),

@@ -46,6 +46,17 @@ describe('resolveDocNextSteps', () => {
     expect(resolve({ cta: { reviewBeforeBooking: true }, acceptanceMode: 'standard_slot_pick' }).variant).toBe('team_confirms');
   });
 
+  it('commercial signing (cta.commercialAgreement.canSign): an authored proposal gets the sign label; nothing else changes', () => {
+    const cta = { quoteRequired: true, commercialAgreement: { canSign: true, state: 'none' } };
+    expect(resolve({ authoredProposal: true, cta })).toEqual({ variant: 'authored_sign', primaryLabel: 'Accept & sign agreement' });
+    // Not offered: no authored proposal, canSign false (no account / already signed), or a terminal state.
+    expect(resolve({ authoredProposal: false, cta }).variant).toBe('team_confirms');
+    expect(resolve({ authoredProposal: true, cta: { ...cta, commercialAgreement: { canSign: false, state: 'signed' } } }))
+      .toEqual({ variant: 'authored', primaryLabel: 'View estimate online' });
+    expect(resolve({ authoredProposal: true, cta: { ...cta, terminalState: 'accepted' } }).variant).toBe('accepted_visit');
+    expect(resolve({ authoredProposal: true, cta: { ...cta, terminalState: 'expired' } })).toEqual({ variant: 'expired', primaryLabel: null });
+  });
+
   it.each(Object.keys(ACCEPT_MODE_LABELS))('open + %s: go ahead with that mode\'s label', (mode) => {
     expect(resolve({ acceptanceMode: mode })).toEqual({ variant: 'go_ahead', primaryLabel: ACCEPT_MODE_LABELS[mode] });
   });

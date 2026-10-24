@@ -78,6 +78,7 @@ const glassAppearanceActive = () => document.documentElement.hasAttribute('data-
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
+import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
 import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
 import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
@@ -9730,6 +9731,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         {data.proposal?.enabled === true
           ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
           : null}
+        {/* "Accept & sign agreement" (GATE_COMMERCIAL_PROPOSAL_SIGN): only when /data carries
+            cta.commercialAgreement — absent with the gate off, so the page is unchanged. */}
+        <CommercialAgreementSign token={token} commercialAgreement={cta?.commercialAgreement} />
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar

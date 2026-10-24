@@ -11,6 +11,7 @@ import ProposalBidForm from '../../components/estimates/ProposalBidForm';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
 import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
 import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
+import { formatETDateTime } from '../../lib/timezone';
 
 // Commercial proposal builder — the full-page surface for authoring the
 // multi-building, per-line-item commercial bid on an estimate (HOAs,
@@ -257,6 +258,8 @@ function CommercialProposalEditor() {
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
   const [prospectBrief, setProspectBrief] = useState(null);
+  // GATE_COMMERCIAL_PROPOSAL_SIGN: { state: 'none' | 'awaiting' | 'signed', since?, signedAt? }; null with the gate off.
+  const [commercialAgreement, setCommercialAgreement] = useState(null);
   const [briefOpen, setBriefOpen] = useState(true);
 
   const locked = lockReason(estimate);
@@ -385,6 +388,7 @@ function CommercialProposalEditor() {
       accessRequirements: p.commercialTerms?.accessRequirements || '',
     });
     setProspectBrief(data.prospectBrief || null);
+    setCommercialAgreement(data.commercialAgreement || null);
     // An already-authored proposal means download/send are meaningful now.
     setSavedOnce(p.enabled === true);
     setLoadedAuthored(p.enabled === true && p.synthesized !== true);
@@ -1772,12 +1776,21 @@ function CommercialProposalEditor() {
             </CardBody>
           </Card>
 
-          {(estimate?.sentAt || estimate?.viewedAt) && (
+          {(estimate?.sentAt || estimate?.viewedAt || commercialAgreement) && (
             <Card>
               <CardBody className="space-y-1 text-12 text-zinc-500">
-                {estimate.sentAt && <div>Sent {new Date(estimate.sentAt).toLocaleString()}</div>}
-                {estimate.viewedAt && <div>Viewed {new Date(estimate.viewedAt).toLocaleString()}</div>}
-                {estimate.acceptedAt && <div>Won {new Date(estimate.acceptedAt).toLocaleString()}</div>}
+                {estimate?.sentAt && <div>Sent {new Date(estimate.sentAt).toLocaleString()}</div>}
+                {estimate?.viewedAt && <div>Viewed {new Date(estimate.viewedAt).toLocaleString()}</div>}
+                {estimate?.acceptedAt && <div>Won {new Date(estimate.acceptedAt).toLocaleString()}</div>}
+                {commercialAgreement && (
+                  <div data-testid="proposal-agreement-status">
+                    {commercialAgreement.state === 'signed'
+                      ? `Agreement signed ${formatETDateTime(commercialAgreement.signedAt, { month: 'short', day: 'numeric', year: 'numeric' })}`
+                      : commercialAgreement.state === 'awaiting'
+                        ? `Agreement awaiting signature since ${formatETDateTime(commercialAgreement.since, { month: 'short', day: 'numeric', year: 'numeric' })}`
+                        : 'Agreement not started'}
+                  </div>
+                )}
               </CardBody>
             </Card>
           )}

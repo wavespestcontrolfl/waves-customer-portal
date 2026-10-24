@@ -5471,6 +5471,17 @@ function bidKitLive() {
   return process.env.GATE_BID_KIT === 'true';
 }
 
+// GATE_COMMERCIAL_PROPOSAL_SIGN read at CALL time, strict `=== 'true'`, dark by default in every environment. The one reader
+// for "Accept & sign agreement" on an authored commercial proposal: POST /api/estimates/:token/commercial-agreement
+// (services/commercial-proposal-agreement.js), the `cta.commercialAgreement` block on GET /:token/data, the sign hook in
+// routes/contracts-public.js and the agreement line on GET /api/admin/estimates/:id/proposal. Off: the route answers the generic 404,
+// /data and the admin read carry nothing new, the sign hook is inert; every surface is byte-identical to before. On, a proposal
+// recipient can sign the Commercial Pest Service Agreement online; the signed copy goes to the customer through the existing
+// signed-contract email. The estimate is never accepted and no visit, invoice or charge is made. Kill: unset.
+function commercialProposalSignLive() {
+  return process.env.GATE_COMMERCIAL_PROPOSAL_SIGN === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -7515,3 +7526,5 @@ module.exports.lawnReclaimedHalfNLive = lawnReclaimedHalfNLive;
 module.exports.mosquitoMistingLive = mosquitoMistingLive;
 // GATE_BID_KIT reader, on its own line so gate PRs never conflict.
 module.exports.bidKitLive = bidKitLive;
+// GATE_COMMERCIAL_PROPOSAL_SIGN reader, on its own line so gate PRs never conflict.
+module.exports.commercialProposalSignLive = commercialProposalSignLive;

@@ -1,5 +1,6 @@
 import React from 'react';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
+import { SIGN_BUTTON_LABEL } from '../components/estimate/CommercialAgreementSign';
 
 // The estimate document's primary action and Next steps copy, derived from the
 // CTA state and the server's acceptance contract (data.estimate.acceptance.mode).
@@ -58,6 +59,9 @@ export function resolveDocNextSteps({ cta = {}, authoredProposal = false, accept
   }
   // Declined and expired estimates refuse acceptance online: no action button.
   if (TERMINAL_VARIANTS[terminal]) return { variant: TERMINAL_VARIANTS[terminal], primaryLabel: null };
+  // GATE_COMMERCIAL_PROPOSAL_SIGN: the server offers online signing (cta.commercialAgreement). The document is a
+  // PDF, so the button is a link to the estimate page, where the sign tap lives.
+  if (authoredProposal && cta.commercialAgreement?.canSign === true) return { variant: 'authored_sign', primaryLabel: SIGN_BUTTON_LABEL };
   if (authoredProposal) return { variant: 'authored', primaryLabel: 'View estimate online' };
   if (cta.quoteRequired === true || cta.reviewBeforeBooking === true) return { variant: 'team_confirms', primaryLabel: 'View estimate online' };
   if (acceptanceMode === 'contact_office') return { variant: 'contact_office', primaryLabel: null };
@@ -97,6 +101,11 @@ const VARIANT_TEXT = {
     <>{WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
       questions and finalize this proposal — or call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
       {' '}Your live estimate stays available at {link(estimateUrl, estimateUrl)}.</>
+  ),
+  authored_sign: ({ estimateUrl, primaryLabel }) => (
+    <>To go ahead, tap <strong>{primaryLabel}</strong> above to review and sign your service agreement online,
+      {' '}or call {WAVES_SUPPORT_PHONE_DISPLAY}. Signing does not start service or bill you; {WAVES_ACCOUNT_MANAGER_FIRST_NAME},
+      {' '}your Waves account manager, follows up to schedule. Your live estimate stays available at {link(estimateUrl, estimateUrl)}.</>
   ),
   team_confirms: ({ estimateUrl }) => (
     <>Our team will confirm the final details and scheduling with you — call {WAVES_SUPPORT_PHONE_DISPLAY} any

@@ -228,7 +228,7 @@
     {
       "router": "server/routes/estimate-public.js",
       "mount": "/api/estimates",
-      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag",
+      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag; commercial-agreement is the same contract behind GATE_COMMERCIAL_PROPOSAL_SIGN",
       "routes": [
         "GET /api/estimates/:token",
         "GET /api/estimates/:token/data",
@@ -239,6 +239,7 @@
         "GET /api/estimates/:token/warranty-comparison/pdf",
         "POST /api/estimates/:token/bundle-inquiry",
         "POST /api/estimates/:token/change-request",
+        "POST /api/estimates/:token/commercial-agreement",
         "POST /api/estimates/:token/extension-request",
         "POST /api/estimates/:token/measurement-review",
         "POST /api/estimates/:token/referral-link",
