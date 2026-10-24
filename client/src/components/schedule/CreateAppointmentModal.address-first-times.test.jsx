@@ -87,6 +87,14 @@ describe('CreateAppointmentModal address-first best times', () => {
     await waitFor(() => expect(screen.queryAllByTestId('availability-hour')).toEqual([]));
   });
 
+  it('collapsing the New customer block drops the chips for its address', async () => {
+    renderModal({ addressFirstTimes: true });
+    pickAddress();
+    await screen.findAllByTestId('availability-hour');
+    fireEvent.click(screen.getByText('+ New customer'));
+    await waitFor(() => expect(screen.queryAllByTestId('availability-hour')).toEqual([]));
+  });
+
   it('gate off: a picked address with no customer searches nothing', async () => {
     renderModal();
     pickAddress();

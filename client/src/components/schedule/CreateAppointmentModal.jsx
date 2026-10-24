@@ -4002,8 +4002,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
   // No customer yet (a new caller): with the gate on, the New customer
-  // block's picked address is the search subject instead.
-  const addressOnlyTimes = addressFirstTimes && !selectedCustomer && !!quickAddTarget;
+  // block's picked address is the search subject instead. Only while the
+  // block is open: collapsing it hides the address, so the chips for it go too.
+  const addressOnlyTimes = addressFirstTimes && !selectedCustomer && showQuickAdd && !!quickAddTarget;
   const bestTimesTarget = addressOnlyTimes ? quickAddTarget : bookingPropertyTarget(selectedBookingProperty);
   // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
   // availability strip (days around the chosen date) instead.
