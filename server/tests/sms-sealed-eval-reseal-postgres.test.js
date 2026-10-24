@@ -230,6 +230,13 @@ jest.setTimeout(180000);
     expect(real).toMatchObject({ reactivated: 5, retired: 2, activeCount: 30 });
   });
 
+  test('dry run and real pass agree when the restored items are the missed-visit cases (none counted twice)', async () => {
+    for (let i = 0; i < 3; i += 1) await addSealed({ facts: missedBlock(), sealedDaysAgo: 20 + i, active: false });
+    for (let i = 0; i < 4; i += 1) await addSealed({ facts: prePortalBlock(), sealedDaysAgo: 31 + i });
+    const real = await parity({ target: 100 });
+    expect(real).toMatchObject({ sealed: 0, reactivated: 3, retired: 0, activeCount: 7 });
+  });
+
   test('the minimum age can be lowered for one pass', async () => {
     await addDraft({ facts: currentBlock(), ageDays: 3 });
     expect((await sealedEval.sealEvalItems({ target: 100, dbi: database })).sealed).toBe(0);

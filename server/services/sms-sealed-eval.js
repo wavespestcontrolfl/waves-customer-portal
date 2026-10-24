@@ -467,16 +467,23 @@ async function rotateIncompatibleItems({ dbi, markers, forbidden }) {
 // automate: retireIncompatibleItems is the only writer of active=false,
 // so every retired row was displaced by a contract, never set aside by a
 // person. Returns the count restored.
-async function restoreCompatibleItems({ dbi, remaining, markers, forbidden, dryRun = false }) {
+async function restoreCompatibleItems({
+  dbi, remaining, markers, forbidden, dryRun = false, planned = new Map(),
+}) {
   if (!(remaining > 0)) return 0;
   const compat = compatibleWhereRaw(markers, forbidden);
   const newestRetired = dbi('sms_sealed_eval_items')
-    .select('id')
+    .select(dryRun ? ['id', 'facts_block'] : 'id')
     .where('active', false)
     .whereRaw(compat.sql, compat.bindings)
     .orderBy('sealed_at', 'desc')
     .limit(remaining);
-  if (dryRun) return ((await newestRetired) || []).length;
+  if (dryRun) {
+    // nothing is written, so the rows a real pass would bring back are remembered by id (`planned`) for the later steps
+    const rows = (await newestRetired) || [];
+    rows.forEach((r) => planned.set(r.id, r.facts_block));
+    return rows.length;
+  }
   const restored = await dbi('sms_sealed_eval_items')
     .whereIn('id', newestRetired)
     .update({ active: true });
@@ -511,7 +518,10 @@ async function sealEvalItems({
   let remaining = target - Number(compatibleCount);
   // retired items the current contract matches come back before any new
   // draft is sealed; only the rest of the shortfall is sourced fresh
-  let reactivated = await restoreCompatibleItems({ dbi, remaining, markers, forbidden, dryRun });
+  const plannedRestores = new Map(); // dry run only: id -> facts_block of the retired rows a real pass would reactivate
+  let reactivated = await restoreCompatibleItems({
+    dbi, remaining, markers, forbidden, dryRun, planned: plannedRestores,
+  });
   remaining -= reactivated;
   let activeAfterRestore = Number(activeCount) + reactivated;
   // Real MISSED VISIT cases the version needs (versionNeedsMissedCases) are sealed
@@ -520,7 +530,8 @@ async function sealEvalItems({
   let missedShort = 0;
   if (versionNeedsMissedCases(sealVersion)) {
     const held = ((await dbi('sms_sealed_eval_items').where('active', true)
-      .whereRaw(compat.sql, compat.bindings).select('facts_block')) || []).filter((i) => hasRenderedMissedCase(i.facts_block)).length;
+      .whereRaw(compat.sql, compat.bindings).select('facts_block')) || []).filter((i) => hasRenderedMissedCase(i.facts_block)).length
+      + [...plannedRestores.values()].filter((f) => hasRenderedMissedCase(f)).length;
     missedShort = Math.max(0, SEALED_EVAL_MISSED_CASES_MIN - held);
     // Retired compatible MISSED VISIT cases come back first (a prompt rollback and
     // return leaves them inactive, and the candidate anti-join never re-seals a
@@ -529,7 +540,7 @@ async function sealEvalItems({
     if (missedShort > 0) {
       const retiredMissed = ((await dbi('sms_sealed_eval_items').where('active', false)
         .whereRaw(compat.sql, compat.bindings).orderBy('sealed_at', 'desc').select('id', 'facts_block')) || [])
-        .filter((i) => hasRenderedMissedCase(i.facts_block)).slice(0, missedShort).map((i) => i.id);
+        .filter((i) => !plannedRestores.has(i.id) && hasRenderedMissedCase(i.facts_block)).slice(0, missedShort).map((i) => i.id);
       if (retiredMissed.length) {
         const back = dryRun ? retiredMissed.length
           : Number(await dbi('sms_sealed_eval_items').whereIn('id', retiredMissed).where('active', false).update({ active: true })) || 0;
