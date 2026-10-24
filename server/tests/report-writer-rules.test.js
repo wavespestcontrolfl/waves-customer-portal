@@ -846,6 +846,13 @@ describe('product facts for the pest writer', () => {
       expect(withNamed([ALPINE_KITCHEN], named('Ghost ants in the kitchen'))).toContain('its label lists ants.');
     });
 
+    test('a species a label covers only in part is an exception too (Advion Ant Gel: foraging fire ants only)', () => {
+      const gel = app('Advion Ant Bait Gel', 'bait application', 'bait_placement', 'Kitchen', []);
+      expect(withNamed([gel], named('Fire ants by the patio'))).toBeNull();
+      expect(withNamed([gel], named('Ghost ants on the counter'))).toContain('its label lists ghost ants.');
+      expect(findReportProductCopyEntry({ name: 'Advion Ant Bait Gel' }).labelPestsExcept).toEqual(['Fire ants']);
+    });
+
     test('a product with no main pests gets a line only when its label names a pest named today', () => {
       const demand = app('Demand CS', 'insect-control application', 'perimeter_spray', 'Eaves / soffits', []);
       expect(withNamed([demand], null)).toBeNull();

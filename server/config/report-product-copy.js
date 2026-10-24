@@ -29,8 +29,9 @@
  *                    "labels go"). Read only by the AI report writer's
  *                    PRODUCT FACTS, and only for a pest the technician named
  *                    today (GATE_PEST_LABEL_FACTS); never printed as a list.
- *   labelPestsExcept — species the label leaves out by name; they never fall
- *                    back to their group.
+ *   labelPestsExcept — species the label leaves out by name, or covers only
+ *                    in part ("foraging red imported fire ants"); they never
+ *                    fall back to their group.
  *
  * Matched PRIMARILY by EPA registration number (the number printed on the
  * label itself, so it survives any catalog display-name spelling), read off
@@ -119,6 +120,8 @@ const REPORT_PRODUCT_COPY = [
     // Pests its current EPA label names, for the writer's "its label lists" fact
     // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 053883-00279-20200617 (2020-06-17).
     // Ants, cockroaches and spiders appear only as closed lists of species, so no group term.
+    // Widow spiders appear only as black widows, so they are an exception.
+    labelPestsExcept: ['Widow spiders'],
     labelPests: ['Big-headed ants', 'Crazy ants', 'Carpenter ants', 'Argentine ants', 'Pharaoh ants', 'Smokybrown cockroaches', 'Australian cockroaches', 'silverfish', 'millipedes', 'centipedes', 'Paper wasps', 'Yellowjackets'],
     petsKids: 'Keep people and pets off treated areas until the spray has dried.',
   },
@@ -206,8 +209,10 @@ const REPORT_PRODUCT_COPY = [
     // Narrow bait product (owner ruling 2026-09-29): no line.
     // Pests its current EPA label names, for the writer's "its label lists" fact
     // (GATE_PEST_LABEL_FACTS; label-pest-facts.js). EPA PPLS 000100-01498-20200417 (2020-04-17).
-    // Fire ants are limited to foraging red imported fire ants, so not listed.
+    // Fire ants are limited to foraging red imported fire ants, so they are an
+    // exception and never fall back to "ants".
     labelPests: ['ants', 'Ghost ants', 'Big-headed ants', 'Crazy ants', 'White-footed ants', 'Carpenter ants', 'Argentine ants', 'Pharaoh ants', 'Rover ants'],
+    labelPestsExcept: ['Fire ants'],
     petsKids: 'Leave the placements undisturbed.',
   },
   {
