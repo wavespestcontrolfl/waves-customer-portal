@@ -1199,6 +1199,10 @@ router.post('/sms', async (req, res) => {
       res.once('finish', () => {
         void require('../services/lead-call-reply-ring').ringForCallReply(ringInput)
           .catch((err) => logger.warn(`[lead-call-reply-ring] post-ack ring failed: ${err.code || err.name || 'error'}`));
+        // GATE_LEAD_CALL_TEXT_FOLLOWUP: the TEXT answer, the night CALL time
+        // ask and the time reply (services/lead-call-text-followup.js).
+        void require('../services/lead-call-text-followup').handleLeadReply(ringInput)
+          .catch((err) => logger.warn(`[lead-call-text-followup] post-ack follow-up failed: ${err.code || err.name || 'error'}`));
       });
     }
 

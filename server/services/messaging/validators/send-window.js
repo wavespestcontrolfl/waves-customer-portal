@@ -132,6 +132,10 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'estimate_accept_onetime_confirmed',
   'estimate_deposit_receipt',
   'estimate_service_details_send',
+  // Owner 2026-10-24: the answer to a lead's own CALL / TEXT reply (which
+  // service, what time tomorrow, the booked-time confirmation) goes out at
+  // once, at any hour: the lead just texted us (lead-call-text-followup.js).
+  'lead_call_text_followup',
   'lead_response_auto_reply',
   'lead_webhook_auto_reply',
   // Owner ruling 2026-09-28: a caller reaching out to us — a missed call or
