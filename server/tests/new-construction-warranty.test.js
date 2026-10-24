@@ -407,12 +407,14 @@ describe('method wording (soil, Bora-Care only, soil + Bora-Care)', () => {
     product_name: 'Termidor SC', active_ingredient: 'fipronil', concentration_pct: '0.06', gallons_applied: '180', square_footage: '1800',
     applicator_name: 'Sam Tester', applicator_fdacs_id: 'JF000000', warranty_type: 'Builder 1-year, renewable yearly to year 5', wdo_target: ['Subterranean termites'],
   };
+  // As the certificate form records Bora-Care: the product picker's chemistry
+  // and no concentration or gallons (the form clears both for it).
   const boraCare = {
-    ...soil, treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care', active_ingredient: 'Disodium octaborate tetrahydrate 40%',
-    epa_registration: '64405-1', concentration_pct: '23', gallons_applied: '40', square_footage: '2400', wdo_target: ['Formosan subterranean termites'],
+    ...soil, treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care', active_ingredient: 'Disodium octaborate tetrahydrate 40.0%',
+    epa_registration: '64405-1', concentration_pct: '', gallons_applied: '', square_footage: '2400', wdo_target: ['Formosan subterranean termites'],
     framing_inspection_date: '2026-09-28', wood_base_plate_pct: '85',
   };
-  const secondary = { treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care', epa_registration: '64405-1', active_ingredient: 'disodium octaborate tetrahydrate', concentration_pct: '23%', gallons_applied: '30 gallons', square_footage: '1,800' };
+  const secondary = { treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care', epa_registration: '64405-1', active_ingredient: 'Disodium octaborate tetrahydrate 40.0%', concentration_pct: '', gallons_applied: '', square_footage: '1,800' };
   const combined = { ...soil, additional_applications: [secondary], borate_treatment_date: '2026-10-15' };
   const office = {
     warranty: { structures: 'The new home', notice_location: 'beside the electric panel', payer: 'Owner Test', treatment_price: '$1,250.00', plan_price: 'Included in the treatment price', renewal_fee: '99', consumer_notice_date: '09/01/2026' },
@@ -445,8 +447,8 @@ describe('method wording (soil, Bora-Care only, soil + Bora-Care)', () => {
 
   test('Bora-Care only prints its own paragraph and conditions, and runs from its one treatment date', async () => {
     const v = await issue(boraCare);
-    expect(v.treatment).toMatchObject({ product: 'Bora-Care', active_ingredient: 'Disodium octaborate tetrahydrate 40%' });
-    expect(v.treatment.description).toBe('A preventive borate wood treatment for subterranean termites during construction, applied to the structural wood as the primary treatment, as its label directs (Florida Building Code 1816.1 / R318.1; Rule 5E-14.106(6), F.A.C.). No termite infestation was known to be present. No soil-applied termiticide barrier was installed under or around the foundation. Product: Bora-Care (disodium octaborate tetrahydrate), EPA Reg. No. 64405-1, at 23% · 40 gallons · 2400 sq ft · N/A linear ft. Treatment date: 10/01/2026, after the final framing inspection on 09/28/2026. Wood base plates: 85% of all base plates. Applicator: Sam Tester, ID card JF000000.');
+    expect(v.treatment).toMatchObject({ product: 'Bora-Care', active_ingredient: 'Disodium octaborate tetrahydrate 40.0%' });
+    expect(v.treatment.description).toBe('A preventive borate wood treatment for subterranean termites during construction, applied to the structural wood as the primary treatment, as its label directs (Florida Building Code 1816.1 / R318.1; Rule 5E-14.106(6), F.A.C.). No termite infestation was known to be present. No soil-applied termiticide barrier was installed under or around the foundation. Product: Bora-Care (disodium octaborate tetrahydrate), EPA Reg. No. 64405-1, mixed as its label directs. Area treated: 2400 sq ft. Treatment date: 10/01/2026, after the final framing inspection on 09/28/2026. Wood base plates: 85% of all base plates. Applicator: Sam Tester, ID card JF000000.');
     expect(v.conditions.first).toMatch(/^Wood added, replaced or exposed after our treatment is not treated\./);
     expect(v.warranty).toMatchObject({ start_basis: 'initial', start_date: '10/01/2026', term_end: '10/01/2027' });
     const body = render(BODY_V9, v);
@@ -455,14 +457,23 @@ describe('method wording (soil, Bora-Care only, soil + Bora-Care)', () => {
     expect(body.body).not.toMatch(/final exterior treatment|preventive soil treatment/i);
     // A builder lot has no later visit to wait for: its one treatment is its final one.
     await expect(issue(boraCare, master)).resolves.toMatchObject({ warranty: { start_basis: 'final', start_date: '10/01/2026' } });
-    // Version 8's soil paragraph cannot render a Bora-Care job.
-    expect(render(BODY_V8, v).unresolvedVariables).toEqual(['treatment.final_exterior_line']);
+    // Version 8's soil paragraph cannot render a Bora-Care job, even one
+    // with hand-typed amounts: its final exterior line stays blank.
+    expect(render(BODY_V8, v).unresolvedVariables).toContain('treatment.final_exterior_line');
+    expect(render(BODY_V8, await issue({ ...boraCare, concentration_pct: '23', gallons_applied: '40' })).unresolvedVariables).toEqual(['treatment.final_exterior_line']);
   });
 
   test('Bora-Care only refuses what its label does not allow, with no override', async () => {
-    for (const ok of [{ wood_base_plate_pct: '60' }, { wood_base_plate_pct: '100%' }, { framing_inspection_date: '2026-10-01' }, { borate_treatment_date: '2026-10-01' }, { product_name: 'Other', product_name_other: 'bora-care', active_ingredient: '' }]) {
-      await expect(issue({ ...boraCare, ...ok })).resolves.toBeTruthy();
+    for (const ok of [
+      { wood_base_plate_pct: '60' }, { wood_base_plate_pct: '100%' }, { framing_inspection_date: '2026-10-01' }, { borate_treatment_date: '2026-10-01' },
+      { product_name: 'Other', product_name_other: 'bora-care', active_ingredient: '' },
+      // A linear-feet-only record, and a hand-typed amount the form would clear: neither changes the text's product line.
+      { square_footage: '', linear_feet: '220 LF' }, { concentration_pct: '23', gallons_applied: '40' },
+    ]) {
+      const v = await issue({ ...boraCare, ...ok });
+      expect(v.treatment.description).toContain('EPA Reg. No. 64405-1, mixed as its label directs. Area treated: ');
     }
+    expect((await issue({ ...boraCare, square_footage: '', linear_feet: '220 LF' })).treatment.description).toContain('Area treated: 220 linear ft.');
     for (const [bad, said] of [
       [{ wood_base_plate_pct: '59.9' }, 'under 60%'],
       [{ wood_base_plate_pct: '' }, 'wood base plates'],
@@ -475,6 +486,8 @@ describe('method wording (soil, Bora-Care only, soil + Bora-Care)', () => {
       [{ product_name: 'Termidor SC' }, 'written for Bora-Care'],
       [{ active_ingredient: 'fipronil' }, 'does not match Bora-Care'],
       [{ epa_registration: '7969-210' }, '64405-1'],
+      [{ square_footage: '', linear_feet: '' }, 'square_footage or linear_feet'],
+      [{ square_footage: 'the whole house' }, 'square_footage'],
     ]) {
       await expect(issue({ ...boraCare, ...bad })).rejects.toMatchObject({ status: 409, message: expect.stringContaining(said) });
     }
@@ -483,7 +496,7 @@ describe('method wording (soil, Bora-Care only, soil + Bora-Care)', () => {
   test('soil + Bora-Care prints Bora-Care as the secondary treatment on its own date, with soil conditions', async () => {
     const v = await issue(combined);
     expect(v.treatment.description).toMatch(/^A preventive soil treatment for subterranean termites during construction\./);
-    expect(v.treatment.description).toMatch(/ Applicator: Sam Tester, ID card JF000000\. Secondary treatment \(Rule 5E-14\.106\(9\), F\.A\.C\.\): Bora-Care \(disodium octaborate tetrahydrate\), EPA Reg\. No\. 64405-1, at 23% · 30 gallons · 1,800 sq ft, applied to the structural wood as its label directs on 10\/15\/2026\.$/);
+    expect(v.treatment.description).toMatch(/ Applicator: Sam Tester, ID card JF000000\. Secondary treatment \(Rule 5E-14\.106\(9\), F\.A\.C\.\): Bora-Care \(disodium octaborate tetrahydrate\), EPA Reg\. No\. 64405-1, mixed as its label directs and applied to the structural wood on 10\/15\/2026\. Area treated: 1,800 sq ft\.$/);
     expect(v.conditions.first).toMatch(/^The final exterior treatment must be completed before the building is occupied\./);
     expect(v.conditions.third).toMatch(/^Call us before work that disturbs treated soil\..*This does not reduce the coverage of the soil barrier\.$/);
     expect(render(BODY_V9, v).unresolvedVariables).toEqual([]);
@@ -496,8 +509,10 @@ describe('method wording (soil, Bora-Care only, soil + Bora-Care)', () => {
       [{ borate_treatment_date: '2026-09-30' }, 'between the treatment date and today'],
       [{ borate_treatment_date: '2099-01-01' }, 'between the treatment date and today'],
       [{ additional_applications: [{ ...secondary, product_name: 'Termidor SC' }] }, 'written for Bora-Care'],
-      [{ additional_applications: [{ ...secondary, gallons_applied: '0' }] }, 'gallons_applied'],
+      [{ additional_applications: [{ ...secondary, square_footage: '' }] }, 'square_footage or linear_feet'],
       [{ additional_applications: [{ ...secondary, concentration_pct: 'full strength' }] }, 'concentration_pct'],
+      // The soil barrier is still a liquid: its concentration and gallons stay required.
+      [{ gallons_applied: '' }, 'gallons_applied'],
     ]) {
       await expect(issue({ ...combined, ...bad })).rejects.toMatchObject({ status: 409, message: expect.stringContaining(said) });
     }
