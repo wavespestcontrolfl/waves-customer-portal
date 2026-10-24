@@ -53,6 +53,8 @@ function fakeDb(tables, reads = []) {
     reads.push(table);
     let rows = tables[table] || [];
     const sorts = [];
+    let lim = Infinity;
+    let off = 0;
     const sorted = () => [...rows].sort((a, b) => {
       for (const [col, dir] of sorts) {
         if (a[col] === b[col]) continue;
@@ -64,10 +66,11 @@ function fakeDb(tables, reads = []) {
       where(cond) { if (cond && typeof cond === 'object') rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
       whereIn(col, values) { rows = rows.filter((r) => values.includes(r[col])); return q; },
       orderBy(col, dir = 'asc') { sorts.push([col, dir]); return q; },
-      limit(n) { rows = sorted().slice(0, n); return q; },
+      limit(n) { lim = n; return q; },
+      offset(n) { off = n; return q; },
       forShare() { return q; },
       first: async () => sorted()[0],
-      select: async () => sorted().map((r) => ({ ...r })),
+      select: async () => sorted().slice(off, off + lim).map((r) => ({ ...r })),
       columnInfo: async () => Object.fromEntries((tables.__columns?.[table] || []).map((c) => [c, {}])),
     };
     return q;
@@ -286,6 +289,88 @@ describe('Update Details (item 5): the same resolver on a visit edit', () => {
   test('another add-on on the same save is unchanged', async () => {
     const { normalizedAddons } = await normalize([newLine(), { serviceId: PEST.id, name: 'Pest Control', basePrice: 40, recurringPattern: 'quarterly' }]);
     expect(normalizedAddons[1]).toMatchObject({ serviceKey: 'pest_control', base: 40, price: 40, serviceName: 'Pest Control', recurringPattern: 'quarterly' });
+  });
+});
+
+describe('Update Details that moves the visit to another house prices the refill for the destination', () => {
+  const VISIT = 'visit-1';
+  const OTHER = 'prop-other';
+  const tables = (over = {}) => ({
+    ...baseTables({
+      estimates: [accepted('natural'), accepted('premium', { id: 'est-other', property_id: OTHER, accepted_at: '2026-10-05T00:00:00Z' })],
+      customer_properties: [{ id: HOUSE, customer_id: CUSTOMER.id, active: true }, { id: OTHER, customer_id: CUSTOMER.id, active: true }],
+    }),
+    __columns: { scheduled_services: ['id', 'customer_id', 'property_id', 'source_estimate_id', 'service_id', 'service_key_snapshot'] },
+    scheduled_services: [{ id: VISIT, customer_id: CUSTOMER.id, property_id: HOUSE, source_estimate_id: null, service_id: PLAN.id, service_key_snapshot: PLAN.service_key }],
+    scheduled_service_addons: [],
+    ...over,
+  });
+  const normalize = (extra = {}, t = tables()) => normalizeUpdateDetailsAddons({
+    db: fakeDb(t), id: VISIT, addons: [{ serviceId: REFILL_ID, name: REFILL.name, basePrice: 129 }], updates: {}, isRecurring: false,
+    serviceType: PLAN.name, scheduledDate: '2026-11-03', ...extra,
+  });
+
+  test('no move: priced for the house the visit is at', async () => {
+    expect((await normalize()).normalizedAddons[0]).toMatchObject({ price: 219, refillPricedForProperty: HOUSE });
+  });
+
+  test('a move in the same save: priced for the destination, and tagged with it', async () => {
+    expect((await normalize({ propertyId: OTHER })).normalizedAddons[0]).toMatchObject({ price: 319, refillPricedForProperty: OTHER });
+  });
+
+  test('a destination with no accepted misting estimate refuses instead of keeping the old house\'s price', async () => {
+    await expect(normalize({ propertyId: OTHER }, tables({ estimates: [accepted('natural')] }))).rejects.toMatchObject({ code: 'MISTING_REFILL_UNPRICED' });
+  });
+
+  test('only a refill priced now carries the tag; other lines and kept-stored refills do not', async () => {
+    const out = await normalize({}, tables());
+    expect(Object.keys(out.normalizedAddons[0])).toContain('refillPricedForProperty');
+    const pest = await normalizeUpdateDetailsAddons({
+      db: fakeDb(tables()), id: VISIT, addons: [{ serviceId: PEST.id, name: 'Pest Control', basePrice: 40 }], updates: {}, isRecurring: false, serviceType: PLAN.name, scheduledDate: '2026-11-03',
+    });
+    expect(Object.keys(pest.normalizedAddons[0])).not.toContain('refillPricedForProperty');
+  });
+
+  describe('assertRefillPropertyCurrent: the price is re-checked against the house under the save\'s row lock', () => {
+    const { assertRefillPropertyCurrent } = router._test;
+    const trxFor = (propertyId) => { const reads = []; const trx = (table) => { reads.push(table); return { where: () => ({ first: async () => ({ property_id: propertyId }) }) }; }; trx.reads = reads; return trx; };
+    const line = (property) => ({ serviceKey: 'mosquito_misting_refill', refillPricedForProperty: property });
+
+    test('the locked row\'s house matches what the refill was priced for: allowed', async () => {
+      await expect(assertRefillPropertyCurrent(trxFor(HOUSE), VISIT, { addressPlan: null, replaceAddons: [line(HOUSE)] })).resolves.toBeUndefined();
+    });
+
+    test('another editor moved the visit in between: retryable 409, nothing saved at the old house\'s price', async () => {
+      await expect(assertRefillPropertyCurrent(trxFor(OTHER), VISIT, { addressPlan: null, replaceAddons: [line(HOUSE)] }))
+        .rejects.toMatchObject({ status: 409, code: 'VISIT_CHANGED_RETRY' });
+    });
+
+    test('this save\'s own move decides the house: priced for the destination is allowed, priced for the old house is not', async () => {
+      const plan = { propertyId: OTHER };
+      await expect(assertRefillPropertyCurrent(trxFor(HOUSE), VISIT, { addressPlan: plan, replaceAddons: [line(OTHER)] })).resolves.toBeUndefined();
+      await expect(assertRefillPropertyCurrent(trxFor(HOUSE), VISIT, { addressPlan: plan, replaceAddons: [line(HOUSE)] }))
+        .rejects.toMatchObject({ code: 'VISIT_CHANGED_RETRY' });
+    });
+
+    test('no priced refill line: no read at all', async () => {
+      const trx = trxFor(HOUSE);
+      await assertRefillPropertyCurrent(trx, VISIT, { addressPlan: null, replaceAddons: [{ serviceKey: 'pest_control' }, null] });
+      await assertRefillPropertyCurrent(trx, VISIT, { addressPlan: null, replaceAddons: undefined });
+      expect(trx.reads).toEqual([]);
+    });
+
+    test('a visit with no property and a refill priced with none agree', async () => {
+      await expect(assertRefillPropertyCurrent(trxFor(null), VISIT, { addressPlan: null, replaceAddons: [line(null)] })).resolves.toBeUndefined();
+    });
+  });
+
+  test('the save wires the check under the lock, right beside the area add-on edit check, and both planners pass the destination', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(src).toContain('await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons });');
+    expect(src).toContain('presetEligibilityCheck, propertyId,\n      });');
+    expect(src).toContain("propertyId: typeof req.body.propertyId === 'string' ? req.body.propertyId : undefined,");
   });
 });
 

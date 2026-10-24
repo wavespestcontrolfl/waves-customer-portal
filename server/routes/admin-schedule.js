@@ -2069,6 +2069,23 @@ async function assertAreaAddOnEdit(trx, visitId, { updates, replaceAddons, addre
   });
 }
 
+// A misting refill is priced for one house (the accepted misting estimate's property). The price was set before the save's row lock,
+// so a move to another house in the same save, or another editor's move landing in between, must not keep a price set for the old
+// house: under the lock, the house the visit will be at (the posted destination, else the locked row's own) must be the one each
+// priced refill line was resolved for. A mismatch is the same retryable refusal every concurrent-edit conflict on this route uses.
+async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceAddons }) {
+  const priced = (Array.isArray(replaceAddons) ? replaceAddons : []).filter((line) => line && line.refillPricedForProperty !== undefined);
+  if (!priced.length) return;
+  const row = await trx('scheduled_services').where({ id: visitId }).first('property_id');
+  const house = String((addressPlan ? addressPlan.propertyId : row && row.property_id) || '');
+  if (priced.some((line) => String(line.refillPricedForProperty || '') !== house)) {
+    throw Object.assign(
+      httpError(409, 'This visit moved to a different address while you were editing, so the misting refill price is out of date. Reload and save again.'),
+      { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+}
+
 function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
@@ -12267,7 +12284,7 @@ async function computeSingleServiceEstimatedPricePlan({
 
 // The visit a refill is being added to: who and where it is for, the estimate it came from, and the catalog key it will carry after
 // this save (a service change in the same save counts). Read once per save.
-async function loadRefillVisit(database, id, cols, updates) {
+async function loadRefillVisit(database, id, cols, updates, destinationPropertyId = undefined) {
   const wanted = ['customer_id', 'property_id', 'source_estimate_id', 'service_id', 'service_key_snapshot'].filter((column) => cols[column]);
   const row = (await database('scheduled_services').where({ id }).first(...wanted)) || {};
   let parentServiceKey = updates && updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : row.service_key_snapshot;
@@ -12277,14 +12294,15 @@ async function loadRefillVisit(database, id, cols, updates) {
   }
   return {
     customer_id: row.customer_id || null,
-    property_id: row.property_id || null,
+    // The house the visit will be at once this save lands: the posted destination when the save moves it, else where it is.
+    property_id: (destinationPropertyId !== undefined ? destinationPropertyId : row.property_id) || null,
     source_estimate_id: row.source_estimate_id || null,
     parentServiceKey: parentServiceKey || null,
   };
 }
 
 async function normalizeUpdateDetailsAddons({
-  db, id, addons, updates, isRecurring, serviceType, scheduledDate,
+  db, id, addons, updates, isRecurring, serviceType, scheduledDate, propertyId,
 }) {
   // Codex pre-push audit P2 (structural round 3 on #4657, :9310): the
   // service-identity resolution + per-addon normalization phase of
@@ -12443,7 +12461,7 @@ async function normalizeUpdateDetailsAddons({
         // edit); a NEW unpriceable refill is refused. GATE_MOSQUITO_MISTING off: untouched.
         let refillLine = null;
         if (mistingRefill.refillLive() && mistingRefill.isRefillKey(catalogService?.service_key)) {
-          if (!refillVisit) refillVisit = await loadRefillVisit(db, id, cols, updates);
+          if (!refillVisit) refillVisit = await loadRefillVisit(db, id, cols, updates, propertyId);
           const prior = a.id ? existingAddonDiscountById.get(a.id) : null;
           const attach = await mistingRefill.resolveRefillAttachment({
             customerId: refillVisit.customer_id,
@@ -12583,6 +12601,8 @@ async function normalizeUpdateDetailsAddons({
           weekendShift: a.weekendShift,
           discount: lineDiscount,
           legacyGrossUnknown,
+          // The house this refill was priced for, re-checked under the save's row lock (assertRefillPropertyCurrent).
+          ...(refillLine && refillLine.ok ? { refillPricedForProperty: refillVisit.property_id } : {}),
         });
       }
 
@@ -12723,7 +12743,7 @@ async function computeUpdateDetailsFinancialPlan({
   db, id, updates, discountType, discountAmount, discountId, isRecurring, serviceType, scheduledDate,
   primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
   appointmentDiscountPreset, appointmentDiscountChanged: appointmentDiscountChangedAtRouteRead, appointmentDiscountCols,
-  presetEligibilityCheck,
+  presetEligibilityCheck, propertyId,
 }) {
   // GitHub Codex round 27 P1 (#4657, :10969): the route's early answer is
   // only the DEFAULT — each branch below that reads the row re-derives
@@ -12786,7 +12806,7 @@ async function computeUpdateDetailsFinancialPlan({
       const {
         cols, normalizedAddons, existingAddonDiscountRows, isNewAddonDiscount,
       } = await normalizeUpdateDetailsAddons({
-        db, id, addons, updates, isRecurring, serviceType, scheduledDate,
+        db, id, addons, updates, isRecurring, serviceType, scheduledDate, propertyId,
       });
       replaceAddons = normalizedAddons;
       expectedAddonRowIds = existingAddonDiscountRows.map((r) => r.id);
@@ -14126,7 +14146,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         db, id: req.params.id, updates, discountType, discountAmount, discountId, isRecurring, serviceType, scheduledDate,
         primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
         appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
-        presetEligibilityCheck,
+        presetEligibilityCheck, propertyId,
       });
       // GitHub Codex round 27 P1 (#4657, :10969): the planner's own answer,
       // judged against the row read its CAS snapshot was built from.
@@ -15572,6 +15592,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             .first('customer_id', 'scheduled_date')
           : null;
         await assertAreaAddOnEdit(trx, req.params.id, { updates, replaceAddons, addressPlan });
+        await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons });
         await areaAddOnRows.clearOwnAreaAddOnScopeOnServiceChange(trx, req.params.id, updates);
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
@@ -17509,6 +17530,8 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
       primaryLinePrice, estimatedPrice, addons, serviceId, postedServiceKey,
       appointmentDiscountPreset, appointmentDiscountChanged, appointmentDiscountCols,
       presetEligibilityCheck,
+      // A refill is priced for the house the visit will be at after this save (an address move in the same save counts).
+      propertyId: typeof req.body.propertyId === 'string' ? req.body.propertyId : undefined,
     });
 
     // Client rearchitecture (structural round 3 on #4657): the primary
@@ -28667,6 +28690,7 @@ router._test = {
   filterAddonLinesForDate,
   ONE_TIME_ADDON_SERVICE_KEYS,
   normalizeUpdateDetailsAddons,
+  assertRefillPropertyCurrent,
   isOneTimeOnlyAddonKey,
   negativePricePosted,
   discountChangeWithoutPricePosted,

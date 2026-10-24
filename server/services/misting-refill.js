@@ -22,14 +22,18 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const {
-  MISTING_REFILL_CATALOG_KEY, MISTING_SERVICE_CATALOG_KEY, isMistingSelection,
+  MISTING_REFILL_CATALOG_KEY, MISTING_SERVICE_CATALOG_KEY, isMistingSelection, mistingProposalIdentity,
 } = require('../utils/mosquito-misting-system');
 const { MOSQUITO_MISTING } = require('./pricing-engine/constants');
 const { mistingRefillPriceFor } = require('./pricing-engine/mosquito-misting-config');
-const { storedMistingRows } = require('./estimate-result-container');
+const { storedMistingRows, proposalIsAuthoritative } = require('./estimate-result-container');
+const { estimateDataCarriesMosquitoMisting } = require('./pricing-engine/v1-legacy-mapper');
 
 const REFILL_BASE_NAME = 'Mosquito Misting System Refill';
-const NEWEST_ACCEPTED_LIMIT = 20;
+// Accepted estimates are read newest first in pages and filtered as they come, so a customer's newer unrelated estimates can never hide
+// the older misting one. A customer with more than SCAN_CAP accepted estimates stops being read there (never reached in practice).
+const SCAN_PAGE = 20;
+const SCAN_CAP = 1000;
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 // GATE_MOSQUITO_MISTING, read at call time. A test that mocks the gate module with a partial set reads as off.
@@ -65,24 +69,51 @@ function asSolution(value) {
   return hasOwn(MOSQUITO_MISTING.refills, key) ? key : null;
 }
 
-// What one stored estimate says about a misting plan: { carries, solution }. `carries` is false when it has no misting plan at all
-// (a pest or lawn estimate); `solution` is null when it has one but does not say which refill solution was sold.
+// The same "authored itemized proposal" test the stored-estimate guards use (v1-legacy-mapper): such a proposal, not the retained engine
+// rows, says what was sold.
+const proposalIsItemized = (proposal) => ['buildings', 'programs', 'correctiveWork']
+  .some((key) => Array.isArray(proposal && proposal[key]) && proposal[key].length > 0);
+
+const solutionOfLine = (line) => asSolution(line && line.pricingKnobs && line.pricingKnobs.refillSolution)
+  || asSolution(line && line.solution) || asSolution(line && line.refill && line.refill.solution);
+
+// The solution an AUTHORED proposal states on its own misting lines, or null. In proposal mode this is the only evidence that counts.
+function solutionFromProposal(proposal) {
+  const lines = [
+    ...(proposal.buildings || []).flatMap((building) => (building && building.lineItems) || []),
+    ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+  ];
+  for (const line of lines) {
+    if (!mistingProposalIdentity(line)) continue;
+    const found = solutionOfLine(line);
+    if (found) return found;
+  }
+  return null;
+}
+
+// What one stored estimate says about a misting plan: { carries, solution }. Whether it carries a plan at all is the stored-estimate
+// guards' own rule (estimateDataCarriesMosquitoMisting), which honors an authored proposal: one that removed the misting plan carries
+// none, whatever engine rows the estimate retains. `solution` is null when it carries a plan but does not say which refill solution was
+// sold: an authored proposal must state it on its own misting line; otherwise the stamped rows, then the engine inputs.
 function readEstimateMisting(row) {
   const data = parseData(row && row.estimate_data);
   if (!data) return { carries: false, solution: null };
+  let carries = false;
+  try { carries = estimateDataCarriesMosquitoMisting(data, { pricingAuthority: row.pricing_authority }); } catch { carries = false; }
+  if (!carries) return { carries: false, solution: null };
+  if (proposalIsAuthoritative(data) && proposalIsItemized(data.proposal)) return { carries: true, solution: solutionFromProposal(data.proposal) };
   let rows = [];
   try { rows = storedMistingRows(data, { pricingAuthority: row.pricing_authority }); } catch { rows = []; }
-  const inputs = [data.engineInputs, data.inputs, data.result && data.result.engineInputs].find((v) => v && typeof v === 'object');
-  const services = (inputs && inputs.services) || {};
-  const chosen = [services.mosquitoMisting, services.mosquito_misting].find(isMistingSelection);
-  if (!rows.length && !chosen) return { carries: false, solution: null };
   for (const line of rows) {
-    const found = asSolution(line.pricingKnobs && line.pricingKnobs.refillSolution) || asSolution(line.solution)
-      || asSolution(line.refill && line.refill.solution);
+    const found = solutionOfLine(line);
     if (found) return { carries: true, solution: found };
   }
   // Inputs only: a selection that names no solution was priced by the engine at its default solution; one that names an unknown
   // solution is ambiguous, so it reads as unreadable.
+  const shapes = [data.engineInputs, data.engineInput, data.inputs, data.engineRequest && data.engineRequest.options, data.result && data.result.engineInputs];
+  const chosen = shapes
+    .map((shape) => shape && shape.services && [shape.services.mosquitoMisting, shape.services.mosquito_misting].find(isMistingSelection))
+    .find(Boolean);
   if (chosen && typeof chosen === 'object' && chosen.solution != null && String(chosen.solution).trim() !== '') {
     return { carries: true, solution: asSolution(chosen.solution) };
   }
@@ -115,17 +146,23 @@ async function findAcceptedMistingEstimate({ customerId, propertyId, soleId, sou
       if (read.carries) return { id: own.id, ...read };
     }
   }
-  const candidates = await database('estimates')
-    .where({ customer_id: customerId, status: 'accepted' })
-    .orderBy('accepted_at', 'desc')
-    .orderBy('id', 'desc')
-    .limit(NEWEST_ACCEPTED_LIMIT)
-    .select(...ESTIMATE_COLUMNS);
-  for (const row of Array.isArray(candidates) ? candidates : []) {
-    if (!sameProperty(row, propertyId, soleId)) continue;
-    const read = readEstimateMisting(row);
-    if (read.carries) return { id: row.id, ...read };
+  for (let offset = 0; offset < SCAN_CAP; offset += SCAN_PAGE) {
+    const page = await database('estimates')
+      .where({ customer_id: customerId, status: 'accepted' })
+      .orderBy('accepted_at', 'desc')
+      .orderBy('id', 'desc')
+      .limit(SCAN_PAGE)
+      .offset(offset)
+      .select(...ESTIMATE_COLUMNS);
+    const rows = Array.isArray(page) ? page : [];
+    for (const row of rows) {
+      if (!sameProperty(row, propertyId, soleId)) continue;
+      const read = readEstimateMisting(row);
+      if (read.carries) return { id: row.id, ...read };
+    }
+    if (rows.length < SCAN_PAGE) return null;
   }
+  logger.warn(`[misting-refill] stopped reading accepted estimates for customer ${customerId} at ${SCAN_CAP}`);
   return null;
 }
 
