@@ -7752,6 +7752,16 @@ function pestRainOutlookLive() {
 // GATE_PEST_RAIN_OUTLOOK reader, on its own line so gate PRs never conflict.
 module.exports.pestRainOutlookLive = pestRainOutlookLive;
 
+// GATE_PEST_LABEL_FACTS read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-24, "labels
+// go"). On, the pest report writer's PRODUCT FACTS add "its label lists <pest>" for a pest the technician named today
+// (note, observations, product tags) that the product's reviewed EPA label list names (label-pest-facts.js). Off =
+// the block is byte-identical to before.
+function pestLabelFactsLive() {
+  return process.env.GATE_PEST_LABEL_FACTS === 'true';
+}
+// GATE_PEST_LABEL_FACTS reader, on its own line so gate PRs never conflict.
+module.exports.pestLabelFactsLive = pestLabelFactsLive;
+
 // GATE_LAWN_TS_STOCK_ADVISORY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-20,
 // "make lawn and tree & shrub work the same as pest"). On, a lawn or tree & shrub visit's completion may take a
 // product's stock below zero (recorded on the visit, as a WaveGuard lawn completion's is) instead of refusing, the lawn
