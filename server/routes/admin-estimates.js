@@ -895,6 +895,8 @@ function estimateEmailPriceLine(estimate) {
     pt.monthlyEquivalent > 0 && `${centsMoney(pt.monthlyEquivalent)}/mo`,
     pt.annualRecurring > 0 && `${centsMoney(pt.annualRecurring)}/yr recurring`,
     pt.oneTime > 0 && `${centsMoney(pt.oneTime)} one-time`,
+    // The first-year total includes tax; say so the way the PDF's tax row does.
+    pt.hasTax && `${centsMoney(pt.totalTax)} tax (${(pt.taxRate * 100).toFixed(2)}%)`,
     pt.firstYearTotal > 0 && `first-year total ${centsMoney(pt.firstYearTotal)}`,
   ].filter(Boolean).join(' · ');
 }
@@ -4351,9 +4353,21 @@ router.get('/:id/proposal', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const proposal = normalizeProposal(estimate);
+    // Suggested tax rate (a fraction) for the builder's tax field: the same
+    // canonical resolver the Generate-from-estimate draft uses (verified
+    // exemption -> 0, county rate, FL commercial default), in strict mode: a
+    // failed customer / exemption / county lookup is null (no autofill), never
+    // the unchecked default labelled as the customer's rate. Never throws the read.
+    let suggestedTaxRate = null;
+    try {
+      const rate = await require('../services/estimate-converter')
+        .resolveCommercialPrepayBaseRate(estimate.customer_id ?? null, { database: db, strict: true });
+      suggestedTaxRate = Number.isFinite(Number(rate)) ? Number(rate) : null;
+    } catch (_) { suggestedTaxRate = null; }
     res.json({
       proposal,
       totals: computeProposalTotals(proposal),
+      suggestedTaxRate,
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
       // Private operator inputs live beside the public proposal allowlist.
       projectCosting: parseEstimateData(estimate.estimate_data)?.proposalCosting || null,

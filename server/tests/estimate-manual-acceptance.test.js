@@ -12,6 +12,8 @@ jest.mock('../services/estimate-converter', () => ({
   // Frozen rodent bait-station setup the prepay invoice bills as its own
   // line (codex #3591 r24) — tests set mockFrozenRodentSetup to exercise it.
   frozenRodentBaitSetupAmount: jest.fn(() => mockFrozenRodentSetup),
+  // The prepay invoice's one-time lines (rodent setup + misting install) as one helper.
+  frozenPrepayOneTimeLines: jest.fn(() => ({ rodentSetup: mockFrozenRodentSetup, mistingInstall: 0, total: mockFrozenRodentSetup })),
   // Real-enough mirror of the fee-mix rule (solo pest / solo mosquito only)
   // so estimate-public's breakdown/fee gates work under this module mock.
   recurringMixHasMembershipFeeService: (services = []) => {
@@ -459,6 +461,8 @@ describe('estimate manual acceptance', () => {
       autoSendInvoice: false,
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
+      // The prepay invoice bills a misting install when the estimate carries one (misting PR 2a): the install office bell is armed.
+      mistingInstallBilled: true,
     });
     expect(inserts).toEqual([
       expect.objectContaining({

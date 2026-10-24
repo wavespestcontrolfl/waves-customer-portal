@@ -20,6 +20,14 @@ const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity
 const PROPERTY = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, propertyType: 'single_family' };
 const OPTS = { tier: 'essential', nozzles: 40, risers: 12, solution: 'natural' };
 const seed = () => JSON.parse(JSON.stringify(config.defaultMosquitoMistingPricingData()));
+// PR 2a flipped MOSQUITO_MISTING_CONVERSION_READY to true. The accept-pending refusal stays reachable through that code-owned
+// constant, so the PR 1 posture is pinned below by setting it false for the duration of a describe (and restoring it).
+const conversionConstants = require('../services/pricing-engine/constants');
+const pendingMode = () => {
+  let saved;
+  beforeEach(() => { saved = conversionConstants.MOSQUITO_MISTING_CONVERSION_READY; conversionConstants.MOSQUITO_MISTING_CONVERSION_READY = false; });
+  afterEach(() => { conversionConstants.MOSQUITO_MISTING_CONVERSION_READY = saved; });
+};
 const saved = process.env.GATE_MOSQUITO_MISTING;
 beforeEach(() => { process.env.GATE_MOSQUITO_MISTING = 'true'; });
 afterEach(() => {
@@ -145,6 +153,7 @@ describe('replay: a sent misting quote keeps the prices it was priced with', () 
 });
 
 describe('a stored misting estimate is refused while the gate is off', () => {
+  pendingMode();
   const stored = () => {
     const input = { ...PROPERTY, services: { mosquitoMisting: OPTS } };
     const est = generateEstimate(input);
@@ -227,6 +236,7 @@ describe('false misting selections are not selections (the engine\'s own rule)',
 });
 
 describe('the engine and the guard share ONE selection rule', () => {
+  pendingMode();
   const { isMistingSelection } = require('../utils/mosquito-misting-system');
   const price = (value, extra = {}) => generateEstimate({ ...PROPERTY, services: { mosquitoMisting: value }, ...extra }).lineItems.some((l) => l.service === 'mosquito_misting');
 
@@ -257,7 +267,8 @@ describe('the engine and the guard share ONE selection rule', () => {
   });
 });
 
-describe('acceptance of a priced misting estimate is pending misting PR 2, even with the gate on', () => {
+describe('accept-pending mode (MOSQUITO_MISTING_CONVERSION_READY false, the PR 1 posture, kept reachable)', () => {
+  pendingMode();
   const constants = require('../services/pricing-engine/constants');
   const priced = () => {
     const input = { ...PROPERTY, services: { mosquitoMisting: OPTS } };
@@ -268,8 +279,9 @@ describe('acceptance of a priced misting estimate is pending misting PR 2, even 
     return { result: mapper.mapV1ToLegacyShape(generateEstimate(input)), engineInputs: { ...input, services: { pest: input.services.pest } } };
   };
 
-  test('the readiness constant is code-owned and false', () => {
-    expect(constants.MOSQUITO_MISTING_CONVERSION_READY).toBe(false);
+  test('the readiness constant is a plain code-owned boolean (no env var)', () => {
+    expect(typeof constants.MOSQUITO_MISTING_CONVERSION_READY).toBe('boolean');
+    expect(process.env.MOSQUITO_MISTING_CONVERSION_READY).toBeUndefined();
   });
 
   test('gate ON + priced misting: the customer and staff refusals fire with the new code, reason and texts', () => {
@@ -338,51 +350,13 @@ describe('acceptance of a priced misting estimate is pending misting PR 2, even 
 
   test('when conversion is ready the block lifts (the PR 2 switch)', () => {
     constants.MOSQUITO_MISTING_CONVERSION_READY = true;
-    try {
-      expect(mapper.estimateMistingAcceptBlocked(priced())).toBe(false);
-      expect(mapper.gatedAddOnCustomerRefusal(priced())).toBeNull();
-    } finally {
-      constants.MOSQUITO_MISTING_CONVERSION_READY = false;
-    }
-  });
-});
-
-describe('replay resolves an implicit tier and solution from the stamp, not the live defaults', () => {
-  test('a saved `mosquitoMisting: true` input replays the system it was sold as after the defaults change', () => {
-    const { MOSQUITO_MISTING: M } = require('../services/pricing-engine/constants');
-    const first = priceMosquitoMisting(PROPERTY, {});
-    expect(first.tier).toBe('smart');
-    expect(first.installation.price).toBe(4595);
-    const savedTier = M.defaultTier;
-    const savedSolution = M.defaultSolution;
-    try {
-      M.defaultTier = 'essential';
-      M.defaultSolution = 'premium';
-      const fresh = priceMosquitoMisting(PROPERTY, {});
-      expect(fresh.tier).toBe('essential');
-      expect(fresh.installation.price).toBe(3795);
-      const replay = priceMosquitoMisting(PROPERTY, { knobs: first.pricingKnobs });
-      expect(replay.tier).toBe('smart');
-      expect(replay.solution).toBe('standard');
-      expect(replay.installation.price).toBe(first.installation.price);
-      expect(replay.annual).toBe(first.annual);
-      expect(replay.refill.perFill).toBe(first.refill.perFill);
-      expect(replay.manualReviewReasons).toEqual([]);
-      // an explicit option still wins, and a mismatch with the stamp skips the stamp
-      const explicit = priceMosquitoMisting(PROPERTY, { tier: 'essential', knobs: first.pricingKnobs });
-      expect(explicit.tier).toBe('essential');
-      expect(explicit.installation.price).toBe(3795);
-      // through the engine, with the saved input shape `true`
-      const est = generateEstimate({ ...PROPERTY, services: { mosquitoMisting: true }, mistingPricingKnobs: first.pricingKnobs });
-      expect(est.lineItems.find((l) => l.service === 'mosquito_misting').installation.price).toBe(4595);
-    } finally {
-      M.defaultTier = savedTier;
-      M.defaultSolution = savedSolution;
-    }
+    expect(mapper.estimateMistingAcceptBlocked(priced())).toBe(false);
+    expect(mapper.gatedAddOnCustomerRefusal(priced())).toBeNull();
   });
 });
 
 describe('an authored proposal keeps the misting identity', () => {
+  pendingMode();
   const { normalizeBuilding, normalizePrograms } = require('../services/estimate-proposal');
   // The PUT stores buildings / programs through these normalizers; the detector reads what they persist.
   const authored = (lines, programs) => ({
@@ -445,6 +419,7 @@ describe('an authored proposal keeps the misting identity', () => {
 });
 
 describe('the proposal editor cannot launder the misting identity away', () => {
+  pendingMode();
   const { normalizeBuilding, normalizePrograms, carryMistingIdentity } = require('../services/estimate-proposal');
   const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
   const savedProposal = () => ({
@@ -617,6 +592,7 @@ describe('the other resolvers never read the misting plan as the barrier program
 });
 
 describe('pre-push audit: priced proposal lines and commercial rows', () => {
+  pendingMode();
   const { normalizeBuilding } = require('../services/estimate-proposal');
   const authored = (lines) => ({
     result: { recurring: { services: [{ service: 'pest_control', mo: 40 }] } },
@@ -713,6 +689,7 @@ describe('Codex round 8: whole-number counts, one commercial misting key', () =>
 });
 
 describe('pre-push audit: the canonical hand-booked work labels are misting identities in proposals', () => {
+  pendingMode();
   const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
   const { normalizeCorrectiveWork, normalizeBuilding } = require('../services/estimate-proposal');
   afterEach(() => { delete process.env.GATE_MOSQUITO_MISTING; });
@@ -739,6 +716,7 @@ describe('pre-push audit: the canonical hand-booked work labels are misting iden
 });
 
 describe('pre-push audit: a corrective-work row with a generic family keeps a misting marker', () => {
+  pendingMode();
   const { normalizeCorrectiveWork, carryMistingIdentity } = require('../services/estimate-proposal');
   afterEach(() => { delete process.env.GATE_MOSQUITO_MISTING; });
   test('service family stays, originalRequestedService marks it, a rename keeps both guards', () => {

@@ -799,6 +799,11 @@ async function depositStillRecordable(estimateId) {
     if (require('./pricing-engine/v1-legacy-mapper').estimateMistingAcceptBlocked(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) {
       return { recordable: false, reason: 'mosquito_misting_conversion_pending' };
     }
+    // A priced misting plan whose install amount cannot be read from the stored quote cannot be accepted (fail closed), so a
+    // deposit has nothing to convert into either.
+    if (require('./pricing-engine/v1-legacy-mapper').estimateMistingInstallUnresolved(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority })) {
+      return { recordable: false, reason: 'mosquito_misting_install_unresolved' };
+    }
   }
 
   let gates = null;

@@ -14,6 +14,10 @@ function ProcedureText({ procedure, D, full = false }) {
     <ol style={{ paddingLeft: 24 }}>
       {procedure.steps.map((step, i) => <li key={i} style={{ padding: '8px 0 8px 4px' }}>{step}</li>)}
     </ol>
+    {procedure.safety?.length > 0 && <>
+      <h4 style={{ fontSize: 14, fontWeight: 500 }}>Safety</h4>
+      <ul style={{ paddingLeft: 24 }}>{procedure.safety.map((rule, i) => <li key={i} style={{ marginBottom: 8 }}>{rule}</li>)}</ul>
+    </>}
     {procedure.conditional.length > 0 && <>
       <h4 style={{ fontSize: 14, fontWeight: 500 }}>If needed</h4>
       <ul style={{ paddingLeft: 24 }}>{procedure.conditional.map((step, i) => <li key={i} style={{ marginBottom: 8 }}>{step}</li>)}</ul>
@@ -31,6 +35,7 @@ function SopSheet({ procedure, onClose, D }) {
   function download() {
     const content = [procedure.name, procedure.source, procedure.title, procedure.objective, ...procedure.visitNotes,
       'Steps', ...procedure.steps.map((step, i) => `${i + 1}. ${step}`),
+      ...(procedure.safety?.length ? ['Safety', ...procedure.safety] : []),
       ...(procedure.conditional.length ? ['If needed', ...procedure.conditional] : []),
       ...procedure.notes,
       'Check the Job Card for current product weather clearance and verified mixing amounts.',

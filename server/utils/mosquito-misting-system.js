@@ -60,6 +60,55 @@
  */
 
 const MISTING_SYSTEM_SERVICE_KEY = 'mosquito_misting_system';
+// The catalog rows the converted misting system lives under (migration 20261023100000, misting PR 2a): the one-time install, the
+// monthly service plan (12 applications a year) and the per-fill refill add-on. All three are `mosquito_misting_*` keys, so
+// isMistingSystemService counts them; none is the free design visit, so isMistingDesignConsultation (exact key) refuses them.
+const MISTING_INSTALL_CATALOG_KEY = 'mosquito_misting_install';
+const MISTING_SERVICE_CATALOG_KEY = 'mosquito_misting_service';
+const MISTING_REFILL_CATALOG_KEY = 'mosquito_misting_refill';
+
+// Durable identity of the misting installation line on an acceptance invoice (stored in invoices.line_items beside description,
+// quantity and unit_price; create() spreads unknown keys). The install is one-time money, not annual coverage money: readers that
+// slice a prepay invoice across covered visits subtract these lines by this marker, never by a description match.
+const MISTING_INSTALL_LINE_KIND = 'misting_installation';
+const MISTING_INSTALL_LINE_SERVICE = 'mosquito_misting_installation';
+
+function mistingInstallLine({ description, amount }) {
+  return {
+    description,
+    quantity: 1,
+    unit_price: amount,
+    kind: MISTING_INSTALL_LINE_KIND,
+    service: MISTING_INSTALL_LINE_SERVICE,
+  };
+}
+
+// The marked invoice lines for a frozen install ({ amount, description, lines? } from the converter's frozenMistingInstall): ONE marked
+// line per sold install (an authored proposal can sell several buildings), else the single { amount, description } as one line.
+function mistingInstallInvoiceLines(install) {
+  if (!install) return [];
+  const entries = Array.isArray(install.lines) && install.lines.length ? install.lines : [install];
+  return entries
+    .filter((entry) => entry && Number(entry.amount) > 0)
+    .map((entry) => mistingInstallLine({ description: entry.description, amount: entry.amount }));
+}
+
+function isMistingInstallLine(line) {
+  return !!line && typeof line === 'object' && line.kind === MISTING_INSTALL_LINE_KIND;
+}
+
+// Sum of unit_price x quantity over the install-marked lines of an invoice's line_items (array or JSON string). Cents-rounded.
+function mistingInstallLinesTotal(lineItems) {
+  let lines = lineItems;
+  if (typeof lines === 'string') {
+    try { lines = JSON.parse(lines); } catch { return 0; }
+  }
+  if (!Array.isArray(lines)) return 0;
+  const total = lines
+    .filter(isMistingInstallLine)
+    .reduce((sum, li) => sum + (Number(li.unit_price) || 0) * (Number(li.quantity) || 1), 0);
+  return Math.round(total * 100) / 100;
+}
 // The pricing engine's recurring plan line (GATE_MOSQUITO_MISTING). It is the
 // misting SYSTEM's install + plan + refills, so isMistingSystemService counts
 // it, but isMistingDesignConsultation does NOT: it is not the free design visit.
@@ -185,6 +234,15 @@ function isMistingSystemServiceUnconfigured({ serviceKey, name } = {}) {
 module.exports = {
   MISTING_SYSTEM_SERVICE_KEY,
   MISTING_ENGINE_SERVICE_KEY,
+  MISTING_INSTALL_CATALOG_KEY,
+  MISTING_SERVICE_CATALOG_KEY,
+  MISTING_REFILL_CATALOG_KEY,
+  MISTING_INSTALL_LINE_KIND,
+  MISTING_INSTALL_LINE_SERVICE,
+  mistingInstallLine,
+  mistingInstallInvoiceLines,
+  isMistingInstallLine,
+  mistingInstallLinesTotal,
   isMistingSystemIdentity,
   isMistingSelection,
   mistingProposalIdentity,

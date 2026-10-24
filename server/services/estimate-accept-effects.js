@@ -585,6 +585,7 @@ const BELLS = [
   ['per_application_fee', 'perApplicationFeeNotification'],
   ['tier_upgrade', 'tierUpgradeNotification'],
   ['plan_rate_review', 'planRateReviewNotification'],
+  ['misting_install_schedule', 'mistingInstallNotification'],
 ];
 
 // A short, stable key of the approved recipient. The plan carries it (not the
@@ -683,6 +684,7 @@ const BELL_LABELS = {
   per_application_fee: 'per-application fee admin',
   tier_upgrade: 'tier-upgrade admin',
   plan_rate_review: 'plan-rate review',
+  misting_install_schedule: 'misting install admin',
 };
 
 // ── The rule for every step: a pinned target ──

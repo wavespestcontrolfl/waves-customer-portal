@@ -2542,11 +2542,13 @@ const MOSQUITO_MISTING = {
   serviceCallNoPlan: 149,
 };
 
-// ACCEPTANCE of a priced misting estimate is blocked until misting PR 2 ships the conversion: the recurring series seeding
-// cadence, the install on the acceptance invoice, per-application refill billing and the catalog rows. Code-owned on purpose
-// (no env var, no pricing_config): flipping it is the PR 2 change, not a toggle. Read at call time by
+// ACCEPTANCE of a priced misting estimate was blocked (fail closed, even with the gate on) until misting PR 2 shipped the conversion:
+// the recurring series (catalog row mosquito_misting_service, monthly cadence, 12 applications), the install on the acceptance
+// invoice with one office bell, and the dormant refill catalog row (refill billing: misting PR 2c). Misting PR 2a (#6543) ships them,
+// so it is true. Code-owned on purpose (no env var, no pricing_config): flipping it back is a code change, not a toggle, and the
+// gate-off refusal (GATE_MOSQUITO_MISTING) is separate and unchanged. Read at call time by
 // v1-legacy-mapper#estimateMistingAcceptBlocked.
-const MOSQUITO_MISTING_CONVERSION_READY = false;
+const MOSQUITO_MISTING_CONVERSION_READY = true;
 
 // The DB-editable prices of MOSQUITO_MISTING (pricing_config row `mosquito_misting_pricing`, mosquito-misting-config.js), frozen
 // as written above: production prices are DB-authoritative and these are the fresh-environment defaults and the migration seed.

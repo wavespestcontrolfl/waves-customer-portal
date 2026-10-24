@@ -2676,5 +2676,54 @@
         }
       }
     ]
+  },
+  "mosquito_misting": {
+    "name": "Mosquito Misting System Protocol",
+    "one_time": false,
+    "notes": [
+      "The automatic misting system: install, monthly service plan visits and per-fill refills. A visit here is routed by its catalog service key (mosquito_misting_install, mosquito_misting_service, mosquito_misting_refill), never by name: the barrier mosquito program is a different job, and bare \"misting\" in its 21-day cycle wording stays the barrier program.",
+      "Source: wiki/protocols/mosquito-misting-systems.md. Label is the law: only products whose label allows automatic misting-system use, at label rates. Log product, EPA registration number (or 25(b)), amount and date on every refill.",
+      "The cabinet stays locked and only Waves licensed techs handle or refill solution. The system reduces adult mosquitoes in the treated zone; never claim disease prevention."
+    ],
+    "safety_rules": [
+      "Nozzles aim at resting sites and AWAY from pools, ponds, canals, other water, grills, dining areas and AC or air intakes; keep them off siding, painted or metal surfaces and vehicles.",
+      "Pause for rain, fog, wind over 10 mph or temperatures below 50 F. Pause every system before a named storm and inspect before resuming.",
+      "Any exposure report (person, pet, fish kill, bee kill): pause the whole system and call Adam the same day. A drift complaint: stop that zone and re-aim before the next cycle."
+    ],
+    "visits": [
+      {
+        "visit": 1,
+        "month": "Any",
+        "visit_type": "Service plan visit (monthly)",
+        "main_goal": "Keep the installed misting system sealed, calibrated and full.",
+        "primary": "Check the solution level; refill and log it if low\nCheck the controller schedule, battery, connectivity and sensor status\nWalk the tubing for leaks, kinks, mower or rodent damage\nSpot-check each nozzle spray pattern and re-aim anything that has shifted",
+        "secondary": "Every third visit: pull and clean every nozzle, replace worn ones, replace the filter element and check pump pressure\nRe-check aim after landscaping changes and photo log\nOnce a year: replace check valves and the filter and run a full leak and pressure test",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "notes": "Clogged nozzles are the number one failure; a weak nozzle still runs, so the quarterly clean is not optional. Dec to Feb: drop to one cycle a day."
+      },
+      {
+        "visit": 2,
+        "month": "Any",
+        "visit_type": "Installation (one-time)",
+        "main_goal": "Install, calibrate and hand over a working misting system.",
+        "primary": "Call 811 before any trenching\nMount the unit and cabinet; install the surge protector, inline filter and check valves\nRun tubing along eaves and fences first, then landscape risers; bury or clip runs out of mower and edger paths\nSet and photograph each nozzle per the placement rules\nPressure and leak test; walk every nozzle for its spray pattern",
+        "secondary": "Calibrate before enabling the schedule: from the product label and the measured system output work out the cycle length and cycles per day that stay within the label, and record the calculation on the install record\nProgram dawn and dusk cycles; connect the app and any weather sensor\nPost the product label and dilution statement at the unit and lock the cabinet\nCustomer walkthrough and the disclosure sheet (product, pause instructions, pollinator and pet guidance, no self-refill, comfort system not disease prevention)",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "notes": "Signed agreement and any HOA or ARC approval are in hand before the install day. Re-calibrate whenever the product, dilution or nozzle count changes."
+      },
+      {
+        "visit": 3,
+        "month": "Any",
+        "visit_type": "Refill (billed per refill application)",
+        "main_goal": "Refill the tank with the customer's chosen solution and log it.",
+        "primary": "Refill the locked reservoir with the solution on the work order (standard, natural or premium)\nLog the product, EPA registration number (or 25(b)), amount and date\nConfirm the cycle settings still match the calibrated schedule",
+        "secondary": "Rinse and check the reservoir cap, seal and level indicator\nNote the solution level before the refill",
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "notes": "The solution tier sets the price and the product; the label decides use directions. A refill rides its parent service-plan visit as a billing line."
+      }
+    ]
   }
 }

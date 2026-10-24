@@ -2,6 +2,8 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { addMonthsSameDay: addMonthsSameDayShared } = require('../utils/date-only');
 const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const db = require('../models/db');
+const { mistingInstallLinesTotal, isMistingInstallLine } = require('../utils/mosquito-misting-system');
+const { isAnnualPrepayCoverageLine, looksLikeLegacyCoverageDescription } = require('../utils/annual-prepay-line-kinds');
 const logger = require('./logger');
 const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -1116,6 +1118,13 @@ async function fileCoverageException(term, reason, body, {
 async function seededVisitPriceForTerm(term, conn, coverageVisitCount) {
   if (!term?.prepay_invoice_id || !coverageVisitCount) return null;
   const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total', 'line_items');
+  const lines = parsePrepayInvoiceLines(inv);
+  // (a) Durable kinds: an invoice whose coverage line carries the coverage kind states the per-application basis directly — the
+  // coverage line amount over the sold visits. Setup lines, the misting installation and any other one-time line are simply not
+  // coverage, so nothing is subtracted and nothing can be mistaken for it. (Misting PR 2a.)
+  const kindedCoverage = coverageBasisFromKindedLines(lines);
+  if (kindedCoverage != null) return perVisitPrice(kindedCoverage, coverageVisitCount);
+  // (b) LEGACY invoices (no coverage kind): the invoice subtotal minus the one-time lines, divided by the sold visits.
   let base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
   // One-time setup lines (rodent bait-station setup, owner 2026-08-29)
   // ride the prepay invoice but are NOT per-visit coverage money —
@@ -1131,16 +1140,44 @@ async function seededVisitPriceForTerm(term, conn, coverageVisitCount) {
     setupTotal = Math.round((Number(claimRow?.amount) || 0) * 100) / 100;
   } catch { /* unreadable ledger — fall back to the line scan */ }
   if (!(setupTotal > 0)) {
-    try {
-      const lines = typeof inv?.line_items === 'string' ? JSON.parse(inv.line_items) : inv?.line_items;
-      if (Array.isArray(lines)) {
-        setupTotal = lines
-          .filter((li) => /\bsetup\b/i.test(String(li?.description || '')))
-          .reduce((s, li) => s + (Number(li?.unit_price) || 0) * (Number(li?.quantity) || 1), 0);
-      }
-    } catch { /* unparseable line_items — keep the subtotal basis */ }
+    setupTotal = legacySetupTotal(lines);
   }
   if (setupTotal > 0 && setupTotal < base) base = Math.round((base - setupTotal) * 100) / 100;
+  // The misting installation (misting PR 2a) is one-time money on the acceptance invoice, not coverage money: subtract the lines that
+  // carry the install marker (a durable identity in line_items, never the description). Subtracted exactly once, independent of the
+  // setup subtraction above.
+  const markedOneTime = mistingInstallLinesTotal(lines);
+  if (markedOneTime > 0) base = Math.round((base - markedOneTime) * 100) / 100;
+  return perVisitPrice(base, coverageVisitCount);
+}
+
+// The prepay invoice's line_items as an array (a JSON string or an array), or null when absent or unparseable.
+function parsePrepayInvoiceLines(inv) {
+  try {
+    const parsed = typeof inv?.line_items === 'string' ? JSON.parse(inv.line_items) : inv?.line_items;
+    return Array.isArray(parsed) ? parsed : null;
+  } catch { return null; /* unparseable line_items — keep the subtotal basis */ }
+}
+
+const prepayLineAmount = (li) => (Number(li?.unit_price) || 0) * (Number(li?.quantity) || 1);
+
+// The sum of the invoice's coverage-kinded lines (the converter's annual_prepay_coverage line), or null when it has none (a legacy invoice).
+function coverageBasisFromKindedLines(lines) {
+  const coverageLines = (lines || []).filter(isAnnualPrepayCoverageLine);
+  if (!coverageLines.length) return null;
+  return Math.round(coverageLines.reduce((sum, li) => sum + Math.max(0, prepayLineAmount(li)), 0) * 100) / 100;
+}
+
+// The pre-ledger setup scan for a legacy invoice: lines whose description reads "setup", never the converter's coverage wording
+// ("WaveGuard Membership — 12 months prepaid (setup fee waived)" contains the word) and never a marked one-time line.
+function legacySetupTotal(lines) {
+  return (lines || [])
+    .filter((li) => !isMistingInstallLine(li) && !looksLikeLegacyCoverageDescription(li) && /\bsetup\b/i.test(String(li?.description || '')))
+    .reduce((sum, li) => sum + prepayLineAmount(li), 0);
+}
+
+// base over the sold visits to the cent; null when there is no positive base.
+function perVisitPrice(base, coverageVisitCount) {
   return base > 0 ? Math.round((base / coverageVisitCount) * 100) / 100 : null;
 }
 
@@ -11224,6 +11261,8 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
 
 module.exports = {
   createTermForAnnualPrepay,
+  // The per-application price a gap-filled visit inherits from the prepay invoice (setup and misting install lines excluded).
+  seededVisitPriceForTerm,
   termiteDeclineBlockedReason,
   whereTermCurrentOrAwaitingInstallation,
   // Codex pre-push P1: the portal GET (property.js) and /api/auth/me's

@@ -66,6 +66,19 @@ const emptyBuilding = (i) => ({ name: `Building ${i + 1}`, note: '', lineItems: 
 
 const roundMoney = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+// Auto-fill rule for the tax field. The rate comes from the server's
+// canonical resolver (GET /proposal -> suggestedTaxRate: verified exemption
+// -> 0, county tax_rates, FL commercial default) and is only a SUGGESTION:
+// it fills a zero/empty field when something taxable exists, the proposal is
+// editable, and the operator has not typed in the field this session.
+function taxAutofillPct({ locked, operatorEdited, currentPct, anyTaxable, suggestedRate }) {
+  if (locked || operatorEdited || !anyTaxable) return null;
+  if (Number(currentPct) > 0) return null;
+  const rate = Number(suggestedRate);
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  return String(roundMoney(rate * 10000) / 100);
+}
+
 const lineAmount = proposalLineAmount;
 const lineAnnual = (li) =>
   li.frequency === 'one_time' ? 0 : lineAmount(li) * (PER_YEAR[li.frequency] || 0);
@@ -206,12 +219,24 @@ function CommercialProposalEditor() {
   const [preparedFor, setPreparedFor] = useState('');
   const [propertyAddress, setPropertyAddress] = useState('');
   const [taxRatePct, setTaxRatePct] = useState('0');
+  // Server-resolved tax suggestion (fraction, e.g. 0.07) and whether the field
+  // currently holds that suggestion (drives the hint under the field).
+  const [suggestedTaxRate, setSuggestedTaxRate] = useState(null);
+  const [taxAutoFilled, setTaxAutoFilled] = useState(false);
+  const taxOperatorEditedRef = React.useRef(false);
   const [terms, setTerms] = useState('');
   const [validThrough, setValidThrough] = useState('');
   const [projectCosting, setProjectCosting] = useState({ revenueYears: 1, rows: [] });
   // The SAVED fixed date — the one the server enforces on send and Mark won.
   const [savedValidThrough, setSavedValidThrough] = useState('');
   const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
+  // "Bid tools" switch: shows the Required bid form and Project cost sheet
+  // sections. Visibility only; the sections stay mounted and their data stays
+  // in state, so hiding never drops or resets anything. Defaults ON when the
+  // proposal already carries bid work; once the operator flips it, their
+  // choice wins over later reloads.
+  const [bidToolsOpen, setBidToolsOpen] = useState(false);
+  const bidToolsChosenRef = React.useRef(false);
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
   const showUnitColumn = bidToolsEnabled || buildings.some((building) => building.lineItems.some((line) => line.unit));
   // Structured agreement sections (slice 1A-i) — all optional; leaving a
@@ -281,11 +306,19 @@ function CommercialProposalEditor() {
     setPreparedFor(p.preparedFor || est?.customerName || '');
     setPropertyAddress(p.propertyAddress || est?.address || '');
     setTaxRatePct(String((Number(p.taxRate) || 0) * 100));
+    setSuggestedTaxRate(Number(data.suggestedTaxRate) > 0 ? Number(data.suggestedTaxRate) : null);
     setTerms(p.terms || '');
     setValidThrough(p.validThrough || '');
     setProjectCosting(data.projectCosting || { revenueYears: 1, rows: [] });
     setSavedValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
+    if (!bidToolsChosenRef.current) {
+      setBidToolsOpen(
+        (data.projectCosting?.rows?.length || 0) > 0
+        || !!p.validThrough
+        || (p.buildings || []).some((b) => (b.lineItems || []).some((li) => li.unit)),
+      );
+    }
     setBuildings(
       Array.isArray(p.buildings) && p.buildings.length
         ? p.buildings.map((b) => ({
@@ -382,6 +415,22 @@ function CommercialProposalEditor() {
 
   const taxRate = (Number(taxRatePct) || 0) / 100;
   const programsMode = programsState.some(programRowIsPriced);
+  // Any taxable item that would SAVE (buildings are omitted in programs mode,
+  // like computeTotals) — on-screen rows with no description/price count too,
+  // so the rate is already there the moment the toggle flips.
+  const anyTaxable = (programsMode ? [] : buildings).some((b) => (b.lineItems || []).some((li) => li.taxable))
+    || programsState.some((pr) => pr.taxable)
+    || correctiveWork.some((w) => w.taxable);
+  useEffect(() => {
+    const fill = taxAutofillPct({
+      locked, operatorEdited: taxOperatorEditedRef.current, currentPct: taxRatePct,
+      anyTaxable, suggestedRate: suggestedTaxRate,
+    });
+    if (fill == null) return;
+    setTaxRatePct(fill);
+    setTaxAutoFilled(true);
+    setDirty(true);
+  }, [locked, taxRatePct, anyTaxable, suggestedTaxRate]);
   // Sidebar mirrors what SAVES: in programs mode the payload omits the
   // buildings entirely, so their (hidden) line items must not count.
   const totals = useMemo(
@@ -504,6 +553,7 @@ function CommercialProposalEditor() {
         // (codex 1A-ii r3); the operator reviews it like everything else.
         if (monetaryFilled > 0 && draft?.suggestedTaxRate && !(Number(live.taxRate) > 0)) {
           setTaxRatePct(String(draft.suggestedTaxRate * 100));
+          setTaxAutoFilled(true);
         }
         // Monetary sections were installed — the on-screen SYNTHESIZED
         // building lines describe the same charges and would double-count
@@ -1102,7 +1152,12 @@ function CommercialProposalEditor() {
                 <label className="block">
                   <span className={LABEL}>Tax rate (%) — taxable lines only</span>
                   <Input type="number" min="0" step="0.01" value={taxRatePct} disabled={!!locked} className="mt-1"
-                    onChange={(e) => { setTaxRatePct(e.target.value); touch(); }} />
+                    onChange={(e) => { taxOperatorEditedRef.current = true; setTaxAutoFilled(false); setTaxRatePct(e.target.value); touch(); }} />
+                  {taxAutoFilled && !locked && Number(taxRatePct) > 0 && (
+                    <span className="mt-1 block text-12 text-zinc-500">
+                      Filled from the customer's county rate — edit if exempt.
+                    </span>
+                  )}
                 </label>
               </div>
             </CardBody>
@@ -1481,9 +1536,27 @@ function CommercialProposalEditor() {
             </Button>
           )}
 
-          {bidToolsEnabled && !programsMode && <ProposalBidForm buildings={buildings} onDownload={downloadBidForm} disabled={saving || estimate?.status === 'sending'} />}
-          {(bidToolsEnabled || projectCosting.rows.length > 0) && <ProposalProjectCosting value={projectCosting} totals={totals} revenueIssue={revenueIssue} disabled={!!locked || !bidToolsEnabled}
-            onChange={(value) => { setProjectCosting(value); markEdit(); }} />}
+          {bidToolsEnabled && (
+            <div className="flex items-center gap-2 text-14">
+              <Switch
+                checked={bidToolsOpen}
+                id="bid-tools-switch" label="Bid tools"
+                onChange={(v) => { bidToolsChosenRef.current = true; setBidToolsOpen(v); }}
+              />
+              <span className="text-zinc-600">Required bid form and private project cost sheet, for solicitation bids.</span>
+            </div>
+          )}
+          {bidToolsEnabled && !programsMode && (
+            <div hidden={!bidToolsOpen}>
+              <ProposalBidForm buildings={buildings} onDownload={downloadBidForm} disabled={saving || estimate?.status === 'sending'} />
+            </div>
+          )}
+          {(bidToolsEnabled || projectCosting.rows.length > 0) && (
+            <div hidden={bidToolsEnabled && !bidToolsOpen}>
+              <ProposalProjectCosting value={projectCosting} totals={totals} revenueIssue={revenueIssue} disabled={!!locked || !bidToolsEnabled}
+                onChange={(value) => { setProjectCosting(value); markEdit(); }} />
+            </div>
+          )}
 
           <Card>
             <CardHeader>

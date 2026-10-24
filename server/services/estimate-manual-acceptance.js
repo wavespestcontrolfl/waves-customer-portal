@@ -167,8 +167,10 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
   // The frozen bait-station setup rides the prepay invoice as its own
   // (taxed) line — the operator preview must equal the minted invoice
   // (codex #3591 r24 P1).
-  const frozenSetupForPreview = Number(EstimateConverter.frozenRodentBaitSetupAmount(data)) || 0;
-  const amount = Math.round((Number(resolved.amount) + frozenSetupForPreview) * 100) / 100;
+  // The misting installation rides the same invoice (misting PR 2a): one helper for both one-time lines.
+  const frozenOneTimeForPreview = EstimateConverter.frozenPrepayOneTimeLines(data);
+  const frozenSetupForPreview = frozenOneTimeForPreview.rodentSetup;
+  const amount = Math.round((Number(resolved.amount) + frozenOneTimeForPreview.total) * 100) / 100;
   // Same commercial detection as the converter (recurringServiceKey prefix) —
   // non-commercial prepay stays residential-exempt, so no tax leg at all.
   const hasCommercialRecurring = (recurringSvcList || []).some(
@@ -236,6 +238,27 @@ function isTermiteAnnualSetupRow(row = {}, { requireKind = true } = {}) {
     && (!requireKind || String(row?.kind || '').toLowerCase() === 'setup');
 }
 
+// The mosquito misting installation (misting PR 2a): a one-time row by durable identity (service mosquito_misting_installation, or the
+// invoice line kind misting_installation), never by description. The annual-prepay converter bills it as its own marked line on the
+// prepay invoice, so it is not a dropped charge. Only a row frozenMistingInstall actually resolves is exempt (priced, not quote-required).
+function isMistingInstallRow(row = {}) {
+  return String(row?.service || '').toLowerCase() === 'mosquito_misting_installation'
+    || String(row?.kind || '').toLowerCase() === 'misting_installation';
+}
+
+// A row predicate: true for a misting install row the prepay converter bills as its own line (see isMistingInstallRow). The resolution
+// of frozenMistingInstall is lazy and shared across rows.
+function mistingInstallExemption(data) {
+  let invoiced;
+  return (row) => {
+    if (!isMistingInstallRow(row) || row.quoteRequired === true) return false;
+    if (invoiced === undefined) {
+      invoiced = typeof EstimateConverter.frozenMistingInstall === 'function' && !!EstimateConverter.frozenMistingInstall(data);
+    }
+    return invoiced;
+  };
+}
+
 function manualPrepayBlockingOneTimeCharge(estimate = {}) {
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
   try {
@@ -264,8 +287,10 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
       }
       return termiteAnnualSetupInvoiced;
     };
+    // The misting install is invoiced on the prepay invoice the same way (resolved lazily, only for a misting row).
+    const mistingInstallExempt = mistingInstallExemption(data);
     const blocksPrepay = (row) => !isNonBillableOneTimeRow(row) && !isRodentBaitSetupRow(row)
-      && !termiteAnnualSetupExempt(row);
+      && !termiteAnnualSetupExempt(row) && !mistingInstallExempt(row);
     const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];
     if (oneTimeRows.some(blocksPrepay)) return true;
     // The raw-rows list masks the residual: when ANY raw one-time row exists,
@@ -1070,6 +1095,8 @@ async function runConversion(trx, ctx, updatedEstimate, annualPrepayAmount) {
     skipMembershipEmail: true,
     skipWelcomeSms: true,
     skipSetupInvoice: !ctx.annualPrepaySelected,
+    // Only the annual-prepay manual accept mints an invoice, so only it bills the misting install (a Mark Won that bills nothing raises no install bell).
+    ...(ctx.annualPrepaySelected ? { mistingInstallBilled: true } : {}),
     deferCommercialScheduleNotification: true,
     ...cardConvertOptions(ctx),
   };

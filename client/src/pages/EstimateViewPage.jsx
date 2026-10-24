@@ -1520,9 +1520,15 @@ export function oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode) {
   // P1) — PPB previews it via extraInvoiceRows, so it is not an "after
   // completion" extra either.
   const setup = (Array.isArray(breakdown?.items) ? breakdown.items : [])
-    .filter((row) => isWaveGuardSetupBreakdownRow(row) || isRodentBaitSetupBreakdownRow(row))
+    .filter((row) => isWaveGuardSetupBreakdownRow(row) || isRodentBaitSetupBreakdownRow(row) || isMistingInstallBreakdownRow(row))
     .reduce((sum, row) => sum + (Number(row.amount ?? row.price ?? row.total) || 0), 0);
   return Math.max(0, Math.round((total - setup) * 100) / 100);
+}
+
+// The misting installation rides the one-time breakdown but is invoiced up front with the accept (PPB previews it via
+// extraInvoiceRows), so it is not an "after completion" extra either.
+export function isMistingInstallBreakdownRow(item = {}) {
+  return String(item?.service || '').toLowerCase() === 'mosquito_misting_installation';
 }
 
 export function isRodentBaitSetupBreakdownRow(item = {}) {
@@ -9041,9 +9047,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Up-front rows beyond the WaveGuard setup (codex #3591 r33 P1): the
   // frozen rodent bait-station setup is invoiced beside the first
   // application by BOTH accept paths, so the payment choice previews it.
-  const rodentSetupInvoiceRows = Number(pricing?.rodentBaitSetupFee?.amount) > 0
-    ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
-    : [];
+  const rodentSetupInvoiceRows = [
+    ...(Number(pricing?.rodentBaitSetupFee?.amount) > 0
+      ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
+      : []),
+    // The mosquito misting installation (misting PR 2a) is invoiced up front beside the first application on the standard,
+    // invoice-mode and annual-prepay invoices, never prepay-waived: PPB previews it as its own row, labeled by the tier.
+    ...(Number(pricing?.mistingInstallFee?.amount) > 0
+      ? [{ label: pricing.mistingInstallFee.label || 'Mosquito Misting System Installation', amount: Number(pricing.mistingInstallFee.amount) }]
+      : []),
+  ];
   // The after-visit card promise the capture surfaces render (GitHub Codex #5481
   // r3): the server's best-case promise (/data afterVisitConsent + version) AND
   // an invoice shape that is actually deferred to the first visit — a setup-only
@@ -10558,9 +10571,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 // The area add-on refusals that mean "this estimate books nothing online right now" (the add-on gate is off, an add-on's
 // yearly limit is reached or its history cannot be read, or the estimate cannot be accepted in this mode). They are NOT a
 // taken slot: the page reloads and the server's own contact-the-office copy speaks, as for the Bermuda gate.
-// The mosquito misting system's two refusals (gate off; acceptance pending until misting PR 2) are the same kind of
-// permanent no-booking state, never a taken slot.
+// The mosquito misting system's refusals (gate off; acceptance pending; a priced plan whose install amount cannot be read) are the
+// same kind of permanent no-booking state, never a taken slot.
 export function isAreaAddOnNoBookingCode(code) {
   return ['AREA_ADDONS_GATED', 'AREA_ADDON_YEARLY_LIMIT_REACHED', 'AREA_ADDON_HISTORY_UNAVAILABLE', 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
-    'MOSQUITO_MISTING_GATED', 'MOSQUITO_MISTING_ACCEPT_PENDING'].includes(code);
+    'MOSQUITO_MISTING_GATED', 'MOSQUITO_MISTING_ACCEPT_PENDING', 'MOSQUITO_MISTING_INSTALL_UNRESOLVED'].includes(code);
 }
