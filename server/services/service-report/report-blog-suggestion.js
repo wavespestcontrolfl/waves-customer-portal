@@ -204,9 +204,11 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   // published topic (GitHub Codex P1 on 45144528b8).
   const { known } = await wordsOnTheSite(knex, phrase);
   if (!known.length || !known.every(Boolean)) return { error: 'not_a_topic' };
-  // The seeder reads every match: town-titled posts can fill the first eight.
-  const covering = (await searchReportBlogPosts(knex, phrase, generalOnly ? { limit: Infinity } : undefined)).filter((post) => post.exact);
-  if (covering.some((post) => !(generalOnly && isTownTitled(post.title)))) return { status: 'covered' };
+  // The seeder reads every match (town-titled posts can fill the first
+  // eight) and judges each by its title and its H1 (local Codex P2 on
+  // c407c7b700): a generic title over a town H1 is still a town post.
+  const covering = (await searchReportBlogPosts(knex, phrase, generalOnly ? { limit: Infinity, withHeadline: true } : undefined)).filter((post) => post.exact);
+  if (covering.some((post) => !(generalOnly && (isTownTitled(post.title) || isTownTitled(post.headline))))) return { status: 'covered' };
   if (dryRun) return (await standingAnswer(knex, phrase)) || { status: 'would_queue' };
   // One suggestion at a time per person, so the day's cap holds when taps
   // race: the count, the held check and the write share one transaction

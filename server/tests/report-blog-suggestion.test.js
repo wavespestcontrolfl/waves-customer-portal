@@ -317,6 +317,12 @@ describe('suggestReportBlogPost', () => {
     expect(await suggestReportBlogPost(queueKnex({ registry: [LIVE_STANDING_WATER] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'covered' });
   });
 
+  test('generalOnly judges a covering post by its H1 too: a generic title over a town H1 does not cover the topic (local Codex P2 on c407c7b700)', async () => {
+    const townH1 = { ...LIVE_STANDING_WATER, title: 'Mosquito Prevention Guide', h1: 'Standing Water Mosquitoes in Sarasota', metadata: { frontmatter: { title: 'Mosquito Prevention Guide' } } };
+    expect(await suggestReportBlogPost(queueKnex({ registry: [townH1] }), { phrase: 'standing water', dryRun: true })).toEqual({ status: 'covered' });
+    expect(await suggestReportBlogPost(queueKnex({ registry: [townH1] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'would_queue' });
+  });
+
   test('generalOnly reads every match: a general post ranked behind eight newer town-titled ones still covers the topic (pre-push P1 on d753d034e7)', async () => {
     const towns = ['Bradenton', 'Parrish', 'Palmetto', 'Venice', 'North Port', 'Nokomis', 'Osprey', 'Ellenton'].map((town, i) => ({
       ...LIVE_STANDING_WATER,

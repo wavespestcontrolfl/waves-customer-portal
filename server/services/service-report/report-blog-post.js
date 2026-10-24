@@ -393,8 +393,10 @@ async function tipBlogPosts(knex, tips) {
  * (wordBeingTyped) and every post says whether it `starts` the search so.
  * `limit` (eight unless given): the tip seeder's coverage check reads every
  * match, so a general post ranked behind eight town-titled ones still counts.
+ * `withHeadline` (the seeder's too) adds each post's deployed title and H1 as
+ * `headline`, so a post whose H1 names a town is judged by it.
  */
-async function searchReportBlogPosts(knex, query, { limit = MAX_RESULTS } = {}) {
+async function searchReportBlogPosts(knex, query, { limit = MAX_RESULTS, withHeadline = false } = {}) {
   let terms = searchTerms(query);
   if (!terms.length) return [];
   // Every word of the search, not only the first MAX_TERMS the read and the
@@ -440,7 +442,7 @@ async function searchReportBlogPosts(knex, query, { limit = MAX_RESULTS } = {}) 
     // word that way. The forms show those as the matches for a word still
     // being typed, and with the field present offer no suggestion (the word
     // is on no post whole; GitHub Codex P2 on 7331ef2402).
-    .map((entry) => ({ ...entry.post, exact: entry.exact, ...(started ? { starts: entry.starts } : {}) }));
+    .map((entry) => ({ ...entry.post, exact: entry.exact, ...(started ? { starts: entry.starts } : {}), ...(withHeadline ? { headline: entry.texts.title } : {}) }));
 }
 
 // The most words a suggestion's site-words read checks.
