@@ -28,6 +28,9 @@ const RING_TIMEOUT_SECONDS = 20;
 const LEAD_TEXT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const ONE_RING_WINDOW_MS = 24 * 60 * 60 * 1000;
 const RECENT_CALL_WINDOW_MS = 10 * 60 * 1000;
+// An uncertain create that became a real call has its CallSid well before
+// this (the prompt URL is fetched seconds after the ring starts).
+const UNCERTAIN_RING_CHECK_MS = 3 * 60 * 1000;
 const RING_START_HOUR = 8;
 const RING_END_HOUR = 20;
 // Same set as proposal-win / billing-cadence: a row in one of these stages
@@ -202,18 +205,23 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
       logger.info(`[lead-call-reply-ring] rang for customer ${customer.id} (call_log ${claim.callLogId})`);
       return { rang: true, reason: 'rang', callLogId: claim.callLogId };
     } catch (err) {
-      // An ambiguous create may still be ringing: its status callback
-      // decides. A definite failure never rings: the claimed row closes as
-      // failed (it still holds the 24 h limit) and the bell goes now.
+      // A definite failure never rings: the claimed row closes as failed (it
+      // still holds the 24 h limit) and the bell goes now. An uncertain
+      // create may be ringing: its callbacks decide, and a check after 3
+      // minutes settles it as a miss if it never became a call.
       logger.error(`[lead-call-reply-ring] ring failed for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`);
-      if (err?.bridgeAmbiguous) return { rang: false, reason: 'ring_failed' };
-      await db('call_log').where({ id: claim.callLogId }).whereNull('twilio_call_sid')
-        .update({ status: 'failed', updated_at: new Date() })
-        .catch((markErr) => logger.warn(`[lead-call-reply-ring] failed-mark skipped for ${claim.callLogId} (${String(markErr?.code || markErr?.name || 'error')})`));
-      // One bell per CALL text: retries of this alert share the key.
-      await raiseMissedBell({
-        customerId: customer.id, name, firstName, leadId: claim.leadId, callLogId: claim.callLogId, attemptKey: claim.callLogId,
-      });
+      // Twilio's 429 (20429) refuses the request outright: no call exists.
+      const refused = err?.status === 429 || Number(err?.code) === 20429;
+      if (err?.bridgeAmbiguous && !refused) {
+        const timer = setTimeout(() => {
+          settleUnstartedRing(claim.callLogId)
+            .catch((checkErr) => logger.warn(`[lead-call-reply-ring] uncertain-ring check failed for ${claim.callLogId} (${String(checkErr?.code || checkErr?.name || 'error')})`));
+        }, UNCERTAIN_RING_CHECK_MS);
+        if (typeof timer.unref === 'function') timer.unref();
+        return { rang: false, reason: 'ring_uncertain' };
+      }
+      await settleUnstartedRing(claim.callLogId)
+        .catch((settleErr) => logger.warn(`[lead-call-reply-ring] refused-ring settle failed for ${claim.callLogId} (${String(settleErr?.code || settleErr?.name || 'error')})`));
       return { rang: false, reason: 'ring_failed' };
     }
   } catch (err) {
@@ -236,7 +244,14 @@ async function noteRingEnded({ callSid, callStatus }) {
     .where({ twilio_call_sid: callSid, source: SOURCE })
     .first('id', 'customer_id', 'to_phone', 'bridged_at', 'metadata');
   if (!row) return false;
-  if (row.bridged_at) return true;
+  if (!row.bridged_at) await settleMissedRow(row);
+  return true;
+}
+
+// Claims the miss on the row (metadata.missed_bell_at) and raises its one
+// bell. A bell that never lands releases the claim, so a later callback or
+// check can try again (the dedupe key keeps that to one bell).
+async function settleMissedRow(row) {
   const claimed = await db('call_log')
     .where({ id: row.id })
     .whereNull('bridged_at')
@@ -245,7 +260,7 @@ async function noteRingEnded({ callSid, callStatus }) {
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('missed_bell_at', ?::text)", [new Date().toISOString()]),
       updated_at: new Date(),
     });
-  if (!claimed) return true;
+  if (!claimed) return false;
   const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata || '{}') : (row.metadata || {});
   const settled = await raiseMissedBell({
     customerId: row.customer_id,
@@ -254,14 +269,28 @@ async function noteRingEnded({ callSid, callStatus }) {
     leadId: meta.leadId || null,
     callLogId: row.id,
   });
-  // Not settled: release the claim so a later callback for this call can
-  // try again (the dedupe key keeps that to one bell).
   if (!settled) {
     await db('call_log').where({ id: row.id })
       .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'missed_bell_at'"), updated_at: new Date() })
       .catch((err) => logger.warn(`[lead-call-reply-ring] missed claim release failed for ${row.id} (${String(err?.code || err?.name || 'error')})`));
   }
-  return true;
+  return settled;
+}
+
+// A refused ring, or an uncertain one that never became a call: a row that
+// has no CallSid by now never rang (the prompt and status callbacks adopt
+// the sid of any call Twilio did create). It closes as failed and raises
+// its bell; a row with a sid is left to its callbacks.
+async function settleUnstartedRing(callLogId) {
+  const row = await db('call_log')
+    .where({ id: callLogId, source: SOURCE })
+    .whereNull('twilio_call_sid')
+    .first('id', 'customer_id', 'to_phone', 'bridged_at', 'metadata');
+  if (!row || row.bridged_at) return false;
+  await db('call_log').where({ id: row.id }).whereNull('twilio_call_sid')
+    .whereNotIn('status', [...TERMINAL_CALL_STATUSES])
+    .update({ status: 'failed', updated_at: new Date() });
+  return settleMissedRow(row);
 }
 
 module.exports = {
@@ -269,5 +298,5 @@ module.exports = {
   noteRingEnded,
   inRingHours,
   LEAD_CALL_REPLY_RING_SOURCE: SOURCE,
-  _test: { ringBlocker, displayName, raiseMissedBell, bellSettled, RING_TIMEOUT_SECONDS },
+  _test: { ringBlocker, displayName, raiseMissedBell, bellSettled, settleUnstartedRing, RING_TIMEOUT_SECONDS, UNCERTAIN_RING_CHECK_MS },
 };

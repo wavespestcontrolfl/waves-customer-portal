@@ -14,6 +14,7 @@ function resetState() {
     recentCall: null,
     lead: { id: 'lead-1' },
     ringRow: null,
+    reservedRow: { id: 'log-1', customer_id: 'cust-1', to_phone: '+19415550100', bridged_at: null, metadata: { leadName: 'Pat Sample', leadFirstName: 'Pat', leadId: 'lead-1' } },
     claimed: 1,
     locks: [],
     updates: [],
@@ -38,10 +39,13 @@ function mockQuery(table) {
       const bySource = q.filters.some(([f]) => f && f.source === 'lead-call-reply-ring');
       const bySid = q.filters.some(([f]) => f && f.twilio_call_sid);
       if (bySid) return mockState.ringRow;
+      const byId = q.filters.some(([f]) => f && typeof f === 'object' && f.id);
+      if (byId) return mockState.reservedRow;
       return bySource ? mockState.priorRing : mockState.recentCall;
     }
     return null;
   };
+  q.whereNotIn = (...args) => { q.filters.push(args); return q; };
   q.update = async (patch) => { mockState.updates.push({ table, patch, filters: q.filters }); return mockState.claimed; };
   return q;
 }
@@ -133,7 +137,8 @@ test('a definite ring failure raises the missed bell at once', async () => {
   const out = await ring();
   expect(out).toEqual({ rang: false, reason: 'ring_failed' });
   // The claimed row closes as failed so it never reads as ringing.
-  expect(mockState.updates).toEqual([expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ status: 'failed' }) })]);
+  expect(mockState.updates[0]).toEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ status: 'failed' }) }));
+  expect(mockState.updates[1].patch.metadata.sql).toContain('missed_bell_at');
   expect(mockBell).toHaveBeenCalledTimes(1);
   const [category, headline, why, opts] = mockBell.mock.calls[0];
   expect(category).toBe('lead');
@@ -147,10 +152,30 @@ test('a definite ring failure raises the missed bell at once', async () => {
   });
 });
 
-test('an ambiguous ring failure leaves the miss to the status callback', async () => {
-  mockBridge.mockRejectedValueOnce(Object.assign(new Error('timeout'), { bridgeAmbiguous: true }));
+test('a 429 refusal is definite: the row closes and the bell goes now', async () => {
+  mockBridge.mockRejectedValueOnce(Object.assign(new Error('Too Many Requests'), { status: 429, bridgeAmbiguous: true }));
   const out = await ring();
   expect(out).toEqual({ rang: false, reason: 'ring_failed' });
+  expect(mockBell).toHaveBeenCalledTimes(1);
+});
+
+test('an uncertain ring that never became a call is settled as a miss after 3 minutes', async () => {
+  jest.useFakeTimers();
+  try {
+    mockBridge.mockRejectedValueOnce(Object.assign(new Error('timeout'), { bridgeAmbiguous: true }));
+    const out = await ring();
+    expect(out).toEqual({ rang: false, reason: 'ring_uncertain' });
+    expect(mockBell).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(_test.UNCERTAIN_RING_CHECK_MS);
+    expect(mockBell).toHaveBeenCalledTimes(1);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('an uncertain ring Twilio did create (a sid was adopted) is left to its callbacks', async () => {
+  mockState.reservedRow = null; // whereNull(twilio_call_sid) finds nothing
+  await expect(_test.settleUnstartedRing('log-1')).resolves.toBe(false);
   expect(mockState.updates).toHaveLength(0);
   expect(mockBell).not.toHaveBeenCalled();
 });
