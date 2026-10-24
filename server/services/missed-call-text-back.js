@@ -71,6 +71,19 @@
  * finished verdict (stamped once in metadata, see sendSlotDeadline); the
  * 2-minute sweep is what picks it up.
  *
+ * Failed press-1 screen (GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN, owner
+ * ruling 2026-10-24 "this should be fixed": no text-back to robocalls): the
+ * pre-connect screen (GATE_CALL_PRECONNECT_SCREEN, twilio-voice-webhook.js)
+ * asks an unknown caller on STIR attestation B to press 1, and stamps
+ * metadata.preconnect_screen 'failed' when no key came and the call fell to
+ * the voicemail recorder. With the gate on, such a call is skipped
+ * (skipped:screen_failed). In the 4 weeks to 2026-10-24, 17 of this lane's 27
+ * texts went to failed-screen callers (16 in the Oct 14-16 robocall bursts) and, in
+ * 90 days of failed-screen calls, no text-back case was a real prospect.
+ * Unlike the robodialer pattern rules below, nobody can be primed into it: a
+ * real person passes by pressing 1. Only the explicit 'failed' stamp counts;
+ * 'passed', 'gated', 'would_gate' and no stamp text as before.
+ *
  * Timing: every call gets one send slot (SEND_SLOT_MS) from the first
  * moment it may be texted — right after the voicemail-landing grace, any
  * hour of the day. Past the slot the call is skipped for good, so a crashed
@@ -101,6 +114,7 @@ const { autoTextHoldReason, deliveredTexts } = require('./messaging/auto-text-ho
 
 const GATE = 'missedCallTextBack';
 const EMPTY_VOICEMAIL_GATE = 'missedCallTextBackEmptyVoicemail';
+const SKIP_FAILED_SCREEN_GATE = 'missedCallTextSkipFailedScreen';
 const MESSAGE_TYPE = 'missed_call_text_back';
 // voicemail-lead-sms.js's provisional claim outcome: its text is not out
 // yet, and it deletes the row on a failure that never consumed its one-shot.
@@ -232,6 +246,12 @@ function textBackCoreEligible(row, opts) {
 // the sweep, the lease and the provider boundary each read it fresh).
 function emptyVoicemailOn() {
   return isEnabled(EMPTY_VOICEMAIL_GATE) === true;
+}
+
+// Pure: the pre-connect screen challenged this caller and no key was pressed
+// (see the header). Only the explicit 'failed' stamp counts.
+function failedPreconnectScreen(row) {
+  return parseMeta(row && row.metadata).preconnect_screen === 'failed';
 }
 
 /**
@@ -522,6 +542,10 @@ async function precheckRow(row, now) {
   // A Waves line or a staff forward / CSR cell calling in is never a lead
   // (same exclusion as outbound-voicemail-sms.js).
   if (TWILIO_NUMBERS.isInternalNumber(phone)) return { ok: false, outcome: 'skipped:internal_number', reason: 'internal_number' };
+  // A caller who failed the press-1 screen is not texted (owner ruling 2026-10-24).
+  if (failedPreconnectScreen(row) && isEnabled(SKIP_FAILED_SCREEN_GATE) === true) {
+    return { ok: false, outcome: 'skipped:screen_failed', reason: 'screen_failed' };
+  }
 
   // Voicemail-landing grace, from when the call ended, any hour of the day
   // (owner ruling 2026-09-28: no 8am-8pm window check here any more) — same
@@ -809,7 +833,8 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
 // or a line and length so a genuine prospect matches. The bell's classifiers
 // stamp missed_call_text_spam_shadow 'block' | 'burst' so the pattern stays
 // measurable, whichever spam gates are on. The classifiers fail open inside;
-// any error here changes nothing and the text goes as today.
+// any error here changes nothing and the text goes as today. (A caller who
+// failed the press-1 screen is a separate signal nobody can prime: precheckRow.)
 async function stampSpamShadow(row, stampShadow) {
   try {
     const flags = await classifySpamWave(row);
@@ -1012,6 +1037,8 @@ module.exports = {
     stampSpamShadow,
     textBackCoreEligible,
     emptyVoicemailOn,
+    failedPreconnectScreen,
+    SKIP_FAILED_SCREEN_GATE,
     stampEmptyVoicemailSeen,
     EMPTY_VOICEMAIL_LANDING_MS,
     callEndedAt,

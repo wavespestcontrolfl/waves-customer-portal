@@ -92,6 +92,7 @@
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
  *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 15s+, no answer, no voicemail — texts them back from the line they called)
  *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 15s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
+ *   GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN=true (text-back lane only: no text to a caller who failed the press-1 pre-connect screen, call_log.metadata.preconnect_screen 'failed'; settles skipped:screen_failed; the missed-call bell is unchanged; dark by default)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -2608,6 +2609,14 @@ const gates = {
   // awaiting transcription never does). Needs GATE_MISSED_CALL_TEXT_BACK.
   // Off → byte-identical to before.
   missedCallTextBackEmptyVoicemail: process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true',
+  // Narrows the text-back lane ONLY (not the bell), owner ruling 2026-10-24
+  // ("this should be fixed": no text-back to robocalls): a caller who failed
+  // the press-1 pre-connect screen (GATE_CALL_PRECONNECT_SCREEN stamps
+  // call_log.metadata.preconnect_screen 'failed' when an unknown caller on
+  // STIR attestation B pressed no key) gets no text; the call settles
+  // skipped:screen_failed. 'passed', 'gated', 'would_gate' and no stamp text
+  // as before. Off → byte-identical to before.
+  missedCallTextSkipFailedScreen: process.env.GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN === 'true',
   // Missed-call bell gaps (owner 2026-10-20, "ALL", after the call audit). Admin
   // bell only: none of the four sends a customer text, email or call. Each ships
   // dark; off = byte-identical to before, except gates A and B stamp
