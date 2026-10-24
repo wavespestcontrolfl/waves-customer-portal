@@ -519,7 +519,7 @@ function hasAlignedAuthStrict(auth, aligned) {
  * a spam-foldered message would let anyone spoof a customer or Stripe and
  * have Gmail's phishing verdict reversed automatically.
  */
-function hasAlignedAuth(authResults, fromDomain) {
+function hasAlignedAuth(authResults, fromDomain, { strict = false } = {}) {
   const auth = String(authResults || '').toLowerCase();
   const domain = String(fromDomain || '').toLowerCase();
   if (!auth || !domain) return false;
@@ -535,8 +535,9 @@ function hasAlignedAuth(authResults, fromDomain) {
     || (fromOrg !== null && orgDomain(value) === fromOrg);
   // GATE_EMAIL_AUTH_STRICT: read only real resinfo results (comments and
   // quoted strings dropped), from Google's own authserv-id. Gate off keeps
-  // the whole-string match below byte-for-byte.
-  if (emailAuthStrictLive()) return hasAlignedAuthStrict(auth, aligned);
+  // the whole-string match below byte-for-byte. `strict` forces the structural
+  // read for a caller that must never trust the legacy parser.
+  if (strict || emailAuthStrictLive()) return hasAlignedAuthStrict(auth, aligned);
   const dkim = auth.match(/dkim=pass[^;]*/g) || [];
   for (const clause of dkim) {
     // header.i may carry a full identity (user@domain); align on the domain.

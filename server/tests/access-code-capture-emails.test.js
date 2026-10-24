@@ -76,6 +76,9 @@ describe('emailEligible: which emails are read', () => {
     ['a sender Gmail did not authenticate', { authentication_results: 'mx.google.com; dkim=fail header.d=example.invalid; spf=fail smtp.mailfrom=example.invalid' }],
     ['a sender authenticated as another domain', { authentication_results: 'mx.google.com; dkim=pass header.d=other.invalid; spf=pass smtp.mailfrom=other.invalid' }],
     ['mail with no authentication result', { authentication_results: null }],
+    // a quoted SMTP local part naming the customer's domain: the legacy parser
+    // would pass it, so this lane always reads authentication structurally
+    ['a forged quoted local part', { authentication_results: 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=example.invalid y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=example.invalid y"@evil.example' }],
     ['an empty email', { body_text: '  ', body_html: null }],
     ['an email with no sender', { from_address: '' }],
   ])('%s is not read', (_name, patch) => {

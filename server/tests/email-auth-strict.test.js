@@ -34,6 +34,14 @@ const REAL_SPF = 'mx.google.com; dkim=none; spf=pass (google.com: domain of boun
 const GATE = 'GATE_EMAIL_AUTH_STRICT';
 afterEach(() => { delete process.env[GATE]; });
 
+describe('hasAlignedAuth, strict option', () => {
+  test('a caller that asks for strict reads structurally even with the gate off', () => {
+    expect(hasAlignedAuth(FORGED, 'victim.example', { strict: true })).toBe(false);
+    expect(hasAlignedAuth(REAL_DKIM, 'victim.example', { strict: true })).toBe(true);
+    expect(hasAlignedAuth(REAL_SPF, 'victim.example', { strict: true })).toBe(true);
+  });
+});
+
 describe('hasAlignedAuth, gate off', () => {
   test('quoted-local-part forgery is still accepted (unchanged behavior)', () => {
     expect(hasAlignedAuth(FORGED, 'victim.example')).toBe(true);

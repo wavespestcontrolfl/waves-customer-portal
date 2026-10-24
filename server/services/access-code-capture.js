@@ -1342,7 +1342,7 @@ function emailEligible(row) {
     !isInternalEmailRecipient(sender), !isOperationalDomain(domain), !domainMatches(domain, OWN_EMAIL_DOMAINS),
     !isAutomatedSender(sender), !BOUNCE_SENDER.test(sender), !AUTO_REPLY_SUBJECT.test(String(row.subject || '')),
     !EMAIL_BULK_CLASSES.has(row.classification), String(row.list_unsubscribe || '').trim() === '', !row.bid_filed,
-    hasAlignedAuth(row.authentication_results, domain),
+    hasAlignedAuth(row.authentication_results, domain, { strict: true }),
   ].every(Boolean);
 }
 
