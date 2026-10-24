@@ -473,36 +473,41 @@ function spokenNormalizeLine(line) {
     }
     return null;
   };
-  const takeRun = (i) => {
-    let j = i;
-    let pre = tokens[i].lead;
+  const SIGN_WORD = /^(?:sign|key)$/i;
+  // Where a run starts: "pound, three three nine four" / "pound sign 3394" (a
+  // symbol word before digits) or a digit token. { pre, j } or null.
+  const runStart = (i) => {
+    const t = tokens[i];
+    if (t.k !== 'S' || t.lead) return t.lead && !digitish(t) ? null : { pre: t.lead, j: i };
+    const k = SIGN_WORD.test(tokens[i + 1]?.core || '') && !breaksAfter(t) ? i + 2 : i + 1;
+    return breaksAfter(tokens[k - 1]) || !digitAt(k, '') ? null : { pre: t.sym, j: k };
+  };
+  // The digits from j to the end of the clause; "3394#": a symbol written right
+  // after the digits ends the run.
+  const collectDigits = (start) => {
+    let j = start;
     let digits = '';
     let post = '';
-    if (tokens[j].k === 'S' && !pre) {
-      // "pound, three three nine four" / "pound sign 3394": a symbol word before digits
-      let k = j + 1;
-      if (/^(?:sign|key)$/i.test(tokens[k]?.core || '') && !breaksAfter(tokens[k - 1])) k += 1;
-      if (breaksAfter(tokens[k - 1]) || !digitAt(k, '')) return null;
-      pre = tokens[j].sym;
-      j = k;
-    } else if (pre && !digitish(tokens[j])) return null;
-    while (j < n) {
-      if (digits && breaksAfter(tokens[j - 1])) break;
+    while (j < n && !post && !(digits && breaksAfter(tokens[j - 1]))) {
       const dv = digitAt(j, digits);
       if (!dv) break;
       digits += dv.digits;
       j += dv.used;
-      // "3394#": a symbol written right after the digits ends the run
-      if (tokens[j - 1].trail) { post = tokens[j - 1].trail; break; }
+      post = tokens[j - 1].trail;
     }
+    return { j, digits, post };
+  };
+  const takeRun = (i) => {
+    const start = runStart(i);
+    if (!start) return null;
+    let { j, digits, post } = collectDigits(start.j);
     if (!digits) return null;
     // "three three nine four pound": a symbol word after at least three digits
     if (!post && digits.length >= 3 && tokens[j]?.k === 'S' && !breaksAfter(tokens[j - 1])) {
       post = tokens[j].sym;
-      j += 1;
-      if (/^(?:sign|key)$/i.test(tokens[j]?.core || '')) j += 1;
+      j += SIGN_WORD.test(tokens[j + 1]?.core || '') ? 2 : 1;
     }
-    return { end: j, digits, text: `${pre}${digits}${post}${tokens[j - 1].tail || ''}` };
+    return { end: j, digits, text: `${start.pre}${digits}${post}${tokens[j - 1].tail || ''}` };
   };
   const out = [];
   const runs = [];
