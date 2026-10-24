@@ -370,11 +370,13 @@ describe('Update Details that moves the visit to another house never carries a r
   describe('assertRefillPropertyCurrent under the save\'s row lock', () => {
     const { assertRefillPropertyCurrent } = router._test;
     // A scripted transaction: the visit row and the add-on rows it may read.
-    const trxFor = ({ propertyId = HOUSE, addons = [], movedProperty = HOUSE } = {}) => {
+    const trxFor = ({ propertyId = HOUSE, addons = [], movedProperty = HOUSE, hostKey = 'mosquito_misting_service', hostServiceId = null, services = [] } = {}) => {
       const reads = [];
       const trx = (table) => {
         reads.push(table);
-        let rows = table === 'scheduled_service_addons' ? addons : [{ id: VISIT, property_id: propertyId }, { id: MOVED, property_id: movedProperty }];
+        let rows = table === 'scheduled_service_addons' ? addons
+          : table === 'services' ? services
+            : [{ id: VISIT, property_id: propertyId, service_key_snapshot: hostKey, service_id: hostServiceId }, { id: MOVED, property_id: movedProperty }];
         const q = {
           where(cond) { if (cond && typeof cond === 'object') rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
           whereIn(col, values) { rows = rows.filter((r) => values.includes(r[col])); return q; },
@@ -394,6 +396,22 @@ describe('Update Details that moves the visit to another house never carries a r
       await expect(assertRefillPropertyCurrent(trxFor({ propertyId: OTHER }), VISIT, { addressPlan: null, replaceAddons: [priced(HOUSE)] }))
         .rejects.toMatchObject({ status: 409, code: 'VISIT_CHANGED_RETRY' });
       await expect(assertRefillPropertyCurrent(trxFor({ propertyId: null }), VISIT, { addressPlan: null, replaceAddons: [priced(null)] })).resolves.toBeUndefined();
+    });
+
+    test('no address change: the locked row\'s host must still be the misting plan (a concurrent service switch is a retryable conflict)', async () => {
+      await expect(assertRefillPropertyCurrent(trxFor({ hostKey: 'pest_control' }), VISIT, { addressPlan: null, replaceAddons: [priced(HOUSE)] }))
+        .rejects.toMatchObject({ status: 409, code: 'VISIT_CHANGED_RETRY' });
+      // No snapshot on the row: the catalog row behind service_id decides.
+      await expect(assertRefillPropertyCurrent(trxFor({ hostKey: null, hostServiceId: 'svc-9', services: [{ id: 'svc-9', service_key: 'mosquito_misting_service' }] }), VISIT, { addressPlan: null, replaceAddons: [priced(HOUSE)] }))
+        .resolves.toBeUndefined();
+      await expect(assertRefillPropertyCurrent(trxFor({ hostKey: null, hostServiceId: 'svc-9', services: [{ id: 'svc-9', service_key: 'lawn_care' }] }), VISIT, { addressPlan: null, replaceAddons: [priced(HOUSE)] }))
+        .rejects.toMatchObject({ status: 409, code: 'VISIT_CHANGED_RETRY' });
+      // No key at all under the lock: fail closed.
+      await expect(assertRefillPropertyCurrent(trxFor({ hostKey: null }), VISIT, { addressPlan: null, replaceAddons: [priced(HOUSE)] }))
+        .rejects.toMatchObject({ status: 409, code: 'VISIT_CHANGED_RETRY' });
+      // The save sets the service itself: that key was judged before the lock, the stored host is not re-read.
+      await expect(assertRefillPropertyCurrent(trxFor({ hostKey: 'pest_control' }), VISIT, { addressPlan: null, replaceAddons: [priced(HOUSE)], updates: { service_key_snapshot: 'mosquito_misting_service' } }))
+        .resolves.toBeUndefined();
     });
 
     test('no priced refill line and no address change: no read at all', async () => {
@@ -458,7 +476,7 @@ describe('Update Details that moves the visit to another house never carries a r
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    expect(src).toContain('await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons });');
+    expect(src).toContain('await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons, updates });');
     expect(src).toContain('presetEligibilityCheck, propertyId,\n      });');
     expect(src).toContain("propertyId: typeof req.body.propertyId === 'string' ? req.body.propertyId : undefined,");
   });

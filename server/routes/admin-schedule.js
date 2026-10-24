@@ -2094,7 +2094,10 @@ async function assertRefillPlacementOnEdit(database, id, { updates, addonsPosted
 //    price was set for the old house; remove the refill, move the address, add it again;
 //  - a save that stays put must still be at the house each refill line was priced for, so another editor's move landing after the
 //    price was set is a retryable conflict, not a stale price.
-async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceAddons }) {
+//  - and the HOST must still be the misting plan under the lock: the resolver judged the host from a read taken before the lock, so
+//    another editor's service switch landing in between would leave a refill on a non-misting visit (pre-push P1, PR 2c). The save's own
+//    explicit service (updates.service_key_snapshot) was already judged before the lock; here only a host the save leaves alone is re-read.
+async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceAddons, updates }) {
   const lines = Array.isArray(replaceAddons) ? replaceAddons.filter(Boolean) : null;
   if (addressPlan) {
     // Only a visit whose property actually changes is "moved": the sheet posts the current property too, and a series plan lists
@@ -2117,11 +2120,23 @@ async function assertRefillPropertyCurrent(trx, visitId, { addressPlan, replaceA
   }
   const priced = (lines || []).filter((line) => line.refillPricedForProperty !== undefined);
   if (!priced.length) return;
-  const row = await trx('scheduled_services').where({ id: visitId }).first('property_id');
+  const row = await trx('scheduled_services').where({ id: visitId }).first('property_id', 'service_key_snapshot', 'service_id');
   const house = String((row && row.property_id) || '');
   if (priced.some((line) => String(line.refillPricedForProperty || '') !== house)) {
     throw Object.assign(
       httpError(409, 'This visit moved to a different address while you were editing, so the misting refill price is out of date. Reload and save again.'),
+      { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+  if (updates && updates.service_key_snapshot !== undefined) return;
+  let hostKey = row && row.service_key_snapshot;
+  if (!hostKey && row && row.service_id) {
+    const svc = await trx('services').where({ id: row.service_id }).first('service_key').catch(() => null);
+    hostKey = svc && svc.service_key;
+  }
+  if (hostKey !== MISTING_SERVICE_KEY) {
+    throw Object.assign(
+      httpError(409, 'This visit\'s service changed while you were editing, and a misting refill only goes on a Mosquito Misting Service Plan visit. Reload and save again.'),
       { code: 'VISIT_CHANGED_RETRY' },
     );
   }
@@ -15718,7 +15733,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             .first('customer_id', 'scheduled_date')
           : null;
         await assertAreaAddOnEdit(trx, req.params.id, { updates, replaceAddons, addressPlan });
-        await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons });
+        await assertRefillPropertyCurrent(trx, req.params.id, { addressPlan, replaceAddons, updates });
         await areaAddOnRows.clearOwnAreaAddOnScopeOnServiceChange(trx, req.params.id, updates);
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
