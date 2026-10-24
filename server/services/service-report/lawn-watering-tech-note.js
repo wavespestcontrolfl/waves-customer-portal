@@ -11,7 +11,7 @@
  * `lawn_watering_tech_note`) instead of an office alert: too late with no hold,
  * water the product in on site; a clash, never water during the hold (it is a
  * label direction, or the label ladder would have shortened it), and ask the
- * customer to water in first thing tomorrow. Every other reason keeps the
+ * customer to water in as soon as the no-water time is over. Every other reason keeps the
  * office alert (lawn-watering-sms.js).
  *
  * The caller falls back to the office alert when this returns null (no
@@ -40,7 +40,7 @@ function techNoteMessage(noClaim) {
   const holds = names(noClaim.holdProducts);
   const h = holds.join(' and ') || OTHER_PRODUCT;
   const needs = (list) => (list.length > 1 ? 'need' : 'needs');
-  return `Do not water now: ${h} ${needs(holds)} time with no water. ${w} ${needs(waterIns)} watering in, and no time is left today for both, so the customer got no watering text. Ask the customer to water ${w} in first thing tomorrow. Next time, water ${w} in before you apply ${h}.`;
+  return `Do not water now: ${h} ${needs(holds)} time with no water. ${w} ${needs(waterIns)} watering in, and no time is left today for both, so the customer got no watering text. Ask the customer to water ${w} in as soon as the no-water time for ${h} is over. Next time, water ${w} in before you apply ${h}.`;
 }
 
 // Only the fields the visit row actually carries: first_name / last_name come
