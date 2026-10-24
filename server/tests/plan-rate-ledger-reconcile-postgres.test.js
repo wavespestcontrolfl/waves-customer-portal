@@ -38,7 +38,7 @@ maybeDescribe('plan-rate ledger reconcile (live Postgres)', () => {
     await db('customers').whereIn('id', created).del();
   });
 
-  async function seed({ bill, stage = 'active_customer', deleted = false, lines = [] }) {
+  async function seed({ bill, stage = 'active_customer', deleted = false, active = true, lines = [] }) {
     const id = randomUUID();
     created.push(id);
     await db('customers').insert({
@@ -46,7 +46,7 @@ maybeDescribe('plan-rate ledger reconcile (live Postgres)', () => {
       first_name: 'Synthetic',
       last_name: 'Ledger',
       phone: `fixture-${id.slice(0, 8)}`,
-      active: true,
+      active,
       pipeline_stage: stage,
       monthly_rate: bill,
       deleted_at: deleted ? new Date(STAMP) : null,
@@ -64,7 +64,7 @@ maybeDescribe('plan-rate ledger reconcile (live Postgres)', () => {
   const alertsFor = (id) => db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'customerId' = ?", [id]).select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata');
 
-  test('the scan: live stages, not deleted, lines present, a one-cent difference counts, a NULL bill is zero, ordered by id', async () => {
+  test('the scan: live customers only (active, customer stage, not deleted), lines present, a one-cent difference counts, a NULL bill is zero, ordered by id', async () => {
     const shortfall = await seed({ bill: '86.60', lines: [['pest_control', '45.00']] });
     const overshoot = await seed({ bill: '50.00', stage: 'won', lines: [['pest_control', '45.00'], ['lawn_care', '45.00']] });
     const nullBill = await seed({ bill: null, stage: 'at_risk', lines: [['pest_control', '45.00']] });
@@ -75,9 +75,10 @@ maybeDescribe('plan-rate ledger reconcile (live Postgres)', () => {
     const churned = await seed({ bill: '86.60', stage: 'churned', lines: [['pest_control', '45.00']] });
     const lead = await seed({ bill: '86.60', stage: 'new_lead', lines: [['pest_control', '45.00']] });
     const deleted = await seed({ bill: '86.60', deleted: true, lines: [['pest_control', '45.00']] });
+    const inactive = await seed({ bill: '86.60', active: false, lines: [['pest_control', '45.00']] });
 
     const found = (await reconcile.divergentCustomersQuery(db)).map((row) => row.id);
-    const mine = new Set([shortfall, overshoot, nullBill, oneCent, balanced, heldAtZero, noLines, churned, lead, deleted]);
+    const mine = new Set([shortfall, overshoot, nullBill, oneCent, balanced, heldAtZero, noLines, churned, lead, deleted, inactive]);
     expect(found.filter((id) => mine.has(id)).sort()).toEqual([shortfall, overshoot, nullBill, oneCent].sort());
     expect(found).toEqual([...found].sort());
   });
@@ -131,6 +132,15 @@ maybeDescribe('plan-rate ledger reconcile (live Postgres)', () => {
       ['unattributed', '41.60', 'invariant_repair'],
     ]);
     expect(await billOf(id)).toBe('86.60');
+  });
+
+  test('an account deactivated after the scan is left alone by the locked read', async () => {
+    const id = await seed({ bill: '86.60', lines: [['pest_control', '45.00']] });
+    expect((await reconcile.divergentCustomersQuery(db)).map((row) => row.id)).toContain(id);
+    await db('customers').where({ id }).update({ active: false });
+    expect(await reconcile.reconcileCustomer(db, id)).toEqual({ outcome: 'not_live' });
+    expect((await linesOf(id)).map((row) => [row.family_key, row.monthly_rate])).toEqual([['pest_control', '45.00']]);
+    expect(await alertsFor(id)).toHaveLength(0);
   });
 
   test('an overshoot writes no line and alerts once across two passes', async () => {

@@ -61,7 +61,7 @@ const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 function customer(n, monthlyRate, extra = {}) {
   return {
-    id: uuid(n), first_name: 'Pat', last_name: `Example${n}`, monthly_rate: monthlyRate, pipeline_stage: 'active_customer', deleted_at: null, ...extra,
+    id: uuid(n), first_name: 'Pat', last_name: `Example${n}`, monthly_rate: monthlyRate, active: true, pipeline_stage: 'active_customer', deleted_at: null, ...extra,
   };
 }
 function line(n, familyKey, monthlyRate, extra = {}) {
@@ -72,41 +72,59 @@ function line(n, familyKey, monthlyRate, extra = {}) {
 
 // A stateful fake knex covering exactly what the reconcile touches: the candidate scan, and
 // per-customer transactions with the advisory lock, the locked customers read, the ledger read and
-// the ledger upsert. Writes to customers, deletes and updates anywhere, and any other table throw.
+// the ledger upsert. The customers builder records and APPLIES every where/whereNull/whereIn it is
+// given (so the real whereLiveCustomer filters the fake rows), and evaluates the scan's gap predicate
+// itself. Writes to customers, deletes and updates anywhere, and any other table throw.
 // `snapshot` stands in for a scan taken BEFORE a concurrent writer committed.
 function makeDb({ customers = [], lines = [], snapshot = null } = {}) {
   const state = { customers: clone(customers), lines: clone(lines) };
   const initialCustomers = clone(customers);
-  const isLive = (c) => c && !c.deleted_at && LIVE.includes(c.pipeline_stage);
-  const scan = () => {
-    if (snapshot) return snapshot.map((id) => ({ id }));
-    return state.customers
-      .filter((c) => {
-        const own = state.lines.filter((l) => l.customer_id === c.id);
-        return isLive(c) && own.length && own.reduce((sum, l) => sum + cents(l.monthly_rate), 0) !== cents(c.monthly_rate);
-      })
-      .map((c) => c.id).sort().map((id) => ({ id }));
+  const hasGap = (c) => {
+    const own = state.lines.filter((l) => l.customer_id === c.id);
+    return own.length > 0 && own.reduce((sum, l) => sum + cents(l.monthly_rate), 0) !== cents(c.monthly_rate);
   };
   const refuse = (what) => () => { mockLog.push({ op: 'refused', what }); throw new Error(`fake: ${what}`); };
 
   const builder = (view, table) => {
-    if (table === 'customers as c') {
-      const b = {};
-      ['join', 'whereNull', 'groupBy', 'havingRaw', 'orderBy', 'select'].forEach((m) => { b[m] = () => b; });
-      b.whereIn = (column, values) => { mockLog.push({ op: 'scan-scope', column, values }); return b; };
-      b.then = (resolve, reject) => { mockLog.push({ op: 'scan' }); return Promise.resolve(scan()).then(resolve, reject); };
-      return b;
-    }
     if (table === 'customers') {
-      let id;
+      const scope = [];
+      const preds = [];
       let locked = false;
+      let gapPredicate = false;
       const b = {
-        where: (w) => { id = w.id; return b; },
+        modify: (fn) => { fn(b); return b; },
+        where: (criteria, value) => {
+          const test = typeof criteria === 'object'
+            ? (row) => Object.entries(criteria).every(([key, v]) => row[key] === v)
+            : (row) => row[criteria] === value;
+          scope.push(typeof criteria === 'object' ? ['where', criteria] : ['where', criteria, value]);
+          preds.push(test);
+          return b;
+        },
+        whereNull: (column) => { scope.push(['whereNull', column]); preds.push((row) => row[column] == null); return b; },
+        whereIn: (column, values) => { scope.push(['whereIn', column, values]); preds.push((row) => values.includes(row[column])); return b; },
+        whereRaw: (sql) => {
+          if (!/\(SELECT ROUND\(SUM\(r\.monthly_rate\) \* 100\) FROM customer_plan_rates r WHERE r\.customer_id = customers\.id\) <> ROUND\(COALESCE\(customers\.monthly_rate, 0\) \* 100\)/.test(sql)) {
+            throw new Error(`fake: unexpected scan predicate ${sql}`);
+          }
+          gapPredicate = true;
+          return b;
+        },
+        orderBy: () => b,
+        select: () => b,
         forUpdate: () => { locked = true; return b; },
         first: async () => {
-          mockLog.push({ op: 'customer-read', id, locked });
-          const row = view.customers.find((c) => c.id === id);
+          mockLog.push({ op: 'customer-read', locked, scope });
+          const row = view.customers.find((c) => preds.every((p) => p(c)));
           return row ? { ...row } : undefined;
+        },
+        then: (resolve, reject) => {
+          mockLog.push({ op: 'scan', scope });
+          if (!gapPredicate) return Promise.reject(new Error('fake: scan without the gap predicate')).then(resolve, reject);
+          const rows = snapshot
+            ? snapshot.map((id) => ({ id }))
+            : view.customers.filter((c) => preds.every((p) => p(c)) && hasGap(c)).map((c) => c.id).sort().map((id) => ({ id }));
+          return Promise.resolve(rows).then(resolve, reject);
         },
         update: refuse('customers write'),
         insert: refuse('customers write'),
@@ -219,10 +237,29 @@ test('gate off: nothing is read, written or raised', async () => {
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
 });
 
-test('the scan covers the live customer stages only', async () => {
-  const db = makeDb();
-  await runPlanRateLedgerReconcile({ database: db });
-  expect(ops('scan-scope')).toEqual([{ op: 'scan-scope', column: 'c.pipeline_stage', values: LIVE }]);
+test('the scan only meets live customers: active, a customer stage, not deleted (whereLiveCustomer)', async () => {
+  // Every customer has the same $10 shortfall; only the live one may be read, repaired or alerted.
+  const db = makeDb({
+    customers: [
+      customer(1, '60.00'),
+      customer(2, '60.00', { active: false }),
+      customer(3, '60.00', { pipeline_stage: 'churned' }),
+      customer(4, '60.00', { pipeline_stage: 'new_lead' }),
+      customer(5, '60.00', { deleted_at: STAMP }),
+    ],
+    lines: [1, 2, 3, 4, 5].map((n) => line(n, 'pest_control', '50.00')),
+  });
+  const result = await runPlanRateLedgerReconcile({ database: db });
+  expect(result).toMatchObject({ checked: 1, parked: 1, alerted: 1 });
+  expect(ops('lines-read').map((entry) => entry.id)).toEqual([uuid(1)]);
+  for (const n of [2, 3, 4, 5]) expect(linesOf(db, n).map((l) => l.monthly_rate)).toEqual(['50.00']);
+  // Both the scan and the locked read carry the live rule's active = true.
+  const [scan] = ops('scan');
+  const [read] = ops('customer-read');
+  for (const { scope } of [scan, read]) {
+    expect(scope).toEqual(expect.arrayContaining([['where', 'active', true], ['whereNull', 'deleted_at'], ['whereIn', 'pipeline_stage', LIVE]]));
+  }
+  expectBillsUntouched(db);
 });
 
 test('shortfall: the gap is parked as a new unattributed line, the bill is untouched, the owner is alerted', async () => {
@@ -368,18 +405,19 @@ test('re-check under the lock: a gap a concurrent writer closed before the lock 
   expectBillsUntouched(db);
 });
 
-test('re-check under the lock: lines cleared, or the customer churned or deleted, before the lock: left alone', async () => {
+test('re-check under the lock: lines cleared, or the customer churned, deleted or deactivated, before the lock: left alone', async () => {
   const db = makeDb({
     customers: [
       customer(1, '86.60'),
       customer(2, '86.60', { pipeline_stage: 'churned' }),
       customer(3, '86.60', { deleted_at: STAMP }),
+      customer(4, '86.60', { active: false }),
     ],
-    lines: [line(2, 'pest_control', '45.00'), line(3, 'pest_control', '45.00')],
-    snapshot: [uuid(1), uuid(2), uuid(3)],
+    lines: [line(2, 'pest_control', '45.00'), line(3, 'pest_control', '45.00'), line(4, 'pest_control', '45.00')],
+    snapshot: [uuid(1), uuid(2), uuid(3), uuid(4)],
   });
   const result = await runPlanRateLedgerReconcile({ database: db });
-  expect(result).toMatchObject({ checked: 3, converged: 1, notLive: 2, parked: 0, overshoots: 0, alerted: 0 });
+  expect(result).toMatchObject({ checked: 4, converged: 1, notLive: 3, parked: 0, overshoots: 0, alerted: 0 });
   // Not-live customers are refused before their lines are even read.
   expect(ops('lines-read').map((entry) => entry.id)).toEqual([uuid(1)]);
   expect(ops('upsert')).toEqual([]);

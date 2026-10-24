@@ -18,7 +18,8 @@
  * The only check so far was a local launchd job on the owner's Mac, which hung
  * from 2026-10-16 to 10-24; this is its durable home (job_health records every run).
  *
- * Each run, for every live customer (a customer pipeline stage, not deleted)
+ * Each run, for every live customer (customer-stages.js whereLiveCustomer:
+ * active, a customer pipeline stage, not deleted)
  * whose lines add up to a different figure than the bill by a cent or more:
  * - Shortfall (bill above the lines): the gap is parked in the customer's
  *   'unattributed' line, the ops backfill's pre-seeded repair
@@ -50,7 +51,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { planRateLedgerReconcileLive } = require('../config/feature-gates');
 const { UNATTRIBUTED } = require('./plan-rate-ledger');
-const { CUSTOMER_STAGES } = require('./customer-stages');
+const { whereLiveCustomer } = require('./customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { raiseAdminAlert } = require('./admin-alert-compose');
 const names = require('./admin-alert-names');
@@ -65,22 +66,23 @@ const DEDUPE_PREFIX = 'plan-rate-invariant';
 const cents = (value) => Math.round(Number(value || 0) * 100);
 const dollars = (amountCents) => money(amountCents / 100);
 
-// Live customers whose lines add up to a different figure than the bill, by
-// whole cents (both columns are currency precision, so any difference is one
-// the dues run bills). A customer with no lines is a designed state (a rate
-// set before the ledger existed, handled by the accept-time empty-ledger
-// cases), not a gap. A NULL bill counts as zero: lines above nothing are an
-// overshoot. Ordered by id so a run that spends its alert budget always
-// leaves the same customers for the next one.
+// Live customers (whereLiveCustomer: active, a customer stage, not deleted —
+// an inactive account is not billed by the dues run and comes back into this
+// check the first night after it is reactivated) whose lines add up to a
+// different figure than the bill, by whole cents (both columns are currency
+// precision, so any difference is one the dues run bills). A customer with no
+// lines is a designed state (a rate set before the ledger existed, handled by
+// the accept-time empty-ledger cases), not a gap: the sum over no lines is
+// NULL and never compares unequal. A NULL bill counts as zero: lines above
+// nothing are an overshoot. The sum is a correlated subquery, so the live
+// rule's unqualified columns only ever see customers. Ordered by id so a run
+// that spends its alert budget always leaves the same customers for the next.
 function divergentCustomersQuery(database) {
-  return database('customers as c')
-    .join('customer_plan_rates as r', 'r.customer_id', 'c.id')
-    .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
-    .whereNull('c.deleted_at')
-    .groupBy('c.id', 'c.monthly_rate')
-    .havingRaw('ROUND(SUM(r.monthly_rate) * 100) <> ROUND(COALESCE(c.monthly_rate, 0) * 100)')
-    .orderBy('c.id')
-    .select('c.id');
+  return database('customers')
+    .modify(whereLiveCustomer)
+    .whereRaw('(SELECT ROUND(SUM(r.monthly_rate) * 100) FROM customer_plan_rates r WHERE r.customer_id = customers.id) <> ROUND(COALESCE(customers.monthly_rate, 0) * 100)')
+    .orderBy('id')
+    .select('id');
 }
 
 // Insert the gap as the 'unattributed' line, or ADD it to that line when it
@@ -167,13 +169,15 @@ async function raiseGapAlert(trx, { customer, lines, billedCents, lineSumCents }
 async function reconcileCustomer(database, customerId) {
   return database.transaction(async (trx) => {
     await lockCustomerComms(trx, customerId);
+    // The live rule is part of the locked read: FOR UPDATE re-evaluates it on
+    // the row version it waited for, so an account deactivated, churned or
+    // deleted since the scan reads as absent and is left alone.
     const customer = await trx('customers')
       .where({ id: customerId })
+      .modify(whereLiveCustomer)
       .forUpdate()
-      .first('id', 'first_name', 'last_name', 'monthly_rate', 'pipeline_stage', 'deleted_at');
-    if (!customer || customer.deleted_at || !CUSTOMER_STAGES.includes(customer.pipeline_stage)) {
-      return { outcome: 'not_live' };
-    }
+      .first('id', 'first_name', 'last_name', 'monthly_rate');
+    if (!customer) return { outcome: 'not_live' };
     const lines = await trx('customer_plan_rates')
       .where({ customer_id: customerId })
       .orderBy('family_key')
