@@ -663,7 +663,7 @@ describe('service report — every shipped chip answers its own category (AW-06)
 
   test('chip "How do I keep the weeds from spreading?" answers with the lawn trend/score breakdown', () => {
     expect(answerServiceReportQuestion({ question: 'How do I keep the weeds from spreading?', data: lawnData }))
-      .toMatch(/weed cleanliness/i);
+      .toMatch(/weed control/i);
   });
 
   test('chip "What are the stress areas you flagged?" answers with the lawn trend/score breakdown', () => {
@@ -707,7 +707,7 @@ describe('service report — every shipped chip answers its own category (AW-06)
   test('"What was applied to the weeds?" answers with the recorded treatment, not the lawn trend', () => {
     const answer = answerServiceReportQuestion({ question: 'What was applied to the weeds?', data: lawnData });
     expect(answer).toMatch(/Sources used: this service report/);
-    expect(answer).not.toMatch(/Lawn snapshot summary|weed cleanliness/i);
+    expect(answer).not.toMatch(/Lawn snapshot summary|weed control/i);
   });
 
   test('"What did you spray on the thin areas?" answers with the recorded treatment, not the lawn trend', () => {

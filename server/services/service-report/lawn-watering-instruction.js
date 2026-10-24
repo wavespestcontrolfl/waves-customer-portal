@@ -257,11 +257,13 @@ function finitePositive(v, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+// A rule nobody checked against the label or set as an owner rule.
+const isGuessed = (r) => r.source !== 'label' && r.source !== 'owner';
+
 // Weakest provenance among the rules that drive the instruction.
 function ruleSourceOf(rules) {
-  const sources = rules.map((r) => r.source);
-  if (sources.some((s) => s !== 'label' && s !== 'owner')) return 'default';
-  return sources.includes('owner') ? 'owner' : 'label';
+  if (rules.some(isGuessed)) return 'default';
+  return rules.some((r) => r.source === 'owner') ? 'owner' : 'label';
 }
 
 // ── Minutes ladder ───────────────────────────────────────────────────────
@@ -439,9 +441,9 @@ function groupRules(resolved) {
 }
 
 // "None" is a positive claim: every product resolved and at least one of them
-// is label or owner sourced.
-function noneInstruction(out, nones) {
-  if (!nones.some((r) => r.source === 'label' || r.source === 'owner')) return out;
+// is label or owner sourced; only guessed nones are no claim.
+function noneInstruction(out, nones, list) {
+  if (nones.every(isGuessed)) return withNoClaim(out, 'unchecked_rules', list.map(nameOf));
   out.state = 'none';
   out.ruleSource = ruleSourceOf(nones);
   out.lines = [NONE_LINE_1];
@@ -632,12 +634,15 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, plainWhe
   if (resolved.some((r) => !r)) {
     return withNoClaim(out, 'unruled_product', namesWhere(list, resolved, (r) => !r));
   }
+  // Label first: a guessed rule (the catalog default, never checked against the
+  // label) is no claim either, so the customer never gets a guess (owner
+  // 2026-10-22: every text accurate). The office alert names the product.
+  if (labelFirst && resolved.some(isGuessed)) {
+    return withNoClaim(out, 'unchecked_rules', namesWhere(list, resolved, isGuessed));
+  }
 
   const { holds, waterIns, longs, nones } = groupRules(resolved);
-  if (!holds.length && !waterIns.length && !longs.length) {
-    const none = noneInstruction(out, nones);
-    return none.state ? none : withNoClaim(none, 'unchecked_rules', list.map(nameOf));
-  }
+  if (!holds.length && !waterIns.length && !longs.length) return noneInstruction(out, nones, list);
 
   const decided = decideShortWaterIn(out, { holds, waterIns, list, resolved, runtime, plainWhenNoSetup, at, labelFirst });
   if (decided.noClaim) return withNoClaim(out, decided.noClaim, decided.products);

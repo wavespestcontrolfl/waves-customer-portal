@@ -994,6 +994,30 @@ describe('label first (rule E), second steps and no-claim reasons', () => {
     expect(build({ rules: rules(THREE_WAY, later), completedAt: AT_10AM, plainWhenNoSetup: true, labelFirst: true }).state).toBe('hold_then_water_in');
   });
 
+  // Owner 2026-10-22: every text accurate. A guessed rule (the catalog default
+  // for a product nobody checked) never reaches the customer.
+  test('label first: a guessed rule is no claim, naming only the guessed product', () => {
+    const guess = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'default' };
+    const visit = [{ name: 'Checked', rule: VELISTA }, { name: 'New granule', rule: guess }];
+    const ins = build({ rules: visit, completedAt: AT_10AM, plainWhenNoSetup: true, labelFirst: true });
+    expect(ins.state).toBeNull();
+    expect(ins.lines).toEqual([]);
+    expect(ins.noClaim).toEqual({ reason: 'unchecked_rules', products: ['New granule'] });
+    // Without label first the guess drives the instruction, as before.
+    expect(build({ rules: visit, completedAt: AT_10AM, plainWhenNoSetup: true }).state).toBe('hold_then_water_in');
+  });
+
+  test('label first: a guessed none beside a checked none is no claim too', () => {
+    const visit = [{ name: 'Checked', rule: { mode: 'none', source: 'label' } }, { name: 'Liquid feed', rule: { mode: 'none', source: 'default' } }];
+    expect(build({ rules: visit, completedAt: AT_10AM, labelFirst: true }).noClaim).toEqual({ reason: 'unchecked_rules', products: ['Liquid feed'] });
+    expect(build({ rules: visit, completedAt: AT_10AM }).state).toBe('none');
+  });
+
+  test('label first: a product with no rule is named before a guessed one', () => {
+    const visit = [{ name: 'Unknown', rule: null }, { name: 'Guess', rule: { mode: 'hold', hold_hours: 24, source: 'default' } }];
+    expect(build({ rules: visit, completedAt: AT_10AM, labelFirst: true }).noClaim).toEqual({ reason: 'unruled_product', products: ['Unknown'] });
+  });
+
   test('a product with no rule is named; no products is its own reason', () => {
     expect(build({ rules: [{ name: 'Heritage Action Fungicide', rule: null }, { name: 'P1', rule: DYLOX }], completedAt: AT_10AM }).noClaim)
       .toEqual({ reason: 'unruled_product', products: ['Heritage Action Fungicide'] });

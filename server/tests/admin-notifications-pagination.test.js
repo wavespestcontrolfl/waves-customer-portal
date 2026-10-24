@@ -274,6 +274,25 @@ describe('PUT /:id/done and /:id/reopen', () => {
     expect(res.json).toHaveBeenCalledWith({ success: true, updated: true });
   });
 
+  test('done: a marked row also settles the text follow-up it speaks for; an unmarked row and a settle failure change nothing', async () => {
+    const actions = require('../services/sms-operational-actions');
+    const settle = jest.spyOn(actions, 'settleCommitmentsForDoneAlert').mockResolvedValue(1);
+    jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(1);
+    const res = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { version: VERSION }, techRole: 'admin', technicianId: 7 });
+    expect(settle).toHaveBeenCalledWith(expect.anything(), 'n1', { reviewedBy: 7 });
+    expect(res.json).toHaveBeenCalledWith({ success: true, updated: true });
+    // A failed settle never fails the Done click.
+    settle.mockRejectedValueOnce(new Error('boom'));
+    const failed = await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { version: VERSION }, techRole: 'admin', technicianId: 7 });
+    expect(failed.json).toHaveBeenCalledWith({ success: true, updated: true });
+    // Nothing marked (already done, or changed): the follow-up is left alone.
+    settle.mockClear();
+    NotificationService.markAdminDone.mockResolvedValue(0);
+    jest.spyOn(NotificationService, 'getAdminNotificationState').mockResolvedValue(null);
+    await call(routeHandler('/:id/done', 'put'), { params: { id: 'n1' }, body: { version: VERSION }, techRole: 'admin', technicianId: 7 });
+    expect(settle).not.toHaveBeenCalled();
+  });
+
   test('done: a missing or malformed version is refused before any write', async () => {
     const done = jest.spyOn(NotificationService, 'markAdminDone').mockResolvedValue(1);
     for (const body of [{}, { version: 'not-a-hash' }, { version: 123 }]) {

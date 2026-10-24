@@ -77,7 +77,7 @@ describe('report assistant never leaks null scores into its answer', () => {
     expect(answer).toContain('density/coverage 80%');
     expect(answer).toContain('color/nutrients 82%');
     expect(answer).not.toContain('% overall');
-    expect(answer).not.toContain('weed cleanliness');
+    expect(answer).not.toContain('weed control');
   });
 
   test('keeps the full overall + breakdown when every category is scored', () => {
@@ -92,6 +92,6 @@ describe('report assistant never leaks null scores into its answer', () => {
       },
     });
     expect(answer).toContain('Current lawn health is 81% overall.');
-    expect(answer).toContain('Breakdown: density/coverage 80%, weed cleanliness 90%, color/nutrients 82%, stress/damage 70%.');
+    expect(answer).toContain('Breakdown: density/coverage 80%, weed control 90%, color/nutrients 82%, stress/damage 70%.');
   });
 });

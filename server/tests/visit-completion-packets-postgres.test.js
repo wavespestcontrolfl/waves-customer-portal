@@ -3790,6 +3790,33 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(remainder > 0 ? 3 : 2);
   });
 
+  test.each([['paid', 40, 59], ['refunded', 40, 59]])(
+    'GATE_SETUP_FEE_SETTLED_ANYWHERE: an unstamped packet fee of %s $%s is credited once, remainder $%s', async (status, fee, remainder) => {
+      const saved = process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE;
+      process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE = 'true';
+      try {
+        const estimateId = await linkFixtureEstimateWithSetupObligation();
+        const prior = await createPaidSetupFee(estimateId);
+        const packet = await saveVisitCompletionPacket(submission());
+        await mockPg('invoices').where({ id: prior.id }).update({ status: 'void' });
+        const packetInvoice = await mockPg('invoices').where({ id: packet.body.billing.invoiceId }).first();
+        await mockPg('invoices').where({ id: packetInvoice.id }).update({ status, notes: 'Office edited packet notes',
+          line_items: JSON.stringify([...packetInvoice.line_items,
+            { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: fee, amount: fee }]) });
+        const create = (amount) => InvoiceService.create({ customerId: fixture.customerId,
+          lineItems: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: amount }],
+          notes: `accepted estimate #${estimateId}. Remaining setup fee only.`,
+        });
+        // The obligation already credits the packet's unstamped fee money; the
+        // packet guard must not subtract it a second time.
+        await expect(create(remainder + 1)).rejects.toMatchObject({ code: 'VISIT_PACKET_OWNS_BILLING', status: 409 });
+        expect(Number((await create(remainder)).total)).toBe(remainder);
+      } finally {
+        if (saved === undefined) delete process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE;
+        else process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE = saved;
+      }
+    });
+
   test('a packet invoice that already carries the setup fee owns a later setup-only mint', async () => {
     const estimateId = await linkFixtureEstimateWithSetupObligation();
     const prior = await createPaidSetupFee(estimateId);
