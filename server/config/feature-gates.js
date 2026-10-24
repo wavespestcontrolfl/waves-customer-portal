@@ -7726,6 +7726,17 @@ function pestStockAdvisoryLive() {
 // GATE_PEST_STOCK_ADVISORY reader, on its own line so gate PRs never conflict.
 module.exports.pestStockAdvisoryLive = pestStockAdvisoryLive;
 
+// GATE_PEST_RAIN_OUTLOOK read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-24).
+// On, a pest visit's completion freezes a 48-hour rain outlook in structured_notes.rainOutlook (a second forecast
+// fetch beside the conditions fetch) and the report's Weather call card may say "Dry days ahead" or "Rain in the
+// forecast", with a sentence on how dried spray behaves when the visit's outside sprays are fipronil or pyrethroid.
+// Off = no forecast call, no key on the record, card and PDF key byte-identical to before.
+function pestRainOutlookLive() {
+  return process.env.GATE_PEST_RAIN_OUTLOOK === 'true';
+}
+// GATE_PEST_RAIN_OUTLOOK reader, on its own line so gate PRs never conflict.
+module.exports.pestRainOutlookLive = pestRainOutlookLive;
+
 // GATE_LAWN_TS_STOCK_ADVISORY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-20,
 // "make lawn and tree & shrub work the same as pest"). On, a lawn or tree & shrub visit's completion may take a
 // product's stock below zero (recorded on the visit, as a WaveGuard lawn completion's is) instead of refusing, the lawn

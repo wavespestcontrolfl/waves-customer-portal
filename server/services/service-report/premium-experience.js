@@ -5,6 +5,7 @@ const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { resolveLabel } = require('../pest-pressure/label');
 const { DEFAULT_CONFIG } = require('../pest-pressure/config');
 const { detectServiceLine } = require('./service-line-configs');
+const { buildRainOutlookCardCopy } = require('./pest-rain-outlook');
 
 // Legacy service_records rows can have a null service_line while
 // service_type still identifies a lawn visit — defaulting them to 'pest'
@@ -620,7 +621,7 @@ function formatWeatherFacts(conditions = {}) {
   ].filter(Boolean).join(' · ');
 }
 
-function buildWeatherCallContext({ record } = {}) {
+function buildWeatherCallContext({ record, applications = [] } = {}) {
   const conditions = {
     ...parseJsonObject(record?.conditions),
     ...parseJsonObject(record?.weather_data),
@@ -652,9 +653,17 @@ function buildWeatherCallContext({ record } = {}) {
     // would contradict a wet week (codex P2 #3093 r7).
     body = 'Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
   }
+  // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour outlook replaces the headline
+  // and body when it has something supported to say; null leaves today's card.
+  const rainOutlookCopy = buildRainOutlookCardCopy({
+    outlook: parseJsonObject(record?.structured_notes).rainOutlook,
+    serviceLine: resolveServiceLine(record),
+    applications,
+  });
   return {
     headline,
     body,
+    ...rainOutlookCopy,
     factsLine: formatWeatherFacts(conditions),
     sourceLabel: cleanText(conditions.source),
     sourceKeys: ['condition'],
@@ -737,7 +746,7 @@ async function buildPremiumExperienceContext({
     findings: rows.findings,
     applications: rows.applications,
   });
-  const weatherCall = buildWeatherCallContext({ record });
+  const weatherCall = buildWeatherCallContext({ record, applications: rows.applications });
   const pressureReceipt = buildPressureReceiptContext({
     pressureTrend: dynamicContext.pressureTrend,
     visitRows: rows.visitRows,
@@ -779,6 +788,7 @@ module.exports = {
       zoneIds: parseJsonArray(app.zoneIds || app.zone_ids).map(String),
       area: cleanText(app.area || app.application_area),
       targets: (Array.isArray(app.targets) ? app.targets : parseJsonArray(app.targets)).map(normalizeKey).filter(Boolean),
+      activeIngredient: cleanText(app.activeIngredient || app.active_ingredient),
     }));
     const normalizedZones = zones.map((zone) => ({
       id: String(zone.id),
@@ -816,7 +826,7 @@ module.exports = {
         findings: normalizedFindings,
         applications: normalizedApplications,
       }),
-      weatherCall: buildWeatherCallContext({ record }),
+      weatherCall: buildWeatherCallContext({ record, applications: normalizedApplications }),
       pressureReceipt: buildPressureReceiptContext({
         pressureTrend: dynamicContext.pressureTrend,
         visitRows,
