@@ -248,20 +248,34 @@ async function heldTopic(knex, phrase, { generalOnly = false } = {}) {
 // 930cb1077e); an expired one is revived and counts as a suggestion.
 //
 // `generalOnly`: the general row's own key is read; the phrase's plain row is
-// then read too. One still pending is upgraded in place ({ upgrade: id }: it
-// gets the general-title ask instead of a second row on the same phrase);
-// one the chain is writing (claimed, pending_review) answers already_queued
-// until its post is out; one that is done or skipped is left alone, so the
-// general row is written beside it (local Codex P2 on 6fbfefdcc8).
+// then read too. One still pending, with no brief handed to the terminal
+// writer yet, is upgraded in place ({ upgrade: id }: it gets the
+// general-title ask instead of a second row on the same phrase); one the
+// chain is writing (claimed, pending_review, or pending on a brief the
+// terminal already holds, which is written from as it is) answers
+// already_queued until its post is out; one upgraded before that the chain
+// then refused keeps that final no (declined); one that is done or skipped
+// without the ask is left alone, so the general row is written beside it
+// (local Codex P2 on 6fbfefdcc8; GitHub Codex P2s on de16ea947b).
 async function standingAnswer(knex, phrase, { generalOnly = false } = {}) {
   if (await heldTopic(knex, phrase, { generalOnly })) return { status: 'already_queued' };
   const own = await knex('opportunity_queue').where({ dedupe_key: dedupeKeyFor(phrase, { general: generalOnly }) }).first('status');
   if (own && HELD_STATUSES.includes(own.status)) return { status: 'already_queued' };
   if (own && own.status !== 'expired') return { status: 'declined' };
   if (generalOnly) {
-    const plain = await knex('opportunity_queue').where({ dedupe_key: dedupeKeyFor(phrase) }).first('id', 'status');
+    const plain = await knex('opportunity_queue').where({ dedupe_key: dedupeKeyFor(phrase) })
+      .first('id', 'status', knex.raw("signal_metadata->>'general_title' AS general_title"));
     if (plain && ['claimed', 'pending_review'].includes(plain.status)) return { status: 'already_queued' };
-    if (plain && plain.status === 'pending') return { upgrade: plain.id };
+    if (plain && plain.general_title === 'true' && plain.status !== 'expired') return { status: 'declined' };
+    if (plain && plain.status === 'pending') {
+      // The runner's own read: a brief the terminal writer holds for this
+      // row is the one its draft is written from, so a metadata upgrade
+      // would not reach it. A failed read counts as in flight (never an
+      // upgrade the draft cannot see).
+      const { waitingBriefId } = require('../content/terminal-writer');
+      const handed = await waitingBriefId(plain.id, { conn: knex }).catch(() => 'unknown');
+      return handed ? { status: 'already_queued' } : { upgrade: plain.id };
+    }
   }
   return null;
 }
