@@ -245,6 +245,86 @@ changed balance, or a rotated recipient holds the message; the same
 AND a revalidated one at send. Never weaken a send-time recheck to make a
 stored row "replay".
 
+## 5f. A second writer beside the authoritative one loses its guards
+
+A field that already has an authoritative writer carries that writer's
+guards, not just its UPDATE. Writing the same column from a new path with a
+plain `insert`/`onConflict` upsert silently drops the newer-proposal check,
+the target-row lock/CAS, the stale-proposal retirement and the audit event:
+the value changes, review work that the retirement would have closed stays
+open, and the write is missing from the trail everyone reads. The deterministic
+lead-reply path upserted `contact_preference` beside
+`sms-operational-actions.js` (`AUTO_APPLY_FIELDS`) and lost exactly those four
+(#6337 P1). Extend the existing writer with your path instead of adding a
+second persistence mechanism.
+
+Lock ORDER is part of the same contract. Any NEW writer that LOCKS OR WRITES rows
+in more than one of `call_log`, `call_commitments`, `outbox_messages` and
+`triage_items` in a single transaction takes the shared per-call advisory lock
+`lockTriageCall` (`server/utils/triage-locks.js`) FIRST, before locking any of
+them. With MORE THAN ONE call in that transaction, first is not enough — two
+writers each holding one call's lock and waiting for the other still deadlock —
+so acquire every call id in ONE deterministic order: dedupe and sort, then lock
+in that order, before any protected row lock or write. Both live multi-call
+writers do exactly that (`customer-email-fanout.js`:
+`[...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))].sort()` then a
+lock per id; `admin-triage.js`: the same over `sortedCallIds`), and a later
+acquisition of a lock the transaction already holds is a no-op. A plain unlocked SELECT does not count, and the distinction is load-bearing:
+`renewPromiseOnOfficeVerdict` reads `outbox_messages` that way and locks only
+`call_commitments`, so it is a single-resource path and is excluded from the
+canonical table by construction. The
+relative order of the four afterwards is not load-bearing BETWEEN WRITERS THAT
+ALL TAKE THE LOCK — that is what the advisory lock buys, and the reasoning is in
+the `reschedule-link-promises.js` module doc: two writers that both take it
+first can never hold a row lock at the same time, so they cannot form a cycle.
+
+It buys nothing against a writer that never queues on it, and such writers exist
+IN BOTH ORDERS, so there is no row order a new writer can pick that is safe
+against all of them:
+
+- `admin-call-recordings.js` — operator relink and recording adoption:
+  `call_log`, then `triage_items`.
+- `twilio-voice-webhook.js` — the recovery branch of `parkAdditionalRecording`
+  (~514): `triage_items` insert, then `call_log` update. The inverse.
+
+So ORDERING CANNOT MAKE A NEW WRITER SAFE here. A new writer that must touch
+more than one of the four still takes `lockTriageCall` first — that is what
+protects it against every other writer that takes it — and then accepts that no
+ordering protects it against these two until they migrate. If your change needs
+that protection, raise the migration rather than picking an order and hoping:
+ask which of the two moves under the lock. Picking `call_log` first is safe
+against the first bullet and is exactly the inversion against the second.
+
+The failure mode is not hypothetical. It is the round-6 P1 in that same module
+doc, where `upsertCommitments` sat outside the lock and deadlocked against
+`applyHumanUpdate`. And note what the two bullets mean on their own, with no new
+writer involved: they are an unlocked pair in opposite orders on the same call
+id, which is the shape of that same inversion between two paths that ship today.
+That is an owner decision (#6342), not something to settle in a review.
+
+It does NOT describe all existing code, and a review must not read it as
+licence to reject what is there: the two operator-initiated transactions in
+`admin-call-recordings.js` — customer relink (`call_log`, then `triage_items`)
+and recording adoption (the same two) — write two of the four without taking the
+lock, and they are established paths. Whether they migrate to the advisory lock
+or are documented as safe as they stand is an owner decision, not one to settle
+in a review of whatever file happens to touch them; until it is made, leave them
+as they are and raise the question rather than adding or removing a lock in
+passing. Their row order is `call_log` first, then `triage_items` (relink at
+~553 and ~615, adoption at ~754 and ~843) — and the webhook recovery path above
+takes the two in the opposite order, which is why no single compatible order
+exists and the migration question is the real one.
+Skip it and two writers on the same call can still form a row-lock cycle —
+and the deadlock abort lands in a fail-soft `catch`, so the operation reports
+success and is never retried. A settlement locked `call_log` and then updated
+`triage_items` without it (#6271 P1). Take the advisory lock first. On the
+`lockTriageCall` paths, close with `syncCallReviewStatus`
+(`server/utils/triage-locks.js`) rather than writing a new local recompute —
+but it is not universal: `clearPromiseException`
+(`reschedule-link-promises.js`) and `admin-triage.js` still inline the same
+aggregate, so an existing inline recompute is authoritative, not a defect to
+reject.
+
 ## 6. Schema truth traps (wrong-answer generators)
 
 - `customers.active` is TRUE for leads. A live customer = `active` AND
