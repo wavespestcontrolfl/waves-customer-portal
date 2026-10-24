@@ -113,7 +113,8 @@ async function sentKindRecently({ digits, kind, now }, conn = db) {
     .where({ kind })
     .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
     .where('created_at', '>=', new Date(now.getTime() - ONE_PER_KIND_WINDOW_MS))
-    .whereNot({ send_outcome: 'not_sent' })
+    // A claim still settling (NULL) counts: only a text that provably never left does not.
+    .whereRaw("send_outcome IS DISTINCT FROM 'not_sent'")
     .first('id');
 }
 
