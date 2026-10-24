@@ -3940,8 +3940,11 @@ version of the same content: `{ type: 'tiles', items: [{ icon, title, text }] }`
 `{ type: 'chips', items: [{ key, label, tier: 'main' | 'as_needed' }], note }`,
 `{ type: 'year', months: [{ month, label, main: [key], asNeeded: [key],
 limited }], labels: { key: label }, limitLabel }`, `{ type: 'categories',
-items: [{ key, label, text }] }` and `{ type: 'steps', items: [{ icon, title,
-text }] }`. `icon` and step `key` values are a closed set
+items: [{ key, label, text }] }`, `{ type: 'steps', items: [{ icon, title,
+text }] }` and `{ type: 'tags', items: [string], note }`. Such a packet's
+`property` carries `programLabel` (a fixed program name the page shows in
+place of the grass) and `turfType: null`; the gate-off packet keeps
+`turfType` and has no `programLabel`. `icon` and step `key` values are a closed set
 (`server/services/lawn-service-outline.js` `V13_COPY` / `V13_STEP_LABELS`) that
 `client/src/pages/ServiceOutlinePage.jsx` maps to icons; an unknown `type` or key
 renders as text. No PII is added. Unsetting the gate changes only packets built

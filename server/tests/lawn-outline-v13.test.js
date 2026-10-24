@@ -3,10 +3,12 @@
 // Synthetic inputs: no database.
 //
 // Pins: the gate needs GATE_LAWN_V13; the outline reads the grass the estimate recorded
-// (never the bermudaSuppression flag or a note); bahia is blocked; mixed and unknown lawns
-// get the one program; the month text is the lawn report's own; the year chart and the month
-// chips are drawn from the recipe; every v13 line, each plan size included, reaches a category
-// and no product, number or rate does; the outline stamps its own content version.
+// (never the bermudaSuppression flag or a note); bahia is blocked; every other lawn gets the
+// same customer page, with no grass on it (owner 2026-10-24: "i dont think we make this for
+// specific lawn types"); every section is drawn and keeps its text lines; the month text is
+// the lawn report's own; the year chart and the month chips are drawn from the recipe; every
+// v13 line, each plan size included, reaches a category and no product, number or rate does;
+// the outline stamps its own content version.
 
 const v13 = require('../config/lawn-protocol-v13.json');
 const outline = require('../services/lawn-service-outline');
@@ -96,6 +98,14 @@ const ST_AUG_ESTIMATE = estimateWith(formLawn('st_augustine'));
 const build = (estimate, input = {}) => outline.buildOutline({ db: makeDb(), estimate, input, now: new Date('2026-10-24T12:00:00Z') });
 const section = (result, key) => result.content.sections.find((s) => s.key === key);
 const categoriesOf = (bullets) => bullets.map((b) => b.replace(CONDITIONAL_TAIL, ''));
+const V13_KEYS = [
+  'lawn_program', 'season_focus', 'program_year', 'treatment_categories', 'typical_visit',
+  'local_rules', 'safety', 'after_visit', 'not_included',
+];
+// What the customer page shows (content.turf and generatedAt are not drawn).
+const visible = ({ title, intro, property, season, sections, treatmentCategories, productCards, cta }) => (
+  { title, intro, property, season, sections, treatmentCategories, productCards, cta }
+);
 
 describe('the gate', () => {
   test('GATE_LAWN_OUTLINE_V13 alone does nothing: it needs GATE_LAWN_V13', async () => {
@@ -131,7 +141,8 @@ describe('the grass is the one the estimate recorded', () => {
     await withGates(BOTH, async () => {
       const result = await build(ST_AUG_ESTIMATE);
       expect(result.meta.turf.turfType).toBe('st_augustine');
-      expect(result.content.property.turfType).toBe('St. Augustine');
+      // The page names the program, not the grass.
+      expect(result.content.property).toMatchObject({ turfType: null, programLabel: 'One program for every lawn' });
     });
   });
 
@@ -173,9 +184,7 @@ describe('the grass is the one the estimate recorded', () => {
       expect(result.meta.turf.turfType).toBe('unknown');
       expect(result.content.title).toBe('Your Waves Lawn Care Program Overview');
       expect(result.content.property.turfType).toBeNull();
-      expect(section(result, 'property_summary').bullets).toContain('Turf type: To be confirmed at the first visit');
-      expect(section(result, 'grass_to_confirm').bullets).toEqual(['The program is the same for every grass type we treat.']);
-      expect(section(result, 'limited_outline')).toBeUndefined();
+      expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
       // The one program still plans an unknown lawn (the shared key), so the month has its bullets.
       expect(categoriesOf(section(result, 'season_focus').bullets)).toContain('Fertilizer and nutrition');
       expect(result.validation.status).toBe('passed');
@@ -202,10 +211,25 @@ describe('the grass is the one the estimate recorded', () => {
     await withGates(BOTH, async () => {
       const result = await build(estimateWith(formLawn('mixed')), { month: 6 });
       expect(result.meta.turf.turfType).toBe('mixed');
-      expect(section(result, 'mixed_turf_caution').bullets).toEqual(['Spot treatments follow the product label for the grass in each area.']);
+      expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
       expect(JSON.stringify(result.content)).not.toMatch(/admin confirmation/i);
       expect(categoriesOf(section(result, 'season_focus').bullets)).toContain('Micronutrients');
       expect(result.validation.status).toBe('passed');
+    });
+  });
+});
+
+describe('one page for every lawn', () => {
+  test.each(MONTHS)('month %i: every lawn the program covers gets the same page, and no grass is named on it but the program basis', async (month) => {
+    await withGates(BOTH, async () => {
+      const page = visible((await build(ST_AUG_ESTIMATE, { month })).content);
+      for (const grass of ['bermuda', 'zoysia', 'mixed', 'unknown']) {
+        expect([grass, visible((await build(estimateWith(formLawn(grass)), { month })).content)]).toEqual([grass, page]);
+      }
+      const text = JSON.stringify(page);
+      expect(section({ content: page }, 'lawn_program').body).toMatch(/^Most of the lawns we treat are St\. Augustine, so the program is built around it\./);
+      expect(text.match(/augustine/gi)).toHaveLength(1);
+      expect(text).not.toMatch(/bermuda|zoysia|bahia|grass type|turf type/i);
     });
   });
 });
@@ -234,11 +258,10 @@ describe('the sections', () => {
   test('one program section, the report month text, the drawn year, no tier line and no restricted-season line', async () => {
     await withGates(BOTH, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
-      expect(result.content.sections.map((s) => s.key)).toEqual([
-        'property_summary', 'lawn_program', 'season_focus', 'program_year', 'treatment_categories', 'typical_visit',
-        'local_rules', 'safety', 'after_visit', 'not_included',
-      ]);
+      expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
       expect(result.content.title).toBe('Your Waves Lawn Care Program Overview');
+      // The property summary section is gone: the intro names the customer, the side panel the address.
+      expect(result.content.intro).toMatch(/^Based on your estimate for Test Customer\. One program covers every lawn we treat\./);
       const text = JSON.stringify(result.content.sections);
       expect(text).not.toMatch(/service tier/i);
       expect(text).not.toMatch(/restricted-season logic/i);
@@ -246,8 +269,9 @@ describe('the sections', () => {
       // Owner 2026-10-24: the twelve "In <month> the program focuses on ..." sentences read as filler; the year is drawn.
       expect(text).not.toMatch(/program focuses on/i);
       expect(section(result, 'local_rules').bullets).toEqual([
-        'Rule area: Sarasota County, FL',
-        'Local fertilizer rules may restrict nitrogen and phosphorus applications during the summer rainy season.',
+        'Your rule area: Sarasota County, FL',
+        'What it limits: Local fertilizer rules may restrict nitrogen and phosphorus applications during the summer rainy season.',
+        'What we do instead: Micronutrients for color, inspection, and spot treatments, with no nitrogen or phosphorus',
       ]);
       // One tile row in place of the report and portal sections; GPS records arrival only.
       expect(section(result, 'after_visit').bullets).toContain('Arrival record: GPS on the service vehicle records when the technician arrives');
@@ -259,25 +283,26 @@ describe('the sections', () => {
   test('every drawn section keeps text bullets that say what the drawing says', async () => {
     await withGates(BOTH, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
-      const drawn = result.content.sections.filter((s) => s.visual);
-      expect(drawn.map((s) => [s.key, s.visual.type])).toEqual([
+      // Every section is boxed (owner 2026-10-24: "make the boxes").
+      expect(result.content.sections.map((s) => [s.key, s.visual?.type])).toEqual([
         ['lawn_program', 'tiles'], ['season_focus', 'chips'], ['program_year', 'year'], ['treatment_categories', 'categories'], ['typical_visit', 'steps'],
-        ['after_visit', 'tiles'],
+        ['local_rules', 'tiles'], ['safety', 'tiles'], ['after_visit', 'tiles'], ['not_included', 'tags'],
       ]);
-      expect(section(result, 'safety').bullets).toHaveLength(2);
-      // The dropped card repeated the approved safety text's EPA sentence.
-      expect(section(result, 'safety').bullets.join(' ')).not.toMatch(/EPA registration/);
-      const after = section(result, 'after_visit');
-      expect(after.bullets).toEqual(after.visual.items.map((t) => `${t.title}: ${t.text}`));
-      const tiles = section(result, 'lawn_program');
-      expect(tiles.bullets).toEqual(tiles.visual.items.map((t) => `${t.title}: ${t.text}`));
+      for (const tiles of result.content.sections.filter((s) => s.visual.type === 'tiles')) {
+        expect([tiles.key, tiles.bullets]).toEqual([tiles.key, tiles.visual.items.map((t) => `${t.title}: ${t.text}`)]);
+      }
+      expect(section(result, 'safety').visual.items.map((t) => t.title)).toEqual(['Label directions', 'Stay off until dry', 'Follow your report', 'EPA numbers']);
+      const tags = section(result, 'not_included');
+      expect(tags.bullets).toEqual(tags.visual.items);
+      expect(tags.visual.items).toEqual(['Irrigation repairs', 'Mowing', 'Sod', 'Seed', 'Topdressing', 'Cultural repairs', 'Heavy shade corrections']);
+      expect(tags.visual.note).toMatch(/watering or mowing height/);
       const steps = section(result, 'typical_visit');
       expect(steps.visual.items.map((t) => t.title)).toEqual(['Check', 'Decide', 'Treat', 'Report']);
       expect(steps.bullets).toEqual(steps.visual.items.map((t) => `${t.title}: ${t.text}`));
       expect(steps.body).toBe('');
       const cards = section(result, 'treatment_categories');
       expect(cards.bullets).toEqual(cards.visual.items.map((c) => `${c.label}: ${c.text}`));
-      expect(section(result, 'program_year').bullets[9]).toBe('October: Feeding, Weed barrier; as needed: Disease control, Insect control, Weed spots');
+      expect(section(result, 'program_year').bullets[9]).toBe('October: Fertilizer, Pre-emergent; as needed: Disease control, Insect control, Weed control');
       // The legacy outline draws nothing.
       await withGates({ GATE_LAWN_V13: 'true' }, async () => {
         expect((await build(ST_AUG_ESTIMATE, { month: 10 })).content.sections.some((s) => 'visual' in s)).toBe(false);
@@ -299,7 +324,7 @@ describe('the sections', () => {
       expect(byMonth.Jul).toMatchObject({ main: ['inspection'], limited: true });
       expect(byMonth.Oct.main).toEqual(['feeding', 'barrier']);
       expect(visual.months.filter((m) => m.limited).map((m) => m.label)).toEqual(['Jun', 'Jul', 'Aug', 'Sep']);
-      expect(visual.limitLabel).toBe('Local summer fertilizer limits');
+      expect(visual.limitLabel).toBe('Local summer limits on nitrogen and phosphorus');
       for (const m of visual.months) {
         for (const step of [...m.main, ...m.asNeeded]) expect(visual.labels[step]).toEqual(expect.any(String));
         expect(m.main.filter((step) => m.asNeeded.includes(step))).toEqual([]);
@@ -335,8 +360,8 @@ describe('the sections', () => {
         for (const month of MONTHS) {
           const result = await build(estimateWith(formLawn(grass)), { month });
           expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
-          const drawnTexts = (v) => [v?.note, v?.limitLabel, ...Object.values(v?.labels || {}), ...(v?.items || []).flatMap((i) => [i.title, i.text, i.label])];
-          const texts = [result.content.title, ...result.content.sections.flatMap((s) => [s.title, s.body, ...s.bullets, ...drawnTexts(s.visual)])].filter(Boolean);
+          const drawnTexts = (v) => [v?.note, v?.limitLabel, ...Object.values(v?.labels || {}), ...(v?.items || []).flatMap((i) => (typeof i === 'string' ? [i] : [i.title, i.text, i.label]))];
+          const texts = [result.content.title, result.content.intro, result.content.property.programLabel, ...result.content.sections.flatMap((s) => [s.title, s.body, ...s.bullets, ...drawnTexts(s.visual)])].filter(Boolean);
           for (const text of texts) {
             expect(findBannedCustomerCopy(text)).toEqual([]);
             expect(validateCustomerCopy(text)).toBe(true);

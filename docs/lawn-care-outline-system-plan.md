@@ -6,15 +6,15 @@
 > route list, module count, pipeline steps) have drifted from the shipped build —
 > see the inline corrections further down.
 >
-> **v13 outline, 2026-10-24** (`GATE_LAWN_OUTLINE_V13`, needs `GATE_LAWN_V13`): with the gate on, the
-> program, month, year, treatment and visit sections describe the one v13 program from code, not
-> from approved modules. The month text is the lawn report's own v13 copy
-> (`server/services/service-report/lawn-program-line.js`); the year chart and the month chips are
-> drawn from the recipe lines; the rest is `V13_COPY` and `V13_TREATMENT_CATEGORIES` in
-> `lawn-service-outline.js`. Drawn sections carry a `visual` object the customer page renders
-> (`ServiceOutlinePage.jsx`) and keep text bullets as the fallback; one "After Each Visit" tile row
-> stands in for the report and portal sections. The approved modules still supply the local rule,
-> safety and exclusion text.
+> **v13 outline, 2026-10-24** (`GATE_LAWN_OUTLINE_V13`, needs `GATE_LAWN_V13`): with the gate on, every
+> section describes the one v13 program from code, not from approved modules, and the customer page is
+> the same for every lawn the program covers (owner 2026-10-24: no grass-specific outline; the program
+> section says it is built around St. Augustine, most of the lawns Waves treats). The month text is the
+> lawn report's own v13 copy (`server/services/service-report/lawn-program-line.js`); the year chart and
+> the month chips are drawn from the recipe lines; the rest is `V13_COPY` and `V13_TREATMENT_CATEGORIES`
+> in `lawn-service-outline.js`. Every section carries a `visual` object the customer page renders
+> (`ServiceOutlinePage.jsx`: tiles, chips, year, categories, steps, tags) and keeps text bullets as the
+> fallback. A bahia lawn is blocked (no v13 program).
 > Per-grass sections and the per-grass turf summaries below describe the gate-off outline only.
 
 ## Executive Summary
