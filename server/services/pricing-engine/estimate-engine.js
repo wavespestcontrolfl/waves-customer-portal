@@ -171,10 +171,15 @@ function normalizeLinePriceOverrides(raw) {
   return out;
 }
 
-function linePriceOverrideEligible(item) {
+// An override is keyed by service, so it must name exactly one line: a key
+// several lines share (every area add-on is `area_addon`) would reprice the
+// siblings too. Area add-ons stay out even alone: the add-on table prices
+// them and a booked visit re-checks the sold add-on price.
+function linePriceOverrideEligible(item, serviceLineCounts) {
   if (!item || typeof item !== 'object') return false;
   if (item.annual || item.quoteRequired || item.requiresCustomQuote) return false;
   if (item.retainerBilling || item.trapOnlyRetainerBilling) return false;
+  if (item.service === 'area_addon' || serviceLineCounts.get(item.service) > 1) return false;
   if (item.service === 'pest_initial_roach' || item.priceOverridden === true) return false;
   return (Number(item.price) > 0) || (Number(item.total) > 0);
 }
@@ -231,8 +236,10 @@ function applyLinePriceOverrides(lineItems, raw, addRoutingWarning) {
   // The builder offers an override only on a line stamped here: the legacy
   // mapper also synthesizes one-time rows from nested engine fields (the
   // misting installation, for one) whose keys no engine line carries.
+  const serviceLineCounts = new Map();
+  for (const item of lineItems) serviceLineCounts.set(item?.service, (serviceLineCounts.get(item?.service) || 0) + 1);
   for (const item of lineItems) {
-    if (linePriceOverrideEligible(item)) item.priceOverridable = true;
+    if (linePriceOverrideEligible(item, serviceLineCounts)) item.priceOverridable = true;
   }
   const overrides = normalizeLinePriceOverrides(raw);
   if (overrides.size === 0) return;
@@ -240,8 +247,8 @@ function applyLinePriceOverrides(lineItems, raw, addRoutingWarning) {
   for (const item of lineItems) {
     if (!overrides.has(item?.service)) continue;
     matched.add(item.service);
-    if (!linePriceOverrideEligible(item)) {
-      addRoutingWarning(`Price override for ${item.service} ignored — only priced one-time and specialty lines can be overridden.`);
+    if (item.priceOverridable !== true) {
+      addRoutingWarning(`Price override for ${item.service} ignored — only a priced one-time or specialty line with its own service key can be overridden.`);
       continue;
     }
     const { value, reason } = overrides.get(item.service);

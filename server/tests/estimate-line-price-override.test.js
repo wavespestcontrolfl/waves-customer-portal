@@ -124,6 +124,39 @@ describe('linePriceOverrides', () => {
     ]));
   });
 
+  test('area add-ons are never overridable: one service key for every add-on would reprice the siblings', () => {
+    // Codex P2 on #6614: Web Sweep and Fire Ant Yard are both `area_addon`,
+    // so an override keyed by service repriced both.
+    const prev = process.env.GATE_AREA_ADDONS;
+    process.env.GATE_AREA_ADDONS = 'true';
+    try {
+      const options = {
+        grassType: 'A',
+        areaAddOnVisit: 'standalone',
+        areaAddOns: [{ key: 'web_sweep' }, { key: 'fire_ant_yard', areaSqFt: 5000 }],
+      };
+      const addOnLines = (result) => result.lineItems.filter((li) => li.service === 'area_addon');
+      const base = price(['OT_PEST'], options);
+      expect(addOnLines(base)).toHaveLength(2);
+      expect(addOnLines(base).some((li) => li.priceOverridable)).toBe(false);
+      expect(line(base, 'one_time_pest').priceOverridable).toBe(true);
+
+      const result = price(['OT_PEST'], { ...options, linePriceOverrides: { area_addon: { price: 100 } } });
+      expect(addOnLines(result).map((li) => li.price)).toEqual(addOnLines(base).map((li) => li.price));
+      expect(result.pricingMetadata.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining('Price override for area_addon ignored'),
+      ]));
+
+      // A single add-on stays out too: the add-on table prices it and booking re-checks that price.
+      const single = price(['OT_PEST'], { ...options, areaAddOns: [{ key: 'web_sweep' }] });
+      expect(addOnLines(single)).toHaveLength(1);
+      expect(addOnLines(single)[0].priceOverridable).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.GATE_AREA_ADDONS;
+      else process.env.GATE_AREA_ADDONS = prev;
+    }
+  });
+
   test('an override drops the engine figures from the line detail and keeps rates for extra work', () => {
     // Codex P2 on #6614: the flea package kept "$225 initial + $125 follow-up"
     // under a $600 price on the customer estimate.
