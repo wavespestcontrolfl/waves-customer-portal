@@ -806,6 +806,49 @@ async function activate(itemId, overrides = {}) {
     expect(await mockPg('bank_transactions').count('* as n').first()).toEqual({ n: '0' });
   });
 
+  const SECOND = { account_id: 'acc-second', name: 'Second Checking', mask: '0002', type: 'depository', subtype: 'checking' };
+
+  test('"Add accounts": a newly shared account is registered off and the connection waits for confirmation', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    // Plaid lists the account before it has delivered any of its transactions
+    plaid.getAccounts.mockResolvedValueOnce({ accounts: [...ACCOUNTS, SECOND] });
+    expect(await plaidSync.refreshAccounts(itemId)).toEqual({ added: 1, setup: true, unshared: [] });
+    expect(await mockPg('plaid_items').where({ id: itemId }).first('status')).toEqual({ status: 'setup' });
+    expect(await mockPg('plaid_accounts').where({ account_id: 'acc-second' }).first())
+      .toMatchObject({ plaid_item_id: itemId, enabled: false, mask: '0002' });
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ skipped: 'setup' });
+    expect(plaid.transactionsSync).not.toHaveBeenCalled();
+
+    await activate(itemId, { 'acc-second': { enabled: true } });
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-second', 'acc-second', -107.1, '2026-09-05')], [], [], 'cursor-1'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 1 });
+  });
+
+  test('"Add accounts": an imported account left unticked is reported, and update mode re-authenticates', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    await mockPg('plaid_items').where({ id: itemId }).update({ status: 'login_required' });
+    // the card was unticked in the bank's screen (the loan was never imported)
+    plaid.getAccounts.mockResolvedValueOnce({ accounts: ACCOUNTS.filter(a => a.account_id === 'acc-chk') });
+    const out = await plaidSync.refreshAccounts(itemId);
+    expect(out).toMatchObject({ added: 0, setup: false });
+    expect(out.unshared.map(a => a.name)).toEqual(['Spark Card']);
+    expect(await mockPg('plaid_items').where({ id: itemId }).first('status')).toEqual({ status: 'active' });
+  });
+
+  test('"Add accounts" refuses to register when the connection changed while Plaid answered', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.getAccounts.mockImplementationOnce(async () => {
+      await mockPg('plaid_items').where({ id: itemId }).update({ updated_at: mockPg.fn.now() });
+      return { accounts: [...ACCOUNTS, SECOND] };
+    });
+    await expect(plaidSync.refreshAccounts(itemId)).rejects.toMatchObject({ status: 409 });
+    expect(await mockPg('plaid_accounts').where({ account_id: 'acc-second' }).first()).toBeUndefined();
+    expect(await mockPg('plaid_items').where({ id: itemId }).first('status')).toEqual({ status: 'active' });
+  });
+
   test('feed setup waits for a ledger import that holds the ledger lock, then judges the rows that import wrote', async () => {
     const itemId = await connect();
     const holder = knex({ client: 'pg', connection, searchPath: [SCHEMA, 'public'], pool: { min: 1, max: 1 } });

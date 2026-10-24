@@ -4914,6 +4914,25 @@ function syncSummary(sync) {
   return text;
 }
 
+// After "Add accounts": a newly shared account waits for the operator to
+// confirm it (the connection is back in setup); an imported account the bank
+// no longer shares was unticked in the bank's screen and gets no more data.
+function accountsChangedNotice(r) {
+  const lost = (r?.unshared || []).map((a) => `${a.name}${a.mask ? ` ••${a.mask}` : ""}`);
+  const them = lost.length === 1 ? "it" : "them";
+  const text = [
+    r?.setup
+      ? "Confirm the accounts below: tick Import for each account to sync, check its start date, then click Save and sync."
+      : `No new account was shared.${r?.sync ? ` ${syncSummary(r.sync)}.` : ""}`,
+    lost.length
+      ? `The bank no longer shares ${lost.join(", ")}, so no new transactions arrive for ${them} — click Add accounts again and tick ${them}.`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return { error: lost.length > 0 || !!r?.sync?.error, text };
+}
+
 function PlaidAccountsForm({ item, existingLabels, busy, onSave, onCancel }) {
   const [draft, setDraft] = useState(() =>
     item.accounts.map((a) => ({ ...a })),
@@ -5089,17 +5108,21 @@ function PlaidFeedsPanel({ feedOn, onSynced }) {
     }
   };
 
-  // itemId present = re-login for an existing connection (update mode).
+  // itemId present = update mode for an existing connection: a re-login, or
+  // (addAccounts) changing which of the login's accounts it shares.
   // `resume` = returning from a bank's OAuth redirect: the stored token and
   // the URL the bank sent us back to.
-  const openLink = (itemId, resume = null) =>
-    run(itemId ? `reconnect-${itemId}` : "connect", async () => {
+  const openLink = (itemId, resume = null, addAccounts = false) =>
+    run(itemId ? `${addAccounts ? "accounts" : "reconnect"}-${itemId}` : "connect", async () => {
       const [Plaid, tok] = await Promise.all([
         loadPlaidLink(),
         resume ||
-          post("/admin/tax/bank-import/plaid/link-token", itemId ? { itemId } : {}),
+          post(
+            "/admin/tax/bank-import/plaid/link-token",
+            itemId ? { itemId, ...(addAccounts ? { addAccounts: true } : {}) } : {},
+          ),
       ]);
-      saveLinkResume({ linkToken: tok.linkToken, itemId: itemId || null });
+      saveLinkResume({ linkToken: tok.linkToken, itemId: itemId || null, addAccounts });
       const outcome = await new Promise((resolve, reject) => {
         const handler = Plaid.create({
           token: tok.linkToken,
@@ -5120,7 +5143,11 @@ function PlaidFeedsPanel({ feedOn, onSynced }) {
         handler.open();
       }).finally(() => saveLinkResume(null));
       if (!outcome) return;
-      if (itemId) {
+      if (itemId && addAccounts) {
+        const r = await post(`/admin/tax/bank-import/plaid/items/${itemId}/accounts-changed`);
+        if (r?.sync) onSynced();
+        setNotice(accountsChangedNotice(r));
+      } else if (itemId) {
         reportSync(await post(`/admin/tax/bank-import/plaid/items/${itemId}/reconnected`));
       } else {
         const r = await post("/admin/tax/bank-import/plaid/connect", {
@@ -5141,7 +5168,11 @@ function PlaidFeedsPanel({ feedOn, onSynced }) {
     window.history.replaceState(null, "", window.location.pathname);
     const resume = readLinkResume();
     if (resume?.linkToken)
-      openLink(resume.itemId, { linkToken: resume.linkToken, receivedRedirectUri });
+      openLink(
+        resume.itemId,
+        { linkToken: resume.linkToken, receivedRedirectUri },
+        resume.addAccounts === true,
+      );
     else
       setNotice({
         error: true,
@@ -5249,6 +5280,14 @@ function PlaidFeedsPanel({ feedOn, onSynced }) {
                     }
                   >
                     Edit accounts
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={!!busy}
+                    onClick={() => openLink(item.id, null, true)}
+                  >
+                    {busy === `accounts-${item.id}` ? "Opening…" : "Add accounts"}
                   </Button>
                 </>
               )}

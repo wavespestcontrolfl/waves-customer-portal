@@ -86,7 +86,10 @@ async function call(endpoint, body) {
 // New connection: products=['transactions'] with the longest history Plaid
 // offers (the P&L is per tax year). Update mode (re-auth after
 // ITEM_LOGIN_REQUIRED): pass the item's access token and NO products.
-async function createLinkToken({ clientUserId, accessToken } = {}) {
+// `accountSelection` (update mode only) also lets the user change which of
+// the login's accounts the connection shares — "Add accounts". An account
+// left unticked there stops sharing data.
+async function createLinkToken({ clientUserId, accessToken, accountSelection = false } = {}) {
   const body = {
     client_name: 'Waves Pest Control',
     language: 'en',
@@ -95,6 +98,7 @@ async function createLinkToken({ clientUserId, accessToken } = {}) {
   };
   if (accessToken) {
     body.access_token = accessToken;
+    if (accountSelection) body.update = { account_selection_enabled: true };
   } else {
     body.products = ['transactions'];
     body.transactions = { days_requested: 730 };

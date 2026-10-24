@@ -1946,14 +1946,23 @@ router.get('/bank-import/plaid/status', async (req, res, next) => {
   } catch (err) { plaidRouteError(res, next, err); }
 });
 
-// itemId present = update mode (re-authenticate an existing connection)
+// itemId present = update mode: re-authenticate an existing connection, or
+// (addAccounts) change which of the login's accounts it shares
 router.post('/bank-import/plaid/link-token', async (req, res, next) => {
   try {
-    const { itemId } = req.body || {};
+    const { itemId, addAccounts } = req.body || {};
     if (itemId !== undefined && itemId !== null && !UUID_RE.test(String(itemId))) {
       return res.status(400).json({ error: 'invalid itemId' });
     }
-    const out = await plaidSync.createLinkToken({ clientUserId: req.technicianId, itemId: itemId || null });
+    if (addAccounts !== undefined && typeof addAccounts !== 'boolean') {
+      return res.status(400).json({ error: 'addAccounts must be true or false' });
+    }
+    if (addAccounts && !itemId) {
+      return res.status(400).json({ error: 'addAccounts needs an existing connection (itemId)' });
+    }
+    const out = await plaidSync.createLinkToken({
+      clientUserId: req.technicianId, itemId: itemId || null, addAccounts: addAccounts === true,
+    });
     res.json(out);
   } catch (err) { plaidRouteError(res, next, err); }
 });
@@ -1982,6 +1991,16 @@ router.post('/bank-import/plaid/items/:plaidItemId/reconnected', async (req, res
   try {
     await plaidSync.markReconnected(req.params.plaidItemId);
     res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// "Add accounts" finished in Link: a newly shared account waits for the
+// operator to confirm it (nothing syncs meanwhile); otherwise the feed syncs
+// as after a re-login.
+router.post('/bank-import/plaid/items/:plaidItemId/accounts-changed', async (req, res, next) => {
+  try {
+    const out = await plaidSync.refreshAccounts(req.params.plaidItemId);
+    res.json({ success: true, ...out, sync: out.setup ? null : await plaidSync.syncItem(req.params.plaidItemId) });
   } catch (err) { plaidRouteError(res, next, err); }
 });
 
