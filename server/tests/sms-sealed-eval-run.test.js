@@ -342,6 +342,41 @@ describe('runSealedExam — GATE_SMS_JUDGE_V2 could_send (owner 2026-10-24)', ()
     expect(JSON.parse(complete.patch.verdict_counts)).toEqual({ equivalent: 1 });
   });
 
+  test('a j2 run against an old-judge baseline gets no significance verdict (different rulers are not compared)', async () => {
+    const dbi = makeRunnerDb({
+      runs: [
+        { id: 'r-base', status: 'complete', provider_leg: 'openai', prompt_version: 'house_voice_v8' },
+        { id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', baseline_run_id: 'r-base' },
+      ],
+      items: [item('i1')],
+      results: [{ run_id: 'r-base', item_id: 'i1', verdict: 'equivalent', scores: JSON.stringify(scoresObj) }],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue({ ...judgment('draft_unsafe', scoresObj), judge_version: 'j2', could_send: 'no' });
+    await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    const complete = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(JSON.parse(dbi.state.results.find((r) => r.run_id === 'r1').scores).judge_version).toBe('j2');
+    expect(complete.patch.unsafe_count).toBe(1);
+    expect(complete.patch.significance).toBeUndefined();
+  });
+
+  test('a j2 run against a j2 baseline is compared as before', async () => {
+    const j2Scores = JSON.stringify({ ...scoresObj, could_send: 'no', judge_version: 'j2' });
+    const dbi = makeRunnerDb({
+      runs: [
+        { id: 'r-base', status: 'complete', provider_leg: 'openai', prompt_version: 'house_voice_v8' },
+        { id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', baseline_run_id: 'r-base' },
+      ],
+      items: [item('i1')],
+      results: [{ run_id: 'r-base', item_id: 'i1', verdict: 'draft_unsafe', scores: j2Scores }],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue({ ...judgment('equivalent', scoresObj), judge_version: 'j2', could_send: 'yes' });
+    await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    const complete = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(JSON.parse(complete.patch.significance)).toMatchObject({ newlySafe: 1, direction: 'improved' });
+  });
+
   test('computeSignificance ignores the extra scores key', () => {
     const rows = (ck) => [{ item_id: 'a', verdict: 'equivalent', scores: JSON.stringify({ ...scoresObj, ...(ck ? { could_send: ck } : {}) }) }];
     const sig = sealedEval.computeSignificance({ candidateResults: rows('no'), baselineResults: rows(null) });

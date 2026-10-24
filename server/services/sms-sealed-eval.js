@@ -620,6 +620,14 @@ function mcNemarExact(b, c) {
   return Math.min(1, 2 * cum);
 }
 
+// Which judge ruler graded these result rows: 'j1' (no stamp, the old judge) or the stamped version, sorted and
+// joined when a run mixes them. GATE_SMS_JUDGE_V2 grades stricter, so two runs on different rulers must not be
+// compared (a gate flip between runs, or mid-run on a resume, would read as a regression or an improvement).
+function judgeRulerOf(rows) {
+  const versions = new Set(rows.filter((r) => r.verdict !== 'ungradable').map((r) => parseScores(r.scores)?.judge_version || 'j1'));
+  return [...versions].sort().join('+');
+}
+
 function parseScores(scores) {
   if (!scores) return null;
   try {
@@ -790,7 +798,10 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   // GATE_SMS_JUDGE_V2: the owner-question answer rides in the scores jsonb (no migration); every reader
   // picks named keys from it, so the extra key is tolerated. Absent when the gate is off.
   const scores = parseScores(judgment.scores);
-  const storedScores = scores && judgment.could_send ? { ...scores, could_send: judgment.could_send } : scores;
+  // judge_version rides along so a run (and a baseline comparison) can tell which ruler graded it.
+  const storedScores = scores && judgment.could_send
+    ? { ...scores, could_send: judgment.could_send, judge_version: judgment.judge_version }
+    : scores;
   await dbi('sms_sealed_eval_results')
     .insert({
       run_id: run.id,
@@ -857,7 +868,12 @@ async function finalizeRun({ runId, dbi = db } = {}) {
     const baselineResults = await dbi('sms_sealed_eval_results')
       .where({ run_id: run.baseline_run_id })
       .select('item_id', 'verdict', 'scores');
-    significance = computeSignificance({ candidateResults: results, baselineResults });
+    // Different rulers (or a mixed run) make McNemar meaningless: leave significance unset, as with no baseline.
+    if (judgeRulerOf(results) === judgeRulerOf(baselineResults)) {
+      significance = computeSignificance({ candidateResults: results, baselineResults });
+    } else {
+      logger.warn(`[sealed-eval] run ${String(runId).slice(0, 8)}: no significance verdict, judge ruler differs from its baseline (${judgeRulerOf(results)} vs ${judgeRulerOf(baselineResults)})`);
+    }
   }
 
   const patch = {
