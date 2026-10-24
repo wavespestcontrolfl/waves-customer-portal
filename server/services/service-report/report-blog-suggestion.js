@@ -183,8 +183,11 @@ function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, tipI
  * holds every word, and { error } for a phrase that is no topic or a person
  * over the day's limit. `dryRun` (the tip seeder's) asks every check and
  * writes nothing: { status: 'would_queue' } where a row would be written.
+ * `generalOnly` (the tip seeder's too): a post titled for one town covers no
+ * tip's general subject, so it never answers covered (owner 2026-10-24,
+ * decision 2: queue general posts for the town-titled pairings).
  */
-async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, scheduledServiceId = null, customerId = null, tipId = null, dryRun = false }) {
+async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, scheduledServiceId = null, customerId = null, tipId = null, dryRun = false, generalOnly = false }) {
   // Only text is a phrase: an object or a list would read as "[object
   // Object]" or a comma list (GitHub Codex P2 on 45144528b8).
   if (typeof raw !== 'string') return { error: 'not_a_topic' };
@@ -192,13 +195,14 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   const problem = phraseProblem(phrase, raw);
   if (problem) return { error: problem };
   if (await namesACustomer(knex, phrase, customerId)) return { error: 'not_a_topic' };
-  const { searchReportBlogPosts, wordsOnTheSite } = require('./report-blog-post');
+  const { searchReportBlogPosts, wordsOnTheSite, isTownTitled } = require('./report-blog-post');
   // Every word must be one the site's live posts already use, so a name the
   // checks above miss ("ants for john") or a stray word never becomes a
   // published topic (GitHub Codex P1 on 45144528b8).
   const { known } = await wordsOnTheSite(knex, phrase);
   if (!known.length || !known.every(Boolean)) return { error: 'not_a_topic' };
-  if ((await searchReportBlogPosts(knex, phrase)).some((post) => post.exact)) return { status: 'covered' };
+  const covering = (await searchReportBlogPosts(knex, phrase)).filter((post) => post.exact);
+  if (covering.some((post) => !(generalOnly && isTownTitled(post.title)))) return { status: 'covered' };
   if (dryRun) return (await standingAnswer(knex, phrase)) || { status: 'would_queue' };
   // One suggestion at a time per person, so the day's cap holds when taps
   // race: the count, the held check and the write share one transaction

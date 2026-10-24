@@ -55,7 +55,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   blogPostAllowedFor, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, frozenBlogPostWithImage, searchTerms, registryLink, wordsOnTheSite,
-  liveBlogPostsByPath, tipBlogPosts,
+  liveBlogPostsByPath, tipBlogPosts, isTownTitled,
 } = require('../services/service-report/report-blog-post');
 const router = require('../routes/admin-dispatch');
 
@@ -1023,4 +1023,10 @@ describe('the post a tip fills in (tips with facts, GATE_TECH_TIP_SOURCES, owner
     expect(await tipBlogPosts(knex, null)).toEqual({});
     expect(knex.calls).toEqual([]);
   });
+
+  test('isTownTitled reads "in <town>" or "<town>, FL" for the service-area towns, and leaves generic titles alone', () => {
+    for (const title of ['Get Rid Of Fleas In Lakewood Ranch, FL', 'Ghost Ants in Sarasota: Identification and Next Steps', 'Termites in Venice, FL', 'North Port, Florida lawn guide']) expect([title, isTownTitled(title)]).toEqual([title, true]);
+    for (const title of ['Palmetto Bugs vs. Cockroaches', 'Osprey Nests and Your Roof', 'How to Get Rid of Mice in Southwest Florida', 'Sarasota County fertilizer rules', '', null]) expect([title, isTownTitled(title)]).toEqual([title, false]);
+  });
 });
+

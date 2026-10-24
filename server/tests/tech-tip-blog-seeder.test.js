@@ -52,7 +52,7 @@ describe('seedTechTipBlogs', () => {
     expect(rows[0].post).toEqual(POST);
     expect(suggestReportBlogPost).toHaveBeenCalledTimes(5);
     for (const [, args] of suggestReportBlogPost.mock.calls) expect(args.dryRun).toBe(true);
-    expect(suggestReportBlogPost).toHaveBeenCalledWith(db, { phrase: 'clogged gutters and mosquitoes', tipId: 'water_gutters', dryRun: true });
+    expect(suggestReportBlogPost).toHaveBeenCalledWith(db, { phrase: 'clogged gutters and mosquitoes', tipId: 'water_gutters', dryRun: true, generalOnly: true });
   });
 
   test('a hand-pick writes only those tips, each through Suggest a post with its tip id, and reports the queue\'s answer', async () => {
@@ -60,8 +60,8 @@ describe('seedTechTipBlogs', () => {
     const rows = await seedTechTipBlogs(db, { only: ['water_gutters', 'moisture_ac_drip', 'water_gutters'], execute: true });
     expect(rows.map((row) => [row.tipId, row.outcome])).toEqual([['water_gutters', 'queued'], ['moisture_ac_drip', 'not_a_topic']]);
     expect(suggestReportBlogPost.mock.calls.map(([, args]) => args)).toEqual([
-      { phrase: 'clogged gutters and mosquitoes', tipId: 'water_gutters', dryRun: false },
-      { phrase: 'ac drain line and ants', tipId: 'moisture_ac_drip', dryRun: false },
+      { phrase: 'clogged gutters and mosquitoes', tipId: 'water_gutters', dryRun: false, generalOnly: true },
+      { phrase: 'ac drain line and ants', tipId: 'moisture_ac_drip', dryRun: false, generalOnly: true },
     ]);
   });
 

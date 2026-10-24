@@ -9,7 +9,9 @@
  * (decision 3), and each goes through the office's own "Suggest a post"
  * (report-blog-suggestion suggestReportBlogPost): the phrase must be a topic,
  * every word one the site's live posts use, and a topic a live post covers,
- * the queue holds, or the chain already turned down writes nothing. The dry
+ * the queue holds, or the chain already turned down writes nothing. A post
+ * titled for one town covers no tip's subject (`generalOnly`), so a town-only
+ * subject still gets its general post (decision 2). The dry
  * run, the default, asks the same checks and writes nothing. Writes need
  * GATE_BLOG_SEARCH_SUGGEST, the queue's own switch.
  *
@@ -57,7 +59,7 @@ async function seedTechTipBlogs(knex, { only = [], execute = false } = {}) {
     if (row.post) { row.outcome = 'live'; continue; }
     const key = row.topic.toLowerCase();
     if (!answers.has(key)) {
-      const answer = await suggestReportBlogPost(knex, { phrase: row.topic, tipId: row.tipId, dryRun: !execute });
+      const answer = await suggestReportBlogPost(knex, { phrase: row.topic, tipId: row.tipId, dryRun: !execute, generalOnly: true });
       answers.set(key, answer.status || answer.error || 'unknown');
     }
     row.outcome = answers.get(key);

@@ -310,6 +310,13 @@ describe('suggestReportBlogPost', () => {
     expect(await suggestReportBlogPost(queueKnex(), { phrase: 'ants for john', dryRun: true })).toEqual({ error: 'not_a_topic' });
   });
 
+  test('the tip seeder\'s generalOnly: a post titled for one town covers no tip\'s subject, so the general post is still queued; any other covering post still answers covered (GitHub Codex local review on 039e66e018)', async () => {
+    const town = { ...LIVE_STANDING_WATER, title: 'Standing Water Mosquitoes in Sarasota, FL', h1: 'Standing Water Mosquitoes in Sarasota, FL' };
+    expect(await suggestReportBlogPost(queueKnex({ registry: [town] }), { phrase: 'standing water', dryRun: true })).toEqual({ status: 'covered' });
+    expect(await suggestReportBlogPost(queueKnex({ registry: [town] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'would_queue' });
+    expect(await suggestReportBlogPost(queueKnex({ registry: [LIVE_STANDING_WATER] }), { phrase: 'standing water', dryRun: true, generalOnly: true })).toEqual({ status: 'covered' });
+  });
+
   test('a seeded topic\'s row names its tip', async () => {
     const knex = queueKnex();
     expect(await suggestReportBlogPost(knex, { phrase: 'standing water', tipId: 'water_gutters' })).toEqual({ status: 'queued' });

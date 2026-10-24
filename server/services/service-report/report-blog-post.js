@@ -354,6 +354,7 @@ async function liveBlogPostsByPath(knex, paths) {
 const TOWNS = [...Object.keys(CITY_COUNTY), 'lakewood ranch', 'longboat key', 'englewood', 'sarasota']
   .map((town) => town.replace(/\s+/g, '\\s+')).join('|');
 const TOWN_TITLE_RE = new RegExp(`\\b(?:in|near)\\s+(?:${TOWNS})\\b|\\b(?:${TOWNS}),?\\s+(?:fl|florida)\\b`, 'i');
+const isTownTitled = (title) => TOWN_TITLE_RE.test(String(title || ''));
 
 /**
  * The live hub post each tip names (tip-library `blog.path`), by tip id, for
@@ -368,7 +369,7 @@ async function tipBlogPosts(knex, tips) {
   const posts = {};
   for (const tip of linking) {
     const post = live.get(tip.blog.path);
-    if (post && !TOWN_TITLE_RE.test(String(post.title || ''))) posts[tip.id] = post;
+    if (post && !isTownTitled(post.title)) posts[tip.id] = post;
   }
   return posts;
 }
@@ -543,4 +544,5 @@ module.exports = {
   wordsOnTheSite,
   liveBlogPostsByPath,
   tipBlogPosts,
+  isTownTitled,
 };
