@@ -10,6 +10,7 @@ jest.mock('../services/notification-service', () => ({
 }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'test-account') }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../services/call-promise-ai-close', () => ({ runCallPromiseAiClose: jest.fn(async () => ({ skipped: true, reason: 'gated_off' })) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
@@ -19,6 +20,7 @@ jest.mock('../services/call-commitments', () => {
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
 const { listOpenCommitments, refreshFulfillment, listSlotKeptCallIds, listLapsedEvidenceClosedCallIds, stillOpenIds, OVERDUE_IMPLICIT_DAYS } = require('../services/call-commitments');
+const { runCallPromiseAiClose } = require('../services/call-promise-ai-close');
 const { runCallCommitmentsWatchdog, AGGREGATE_THRESHOLD } = require('../services/call-commitments-watchdog');
 
 const NOW = new Date('2026-09-05T15:00:00Z');
@@ -138,6 +140,24 @@ test('fulfillment is refreshed for every candidate call before paging; a promise
   expect(out).toMatchObject({ overdue: 1, alerted: 1 });
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toContain('call-commitment-overdue:b:');
+});
+
+test('the AI close pass runs after the fixed refresh; a promise it closed is re-listed away and never rings, and a pass that throws never fails the watchdog', async () => {
+  listOpenCommitments
+    .mockResolvedValueOnce([row('a'), row('b')])
+    .mockResolvedValueOnce([row('b')]);
+  runCallPromiseAiClose.mockResolvedValueOnce({ closed: 1 });
+  const out = await runCallCommitmentsWatchdog({ now: NOW });
+  expect(runCallPromiseAiClose).toHaveBeenCalledWith(expect.objectContaining({ now: NOW }));
+  expect(refreshFulfillment.mock.invocationCallOrder[0]).toBeLessThan(runCallPromiseAiClose.mock.invocationCallOrder[0]);
+  expect(listOpenCommitments).toHaveBeenCalledTimes(2);
+  expect(out).toMatchObject({ overdue: 1, alerted: 1 });
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toContain('call-commitment-overdue:b:');
+  jest.clearAllMocks();
+  listOpenCommitments.mockResolvedValue([row('c')]);
+  runCallPromiseAiClose.mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'X' }));
+  NotificationService.notifyAdmin.mockResolvedValue({ id: 'n2' });
+  expect(await runCallCommitmentsWatchdog({ now: NOW })).toMatchObject({ overdue: 1, alerted: 1 });
 });
 
 test('a call holding a promise the evidence close shut on a since-cancelled visit is refreshed too, so the promise can reopen and ring', async () => {

@@ -3130,6 +3130,12 @@ function proofThatKeeps(c, proof, prior) {
   return proof.strength === "direct" || proof.kind === CUSTOMER_LEFT || closesOnAssociation(c, proof) ? proof : null;
 }
 
+// The deterministic stand check of each close a model judged, by its proof's basis.
+const MODEL_CLOSE_STANDS = {
+  [PERSON_CONTACT_BASIS]: (...args) => require("./call-commitment-contact-check").contactCloseStands(...args),
+  ai_check: (...args) => require("./call-promise-ai-close").aiCloseStands(...args),
+};
+
 // Judges refreshFulfillment's automatically closed rows again: still kept by
 // the same record (untouched), kept by another (re-pointed, same customer
 // guard as the open-row write for a slot proof), or reopened carrying
@@ -3142,13 +3148,15 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
   let reopened = 0;
   for (const c of kept) {
     const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
-    // A close a model judged from one person's text or call back stays while
-    // that record stands — read again here, deterministically, whether or not
-    // PROMISE_CONTACT_CHECK is on (the switch only stops NEW checks). Anything
+    // A close a model judged stays while the record it cites stands — a person's
+    // text or call back (PERSON_CONTACT_BASIS), or any line's record found by the
+    // AI check (call-promise-ai-close.js) — read again here, deterministically,
+    // whether or not its gate is on (the switch only stops NEW checks). Anything
     // else falls through to the ordinary re-judge below, which reopens it.
-    if (prior?.basis === PERSON_CONTACT_BASIS) {
-      const stands = await require("./call-commitment-contact-check").contactCloseStands(conn, c, row, prior).catch((err) => {
-        logger.warn(`[call-commitments] contact-close lookup failed for ${c.id}: ${err.message}`);
+    const closeStands = MODEL_CLOSE_STANDS[prior?.basis];
+    if (closeStands) {
+      const stands = await closeStands(conn, c, row, prior).catch((err) => {
+        logger.warn(`[call-commitments] model-close lookup failed for ${c.id}: ${err.message}`);
         return LOOKUP_FAILED;
       });
       if (stands === LOOKUP_FAILED) { failed += 1; continue; }

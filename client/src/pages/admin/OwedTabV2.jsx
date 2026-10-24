@@ -120,6 +120,9 @@ function walksMatch(previous, current) {
   );
 }
 
+// The record an AI-check close rests on, by the ledger's record type.
+const AI_CHECK_RECORD = { sms_log: "staff text", call_log: "staff call", email: "staff email", email_message: "email sent", estimate: "estimate sent", scheduled_service: "visit booked or moved" };
+
 // The stored proof of an automatic close, in one phrase.
 export function proofLabel(row) {
   const proof = row.fulfillment || {};
@@ -129,13 +132,18 @@ export function proofLabel(row) {
     const how = proof.record_type === "call_log" ? "staff call back" : "staff text";
     return `Kept: ${how}${proof.matched_at ? ` ${fmtWhen(proof.matched_at)}` : ""}`;
   }
+  // The AI check found the record that kept the promise, on any line.
+  if (proof.kind === "ai_check") {
+    const how = proof.witness === "customer" ? "customer confirmed by text" : AI_CHECK_RECORD[proof.record_type] || "follow-up";
+    return `Kept (AI check): ${how}${proof.matched_at ? ` ${fmtWhen(proof.matched_at)}` : ""}`;
+  }
   return `Kept: ${KEPT_LABEL[proof.kind] || humanize(proof.kind) || "follow-up"}${proof.matched_at ? ` ${fmtWhen(proof.matched_at)}` : ""}`;
 }
 
 // The words a model quoted from the record that kept the promise, if any.
 export function proofQuote(row) {
   const proof = row.fulfillment || {};
-  return proof.kind === "person_contact" && proof.quote ? String(proof.quote).slice(0, 240) : null;
+  return ["person_contact", "ai_check"].includes(proof.kind) && proof.quote ? String(proof.quote).slice(0, 240) : null;
 }
 
 export function whoLabel(row) {
