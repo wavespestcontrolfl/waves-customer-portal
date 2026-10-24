@@ -517,6 +517,10 @@ describe('annual prepay path: a refill on a covered occurrence is the add-on owe
     await expect(run({ trx: trxWith([], [20]), row: row({ primary_line_price: null, estimated_price: '79.00' }), updates: { estimated_price: 298, primary_line_price: 79 } })).resolves.toBe(false);
   });
 
+  test('an occurrence the term has not stamped keeps the full guard (its prepay may still await payment)', async () => {
+    await expect(run({ row: row({ annual_prepay_term_id: null }) })).resolves.toBe(false);
+  });
+
   test('the add-on billing gate dark: never exempt, since the completion would not bill the refill', async () => {
     process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'false';
     await expect(run()).resolves.toBe(false);

@@ -2144,6 +2144,9 @@ async function refillOnlyPriceChange(trx, visitId, { row, updates, replaceAddons
   if (!mistingRefill.refillLive() || !row || !updates || !Array.isArray(replaceAddons) || updates.estimated_price === undefined) return false;
   // The exemption exists only where the refill is billed on top of the coverage; with that billing dark it would go uncollected.
   if (!addonBillingLive()) return false;
+  // Only coverage the term has already stamped on this occurrence. An unstamped visit may be covered by a prepay still awaiting payment,
+  // whose price-hold would see the raised total as drift and drop the visit from coverage: it keeps the full guard.
+  if (!row.annual_prepay_term_id) return false;
   const cents = (value) => Math.round((Number(value) || 0) * 100);
   const postedNet = replaceAddons.filter((line) => line && mistingRefill.isRefillKey(line.serviceKey)).reduce((sum, line) => sum + cents(line.price), 0);
   const stored = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).select('service_key_snapshot', 'estimated_price');
