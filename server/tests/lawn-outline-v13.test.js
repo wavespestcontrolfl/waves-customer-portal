@@ -4,13 +4,13 @@
 //
 // Pins: the gate needs GATE_LAWN_V13; the outline reads the grass the estimate recorded
 // (never the bermudaSuppression flag or a note); bahia is blocked; mixed and unknown lawns
-// get the one program; the month text and the twelve month sentences are the lawn report's
-// own; every v13 line, each plan size included, reaches a category and no product, number or
-// rate does; the outline stamps its own content version.
+// get the one program; the month text is the lawn report's own; the year chart and the month
+// chips are drawn from the recipe; every v13 line, each plan size included, reaches a category
+// and no product, number or rate does; the outline stamps its own content version.
 
 const v13 = require('../config/lawn-protocol-v13.json');
 const outline = require('../services/lawn-service-outline');
-const { PROGRAM_DETAIL_V13, PROGRAM_LINES_V13 } = require('../services/service-report/lawn-program-line');
+const { PROGRAM_DETAIL_V13 } = require('../services/service-report/lawn-program-line');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
@@ -231,25 +231,91 @@ describe('regenerating an older outline', () => {
 });
 
 describe('the sections', () => {
-  test('one program section, the report month text, the year, no tier line and no restricted-season line', async () => {
+  test('one program section, the report month text, the drawn year, no tier line and no restricted-season line', async () => {
     await withGates(BOTH, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
       expect(result.content.sections.map((s) => s.key)).toEqual([
-        'property_summary', 'lawn_program', 'season_focus', 'program_year', 'typical_visit', 'treatment_categories',
-        'local_rules', 'safety', 'post_service_reports', 'portal_tracking', 'not_included',
+        'property_summary', 'lawn_program', 'season_focus', 'program_year', 'treatment_categories', 'typical_visit',
+        'local_rules', 'safety', 'after_visit', 'not_included',
       ]);
       expect(result.content.title).toBe('Your Waves Lawn Care Program Overview');
       const text = JSON.stringify(result.content.sections);
       expect(text).not.toMatch(/service tier/i);
       expect(text).not.toMatch(/restricted-season logic/i);
       expect(text).not.toMatch(/soil.test/i);
-      expect(section(result, 'program_year').bullets).toEqual(MONTHS.map((m) => PROGRAM_LINES_V13[m].line));
+      // Owner 2026-10-24: the twelve "In <month> the program focuses on ..." sentences read as filler; the year is drawn.
+      expect(text).not.toMatch(/program focuses on/i);
       expect(section(result, 'local_rules').bullets).toEqual([
         'Rule area: Sarasota County, FL',
         'Local fertilizer rules may restrict nitrogen and phosphorus applications during the summer rainy season.',
       ]);
-      expect(section(result, 'portal_tracking').body).toMatch(/^GPS on the service vehicle records when the technician arrives/);
+      // One tile row in place of the report and portal sections; GPS records arrival only.
+      expect(section(result, 'after_visit').bullets).toContain('Arrival record: GPS on the service vehicle records when the technician arrives');
+      expect(text).not.toMatch(/arrival and completion/i);
       expect(result.content.treatmentCategories.map((c) => c.label)).toEqual(section(result, 'treatment_categories').bullets.map((b) => b.split(':')[0]));
+    });
+  });
+
+  test('every drawn section keeps text bullets that say what the drawing says', async () => {
+    await withGates(BOTH, async () => {
+      const result = await build(ST_AUG_ESTIMATE, { month: 10 });
+      const drawn = result.content.sections.filter((s) => s.visual);
+      expect(drawn.map((s) => [s.key, s.visual.type])).toEqual([
+        ['lawn_program', 'tiles'], ['season_focus', 'chips'], ['program_year', 'year'], ['treatment_categories', 'categories'], ['typical_visit', 'steps'],
+        ['after_visit', 'tiles'],
+      ]);
+      expect(section(result, 'safety').bullets).toHaveLength(2);
+      // The dropped card repeated the approved safety text's EPA sentence.
+      expect(section(result, 'safety').bullets.join(' ')).not.toMatch(/EPA registration/);
+      const after = section(result, 'after_visit');
+      expect(after.bullets).toEqual(after.visual.items.map((t) => `${t.title}: ${t.text}`));
+      const tiles = section(result, 'lawn_program');
+      expect(tiles.bullets).toEqual(tiles.visual.items.map((t) => `${t.title}: ${t.text}`));
+      const steps = section(result, 'typical_visit');
+      expect(steps.visual.items.map((t) => t.title)).toEqual(['Check', 'Decide', 'Treat', 'Report']);
+      expect(steps.bullets).toEqual(steps.visual.items.map((t) => `${t.title}: ${t.text}`));
+      expect(steps.body).toBe('');
+      const cards = section(result, 'treatment_categories');
+      expect(cards.bullets).toEqual(cards.visual.items.map((c) => `${c.label}: ${c.text}`));
+      expect(section(result, 'program_year').bullets[9]).toBe('October: Feeding, Weed barrier; as needed: Disease control, Insect control, Weed spots');
+      // The legacy outline draws nothing.
+      await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+        expect((await build(ST_AUG_ESTIMATE, { month: 10 })).content.sections.some((s) => 'visual' in s)).toBe(false);
+      });
+    });
+  });
+
+  test('the year chart is the recipe: each month\'s whole-lawn step, what may be added, and the rule\'s limited months', async () => {
+    await withGates(BOTH, async () => {
+      const { visual } = section(await build(ST_AUG_ESTIMATE, { month: 10 }), 'program_year');
+      const byMonth = Object.fromEntries(visual.months.map((m) => [m.label, m]));
+      expect(visual.months.map((m) => m.label)).toEqual(MONTH_ABBR);
+      expect(byMonth.Jan).toMatchObject({ main: ['barrier', 'micros'], asNeeded: ['disease', 'weeds'], limited: false });
+      expect(byMonth.Feb).toMatchObject({ main: ['feeding'], asNeeded: ['weeds'] });
+      // The 9x April bag (pre-emergent with fertilizer) is a plan-size variant: drawn as may-be-added.
+      expect(byMonth.Apr.main).toEqual(['feeding']);
+      expect(byMonth.Apr.asNeeded).toEqual(expect.arrayContaining(['barrier', 'disease', 'insects']));
+      expect(byMonth.May.main).toEqual(['insects']);
+      expect(byMonth.Jul).toMatchObject({ main: ['inspection'], limited: true });
+      expect(byMonth.Oct.main).toEqual(['feeding', 'barrier']);
+      expect(visual.months.filter((m) => m.limited).map((m) => m.label)).toEqual(['Jun', 'Jul', 'Aug', 'Sep']);
+      expect(visual.limitLabel).toBe('Local summer fertilizer limits');
+      for (const m of visual.months) {
+        for (const step of [...m.main, ...m.asNeeded]) expect(visual.labels[step]).toEqual(expect.any(String));
+        expect(m.main.filter((step) => m.asNeeded.includes(step))).toEqual([]);
+      }
+      // The month chips are the same steps.
+      const chips = section(await build(ST_AUG_ESTIMATE, { month: 10 }), 'season_focus').visual.items;
+      expect(chips.filter((c) => c.tier === 'main').map((c) => c.key)).toEqual(byMonth.Oct.main);
+      expect(chips.filter((c) => c.tier === 'as_needed').map((c) => c.key)).toEqual(byMonth.Oct.asNeeded);
+    });
+  });
+
+  test('a lawn with no program (bahia) draws an empty year and no chips', async () => {
+    await withGates(BOTH, async () => {
+      const result = await build(estimateWith(formLawn('bahia')), { month: 10 });
+      expect(section(result, 'program_year').visual.months.every((m) => !m.main.length && !m.asNeeded.length)).toBe(true);
+      expect(section(result, 'season_focus').visual.items).toEqual([]);
     });
   });
 
@@ -269,7 +335,8 @@ describe('the sections', () => {
         for (const month of MONTHS) {
           const result = await build(estimateWith(formLawn(grass)), { month });
           expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
-          const texts = [result.content.title, ...result.content.sections.flatMap((s) => [s.title, s.body, ...s.bullets])].filter(Boolean);
+          const drawnTexts = (v) => [v?.note, v?.limitLabel, ...Object.values(v?.labels || {}), ...(v?.items || []).flatMap((i) => [i.title, i.text, i.label])];
+          const texts = [result.content.title, ...result.content.sections.flatMap((s) => [s.title, s.body, ...s.bullets, ...drawnTexts(s.visual)])].filter(Boolean);
           for (const text of texts) {
             expect(findBannedCustomerCopy(text)).toEqual([]);
             expect(validateCustomerCopy(text)).toBe(true);
