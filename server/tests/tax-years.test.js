@@ -13,26 +13,57 @@
  *  4. filed_on is a real day from the start of the year to today.
  *  5. Marking filed is draft to filed only (409 otherwise); unmarking a year
  *     that was never filed is a 409, a year with no record a 404.
+ *  6. Filing only matches the version the return was computed from: a write
+ *     that landed since (a PUT) is a 409 and the snapshot is never written.
+ *  7. A failed read of the prior year is an error, never a zero carryover.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
-const state = { existing: null, upserted: [], upsertReturns: undefined, updateRows: [], inserted: [], rows: {} };
+const state = {
+  existing: null, upserted: [], upsertReturns: undefined, updateRows: [], inserted: [], rows: {},
+  firstResults: [], firstCalls: 0, wheres: [], store: null,
+};
+// state.store (optional) is a one-row fake of tax_years: the filing UPDATE
+// matches it only while it is a draft AND its version equals the whereRaw
+// binding, exactly like the SQL; a match applies the patch.
 function mockTable() {
+  let rawVersion = null;
+  let patch = null;
   const b = {
-    where: jest.fn(() => b),
+    where: jest.fn((...args) => { state.wheres.push(args); return b; }),
+    whereRaw: jest.fn((_sql, bindings) => { rawVersion = bindings[0]; return b; }),
     orderBy: jest.fn(() => b),
     select: jest.fn(() => Promise.resolve(state.rows.list || [])),
-    first: jest.fn(() => Promise.resolve(state.existing)),
+    first: jest.fn(() => {
+      state.firstCalls += 1;
+      if (state.firstResults.length) {
+        const next = state.firstResults.shift();
+        return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+      }
+      return Promise.resolve(state.store ? { status: state.store.status } : state.existing);
+    }),
     insert: jest.fn((row) => { state.inserted.push(row); return b; }),
     onConflict: jest.fn(() => b),
-    merge: jest.fn((patch) => { state.upserted.push(patch); return b; }),
+    merge: jest.fn((p) => { state.upserted.push(p); return b; }),
     ignore: jest.fn(() => Promise.resolve()),
-    update: jest.fn(() => b),
-    returning: jest.fn(() => Promise.resolve(state.upsertReturns !== undefined ? state.upsertReturns : state.updateRows)),
+    update: jest.fn((p) => { patch = p; return b; }),
+    returning: jest.fn(() => {
+      if (state.store && patch) {
+        if (state.store.status !== 'draft' || state.store.version !== rawVersion) return Promise.resolve([]);
+        Object.assign(state.store, { status: 'filed', snapshot: patch.filed_snapshot });
+        return Promise.resolve([{ tax_year: 2025, status: 'filed', filed_on: patch.filed_on, other_income: '0', estimates_paid: '0', nol_in: null, qbi_loss_in: null, sec179_carry_in: null, home_office_carry_in: null }]);
+      }
+      return Promise.resolve(state.upsertReturns !== undefined ? state.upsertReturns : state.updateRows);
+    }),
   };
   return b;
 }
-jest.mock('../models/db', () => jest.fn(() => mockTable()));
+jest.mock('../models/db', () => {
+  const d = jest.fn(() => mockTable());
+  d.raw = jest.fn((sql) => sql);
+  d.fn = { now: jest.fn(() => 'db-now') };
+  return d;
+});
 
 const ty = require('../services/tax-years');
 const { etParts, etDateString } = require('../utils/datetime-et');
@@ -41,14 +72,15 @@ const httpErr = (status) => expect.objectContaining({ status });
 const year = etParts().year - 1;
 
 beforeEach(() => {
-  Object.assign(state, { existing: null, upserted: [], upsertReturns: undefined, updateRows: [], inserted: [], rows: {} });
+  Object.assign(state, { existing: null, upserted: [], upsertReturns: undefined, updateRows: [], inserted: [], rows: {}, firstResults: [], firstCalls: 0, wheres: [], store: null });
 });
 
 describe('upsertYear validation', () => {
   beforeEach(() => { state.upsertReturns = [{ tax_year: year, filing_status: 'single', status: 'draft', other_income: '10.50', estimates_paid: '0', nol_in: null, qbi_loss_in: '0.00', sec179_carry_in: null, home_office_carry_in: null, filed_on: null }]; });
   test('saves strict numbers rounded to cents and a known filing status', async () => {
     const row = await ty.upsertYear(String(year), { filing_status: 'mfj', other_income: '10.505', estimates_paid: 200, notes: '  hi  ' });
-    expect(state.upserted[0]).toMatchObject({ filing_status: 'mfj', other_income: 10.51, estimates_paid: 200, notes: 'hi' });
+    expect(state.upserted[0]).toMatchObject({ filing_status: 'mfj', other_income: 10.51, estimates_paid: 200, notes: 'hi', updated_at: 'db-now' });
+    expect(state.wheres).toContainEqual(['tax_years.status', 'draft']); // a filing that lands first makes this write match nothing
     expect(row.other_income).toBe(10.5);
     expect(row).toMatchObject({ nol_in: null, qbi_loss_in: 0, sec179_carry_in: null }); // NULL stays NULL, a stored 0 stays 0
   });
@@ -117,6 +149,27 @@ describe('resolveCarryIn', () => {
   });
 });
 
+describe('getYearDetail: the prior year read', () => {
+  test('a failed read of the prior year is an error, never a zero carryover', async () => {
+    state.firstResults = [null, new Error('db down')]; // this year reads, the prior year fails
+    await expect(ty.getYearDetail(year)).rejects.toThrow('db down');
+  });
+  test('a failed read of this year is an error too', async () => {
+    state.firstResults = [new Error('db down'), null];
+    await expect(ty.getYearDetail(year)).rejects.toThrow('db down');
+  });
+  test('a prior year with no row is a normal none', async () => {
+    state.firstResults = [null, null];
+    const d = await ty.getYearDetail(year);
+    expect(d.carry_in.nol).toMatchObject({ value: 0, source: 'none' });
+  });
+  test('the first year the module knows has no prior year to read', async () => {
+    const d = await ty.getYearDetail(2020);
+    expect(state.firstCalls).toBe(1);
+    expect(d.carry_in.nol.source).toBe('none');
+  });
+});
+
 describe('getYearRow', () => {
   test('a year with no record reads as the defaults', async () => {
     const r = await ty.getYearRow(year);
@@ -141,15 +194,31 @@ describe('parseFiledOn', () => {
 });
 
 describe('markFiled and unmarkFiled', () => {
-  test('mark filed freezes the snapshot as JSON and returns the row', async () => {
-    state.updateRows = [{ tax_year: 2025, status: 'filed', filed_on: '2026-04-15', other_income: '0', estimates_paid: '0', nol_in: '0', qbi_loss_in: '0', sec179_carry_in: '0', home_office_carry_in: '0' }];
-    const row = await ty.markFiled(2025, '2026-04-15', { result: { total_tax: 1 } });
+  const draft = () => ({ status: 'draft', version: 'v1', snapshot: null });
+  test('mark filed freezes the snapshot as JSON when the version still matches', async () => {
+    state.store = draft();
+    const row = await ty.markFiled(2025, '2026-04-15', { result: { total_tax: 1 } }, 'v1');
     expect(row.status).toBe('filed');
-    expect(state.inserted[0]).toEqual({ tax_year: 2025 }); // the draft row is made when there is none
+    expect(state.store.snapshot).toBe(JSON.stringify({ result: { total_tax: 1 } }));
   });
-  test('a year that is not a draft is a 409', async () => {
-    state.updateRows = [];
-    await expect(ty.markFiled(2025, '2026-04-15', {})).rejects.toEqual(httpErr(409));
+  test('ensureRow makes the draft row first, without touching an existing one', async () => {
+    await ty.ensureRow(2025);
+    expect(state.inserted[0]).toEqual({ tax_year: 2025 });
+  });
+  test('a PUT landing between the read and the filing is a 409 and writes no snapshot', async () => {
+    state.store = draft(); // the row as read: version v1, the return is computed from it
+    state.store.version = 'v2'; // a PUT commits now
+    await expect(ty.markFiled(2025, '2026-04-15', { result: {} }, 'v1')).rejects.toMatchObject({
+      status: 409, message: 'the year changed while it was being filed; reload and try again',
+    });
+    expect(state.store).toEqual({ status: 'draft', version: 'v2', snapshot: null });
+  });
+  test('a year already filed is a 409 that says so', async () => {
+    state.store = { status: 'filed', version: 'v1', snapshot: '{}' };
+    await expect(ty.markFiled(2025, '2026-04-15', {}, 'v1')).rejects.toMatchObject({ status: 409, message: '2025 is already marked filed' });
+  });
+  test('a version is required', async () => {
+    await expect(ty.markFiled(2025, '2026-04-15', {})).rejects.toThrow(/version/);
   });
   test('unmark: 409 for a year that is not filed, 404 for no record', async () => {
     state.updateRows = [];

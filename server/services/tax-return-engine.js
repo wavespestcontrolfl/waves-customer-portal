@@ -424,6 +424,7 @@ async function gatherInputs(year) {
     status: detail.row.status,
     filed_on: detail.row.filed_on,
     filed_snapshot: detail.row.filed_snapshot,
+    row_version: detail.row.version,
     warnings,
   };
 }
@@ -433,11 +434,19 @@ async function computeYear(year) {
 }
 
 // Freeze today's answer. The snapshot keeps the numbers but not the warnings.
+// Calculating and filing are one optimistic step: the year row exists first,
+// the return is computed from the row as read (its version), and the filing
+// UPDATE only matches that same version. A PUT that lands in between is a 409
+// and writes nothing. Expenses and equipment are read live while computing, so
+// the snapshot is the books as of the moment it was filed.
 async function fileYear(year, { filed_on: filedOn } = {}) {
   const y = sharedBills.parseYear(year);
   const date = taxYears.parseFiledOn(filedOn, y);
-  const { warnings: _warnings, ...result } = await computeYear(y);
-  return taxYears.markFiled(y, date, { frozen_at: new Date().toISOString(), result });
+  getYearConstants(y); // 400 for a year that is not loaded, before a row is made
+  await taxYears.ensureRow(y);
+  const inputs = await gatherInputs(y);
+  const { warnings: _warnings, ...result } = computeReturn(inputs);
+  return taxYears.markFiled(y, date, { frozen_at: new Date().toISOString(), result }, inputs.row_version);
 }
 
 module.exports = {

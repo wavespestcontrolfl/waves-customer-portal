@@ -292,6 +292,6 @@ module.exports = {
   isOn, normalize, patternMatches, matchBill, shareOf, sharedNote, bookedSharePct, homeOfficeDeduction,
   listBills, loadEnabledBills, createBill, updateBill, deleteBill,
   getHomeOffice, upsertHomeOffice, deleteHomeOffice,
-  strictNumber, parseYear, httpError,
+  strictNumber, parseYear, httpError, FIRST_YEAR,
   PATTERN_MIN, PATTERN_MAX, HOME_OFFICE_RATE, HOME_OFFICE_MAX_SQ_FT,
 };

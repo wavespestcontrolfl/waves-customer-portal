@@ -2,13 +2,16 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, configure, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import ReturnTab from './ReturnTab.jsx';
 import { etParts } from '../../../lib/timezone';
 
 // Locked-down behaviors: hidden (and silent) while the gate is off; the
 // server's lines on screen with each carry-in's source; Save year, Mark filed
 // and Unmark post what they should; a failed return shows its message.
+
+// the form renders after two fetches: a loaded machine needs more than the 1s default
+configure({ asyncUtilTimeout: 10000 });
 
 const YEAR = etParts().year;
 

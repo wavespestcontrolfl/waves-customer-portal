@@ -42,9 +42,13 @@ jest.mock('../services/pnl-report', () => ({
 jest.mock('../services/tax-years', () => ({
   ...jest.requireActual('../services/tax-years'),
   getYearDetail: jest.fn(() => Promise.resolve(state.detail)),
+  ensureRow: jest.fn(() => Promise.resolve()),
+  markFiled: jest.fn(),
 }));
 
 const engine = require('../services/tax-return-engine');
+const taxYears = require('../services/tax-years');
+const pnlReport = require('../services/pnl-report');
 const { getYearConstants, YEARS } = require('../services/tax-year-constants');
 
 const { computeReturn, bracketTax, dueDate, reserve, splitDepreciation } = engine;
@@ -383,7 +387,7 @@ describe('splitDepreciation (the register, through the P&L proration)', () => {
   });
 });
 
-describe('gatherInputs (database mocked)', () => {
+describe('gatherInputs and fileYear (database mocked)', () => {
   beforeEach(() => {
     state.rows = {
       expenses: [
@@ -403,7 +407,7 @@ describe('gatherInputs (database mocked)', () => {
     };
     state.detail = {
       year: 2025, exists: true,
-      row: { filing_status: 'mfj', other_income: 1000, estimates_paid: 200, status: 'draft', filed_on: null, filed_snapshot: null },
+      row: { filing_status: 'mfj', other_income: 1000, estimates_paid: 200, status: 'draft', filed_on: null, filed_snapshot: null, version: 'v1' },
       carry_in: { nol: { value: 5 }, qbi_loss: { value: 6 }, sec179: { value: 7 }, home_office: { value: 8 } },
     };
   });
@@ -432,5 +436,51 @@ describe('gatherInputs (database mocked)', () => {
     mockDb.mockClear();
     await expect(engine.gatherInputs(2023)).rejects.toMatchObject({ status: 400, message: 'tax constants for 2023 are not loaded' });
     expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  describe('fileYear: calculating and filing are one optimistic step', () => {
+    beforeEach(() => {
+      taxYears.ensureRow.mockClear();
+      taxYears.markFiled.mockReset();
+      taxYears.getYearDetail.mockClear();
+    });
+
+    test('the row exists first, the return is computed from the row as read, and its version goes to the filing', async () => {
+      taxYears.markFiled.mockResolvedValue({ status: 'filed' });
+      await engine.fileYear(2025, { filed_on: '2026-04-10' });
+      expect(taxYears.ensureRow).toHaveBeenCalledWith(2025);
+      expect(taxYears.ensureRow.mock.invocationCallOrder[0]).toBeLessThan(taxYears.getYearDetail.mock.invocationCallOrder[0]);
+      const [y, date, snapshot, version] = taxYears.markFiled.mock.calls[0];
+      expect([y, date, version]).toEqual([2025, '2026-04-10', 'v1']);
+      expect(snapshot.result.lines.gross_receipts).toBe(12345.67);
+      expect(snapshot.result.warnings).toBeUndefined();
+    });
+
+    test('a PUT that lands while the return is computed is a 409 and nothing is frozen', async () => {
+      // the year row as the PUT leaves it; the filing was computed from v1
+      const store = { version: 'v1', frozen: null };
+      const httpErr = (status, message) => Object.assign(new Error(message), { status });
+      pnlReport.buildPnlReport.mockImplementationOnce(async () => { store.version = 'v2'; return state.pnl; }); // the PUT commits mid-compute
+      taxYears.markFiled.mockImplementation(async (_y, _d, snapshot, version) => {
+        if (version !== store.version) throw httpErr(409, 'the year changed while it was being filed; reload and try again');
+        store.frozen = snapshot;
+        return { status: 'filed' };
+      });
+      await expect(engine.fileYear(2025)).rejects.toMatchObject({ status: 409, message: /changed while it was being filed/ });
+      expect(store.frozen).toBeNull();
+      expect(taxYears.markFiled.mock.calls[0][3]).toBe('v1'); // the version read before computing, not after
+    });
+
+    test('a failed read while gathering (the prior year, say) persists nothing', async () => {
+      taxYears.getYearDetail.mockRejectedValueOnce(new Error('db down'));
+      await expect(engine.fileYear(2025)).rejects.toThrow('db down');
+      expect(taxYears.markFiled).not.toHaveBeenCalled();
+    });
+
+    test('a year with no constants is refused before the row is touched', async () => {
+      await expect(engine.fileYear(2023)).rejects.toMatchObject({ status: 400 });
+      expect(taxYears.ensureRow).not.toHaveBeenCalled();
+      expect(taxYears.markFiled).not.toHaveBeenCalled();
+    });
   });
 });
