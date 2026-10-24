@@ -62,16 +62,16 @@
  * bells with classifyOpenBookingMiss: the visit got booked, or was done on
  * another day, or the agreed day passed 14 days ago -> done, with a resolution
  * line; older duplicates of one call -> done as replaced. A visit booked on a
- * DIFFERENT day than the call agreed (the office booked the wrong week) turns
- * the open bell into a date check ("Booked Wed Oct 28 ...; the call agreed Wed
- * Nov 4 ..."), unread again, and the first ring says the same instead of
- * "nothing is on the calendar". Same gate, same lock; a close failure logs a
+ * DIFFERENT day than the call agreed (the office booked the wrong week) is a
+ * new episode: it rings one fresh date-check bell ("Booked Wed Oct 28 ...; the
+ * call agreed Wed Nov 4 ..."), and only then closes the old bells as replaced.
+ * The first ring says the same instead of "nothing is on the calendar". Same gate, same lock; a close failure logs a
  * warning and never stops the ring path.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { raiseAdminAlert, composeAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
+const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 
@@ -119,6 +119,7 @@ const OTHER_DAY_MATCH_DAYS = 21;
 const PAST_AFTER_DAYS = 14;
 const BELL_DEDUPE_PREFIX = 'call-booking-miss';
 const REPLACED = 'Replaced by a newer alert for this call';
+const REPLACED_BY_DATE_CHECK = 'Replaced by a date check';
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
@@ -314,14 +315,17 @@ const newestFirst = (a, b) => (new Date(b.created_at) - new Date(a.created_at)) 
 // the evidence rows (see loadBookingRows: provenance, the customer and its
 // namesakes), `openRows` the call's open bells ({ id, created_at, mismatch_visit_id,
 // mismatch_date, mismatch_time }), `namesakes` as computeBookingMisses takes it.
-// Returns { verdict, row, mismatch, closes: [{ ids, resolution }], keep, rewrite }:
+// Returns { verdict, row, mismatch, closes: [{ ids, resolution }], keep, raise }:
 //   booked           the visit is on the agreed slot -> close every bell
 //   done_other_day   the call's own customer had a later visit completed on
 //                    another day -> close every bell (a namesake may be another
 //                    person, so a namesake's completed visit never closes)
 //   booked_other_day a later visit is on the calendar on another day or outside
-//                    the window -> keep the newest bell, close older ones,
-//                    rewrite the kept one when the booked visit changed
+//                    the window. The newest bell already shows this visit ->
+//                    keep it, close older ones. Otherwise `raise` is the
+//                    mismatch to ring as a FRESH date-check bell, and `closes`
+//                    (every open bell, "Replaced by a date check") may run only
+//                    once that bell is raised.
 //   past             nothing booked and the agreed day was PAST_AFTER_DAYS ago
 //                    or more -> close every bell
 //   still_missed     keep the newest bell, close older duplicates
@@ -331,7 +335,7 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
   const ordered = [...openRows].sort(newestFirst);
   const newest = ordered[0] || null;
   const closeAll = (resolution) => (ordered.length ? [{ ids: ordered.map((r) => r.id), resolution }] : []);
-  const result = (verdict, row, extra = {}) => ({ verdict, row, mismatch: null, closes: [], keep: null, rewrite: null, ...extra });
+  const result = (verdict, row, extra = {}) => ({ verdict, row, mismatch: null, closes: [], keep: null, raise: null, ...extra });
   const keepNewest = () => (ordered.length > 1 ? [{ ids: ordered.slice(1).map((r) => r.id), resolution: REPLACED }] : []);
 
   const sameName = namesakes.get(call.id);
@@ -358,7 +362,8 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows = [], { now = 
       && String(newest.mismatch_visit_id ?? '') === String(mismatch.visit_id ?? '')
       && (newest.mismatch_date ?? '') === mismatch.date
       && (newest.mismatch_time ?? '') === (mismatch.time ?? '');
-    return result('booked_other_day', live, { mismatch, closes: keepNewest(), keep: newest && newest.id, rewrite: newest && !same ? { id: newest.id, mismatch } : null });
+    if (newest && !same) return result('booked_other_day', live, { mismatch, raise: mismatch, closes: closeAll(REPLACED_BY_DATE_CHECK) });
+    return result('booked_other_day', live, { mismatch, closes: keepNewest(), keep: newest && newest.id });
   }
 
   if (dayNumber(etDateString(now)) - dayNumber(slot.dateET) >= PAST_AFTER_DAYS) {
@@ -532,8 +537,8 @@ async function loadBookingRows(entries, namesakes) {
     );
 }
 
-// The date-check text, for the first ring and for the rewrite of a standing
-// bell: the office booked a visit, but not on the day the call agreed. `name`
+// The date-check text, for the first ring and for the fresh bell the close
+// pass raises when a visit lands on another day: the office booked a visit, but not on the day the call agreed. `name`
 // is null when only the old bell's slot is known. Headline and why follow
 // docs/admin-notifications.md (composeAdminAlert checks them).
 function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
@@ -558,11 +563,19 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
 // The close pass (owner 2026-10-24): every open booking-miss bell is checked
 // against the schedule on every tick, not only the ones a new ring would reach.
 // Open bells are grouped by call; each call's verdict (classifyOpenBookingMiss)
-// closes them as done with a resolution, or turns the kept one into a date
-// check. System-closer pattern (openToCloser + doneColumns), the same shape
-// promise-chaser-bell uses. Returns { closed, rewritten } (rows).
-async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
+// closes them as done with a resolution. A visit booked on another day is a
+// NEW episode: it rings a fresh date-check bell once (the bell list orders by
+// created_at, so a rewritten old row would stay buried), and only after that
+// bell exists (raised, or already standing under the same key) are the old
+// "nothing is on the calendar" bells closed. A failed raise closes nothing.
+// System-closer pattern (openToCloser + doneColumns), the same shape
+// promise-chaser-bell uses.
+// Returns { closed, raised } (rows); with `dryRun` it makes every read, writes
+// nothing, and returns { closed: 0, rewritten: 0, raised: 0, plans } (one plan
+// per call examined).
+async function closeResolvedBookingMissBells({ now = new Date(), dryRun = false } = {}) {
   const NotificationService = require('./notification-service');
+  const none = dryRun ? { closed: 0, rewritten: 0, raised: 0, plans: [] } : { closed: 0, raised: 0 };
   const openRows = await db('notifications')
     .where({ recipient_type: 'admin' })
     .whereNull('done_at')
@@ -582,7 +595,7 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
     if (!byCall.has(row.call_log_id)) byCall.set(row.call_log_id, []);
     byCall.get(row.call_log_id).push(row);
   }
-  if (!byCall.size) return { closed: 0, rewritten: 0 };
+  if (!byCall.size) return none;
 
   const calls = await db('call_log')
     .whereIn('id', [...byCall.keys()])
@@ -606,56 +619,46 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
     }
     entries.push({ call, slot, rows });
   }
-  if (!entries.length) return { closed: 0, rewritten: 0 };
+  if (!entries.length) return none;
 
   const { namesakes } = await loadNamesakeAccounts(entries);
   const bookedRows = await loadBookingRows(entries, namesakes);
-  let closed = 0;
-  let rewritten = 0;
-  for (const { call, slot, rows } of entries) {
-    const plan = classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes });
-    for (const { ids, resolution } of plan.closes) {
-      closed += await NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }).whereIn('id', ids), BELL_DEDUPE_PREFIX)
-        .update(NotificationService._private.doneColumns({ by: BELL_DEDUPE_PREFIX, resolution, keepExisting: true, conn: db }))
-        .catch((err) => { logger.warn(`[call-booking-miss] failed to close bell(s) for call ${call.id}: ${err.message}`); return 0; });
-    }
-    if (plan.rewrite) {
-      const wrote = await rewriteAsDateCheck(plan.rewrite, { call, slot, NotificationService })
-        .catch((err) => { logger.warn(`[call-booking-miss] failed to rewrite the bell for call ${call.id}: ${err.message}`); return 0; });
-      rewritten += wrote;
-    }
+  const plans = entries.map(({ call, slot, rows }) => ({ call, slot, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
+  if (dryRun) {
+    return {
+      ...none,
+      plans: plans.map(({ call, plan }) => ({
+        callId: call.id,
+        verdict: plan.verdict,
+        closeIds: plan.closes.flatMap((c) => c.ids),
+        keepId: plan.keep,
+        mismatch: plan.mismatch,
+        wouldRaise: !!plan.raise,
+      })),
+    };
   }
-  if (closed || rewritten) logger.info(`[call-booking-miss] close pass: closed=${closed} rewritten=${rewritten}`);
-  return { closed, rewritten };
-}
 
-// Turn the kept bell into the date check: new words, unread again (somebody
-// has to look at it), no push. Only when the booked visit changed (the caller
-// compared). A name unknown (reprocessed call, old title unparseable) leaves
-// the title alone.
-async function rewriteAsDateCheck({ id, mismatch }, { call, slot, NotificationService }) {
-  const parts = dateCheckAlert({ name: slot.name === 'Unknown caller' ? null : slot.name, slot, call, mismatch, service: slot.service });
-  const composed = composeAdminAlert({
-    area: 'Schedule', action: parts.action, why: parts.why, severity: 'needs-you', link: parts.link,
-    subject: { type: 'call', id: call.id }, doneWhen: 'visit_booked', who: 'person',
-  });
-  const text = NotificationService.normalizeAdminText({ category: 'alert', title: composed.headline, body: composed.why, detail: parts.detail });
-  const updated = await db('notifications')
-    .where({ id, recipient_type: 'admin' })
-    .whereNull('done_at')
-    .update({
-      ...(slot.name && slot.name !== 'Unknown caller' ? { title: text.title } : {}),
-      body: text.body,
-      detail: text.detail,
-      link: composed.link,
-      // Unread again; the row is open (done_at IS NULL above), so the done fields stay clear.
-      read_at: null,
-      done_at: null,
-      done_by: null,
-      resolution: null,
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ mismatch })]),
-    });
-  return updated ? 1 : 0;
+  let closed = 0;
+  let raised = 0;
+  const closeRows = ({ ids, resolution }, callId) => NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }).whereIn('id', ids), BELL_DEDUPE_PREFIX)
+    .update(NotificationService._private.doneColumns({ by: BELL_DEDUPE_PREFIX, resolution, keepExisting: true, conn: db }))
+    .catch((err) => { logger.warn(`[call-booking-miss] failed to close bell(s) for call ${callId}: ${err.message}`); return 0; });
+  for (const { call, slot, plan } of plans) {
+    if (plan.raise) {
+      const { visit_id: visitId, date, time } = plan.raise;
+      const outcome = await ringMiss(
+        { call, slot, mismatch: plan.raise },
+        { dedupeKey: `${BELL_DEDUPE_PREFIX}-date:${call.id}:${visitId}:${date}:${time ?? 'none'}`, repeat: false },
+      ).catch((err) => { logger.warn(`[call-booking-miss] failed to raise the date check for call ${call.id}: ${err.message}`); return 'failed'; });
+      // Close the old bells only once the date check stands ('rung' or an
+      // existing row under the same key). A suppressed or failed raise keeps them.
+      if (outcome !== 'rung' && outcome !== 'deduped') continue;
+      if (outcome === 'rung') raised += 1;
+    }
+    for (const close of plan.closes) closed += await closeRows(close, call.id);
+  }
+  if (closed || raised) logger.info(`[call-booking-miss] close pass: closed=${closed} raised=${raised}`);
+  return { closed, raised };
 }
 
 async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
@@ -671,7 +674,7 @@ async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
 
 async function runInner({ now = new Date() } = {}) {
   const closed = await closeResolvedBookingMissBells({ now })
-    .catch((err) => { logger.warn(`[call-booking-miss] close pass failed: ${err.message}`); return { closed: 0, rewritten: 0 }; });
+    .catch((err) => { logger.warn(`[call-booking-miss] close pass failed: ${err.message}`); return { closed: 0, raised: 0 }; });
   const windowStart = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
   // Exclude ACTIVE processing only ('processing' / NULL): a delayed or
   // force-reprocessed call persists its valid V2 extraction BEFORE the
