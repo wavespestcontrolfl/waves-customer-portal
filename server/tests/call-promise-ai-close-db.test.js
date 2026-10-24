@@ -45,6 +45,8 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     await db('audit_log').whereIn('resource_id', made.commitmentIds).del();
     await del('job_status_history', made.visitIds, 'job_id');
     await del('scheduled_services', made.visitIds);
+    await del('leads', made.leadIds || []);
+    await del('estimates', made.estimateIds || []);
     await del('sms_log', made.smsIds);
     await del('call_log', made.callIds); // cascades the commitments
     await del('customer_properties', made.customerIds, 'customer_id');
@@ -304,6 +306,73 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       await db('call_log').where({ id: w.call.id }).update({ duration_seconds: 3 * 60 * 60 });
       expect(await close.closeOnVerdict(db, candidate, judged, { now: new Date() })).toBe(false);
       expect((await row(w.commitment.id)).status).toBe('open');
+    });
+  });
+
+  describe('review round 3', () => {
+    test('an email-backed close stores no quote, only the record type, id and a label', async () => {
+      const w = await world();
+      const [mail] = await db('email_messages').insert({ recipient_type: 'customer', recipient_id: w.customerId, recipient_email_snapshot: `promise${w.n}@example.invalid`,
+        status: 'delivered', sent_at: later(), delivered_at: later(), text_snapshot: 'Your secure link to add a card: https://portal.wavespestcontrol.com/secure/Ab3dE5gH7jK9mN2pQ4sT6vX8' }).returning('id');
+      say(w, fulfilledBy(`email_delivery:${mail.id}`, 'Your secure link to add a card'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      const proof = (await row(w.commitment.id)).fulfillment;
+      expect(proof).toMatchObject({ kind: 'ai_check', record_type: 'email_message', record_id: mail.id, label: 'email', quote: null });
+      expect(JSON.stringify(proof)).not.toMatch(/secure|Ab3dE5/);
+      await db('email_messages').where({ id: mail.id }).del();
+    });
+
+    test('a text quote is kept but run through the repo scrubbers: private links and card numbers are removed', async () => {
+      const w = await world();
+      const text = await addSms(w, { message_body: 'Your link: https://portal.wavespestcontrol.com/pay/Ab3dE5gH7jK9mN2pQ4sT6vX8 is ready' });
+      say(w, fulfilledBy(`sms:${text}`, 'https://portal.wavespestcontrol.com/pay/Ab3dE5gH7jK9mN2pQ4sT6vX8 is ready'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      const proof = (await row(w.commitment.id)).fulfillment;
+      expect(proof.label).toBe('text');
+      expect(proof.quote).toContain('is ready');
+      expect(proof.quote).not.toContain('Ab3dE5');
+      const { safeQuote } = close;
+      expect(safeQuote('sms_log', 'Card 4242 4242 4242 4242 charged')).not.toMatch(/4242 4242 4242 4242/);
+      expect(safeQuote('email', 'anything')).toBeNull();
+      expect(safeQuote('email_message', 'anything')).toBeNull();
+      expect(safeQuote('sms_log', 'x'.repeat(500))).toHaveLength(240);
+    });
+
+    test('the cached verdicts on the staff-readable row carry no quote, and a fulfilled verdict is not cached', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+      await run(w);
+      expect(JSON.stringify((await row(w.commitment.id)).contact_check)).not.toContain('warranty covers');
+    });
+
+    test('an AI close citing a lead-owned estimate reopens when the lead is soft-deleted or relinked', async () => {
+      const make = async () => {
+        const w = await world({ kind: 'send_estimate', description: null });
+        const [lead] = await db('leads').insert({ customer_id: w.customerId }).returning('id');
+        const [estimate] = await db('estimates').insert({ customer_id: null, property_id: w.propertyId, status: 'sent', service_interest: 'Pest Control Estimate',
+          estimate_data: { lead_id: lead.id, deliveryState: { lastDeliveredAt: later().toISOString() } } }).returning('id');
+        await db('leads').where({ id: lead.id }).update({ estimate_id: estimate.id });
+        made.leadIds = [...(made.leadIds || []), lead.id]; made.estimateIds = [...(made.estimateIds || []), estimate.id];
+        say(w, fulfilledBy(`estimate:${estimate.id}`, 'Pest Control Estimate'));
+        expect(await run(w)).toMatchObject({ closed: 1 });
+        expect((await row(w.commitment.id)).fulfillment).toMatchObject({ record_type: 'estimate', record_id: estimate.id });
+        expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+        await cc.refreshFulfillment(db, w.call.id);
+        expect((await row(w.commitment.id)).status).toBe('fulfilled');
+        return { w, lead };
+      };
+      for (const [label, change] of [['soft delete', { deleted_at: new Date() }], ['relink', { customer_id: null }]]) {
+        const { w, lead } = await make();
+        if (label === 'relink') {
+          const other = await world();
+          change.customer_id = other.customerId;
+        }
+        await db('leads').where({ id: lead.id }).update(change);
+        expect([label, (await cc.listLapsedEvidenceClosedCallIds(db)).includes(w.call.id)]).toEqual([label, true]);
+        await cc.refreshFulfillment(db, w.call.id);
+        expect([label, (await row(w.commitment.id)).status]).toEqual([label, 'open']);
+      }
     });
   });
 

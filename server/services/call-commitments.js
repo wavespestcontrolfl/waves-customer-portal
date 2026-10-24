@@ -1625,25 +1625,29 @@ async function directEstimatesSentAfter(conn, probes) {
 
 // Shared ownership fence for delivered estimates, including commercial
 // proposals whose estimate is unowned but whose live lead has a customer.
-function whereEstimateCustomerOwnership(query, customerId) {
-  return query.whereRaw(`(estimates.customer_id = ? OR (
+function estimateOwnershipSql(customer) {
+  return `(estimates.customer_id = ${customer} OR (
           estimates.customer_id IS NULL
           AND (estimates.id IN (
             SELECT l.estimate_id FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id = ? AND l.estimate_id IS NOT NULL
+            WHERE l.deleted_at IS NULL AND l.customer_id = ${customer} AND l.estimate_id IS NOT NULL
           ) OR estimates.estimate_data ->> 'lead_id' IN (
             SELECT l.id::text FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id = ?
+            WHERE l.deleted_at IS NULL AND l.customer_id = ${customer}
           ))
           AND estimates.id NOT IN (
             SELECT l.estimate_id FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ? AND l.estimate_id IS NOT NULL
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ${customer} AND l.estimate_id IS NOT NULL
           )
           AND COALESCE(estimates.estimate_data ->> 'lead_id', '') NOT IN (
             SELECT l.id::text FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ?
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ${customer}
           )
-        ))`, [customerId, customerId, customerId, customerId, customerId]);
+        ))`;
+}
+
+function whereEstimateCustomerOwnership(query, customerId) {
+  return query.whereRaw(estimateOwnershipSql("?"), [customerId, customerId, customerId, customerId, customerId]);
 }
 
 // whereEstimateCustomerOwnership for MANY customers in ONE query: each
@@ -4291,6 +4295,7 @@ module.exports = {
   PLACEHOLDER_NAME_SQL_RE,
   isMissingName,
   whereEstimateCustomerOwnership,
+  estimateOwnershipSql,
   whereEstimateOwnedByAny,
   whereEstimateOnCustomerRecord,
   ESTIMATE_OWNER_SQL,

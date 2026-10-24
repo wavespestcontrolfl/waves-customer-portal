@@ -88,7 +88,25 @@ const sqlList = (values) => values.map((v) => `'${v}'`).join(', ');
 const RECORD_TABLES = { sms_log: ['sms_log', 'customer_id'], call_log: ['call_log', 'customer_id'],
   scheduled_service: ['scheduled_services', 'customer_id', (q, prior) => (prior?.visit_cancel
     ? q.whereIn('status', CANCELLED_VISIT_STATUSES) : q.whereNotIn('status', DEAD_VISIT_STATUSES))],
-  estimate: ['estimates', null], email: ['emails', null], email_message: ['email_messages', null] };
+  // An estimate counts while it is still the customer's: its own row, or an unowned one admitted by a live lead
+  // (call-commitments.js, the one ownership fence the evidence loader reads).
+  estimate: ['estimates', null, (q, _prior, customerId) => commitments.whereEstimateCustomerOwnership(q, customerId)], email: ['emails', null], email_message: ['email_messages', null] };
+
+// What the stored proof may keep of the model's quote. The Owed feed (/commitments/auto-closed) is readable by
+// every active technician, so the proof stores a record type, id and short label, and a quote only when it is
+// safe: never from an email record (admin-only Gmail, delivery snapshots that carry /secure/<token> links), and
+// every other quote goes through the repo's scrubbers (signed-link-redaction.js: private links and pasted
+// credentials; pan-scrub.js: card numbers), capped short.
+const QUOTE_CAP = 240;
+const NO_QUOTE_RECORDS = new Set(['email', 'email_message']);
+const RECORD_LABEL = { sms_log: 'text', call_log: 'call', scheduled_service: 'visit', estimate: 'estimate', email: 'email', email_message: 'email' };
+function safeQuote(recordType, quote) {
+  if (NO_QUOTE_RECORDS.has(recordType) || typeof quote !== 'string' || !quote.trim()) return null;
+  const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+  const { scrubPans } = require('../utils/pan-scrub');
+  const clean = scrubPans(redactSecrets(quote, newState())).trim().slice(0, QUOTE_CAP);
+  return clean || null;
+}
 
 const callEnd = (call) => require('./call-booking-link-text').callEndFor(call);
 const CALL_TIMING = ['created_at', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'direction', 'metadata'];
@@ -207,9 +225,10 @@ function proofOf(row, verdict, evidence) {
   const record = verdict.record_type === 'visit' && evidence?.records.find((r) => r.ref === `visit:${verdict.record_id}`);
   const visitCancel = !!record?.cancelled_at && !record.progressed_at && !record.booked_at && !record.moved_at;
   const matchedAt = verdict.matched_at ? iso(verdict.matched_at) : iso(new Date());
+  const recordType = LEDGER_RECORD_TYPE[verdict.record_type] || verdict.record_type;
   return storedProof({ strength: 'association', kind: AI_CHECK_KIND, basis: AI_CHECK_BASIS, closed_agent: AGENT,
-    record_type: LEDGER_RECORD_TYPE[verdict.record_type] || verdict.record_type, record_id: verdict.record_id, matched_at: matchedAt,
-    quote: verdict.quote, check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
+    record_type: recordType, record_id: verdict.record_id, label: RECORD_LABEL[recordType] || 'record', matched_at: matchedAt,
+    quote: safeQuote(recordType, verdict.quote), check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
     promise_md5: promiseMd5(row), evidence_hash: verdict.evidence_hash, extractor_version: VERSION, ...(visitCancel ? { visit_cancel: true } : {}) }, row.call_customer_id);
 }
 
@@ -259,7 +278,7 @@ async function aiCloseStands(conn, commitment, call, prior) {
   if (!table || !UUID_RE.test(String(prior.record_id))) return false;
   return !!await conn(table).where({ id: prior.record_id })
     .modify((q) => { if (customerColumn) q.where(customerColumn, call.customer_id); })
-    .modify((q) => { if (stillCounts) stillCounts(q, prior); }).first('id');
+    .modify((q) => { if (stillCounts) stillCounts(q, prior, call.customer_id); }).first('id');
 }
 
 // The watchdog's lapse scan (listLapsedAssociationCloses) asks, per closed row of
@@ -268,10 +287,15 @@ async function aiCloseStands(conn, commitment, call, prior) {
 // branch only (a text cast would defeat the primary-key index). `cc` is the
 // closed row's alias (its fulfillment), `cl` its call.
 function aiCheckLapsedSql(cc = 'cc', cl = 'cl') {
-  const branches = Object.entries(RECORD_TABLES).map(([type, [table, customerColumn, stillCounts]]) => {
-    const dead = stillCounts ? ` AND (CASE WHEN (${cc}.fulfillment ->> 'visit_cancel') = 'true' THEN r.status IN (${sqlList(CANCELLED_VISIT_STATUSES)}) ELSE r.status NOT IN (${sqlList(DEAD_VISIT_STATUSES)}) END)` : '';
+  const alive = {
+    scheduled_service: `NOT EXISTS (SELECT 1 FROM scheduled_services r WHERE r.id = (${cc}.fulfillment ->> 'record_id')::uuid AND r.customer_id = ${cl}.customer_id
+      AND (CASE WHEN (${cc}.fulfillment ->> 'visit_cancel') = 'true' THEN r.status IN (${sqlList(CANCELLED_VISIT_STATUSES)}) ELSE r.status NOT IN (${sqlList(DEAD_VISIT_STATUSES)}) END))`,
+    // The unaliased table name: the shared ownership predicate names its columns `estimates.`.
+    estimate: `NOT EXISTS (SELECT 1 FROM estimates WHERE estimates.id = (${cc}.fulfillment ->> 'record_id')::uuid AND ${commitments.estimateOwnershipSql(`${cl}.customer_id`)})`,
+  };
+  const branches = Object.entries(RECORD_TABLES).map(([type, [table, customerColumn]]) => {
     const owner = customerColumn ? ` AND r.${customerColumn} = ${cl}.customer_id` : '';
-    return `WHEN '${type}' THEN NOT EXISTS (SELECT 1 FROM ${table} r WHERE r.id = (${cc}.fulfillment ->> 'record_id')::uuid${owner}${dead})`;
+    return `WHEN '${type}' THEN ${alive[type] || `NOT EXISTS (SELECT 1 FROM ${table} r WHERE r.id = (${cc}.fulfillment ->> 'record_id')::uuid${owner})`}`;
   });
   return `((${cc}.fulfillment ->> 'basis') = '${AI_CHECK_BASIS}' AND CASE (${cc}.fulfillment ->> 'record_type') ${branches.join(' ')} ELSE TRUE END)`;
 }
@@ -280,7 +304,10 @@ function aiCheckLapsedSql(cc = 'cc', cl = 'cl') {
 
 // Bookkeeping only: never bumps updated_at, the version the close guards on.
 async function storeCache(conn, row, cache, now) {
-  const next = { version: VERSION, ...cache, checked_at: now.toISOString() };
+  // contact_check rides on the staff-readable commitment row: keep the cached verdicts free of quotes. A
+  // fulfilled verdict is not cached at all (it closes the promise in the same run; a lost race asks again).
+  const bare = (v) => (v && v.verdict !== 'fulfilled' ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'quote')) : null);
+  const next = { version: VERSION, fulfillment_check: bare(cache.fulfillment_check), thread_check: bare(cache.thread_check), checked_at: now.toISOString() };
   const prior = parsed(row.contact_check)?.ai_close;
   const same = (a, b) => (a?.evidence_hash ?? null) === (b?.evidence_hash ?? null) && (a?.retry_after ?? null) === (b?.retry_after ?? null);
   if (prior?.version === VERSION && same(prior.fulfillment_check, next.fulfillment_check) && same(prior.thread_check, next.thread_check)) return;
@@ -337,5 +364,5 @@ function runInBackground({ conn, callIds }) {
   return backgroundRun;
 }
 
-module.exports = { runCallPromiseAiClose, runInBackground, aiCheckLapsedSql, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
+module.exports = { safeQuote, runCallPromiseAiClose, runInBackground, aiCheckLapsedSql, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
   VERSION, CANDIDATE_LIMIT, AI_CHECK_KIND, AI_CHECK_BASIS, AGENT, MAX_MODEL_CALLS, QUEUE_MODEL_CALLS };
