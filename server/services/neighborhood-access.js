@@ -401,6 +401,10 @@ async function unfiledGateCodeCustomers(conn) {
       .orWhereRaw(`f.neighborhood_id IS DISTINCT FROM (
         SELECT CASE WHEN count(*) = 1 THEN (array_agg(p.neighborhood_id))[1] END
         FROM customer_properties p WHERE p.customer_id = pp.customer_id AND p.active)`))
+    // A caller-linked home files nothing until confirmed (fileOneSavedCode);
+    // listing it would only retry it every pass.
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM customer_properties p
+      WHERE p.customer_id = pp.customer_id AND p.active AND p.neighborhood_source = 'caller')`)
     // A single property the office explicitly cleared (no neighborhood, set
     // by the office) is settled until the office links it again: filing has
     // nowhere to go and the county lookup must not run, so it is not retried.
@@ -446,6 +450,10 @@ async function fileOneSavedCode(customerId, lookup, platLookup) {
     const active = await trx('customer_properties').where({ customer_id: customerId, active: true }).forUpdate()
       .select('id', 'neighborhood_id', 'neighborhood_source');
     if (active.length !== 1 || active[0].id !== snapshot.id) return { status: 'property_changed' };
+    // A home linked from the community the customer SAID (not the county) is kept
+    // out of the shared directory until the county or the office confirms it:
+    // nothing is filed from it, so no entry is added and no other entry demoted.
+    if (active[0].neighborhood_source === 'caller') return { status: 'caller_unconfirmed' };
     const prefs = await trx('property_preferences').where({ customer_id: customerId }).forUpdate()
       .first('neighborhood_gate_code', 'access_notes');
     const value = String(prefs?.neighborhood_gate_code || '').trim();
@@ -474,10 +482,7 @@ async function fileOneSavedCode(customerId, lookup, platLookup) {
     // since retired, because fileNeighborhoodCode skips retired rows.
     if (carried?.same_value && carried.neighborhood_id === neighborhoodId) return { status: 'already_filed', neighborhoodId };
     const carriedFromElsewhere = Boolean(carried?.same_value && carried.neighborhood_id && carried.neighborhood_id !== neighborhoodId);
-    // A home linked from the community the customer SAID (not the county) files
-    // every code needs_confirm, whatever the code looks like.
-    const callerLinked = active[0].neighborhood_source === 'caller';
-    const unconfirmed = markedUnconfirmed || carriedFromElsewhere || callerLinked;
+    const unconfirmed = markedUnconfirmed || carriedFromElsewhere;
     const filed = await fileNeighborhoodCode(trx, { neighborhoodId, value, source: SOURCE, sourceCustomerId: customerId, unconfirmed });
     if (FINAL_OUTCOMES.has(filed.status)) {
       // Ledger the value filed, in the same transaction as the filing.
@@ -585,6 +590,11 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint, platLoo
   return { customers: customerIds.length, tally, failed, bellsFailed: bells.failed, conflicts: bells.conflicts, ...(naming ? { naming } : {}) };
 }
 
+// A link made from the customer's own words stays out of every shared
+// credential read until the county or the office confirms it: the visit reads
+// below see no neighborhood for such a home.
+const CONFIRMED_NEIGHBORHOOD_SQL = "CASE WHEN neighborhood_source = 'caller' THEN NULL ELSE neighborhood_id END AS neighborhood_id";
+
 // Visit id → the neighborhood its stop is in: the visit's own property, or
 // for a visit with no property the customer's ONLY active property when the
 // visit carries no stamped address or the same street and ZIP. A visit that
@@ -598,7 +608,7 @@ async function visitNeighborhoodIds(conn, visits) {
   if (withProperty.length) {
     const rows = await conn('customer_properties')
       .whereIn('id', [...new Set(withProperty.map((v) => v.property_id))])
-      .select('id', 'neighborhood_id');
+      .select('id', conn.raw(CONFIRMED_NEIGHBORHOOD_SQL));
     for (const r of rows) propertyNeighborhood.set(r.id, r.neighborhood_id);
   }
   const customerNeighborhood = new Map();
@@ -606,7 +616,7 @@ async function visitNeighborhoodIds(conn, visits) {
     const rows = await conn('customer_properties')
       .whereIn('customer_id', [...new Set(withoutProperty.map((v) => v.customer_id))])
       .where({ active: true })
-      .select('customer_id', 'neighborhood_id', 'address_line1', 'zip');
+      .select('customer_id', conn.raw(CONFIRMED_NEIGHBORHOOD_SQL), 'address_line1', 'zip');
     const byCustomer = new Map();
     for (const r of rows) byCustomer.set(r.customer_id, [...(byCustomer.get(r.customer_id) || []), r]);
     for (const [customerId, props] of byCustomer) if (props.length === 1) customerNeighborhood.set(customerId, props[0]);

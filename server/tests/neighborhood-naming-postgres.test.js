@@ -423,15 +423,17 @@ postgres('neighborhood naming pass', () => {
   });
 
   describe('through the sweep (the filing the owner asked for)', () => {
-    test('a saved code on an unlinked, checked home reaches the directory once a call names its community, needs_confirm', async () => {
+    test('a home named from a call files nothing: the link waits for the county or the office', async () => {
       const { customerId, propertyId } = await home({ code: '#4321', checked: true, subdivision: 'NOT IN SUBDIVISION 0/0' });
       await callSaying(customerId, 'Chelsea Oaks');
       const r = await sweepSavedGateCodes({ lookup: jest.fn(), platLookup: async () => [] });
       expect(r.naming.caller).toEqual({ linked: 1 });
-      expect(r.tally).toEqual({ filed: 1 });
+      // The caller link stays (it names the community for the office to confirm); nothing is filed, listed or retried.
+      expect(r.customers).toBe(0);
       const { p } = await hoodOf(propertyId);
-      // Unconfirmed: the community came from the customer's words, not the county.
-      expect(await accessRows(p.neighborhood_id)).toEqual([{ code: '#4321', status: 'needs_confirm', source: 'profile' }]);
+      expect(p.neighborhood_source).toBe('caller');
+      expect(await accessRows(p.neighborhood_id)).toEqual([]);
+      expect(await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).toBeUndefined();
     });
 
     test('a saved code on a never-checked home is linked by the county pass and files active', async () => {
@@ -443,11 +445,29 @@ postgres('neighborhood naming pass', () => {
       expect(await accessRows(p.neighborhood_id)).toEqual([{ code: '#5555', status: 'active', source: 'profile' }]);
     });
 
-    test('a clean keypad code on a caller-linked home still files needs_confirm', async () => {
+    test('a caller-linked home saving a code adds no entry and demotes none; after the office confirms it, the code files', async () => {
       const n = await neighborhood('Chelsea Oaks', { source: 'customer' });
-      await home({ code: '1234', neighborhoodId: n, source: 'caller', checked: true });
-      await sweepSavedGateCodes({ lookup: jest.fn(), platLookup: async () => [] });
-      expect(await accessRows(n)).toEqual([{ code: '1234', status: 'needs_confirm', source: 'profile' }]);
+      await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '1111', status: 'active', source: 'office' });
+      const { customerId, propertyId } = await home({ code: '2222', neighborhoodId: n, source: 'caller', checked: true });
+      expect((await sweepSavedGateCodes({ lookup: jest.fn(), platLookup: async () => [] })).customers).toBe(0);
+      expect(await accessRows(n)).toEqual([{ code: '1111', status: 'active', source: 'office' }]);
+      // Office confirm is the existing pick: source 'office' on the same neighborhood.
+      await trx('customer_properties').where({ id: propertyId }).update({ neighborhood_source: 'office' });
+      const r = await sweepSavedGateCodes({ lookup: jest.fn(), platLookup: async () => [] });
+      expect(r.tally).toEqual({ filed_conflict: 1 });
+      expect((await accessRows(n)).map((x) => [x.code, x.status])).toEqual([['1111', 'needs_confirm'], ['2222', 'needs_confirm']]);
+      expect((await trx('neighborhood_access_filings').where({ customer_id: customerId }).first()).neighborhood_id).toBe(n);
+    });
+
+    test('when the county later names a caller-linked home, its saved code files as for any county home', async () => {
+      const callerHood = await neighborhood('Chelsea Oaks', { source: 'customer' });
+      const { propertyId } = await home({ code: '#8888', neighborhoodId: callerHood, source: 'caller' });
+      const r = await sweepSavedGateCodes({ lookup: queue([parcelFor('100 Synthetic Way')]), platLookup: async () => [] });
+      expect(r.naming.county).toEqual({ linked: 1 });
+      expect(r.tally).toEqual({ filed: 1 });
+      const { p } = await hoodOf(propertyId);
+      expect(p.neighborhood_source).toBe('county');
+      expect(await accessRows(p.neighborhood_id)).toEqual([{ code: '#8888', status: 'active', source: 'profile' }]);
     });
 
     test('with GATE_NEIGHBORHOOD_NAMING off the sweep never runs the pass', async () => {

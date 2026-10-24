@@ -96,6 +96,20 @@ describe('CustomerNeighborhoodBlock', () => {
     stubFetch(() => response({ properties: [linked({ neighborhoodSource: 'caller' })] }));
     render(<CustomerNeighborhoodBlock customerId="customer-a" />);
     expect(await screen.findByText('From the customer, confirm')).toBeInTheDocument();
+    expect(screen.getByText('Confirm the neighborhood to use its gate entries.')).toBeInTheDocument();
+  });
+
+  it('Confirm PUTs the same neighborhood as an office pick', async () => {
+    stubFetch((path, init) => {
+      if (path === PROPS_URL) return response({ properties: [linked({ neighborhoodSource: 'caller', entries: [] })] });
+      if (init.method === 'PUT') return response(linked({ neighborhoodSource: 'office', entries: [] }));
+      return response({});
+    });
+    render(<CustomerNeighborhoodBlock customerId="customer-a" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm neighborhood' }));
+    expect(await screen.findByText('Set by office')).toBeInTheDocument();
+    expect(calls.find((c) => c.method === 'PUT').body).toEqual({ neighborhoodId: 'n1' });
+    expect(screen.queryByRole('button', { name: 'Confirm neighborhood' })).toBeNull();
   });
 
   it('two units in one building read (and their Change buttons name) different rows', async () => {

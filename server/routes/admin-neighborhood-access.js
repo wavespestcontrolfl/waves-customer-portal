@@ -498,7 +498,8 @@ async function propertyViews(conn, props) {
       zip: p.zip || null,
       neighborhood: hood ? { id: hood.id, name: hood.name, county: hood.county || null } : null,
       neighborhoodSource: hood ? (p.neighborhood_source || null) : null,
-      entries: hood
+      // An unconfirmed link (from the customer's own words) shows no entries until confirmed.
+      entries: hood && p.neighborhood_source !== 'caller'
         ? entryRows.filter((e) => e.neighborhood_id === hood.id).map((e) => ({
           id: e.id,
           gateLabel: e.gate_label,
