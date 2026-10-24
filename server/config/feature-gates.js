@@ -1819,6 +1819,13 @@ const gates = {
   // lead. Sends nothing to the texter. Off unless exactly 'true'.
   smsLeadExtraction: process.env.GATE_SMS_LEAD_EXTRACTION === 'true',
 
+  // Reply outcome signals (owner 2026-10-24): every 30 minutes, for each Waves
+  // text reply that is 72 hours old, record what the customer did next (confused
+  // or repeated follow-up, opt-out, call within the hour, thanks, silence) in
+  // sms_reply_outcomes, with the AI draft's prompt_version. Measurement only:
+  // sends, changes and holds nothing. Off unless exactly 'true'.
+  smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true',
+
   // Lead Auto-Bridge — when a website lead comes in during business hours,
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
