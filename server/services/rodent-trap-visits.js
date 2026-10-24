@@ -48,6 +48,19 @@ const STAMP_COLUMNS = [
   'ss.service_address_zip',
 ];
 
+// A booking sent without a property is stamped with the customer's ONLY
+// active property (customer-properties soleActivePropertyId), which need not
+// be the primary; two or more stay unplaced, on the primary premise. Read-only
+// twin: that anchor can also create a missing primary row, a write this
+// lookup never makes. With no row at all the premise is the primary address.
+async function soleActivePropertyIdReadOnly(db, customerId) {
+  const rows = await db('customer_properties')
+    .where({ customer_id: customerId, active: true })
+    .limit(2)
+    .select('id');
+  return rows.length === 1 ? rows[0].id : null;
+}
+
 /**
  * Active trapping visits (on the primary line or an add-on line) for one
  * customer at one premise, scheduled in the WINDOW_DAYS up to and including
@@ -56,16 +69,19 @@ const STAMP_COLUMNS = [
  * column, so the bounds compare as calendar days, and the dates come back
  * from SQL as text so no host timezone shifts them. Read-only.
  *
- * The premise is the booking's property when one is given, else the
- * customer's primary address, using the same rules as the trapping review
- * series (review-request trappingPremiseMatcher).
+ * The premise is the booking's property when one is given, else the one the
+ * booking route would anchor (the customer's only active property, or the
+ * primary address), using the same rules as the trapping review series
+ * (review-request trappingPremiseMatcher).
  */
 async function recentTrappingVisits(db, customerId, { date = null, propertyId = null, premiseMatcher } = {}) {
   const through = date || etDateString();
   const since = shiftDay(through, -WINDOW_DAYS);
   const inPremise = premiseMatcher
     // Lazy: review-request loads the messaging stack.
-    || await require('./review-request').trappingPremiseMatcher(customerId, { property_id: propertyId || null });
+    || await require('./review-request').trappingPremiseMatcher(customerId, {
+      property_id: propertyId || await soleActivePropertyIdReadOnly(db, customerId),
+    });
   const dayCol = db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_day");
   const activeInWindow = (q) => q
     .where('ss.customer_id', customerId)

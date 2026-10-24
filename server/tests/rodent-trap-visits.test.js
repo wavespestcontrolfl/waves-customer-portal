@@ -16,8 +16,8 @@ const { recentTrappingVisits, WINDOW_DAYS, INACTIVE_STATUSES } = require('../ser
 
 // Per-table rows. Records every builder call (callbacks included) so a test
 // can read the query shape back; the filtering itself is the database's job.
-function fakeDb({ primaries = [], addons = [] } = {}) {
-  const seen = { primary: [], addon: [] };
+function fakeDb({ primaries = [], addons = [], properties = [] } = {}) {
+  const seen = { primary: [], addon: [], property: [] };
   const builder = (log, rows) => {
     const q = {};
     for (const name of ['join', 'leftJoin', 'where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'orWhereNull', 'orderBy', 'limit']) {
@@ -31,9 +31,13 @@ function fakeDb({ primaries = [], addons = [] } = {}) {
     q.select = async (...cols) => { log.push(['select', ...cols]); return rows; };
     return q;
   };
-  const db = (table) => (String(table).startsWith('scheduled_service_addons')
-    ? builder(seen.addon, addons)
-    : builder(seen.primary, primaries));
+  // No insert/update on the fake: a write from this read-only lookup throws.
+  const db = (table) => {
+    const name = String(table);
+    if (name.startsWith('scheduled_service_addons')) return builder(seen.addon, addons);
+    if (name.startsWith('customer_properties')) return builder(seen.property, properties);
+    return builder(seen.primary, primaries);
+  };
   db.raw = (sql) => sql;
   db.seen = seen;
   return db;
@@ -84,12 +88,24 @@ describe('recent trapping visits notice', () => {
   });
 
   test('without an injected matcher it scopes by the trapping review premise rules for the booking property', async () => {
-    await recentTrappingVisits(fakeDb(), 'c', { date: '2026-10-05', propertyId: 'p1' });
+    const db = fakeDb({ properties: [{ id: 'p-sole' }] });
+    await recentTrappingVisits(db, 'c', { date: '2026-10-05', propertyId: 'p1' });
+    expect(trappingPremiseMatcher).toHaveBeenLastCalledWith('c', { property_id: 'p1' });
+    // A picked property is used as is; nothing else is read for it.
+    expect(db.seen.property).toEqual([]);
+  });
+
+  test('with no property picked, the premise is the one the booking route would anchor', async () => {
+    // The customer's only active property, primary or not (soleActivePropertyId).
+    const sole = fakeDb({ properties: [{ id: 'p-rental' }] });
+    await recentTrappingVisits(sole, 'c', { date: '2026-10-05' });
+    expect(calls(sole.seen.property, 'where')).toEqual([[{ customer_id: 'c', active: true }]]);
+    expect(trappingPremiseMatcher).toHaveBeenLastCalledWith('c', { property_id: 'p-rental' });
+    // Two or more active properties stay on the primary premise, and so does none.
+    await recentTrappingVisits(fakeDb({ properties: [{ id: 'a' }, { id: 'b' }] }), 'c', { date: '2026-10-05' });
+    expect(trappingPremiseMatcher).toHaveBeenLastCalledWith('c', { property_id: null });
     await recentTrappingVisits(fakeDb(), 'c', { date: '2026-10-05' });
-    expect(trappingPremiseMatcher.mock.calls).toEqual([
-      ['c', { property_id: 'p1' }],
-      ['c', { property_id: null }],
-    ]);
+    expect(trappingPremiseMatcher).toHaveBeenLastCalledWith('c', { property_id: null });
   });
 
   test('bounds the window at the booking date and 60 days back, on both lines', async () => {
