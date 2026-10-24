@@ -23,13 +23,24 @@ const detector = require('../services/gps-arrival-detector');
 const SAMPLE_TIME = new Date().toISOString();
 const EN_ROUTE_TIME = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 const originalMaintenanceMode = process.env.STAFF_MAINTENANCE_MODE;
+// Unset in the first two suites (today's behavior); the last suite turns it on.
+const LATE_GATE = 'GATE_GPS_ARRIVAL_LATE_SAMPLES';
+const originalLateGate = process.env[LATE_GATE];
 
-function serviceQueryMock(service) {
-  return {
-    leftJoin: jest.fn().mockReturnThis(),
-    where: jest.fn().mockReturnThis(),
+function serviceQueryMock(service, candidates = []) {
+  const query = {
     first: jest.fn().mockResolvedValue(service),
+    // the late-sample candidate query (GATE_GPS_ARRIVAL_LATE_SAMPLES) on the same table
+    select: jest.fn().mockResolvedValue(candidates),
   };
+  // A callback (a grouped where) runs against the same chain, so its predicates are recorded too.
+  for (const method of ['leftJoin', 'join', 'where', 'orWhere', 'whereNull', 'whereBetween', 'orderBy', 'limit']) {
+    query[method] = jest.fn((...args) => {
+      if (typeof args[0] === 'function') args[0](query);
+      return query;
+    });
+  }
+  return query;
 }
 
 // audit_log answers the not_marked once-per-visit-and-reason lookup; `existingAudit`
@@ -42,17 +53,23 @@ function auditQueryMock(existingAudit) {
   };
 }
 
-function installServiceLookup(service, { existingAudit } = {}) {
-  const query = serviceQueryMock(service);
+function installServiceLookup(service, { existingAudit, candidates } = {}) {
+  const query = serviceQueryMock(service, candidates);
   // the in-transaction FOR SHARE re-read of the lifecycle fields
-  // `first` answers the row re-read, then (grouped stops only) the
+  // `first` answers the row re-read (the row the read named: the current job
+  // or a late-sample candidate), then (grouped stops only) the
   // "has any member arrived" lookup, which finds none by default.
+  const rows = [service, ...(candidates || [])].filter(Boolean);
+  let lockedId = null;
   query.locked = {
-    where: jest.fn().mockReturnThis(),
+    where: jest.fn(function where(predicate) {
+      if (predicate && predicate.id) lockedId = predicate.id;
+      return this;
+    }),
     orderBy: jest.fn().mockReturnThis(),
     forShare: jest.fn().mockReturnThis(),
     noWait: jest.fn().mockReturnThis(),
-    first: jest.fn().mockResolvedValue(service),
+    first: jest.fn(async () => rows.find((row) => row.id === lockedId) || service),
     // the grouped-stop member read: only this member, still open, by default
     select: jest.fn().mockResolvedValue([{
       id: service?.id, arrived_at: null, track_state: service?.track_state, status: service?.status,
@@ -126,6 +143,7 @@ describe('gps-arrival-detector', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.STAFF_MAINTENANCE_MODE;
+    delete process.env[LATE_GATE];
     detector._test.resetConfigCache();
     trackTransitions.markOnProperty.mockResolvedValue({
       ok: true,
@@ -454,6 +472,7 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.STAFF_MAINTENANCE_MODE;
+    delete process.env[LATE_GATE];
     detector._test.resetConfigCache();
     trackTransitions.markOnProperty.mockResolvedValue({ ok: true, state: 'on_property' });
   });
@@ -914,5 +933,323 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
       metadata: expect.objectContaining({ reason: 'stale_location_sample', sample_age_s: expect.any(Number) }),
     })]);
     expect(notMarkedWrites()[0].metadata.sample_age_s).toBeGreaterThanOrEqual(2399);
+  });
+});
+
+describe('gps-arrival-detector late-delivered samples (GATE_GPS_ARRIVAL_LATE_SAMPLES)', () => {
+  const LATE_AT = minutesAgo(40);
+  const LATE_EN_ROUTE = minutesAgo(60);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.STAFF_MAINTENANCE_MODE;
+    process.env[LATE_GATE] = 'true';
+    detector._test.resetConfigCache();
+    trackTransitions.markOnProperty.mockResolvedValue({ ok: true, state: 'on_property' });
+  });
+
+  afterAll(() => {
+    if (originalLateGate === undefined) delete process.env[LATE_GATE];
+    else process.env[LATE_GATE] = originalLateGate;
+  });
+
+  const lateCandidate = (overrides = {}) => baseService({ en_route_at: LATE_EN_ROUTE, scheduled_date: '2026-10-08', ...overrides });
+
+  // tech_status has moved on by default: a newer position far away, another current job.
+  async function lateRun({ candidates = [lateCandidate()], point = {}, techStatus = {}, service = null } = {}) {
+    const query = installServiceLookup(service, { candidates });
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus({ current_job_id: 'svc-next', lat: 27.5, lng: -82.5, location_updated_at: new Date().toISOString(), ...techStatus }),
+      point: basePoint({ reported_at: LATE_AT, speed_mph: 2, ignition: true, ...point }),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    });
+    return { result, query };
+  }
+
+  test('marks the visit that was en route at the sample time, with the sample time and no text', async () => {
+    const { result } = await lateRun();
+
+    expect(result).toMatchObject({ ok: true, reason: 'marked_on_property' });
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledTimes(1);
+    expect(trackTransitions.markOnProperty.mock.calls[0]).toStrictEqual(['svc-1', {
+      actingTechId: 'tech-1',
+      expectTechnicianId: 'tech-1',
+      suppressArrivalSms: true,
+      lateArrival: { at: new Date(LATE_AT), enRouteAt: LATE_EN_ROUTE, scheduledDate: '2026-10-08' },
+    }]);
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'gps_arrival.mark_on_property',
+      resource_id: 'svc-1',
+      metadata: expect.objectContaining({ late_sample: true, sample_age_s: expect.any(Number) }),
+    }));
+  });
+
+  test('candidates: this technician, open, en route from 6 hours before the sample to 2 minutes after, after the tracker mapping', async () => {
+    const { query } = await lateRun();
+
+    const pointMs = new Date(LATE_AT).getTime();
+    expect(query.join).toHaveBeenCalledWith('technicians as t', 't.id', 's.technician_id');
+    expect(query.where).toHaveBeenCalledWith('s.technician_id', 'tech-1');
+    expect(query.whereNull).toHaveBeenCalledWith('s.cancelled_at');
+    expect(query.whereNull).toHaveBeenCalledWith('s.completed_at');
+    expect(query.whereBetween).toHaveBeenCalledWith('s.en_route_at', [
+      new Date(pointMs - 6 * 60 * 60 * 1000),
+      new Date(pointMs + 2 * 60 * 1000),
+    ]);
+    // a point from before the technician's current device mapping may be another vehicle's
+    expect(query.whereNull).toHaveBeenCalledWith('t.bouncie_imei_changed_at');
+    expect(query.orWhere).toHaveBeenCalledWith('t.bouncie_imei_changed_at', '<', new Date(pointMs - 2 * 60 * 1000));
+    expect(query.where).toHaveBeenCalledWith('s.track_state', 'en_route');
+    expect(query.orWhere).toHaveBeenCalledWith('s.status', 'en_route');
+    // one row past the cut, so an overflow is seen (and refused)
+    expect(query.limit).toHaveBeenCalledWith(11);
+  });
+
+  test('more open candidates than the cut: refused, so an unseen stop can never make a match look unique', async () => {
+    const candidates = Array.from({ length: 11 }, (_unused, index) => lateCandidate({
+      id: `svc-${index + 1}`,
+      // only the first is at the point; the rest are far away
+      ...(index === 0 ? {} : { service_lat: 27.5, service_lng: -82.5 }),
+    }));
+
+    const { result } = await lateRun({ candidates });
+
+    expect(result).toEqual({ ok: false, reason: 'late_sample_too_many_candidates' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('ten open candidates are still judged', async () => {
+    const candidates = Array.from({ length: 10 }, (_unused, index) => lateCandidate({
+      id: `svc-${index + 1}`,
+      ...(index === 0 ? {} : { service_lat: 27.5, service_lng: -82.5 }),
+    }));
+
+    const { result } = await lateRun({ candidates });
+
+    expect(result).toMatchObject({ ok: true, reason: 'marked_on_property' });
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', expect.any(Object));
+  });
+
+  test('never stamps the arrival before the visit went en route', async () => {
+    const enRoute = minutesAgo(39);
+    const { result } = await lateRun({ candidates: [lateCandidate({ en_route_at: enRoute })] });
+
+    expect(result.ok).toBe(true);
+    expect(trackTransitions.markOnProperty.mock.calls[0][1].lateArrival.at).toEqual(new Date(enRoute));
+  });
+
+  test('a late sample outside the radius marks nothing and writes nothing', async () => {
+    const { result, query } = await lateRun({ point: { lat: 27.45, lng: -82.3719 } });
+
+    expect(result).toEqual({ ok: false, reason: 'outside_arrival_radius' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(notMarkedWrites()).toHaveLength(0);
+    expect(query.audit.first).not.toHaveBeenCalled();
+  });
+
+  test('a late sample inside the radius but moving too fast marks nothing and is recorded', async () => {
+    const { result } = await lateRun({ point: { speed_mph: 35 } });
+
+    expect(result).toEqual({ ok: false, reason: 'inside_radius_moving_too_fast' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(notMarkedWrites().map((event) => event.metadata.reason)).toEqual(['inside_radius_moving_too_fast']);
+  });
+
+  test('two qualifying stops are ambiguous: nothing is marked, both are recorded', async () => {
+    const { result } = await lateRun({
+      candidates: [lateCandidate(), lateCandidate({ id: 'svc-2', en_route_at: minutesAgo(70) })],
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'late_sample_ambiguous' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(notMarkedWrites().map((event) => [event.resource_id, event.metadata.reason])).toEqual([
+      ['svc-1', 'late_sample_ambiguous'],
+      ['svc-2', 'late_sample_ambiguous'],
+    ]);
+  });
+
+  test('the members of one grouped stop are ONE stop, not an ambiguous pair, and the refused mark is recorded', async () => {
+    trackTransitions.markOnProperty.mockResolvedValue({ ok: false, reason: 'late_arrival_grouped_stop' });
+    const grouped = { visit_id: 'visit-1', group_en_route_at: minutesAgo(61) };
+    const { result } = await lateRun({
+      candidates: [lateCandidate(grouped), lateCandidate({ ...grouped, id: 'svc-2', en_route_at: minutesAgo(61) })],
+      service: lateCandidate(grouped),
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed' });
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledTimes(1);
+    expect(notMarkedWrites()).toEqual([expect.objectContaining({
+      metadata: expect.objectContaining({ reason: 'mark_on_property_failed', detail: 'late_arrival_grouped_stop', stop: 'visit:visit-1' }),
+    })]);
+  });
+
+  test('only the visit whose destination holds the point is chosen among several', async () => {
+    const { result } = await lateRun({
+      candidates: [
+        lateCandidate({ id: 'svc-far', service_lat: 27.5, service_lng: -82.5 }),
+        lateCandidate({ id: 'svc-here', en_route_at: minutesAgo(70) }),
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-here', expect.any(Object));
+  });
+
+  test('a candidate no longer en route is not marked', async () => {
+    const { result } = await lateRun({
+      candidates: [lateCandidate({ track_state: 'on_property', status: 'on_site', arrived_at: new Date() })],
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'late_sample_no_candidate' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
+  test('no candidate means nothing to attribute the sample to', async () => {
+    const { result } = await lateRun({ candidates: [] });
+
+    expect(result).toEqual({ ok: false, reason: 'late_sample_no_candidate' });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a sample with no technician identity is not attributed', async () => {
+    const { result, query } = await lateRun({ techStatus: { tech_id: null } });
+
+    expect(result).toEqual({ ok: false, reason: 'late_sample_unattributable' });
+    expect(query.select).not.toHaveBeenCalled();
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
+  test('a late sample never geocodes: a candidate with no stored coordinates is not judged', async () => {
+    ensureCustomerGeocoded.mockResolvedValue({ lat: 27.4386, lng: -82.3719 });
+
+    const { result } = await lateRun({
+      candidates: [lateCandidate({ service_lat: null, service_lng: null, customer_latitude: null, customer_longitude: null })],
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'late_sample_no_candidate' });
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
+  test('a mark the tracker refuses (rescheduled or restarted since the lookup) is reported, not hidden', async () => {
+    trackTransitions.markOnProperty.mockResolvedValue({ ok: false, reason: 'attempt_changed' });
+
+    const { result } = await lateRun({ service: lateCandidate() });
+
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed' });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'gps_arrival.mark_on_property_failed',
+      metadata: expect.objectContaining({ late_sample: true }),
+    }));
+    expect(notMarkedWrites()).toEqual([expect.objectContaining({
+      resource_id: 'svc-1',
+      metadata: expect.objectContaining({ reason: 'mark_on_property_failed', detail: 'attempt_changed' }),
+    })]);
+  });
+
+  test('a lookup failure marks nothing', async () => {
+    const query = installServiceLookup(null);
+    query.select.mockRejectedValue(new Error('db down'));
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(), point: basePoint({ reported_at: LATE_AT }), configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'service_lookup_failed' });
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
+  test('a sample older than 6 hours keeps the ordinary stale refusal', async () => {
+    const old = minutesAgo(7 * 60);
+    const { result, query } = await lateRun({
+      service: baseService({ en_route_at: minutesAgo(8 * 60) }),
+      techStatus: { current_job_id: 'svc-1', lat: 27.4386, lng: -82.3719, location_updated_at: old },
+      point: { reported_at: old },
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'stale_location_sample' });
+    expect(query.select).not.toHaveBeenCalled();
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
+  test('a sample under 10 minutes old keeps the live path and its options', async () => {
+    installServiceLookup(baseService());
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(),
+      point: basePoint({ speed_mph: 2, ignition: true }),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(trackTransitions.markOnProperty.mock.calls[0]).toStrictEqual(['svc-1', { actingTechId: 'tech-1' }]);
+  });
+
+  test('isLateSample is true only between 10 minutes and 6 hours, and only with the gate on', () => {
+    const at = (minutes) => ({ reported_at: minutesAgo(minutes) });
+    expect(detector._test.isLateSample(at(9))).toBe(false);
+    expect(detector._test.isLateSample(at(11))).toBe(true);
+    expect(detector._test.isLateSample(at(359))).toBe(true);
+    expect(detector._test.isLateSample(at(361))).toBe(false);
+    expect(detector._test.isLateSample({ reported_at: minutesAgo(-5) })).toBe(false);
+    expect(detector._test.isLateSample({})).toBe(false);
+    delete process.env[LATE_GATE];
+    expect(detector._test.isLateSample(at(40))).toBe(false);
+  });
+
+  // The gate-off proof: with the variable unset or anything but exactly 'true',
+  // the late path never runs and every sample is judged exactly as today.
+  describe.each([
+    ['unset', undefined],
+    ['false', 'false'],
+    ['TRUE', 'TRUE'],
+    ['1', '1'],
+    [' true', ' true'],
+  ])('gate %s: behavior is unchanged', (_label, value) => {
+    beforeEach(() => {
+      if (value === undefined) delete process.env[LATE_GATE];
+      else process.env[LATE_GATE] = value;
+    });
+
+    test('the late sample tech_status accepted is refused as stale and recorded, as before', async () => {
+      const { result, query } = await lateRun({
+        service: baseService({ en_route_at: LATE_EN_ROUTE }),
+        techStatus: { current_job_id: 'svc-1', lat: 27.4386, lng: -82.3719, location_updated_at: LATE_AT },
+      });
+
+      expect(result).toEqual({ ok: false, reason: 'stale_location_sample' });
+      expect(query.join).not.toHaveBeenCalled();
+      expect(query.select).not.toHaveBeenCalled();
+      expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+      expect(notMarkedWrites().map((event) => event.metadata.reason)).toEqual(['stale_location_sample']);
+    });
+
+    test('the late sample tech_status superseded is refused as stale and recorded, as before', async () => {
+      const { result, query } = await lateRun({
+        service: baseService({ en_route_at: LATE_EN_ROUTE }),
+        techStatus: { current_job_id: 'svc-1' },
+        point: { lat: NEAR_LAT },
+      });
+
+      expect(result).toEqual({ ok: false, reason: 'stale_location_sample' });
+      expect(query.select).not.toHaveBeenCalled();
+      expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+      expect(notMarkedWrites().map((event) => event.metadata.reason)).toEqual(['stale_location_sample']);
+    });
+
+    test('a fresh sample marks with exactly the live options and the live audit row', async () => {
+      installServiceLookup(baseService());
+
+      const result = await detector.maybeMarkArrivedFromGps({
+        techStatus: baseTechStatus(), point: basePoint({ speed_mph: 2, ignition: true }), configOverride: detector._test.DEFAULT_CONFIG,
+      });
+
+      expect(result).toMatchObject({ ok: true, reason: 'marked_on_property' });
+      expect(trackTransitions.markOnProperty.mock.calls[0]).toStrictEqual(['svc-1', { actingTechId: 'tech-1' }]);
+      const [markRow] = recordAuditEvent.mock.calls.map(([event]) => event);
+      expect(markRow.action).toBe('gps_arrival.mark_on_property');
+      expect(markRow.metadata).not.toHaveProperty('late_sample');
+      expect(markRow.metadata).not.toHaveProperty('sample_age_s');
+    });
   });
 });

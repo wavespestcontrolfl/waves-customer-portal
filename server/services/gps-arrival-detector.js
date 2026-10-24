@@ -5,6 +5,7 @@ const { ensureCustomerGeocoded } = require('./geocoder');
 const { recordAuditEvent } = require('./audit-log');
 const { stampedAddressDiverges } = require('./stamped-address');
 const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
+const { gpsArrivalLateSamplesLive } = require('../config/feature-gates');
 
 const SETTINGS_KEYS = [
   'gps_arrival.enabled',
@@ -27,6 +28,12 @@ const GEOCODE_TIMEOUT_MS = 1200;
 const MAX_SAMPLE_AGE_MS = 10 * 60 * 1000;
 const SAMPLE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
 const EN_ROUTE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
+// GATE_GPS_ARRIVAL_LATE_SAMPLES: a sample older than MAX_SAMPLE_AGE_MS is still
+// judged up to this age (Bouncie has delivered trip-data 35-60 minutes late).
+const LATE_SAMPLE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+// More open candidates than this and the sample is refused: one more row is
+// read, so a stop past the cut can never make a visible match look unique.
+const LATE_CANDIDATE_LIMIT = 10;
 const NOT_MARKED_ACTION = 'gps_arrival.not_marked';
 const NOT_MARKED_MEMO_MAX = 2000;
 let configCache = null;
@@ -264,38 +271,72 @@ async function resolveDestination(service) {
   }
 }
 
-async function loadCurrentService(currentJobId) {
-  if (!currentJobId) return null;
+// The visit columns every detector path reads (the current job and the
+// late-sample candidates alike), so their diagnostics key the same way.
+function serviceColumns() {
+  return [
+    's.id',
+    's.customer_id',
+    's.technician_id',
+    's.track_state',
+    's.status',
+    's.cancelled_at',
+    's.completed_at',
+    's.arrived_at',
+    's.en_route_at',
+    's.scheduled_date',
+    's.visit_id',
+    'sv.en_route_at as visit_en_route_at',
+    // The earliest en-route time among the stop's current members.
+    db.raw('(select min(m.en_route_at) from scheduled_services m where m.visit_id = s.visit_id) as group_en_route_at'),
+    's.lat as service_lat',
+    's.lng as service_lng',
+    's.service_address_line1 as service_address_line1',
+    's.service_address_zip as service_address_zip',
+    's.service_address_city as service_address_city',
+    'c.address_line1 as customer_address_line1',
+    'c.zip as customer_zip',
+    'c.city as customer_city',
+    'c.latitude as customer_latitude',
+    'c.longitude as customer_longitude',
+  ];
+}
+
+function servicesQuery() {
   return db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
-    .leftJoin('service_visits as sv', 's.visit_id', 'sv.id')
+    .leftJoin('service_visits as sv', 's.visit_id', 'sv.id');
+}
+
+async function loadCurrentService(currentJobId) {
+  if (!currentJobId) return null;
+  return servicesQuery()
     .where('s.id', currentJobId)
-    .first(
-      's.id',
-      's.customer_id',
-      's.technician_id',
-      's.track_state',
-      's.status',
-      's.cancelled_at',
-      's.completed_at',
-      's.arrived_at',
-      's.en_route_at',
-      's.scheduled_date',
-      's.visit_id',
-      'sv.en_route_at as visit_en_route_at',
-      // The earliest en-route time among the stop's current members.
-      db.raw('(select min(m.en_route_at) from scheduled_services m where m.visit_id = s.visit_id) as group_en_route_at'),
-      's.lat as service_lat',
-      's.lng as service_lng',
-      's.service_address_line1 as service_address_line1',
-      's.service_address_zip as service_address_zip',
-      's.service_address_city as service_address_city',
-      'c.address_line1 as customer_address_line1',
-      'c.zip as customer_zip',
-      'c.city as customer_city',
-      'c.latitude as customer_latitude',
-      'c.longitude as customer_longitude'
-    );
+    .first(...serviceColumns());
+}
+
+// Late-sample candidates: this technician's open visits that went en route no
+// later than the sample (plus the usual tolerance) and at most 6 hours before
+// it. The sample must also postdate the technician's current tracker mapping
+// (technicians.bouncie_imei_changed_at, NULL = never remapped): an earlier
+// point may be another vehicle's, and the 2-minute tolerance covers a device
+// clock that runs ahead. The caller keeps the ones still en route now.
+async function loadLateCandidates(techId, pointMs) {
+  return servicesQuery()
+    .join('technicians as t', 't.id', 's.technician_id')
+    .where('s.technician_id', techId)
+    .whereNull('s.cancelled_at')
+    .whereNull('s.completed_at')
+    .whereBetween('s.en_route_at', [
+      new Date(pointMs - LATE_SAMPLE_MAX_AGE_MS),
+      new Date(pointMs + EN_ROUTE_TIMESTAMP_TOLERANCE_MS),
+    ])
+    .where((mapping) => mapping.whereNull('t.bouncie_imei_changed_at')
+      .orWhere('t.bouncie_imei_changed_at', '<', new Date(pointMs - SAMPLE_TIMESTAMP_TOLERANCE_MS)))
+    .where((state) => state.where('s.track_state', 'en_route').orWhere('s.status', 'en_route'))
+    .orderBy('s.en_route_at', 'desc')
+    .limit(LATE_CANDIDATE_LIMIT + 1)
+    .select(serviceColumns());
 }
 
 function isEnRouteService(service) {
@@ -344,7 +385,7 @@ function stopKey(service) {
   return service?.visit_id ? `visit:${service.visit_id}` : `service:${service?.id}`;
 }
 
-function auditMetadata({ service, techStatus, destination, distance, point, decision, result, error, notMarked }) {
+function auditMetadata({ service, techStatus, destination, distance, point, decision, result, error, notMarked, late }) {
   if (notMarked) {
     return {
       reason: notMarked.reason,
@@ -368,6 +409,8 @@ function auditMetadata({ service, techStatus, destination, distance, point, deci
     decision_reason: decision.reason,
     mark_on_property_result: result || null,
     error: error ? error.message : null,
+    // A mark from a late-delivered sample (GATE_GPS_ARRIVAL_LATE_SAMPLES).
+    ...(late ? { late_sample: true, sample_age_s: sampleAgeSeconds(point) } : {}),
   };
 }
 
@@ -529,13 +572,11 @@ async function stillOpenWithoutArrival(serviceId) {
   }
 }
 
-async function markAndAudit({ service, techStatus, destination, distance, point, decision, config }) {
+async function markAndAudit({ service, techStatus, destination, distance, point, decision, config, markOptions, late = false }) {
   let result = null;
   try {
-    // techStatus.tech_id is the tech reporting this GPS sample; the caller
-    // already rejected a tech/assignment mismatch, so it's the one arriving.
-    result = await trackTransitions.markOnProperty(service.id, { actingTechId: techStatus.tech_id });
-    await auditArrival({ service, techStatus, destination, distance, point, decision, result });
+    result = await trackTransitions.markOnProperty(service.id, markOptions);
+    await auditArrival({ service, techStatus, destination, distance, point, decision, result, late });
     // A grouped stop can land the primary on property and still answer
     // visit_fanout_incomplete (ok false): the arrival happened, so it is not a
     // miss. Judge by the returned state, not result.ok alone.
@@ -556,7 +597,7 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
     };
   } catch (err) {
     logger.error(`[gps-arrival] markOnProperty failed for ${service.id}: ${err.message}`);
-    await auditArrival({ service, techStatus, destination, distance, point, decision, result, error: err });
+    await auditArrival({ service, techStatus, destination, distance, point, decision, result, error: err, late });
     // markOnProperty can commit the flip and then throw in its post-flip work,
     // so the throw alone does not prove a miss: judge by the persisted row.
     if (await stillOpenWithoutArrival(service.id)) {
@@ -567,6 +608,98 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
     }
     return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance };
   }
+}
+
+function isLateSample(point, now = Date.now()) {
+  if (!gpsArrivalLateSamplesLive()) return false;
+  const pointMs = timestampMs(point?.reported_at);
+  if (pointMs == null) return false;
+  const age = now - pointMs;
+  return age > MAX_SAMPLE_AGE_MS && age <= LATE_SAMPLE_MAX_AGE_MS;
+}
+
+// Each candidate still en route, judged against the sample by the live arrival
+// decision and its STORED destination (visit, then customer coordinates): a
+// late sample never geocodes, and a candidate with none stored is not judged.
+function evaluateLateCandidates(candidates, point, config) {
+  const evaluated = [];
+  for (const service of candidates.filter(isEnRouteService)) {
+    const destination = extractDestination(service);
+    if (!destination) continue;
+    const distance = distanceMeters(point.lat, point.lng, destination.lat, destination.lng);
+    const decision = buildArrivalDecision({ distance, speedMph: point.speed_mph, ignition: point.ignition, config });
+    evaluated.push({ service, destination, distance, decision });
+  }
+  return evaluated;
+}
+
+/**
+ * GATE_GPS_ARRIVAL_LATE_SAMPLES. Bouncie sometimes delivers trip-data 35-60
+ * minutes late, so a sample taken inside the radius and slow is older than
+ * MAX_SAMPLE_AGE_MS when it reaches us. The live checks cannot validate it
+ * (tech_status keeps the newer point, and the tech's current job may have
+ * moved on), so it is checked against the VISIT instead:
+ *   - the visit is assigned to the technician the device is mapped to, and the
+ *     sample postdates that mapping;
+ *   - it went en route no later than the sample (plus the 2-minute tolerance)
+ *     and at most 6 hours before it, and is STILL en route now;
+ *   - the sample is inside its arrival radius and slow, by the live decision.
+ * The members of one grouped stop count as one stop, and the arrival is made
+ * only when exactly one stop qualifies (two are late_sample_ambiguous). It
+ * carries the SAMPLE's time (never before en_route_at) and never texts the
+ * customer. markOnProperty refuses a visit rescheduled or restarted since this
+ * lookup, and any grouped stop (its siblings would be left behind).
+ */
+async function maybeMarkArrivedFromLateSample({ techStatus, point, config }) {
+  const techId = techStatus?.tech_id;
+  if (!techId || validLatitude(point?.lat) == null || validLongitude(point?.lng) == null) {
+    return { ok: false, reason: 'late_sample_unattributable' };
+  }
+  const pointMs = timestampMs(point.reported_at);
+  let candidates;
+  try {
+    candidates = await loadLateCandidates(techId, pointMs);
+  } catch (err) {
+    logger.warn(`[gps-arrival] late-sample lookup failed for ${techId}: ${err.message}`);
+    return { ok: false, reason: 'service_lookup_failed' };
+  }
+  // Fail closed: past the cut, a qualifying stop could be unseen.
+  if (candidates.length > LATE_CANDIDATE_LIMIT) return { ok: false, reason: 'late_sample_too_many_candidates' };
+
+  const evaluated = evaluateLateCandidates(candidates, point, config);
+  const arriving = evaluated.filter((entry) => entry.decision.arrived);
+  const record = async (entries, reasonOf) => {
+    for (const entry of entries) {
+      await recordNotMarked({ ...entry, techStatus, point, config, reason: reasonOf(entry) });
+    }
+  };
+  if (new Set(arriving.map((entry) => stopKey(entry.service))).size > 1) {
+    await record(arriving, () => 'late_sample_ambiguous');
+    return { ok: false, reason: 'late_sample_ambiguous' };
+  }
+  if (arriving.length === 0) {
+    await record(evaluated, (entry) => entry.decision.reason);
+    return { ok: false, reason: evaluated[0]?.decision.reason || 'late_sample_no_candidate' };
+  }
+
+  const { service } = arriving[0];
+  return markAndAudit({
+    ...arriving[0],
+    techStatus,
+    point,
+    config,
+    late: true,
+    markOptions: {
+      actingTechId: techId,
+      expectTechnicianId: techId,
+      suppressArrivalSms: true,
+      lateArrival: {
+        at: new Date(Math.max(pointMs, timestampMs(service.en_route_at))),
+        enRouteAt: service.en_route_at,
+        scheduledDate: service.scheduled_date,
+      },
+    },
+  });
 }
 
 async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = null } = {}) {
@@ -586,6 +719,8 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
 
   const config = await loadConfig(configOverride);
   if (!config.enabled) return { ok: false, reason: 'disabled' };
+
+  if (isLateSample(point)) return maybeMarkArrivedFromLateSample({ techStatus, point, config });
 
   const currentJobId = techStatus?.current_job_id;
   if (!currentJobId) return { ok: false, reason: 'no_current_job' };
@@ -639,7 +774,12 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
     };
   }
 
-  return markAndAudit({ service, techStatus, destination, distance, point, decision, config });
+  // techStatus.tech_id is the tech reporting this GPS sample; the guard above
+  // already rejected a tech/assignment mismatch, so it's the one arriving.
+  return markAndAudit({
+    service, techStatus, destination, distance, point, decision, config,
+    markOptions: { actingTechId: techStatus.tech_id },
+  });
 }
 
 function resetConfigCache() {
@@ -661,6 +801,7 @@ module.exports = {
     distanceMeters,
     finiteNumber,
     isAcceptedCurrentSample,
+    isLateSample,
     validateSampleTiming,
     loadConfig,
     resetConfigCache,
