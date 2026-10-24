@@ -279,6 +279,23 @@ function withheldProductsLine(count) {
     : 'Products applied: None recorded';
 }
 
+// The writer's Observations line and REPORTED BY CUSTOMER block. `quiet`
+// (GATE_PEST_QUIET_VISIT, one-voice pest prompt only): an empty field sends no
+// line ("Observations: None noted" is where quiet reports got "noted"), and the
+// customer-home choice is left out: the sheet opens on "home — spoke with them"
+// every time, so it is no proof we talked, and the visit timeline prints it.
+function observedAndReportedLines({ quiet = false, observations = [], stationObserved = '', interaction = '', concern = '' } = {}) {
+  // Station checks (visit-station-facts.js) arrive as their own "\n…" line.
+  const observed = !quiet || observations.length
+    ? `Observations: ${observations.length ? observations.join('; ') : 'None noted'}${stationObserved}\n`
+    : (stationObserved ? `${stationObserved.replace(/^\n/, '')}\n` : '');
+  const lines = [
+    quiet ? null : `Customer interaction: ${interaction || 'Not specified'}`,
+    quiet && !concern ? null : `Customer concern (as reported, not a verified finding): ${concern || 'None'}`,
+  ].filter(Boolean);
+  return { observed, customer: lines.length ? `[REPORTED BY CUSTOMER]\n${lines.join('\n')}\n\n` : '' };
+}
+
 // Active ingredients the model might recall on its own. This visit's catalog
 // actives are screened too (the route passes them); this list catches the
 // common ones a product on another visit carries.
@@ -828,6 +845,7 @@ module.exports = {
   TECHNICIAN_NOTE_HEADER,
   CUSTOMER_WORDS_HEADER,
   withheldProductsLine,
+  observedAndReportedLines,
   bookedReasonBlock,
   COMMON_ACTIVE_INGREDIENTS,
   activeIngredientsMentioned,

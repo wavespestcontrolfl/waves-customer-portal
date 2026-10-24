@@ -7,7 +7,7 @@ const path = require('path');
 const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
 const {
   OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned, bookedReasonBlock,
-  groundedTimeframePhrases,
+  groundedTimeframePhrases, observedAndReportedLines,
 } = require('../services/service-report/report-writer-rules');
 const { scrubCustomerText } = require('../services/completion-comms-context');
 const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
@@ -805,5 +805,31 @@ describe('product facts for the pest writer', () => {
   test('the adapter tells the writer how to use the facts, reassure, and name a sweep', () => {
     expect(PEST_WRITER_ADAPTER).toContain('PRODUCT FACTS are how you know what each treatment is for');
     expect(PEST_WRITER_ADAPTER).toContain('when the TECHNICIAN NOTE names the places swept, name only those places');
+  });
+});
+
+// GATE_PEST_QUIET_VISIT's input trim (the route passes `quiet` only under the
+// one-voice pest prompt). Off, the lines are the legacy ones, byte for byte.
+describe('observedAndReportedLines', () => {
+  const STATION = '\nTechnician station checks, observed (from the station form): 2 of 4 stations showed feeding.';
+
+  test('off: the legacy lines, empty fields included', () => {
+    expect(observedAndReportedLines({ interaction: 'Customer home — spoke with them' })).toEqual({
+      observed: 'Observations: None noted\n',
+      customer: '[REPORTED BY CUSTOMER]\nCustomer interaction: Customer home — spoke with them\nCustomer concern (as reported, not a verified finding): None\n\n',
+    });
+    expect(observedAndReportedLines({ observations: ['Ants on the slider'], stationObserved: STATION }).observed)
+      .toBe(`Observations: Ants on the slider${STATION}\n`);
+  });
+
+  test('quiet: an empty field and the customer-home choice send nothing', () => {
+    expect(observedAndReportedLines({ quiet: true, interaction: 'Customer home — spoke with them' })).toEqual({ observed: '', customer: '' });
+  });
+
+  test('quiet: recorded facts stay, and station checks alone carry no "None noted"', () => {
+    expect(observedAndReportedLines({ quiet: true, observations: ['Webs on the lanai screen'] }).observed).toBe('Observations: Webs on the lanai screen\n');
+    expect(observedAndReportedLines({ quiet: true, stationObserved: STATION }).observed).toBe(`${STATION.slice(1)}\n`);
+    expect(observedAndReportedLines({ quiet: true, interaction: 'Customer not home — full access', concern: 'Ants by the back door' }).customer)
+      .toBe('[REPORTED BY CUSTOMER]\nCustomer concern (as reported, not a verified finding): Ants by the back door\n\n');
   });
 });

@@ -16,7 +16,7 @@ const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { pestReportVoiceLive } = require('../config/feature-gates');
+const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
@@ -141,7 +141,7 @@ const ActivityIndicators = require('../services/service-report/activity-indicato
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
-  TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+  TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, observedAndReportedLines, writerRulesRejection,
   noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
   activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
 } = require('../services/service-report/report-writer-rules');
@@ -26210,7 +26210,7 @@ router.post('/generate-report', async (req, res) => {
     // GATE_REPORT_WRITER_RULES, read once per request. It applies only to
     // writers in its scope (never lawn or tree/shrub/palm — owner
     // 2026-09-30, another lane owns them); see report-writer-rules.js.
-    const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
+    const { selectReportCopyPrompt, writerRulesInScope, pestVoiceServes } = require('../services/service-report/lawn-report-copy-prompt');
     const writerRulesGate = reportWriterRulesLive();
 
     // A technician writes a report only for a visit of their own: the id-less
@@ -27111,11 +27111,18 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       }
     }
 
-    const selectedSystemPrompt = selectReportCopyPrompt(
-      systemPrompt,
-      groundingServiceType,
-      writerRulesOn ? { ...reportPromptContext, writerRules: true, pestVoice: pestReportVoiceLive() } : reportPromptContext,
-    );
+    const promptContext = writerRulesOn
+      ? { ...reportPromptContext, writerRules: true, pestVoice: pestReportVoiceLive(), pestQuietVisit: pestQuietVisitLive() }
+      : reportPromptContext;
+    const selectedSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, promptContext);
+    // GATE_PEST_QUIET_VISIT trims empty inputs under the one-voice pest prompt only.
+    const inputLines = observedAndReportedLines({
+      quiet: promptContext.pestQuietVisit === true && pestVoiceServes(groundingServiceType, promptContext),
+      observations: promptObs,
+      stationObserved: stationLines.observed,
+      interaction: customerInteraction,
+      concern: promptConcern,
+    });
     // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
     // instruction is THE guard, no word filter). In the system prompt so it
     // reaches every tree & shrub generation even when the grounding context
@@ -27151,14 +27158,9 @@ ${writerRulesOn
     : `Products Applied / Active Ingredients: ${productsText || 'Not specified'}`}
 
 [OBSERVED BY TECHNICIAN]
-Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}${stationLines.observed}
-Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
+${inputLines.observed}Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
 
-[REPORTED BY CUSTOMER]
-Customer interaction: ${customerInteraction || 'Not specified'}
-Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
-
-[FUTURE ADVICE — not completed work]
+${inputLines.customer}[FUTURE ADVICE — not completed work]
 Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
 
 Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;

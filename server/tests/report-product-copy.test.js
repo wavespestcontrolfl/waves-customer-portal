@@ -232,7 +232,7 @@ describe('reportProductCopyForApplicationProduct — report-data.js shape', () =
   it('falls back to the legacy `epa_reg` field when `epa_reg_number` is absent', () => {
     const copy = reportProductCopyForApplicationProduct({ product_name: 'ignored', epa_reg: '432-772' });
     expect(copy).not.toBeNull();
-    expect(copy.how_it_works).toMatch(/waterproof dust/);
+    expect(copy.how_it_works).toMatch(/does not clump or absorb moisture/);
   });
 
   it('a product with no product_id / no catalog join still resolves by its snapshotted product_name — Gentrol is a narrow IGR with no also_labeled_for line', () => {
