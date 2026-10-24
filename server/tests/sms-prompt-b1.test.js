@@ -552,14 +552,16 @@ describe('change A: the latest visit notes and findings', () => {
     expect(facts).toContain('Wasp nest under the eave');
   });
 
-  test('the report writer screen drops a finding row it would reject (infestation, poison, a product, a date)', () => {
+  test('the complete customer-copy screen drops a finding row it would reject (infestation, poison, deadly, an access code, the label)', () => {
     on();
     const facts = freshDrafter().buildFactsBlock(ctx([
       { title: 'Severe infestation at the lanai', detail: 'x', severity: 'high', category: 'activity' },
       { title: 'Poison bait found in the garage', detail: 'x', severity: 'high', category: 'observation' },
+      { title: 'Deadly spiders near the lanai', detail: 'x', severity: 'high', category: 'activity' },
+      { title: 'Side gate stuck', detail: 'Gate code 4471 works.', severity: 'low', category: 'observation' },
       { title: 'Wasp nest under the eave', detail: 'Small nest.', severity: 'medium', category: 'activity' },
     ]), { now: NOW });
-    expect(facts).not.toMatch(/infestation|Poison/i);
+    expect(facts).not.toMatch(/infestation|Poison|Deadly|4471/i);
     expect(facts).toContain('findings: "Wasp nest under the eave - Small nest. (medium/activity)"');
   });
 

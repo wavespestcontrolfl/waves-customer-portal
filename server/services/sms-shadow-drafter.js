@@ -4020,19 +4020,17 @@ const LATEST_VISIT_NOTES_CAP = 1200;
 // The latest visit's service_findings as ONE history part ([] when none or the gate is off): title, detail and recommendation,
 // severity/category as a label. Each is a single capped line, injection-screened and compliance-screened like every other
 // tech-authored fact; the aggregator loads them only when the visit's customer-safe notes exist (never raw technician_notes).
-// The words customer copy about a visit never carries (the report writer's rule list in service-report/report-writer-rules and
-// pest-report-voice, and treatment-narrative's FORBIDDEN list): confirmed-diagnosis, over-claim and safety vocabulary.
-const FINDING_COPY_BANNED_RE = /\b(?:infest\w*|infections?|infected|diseased|eliminat\w+|eradicat\w+|exterminat\w+|resolved|solved|gone|cleared|pest-?free|[\w-]+-proof|guarantee[ds]?|bond|cure[sd]?|permanent(?:ly)?|safe|safer|safest|safely|unsafe|non-?toxic|toxic|harmless|poison\w*|dangerous|harmful|chemicals?|epa)\b/i;
-// The full customer-copy screen for a finding row: the report writer's screens (amounts, dates, timeframes, product names ...) AND the
-// word list above. Fails closed: if the screen cannot load, the text is rejected.
-function reportWriterScreenRejects(text) {
+// The COMPLETE customer-copy screen (AGENTS.md: every path admitting free text into report/treatment copy runs customerCopyViolations, never
+// the findBannedCustomerCopy subset) plus the access-code shapes. Fails closed: if the screen cannot load, the text is rejected.
+function findingCopyRejected(text) {
   try {
-    return FINDING_COPY_BANNED_RE.test(text) || Boolean(require('./service-report/report-writer-rules').writerRulesRejection(text));
+    const { customerCopyViolations, containsReportAccessCode } = require('./service-report/technician-report-copy');
+    return customerCopyViolations(text).length > 0 || containsReportAccessCode(text);
   } catch {
     return true;
   }
 }
-function latestVisitFindingParts(findings, hasBannedCopy) {
+function latestVisitFindingParts(findings) {
   if (!smsPromptB1Live() || !Array.isArray(findings)) return [];
   const rows = findings.slice(0, 5).map((f) => {
     const text = [
@@ -4041,7 +4039,9 @@ function latestVisitFindingParts(findings, hasBannedCopy) {
       f?.recommendation ? `recommended: ${sanitizeSingleLine(f.recommendation, 200)}` : '',
     ].filter(Boolean).join(' - ');
     const label = [f?.severity, f?.category].map((v) => sanitizeSingleLine(v, 30)).filter(Boolean).join('/');
-    return text && !EXEMPLAR_INJECTION_RE.test(text) && !hasBannedCopy(text) && !reportWriterScreenRejects(text) ? `${text}${label ? ` (${label})` : ''}` : '';
+    const row = text ? `${text}${label ? ` (${label})` : ''}` : '';
+    // the whole rendered row, label included, passes the screens
+    return row && !EXEMPLAR_INJECTION_RE.test(row) && !findingCopyRejected(row) ? row : '';
   }).filter(Boolean);
   return rows.length ? [`findings: "${rows.join(' | ')}"`] : [];
 }
@@ -5417,7 +5417,7 @@ function buildFactsBlock(context, extras = {}) {
           const parts = [`${s.type} on ${formatEtDate(s.date)}`];
           // B1 (change A): the LATEST finished visit's customer-safe notes run to ~1,200 characters; older visits keep 300.
           if (s.notes) parts.push(`notes: "${sanitizeSingleLine(s.notes, i === 0 && smsPromptB1Live() ? LATEST_VISIT_NOTES_CAP : 300)}"`);
-          if (i === 0) parts.push(...latestVisitFindingParts(s.findings, hasBannedCopy));
+          if (i === 0) parts.push(...latestVisitFindingParts(s.findings));
           if (Array.isArray(s.areasServiced) && s.areasServiced.length) {
             parts.push(`areas: ${s.areasServiced.slice(0, 8).map((a) => sanitizeSingleLine(a, 40)).filter(Boolean).join(', ')}`);
           }
