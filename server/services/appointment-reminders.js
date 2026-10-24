@@ -306,7 +306,9 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
 //   - non-'sms' (an explicit email / both / push choice): returned untouched;
 //   - prefs unreadable: 'sms' (the email leg bypasses sendCustomerMessage's
 //     consent validator, so it must never ride on a fail-open default);
-//   - customer picked the channel in the portal (explicit stamp): 'sms';
+//   - customer picked the channel in the portal (explicit stamp): 'sms'; every
+//     row that predates the stamp counts as picked (20261024230000), so only a
+//     customer created after it can be promoted;
 //   - portal-wide email off, or the confirmation toggle off: 'sms';
 //   - gate off: 'sms';
 //   - new client = no scheduled_services row with status 'completed' for this
