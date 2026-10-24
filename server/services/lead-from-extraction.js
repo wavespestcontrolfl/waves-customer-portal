@@ -581,11 +581,17 @@ async function stampCustomerPreferredLanguage(customerId, language) {
  *     requested_service|matched_service, preferred_date_time, pain_points,
  *     call_summary, lead_quality ('hot'|'warm'|'cold'),
  *     contact_preference, preferred_contact_method, do_not_contact_request }
- * @param {object} opts { phone, toPhone, callSid, language, callDurationSeconds }
+ * @param {object} opts { phone, toPhone, callSid, language, callDurationSeconds,
+ *   channel: 'sms' for the text-thread reader (sms-lead-extraction.js), messageSid }
  * @returns {Promise<{ leadId: string|null, customerId: string|null, created: boolean }>}
  */
 async function createLeadFromExtraction(extracted = {}, opts = {}) {
   const phone = opts.phone || extracted.phone || null;
+  // The text-thread reader (GATE_SMS_LEAD_EXTRACTION) writes through this same
+  // function so a texted lead gets the call path's reuse and merge rules; only
+  // the labels below differ. Anything else is the voice path, as before.
+  const viaSms = opts.channel === 'sms';
+  const captureSource = viaSms ? 'sms_agent' : 'voice_agent';
   const language = opts.language ? String(opts.language).toLowerCase().slice(0, 8) : null;
   // composeServiceInterest returns the matched service plus any requested
   // families it doesn't cover (multi-service calls), or null when nothing
@@ -764,12 +770,13 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         first_name: nameCase(extracted.first_name),
         last_name: nameCase(extracted.last_name) || '',
         email: extracted.email || null,
-        lead_type: 'inbound_call',
+        lead_type: viaSms ? 'inbound_sms' : 'inbound_call',
         first_contact_at: new Date(),
-        first_contact_channel: 'call',
+        first_contact_channel: viaSms ? 'sms' : 'call',
         status: 'new',
       };
       if (opts.callSid) insert.twilio_call_sid = opts.callSid;
+      if (viaSms && opts.messageSid) insert.twilio_message_sid = opts.messageSid;
       if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
       const [newLead] = await q('leads').insert(insert).returning('*');
       leadId = newLead.id;
@@ -829,7 +836,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     const merged = mergeLeadExtractedData(priorExtracted, {
       pain_points: extracted.pain_points,
       preferred_date_time: extracted.preferred_date_time,
-      source: 'voice_agent',
+      source: captureSource,
       language: language || priorExtracted.language || null,
       ...(extracted.quote_requested === true ? { quote_requested: true } : {}),
       ...(extracted.quote_promised === true ? { quote_promised: true } : {}),
@@ -918,13 +925,15 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     activityRow = {
       lead_id: leadId,
       activity_type: 'ai_triage',
-      description: `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
-      performed_by: 'AI Voice Agent',
+      description: viaSms
+        ? `AI text reader captured: ${service || 'general inquiry'}`
+        : `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
+      performed_by: viaSms ? 'AI Text Reader' : 'AI Voice Agent',
       metadata: JSON.stringify({
         call_summary: extracted.call_summary,
         pain_points: extracted.pain_points,
         language,
-        source: 'voice_agent',
+        source: captureSource,
         ...(contactPreference || {}),
       }),
     };

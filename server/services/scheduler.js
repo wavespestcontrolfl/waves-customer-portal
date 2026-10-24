@@ -1115,6 +1115,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — text-thread lead reader (GATE_SMS_LEAD_EXTRACTION, read in
+  // the sweep): a quiet thread from an unknown number becomes a lead. The
+  // durable per-thread claim fences overlapping ticks and instances.
+  cron.schedule('*/5 * * * *', async () => {
+    if (!isEnabled('smsLeadExtraction')) return;
+    try {
+      await runExclusive('sms-lead-extraction', async () => {
+        await require('./sms-lead-extraction').sweepSmsLeadCandidates();
+      });
+    } catch (err) {
+      logger.error(`[sms-lead-extraction] sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — retry committed route-quality refreshes, including dates
   // outside the nightly optimizer's six-day band. The durable row claim
   // fences overlapping ticks/deploys; no second cron lease is needed.
