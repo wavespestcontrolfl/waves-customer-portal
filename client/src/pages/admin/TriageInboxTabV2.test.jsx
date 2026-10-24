@@ -641,6 +641,53 @@ describe('FamilyEvidence — the caller\'s own account', () => {
   });
 });
 
+// GATE_CALL_ADDRESS_FAMILY_CARD: the address-basis card asks the question and offers the two actions.
+describe('FamilyEvidence — stated address on an account (Attach as contact / New customer)', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const payload = {
+    flag: 'family_account_candidates', match_basis: 'stated_address_on_account',
+    caller_name: 'Dana Bronner', caller_phone: '+19415550101', caller_role: 'family_member',
+    holder_candidates: [{ id: A, name: 'Angelina Testerson', city: 'Parrish', address_matches: true }],
+    customer_ids: [A], reason: 'The caller gave the address of an existing account.',
+  };
+  const open = { isOpenView: true, isAdmin: true, canAttach: true, canNewCustomer: true };
+
+  it('asks "<caller> called about <customer>\'s home. Add as a contact?" and files the role the call gave', () => {
+    const onAttach = vi.fn();
+    render(<FamilyEvidence payload={payload} {...open} onAttach={onAttach} />);
+    expect(screen.getByText("Dana Bronner called about Angelina Testerson's home. Add as a contact?")).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveValue('family_member');
+    fireEvent.click(screen.getByRole('button', { name: 'Attach as contact' }));
+    expect(onAttach).toHaveBeenCalledWith(A, 'family_member');
+  });
+  it('sends the role the office picked', () => {
+    const onAttach = vi.fn();
+    render(<FamilyEvidence payload={payload} {...open} onAttach={onAttach} />);
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'tenant' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Attach as contact' }));
+    expect(onAttach).toHaveBeenCalledWith(A, 'tenant');
+  });
+  it('New customer is its own button', () => {
+    const onNewCustomer = vi.fn();
+    render(<FamilyEvidence payload={payload} {...open} onNewCustomer={onNewCustomer} />);
+    fireEvent.click(screen.getByRole('button', { name: 'New customer' }));
+    expect(onNewCustomer).toHaveBeenCalledTimes(1);
+  });
+  it('shows no action on a closed card, to a non-admin, or when the server offers none (gate off)', () => {
+    for (const props of [{ ...open, isOpenView: false }, { ...open, isAdmin: false }, { isOpenView: true, isAdmin: true }]) {
+      cleanup();
+      render(<FamilyEvidence payload={payload} {...props} />);
+      expect(screen.queryByRole('button')).toBeNull();
+    }
+  });
+  it('an older-basis card keeps its text and gains only New customer when the server offers it', () => {
+    render(<FamilyEvidence payload={{ ...payload, match_basis: 'caller_full_name' }} {...open} canAttach={false} />);
+    expect(screen.queryByText(/Add as a contact\?/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Attach/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'New customer' })).toBeInTheDocument();
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{

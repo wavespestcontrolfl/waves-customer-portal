@@ -51,6 +51,14 @@
  * call-recording-processor findCustomerViaCallbackSpokenNumber). Same suggest-only card; the pass also mints no
  * customer around it. Anyone can name any number in a voicemail, so nothing is linked.
  *
+ * A service address an account already has (GATE_CALL_ADDRESS_FAMILY_CARD, dark; basis stated_address_on_account, owner
+ * 2026-10-24 "yes build"). A daughter called from her own number for her mother; the names came through spelled a little
+ * differently, so no name basis fired and the pass minted a third record for one house. After the bases above find nothing,
+ * a LIVE account at the same house number and street (the existing sameHouseNumberStreet rules: a stated unit must equal the
+ * unit on file, and the stated ZIP or city must agree) is suggested. At most MAX_OWN_CANDIDATES accounts; more is not
+ * evidence. The card carries what the office needs to attach the caller as a service contact (name, number, the role the call
+ * gave); the Attach and New customer actions live in routes/admin-triage.js. Still read-only here.
+ *
  * No card: the caller is not a family member, no full name was named, a voicemail
  * (a one-sided transcription never names an account), an outbound call, a call that
  * is already linked or was unlinked on purpose, a number some live account already
@@ -61,7 +69,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { whereLiveCustomer } = require('./customer-stages');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
-const { unitAnywhereOnLine } = require('../utils/address-normalizer');
+const { unitAnywhereOnLine, splitUnitFirstLine } = require('../utils/address-normalizer');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
@@ -154,6 +162,7 @@ const OWN_ACCOUNT_REASONS = {
   caller_first_name_recent_visit: 'An account with this caller\'s first name has a visit on the calendar close to this call. Confirm it is the same household, then link the call.',
   contact_phone_on_account: 'The caller gave a phone number for another person, and an account carries that number. Confirm the caller is calling for this account, then link the call. A lead or customer record may exist under the caller: merge it on the Duplicates page.',
   callback_spoken_number: 'The office called this voicemail back on the number it came from, but the caller had said another number to call. An account has that number as its main phone, under the same first name. Anyone can say any number in a voicemail, so nothing was linked or sent. Confirm it is the same person, then link the call.',
+  stated_address_on_account: 'The caller gave the address of an existing account and called from a number no account carries. Add them as a contact on that account (this also links the call), or choose New customer if they are a different household. Nothing is sent to them.',
   caller_first_name_city_recent: 'The caller gave a first name only. An account created in the last two weeks has that first name in the same city. Confirm it is the same person, then link the call. A customer record may exist under the caller: merge it on the Duplicates page.',
 };
 
@@ -332,6 +341,53 @@ async function matchContactPhoneAccounts({ call, extracted, v2CanonicalExtractio
   };
 }
 
+// The roles a service-contact slot may be given from the card (the persisted schema's relationship values a
+// person at someone else's home can hold). The call's own relationship is the default; anything else is 'other'.
+const ATTACH_ROLES = ['family_member', 'spouse_partner', 'tenant', 'landlord', 'home_buyer', 'home_seller', 'property_manager', 'real_estate_agent', 'other'];
+const STATED_ADDRESS_SKIPPED_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
+
+/**
+ * Basis stated_address_on_account (GATE_CALL_ADDRESS_FAMILY_CARD): live accounts at the street address the caller
+ * stated, from the extraction alone. { basis, candidates, more_accounts, attach } or null. `attach` is what the Attach
+ * action files (name, number, role). Never one of this pass's own customer or the call's linked one.
+ */
+async function matchStatedAddressAccounts({ call, extracted, v2CanonicalExtraction, statedAddress, isOutbound = false, phone = null, conn = db }) {
+  if (!require('../config/feature-gates').callAddressFamilyCardLive()) return null;
+  if (isOutbound || extracted.is_voicemail) return null;
+  if (STATED_ADDRESS_SKIPPED_NATURES.has(String(v2CanonicalExtraction?.call_nature || ''))) return null;
+  const callerFirst = String(extracted.first_name || '').trim();
+  const street = String((statedAddress && statedAddress.street_line_1) || '').trim();
+  if (!callerFirst || !street) return null;
+  // The house number, read the way sameHouseNumberStreet reads a street line (a legacy unit-first line is peeled).
+  const house = (String((splitUnitFirstLine(street) || {}).rest || street).match(/^\s*(\d+)/) || [])[1];
+  if (!house) return null;
+  const own = createdCustomerId(call);
+  const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+  const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+  const placeAgrees = (c) => (zip5(statedAddress.postal_code) !== '' && zip5(statedAddress.postal_code) === zip5(c.zip))
+    || (cityKey(statedAddress.city) !== '' && cityKey(statedAddress.city) === cityKey(c.city));
+  const rows = await conn('customers')
+    .modify(whereLiveCustomer)
+    .whereRaw('address_line1 ~ ?', [`(^|,\\s*)${house}([^0-9]|$)`])
+    .orderBy('created_at', 'asc').orderBy('id', 'asc').limit(200)
+    .select('id', 'first_name', 'last_name', 'city', 'address_line1', 'address_line2', 'zip');
+  const found = rows.filter((r) => String(r.id) !== own && String(r.id) !== String(call.customer_id || '')
+    && statedAddressCorroborates(statedAddress, r) && placeAgrees(r));
+  if (!found.length || found.length > MAX_OWN_CANDIDATES) return null;
+  const relationship = String(v2CanonicalExtraction?.caller?.relationship_to_property || '').trim().toLowerCase();
+  return {
+    basis: 'stated_address_on_account',
+    more_accounts: false,
+    candidates: found.map((m) => ({ ...ownCandidate(m), address_matches: true })),
+    attach: {
+      caller_first_name: callerFirst,
+      caller_last_name: String(extracted.last_name || '').trim() || null,
+      caller_role: ATTACH_ROLES.includes(relationship) ? relationship : 'other',
+      contact_phone: phone || call.from_phone || null,
+    },
+  };
+}
+
 // What the card suggests for this call: the family rule first, then a number the caller gave for
 // another person, else the caller's own account.
 /**
@@ -370,7 +426,7 @@ async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress
 
 async function matchSuggestedAccounts(args) {
   return (await matchFamilyAccounts(args)) || (await matchContactPhoneAccounts(args))
-    || (await matchCallbackSpokenNumberAccount(args)) || matchCallerOwnAccounts(args);
+    || (await matchCallbackSpokenNumberAccount(args)) || (await matchCallerOwnAccounts(args)) || matchStatedAddressAccounts(args);
 }
 
 /**
@@ -428,6 +484,8 @@ function cardPayload({ suggestion, extracted, call, phone }) {
     more_accounts: suggestion.more_accounts,
     customer_ids: suggestion.candidates.map((c) => c.id),
     reason: suggestion.basis ? OWN_ACCOUNT_REASONS[suggestion.basis] : CARD_REASON,
+    // Set only for stated_address_on_account: what the Attach action files as the account's contact.
+    ...(suggestion.attach || {}),
   };
 }
 
@@ -543,6 +601,8 @@ module.exports = {
   matchCallerOwnAccounts,
   matchContactPhoneAccounts,
   matchCallbackSpokenNumberAccount,
+  matchStatedAddressAccounts,
+  ATTACH_ROLES,
   contactPhones,
   RECENT_DAYS,
   MAX_OWN_CANDIDATES,

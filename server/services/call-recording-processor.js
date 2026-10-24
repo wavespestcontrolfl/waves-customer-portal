@@ -3983,7 +3983,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp } = {}) {
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp, operatorAttach = false } = {}) {
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
@@ -3992,7 +3992,9 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // stranger). Refused here, at the one slot writer, like #6028's intake rule.
   if (contact && contact.phone && isImpossibleNanpPhone(contact.phone)) contact = { ...contact, phone: null };
   const onSiteOnly = !!contact && contact.wants_notifications !== true && onSiteAskEligible && onSiteOptinAskTrigger(contact);
-  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly)) return 'skipped_no_intent';
+  // operatorAttach: the office chose to file this person on the account (the family-account card's Attach as
+  // contact). It is the intent the caller's own words otherwise supply; every guard below still applies.
+  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly && !operatorAttach)) return 'skipped_no_intent';
   // Nobody asked for this person to get notifications: their opt-in covers
   // appointment TEXTS only, so their email is not filed (service-report
   // emails fan out to every slot email).
@@ -14422,6 +14424,15 @@ const CallRecordingProcessor = {
     // could be written (a failed card write must never turn into a duplicate customer).
     let spokenNumberSuggested = false;
     let phoneMatchedThisPass = false;
+    // GATE_CALL_ADDRESS_FAMILY_CARD (owner 2026-10-24): an unknown-number caller whose stated address (or
+    // name) an account already has got a suggest-only family-account card above. With the gate on, that card
+    // is the pass's whole answer: no new customer is minted around it (the duplicate the card exists to
+    // stop), the call stays customer-less like the shared-phone case, and the workable-lead path below still
+    // captures the prospect. The card's New customer action closes it and reprocesses, which mints the old
+    // way. A card an operator already closed is never filed again, so it holds nothing.
+    let familyCardHold = false;
+    const familyCardCovers = !!familyCardReport.filed && familyCardReport.filed !== 'callback_spoken_number'
+      && require('../config/feature-gates').callAddressFamilyCardLive();
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -14474,6 +14485,9 @@ const CallRecordingProcessor = {
         // relink (customer_link_override).
         // A failed card write is the card's own warn line; the next reprocess files it again.
         logger.info(`[call-proc] ${maskSid(callSid)}: callback voicemail's spoken number matches an account — suggest-only card, no link, no new customer`);
+      } else if (familyCardCovers && (extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+        familyCardHold = true;
+        logger.info(`[call-proc] ${maskSid(callSid)}: an account matches this caller (${familyCardReport.filed}) — suggest-only card, no link, no new customer`);
       } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -16399,7 +16413,7 @@ const CallRecordingProcessor = {
     // never a creation failure to file a card for on every reprocess.
     // …and a spoken-number suggestion (GATE_CALLBACK_SPOKEN_NUMBER_LINK) is the same: the pass
     // deliberately created nobody and the family-account card names the account.
-    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink && !spokenNumberSuggested);
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink && !spokenNumberSuggested && !familyCardHold);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -16641,7 +16655,7 @@ const CallRecordingProcessor = {
         const sameCallEligibility = {
           customerId,
           workableUnnamedLead,
-          unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested),
+          unclaimedOnly: !!(sharedPhoneAmbiguity.candidates || spokenNumberSuggested || familyCardHold),
         };
         const { lead: existingLead, matchedVia: existingLeadVia, phoneNameConflictLeadId } = await findReusableCallLead(db, {
           phone,
@@ -25412,6 +25426,8 @@ CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustome
 // caller recognition mirrors the call pipeline exactly instead of forking a
 // parallel matcher — the two can never drift.
 CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
+// The one service-contact slot writer, for the family-account card's Attach as contact action (routes/admin-triage.js).
+CallRecordingProcessor.persistCallSecondaryContact = persistCallSecondaryContact;
 CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
 
 /**
