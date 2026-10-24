@@ -7,7 +7,9 @@
 // review reason: the lane goes yellow and the send gate holds the draft until
 // an admin counts the palms on the aerial photo and confirms (AI Draft Review
 // -> confirm the send), or rebuilds the quote in the estimate tool, whose
-// resubmitted line is caller-stated and carries no palmCountFromLookup.
+// resubmitted line is caller-stated and carries no palmCountFromLookup. With
+// GATE_SATELLITE_PALM_COUNT_TYPED on, the confirm also needs the admin's typed
+// count (satellitePalmCountToConfirm below, read by the send gate).
 //
 // This runs on the FRESH draft pricing only, NOT inside the pricer: the
 // stored engineInputs of every sent quote still carry palmCountFromLookup and
@@ -35,5 +37,16 @@ function flagLookupPalmCountForReview(engineInput, engineResult) {
   return engineResult;
 }
 
+// The satellite palm count a STORED draft still prices (follow-up B to the
+// flag above, owner 2026-10-24: the count is a suggestion until an admin types
+// the real one before the first send). Keyed on the line's own provenance and
+// count, the same line predicate as the flag, not on the review reason: a
+// later recompute from engineInputs drops the reason but keeps the line's
+// palmCountFromLookup. Returns the priced count, or null when no line has one.
+function satellitePalmCountToConfirm(estimateData) {
+  const lines = Array.isArray(estimateData?.engineResult?.lineItems) ? estimateData.engineResult.lineItems : [];
+  const line = lines.find((l) => l?.service === 'tree_shrub' && l.palmCountFromLookup === true && Number(l.palmCount) > 0);
+  return line ? Number(line.palmCount) : null;
+}
 
-module.exports = { LOOKUP_PALM_REVIEW_REASON, LOOKUP_PALM_REVIEW_WARNING, flagLookupPalmCountForReview };
+module.exports = { LOOKUP_PALM_REVIEW_REASON, LOOKUP_PALM_REVIEW_WARNING, flagLookupPalmCountForReview, satellitePalmCountToConfirm };

@@ -87,11 +87,44 @@ describe('the payload key', () => {
   });
 });
 
+describe('GATE_LAWN_REPORT_STORY: story inside the layout key', () => {
+  const STORY = 'GATE_LAWN_REPORT_STORY';
+  const savedStory = process.env[STORY];
+  afterEach(() => { if (savedStory === undefined) delete process.env[STORY]; else process.env[STORY] = savedStory; });
+  const v2 = { snapshot: {} };
+
+  test('strict opt-in reader: only the exact string true', () => {
+    delete process.env[STORY];
+    expect(featureGates.lawnReportStoryLive()).toBe(false);
+    for (const v of ['1', 'on', 'TRUE', 'True', 'yes', '']) {
+      process.env[STORY] = v;
+      expect(featureGates.lawnReportStoryLive()).toBe(false);
+    }
+    process.env[STORY] = 'true';
+    expect(featureGates.lawnReportStoryLive()).toBe(true);
+  });
+
+  test('story gate off: the layout key is exactly as before (no story member)', () => {
+    gateOn();
+    delete process.env[STORY];
+    expect(lawnLayoutPayload({ serviceLine: 'lawn', reportV2: v2 })).toEqual({ lawnLayout: { mowingRange: null } });
+  });
+
+  test('story gate on: story:true rides inside the layout key; never without the layout gate or on another line', () => {
+    process.env[STORY] = 'true';
+    gateOn();
+    expect(lawnLayoutPayload({ serviceLine: 'lawn', reportV2: v2 })).toEqual({ lawnLayout: { mowingRange: null, story: true } });
+    expect(lawnLayoutPayload({ serviceLine: 'tree_shrub', reportV2: v2 })).toEqual({});
+    gateOff();
+    expect(lawnLayoutPayload({ serviceLine: 'lawn', reportV2: v2 })).toEqual({});
+  });
+});
+
 describe('the fixed customer sentences', () => {
   const FIGURES = { phone: '(941) 297-5749', grass: 'St. Augustine', min: '3.5', max: '4' };
   const fill = (text) => text.replace(/\{(\w+)\}/g, (_, key) => FIGURES[key]);
   const strings = [
-    COPY.yourPartTitle, COPY.walkOnLabel, COPY.alsoLabel, COPY.nothingToDo, COPY.scoreToggle,
+    COPY.yourPartTitle, COPY.walkOnLabel, COPY.alsoLabel, COPY.nothingToDo, COPY.scoreToggle, COPY.storySummaryToggle,
     COPY.whenToCallTitle, ...COPY.whenToCall, COPY.mowing,
   ].map(fill);
 

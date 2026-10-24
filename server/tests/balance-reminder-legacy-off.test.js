@@ -389,6 +389,23 @@ describe('latePaymentCheck', () => {
     expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
   });
 
+  test('latePaymentCheckRetired({ log: false }) (the quiet-invoice list reads it): the same verdicts, no log line', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    await expect(balanceReminder.latePaymentCheckRetired({ log: false })).resolves.toBe(true);
+    mockUnpaidCheck({ id: 'inv-unpaid' });
+    await expect(balanceReminder.latePaymentCheckRetired({ log: false })).resolves.toBe(false);
+    db.mockImplementation((table) => { throw new Error(`unexpected table ${table}`); });
+    await expect(balanceReminder.latePaymentCheckRetired({ log: false })).resolves.toBe(false);
+    mockUnpaidCheck(undefined);
+    delete process.env.GATE_DUNNING_LADDER_90;
+    await expect(balanceReminder.latePaymentCheckRetired({ log: false })).resolves.toBe(false);
+    delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
+    await expect(balanceReminder.latePaymentCheckRetired({ log: false })).resolves.toBe(false);
+    expect(logger.info).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
   test('neither gate set: runs the legacy body unchanged, no warn, no retirement log', async () => {
     delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
     delete process.env.GATE_DUNNING_LADDER_90;

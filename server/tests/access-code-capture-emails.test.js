@@ -121,22 +121,34 @@ describe('the customer\'s new words only', () => {
   });
 });
 
+// Bounded means the CPU time this process spends, not wall time: on a loaded CI
+// runner the wall clock read about twice the work (main, 2026-10-24). Nested
+// unclosed <blockquote> openers cost time quadratic in their depth (each level
+// indents everything inside it), about 0.8 s of work at the conversion cap on a
+// fast machine (0.5-0.7 s of CPU at load 30), so they get more room; without the
+// cap the same 200 KB body costs tens of times that, which every budget here fails.
+const cpuMs = (fn) => {
+  const start = process.cpuUsage();
+  fn();
+  const { user, system } = process.cpuUsage(start);
+  return (user + system) / 1000;
+};
 describe('an HTML email built to stall the link scan', () => {
-  test.each(['<blockquote ', '<style ', '<!-- '])('a 200 KB body of unclosed %s openers converts once, in bounded time', (opener) => {
+  test.each([['<blockquote ', 4000], ['<style ', 1000], ['<!-- ', 1000]])('a 200 KB body of unclosed %s openers converts once, in bounded time', (opener, budgetMs) => {
     const row = email({ body_text: '', body_html: opener.repeat(Math.floor(200000 / opener.length)) });
-    const started = Date.now();
-    emailAsMessage(row, null);
-    emailAsMessage(row, null);
-    emailEligible(row);
-    expect(Date.now() - started).toBeLessThan(1000);
+    expect(cpuMs(() => {
+      emailAsMessage(row, null);
+      emailAsMessage(row, null);
+      emailEligible(row);
+    })).toBeLessThan(budgetMs);
   });
   test.each(['On a ', '> ', 'On Tue wrote:\n'])('a 15 MB plain-text body of %j is bounded before reply stripping', (chunk) => {
     const row = email({ body_text: chunk.repeat(Math.floor((15 * 1024 * 1024) / chunk.length)) });
-    const started = Date.now();
-    emailAsMessage(row, null);
-    emailAsMessage(row, null);
-    emailEligible(row);
-    expect(Date.now() - started).toBeLessThan(1000);
+    expect(cpuMs(() => {
+      emailAsMessage(row, null);
+      emailAsMessage(row, null);
+      emailEligible(row);
+    })).toBeLessThan(1000);
   });
   test('Outlook styles before <body> do not crowd out the words', () => {
     const html = `<html><head><style>${'.x{color:red}'.repeat(3000)}</style></head><body><p>Gate code is #4821.</p></body></html>`;
@@ -144,9 +156,8 @@ describe('an HTML email built to stall the link scan', () => {
   });
   test('many unclosed links convert in bounded time, under and over the size cap', () => {
     for (const n of [2700, 6400]) {
-      const started = Date.now();
-      emailAsMessage(email({ body_text: '', body_html: `<p>${'<a href="https://example.invalid/p">x '.repeat(n)}` }), null);
-      expect(Date.now() - started).toBeLessThan(1000);
+      expect(cpuMs(() => emailAsMessage(email({ body_text: '', body_html: `<p>${'<a href="https://example.invalid/p">x '.repeat(n)}` }), null)))
+        .toBeLessThan(1000);
     }
   });
 });
