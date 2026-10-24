@@ -487,6 +487,74 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     });
   });
 
+  describe('a later customer text outranks a staff record', () => {
+    const threadSays = (w, replyId, quote) => (payload) => (payload.text.includes(THREAD_PROMPT)
+      ? (replyId ? { ok: true, json: { verdict: 'completed', record_ref: `sms:${replyId}`, quote } } : { ok: true, json: { verdict: 'not_completed', record_ref: null, quote: null } })
+      : null);
+    const recordThenThread = (w, textId, threadAnswer) => say(w, (payload) => (payload.text.includes(THREAD_PROMPT)
+      ? threadAnswer : fulfilledBy(`sms:${textId}`, 'the warranty covers the retreatment')));
+
+    test('staff "done" then the customer says no one came: stays open, and is not re-judged on unchanged evidence', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      await addCustomerText(w, 'No one came, still waiting');
+      recordThenThread(w, text, { ok: true, json: { verdict: 'not_completed', record_ref: null, quote: null } });
+      expect(await run(w)).toMatchObject({ closed: 0, model_calls: 2 });
+      expect((await row(w.commitment.id)).status).toBe('open');
+      expect((await row(w.commitment.id)).contact_check.ai_close.fulfillment_check).toMatchObject({ reason: 'contradicted_by_later_text' });
+      await run(w);
+      expect(asked(w)).toHaveLength(1);
+      expect(askedThread(w)).toHaveLength(1);
+    });
+
+    test('staff "done" then the customer says thanks, all good: closes through the thread', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      const reply = await addCustomerText(w, 'Thanks, all good');
+      recordThenThread(w, text, { ok: true, json: { verdict: 'completed', record_ref: `sms:${reply}`, quote: 'all good' } });
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      expect((await row(w.commitment.id)).fulfillment).toMatchObject({ check: 'thread_confirmation', witness: 'customer', record_id: reply });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+    });
+
+    test('an existing record close reopens when a contradicting customer text arrives; no model call', async () => {
+      const w = await world();
+      const text = await addSms(w);
+      say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+      expect(await run(w)).toMatchObject({ closed: 1, model_calls: 1 });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      const before = dispatchWithFallback.mock.calls.length;
+      await addCustomerText(w, 'No one came');
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+      expect(dispatchWithFallback.mock.calls.length).toBe(before);
+    });
+
+    test('a customer text before the staff record changes nothing: one model call, closes, stays closed', async () => {
+      const w = await world();
+      await addSms(w, { direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, message_type: null, status: 'received', metadata: null, message_body: 'Any news on the warranty?', created_at: later(5) });
+      const text = await addSms(w, { created_at: later(30) });
+      say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
+      expect(await run(w)).toMatchObject({ closed: 1, model_calls: 1 });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+    });
+
+    test('a thread close stays closed over its own confirming text, and reopens on a newer contradiction', async () => {
+      const w = await world({ kind: 'send_report' });
+      const reply = await addCustomerText(w, 'Got the report, thanks!');
+      say(w, threadSays(w, reply, 'Got the report'));
+      expect(await run(w)).toMatchObject({ closed: 1 });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      await addSms(w, { direction: 'inbound', from_phone: w.phone, to_phone: OUR_NUMBER, message_type: null, status: 'received', metadata: null, message_body: 'Wait, it was the wrong report', created_at: new Date(Date.now() - 60 * 1000) });
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+  });
+
   describe('cost', () => {
     test('an unchanged promise with unchanged evidence is never asked twice; a new record is asked again', async () => {
       const w = await world();
