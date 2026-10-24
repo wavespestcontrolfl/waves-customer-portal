@@ -246,6 +246,19 @@ function isMistingInstallRow(row = {}) {
     || String(row?.kind || '').toLowerCase() === 'misting_installation';
 }
 
+// A row predicate: true for a misting install row the prepay converter bills as its own line (see isMistingInstallRow). The resolution
+// of frozenMistingInstall is lazy and shared across rows.
+function mistingInstallExemption(data) {
+  let invoiced;
+  return (row) => {
+    if (!isMistingInstallRow(row) || row.quoteRequired === true) return false;
+    if (invoiced === undefined) {
+      invoiced = typeof EstimateConverter.frozenMistingInstall === 'function' && !!EstimateConverter.frozenMistingInstall(data);
+    }
+    return invoiced;
+  };
+}
+
 function manualPrepayBlockingOneTimeCharge(estimate = {}) {
   const data = parseEstimateData(estimate.estimate_data || estimate.estimateData);
   try {
@@ -275,15 +288,7 @@ function manualPrepayBlockingOneTimeCharge(estimate = {}) {
       return termiteAnnualSetupInvoiced;
     };
     // The misting install is invoiced on the prepay invoice the same way (resolved lazily, only for a misting row).
-    let mistingInstallInvoiced;
-    const mistingInstallExempt = (row) => {
-      if (!isMistingInstallRow(row)) return false;
-      if (mistingInstallInvoiced === undefined) {
-        mistingInstallInvoiced = typeof EstimateConverter.frozenMistingInstall === 'function'
-          && !!EstimateConverter.frozenMistingInstall(data);
-      }
-      return mistingInstallInvoiced && row.quoteRequired !== true;
-    };
+    const mistingInstallExempt = mistingInstallExemption(data);
     const blocksPrepay = (row) => !isNonBillableOneTimeRow(row) && !isRodentBaitSetupRow(row)
       && !termiteAnnualSetupExempt(row) && !mistingInstallExempt(row);
     const oneTimeRows = acceptanceServiceLists(data).oneTimeList || [];

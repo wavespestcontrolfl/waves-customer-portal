@@ -2226,78 +2226,92 @@ function normalizeEstimateData(value) {
   return value;
 }
 
-// The one-time install of an accepted mosquito misting system (GATE_MOSQUITO_MISTING, misting PR 2a), read from the STORED estimate
-// so the invoice bills exactly the figure the quote was sent at (never a live constant: frozen-disclosure rule, same as
-// frozenSetupFeeAmount / frozenRodentBaitSetupAmount). It resolves through the SAME authoritative container logic the misting guards use
-// (estimate-result-container storedMistingRows / storedEstimateContainer), in this order:
-//   1. an AUTHORED, itemized proposal (proposal.enabled): its priced install line (mistingProposalIdentity), the accepted quote;
-//   2. a mapped `mosquito_misting_installation` one-time item (not quoteRequired);
-//   3. the raw engine `mosquito_misting` line's installation.price when the line is priced (quoteRequired !== true) — the shape an
-//      engine-origin estimate stores at engineResult.lineItems (withSupplementedRecurringServices maps no install item for it);
-//   4. any mapped item in the bare data (older / unwrapped shapes).
-// Null when the estimate carries no priced install (an oversize layout is an unpriced quote-required row and bills nothing).
-// Returns { amount, description }.
-function frozenMistingInstall(estimateData = {}, { pricingAuthority = null } = {}) {
-  const data = normalizeEstimateData(estimateData);
-  const resultContainer = require('./estimate-result-container');
+const MISTING_INSTALL_FALLBACK_NAME = 'Mosquito Misting System Installation';
+const MISTING_PROPOSAL_SECTIONS = ['buildings', 'programs', 'correctiveWork'];
+
+// The priced amount of a stored row (first positive of the money fields), or null.
+function mistingRowPrice(row) {
+  return firstPositiveNumber(row.price, row.amount, row.total, row.priceAfterDiscount, row.totalAfterDiscount);
+}
+
+// Several sold installs -> { amount: total, description, lines: [{ amount, description }] }; none -> null. The invoices emit one marked
+// line per entry; every total, preview and divider uses the total.
+function packMistingInstall(entries) {
+  if (!entries.length) return null;
+  const amount = roundMoney(entries.reduce((sum, entry) => sum + entry.amount, 0));
+  const description = entries.length === 1 ? entries[0].description : `${MISTING_INSTALL_FALLBACK_NAME} (${entries.length} systems)`;
+  return { amount, description, lines: entries };
+}
+
+// An AUTHORED itemized proposal is the accepted quote and may sell an install per building: every line of the proposal sections, each
+// line object once (a line listed under two containers is the same line).
+function isItemizedAuthoredProposal(proposal) {
+  return !!proposal && proposal.enabled === true
+    && MISTING_PROPOSAL_SECTIONS.some((key) => Array.isArray(proposal[key]) && proposal[key].length > 0);
+}
+
+function proposalLineObjects(proposal) {
+  const lines = [
+    ...(proposal.buildings || []).flatMap((building) => (building && building.lineItems) || []),
+    ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+  ];
+  return [...new Set(lines.filter((line) => line && typeof line === 'object'))];
+}
+
+// Every priced install line of an authored proposal.
+function mistingInstallFromProposal(proposal) {
   const { mistingProposalIdentity } = require('../utils/mosquito-misting-system');
-  const priceOf = (row) => firstPositiveNumber(row.price, row.amount, row.total, row.priceAfterDiscount, row.totalAfterDiscount);
-  const named = (row, fallback) => String(row.name || row.label || fallback);
-  const fallbackName = 'Mosquito Misting System Installation';
-  // One or more sold installs -> { amount: total, description, lines: [{ amount, description }] }. The invoices emit one marked line
-  // per entry; every total, preview and divider uses the total.
-  const pack = (entries) => {
-    if (!entries.length) return null;
-    const amount = roundMoney(entries.reduce((sum, entry) => sum + entry.amount, 0));
-    const description = entries.length === 1 ? entries[0].description : `${fallbackName} (${entries.length} systems)`;
-    return { amount, description, lines: entries };
-  };
-
-  // An authored itemized proposal is the accepted quote and may sell an install per building: EVERY priced install line counts, once
-  // (a line object listed under two containers is the same line). Mapped / raw rows are never added to it (same install, other shape).
-  const proposal = data && data.proposal;
-  if (proposal && proposal.enabled === true
-    && ['buildings', 'programs', 'correctiveWork'].some((key) => Array.isArray(proposal[key]) && proposal[key].length > 0)) {
-    const lines = [
-      ...(proposal.buildings || []).flatMap((building) => (building && building.lineItems) || []),
-      ...(proposal.programs || []), ...(proposal.correctiveWork || []),
-    ];
-    const seen = new Set();
-    const entries = [];
-    for (const line of lines) {
-      if (!line || typeof line !== 'object' || seen.has(line)) continue;
-      seen.add(line);
-      if (mistingProposalIdentity(line) !== 'mosquito_misting_installation') continue;
-      const amount = firstPositiveNumber(line.amount, Number(line.unitPrice) * (Number(line.quantity) || 1), line.price);
-      if (amount != null) entries.push({ amount: roundMoney(amount), description: String(line.description || line.label || line.name || fallbackName) });
-    }
-    return pack(entries);
+  const entries = [];
+  for (const line of proposalLineObjects(proposal)) {
+    if (mistingProposalIdentity(line) !== 'mosquito_misting_installation') continue;
+    const amount = firstPositiveNumber(line.amount, Number(line.unitPrice) * (Number(line.quantity) || 1), line.price);
+    if (amount != null) entries.push({ amount: roundMoney(amount), description: String(line.description || line.label || line.name || MISTING_INSTALL_FALLBACK_NAME) });
   }
+  return packMistingInstall(entries);
+}
 
-  // Engine / mapped shapes carry ONE system per estimate (the engine prices a single services.mosquitoMisting selection); the same
-  // install is mirrored across containers as distinct objects, so the first priced one is the install (never summed with its mirrors).
-  let stored = [];
-  try { stored = resultContainer.storedMistingRows(data, { pricingAuthority }); } catch { stored = []; }
-  for (const row of stored) {
+// A mapped `mosquito_misting_installation` one-time item (priced, not quote-required). The engine prices ONE system per estimate and the
+// same install is mirrored across containers as distinct objects, so the first priced one is the install (never summed with its mirrors).
+function mistingInstallFromMappedItems(rows) {
+  for (const row of rows) {
     if (String(row.service || '').toLowerCase() !== 'mosquito_misting_installation' || row.quoteRequired === true) continue;
-    const amount = priceOf(row);
-    if (amount != null) return pack([{ amount: roundMoney(amount), description: named(row, fallbackName) }]);
+    const amount = mistingRowPrice(row);
+    if (amount != null) return packMistingInstall([{ amount: roundMoney(amount), description: String(row.name || row.label || MISTING_INSTALL_FALLBACK_NAME) }]);
   }
-  for (const row of stored) {
+  return null;
+}
+
+// The raw engine `mosquito_misting` line's installation.price (the shape an engine-origin estimate stores at engineResult.lineItems),
+// when the line is priced (quoteRequired !== true).
+function mistingInstallFromRawLine(rows) {
+  for (const row of rows) {
     if (String(row.service || '').toLowerCase() !== 'mosquito_misting' || row.quoteRequired === true) continue;
     const amount = firstPositiveNumber(row.installation && row.installation.price);
     if (amount != null) {
-      return pack([{ amount: roundMoney(amount), description: row.tierLabel ? `${row.tierLabel} Installation` : fallbackName }]);
+      return packMistingInstall([{ amount: roundMoney(amount), description: row.tierLabel ? `${row.tierLabel} Installation` : MISTING_INSTALL_FALLBACK_NAME }]);
     }
   }
-  if (stored.length) return null;
-  const rows = estimateOneTimeItemsFromData(data, { collapseMirrored: true })
-    .filter((item) => item && String(item.service || '').toLowerCase() === 'mosquito_misting_installation' && item.quoteRequired !== true);
-  for (const row of rows) {
-    const amount = priceOf(row);
-    if (amount != null) return pack([{ amount: roundMoney(amount), description: named(row, fallbackName) }]);
-  }
   return null;
+}
+
+// The one-time install of an accepted mosquito misting system (GATE_MOSQUITO_MISTING, misting PR 2a), read from the STORED estimate so
+// the invoice bills exactly the figure the quote was sent at (never a live constant: frozen-disclosure rule, same as
+// frozenSetupFeeAmount / frozenRodentBaitSetupAmount). It resolves through the SAME authoritative container logic the misting guards use
+// (estimate-result-container storedMistingRows / storedEstimateContainer), in this order:
+//   1. an AUTHORED, itemized proposal: its priced install lines (the accepted quote; a mapped or raw copy is never added to it);
+//   2. a mapped `mosquito_misting_installation` one-time item (not quoteRequired);
+//   3. the raw engine `mosquito_misting` line's installation.price when the line is priced;
+//   4. any mapped item in the bare data (older / unwrapped shapes), only when no stored misting rows exist.
+// Null when the estimate carries no priced install (an oversize layout is an unpriced quote-required row and bills nothing).
+// Returns { amount, description, lines }.
+function frozenMistingInstall(estimateData = {}, { pricingAuthority = null } = {}) {
+  const data = normalizeEstimateData(estimateData);
+  if (isItemizedAuthoredProposal(data && data.proposal)) return mistingInstallFromProposal(data.proposal);
+  let stored = [];
+  try { stored = require('./estimate-result-container').storedMistingRows(data, { pricingAuthority }); } catch { stored = []; }
+  const fromStored = mistingInstallFromMappedItems(stored) || mistingInstallFromRawLine(stored);
+  if (fromStored || stored.length) return fromStored;
+  return mistingInstallFromMappedItems(estimateOneTimeItemsFromData(data, { collapseMirrored: true }));
 }
 
 // One-time lines that ride an annual-prepay invoice beside the coverage amount but are NOT coverage money: the disclosed rodent

@@ -1154,6 +1154,12 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
  * the booking's catalog service key — a matcher rule that claims it fixes
  * the visit regardless of the display name.
  */
+// The misting program's safety rules as a procedure field ({ safety: [...] }), or {} for any other program (they keep their procedure).
+function mistingSafetyField(program, effectiveProgramKey) {
+  if (effectiveProgramKey !== 'mosquito_misting' || !program?.safety_rules?.length) return {};
+  return { safety: program.safety_rules.map((rule) => String(rule)) };
+}
+
 function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { programKey = null, serviceKey = null } = {}) {
   const match = matchServiceProtocol(protocols, serviceType, { serviceKey });
   const program = programKey ? (protocols?.[programKey] || null) : match?.program;
@@ -1175,6 +1181,10 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   return { visit, lines, procedure: {
     name: program.name,
     ...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),
+    // The misting program has no field guide, so its weather-shutdown, nozzle-placement and exposure-response rules ride the generic
+    // procedure as a Safety section (the SOP and its text download). Keyed to the misting program on purpose: other programs that
+    // declare safety_rules without a field guide (mosquito, rodent, palm injection ...) keep their procedure exactly as it was.
+    ...(fieldGuide ? {} : mistingSafetyField(program, programKey || match?.programKey)),
     source: 'Service template',
     title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,
     objective: procedureLines(visit.main_goal).join(' ') || null,

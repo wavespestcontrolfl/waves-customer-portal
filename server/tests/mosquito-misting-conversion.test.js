@@ -272,6 +272,48 @@ describe('protocols and the job card route by catalog key', () => {
     expect(matchServiceProtocol(protocols, 'Mosquito Misting System Service', { serviceKey: 'mosquito_misting_system' })).toMatchObject({ program: null, reason: 'misting_system_consultation' });
   });
 
+  test('the misting plan, install and refill procedures carry the misting safety rules (no field guide needed); other programs are unchanged', async () => {
+    const { resolveVisitProducts } = require('../services/job-card');
+    const visitFor = (serviceKey, serviceType) => resolveVisitProducts({
+      facts: { serviceCategory: 'mosquito', serviceType, serviceKey, scheduledDate: '2027-03-10', isLawn: false },
+      protocols, catalog: [], dbh: null, deps: {},
+    });
+    const rules = protocols.mosquito_misting.safety_rules;
+    expect(rules.length).toBeGreaterThan(0);
+    for (const [key, name] of [['mosquito_misting_service', 'Mosquito Misting Service Plan'], ['mosquito_misting_install', 'Mosquito Misting System Installation'], ['mosquito_misting_refill', 'Mosquito Misting System Refill']]) {
+      const out = await visitFor(key, name);
+      expect(out.procedure.fieldGuide).toBeUndefined();
+      expect(out.procedure.safety).toEqual(rules);
+      expect(out.procedure.safetyRules).toBeUndefined();
+      expect(out.procedure.safety.join(' ')).toMatch(/Pause for rain, fog, wind over 10 mph/);
+    }
+    // the barrier mosquito program declares safety rules too and must not gain a Safety section
+    const barrier = await visitFor(null, '21-day mosquito misting');
+    expect(barrier.procedure.name).toBe('Mosquito Control Protocol');
+    expect(barrier.procedure).not.toHaveProperty('safety');
+    // a pest visit is unchanged
+    const pest = await visitFor('pest_general_quarterly', 'Quarterly Pest Control Service');
+    if (pest.procedure) expect(pest.procedure).not.toHaveProperty('safety');
+    // every other program that declares safety_rules without a field guide stays free of the new field
+    for (const [programKey, program] of Object.entries(protocols)) {
+      if (programKey === 'mosquito_misting' || !program || !program.safety_rules) continue;
+      const out = await resolveVisitProducts({
+        facts: { serviceCategory: 'mosquito', serviceType: program.name, scheduledDate: '2027-03-10', isLawn: false },
+        protocols, catalog: [], dbh: null, deps: { programKey },
+      });
+      if (out.procedure) expect(out.procedure).not.toHaveProperty('safety');
+    }
+  });
+
+  test('a Tree & Shrub visit keeps its field-guide safetyRules and gains no safety field', () => {
+    const { _test } = require('../services/job-card');
+    expect(typeof _test).toBe('object');
+    const job = require('fs').readFileSync(path.join(__dirname, '..', 'services/job-card.js'), 'utf8');
+    expect(job).toContain("...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),");
+    expect(job).toContain("...(fieldGuide ? {} : mistingSafetyField(program, programKey || match?.programKey)),");
+    expect(job).toContain("if (effectiveProgramKey !== 'mosquito_misting' || !program?.safety_rules?.length) return {};");
+  });
+
   test('the job card resolves the misting program for the plan visit and the install visit (not the barrier steps)', async () => {
     const { resolveVisitProducts } = require('../services/job-card');
     const visitFor = (serviceKey, serviceType) => resolveVisitProducts({
