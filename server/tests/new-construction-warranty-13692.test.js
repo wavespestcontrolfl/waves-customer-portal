@@ -19,6 +19,8 @@ const findings = {
   builder_contractor: 'Example Homes LLC', product_name: 'Termidor SC', active_ingredient: 'fipronil',
   concentration_pct: '0.06', gallons_applied: '180', square_footage: '1800', applicator_name: 'Sam Tester', applicator_fdacs_id: 'JF000000',
   warranty_type: 'Builder 1-year, renewable yearly to year 5', wdo_target: ['Subterranean termites'],
+  // A builder lot (master basis) runs from its final treatment date.
+  final_exterior_date: '2026-10-20',
 };
 const project = { id: 'abcd1234-0000-0000', customer_id: 'cust-1', project_date: '2026-10-01', sent_at: '2026-10-02T12:00:00Z', project_type: 'pre_treatment_termite_certificate', findings: JSON.stringify(findings) };
 const conn = (table) => ({

@@ -34,7 +34,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({
 const knex = require('knex');
 const express = require('express');
 const { randomUUID } = require('crypto');
-const migration = require('../models/migrations/20261024210000_consumer_notice_paper_records');
+const migration = require('../models/migrations/20261024220000_consumer_notice_paper_records');
 const notices = require('../services/consumer-notices');
 
 const describeDb = SKIP ? describe.skip : describe;
