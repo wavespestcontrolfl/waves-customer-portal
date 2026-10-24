@@ -133,8 +133,17 @@ describe('groupInvoiceLinesByProperty (documents)', () => {
     expect(groupInvoiceLinesByProperty([service('a', PALM), service('b', PALM)])).toBeNull();
     expect(groupInvoiceLinesByProperty([service('a', PALM), service('b', null)])).toBeNull();
     expect(groupInvoiceLinesByProperty([{ description: 'Legacy', quantity: 1, unit_price: 99, amount: 99 }])).toBeNull();
-    expect(invoicePropertyLabels([service('a', PALM)])).toEqual([]);
+    expect(invoicePropertyLabels([service('a', PALM)])).toEqual([]); // no frozen address → legacy resolution
     expect(propertyAddressLabel(null)).toBe('');
+  });
+
+  test('the email names the one frozen property even when the table stays flat (a second home, not the primary)', async () => {
+    const bayOnly = [{ ...service('a', BAY), property_address: addr(BAY) }, { ...service('b', BAY), property_address: addr(BAY) }];
+    expect(groupInvoiceLinesByProperty(bayOnly)).toBeNull();
+    expect(invoicePropertyLabels(bayOnly)).toEqual(['410 Bayshore Rd Unit B, Parrish, FL 34219']);
+    const Details = require('../services/billing-email-details');
+    const text = await Details.invoicePropertyAddress({ customer_id: CUSTOMER, line_items: bayOnly }, { id: CUSTOMER, address_line1: '1842 Palm Harbor Dr', city: 'Bradenton', state: 'FL', zip: '34209' });
+    expect(text).toBe('410 Bayshore Rd Unit B, Parrish, FL 34219');
   });
 
   test('the invoice and receipt PDFs print each property heading, its discount and subtotal', async () => {

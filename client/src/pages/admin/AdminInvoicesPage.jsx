@@ -6238,6 +6238,12 @@ function CreateInvoice({
   useEffect(() => {
     let alive = true;
     setCustomerProperties([]);
+    // A property belongs to ONE customer: on create, changing (or clearing)
+    // the customer drops every line's property so a stale id from the previous
+    // customer can never reach the server's ownership check.
+    const stripLineProperties = (items) =>
+      items.map(({ property_id: _pid, property_address: _addr, ...rest }) => rest);
+    if (!editMode) setLineItems((current) => stripLineProperties(current));
     if (!customerIdForProperties) return;
     adminFetch(
       "/admin/invoices/customers/" + customerIdForProperties + "/properties",
@@ -6249,8 +6255,7 @@ function CreateInvoice({
           : [];
         setCustomerProperties(properties);
         // Edit mode never rewrites the loaded lines (the save's dirty check
-        // compares them to the stored baseline); the submit payload fills a
-        // missing property with the primary instead (withDefaultLineProperty).
+        // compares them to the stored baseline) and defaults nothing.
         if (properties.length < 2 || editMode) return;
         const primaryId =
           properties.find((p) => p.is_primary)?.id || properties[0]?.id;

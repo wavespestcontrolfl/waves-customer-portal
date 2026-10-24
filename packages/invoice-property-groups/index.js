@@ -137,10 +137,27 @@ function groupInvoiceLinesByProperty(lineItems) {
   }));
 }
 
-/** Distinct property address labels across a multi-property invoice; [] for a flat invoice. */
+/**
+ * The distinct property addresses an invoice's lines were frozen at, in
+ * first-appearance order — one label when every line sits at one saved
+ * property (the email names THAT property, not the account address), several
+ * for a multi-property invoice. [] when any service line names no property
+ * or carries no frozen street, so a legacy invoice resolves as before.
+ */
 function invoicePropertyLabels(lineItems) {
-  const groups = groupInvoiceLinesByProperty(lineItems);
-  return groups ? groups.map((group) => group.label) : [];
+  const services = parseLineItems(lineItems).filter((item) => !isDiscountLine(item));
+  if (!services.length || services.some((item) => !clean(item.property_id))) return [];
+  const labels = new Map();
+  for (const line of services) {
+    const key = clean(line.property_id);
+    if (labels.has(key)) continue;
+    const label = line.property_address && typeof line.property_address === 'object'
+      ? propertyAddressLabel(line.property_address)
+      : '';
+    if (!label) return [];
+    labels.set(key, label);
+  }
+  return [...labels.values()];
 }
 
 module.exports = {
