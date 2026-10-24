@@ -35,8 +35,8 @@
  *   - the close is one transaction that locks the promise, the call and the
  *     cited record, reads the evidence again and checks it hashes as the model
  *     saw it (revalidateSmsFulfillment), then writes the same association proof
- *     every automatic close carries (closed_by promise_evidence), with the quote
- *     and closed_agent 'ai-check'. The Owed tab lists it with a Reopen; a
+ *     every automatic close carries (closed_by promise_evidence), with the cited
+ *     record and a label (never the quote) and closed_agent 'ai-check'. The Owed tab lists it with a Reopen; a
  *     reopen is a human verdict, which this job never overrides.
  *
  * refreshFulfillment's re-judge keeps such a close while its cited record
@@ -79,21 +79,10 @@ const LEDGER_RECORD_TYPE = { sms: 'sms_log', call: 'call_log', visit: 'scheduled
   email_reply: 'email', email_delivery: 'email_message' };
 const CHECKER_TYPE = Object.fromEntries(Object.entries(LEDGER_RECORD_TYPE).map(([checker, ledger]) => [ledger, checker]));
 
-// What the stored proof may keep of the model's quote. The Owed feed (/commitments/auto-closed) is readable by
-// every active technician, so the proof stores a record type, id and short label, and a quote only when it is
-// safe: never from an email record (admin-only Gmail, delivery snapshots that carry /secure/<token> links), and
-// every other quote goes through the repo's scrubbers (signed-link-redaction.js: private links and pasted
-// credentials; pan-scrub.js: card numbers), capped short.
-const QUOTE_CAP = 240;
-const NO_QUOTE_RECORDS = new Set(['email', 'email_message']);
+// The stored proof keeps a record type, id and short label, never the model's quote: the Owed feed
+// (/commitments/auto-closed) is readable by every active technician, and a quoted line can carry a private
+// link, a card number or a gate/lockbox code that no scrubber reliably catches. Staff open the record itself.
 const RECORD_LABEL = { sms_log: 'text', call_log: 'call', scheduled_service: 'visit', estimate: 'estimate', email: 'email', email_message: 'email' };
-function safeQuote(recordType, quote) {
-  if (NO_QUOTE_RECORDS.has(recordType) || typeof quote !== 'string' || !quote.trim()) return null;
-  const { redactSecrets, newState } = require('../utils/signed-link-redaction');
-  const { scrubPans } = require('../utils/pan-scrub');
-  const clean = scrubPans(redactSecrets(quote, newState())).trim().slice(0, QUOTE_CAP);
-  return clean || null;
-}
 
 const callEnd = (call) => require('./call-booking-link-text').callEndFor(call);
 const CALL_TIMING = ['created_at', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'direction', 'metadata'];
@@ -178,14 +167,15 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
   const { current, message } = await subjectOf(conn, row, from, cache);
   const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
   let model = 0;
+  // One model call from the run's budget; false when it is spent.
+  const take = () => (budget.left > 0 ? ((budget.left -= 1), (model += 1), true) : false);
   let checked = null;
   let verdict = { verdict: 'open', reason: 'no_witness' };
   if (evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
     const previous = current.sms_context.fulfillment_check;
     const { evidenceHash } = fulfillmentFingerprint(current, evidence);
     const fresh = previous?.evidence_hash === evidenceHash && (!previous.retry_after || new Date(previous.retry_after) > now);
-    if (!fresh && budget.left <= 0) return { outcome: 'deferred', reason: 'budget' };
-    if (!fresh) { budget.left -= 1; model += 1; }
+    if (!fresh && !take()) return { outcome: 'deferred', reason: 'budget' };
     checked = await verify(current, evidence, { now, requireModel: true });
     verdict = sayWavesWords(checked, evidence);
     // A fulfilled verdict the speaker check downgraded is cached as the downgrade, with its evidence hash: the same
@@ -197,10 +187,8 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
   if (verdict.verdict === 'fulfilled') return result;
   // The customer's own later "got it, thanks" (or a person's "done") closes what
   // no record shows: the thread check, which only a later text can start.
-  const thread = await verifyThread(conn, current, message, now, { mayCall: () => {
-    if (budget.left <= 0) return false;
-    budget.left -= 1; result.model += 1; return true;
-  } }).catch((err) => { logger.warn(`[call-promise-ai-close] thread check failed for ${row.id}: ${err.code || err.name}`); return null; });
+  const thread = await verifyThread(conn, current, message, now, { mayCall: take }).catch((err) => { logger.warn(`[call-promise-ai-close] thread check failed for ${row.id}: ${err.code || err.name}`); return null; });
+  result.model = model;
   if (thread) {
     result.cache.thread_check = thread;
     if (thread.verdict === 'fulfilled') return { ...result, verdict: thread };
@@ -269,7 +257,7 @@ function proofOf(row, verdict, witnessFp) {
   const recordType = LEDGER_RECORD_TYPE[verdict.record_type] || verdict.record_type;
   return storedProof({ strength: 'association', kind: AI_CHECK_KIND, basis: AI_CHECK_BASIS, closed_agent: AGENT,
     record_type: recordType, record_id: verdict.record_id, label: RECORD_LABEL[recordType] || 'record', matched_at: matchedAt,
-    quote: safeQuote(recordType, verdict.quote), check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
+    check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
     promise_md5: promiseMd5(row), witness_fp: witnessFp, evidence_hash: verdict.evidence_hash, extractor_version: VERSION }, row.call_customer_id);
 }
 
@@ -416,5 +404,5 @@ function runInBackground({ conn, callIds }) {
   return backgroundRun;
 }
 
-module.exports = { safeQuote, runCallPromiseAiClose, runInBackground, listRecheckCallIds, witnessFingerprint, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
+module.exports = { runCallPromiseAiClose, runInBackground, listRecheckCallIds, witnessFingerprint, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
   VERSION, CANDIDATE_LIMIT, AI_CHECK_KIND, AI_CHECK_BASIS, AGENT, MAX_MODEL_CALLS, QUEUE_MODEL_CALLS };

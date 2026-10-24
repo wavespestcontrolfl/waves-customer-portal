@@ -143,7 +143,7 @@ export function proofLabel(row) {
 // The words a model quoted from the record that kept the promise, if any.
 export function proofQuote(row) {
   const proof = row.fulfillment || {};
-  return ["person_contact", "ai_check"].includes(proof.kind) && proof.quote ? String(proof.quote).slice(0, 240) : null;
+  return proof.kind === "person_contact" && proof.quote ? String(proof.quote).slice(0, 240) : null;
 }
 
 export function whoLabel(row) {

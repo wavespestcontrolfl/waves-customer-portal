@@ -129,11 +129,12 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       const after = await row(w.commitment.id);
       expect(after.status).toBe('fulfilled');
       expect(after.fulfillment).toMatchObject({ kind: 'ai_check', strength: 'association', basis: 'ai_check', closed_by: 'promise_evidence', closed_agent: 'ai-check',
-        record_type: 'sms_log', record_id: text, quote: 'the warranty covers the retreatment', judged_customer_id: w.customerId });
+        record_type: 'sms_log', record_id: text, judged_customer_id: w.customerId });
+      expect(after.fulfillment.quote).toBeUndefined();
       expect(new Date(after.fulfilled_at).getTime()).toBeGreaterThan(w.call.created_at.getTime());
       // The Owed tab's Closed-automatically list shows it, with the proof.
       const listed = await cc.listAutoClosedCommitments(db, { days: 7 });
-      expect(listed.commitments.find((c) => c.id === w.commitment.id)?.fulfillment).toMatchObject({ kind: 'ai_check', quote: 'the warranty covers the retreatment' });
+      expect(listed.commitments.find((c) => c.id === w.commitment.id)?.fulfillment).toMatchObject({ kind: 'ai_check', record_id: text });
     });
 
     test('a visit booked after the call keeps a scheduling promise', async () => {
@@ -174,7 +175,7 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
         : { ok: true, json: { verdict: 'open', record_ref: null, quote: null } }));
       const result = await run(w);
       expect(result).toMatchObject({ model_calls: 1, closed: 1 });
-      expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'ai_check', check: 'thread_confirmation', witness: 'customer', record_type: 'sms_log', record_id: reply, quote: 'Got the report' });
+      expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'ai_check', check: 'thread_confirmation', witness: 'customer', record_type: 'sms_log', record_id: reply });
     });
   });
 
@@ -316,25 +317,21 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       say(w, fulfilledBy(`email_delivery:${mail.id}`, 'Your secure link to add a card'));
       expect(await run(w)).toMatchObject({ closed: 1 });
       const proof = (await row(w.commitment.id)).fulfillment;
-      expect(proof).toMatchObject({ kind: 'ai_check', record_type: 'email_message', record_id: mail.id, label: 'email', quote: null });
+      expect(proof).toMatchObject({ kind: 'ai_check', record_type: 'email_message', record_id: mail.id, label: 'email' });
+      expect(proof.quote).toBeUndefined();
       expect(JSON.stringify(proof)).not.toMatch(/secure|Ab3dE5/);
       await db('email_messages').where({ id: mail.id }).del();
     });
 
-    test('a text quote is kept but run through the repo scrubbers: private links and card numbers are removed', async () => {
+    test('the stored proof never keeps a quote: a gate code, private link or card number in the cited text stays out', async () => {
       const w = await world();
-      const text = await addSms(w, { message_body: 'Your link: https://portal.wavespestcontrol.com/pay/Ab3dE5gH7jK9mN2pQ4sT6vX8 is ready' });
-      say(w, fulfilledBy(`sms:${text}`, 'https://portal.wavespestcontrol.com/pay/Ab3dE5gH7jK9mN2pQ4sT6vX8 is ready'));
+      const text = await addSms(w, { message_body: 'Gate code: 4821. Pay at https://portal.wavespestcontrol.com/pay/Ab3dE5gH7jK9mN2pQ4sT6vX8, card 4242 4242 4242 4242' });
+      say(w, fulfilledBy(`sms:${text}`, 'Gate code: 4821'));
       expect(await run(w)).toMatchObject({ closed: 1 });
       const proof = (await row(w.commitment.id)).fulfillment;
       expect(proof.label).toBe('text');
-      expect(proof.quote).toContain('is ready');
-      expect(proof.quote).not.toContain('Ab3dE5');
-      const { safeQuote } = close;
-      expect(safeQuote('sms_log', 'Card 4242 4242 4242 4242 charged')).not.toMatch(/4242 4242 4242 4242/);
-      expect(safeQuote('email', 'anything')).toBeNull();
-      expect(safeQuote('email_message', 'anything')).toBeNull();
-      expect(safeQuote('sms_log', 'x'.repeat(500))).toHaveLength(240);
+      expect(proof.quote).toBeUndefined();
+      expect(JSON.stringify(proof)).not.toMatch(/4821|Ab3dE5|4242/);
     });
 
     test('the cached verdicts on the staff-readable row carry no quote, and a fulfilled verdict is not cached', async () => {
