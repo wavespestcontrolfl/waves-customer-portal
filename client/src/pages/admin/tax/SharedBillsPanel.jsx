@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   ActionFeedback,
   Button,
@@ -212,23 +212,32 @@ function HomeOfficeBox() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  // only the newest year's response may fill the form: a slower answer for a
+  // year the operator already left must not land under the new year's Save
+  const loadSeq = useRef(0);
 
   const load = useCallback(() => {
+    const seq = ++loadSeq.current;
+    setLoading(true);
     setError("");
     setNotice("");
     adminFetch(`${T}/home-office/${year}`)
       .then((d) => {
+        if (seq !== loadSeq.current) return;
         setSaved(d.row);
         setForm(d.row
           ? { sq_ft: String(d.row.sq_ft), months: String(d.row.months), notes: d.row.notes || "" }
           : { sq_ft: "", months: "12", notes: "" });
+        setLoading(false);
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => { if (seq === loadSeq.current) setError(e.message); });
   }, [year]);
   useEffect(() => { load(); }, [load]);
 
   const save = async (e) => {
     e.preventDefault();
+    if (busy || loading) return;
     setBusy(true);
     setError("");
     setNotice("");
@@ -244,6 +253,7 @@ function HomeOfficeBox() {
   };
 
   const remove = async () => {
+    if (busy || loading) return;
     setBusy(true);
     setError("");
     setNotice("");
@@ -273,7 +283,7 @@ function HomeOfficeBox() {
         </div>
         <form onSubmit={save} className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">
-            <Select aria-label="Home office year" className="flex-1 min-w-[120px]" value={String(year)} onChange={(e) => setYear(Number(e.target.value))}>
+            <Select aria-label="Home office year" className="flex-1 min-w-[120px]" value={String(year)} disabled={busy} onChange={(e) => setYear(Number(e.target.value))}>
               {years.map((y) => <option key={y} value={y}>{y}</option>)}
             </Select>
             <Input
@@ -298,8 +308,8 @@ function HomeOfficeBox() {
             Deduction for {year}: <strong>{money(previewDeduction(form.sq_ft, form.months))}</strong>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button type="submit" variant="primary" disabled={busy}>Save home office</Button>
-            {saved && <Button variant="secondary" disabled={busy} onClick={remove}>Remove {year}</Button>}
+            <Button type="submit" variant="primary" disabled={busy || loading}>Save home office</Button>
+            {saved && <Button variant="secondary" disabled={busy || loading} onClick={remove}>Remove {year}</Button>}
           </div>
         </form>
         {notice && <div className="text-sm text-ink-secondary">{notice}</div>}

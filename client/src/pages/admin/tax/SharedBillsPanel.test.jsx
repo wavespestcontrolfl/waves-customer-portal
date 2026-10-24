@@ -94,3 +94,32 @@ it('previews the home office deduction, caps it at 300 sq ft, and saves it', asy
   // the server refuses 400 sq ft: what was typed goes up as typed, never silently changed
   expect(calls.find((c) => c.method === 'PUT').body).toMatchObject({ sq_ft: '400', months: '12' });
 });
+
+it('keeps the newer year when an older year answers late, and blocks Save until the year loads', async () => {
+  let releaseThisYear;
+  const base = fetch.getMockImplementation();
+  const thisYear = new Date().getFullYear();
+  fetch.mockImplementation(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.endsWith(`/home-office/${thisYear}`) && !opts.method) {
+      calls.push({ url: u, method: 'GET' });
+      await new Promise((r) => { releaseThisYear = r; });
+      return json({ year: thisYear, row: { tax_year: thisYear, sq_ft: 100, months: 12 }, deduction: 500 });
+    }
+    if (u.endsWith(`/home-office/${thisYear - 1}`) && !opts.method) {
+      calls.push({ url: u, method: 'GET' });
+      return json({ year: thisYear - 1, row: { tax_year: thisYear - 1, sq_ft: 250, months: 12 }, deduction: 1250 });
+    }
+    return base(url, opts);
+  });
+  render(<SharedBillsPanel />);
+  await screen.findByText('Phone plan');
+  await waitFor(() => expect(releaseThisYear).toBeTypeOf('function'));
+  expect(screen.getByRole('button', { name: 'Save home office' })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Home office year'), { target: { value: String(thisYear - 1) } });
+  await waitFor(() => expect(screen.getByLabelText('Square feet')).toHaveValue('250'));
+  releaseThisYear();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.getByLabelText('Square feet')).toHaveValue('250');
+  expect(screen.getByRole('button', { name: 'Save home office' })).not.toBeDisabled();
+});
