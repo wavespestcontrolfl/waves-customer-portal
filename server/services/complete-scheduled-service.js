@@ -12890,6 +12890,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && SeriesPriceGuards.seriesPriceGuardsLive()
       && SeriesPriceGuards.unbilledCompletionAlertDue({
         visitPerformed, isCallback: svc.is_callback, serviceType: svc.service_type, reviewedVisitPrice,
+        authoritativeZeroPrice: hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price),
         invoiceAmount: mintInvoiceAmount, prepaidCovered, autopayCoversVisit, alreadyPaid, invoice, invoiceCreated,
       })) {
       try {

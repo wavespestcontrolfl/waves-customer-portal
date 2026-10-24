@@ -117,7 +117,7 @@ describe('extensionPriceVerdict', () => {
 describe('unbilledCompletionAlertDue', () => {
   const base = {
     visitPerformed: true, isCallback: false, serviceType: 'Quarterly Pest Control', reviewedVisitPrice: false,
-    invoiceAmount: 0, prepaidCovered: false, autopayCoversVisit: false, alreadyPaid: false, invoice: null, invoiceCreated: false,
+    authoritativeZeroPrice: false, invoiceAmount: 0, prepaidCovered: false, autopayCoversVisit: false, alreadyPaid: false, invoice: null, invoiceCreated: false,
   };
   test('a performed $0 visit with nothing billed or covering it is due, on any lane', () => {
     expect(guards.unbilledCompletionAlertDue(base)).toBe(true);
@@ -129,6 +129,7 @@ describe('unbilledCompletionAlertDue', () => {
     ['callback', { isCallback: true }],
     ['always-free type', { serviceType: 'Re-Service' }],
     ['reviewed price at completion', { reviewedVisitPrice: true }],
+    ['an authoritative $0 (discounted to $0, or stamped $0 under the free-zero ruling)', { authoritativeZeroPrice: true }],
     ['prepaid / annual prepay', { prepaidCovered: true }],
     ['dues cover it', { autopayCoversVisit: true }],
     ['already paid', { alreadyPaid: true }],
@@ -136,6 +137,23 @@ describe('unbilledCompletionAlertDue', () => {
     ['an invoice was minted', { invoiceCreated: true }],
   ])('not due when %s', (_label, patch) => {
     expect(guards.unbilledCompletionAlertDue({ ...base, ...patch })).toBe(false);
+  });
+});
+
+describe('completion wiring (source contract)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+  const at = src.indexOf('SeriesPriceGuards.unbilledCompletionAlertDue({');
+  const block = src.slice(at - 400, at + 600);
+  test('gated, after the mint, and fed the billing-lane authoritative-zero fact', () => {
+    expect(at).toBeGreaterThan(src.indexOf('const shouldInvoice = '));
+    expect(block).toContain('SeriesPriceGuards.seriesPriceGuardsLive()');
+    expect(block).toContain('authoritativeZeroPrice: hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)');
+    expect(block).toContain('invoiceAmount: mintInvoiceAmount');
+  });
+  test('a discounted-to-$0 visit reads as authoritative through the shared predicate', () => {
+    const { hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+    expect(hasAuthoritativeZeroPrice('0', '89.00')).toBe(true);
+    expect(hasAuthoritativeZeroPrice(null, '89.00')).toBe(false);
   });
 });
 

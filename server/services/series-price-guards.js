@@ -167,13 +167,15 @@ function raiseExtensionPriceAlertAfterCommit(conn, verdict, context) {
 // A performed visit that completed with no billable amount and nothing
 // billed or covering it. Pure — the completion flow passes its own hoisted
 // derivations. A reviewed price (set at completion, $0 included) is the
-// tech's explicit decision and is not flagged.
+// tech's explicit decision and is not flagged; so is an authoritative $0 on
+// the visit (billing-lane.js hasAuthoritativeZeroPrice: discounted to $0, or
+// any stamped $0 under GATE_STAMPED_ZERO_FREE — "$0 means charge nothing").
 function unbilledCompletionAlertDue({
-  visitPerformed, isCallback, serviceType, reviewedVisitPrice, invoiceAmount,
+  visitPerformed, isCallback, serviceType, reviewedVisitPrice, authoritativeZeroPrice, invoiceAmount,
   prepaidCovered, autopayCoversVisit, alreadyPaid, invoice, invoiceCreated,
 }) {
   return !!visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType)
-    && !reviewedVisitPrice && !(Number(invoiceAmount) > 0)
+    && !reviewedVisitPrice && !authoritativeZeroPrice && !(Number(invoiceAmount) > 0)
     && !prepaidCovered && !autopayCoversVisit
     && !alreadyPaid && !invoice && !invoiceCreated;
 }
