@@ -9,8 +9,8 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const {
-  CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
+  contentLibraryVersion,
   protocolVersion,
   TEMPLATE_VERSION,
   buildOutline,
@@ -175,7 +175,7 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
     season_band: outline.inputSnapshot.seasonBand,
     jurisdiction_id: rule?.jurisdiction_id || outline.inputSnapshot.jurisdictionId || null,
     fertilizer_rule_version: rule?.version || null,
-    content_library_version: CONTENT_LIBRARY_VERSION,
+    content_library_version: contentLibraryVersion(),
     protocol_version: protocolVersion(),
     product_registry_version: PRODUCT_REGISTRY_VERSION,
     template_version: TEMPLATE_VERSION,
@@ -246,7 +246,7 @@ router.post('/preview', async (req, res, next) => {
       validation: outline.validation,
       meta: {
         templateVersion: TEMPLATE_VERSION,
-        contentLibraryVersion: CONTENT_LIBRARY_VERSION,
+        contentLibraryVersion: contentLibraryVersion(),
         protocolVersion: protocolVersion(),
         productRegistryVersion: PRODUCT_REGISTRY_VERSION,
       },

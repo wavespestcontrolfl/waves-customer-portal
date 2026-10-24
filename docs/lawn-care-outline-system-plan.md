@@ -5,6 +5,14 @@
 > and `server/routes/service-outlines-public.js`. Some details below (table name,
 > route list, module count, pipeline steps) have drifted from the shipped build —
 > see the inline corrections further down.
+>
+> **v13 outline, 2026-10-24** (`GATE_LAWN_OUTLINE_V13`, needs `GATE_LAWN_V13`): with the gate on, the
+> program, month, year and treatment-category sections describe the one v13 program from code, not
+> from approved modules. The month and year text is the lawn report's own v13 copy
+> (`server/services/service-report/lawn-program-line.js`); the rest is `V13_COPY` and
+> `V13_TREATMENT_CATEGORIES` in `lawn-service-outline.js`. The approved modules still supply the
+> assessment, product transparency, local rule, safety, report, reminder, portal and exclusion text.
+> Per-grass sections and the per-grass turf summaries below describe the gate-off outline only.
 
 ## Executive Summary
 

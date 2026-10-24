@@ -1,0 +1,303 @@
+// The lawn service outline on the v13 program, behind GATE_LAWN_OUTLINE_V13 (owner 2026-10-22:
+// "lawn service outline ... updated with the new protocols, check other sections").
+// Synthetic inputs: no database.
+//
+// Pins: the gate needs GATE_LAWN_V13; the outline reads the grass the estimate recorded
+// (never the bermudaSuppression flag or a note); bahia is blocked; mixed and unknown lawns
+// get the one program; the month text and the twelve month sentences are the lawn report's
+// own; every v13 line, each plan size included, reaches a category and no product, number or
+// rate does; the outline stamps its own content version.
+
+const v13 = require('../config/lawn-protocol-v13.json');
+const outline = require('../services/lawn-service-outline');
+const { PROGRAM_DETAIL_V13, PROGRAM_LINES_V13 } = require('../services/service-report/lawn-program-line');
+const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
+const { validateCustomerCopy } = require('../services/service-report/premium-experience');
+
+const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_V13', 'GATE_LAWN_BERMUDA_REMOVAL'];
+const BOTH = { GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true' };
+const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const CONDITIONAL_TAIL = ' may be relevant when turf condition, weather, label directions, and local rules allow.';
+
+async function withGates(values, fn) {
+  const saved = Object.fromEntries(GATE_NAMES.map((name) => [name, process.env[name]]));
+  try {
+    for (const name of GATE_NAMES) {
+      if (values[name] === undefined) delete process.env[name]; else process.env[name] = values[name];
+    }
+    return await fn();
+  } finally {
+    for (const name of GATE_NAMES) {
+      if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];
+    }
+  }
+}
+
+const MODULE_KEYS = [
+  'assessment_protocol', 'st_augustine_protocol_summary', 'bermuda_protocol_summary', 'zoysia_protocol_summary',
+  'bahia_protocol_summary', 'mixed_turf_summary', 'unknown_turf_summary', 'season_jan_mar', 'season_apr_may',
+  'season_jun_sep', 'season_oct_dec', 'product_transparency', 'safety_and_label_compliance', 'local_fertilizer_rules',
+  'post_service_reports', 'gps_tracking', 'service_reminders', 'customer_portal', 'what_this_does_not_include',
+];
+
+function makeDb() {
+  const moduleRows = MODULE_KEYS.map((key) => ({ key, plain_text: `Approved ${key} text.`, status: 'approved', version: 1 }));
+  const rule = {
+    jurisdiction_id: 'sarasota_county_fl',
+    jurisdiction_name: 'Sarasota County, FL',
+    version: '2026-05-30',
+    public_summary: 'Local fertilizer rules may restrict nitrogen and phosphorus applications during the summer rainy season.',
+    restricted_start_month: 6,
+    restricted_start_day: 1,
+    restricted_end_month: 9,
+    restricted_end_day: 30,
+  };
+  const db = jest.fn((table) => {
+    const chain = {
+      where: jest.fn(() => chain),
+      whereIn: jest.fn(() => chain),
+      whereNull: jest.fn(() => chain),
+      orWhere: jest.fn(() => chain),
+      orderBy: jest.fn(() => chain),
+      select: jest.fn(() => chain),
+      limit: jest.fn(() => chain),
+      first: jest.fn(() => Promise.resolve(table === 'jurisdiction_fertilizer_rules' ? rule : null)),
+      then: (resolve, reject) => Promise.resolve(table === 'lawn_service_content_modules' ? moduleRows : []).then(resolve, reject),
+    };
+    return chain;
+  });
+  db.fn = { now: jest.fn(() => new Date('2026-10-24T12:00:00Z')) };
+  return db;
+}
+
+// A St. Augustine estimate as production writes it: the grass in inputs.grassType and the
+// bermuda suppression add-on flag elsewhere in the same JSON.
+function estimateWith(estimateData, extra = {}) {
+  return {
+    id: 'estimate-1',
+    customer_name: 'Test Customer',
+    address: '100 Test Way, Sarasota, FL 34240',
+    token: 'estimate-token',
+    estimate_data: estimateData,
+    ...extra,
+  };
+}
+const ST_AUG_ESTIMATE = estimateWith({ inputs: { grassType: 'st_augustine', bermudaSuppression: false }, engineRequest: { options: { grassType: 'st_augustine' } } });
+
+const build = (estimate, input = {}) => outline.buildOutline({ db: makeDb(), estimate, input, now: new Date('2026-10-24T12:00:00Z') });
+const section = (result, key) => result.content.sections.find((s) => s.key === key);
+const categoriesOf = (bullets) => bullets.map((b) => b.replace(CONDITIONAL_TAIL, ''));
+
+describe('the gate', () => {
+  test('GATE_LAWN_OUTLINE_V13 alone does nothing: it needs GATE_LAWN_V13', async () => {
+    await withGates({ GATE_LAWN_OUTLINE_V13: 'true' }, async () => {
+      const result = await build(ST_AUG_ESTIMATE, { month: 10 });
+      expect(section(result, 'your_turf_type')).toBeTruthy();
+      expect(section(result, 'lawn_program')).toBeUndefined();
+      expect(result.meta.contentLibraryVersion).toBe('seed-v1');
+      expect(outline.contentLibraryVersion()).toBe('seed-v1');
+    });
+  });
+
+  test('stamps: the v13 outline carries its own content version; off keeps seed-v1', async () => {
+    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+      expect(outline.contentLibraryVersion()).toBe('seed-v1');
+      expect((await build(ST_AUG_ESTIMATE)).meta.contentLibraryVersion).toBe('seed-v1');
+    });
+    await withGates(BOTH, async () => {
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-1');
+      expect(outline.CONTENT_LIBRARY_VERSION).toBe('seed-v1');
+      const result = await build(ST_AUG_ESTIMATE);
+      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-1');
+      expect(result.meta.protocolVersion).toBe('lawn-v13');
+    });
+  });
+});
+
+describe('the grass is the one the estimate recorded', () => {
+  test('a St. Augustine estimate reads St. Augustine; the old whole-estimate scan read its bermudaSuppression flag as Bermuda', async () => {
+    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+      expect((await build(ST_AUG_ESTIMATE)).meta.turf.turfType).toBe('bermuda');
+    });
+    await withGates(BOTH, async () => {
+      const result = await build(ST_AUG_ESTIMATE);
+      expect(result.meta.turf.turfType).toBe('st_augustine');
+      expect(result.content.property.turfType).toBe('St. Augustine');
+    });
+  });
+
+  test('the composer pick wins, and the pricing codes map (A, C1, C2)', async () => {
+    await withGates(BOTH, async () => {
+      expect((await build(ST_AUG_ESTIMATE, { turfType: 'zoysia' })).meta.turf.turfType).toBe('zoysia');
+      expect((await build(estimateWith({ inputs: { grassType: 'A' } }))).meta.turf.turfType).toBe('st_augustine');
+      expect((await build(estimateWith({ inputs: { grassType: 'C1' } }))).meta.turf.turfType).toBe('bermuda');
+      expect((await build(estimateWith({ inputs: { grassType: 'C2' } }))).meta.turf.turfType).toBe('zoysia');
+      expect((await build(estimateWith({ result: { results: { lawnMeta: { grassType: 'zoysia' } } } }))).meta.turf.turfType).toBe('zoysia');
+    });
+  });
+
+  test('no recorded grass is unknown, never a guess from a note or the rest of the estimate', async () => {
+    await withGates(BOTH, async () => {
+      const estimate = estimateWith(
+        { engineRequest: { profile: { possibleGrassType: 'BAHIA' } }, inputs: { bermudaSuppression: true } },
+        { notes: 'Bermuda creeping in from the neighbor', description: 'Front yard St. Augustine' },
+      );
+      const result = await build(estimate, { month: 4 });
+      expect(result.meta.turf.turfType).toBe('unknown');
+      expect(result.content.title).toBe('Your Waves Lawn Care Program Overview');
+      expect(result.content.property.turfType).toBeNull();
+      expect(section(result, 'property_summary').bullets).toContain('Turf type: To be confirmed at the first visit');
+      expect(section(result, 'grass_to_confirm').bullets).toEqual(['The program is the same for every grass type we treat.']);
+      expect(section(result, 'limited_outline')).toBeUndefined();
+      // The one program still plans an unknown lawn (the shared key), so the month has its bullets.
+      expect(categoriesOf(section(result, 'season_focus').bullets)).toContain('Fertilizer and nutrition');
+      expect(result.validation.status).toBe('passed');
+    });
+  });
+
+  test.each(['bahia', 'D', 'Argentine bahia'])('bahia (%s) is blocked: v13 has no bahia program', async (grass) => {
+    await withGates(BOTH, async () => {
+      const result = await build(estimateWith({ inputs: { grassType: grass } }), { month: 10 });
+      expect(result.meta.turf.turfType).toBe('bahia');
+      expect(result.validation.status).toBe('blocked');
+      expect(result.validation.errors.join(' ')).toMatch(/no lawn program/i);
+      expect(section(result, 'season_focus').bullets).toEqual([]);
+    });
+  });
+
+  test('a mixed lawn gets the one program and no staff wording', async () => {
+    await withGates(BOTH, async () => {
+      const result = await build(estimateWith({ lawn: { grassType: 'mixed' } }), { month: 6 });
+      expect(result.meta.turf.turfType).toBe('mixed');
+      expect(section(result, 'mixed_turf_caution').bullets).toEqual(['Spot treatments follow the product label for the grass in each area.']);
+      expect(JSON.stringify(result.content)).not.toMatch(/admin confirmation/i);
+      expect(categoriesOf(section(result, 'season_focus').bullets)).toContain('Micronutrients');
+      expect(result.validation.status).toBe('passed');
+    });
+  });
+});
+
+describe('the sections', () => {
+  test('one program section, the report month text, the year, no tier line and no restricted-season line', async () => {
+    await withGates(BOTH, async () => {
+      const result = await build(ST_AUG_ESTIMATE, { month: 10 });
+      expect(result.content.sections.map((s) => s.key)).toEqual([
+        'property_summary', 'lawn_program', 'season_focus', 'program_year', 'typical_visit', 'treatment_categories',
+        'local_rules', 'safety', 'post_service_reports', 'portal_tracking', 'not_included',
+      ]);
+      expect(result.content.title).toBe('Your Waves Lawn Care Program Overview');
+      const text = JSON.stringify(result.content.sections);
+      expect(text).not.toMatch(/service tier/i);
+      expect(text).not.toMatch(/restricted-season logic/i);
+      expect(text).not.toMatch(/soil.test/i);
+      expect(section(result, 'program_year').bullets).toEqual(MONTHS.map((m) => PROGRAM_LINES_V13[m].line));
+      expect(section(result, 'local_rules').bullets).toEqual([
+        'Rule area: Sarasota County, FL',
+        'Local fertilizer rules may restrict nitrogen and phosphorus applications during the summer rainy season.',
+      ]);
+      expect(section(result, 'portal_tracking').body).toMatch(/^GPS on the service vehicle records when the technician arrives/);
+      expect(result.content.treatmentCategories.map((c) => c.label)).toEqual(section(result, 'treatment_categories').bullets.map((b) => b.split(':')[0]));
+    });
+  });
+
+  test.each(MONTHS)('month %i: the season text is the lawn report\'s own "why now" text', async (month) => {
+    await withGates(BOTH, async () => {
+      const result = await build(ST_AUG_ESTIMATE, { month });
+      const season = section(result, 'season_focus');
+      expect(season.title).toBe(`${MONTH_ABBR[month - 1]} Service Focus`);
+      expect(season.body).toBe(PROGRAM_DETAIL_V13[month].whyNow);
+      expect(season.bullets.length).toBeGreaterThan(0);
+    });
+  });
+
+  test('every outline the program covers passes validation and the customer-copy checks', async () => {
+    await withGates(BOTH, async () => {
+      for (const grass of ['st_augustine', 'bermuda', 'zoysia', 'mixed', 'unknown']) {
+        for (const month of MONTHS) {
+          const result = await build(estimateWith({ inputs: { grassType: grass } }), { month });
+          expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
+          const texts = [result.content.title, ...result.content.sections.flatMap((s) => [s.title, s.body, ...s.bullets])].filter(Boolean);
+          for (const text of texts) {
+            expect(findBannedCustomerCopy(text)).toEqual([]);
+            expect(validateCustomerCopy(text)).toBe(true);
+          }
+        }
+      }
+    });
+  });
+});
+
+describe('the month bullets cover every v13 line', () => {
+  const stepsOf = (visit) => [visit, ...Object.values(visit.cadenceVariants || {})];
+  const linesOf = (step) => `${step.primary || ''}\n${step.secondary || ''}`.split('\n').map((l) => l.trim()).filter(Boolean);
+  const productNames = new Set();
+  for (const track of Object.values(v13)) {
+    for (const visit of track.visits) {
+      for (const step of stepsOf(visit)) for (const line of linesOf(step)) if (line.includes(' — ')) productNames.add(line.split(' — ')[0]);
+    }
+  }
+
+  test('every line of every track, each plan size included, names a category', async () => {
+    await withGates(BOTH, async () => {
+      for (const track of Object.values(v13)) {
+        for (const visit of track.visits) {
+          for (const step of stepsOf(visit)) {
+            for (const line of linesOf(step)) {
+              expect([line, outline.customerProtocolBullets({ primary: line, secondary: '' }).length]).toEqual([line, 1]);
+            }
+          }
+        }
+      }
+    });
+  });
+
+  test('the lines the GATE_LAWN_V13 outline drops reach their categories', async () => {
+    await withGates(BOTH, async () => {
+      const categoryOf = (name) => {
+        const line = Object.values(v13).flatMap((t) => t.visits).flatMap(stepsOf).flatMap(linesOf).find((l) => l.startsWith(name));
+        return categoriesOf(outline.customerProtocolBullets({ primary: line, secondary: '' }))[0];
+      };
+      expect(categoryOf('LESCO 44-0-0')).toBe('Fertilizer and nutrition');
+      expect(categoryOf('Headway Fungicide')).toBe('Disease control');
+      expect(categoryOf('Advion Insect Granule')).toBe('Insect control');
+      expect(categoryOf('Topchoice Granular Insecticide')).toBe('Insect control');
+    });
+    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+      const april = v13.st_augustine.visits.find((v) => v.month === 'Apr');
+      expect(categoriesOf(outline.customerProtocolBullets(april))).not.toContain('Fertilizer and nutrition');
+    });
+  });
+
+  test('April lists the 12x bag and the 9x pre-emergent bag', async () => {
+    await withGates(BOTH, async () => {
+      const result = await build(ST_AUG_ESTIMATE, { month: 4 });
+      expect(categoriesOf(section(result, 'season_focus').bullets)).toEqual(expect.arrayContaining([
+        'Fertilizer and nutrition',
+        'Pre-emergent weed control with fertilizer',
+        'Disease control',
+        'Insect control',
+      ]));
+    });
+  });
+
+  test('no product name, number or rate reaches a bullet, and add-on steps never do', async () => {
+    const aprilBullets = async (gates) => withGates(gates, async () => section(await build(ST_AUG_ESTIMATE, { month: 4 }), 'season_focus').bullets);
+    expect(await aprilBullets({ ...BOTH, GATE_LAWN_BERMUDA_REMOVAL: 'true' })).toEqual(await aprilBullets(BOTH));
+    await withGates({ ...BOTH, GATE_LAWN_BERMUDA_REMOVAL: 'true' }, async () => {
+      for (const grass of ['st_augustine', 'bermuda', 'zoysia']) {
+        for (const month of MONTHS) {
+          const bullets = section(await build(estimateWith({ inputs: { grassType: grass } }), { month }), 'season_focus').bullets;
+          for (const bullet of bullets) {
+            expect(bullet).not.toMatch(/\d/);
+            for (const name of productNames) {
+              const words = name.toLowerCase().split(/\s+/);
+              const needle = words[0] === 'lesco' ? name.toLowerCase() : words[0];
+              expect(bullet.toLowerCase()).not.toContain(needle);
+            }
+          }
+        }
+      }
+    });
+  });
+});
