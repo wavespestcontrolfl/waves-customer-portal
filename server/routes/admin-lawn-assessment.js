@@ -26,7 +26,7 @@ const visitDelivery = require('../services/lawn-visit-delivery');
 const KnowledgeBridge = require('../services/knowledge-bridge');
 const LawnIntel = require('../services/lawn-intelligence');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
-const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
+const { visitSeasonAdjust } = require('../services/service-report/lawn-seasonality');
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
 const { loadCustomerGrassContext, GRASS_SOURCE, photoAiWritesGrass } = require('../services/lawn-grass-context');
 const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
@@ -868,9 +868,16 @@ router.post('/assess', async (req, res, next) => {
         }
       } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
     }
-    const seasonAdjust = (scores) => (Number.isFinite(recentMinTempF)
-      ? seasonAwareAdjustment(scores, { month, recentMinTempF })
-      : lawnAssessment.applySeasonalAdjustment(scores, month));
+    // GATE_LAWN_NO_SEASON_BOOST (owner 2026-10-24): store the model's turf_density and
+    // color_health unboosted — the prompt already asks for color "for the season", so the
+    // multiplier counted the season twice. Identity on both the one-call and legacy paths;
+    // the season itself still drives report wording and the progress-engine season gates.
+    const seasonAdjust = visitSeasonAdjust({
+      month,
+      recentMinTempF,
+      calendarAdjust: lawnAssessment.applySeasonalAdjustment,
+      noBoost: require('../config/feature-gates').lawnNoSeasonBoostLive(),
+    });
 
     // Check if this is the first assessment (baseline)
     let isBaseline;
