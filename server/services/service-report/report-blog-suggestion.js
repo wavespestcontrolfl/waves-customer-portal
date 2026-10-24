@@ -150,7 +150,9 @@ function phraseProblem(phrase, typed = phrase) {
 
 // The queue row for a phrase. `tipId` (the tip seeder, owner 2026-10-24):
 // the tip whose topic it is, so the queue says why the row exists.
-function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, tipId = null, now = new Date() } = {}) {
+// `generalTitle` (the seeder's too): the post must name no town in its title,
+// carried into the brief and enforced by the quality gate (general_title).
+function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, tipId = null, generalTitle = false, now = new Date() } = {}) {
   const { inferServiceFromQuery, extractSpecialtyTopic } = require('../seo/gsc-opportunity-miner');
   return {
     bucket: 'operator_intercept',
@@ -169,6 +171,7 @@ function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, tipI
       suggested_by: actorId,
       scheduled_service_id: scheduledServiceId,
       ...(tipId ? { tech_tip_id: tipId } : {}),
+      ...(generalTitle ? { general_title: true } : {}),
     },
     status: 'pending',
     expires_at: new Date(now.getTime() + EXPIRES_DAYS * 24 * 60 * 60 * 1000),
@@ -208,7 +211,7 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
   // One suggestion at a time per person, so the day's cap holds when taps
   // race: the count, the held check and the write share one transaction
   // under the person's advisory lock (pre-push P1 on 1aaeaa36ab).
-  return knex.transaction((trx) => writeSuggestion(trx, phrase, { actorId, scheduledServiceId, tipId }));
+  return knex.transaction((trx) => writeSuggestion(trx, phrase, { actorId, scheduledServiceId, tipId, generalTitle: generalOnly }));
 }
 
 // A new-blog row of any source that holds the phrase as its topic. A row is a
@@ -238,7 +241,7 @@ async function standingAnswer(knex, phrase) {
   return null;
 }
 
-async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId, tipId = null }) {
+async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId, tipId = null, generalTitle = false }) {
   if (actorId) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-blog-suggestion:${actorId}`]);
   const answered = await standingAnswer(trx, phrase);
   if (answered) return answered;
@@ -251,7 +254,7 @@ async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId, tipId
       .first();
     if (Number(sent?.n) >= MAX_PER_DAY) return { error: 'too_many_suggestions' };
   }
-  const row = suggestionRow(phrase, { actorId: actorId == null ? null : String(actorId), scheduledServiceId, tipId });
+  const row = suggestionRow(phrase, { actorId: actorId == null ? null : String(actorId), scheduledServiceId, tipId, generalTitle });
   const columns = Object.keys(row);
   const values = columns.map((column) => (column === 'score_breakdown' || column === 'signal_metadata' ? JSON.stringify(row[column]) : row[column]));
   // A new key writes the row; an expired suggestion of the same phrase is

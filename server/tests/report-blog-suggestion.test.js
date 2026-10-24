@@ -340,6 +340,16 @@ describe('suggestReportBlogPost', () => {
     expect(JSON.parse(values.find((v) => typeof v === 'string' && v.includes('operator_pinned')))).toMatchObject({ source: 'tech_blog_search', tech_tip_id: 'water_gutters', suggested_by: null });
   });
 
+  test('a seeded topic (generalOnly) asks for a general title on its row; an office suggestion does not', async () => {
+    const seeded = queueKnex();
+    await suggestReportBlogPost(seeded, { phrase: 'standing water', tipId: 'water_gutters', generalOnly: true });
+    const meta = (knex) => JSON.parse(queueWrites(knex)[0][2].find((v) => typeof v === 'string' && v.includes('operator_pinned')));
+    expect(meta(seeded)).toMatchObject({ tech_tip_id: 'water_gutters', general_title: true });
+    const office = queueKnex();
+    await suggestReportBlogPost(office, { phrase: 'standing water', actorId: 'admin-1' });
+    expect(meta(office)).not.toHaveProperty('general_title');
+  });
+
   test('a suggestion held already (not expired) answers already_queued', async () => {
     const knex = queueKnex({ inserted: false, standing: { status: 'pending' } });
     expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'tech-1' })).toEqual({ status: 'already_queued' });

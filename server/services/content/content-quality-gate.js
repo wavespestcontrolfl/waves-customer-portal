@@ -182,6 +182,12 @@ const PAGE_TYPE_CHECKS = {
     // them. As a 6-pt soft miss, a hubless draft scores 51 >= 42 and
     // auto-publishes — the exact A1 first-batch failure shape.
     { name: 'hub_link_present', weight: 6, isHard: true, evaluate: checkHubLinkPresent },
+    // Tip seeder topics (tips with facts, owner 2026-10-24, decision 2): the
+    // general post for a town-titled pairing must come back general. A title
+    // naming one town fails hard, so the row gets its one feedback redraft,
+    // then skips, never a town post the tip cannot use. Every other brief
+    // answers ok.
+    { name: 'general_title', weight: 0, isHard: true, evaluate: checkGeneralTitle },
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
@@ -1282,6 +1288,14 @@ function checkHubLinkPresent(draft, brief) {
   return { ok: false, reason: 'no_hub_link_found' };
 }
 
+function checkGeneralTitle(draft, brief) {
+  if (brief?.gsc_signal?.general_title !== true) return { ok: true, reason: 'not_general_title_brief' };
+  const { isTownTitled } = require('../service-report/report-blog-post');
+  const fm = draft.frontmatter || {};
+  const titles = [draft.title, fm.title, draft.metaTitle, fm.metaTitle, draft.h1, fm.h1];
+  return titles.some((title) => isTownTitled(title)) ? { ok: false, reason: 'title_names_a_town' } : { ok: true };
+}
+
 function checkTwoPlusCityMentions(draft, brief) {
   const body = String(draft.body || '').toLowerCase();
   // A spoke/operator brief targets ONE city — verify the post actually localizes
@@ -2350,6 +2364,7 @@ module.exports._internals = {
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
   checkCitabilityBackfillGapsCleared,
+  checkGeneralTitle,
   countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,

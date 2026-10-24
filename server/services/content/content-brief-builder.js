@@ -36,6 +36,8 @@ const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
 const { isBlogSearchSuggestion } = require('../service-report/report-blog-suggestion');
+// The title rule a tip seeder topic's brief carries (general_title).
+const GENERAL_TITLE_RULE = 'Name no town or city in the title or the H1: this post answers a tip on service reports for customers across Southwest Florida.';
 const spokeSeeder = require('./spoke-seed-seeder');
 // Lazy: the seeder pulls in the quality gate; only backfill rows need it.
 const CITABILITY_BACKFILL_BUCKET = 'citability_backfill';
@@ -995,6 +997,13 @@ class ContentBriefBuilder {
         // gate waives GSC evidence for it (a new topic has no traffic) but not
         // SERP evidence, and never treats it as operator-authored.
         ...(isBlogSearchSuggestion(opportunity) ? { suggested: true, suggested_at: opportunity.signal_metadata?.suggested_at || null } : {}),
+        // A tip seeder topic (tips with facts, owner 2026-10-24): the post
+        // replaces a town-titled pairing, so its title names no town. The
+        // writer reads the rule here; the quality gate enforces it
+        // (general_title).
+        ...(isBlogSearchSuggestion(opportunity) && opportunity.signal_metadata?.general_title === true
+          ? { general_title: true, title_rule: GENERAL_TITLE_RULE }
+          : {}),
         // Fallback covers rows mined BEFORE seasonal_rising started writing
         // the canonical key — without it those queued rows keep failing
         // gsc_signal_attached until they are re-mined.
