@@ -149,6 +149,17 @@ describe('gate on: a repeat form from a row that is still a lead', () => {
     });
   });
 
+  test('the alert key is the one the relevance sweep closes once the lead is contacted', async () => {
+    const router = load('true');
+    mockTables.customers = [row()];
+    await submit(router);
+    const { CLASSES } = require('../services/admin-alert-relevance');
+    const cls = CLASSES.find((c) => c.key === 'lead_repeat_form');
+    expect(cls).toMatchObject({ categories: ['lead'], rearm: false });
+    expect(notifyAdmin.mock.calls[0][0]).toBe('lead');
+    expect(notifyAdmin.mock.calls[0][3].dedupeKey.startsWith(cls.prefix)).toBe(true);
+  });
+
   test('an address ask in progress (awaiting_address) is kept too', async () => {
     const router = load('true');
     mockTables.customers = [row({ lead_intake_status: 'awaiting_address' })];
