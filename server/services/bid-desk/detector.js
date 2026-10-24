@@ -131,6 +131,13 @@ function bodyLines(email) {
   return text.split(/\r?\n/).map((line) => line.replace(/[ \t ]+/g, ' ').trim()).filter(Boolean);
 }
 
+// Blue Book's text part is only a stub ("IF you can't see this email login to ..."); the invite is in the HTML
+// part. Its lines are both parts, text first.
+function bluebookLines(email) {
+  const html = htmlToText(email.body_html).split(/\r?\n/).map((line) => line.replace(/[ \t\u00a0]+/g, ' ').trim()).filter(Boolean);
+  return [...(String(email.body_text || '').trim() ? bodyLines(email) : []), ...html];
+}
+
 const domainOf = (address) => {
   const at = String(address || '').toLowerCase().trim().lastIndexOf('@');
   return at === -1 ? '' : String(address).toLowerCase().trim().slice(at + 1).replace(/[>\s]+$/, '');
@@ -195,7 +202,7 @@ function bidSource(email, sender, bidWords) {
   if (sender === 'bluebook') {
     // A contractor's invite, reminder or addendum carries the invite line; the network's own "Project Notification"
     // and account mail do not.
-    return bodyLines(email).some((line) => BB_INVITED.test(line) || BB_DUE.test(line))
+    return bluebookLines(email).some((line) => BB_INVITED.test(line) || BB_DUE.test(line))
       ? { source: 'bluebook' } : { reason: 'provider_not_bid' };
   }
   if (bidWords) return { source: sender === 'gov_email' ? 'gov_email' : 'email_subject' };
@@ -421,7 +428,8 @@ function parseBidEmail(email = {}) {
   const detected = detectBidEmail(email);
   const kindOfSender = senderKind(email);
   const template = TEMPLATE_PARSERS[kindOfSender] ? kindOfSender : null;
-  const { fields, due, jobWalk } = templateFields(template, template ? bodyLines(email) : []);
+  const lines = { bluebook: bluebookLines }[template] || (template ? bodyLines : () => []);
+  const { fields, due, jobWalk } = templateFields(template, lines(email));
   const pick = (key) => fields[key] || null;
   return {
     template,

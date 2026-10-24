@@ -423,6 +423,17 @@ describe('Blue Book ONETEAM invites', () => {
     });
   });
 
+  test('reads the HTML part when the text part is only the "can\'t see this email" stub (as delivered)', () => {
+    const html = BB_LINES().map((line) => `<div>${line.replace('&', '&amp;')}</div>`).join('');
+    const stub = " IF you can't see this email login to http://www.thebluebook.com/_bbbid.htm?ABCDEF or call the Blue Book Product Support Staff at 888-555-0100. ";
+    expect(parseBidEmail(bbInvite({ body_text: stub, body_html: html }))).toMatchObject({
+      source: 'bluebook', template: 'bluebook', gc_or_agency: 'Fixture & Honor LLC',
+      project_title: 'Government Building Project in Sampleport, FL', package_name: 'Pest Control--Exterminating',
+      due_source_line: 'Bid is due by 5:00 PM (Pacific) on September 14, 2026',
+    });
+    expect(detectBidEmail(bbInvite({ body_text: stub, body_html: '<div>Project Notification</div>' })).bid).toBe(false);
+  });
+
   test("the network's own Project Notification and account mail are not bids", () => {
     const notice = bbInvite({
       from_address: 'bbbid400@bbbid.thebluebook.com', subject: 'Project Notification from Sample County',
