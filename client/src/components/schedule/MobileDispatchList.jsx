@@ -355,6 +355,17 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             style={{ fontSize: 12, marginTop: 3 }}
           >
             {formatWindow(service)}
+            {/* Rain at this stop: its zone's hourly chance at the window-start
+                hour (server rainAtStop). Exception-based like every rain chip:
+                shown from 40%, alert-red from 50%. */}
+            {Number.isFinite(service.rainAtStop) && service.rainAtStop >= 40 && (
+              <span
+                className={service.rainAtStop >= 50 ? 'text-alert-fg font-bold' : 'font-bold'}
+                title={`${service.rainAtStop}% chance of rain at this stop`}
+              >
+                {` · ${service.rainAtStop}% rain`}
+              </span>
+            )}
           </span>
         </button>
         <DispatchReadinessStrip readiness={service.readiness} onOpen={onProtocol ? () => onProtocol(service) : null} className="mt-2" />
