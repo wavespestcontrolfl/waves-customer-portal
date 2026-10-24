@@ -42,17 +42,39 @@ const positiveAmount = (value) => {
   return value != null && value !== '' && Number.isFinite(n) && n > 0 ? n : null;
 };
 
-// What the series last collected: the PAID invoice (pre-tax, deposit credit
-// added back) of its newest completed BASE visit that has one — is_recurring,
+// The amount a paid invoice proves for ONE visit, or null when it cannot:
+// every positive line must be that visit's own charge (client_id
+// `scheduled_<visit>_primary` / `scheduled_<visit>_addon_…`, the tags
+// InvoiceService.createFromService writes). A combined first-application
+// invoice (setup fee beside the application) or one covering several
+// services carries other charges and is not comparable. Pre-tax, with an
+// applied estimate deposit (a prior payment InvoiceService.create nets out
+// of total, not a discount) added back.
+function comparableVisitAmount(invoice) {
+  let lines = invoice?.line_items;
+  try { lines = typeof lines === 'string' ? JSON.parse(lines) : lines; } catch { return null; }
+  const charges = (Array.isArray(lines) ? lines : [])
+    .filter((li) => li && Number(li.amount) > 0 && li.category !== 'deposit_credit');
+  const own = `scheduled_${invoice.visit_id}_`;
+  if (!charges.length || !charges.every((li) => String(li.client_id || '').startsWith(own))) return null;
+  const { invoiceDepositCreditCents } = require('./invoice-helpers');
+  const cents = Math.round(Number(invoice.total) * 100) + invoiceDepositCreditCents(invoice)
+    - Math.round((Number(invoice.tax_amount) || 0) * 100);
+  return positiveAmount(cents / 100);
+}
+
+// What the series last collected: the newest PAID invoice, comparable for
+// its visit (comparableVisitAmount), on a completed BASE visit — is_recurring,
 // not a callback (boosters share recurring_parent_id with is_recurring false,
 // as latestLiveSeriesVisit in admin-schedule.js excludes them; a free
 // re-service is no price evidence). Newest PAID, not newest completed: the
 // visit whose completion triggered the extension usually has an open or
 // processing invoice yet. The invoice is tied to the visit by
-// scheduled_service_id or through its service record. null when no such
-// invoice exists — the comparison is then skipped.
+// scheduled_service_id or through its service record. null when none of the
+// newest few qualifies — the comparison is then skipped.
+const BASELINE_CANDIDATES = 10;
 async function lastPaidSeriesVisitAmount(conn, rootId) {
-  const invoice = await conn('invoices as i')
+  const invoices = await conn('invoices as i')
     .leftJoin('service_records as sr', 'sr.id', 'i.service_record_id')
     .join('scheduled_services as ss', (j) => j.on(conn.raw('ss.id = COALESCE(i.scheduled_service_id, sr.scheduled_service_id)')))
     .where((q) => q.where('ss.id', rootId).orWhere('ss.recurring_parent_id', rootId))
@@ -62,14 +84,13 @@ async function lastPaidSeriesVisitAmount(conn, rootId) {
     .where('i.status', 'paid')
     .orderBy('ss.scheduled_date', 'desc')
     .orderBy('i.created_at', 'desc')
-    .first('i.total', 'i.tax_amount', 'i.line_items');
-  if (!invoice) return null;
-  // `total` already nets out an applied estimate deposit (a prior payment,
-  // not a discount — InvoiceService.create), so add it back.
-  const { invoiceDepositCreditCents } = require('./invoice-helpers');
-  const cents = Math.round(Number(invoice.total) * 100) + invoiceDepositCreditCents(invoice)
-    - Math.round((Number(invoice.tax_amount) || 0) * 100);
-  return positiveAmount(cents / 100);
+    .limit(BASELINE_CANDIDATES)
+    .select('ss.id as visit_id', 'i.total', 'i.tax_amount', 'i.line_items');
+  for (const invoice of invoices || []) {
+    const amount = comparableVisitAmount(invoice);
+    if (amount != null) return amount;
+  }
+  return null;
 }
 
 // Any annual-prepay term link on any visit of the series. The link can sit
@@ -221,6 +242,7 @@ async function raiseUnbilledCompletionAlert(svc) {
 module.exports = {
   OVER_LAST_PAID_RATIO,
   seriesPriceGuardsLive,
+  comparableVisitAmount,
   lastPaidSeriesVisitAmount,
   extensionPriceVerdict,
   insertedRowIsPrepaid,

@@ -22,7 +22,7 @@ function fakeConn(answers) {
   const conn = (table) => {
     const b = {};
     const calls = [];
-    for (const m of ['where', 'orWhere', 'orWhereIn', 'whereNull', 'whereNotNull', 'select', 'orderBy', 'leftJoin', 'join', 'on']) {
+    for (const m of ['where', 'orWhere', 'orWhereIn', 'whereNull', 'whereNotNull', 'select', 'orderBy', 'leftJoin', 'join', 'on', 'limit']) {
       b[m] = (...args) => {
         seen.push([table, m, ...args]);
         calls.push([m, ...args]);
@@ -30,6 +30,7 @@ function fakeConn(answers) {
         return b;
       };
     }
+    b.then = (res, rej) => Promise.resolve(answers[table]).then(res, rej);
     b.first = async (...cols) => {
       seen.push([table, 'first', ...cols]);
       const answer = answers[table];
@@ -44,9 +45,14 @@ function fakeConn(answers) {
 
 // scheduled_services answers the prepay-link probe; 'invoices as i' the
 // newest paid base-visit invoice.
+// A paid invoice whose only charge is visit-9's own primary line.
+const ownInvoice = (amount, extra = {}) => ({
+  visit_id: 'visit-9', total: String(amount + 7), tax_amount: '7.00',
+  line_items: JSON.stringify([{ client_id: 'scheduled_visit-9_primary', amount }]), ...extra,
+});
 const lastPaidConn = (amount, { prepayLinked = false } = {}) => fakeConn({
   scheduled_services: prepayLinked ? { id: 'linked-child' } : undefined,
-  'invoices as i': amount == null ? undefined : { total: String(amount + 7), tax_amount: '7.00' },
+  'invoices as i': amount == null ? [] : [ownInvoice(amount)],
 });
 
 describe('lastPaidSeriesVisitAmount', () => {
@@ -66,12 +72,29 @@ describe('lastPaidSeriesVisitAmount', () => {
   });
   test('an applied estimate deposit is a prior payment: added back to the baseline', async () => {
     const conn = fakeConn({
-      'invoices as i': {
-        total: '57.00', tax_amount: '7.00',
-        line_items: JSON.stringify([{ category: 'service', amount: 100 }, { category: 'deposit_credit', amount: -50 }]),
-      },
+      'invoices as i': [{
+        visit_id: 'v1', total: '57.00', tax_amount: '7.00',
+        line_items: JSON.stringify([{ client_id: 'scheduled_v1_primary', amount: 100 }, { category: 'deposit_credit', amount: -50 }]),
+      }],
     });
     await expect(guards.lastPaidSeriesVisitAmount(conn, 'root-1')).resolves.toBe(100);
+  });
+  test('a paid invoice carrying other charges (setup fee, another service) is skipped for the next comparable one', async () => {
+    const combined = {
+      visit_id: 'v2', total: '206.00', tax_amount: '7.00',
+      line_items: JSON.stringify([{ client_id: 'scheduled_v2_primary', amount: 100 }, { description: 'Setup fee', amount: 99 }]),
+    };
+    const conn = fakeConn({ 'invoices as i': [combined, ownInvoice(117)] });
+    await expect(guards.lastPaidSeriesVisitAmount(conn, 'root-1')).resolves.toBe(117);
+    await expect(guards.lastPaidSeriesVisitAmount(fakeConn({ 'invoices as i': [combined] }), 'root-1')).resolves.toBeNull();
+  });
+  test('comparableVisitAmount: own primary + add-on lines only; untagged or other-visit lines are not comparable', () => {
+    const inv = (lines) => ({ visit_id: 'v3', total: '120.00', tax_amount: '0', line_items: lines });
+    expect(guards.comparableVisitAmount(inv([{ client_id: 'scheduled_v3_primary', amount: 100 }, { client_id: 'scheduled_v3_addon_1', amount: 20 }]))).toBe(120);
+    expect(guards.comparableVisitAmount(inv([{ client_id: 'scheduled_v3_primary', amount: 100 }, { client_id: 'scheduled_v4_primary', amount: 20 }]))).toBeNull();
+    expect(guards.comparableVisitAmount(inv([{ description: 'First service application', amount: 120 }]))).toBeNull();
+    expect(guards.comparableVisitAmount(inv([]))).toBeNull();
+    expect(guards.comparableVisitAmount(inv('not json'))).toBeNull();
   });
   test('null with no paid invoice on any completed base visit', async () => {
     await expect(guards.lastPaidSeriesVisitAmount(lastPaidConn(null), 'root-1')).resolves.toBeNull();
@@ -111,7 +134,7 @@ describe('extensionPriceVerdict', () => {
   test('exempt: a series whose prepay term links only a child (mid-series prepay), even under a cancelled root', async () => {
     const conn = lastPaidConn(null, { prepayLinked: true });
     await expect(guards.extensionPriceVerdict(conn, { parent: cancelled, parentId: 'r', child: child(333.45) })).resolves.toBeNull();
-    expect(conn.seen.some(([t, m]) => t === 'invoices as i' && m === 'first')).toBe(false);
+    expect(conn.seen.some(([t]) => t === 'invoices as i')).toBe(false);
   });
   test('exempt: callback, always-free type, unpriced child, root-linked prepay series — and no reads', async () => {
     const cases = [
