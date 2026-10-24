@@ -33,6 +33,7 @@ const {
   phoneLookupValues,
   withAutomatedEstimateDedupeLocks,
 } = require('../estimate-automation-duplicates');
+const { LOOKUP_PALM_REVIEW_REASON } = require('./lookup-palm-review');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
 const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
@@ -216,7 +217,8 @@ function storiesSourceForPricing(propertyFacts) {
 //    .palmCount. It is deliberately NOT written to property.palmCount —
 //    resolvePalmCount reads that for palm-INJECTION lines and treats it as a
 //    green-lane fallback, so an AI count there would auto-price per-palm
-//    injections nobody measured;
+//    injections nobody measured. The draft then flags that line for review
+//    (lookup-palm-review.js): the satellite read can over-count;
 //  - a trusted 0: no palms, nothing set and no flag;
 //  - no lookup, a distrusted or an invalid count: palmCountUnverified, which
 //    the pricer turns into the palm_count_unverified review reason when it
@@ -807,6 +809,11 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   if (manualLines.length) {
     const pricedManual = manualLines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly) || Number(l.priceAfterDiscount ?? l.price));
     reasons.push(`partial draft: ${manualLines.map((l) => l.service).join(', ')} still need${manualLines.length === 1 ? 's' : ''} manual scoping${pricedManual.length ? ' — their PROVISIONAL amounts are included in the totals; verify before send' : ''}`);
+  }
+  const lookupPalmLine = lines.find((l) => l?.service === 'tree_shrub' && l.palmCountFromLookup === true
+    && Number(l.palmCount) > 0 && (l.manualReviewReasons || []).includes(LOOKUP_PALM_REVIEW_REASON));
+  if (lookupPalmLine) {
+    reasons.push(`tree & shrub palm count (${lookupPalmLine.palmCount}) came from the satellite image, which can over-count — count the palms on the aerial photo and confirm before send`);
   }
   const lowConfidenceLines = pricedLines.filter((l) => String(l.pricingConfidence || '').toLowerCase() === 'low');
   if (lowConfidenceLines.length) {

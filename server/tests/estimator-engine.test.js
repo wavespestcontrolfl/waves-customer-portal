@@ -1495,6 +1495,73 @@ describe('Tree & Shrub palm count from the lookup (owner ruling 2026-10-05)', ()
     expect(noPalms.manualReviewReasons).not.toContain('palm_count_unverified');
     expect(draftPriv.lineRequiresReview(noPalms)).toBe(false);
   });
+
+  describe('satellite palm count goes to review (owner 2026-10-23)', () => {
+    const { flagLookupPalmCountForReview } = require('../services/estimator-engine/lookup-palm-review');
+    const { treeShrubPalmProvenanceForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    const tsOf = (est) => est.lineItems.find((li) => li.service === 'tree_shrub');
+    const draftFor = (services, lookup) => {
+      const input = build(services, lookup);
+      return { input, result: flagLookupPalmCountForReview(input, generateEstimate(input)) };
+    };
+
+    test('a trusted lookup count keeps pricing and carries the review reason, and the lane goes yellow', () => {
+      constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 16, minutesPerPalmVisit: 1.5, largePalmFactor: 2.5 };
+      const services = { treeShrub: { tier: 'standard', treeCount: 2 } };
+      const { result } = draftFor(services, { ...trusted, estimatedPalmCount: 8 });
+      const plain = tsOf(generateEstimate(build(services, { ...trusted, estimatedPalmCount: 8 })));
+      const line = tsOf(result);
+      expect(line.palmCount).toBe(8);
+      expect(line.palmCountSource).toBe('service_line');
+      expect(line.annual).toBe(plain.annual);
+      expect(line.manualReviewReasons).toContain('palm_count_unverified');
+      expect(line.warnings.some((w) => /satellite image/.test(w) && /aerial photo/.test(w))).toBe(true);
+      expect(result.pricingMetadata.manualReviewReasons).toContain('palm_count_unverified');
+      expect(draftPriv.lineRequiresReview(line)).toBe(true);
+      const { lane, reasons } = classifyLane({
+        intent: { ...baseIntent(), services },
+        propertyFacts: facts, engineResult: result, totals: deriveTotals(result),
+        comps: { samples: 10, median: 1, outlier: false, insufficient: true }, calibration: [],
+        context: { isExistingCustomer: false, extractionSource: 'enriched', transcript: 'Caller: tree and shrub please.', smsThread: [] },
+      });
+      expect(lane).toBe(LANES.YELLOW);
+      expect(reasons.some((r) => /palm count \(8\) came from the satellite image/.test(r) && /aerial photo/.test(r))).toBe(true);
+    });
+
+    test('a caller-stated count gets no flag even when the lookup also has one', () => {
+      const { result } = draftFor({ treeShrub: { tier: 'standard', treeCount: 2, palmCount: 4 } }, { ...trusted, estimatedPalmCount: 8 });
+      const line = tsOf(result);
+      expect(line.palmCount).toBe(4);
+      expect(line.palmCountFromLookup).toBeUndefined();
+      expect(line.manualReviewReasons).not.toContain('palm_count_unverified');
+      expect(draftPriv.lineRequiresReview(line)).toBe(false);
+    });
+
+    test('zero and untrusted counts behave as before: a trusted zero stays clean, an untrusted one flags once in the pricer', () => {
+      const zero = draftFor({ treeShrub: { tier: 'standard', treeCount: 2 } },
+        realLookup([{ provider: 'claude', analysis: { confidenceScore: 90, estimatedPalmCount: 0 } }]));
+      expect(tsOf(zero.result).manualReviewReasons).not.toContain('palm_count_unverified');
+      const untrusted = draftFor({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted, estimatedPalmCount: 8, palmCountConfidence: 10 });
+      expect(tsOf(untrusted.result).palmCount).toBe(0);
+      expect(tsOf(untrusted.result).manualReviewReasons.filter((r) => r === 'palm_count_unverified')).toHaveLength(1);
+      expect(tsOf(untrusted.result).warnings).toContain('Palm count not verified; count palms on the aerial photo before sending.');
+    });
+
+    test('replaying a sent draft (stored engineInputs through the pricer) does not gain the flag', () => {
+      const { input } = draftFor({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted, estimatedPalmCount: 8 });
+      expect(input.services.treeShrub.palmCountFromLookup).toBe(true);
+      const stored = JSON.parse(JSON.stringify(input));
+      const replayed = tsOf(generateEstimate(stored));
+      expect(replayed.palmCount).toBe(8);
+      expect(replayed.manualReviewReasons).not.toContain('palm_count_unverified');
+      expect(draftPriv.lineRequiresReview(replayed)).toBe(false);
+    });
+
+    test('the stored palm provenance is unchanged by the flag', () => {
+      const { result } = draftFor({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted, estimatedPalmCount: 8 });
+      expect(treeShrubPalmProvenanceForReplay({ engineResult: result, result })).toBe('service_line');
+    });
+  });
 });
 
 describe('lookup bed areas carry their confidence into the agent draft', () => {

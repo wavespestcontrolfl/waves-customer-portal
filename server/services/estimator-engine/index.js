@@ -76,6 +76,7 @@ const {
   classifyLane,
   createDraftEstimate,
 } = require('./draft-builder');
+const { flagLookupPalmCountForReview } = require('./lookup-palm-review');
 
 
 // Re-point (or clear) an existing draft's lead links when the call's CURRENT
@@ -2931,7 +2932,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         logger.warn(`[estimator-engine] property-type stamp failed: ${err.message}`);
       }
       try {
-        engineResult = generateEstimateSafely(engineInput);
+        engineResult = flagLookupPalmCountForReview(engineInput, generateEstimateSafely(engineInput));
         totals = deriveTotals(engineResult);
       } catch (err) {
         logger.error(`[estimator-engine] pricing engine failed: ${err.message}`);
