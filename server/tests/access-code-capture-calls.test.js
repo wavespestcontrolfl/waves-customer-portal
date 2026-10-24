@@ -116,6 +116,11 @@ describe('verifyCallItems', () => {
       expect(verify(transcript, [item({ code: full.replace(/[#*]/g, ''), quote })])).toEqual([]);
       expect(verify(transcript, [item({ code: full, quote })])).toHaveLength(1);
     });
+    test('a trailing spoken "oh" makes the run unclear: no prefix verifies', () => {
+      const transcript = 'Caller: The gate code is four four five oh, thanks.';
+      const quote = 'The gate code is four four five oh, thanks.';
+      expect(verify(transcript, [item({ code: '445', quote })])).toEqual([]);
+    });
     test('written digits with no symbol still verify', () => {
       expect(verify('Caller: The gate code is 3394.', [item({ code: '3394', quote: 'The gate code is 3394.' })])).toHaveLength(1);
     });

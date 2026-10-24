@@ -605,6 +605,9 @@ function callCodeStands(code, quote, quoted, ctx) {
   const inTurn = NUMERIC_CODE.test(code) ? ({ t }) => codeIsWholeTokenIn(code, spokenTurn(t))
     : ({ t }) => codeIsWholeTokenIn(code, t.text) || codeIsWholeTokenIn(code, spokenTurn(t));
   if (!quoteShows || !quoted.some(inTurn)) return false;
+  // "four four five oh, thanks" leaves "445 oh": the "oh" may be a last zero,
+  // so the run is unclear and no prefix of it is a code.
+  if (NUMERIC_CODE.test(code) && quoted.some(({ t }) => new RegExp(`${digitsOf(code)}[#*]?[\\s,.-]+oh\\b`, 'i').test(spokenTurn(t)))) return false;
   const digits = digitsOf(code);
   if (digits.length >= 10) return false;
   if (refusals.phones.some((phone) => digits.length >= 7 && phone.endsWith(digits))) return false;
