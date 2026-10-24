@@ -146,14 +146,10 @@ async function main() {
     by_kind: {}, by_proof: {}, stays_open: {},
     model_calls: spend.length, failed_calls: spend.filter((s) => !s.ok).length,
   };
+  const bump = (bucket, key) => { bucket[key] = (bucket[key] ?? 0) + 1; };
   for (const l of lines) {
-    if (l.verdict === 'WOULD CLOSE') {
-      tally.by_kind[l.kind] = (tally.by_kind[l.kind] || 0) + 1;
-      tally.by_proof[l.proof] = (tally.by_proof[l.proof] || 0) + 1;
-    } else {
-      const why = `${l.verdict}: ${l.reason || '-'}`;
-      tally.stays_open[why] = (tally.stays_open[why] || 0) + 1;
-    }
+    if (l.verdict === 'WOULD CLOSE') { bump(tally.by_kind, l.kind); bump(tally.by_proof, l.proof); }
+    else bump(tally.stays_open, `${l.verdict}: ${l.reason ?? '-'}`);
   }
   // Estimated cost: tokens × today's list price (llm_model_prices, read-only),
   // the model the provider reported; a model with no listed price is unpriced.

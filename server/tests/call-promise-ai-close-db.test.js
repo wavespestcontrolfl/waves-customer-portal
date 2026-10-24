@@ -420,6 +420,14 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       await db('call_commitments').where({ id: rewritten.w.commitment.id }).update({ description: `${rewritten.w.commitment.description} (changed)` });
       await cc.refreshFulfillment(db, rewritten.w.call.id);
       expect((await row(rewritten.w.commitment.id)).status).toBe('open');
+
+      // A reprocess that only corrects due_type (deadline -> floor) changes which evidence counts.
+      const retimed = await closedByText();
+      const { due_type: dueType } = await row(retimed.w.commitment.id);
+      await db('call_commitments').where({ id: retimed.w.commitment.id })
+        .update({ due_type: dueType === 'floor' ? 'deadline' : 'floor' });
+      await cc.refreshFulfillment(db, retimed.w.call.id);
+      expect((await row(retimed.w.commitment.id)).status).toBe('open');
     });
   });
 

@@ -97,8 +97,11 @@ const iso = (value) => new Date(value).toISOString();
 
 // What the promise is, as a close rests on it: a reprocess that rewrites what
 // was promised takes the close away and the next run judges the new promise.
+// due_type is part of it: a floor and a deadline at the same due_at admit
+// different evidence (call-commitments associationFrom), so a corrected
+// interpretation must invalidate a close that rested on the old one.
 const promiseMd5 = (commitment) => md5(JSON.stringify({ kind: commitment.kind, description: commitment.description,
-  due_at: commitment.due_at ? iso(commitment.due_at) : null,
+  due_at: commitment.due_at ? iso(commitment.due_at) : null, due_type: commitment.due_type || null,
   quotes: (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((e) => String(e?.quote || '').slice(0, 600)) }));
 
 const parsed = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
