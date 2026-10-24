@@ -269,8 +269,11 @@ function dateText(value) {
 
 async function answerTimeAsk({ customer, request, body, smsLogId, now }) {
   const { whyWithQuote } = require('./admin-alert-names');
-  await db('lead_callback_requests').where({ id: request.id })
+  // The first answer claims the ask; a second text handled at the same time
+  // (or a later correction) changes nothing and raises nothing.
+  const claimed = await db('lead_callback_requests').where({ id: request.id, state: 'asked' }).whereNull('answer_text')
     .update({ answer_sms_log_id: smsLogId, answer_text: String(body).slice(0, 500), updated_at: now });
+  if (!claimed) return { action: 'none', reason: 'already_answered' };
   const toOwner = async (why) => {
     await db('lead_callback_requests').where({ id: request.id, state: 'asked' }).update({ state: 'needs_owner', updated_at: now });
     await raiseLeadBell({ customer, leadId: request.lead_id, requestId: request.id, why });
@@ -298,6 +301,29 @@ async function answerTimeAsk({ customer, request, body, smsLogId, now }) {
 }
 
 /**
+ * True when this sender has an open time ask: the SMS webhook then keeps the
+ * text away from the lead-intake machine (which could read "10 AM works" as
+ * an address) and leaves it to handleLeadReply. Never throws.
+ */
+async function hasOpenTimeAsk({ customer, fromPhone, now = new Date() }) {
+  try {
+    if (!isEnabled('leadCallTextFollowup') || !customer?.id) return false;
+    const digits = phoneDigits(fromPhone);
+    if (digits.length !== 10) return false;
+    const open = await db('lead_callback_requests')
+      .where({ state: 'asked', kind: 'call_request', customer_id: customer.id })
+      .whereNull('answer_text')
+      .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
+      .where('created_at', '>=', new Date(now.getTime() - ANSWER_WINDOW_MS))
+      .first('id');
+    return !!open;
+  } catch (err) {
+    logger.warn(`[lead-call-text-followup] open-ask check failed for customer ${customer?.id} (${String(err?.code || err?.name || 'error')})`);
+    return false;
+  }
+}
+
+/**
  * Called by the SMS webhook after the ack for every inbound text the intake
  * machine did not consume. Returns { action, ... }. Never throws.
  */
@@ -312,18 +338,14 @@ async function handleLeadReply({ customer, body, fromPhone, smsLogId = null, now
     const choice = parseCallTextReply(body);
     if (choice === 'text') return startFollowup({ customer, fromPhone, smsLogId, kind: 'text_reply', now });
     if (choice === 'call') {
-      if (inCallHours(now)) {
-        // The ring calls them now; an open time ask is no longer needed.
-        await db('lead_callback_requests').where({ state: 'asked', kind: 'call_request' })
-          .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
-          .update({ state: 'cancelled', updated_at: now });
-        return { action: 'none', reason: 'ring_handles_day_call' };
-      }
+      // A daytime CALL is the ring's: it closes an open time ask once it rings.
+      if (inCallHours(now)) return { action: 'none', reason: 'ring_handles_day_call' };
       return startFollowup({ customer, fromPhone, smsLogId, kind: 'call_request', now });
     }
 
     const open = await db('lead_callback_requests')
       .where({ state: 'asked', kind: 'call_request', customer_id: customer.id })
+      .whereNull('answer_text')
       .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
       .whereNot({ send_outcome: 'not_sent' })
       .orderBy('created_at', 'desc')
@@ -344,6 +366,7 @@ async function handleLeadReply({ customer, body, fromPhone, smsLogId = null, now
 
 module.exports = {
   handleLeadReply,
+  hasOpenTimeAsk,
   parseCallTime,
   ENTRY_POINT,
   TEXT_REPLY_BODY,

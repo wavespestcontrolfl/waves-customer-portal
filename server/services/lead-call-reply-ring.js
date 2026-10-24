@@ -210,6 +210,12 @@ async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, no
         reservedCallLogId: claim.callLogId,
       });
       logger.info(`[lead-call-reply-ring] rang for customer ${customer.id} (call_log ${claim.callLogId})`);
+      // The ring answers the request: an open night time ask for this phone
+      // (lead-call-text-followup.js) is no longer needed.
+      await db('lead_callback_requests').where({ state: 'asked', kind: 'call_request' })
+        .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits])
+        .update({ state: 'cancelled', updated_at: new Date() })
+        .catch((err) => logger.warn(`[lead-call-reply-ring] time-ask close skipped for customer ${customer.id} (${String(err?.code || err?.name || 'error')})`));
       return { rang: true, reason: 'rang', callLogId: claim.callLogId };
     } catch (err) {
       // A definite failure never rings: the claimed row closes as failed (it

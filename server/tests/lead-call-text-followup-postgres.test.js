@@ -140,12 +140,31 @@ jest.setTimeout(30000);
     expect(bellSpecs()[0].why).toBe('Asked for a call at 6:00 AM, outside 8 AM to 8 PM; pick a time with them.');
   });
 
-  test('a daytime CALL leaves the ring to call them and closes an open time ask', async () => {
+  test('a daytime CALL leaves the ring to call them; the open time ask stays until the ring rings', async () => {
     const c = await lead('+19415550107');
     await reply(c, 'call', NIGHT);
     // 9 AM EDT.
     await expect(reply(c, 'call', new Date('2026-10-21T13:00:00Z'))).resolves.toMatchObject({ reason: 'ring_handles_day_call' });
-    expect((await database('lead_callback_requests').where({ customer_id: c.id }).first()).state).toBe('cancelled');
+    expect((await database('lead_callback_requests').where({ customer_id: c.id }).first()).state).toBe('asked');
+  });
+
+  test('two answers handled at once: the first books, the second changes and raises nothing', async () => {
+    const c = await lead('+19415550114');
+    await reply(c, 'call', NIGHT);
+    const results = await Promise.all([reply(c, '10am', NIGHT), reply(c, '11am', NIGHT)]);
+    expect(results.filter((r) => r.action === 'booked')).toHaveLength(1);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(sentBodies()).toHaveLength(2);
+  });
+
+  test('hasOpenTimeAsk is true only while the question waits on an answer', async () => {
+    const { hasOpenTimeAsk } = require('../services/lead-call-text-followup');
+    const c = await lead('+19415550115');
+    await expect(hasOpenTimeAsk({ customer: c, fromPhone: c.phone, now: NIGHT })).resolves.toBe(false);
+    await reply(c, 'call', NIGHT);
+    await expect(hasOpenTimeAsk({ customer: c, fromPhone: c.phone, now: NIGHT })).resolves.toBe(true);
+    await reply(c, '10am', NIGHT);
+    await expect(hasOpenTimeAsk({ customer: c, fromPhone: c.phone, now: NIGHT })).resolves.toBe(false);
   });
 
   test('a lead who became a customer after the question is not booked', async () => {

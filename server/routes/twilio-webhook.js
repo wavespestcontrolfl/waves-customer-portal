@@ -1162,8 +1162,13 @@ router.post('/sms', async (req, res) => {
     // A reschedule/away ask about an EXISTING visit must never be consumed
     // by the intake flow (codex #3232 r29) — consumption returns before
     // the durable reschedule flag below, silently dropping the guard.
+    // GATE_LEAD_CALL_TEXT_FOLLOWUP: a lead answering our "what time
+    // tomorrow" question is answering that, not the intake machine ("10 AM
+    // works" reads as an address there); the follow-up below takes it.
+    const pendingTimeAnswer = !!(customer && Body)
+      && await require('../services/lead-call-text-followup').hasOpenTimeAsk({ customer, fromPhone: From });
     if (customer && Body && customer.lead_intake_status &&
-        customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk) {
+        customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk && !pendingTimeAnswer) {
       try {
         const LeadIntake = require('../services/lead-intake');
         const intakeResult = await LeadIntake.handleIntakeReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
